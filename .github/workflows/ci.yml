@@ -789,26 +789,43 @@ jobs:
       # exactly how a whole suite sat in the tree for weeks looking like
       # coverage. This asserts a NUMBER per integration target, so the silent
       # zero becomes a red check, and prints the counts into the run log.
-      # The runner lane: identity, attestation, presence and dispatch. Behind
-      # its own feature, so `cargo test` at default features compiles none of
-      # it and the gated lane above pins `openhuman,tinycortex` — without this
-      # step the whole surface would be built by `Check (--all-features)` and
-      # RUN by nothing, which is issue #475's exact pathology and the one S0
-      # found already live in the SQLite backend.
+      # Issue #1118. `acp`, `runner` and `tinymemory` share ONE feature set and
+      # therefore one compile of this crate. They used to be three, and the three
+      # were not testing three different things — they were paying three times
+      # for the same tree.
+      #
+      # The measurement, from run 32243809850's step timings on this lane: the
+      # `runner` step took 117s, `acp` 113s and `tinymemory` 90s, and the tests
+      # themselves account for seconds of that. The rest is cargo recompiling the
+      # crate because each `--features` string is a different unit of
+      # compilation. Enumerated across the whole lane, non-primary feature sets
+      # cost ~21 minutes of a ~33 minute job with the actual test execution
+      # measured at 51 seconds.
+      #
+      # Cargo features are ADDITIVE, so a union set runs a superset of what the
+      # three ran separately. What that can change — and the reason this is a
+      # deliberate grouping rather than "throw them all in" — is any test that
+      # asserts a feature's OFF state. Two exist in this tree
+      # (`#[cfg(not(feature = "tinyplace"))]` in `runtime::builder`,
+      # `#[cfg(not(feature = "tinymemory"))]` in `store::select`) and neither is
+      # reached by these filters. `tinyplace` is NOT in this group for exactly
+      # that reason: its step runs the whole `--lib`, where the `not(tinyplace)`
+      # arm is live coverage that a union set would silently delete.
+      #
+      # Through `run-scoped-suite.sh` rather than a bare `cargo test`, which the
+      # `runner` and `acp` steps used before: a wider feature set makes "this
+      # filter now selects nothing" a more reachable failure, and that failure
+      # exits 0. The script asserts a non-zero count per filter.
       - name: Test the runner lane
-        run: cargo test --locked --features runner --lib runner
+        run: scripts/ci/run-scoped-suite.sh "runner" acp,runner,tinymemory runner
 
-      # The ACP surface, for the same reason and with the same shape. Both
-      # modules document themselves in terms of a feature that did not exist
-      # until now, so they compiled into every build and were run by no lane —
-      # and served by no route either, since nothing mounts them yet.
-      # Two invocations, not one: `--lib` selects the target and the bare
-      # argument is the filter, so a second filter would be read as a flag
-      # rather than as another module — and would silently narrow to nothing.
+      # The ACP surface. Two invocations, not one: `run-scoped-suite.sh` takes
+      # exactly one filter, and a second bare argument to `cargo test` narrows
+      # the selection to nothing rather than adding a module.
       - name: Test the ACP surface
         run: |
-          cargo test --locked --features acp --lib server::acp
-          cargo test --locked --features acp --lib harness::acp_run_turn
+          scripts/ci/run-scoped-suite.sh "acp server" acp,runner,tinymemory server::acp
+          scripts/ci/run-scoped-suite.sh "acp run turn" acp,runner,tinymemory harness::acp_run_turn
 
       # Issue #788: Chargebee billing — the REST layer (`chargebee::`) and the
       # toolbelt bridge (`harness::chargebee`) in one filter, which selects both.
@@ -818,7 +835,7 @@ jobs:
       # feature, which that table rejects. All of it is offline: the wire tests
       # drive a stub on an ephemeral port and the rest never build a request.
       - name: Test the Chargebee billing integration
-        run: scripts/ci/run-scoped-suite.sh "chargebee" openhuman,tinycortex,chargebee chargebee
+        run: scripts/ci/run-scoped-suite.sh "chargebee" openhuman,tinycortex,chargebee,paypal,composio chargebee
 
       # Issue #789: PayPal. Here rather than on the fast default job for the same
       # reason as chargebee above — the toolbelt bridge is under `src/harness/`
@@ -829,7 +846,7 @@ jobs:
       # lane with the gated feature set selects all three. Offline: the token
       # cache and error tests drive a stub on an ephemeral port.
       - name: Test the PayPal integration
-        run: scripts/ci/run-scoped-suite.sh "paypal" openhuman,tinycortex,paypal paypal
+        run: scripts/ci/run-scoped-suite.sh "paypal" openhuman,tinycortex,chargebee,paypal,composio paypal
 
       - name: Assert every integration target actually runs
         run: scripts/ci/assert-integration-targets-run.sh openhuman,tinycortex
@@ -990,10 +1007,10 @@ jobs:
       # the ACP step above states: the first bare argument is the filter and a
       # second would narrow the selection to nothing.
       - name: Test Composio tenant isolation
-        run: scripts/ci/run-scoped-suite.sh "composio isolation" openhuman,tinycortex,composio harness::composio::isolation_tests
+        run: scripts/ci/run-scoped-suite.sh "composio isolation" openhuman,tinycortex,chargebee,paypal,composio harness::composio::isolation_tests
 
       - name: Test the Composio ops helpers
-        run: scripts/ci/run-scoped-suite.sh "composio ops helpers" openhuman,tinycortex,composio harness::composio::ops_helper_tests
+        run: scripts/ci/run-scoped-suite.sh "composio ops helpers" openhuman,tinycortex,chargebee,paypal,composio harness::composio::ops_helper_tests
 
       # Issue #820 — which connected account an agent acts as. A third narrow
       # filter for the same reason the two above are narrow, and the same reason
@@ -1004,7 +1021,7 @@ jobs:
       # the negative half is the one protecting every existing single-account
       # company from having its account resolution changed.
       - name: Test which Composio account an execute acts as
-        run: scripts/ci/run-scoped-suite.sh "composio account choice" openhuman,tinycortex,composio harness::composio::live::live_tests
+        run: scripts/ci/run-scoped-suite.sh "composio account choice" openhuman,tinycortex,chargebee,paypal,composio harness::composio::live::live_tests
 
       # Issue #820 — a fourth narrow filter, and the first outside `harness::`.
       # The console-plane half of the same decision: the grouping the choice is
@@ -1018,7 +1035,7 @@ jobs:
       # exists to be nameable here: a gated ops test added later joins it and is
       # run, rather than depending on somebody remembering this file.
       - name: Test the Composio account choice on the console plane
-        run: scripts/ci/run-scoped-suite.sh "composio choice ops" openhuman,tinycortex,composio server::ops::composio::tests::gated_tests
+        run: scripts/ci/run-scoped-suite.sh "composio choice ops" openhuman,tinycortex,chargebee,paypal,composio server::ops::composio::tests::gated_tests
 
       # Issue #914. The `tinymemory` feature binds the engine-neutral
       # `MemoryProvider` contract and adds the `remote`/`null` selection modes.
@@ -1042,10 +1059,10 @@ jobs:
       # covers the boot refusals that keep a misconfigured hosted engine from
       # starting.
       - name: Test the TinyMemory provider contract
-        run: scripts/ci/run-scoped-suite.sh "tinymemory contract" tinymemory store::memory
+        run: scripts/ci/run-scoped-suite.sh "tinymemory contract" acp,runner,tinymemory store::memory
 
       - name: Test the memory engine selection surface
-        run: scripts/ci/run-scoped-suite.sh "tinymemory selection" tinymemory store::select
+        run: scripts/ci/run-scoped-suite.sh "tinymemory selection" acp,runner,tinymemory store::select
 
       # Issue #477. Before this step, `tinyplace` was COMPILED by CI and
       # EXECUTED by nothing. `Check (--all-features)` above builds every
