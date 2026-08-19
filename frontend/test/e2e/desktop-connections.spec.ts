@@ -1,5 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 
+import { openHostMenu } from "./host-switcher";
+
 /**
  * What the desktop opens on, driven against a real host.
  *
@@ -7,7 +9,7 @@ import { expect, test, type Page } from "@playwright/test";
  * base url, which means "same origin" and is a real host only in a browser —
  * made it the bootstrap, and therefore opened on "Couldn't reach a company host
  * at this origin" every launch while its embedded host sat healthy and
- * unselected in the rail.
+ * unselected in the switcher.
  *
  * The desktop cannot be packaged inside this suite, but the thing that *makes*
  * it a desktop can be: `isDesktopRuntime()` is `"__TAURI__" in window` and
@@ -258,8 +260,10 @@ test("a remembered host does not take the launch just by being older", async ({
   }, DEAD_REMOTE);
   await page.goto("/#/tasks");
 
-  // Both hosts are registered, so the rail is drawn and there is a choice.
-  await expect(page.locator('[data-testid^="connection-row-"]')).toHaveCount(2, {
+  // Both hosts are registered, so the switcher offers a choice. Counted off the
+  // closed trigger, which carries the roster size so a count does not depend on
+  // a menu being open.
+  await expect(page.getByTestId("host-switcher")).toHaveAttribute("data-host-count", "2", {
     timeout: 30_000,
   });
   // The console on screen is a working one — which it could not be if the
@@ -271,13 +275,16 @@ test("a remembered host does not take the launch just by being older", async ({
 
   // Said directly, rather than inferred from what rendered: the remembered host
   // is present and not current, and whatever is current is live.
-  await expect(page.getByTestId("connection-row-conn-remembered-remote")).toHaveAttribute(
+  await openHostMenu(page);
+  await expect(page.getByTestId("host-row-conn-remembered-remote")).toHaveAttribute(
     "aria-current",
     "false",
   );
-  await expect(
-    page.locator('[data-testid^="connection-row-"][aria-current="true"]'),
-  ).toHaveAttribute("data-status", "live");
+  await expect(page.locator('[data-testid^="host-row-"][aria-current="true"]')).toHaveAttribute(
+    "data-status",
+    "live",
+  );
+  await page.keyboard.press("Escape");
 });
 
 test("a desktop waits for its own host rather than borrowing a remembered one", async ({
@@ -365,7 +372,8 @@ test("a paired host on plain http is refused, and says why", async ({ page, base
     timeout: 30_000,
   });
 
-  const refused = page.getByTestId("connection-row-conn-paired-cleartext");
+  await openHostMenu(page);
+  const refused = page.getByTestId("host-row-conn-paired-cleartext");
   await expect(refused).toHaveAttribute("data-status", "down");
   // THE assertion. Before this, the row read "cannot reach the company host at
   // http://192.168.1.20:8080" — indistinguishable from a host that is simply
@@ -405,10 +413,14 @@ test("an unencrypted host with no credential still connects", async ({ page, bas
   }, host);
   await page.goto("/#/tasks");
 
-  await expect(page.getByTestId("connection-row-conn-anonymous-http")).toHaveAttribute(
+  // Read off the closed trigger: one host, so its state is the worst state.
+  await expect(page.getByTestId("host-switcher")).toHaveAttribute("data-worst-status", "live", {
+    timeout: 30_000,
+  });
+  await openHostMenu(page);
+  await expect(page.getByTestId("host-row-conn-anonymous-http")).toHaveAttribute(
     "data-status",
     "live",
-    { timeout: 30_000 },
   );
 });
 
@@ -419,8 +431,9 @@ test("a desktop whose host did not start says so, and can still add one", async 
   await page.goto("/");
 
   await expect(page.getByTestId("no-connection")).toBeVisible({ timeout: 30_000 });
-  // The rail holds the only "add a host" control, so it has to survive a count
-  // of zero or the operator is looking at a dead end.
-  await expect(page.getByTestId("connection-rail")).toBeVisible();
-  await expect(page.getByTestId("connection-add")).toBeVisible();
+  // The switcher holds the only "add a host" control, so it has to survive a
+  // count of zero — and it has no sidebar to live in on this screen, which is
+  // the case the rail used to cover for free by standing outside the console.
+  await expect(page.getByTestId("host-switcher")).toBeVisible();
+  await openHostMenu(page);
 });

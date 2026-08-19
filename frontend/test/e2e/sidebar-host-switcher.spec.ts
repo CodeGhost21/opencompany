@@ -1,23 +1,20 @@
 import { expect, test } from "@playwright/test";
 
 /**
- * The nav sidebar must start where the connection rail ends.
+ * The host switcher, in the sidebar header, on a console holding two hosts.
  *
- * The shell's sidebar container is `position: fixed`, so it positions against
- * the viewport rather than the flex column it is written inside. Pinned to
- * `left: 0` it slides underneath the connection rail — which appears as soon
- * as a second host is added — and the rail's 56px covers every nav icon and
- * the first characters of every label. "Company" reads as "mpany".
+ * This spec used to guard the opposite arrangement: an icon rail down the left
+ * edge, and a `position: fixed` sidebar that had to be offset by 56px or it
+ * slid underneath and clipped every nav label — "Company" read as "mpany".
+ * Issue #1142 removed the rail and moved the choice into the sidebar's own
+ * header, so the offset is gone and the assertion inverts: the sidebar now
+ * starts at the left edge of the window, and nothing stands in front of it.
  *
- * It survived review once already: the rail carries `z-50` from an earlier
- * pass that fixed clicks landing on the wrong element, which made the rail
- * paint *over* the sidebar rather than under it, and left the visual clipping
- * in place while looking like a fix.
- *
- * It also survived a full design-system migration and two contrast audits,
- * because every one of those ran against the default single-host console where
- * the rail does not render at all. That is the point of this spec: the broken
- * state needs two connections, and nothing else in the suite creates them.
+ * What carries over is why the spec exists at all. The broken state needed two
+ * connections, and nothing else in the suite creates them — a design-system
+ * migration and two contrast audits all passed straight over it, because every
+ * one of them ran against the default single-host console. Two hosts is still
+ * the only way to see the switcher be a control rather than a nameplate.
  */
 
 // The first-run tour opens a dialog over the console and `aria-hidden`s
@@ -34,7 +31,7 @@ test.beforeEach(async ({ page }) => {
 /** Must match `companies/e2e_harness/company.toml`'s `[users] admins`. */
 const ADMIN_EMAIL = "harness-e2e@tinyhumans.ai";
 
-test("the sidebar clears the connection rail when a second host is added", async ({
+test("the sidebar owns the left edge, and its header switches hosts", async ({
   page,
   baseURL,
 }) => {
@@ -55,21 +52,21 @@ test("the sidebar clears the connection rail when a second host is added", async
     data: { email: ADMIN_EMAIL, code: devCode },
   });
   expect(verified.ok(), "sign-in should mint a session").toBe(true);
-  // Two hosts, so the rail renders. The second address is never contacted —
-  // the rail draws it as unreachable, which is all this spec needs.
+  // Two hosts, so the switcher opens a menu. The second address is never
+  // contacted — the menu draws it as unreachable, which is all this spec needs.
   await page.addInitScript((primary: string) => {
     localStorage.setItem(
       "oc.connections.v1",
       JSON.stringify([
         {
-          id: "rail-spec-primary",
+          id: "switcher-spec-primary",
           baseUrl: primary,
           label: "Primary",
           defaultCompany: null,
           credential: { kind: "cookie" },
         },
         {
-          id: "rail-spec-second",
+          id: "switcher-spec-second",
           baseUrl: "http://127.0.0.1:9",
           label: "Second host",
           defaultCompany: null,
@@ -81,29 +78,43 @@ test("the sidebar clears the connection rail when a second host is added", async
 
   await page.goto("/#/company");
 
-  const rail = page.getByTestId("connection-rail");
-  await expect(rail).toBeVisible();
+  // Nothing stands to the left of the sidebar any more.
+  await expect(page.getByTestId("connection-rail")).toHaveCount(0);
 
   const sidebar = page.locator("[data-slot=sidebar-container]");
   await expect(sidebar).toBeVisible();
-
-  const railBox = await rail.boundingBox();
   const sidebarBox = await sidebar.boundingBox();
-  expect(railBox, "connection rail should have a box").not.toBeNull();
   expect(sidebarBox, "sidebar should have a box").not.toBeNull();
+  expect(sidebarBox!.x, "the sidebar starts at the left edge of the window").toBe(0);
 
-  // The whole assertion: the sidebar starts at or after the rail's right edge.
-  // Pinned to the viewport it starts at 0, and this reads 0 >= 56.
-  expect(sidebarBox!.x).toBeGreaterThanOrEqual(railBox!.x + railBox!.width);
-
-  // And the labels are actually on screen rather than clipped behind it — the
-  // symptom a reader would report, asserted separately from the cause so a
-  // future change that moves the sidebar for some other reason still fails
-  // here rather than passing on a technicality.
+  // And the labels are actually on screen rather than clipped — the symptom a
+  // reader would report, asserted separately from the cause so a future change
+  // that moves the sidebar for some other reason still fails here rather than
+  // passing on a technicality.
   // A nav row is a button, not a link — the shell routes on the hash rather
   // than navigating. `exact` keeps this off the page's own "Company" heading.
   const label = page.getByRole("button", { name: "Company", exact: true });
   const labelBox = await label.boundingBox();
   expect(labelBox, "the Company nav row should have a box").not.toBeNull();
-  expect(labelBox!.x).toBeGreaterThanOrEqual(railBox!.x + railBox!.width);
+  expect(labelBox!.x).toBeGreaterThanOrEqual(0);
+
+  // The switcher took the rail's place, inside the sidebar rather than beside
+  // it, and it holds both hosts.
+  const switcher = page.getByTestId("host-switcher");
+  await expect(switcher).toBeVisible();
+  const switcherBox = await switcher.boundingBox();
+  expect(switcherBox, "the switcher should have a box").not.toBeNull();
+  expect(
+    switcherBox!.x,
+    "the switcher is inside the sidebar, not a column of its own to the left of it",
+  ).toBeGreaterThanOrEqual(sidebarBox!.x);
+
+  // Reachable from the keyboard, which the rail's unlabelled icon buttons
+  // effectively were not — and holding both seeded hosts, plus the way to add
+  // another that the rail's "+" used to be.
+  await switcher.focus();
+  await page.keyboard.press("Enter");
+  await expect(page.getByTestId("host-row-switcher-spec-primary")).toBeVisible();
+  await expect(page.getByTestId("host-row-switcher-spec-second")).toBeVisible();
+  await expect(page.getByTestId("host-switcher-add")).toBeVisible();
 });

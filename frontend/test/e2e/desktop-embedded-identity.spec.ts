@@ -1,5 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 
+import { openHostMenu } from "./host-switcher";
+
 /**
  * Issue #615 — one "This computer" row, however many times the app restarts.
  *
@@ -253,11 +255,10 @@ test("a relaunch at a new port re-addresses the connection instead of adding one
 
   // And the row that survived is the working one: this status comes back from a
   // real request to the real host, through the console's own probe.
-  await expect(page.getByTestId(`connection-row-${first.id}`)).toHaveAttribute(
-    "data-status",
-    "live",
-    { timeout: 30_000 },
-  );
+  await openHostMenu(page);
+  await expect(page.getByTestId(`host-row-${first.id}`)).toHaveAttribute("data-status", "live", {
+    timeout: 30_000,
+  });
 });
 
 test("the rows an older version left behind collapse on the next launch", async ({
