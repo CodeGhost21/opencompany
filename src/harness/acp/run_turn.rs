@@ -537,25 +537,19 @@ mod test {
     /// object-safe would compile here and fail at the one site that matters.
     #[tokio::test]
     async fn it_is_usable_through_the_run_turn_seam() {
-        let agent = Arc::new(Scripted {
-            turn: AcpTurn {
-                updates: vec![
-                    AcpUpdate::ThoughtChunk,
-                    AcpUpdate::ToolCall {
-                        id: "t1".into(),
-                        title: "Read".into(),
-                    },
-                    AcpUpdate::ToolCallUpdate {
-                        id: "t1".into(),
-                        status: "completed".into(),
-                        result: Some("4 items".into()),
-                    },
-                    AcpUpdate::MessageChunk("all done".into()),
-                ],
-                stop_reason: "end_turn".into(),
+        let agent = Arc::new(Scripted::answering(vec![
+            AcpUpdate::ThoughtChunk,
+            AcpUpdate::ToolCall {
+                id: "t1".into(),
+                title: "Read".into(),
             },
-            cancelled: Default::default(),
-        });
+            AcpUpdate::ToolCallUpdate {
+                id: "t1".into(),
+                status: "completed".into(),
+                result: Some("4 items".into()),
+            },
+            AcpUpdate::MessageChunk("all done".into()),
+        ]));
         let run_turn: &dyn RunTurn = &AcpRunTurn::new(agent);
 
         let outcome = run_turn
