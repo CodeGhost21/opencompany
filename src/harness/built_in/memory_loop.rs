@@ -256,4 +256,29 @@ mod test {
         assert!(chunk.body.contains("plan the launch"));
         assert!(chunk.body.contains("here is the plan"));
     }
+
+    #[test]
+    fn multiline_snippets_are_flattened_before_injection() {
+        // Embedded newlines in a stored snippet must be collapsed before
+        // truncation; otherwise they cross the `## Task` boundary and break
+        // the preamble structure (CWE-74 — injection of untrusted whitespace
+        // into the prompt format).
+        let out = inject(
+            "now",
+            &[hit("Task: plan\nOutcome: drafted\n\nNotes: good")],
+        );
+        let preamble = out.split("## Task").next().unwrap();
+        let injected_line = preamble
+            .lines()
+            .find(|l| l.starts_with("- "))
+            .expect("the multiline snippet produces an injected line");
+        assert!(
+            !injected_line.contains('\n'),
+            "newlines must be collapsed, got: {injected_line:?}"
+        );
+        assert!(
+            injected_line.contains("Task: plan Outcome: drafted Notes: good"),
+            "all whitespace runs are collapsed to single spaces: {injected_line:?}"
+        );
+    }
 }
