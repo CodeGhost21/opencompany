@@ -142,8 +142,8 @@ pub struct RunContext<'a> {
 /// `_` prefix keeps it from ever colliding with a roster agent's own workspace
 /// directory.
 ///
-/// `pool`/`deps` are shared with the rest of the harness surface — the roster the
-/// agent nodes address is the one already resident in `pool`.
+/// `turn`/`deps` are shared with the rest of the harness surface — the roster the
+/// agent nodes address is the one resident in the harness(es) the turn routes to.
 ///
 /// `run_request` is the operator's topic for this run (issue #154), threaded to
 /// the agent capability so every agent node's turn message carries what was
