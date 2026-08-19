@@ -92,15 +92,25 @@ impl Drop for EmbeddedHost {
 /// `USERPROFILE` is set, which for a double-clicked application is wherever the
 /// launcher happened to put it.
 pub async fn start(data_dir: PathBuf) -> opencompany::Result<EmbeddedHost> {
-    // Resolve, lock, migrate, and prove the journal root is writable — the same
-    // sequence `serve` runs, shared rather than copied so the two cannot drift.
-    // The lock is what refuses a second instance over one data root, including
-    // the very ordinary case of a terminal already running `opencompany serve`
-    // against the same default.
+    // Resolve, lock, migrate, materialize the workspace layout, and prove the
+    // journal root is writable — the same sequence `serve` runs, shared rather
+    // than copied so the two cannot drift. The lock is what refuses a second
+    // instance over one data root: ordinarily a second window of this app,
+    // since `data_dir` is the platform application-data directory rather than
+    // the CLI's `~/.opencompany`, and a terminal `opencompany serve` therefore
+    // contends for it only when `OPENCOMPANY_DATA_DIR` points both at one
+    // place.
     let instance = opencompany::app::prepare_instance(Some(data_dir)).await?;
 
     let config = AppConfig {
         bind: "127.0.0.1:0".to_string(),
+        // The `[workspace]` section of the root's `config.toml`, resolved by
+        // `prepare_instance`. Not layout — these two are the knobs every
+        // company builder reads — but they come from the same file, and `serve`
+        // sets them from it. A desktop that skipped them ran with the
+        // compiled-in defaults and silently ignored the operator's config.
+        workspace_quota: instance.workspace().quota,
+        workspace_git_enabled: instance.workspace().git_enabled,
         // The standing local admin, and the same seam the hosted control plane
         // fills with `OPENCOMPANY_ADMIN_EMAIL`. Without an eligible address no
         // company on this host can be signed into, whoever created it — the
