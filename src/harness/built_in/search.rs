@@ -585,7 +585,15 @@ fn source_domain(url: &str) -> Option<String> {
 /// call, which is what stops a poisoned snippet forging the closing marker and
 /// speaking as the harness. Same construction as the workspace tools' fence.
 fn fence_nonce() -> String {
-    crate::ports::generate_id()
+    // Same construction as workspace_tools' fence: drawn from the OS CSPRNG,
+    // not [`crate::ports::generate_id`], because the fence's sole property is
+    // unforgeability. A predictable nonce lets a search result that happens
+    // to cite a prior fence token forge the closing marker and speak as the
+    // harness.
+    let mut bytes = [0u8; 16];
+    getrandom::fill(&mut bytes)
+        .expect("the OS CSPRNG is unavailable; cannot mint a content fence");
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 /// Render the citation block the agent sees.
