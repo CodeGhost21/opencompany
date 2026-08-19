@@ -53,6 +53,32 @@ concurrency:
 permissions:
   contents: read
 
+# Issue #1118. Three compiler knobs, set once for every job below, because the
+# critical path through this workflow is compile-shaped: on run 32223481743 the
+# `Rust (openhuman, tinycortex)` lane spent 306s in one `cargo build`, 140s in
+# clippy and 132s in `Check (--all-features)` before a single feature-scoped
+# test ran.
+#
+# `CARGO_INCREMENTAL: 0` — incremental compilation exists to make the SECOND
+# build in a working directory fast. A runner is ephemeral, so there is no
+# second build; what incremental buys here is a larger `target/` for
+# `Swatinem/rust-cache` to save and restore, paid on every lane. Cargo's own
+# guidance for CI is to turn it off.
+#
+# `CARGO_PROFILE_DEV_DEBUG: line-tables-only` — full `debug = true` emits
+# complete DWARF for every crate in the graph, and this workspace's graph is
+# large. Line tables keep a panic's file-and-line (which is what a failing test
+# is read for) and drop the variable and type records a debugger would want and
+# CI never opens. It shrinks both the compile and the link, and — because the
+# artifacts are smaller — the cache save/restore either side of them.
+#
+# These are workflow-level rather than per-job on purpose: every future Rust
+# lane inherits them without anyone remembering to. The console and desktop jobs
+# read `CARGO_*` only where they invoke cargo, so the value is inert elsewhere.
+env:
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+
 # Issue #251. Every cargo invocation below that resolves a dependency graph
 # passes `--locked` (all of them except `cargo fmt`, which resolves nothing and
 # does not accept the flag): CI must build the graph recorded in the committed
