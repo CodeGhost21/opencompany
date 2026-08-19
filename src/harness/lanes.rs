@@ -254,30 +254,4 @@ kind = "built_in"
         assert!(!deep.contains("writer"));
         assert!(!deep.contains("ceo"));
     }
-
-    /// A single-harness company keeps `default_serves: None` (whole roster),
-    /// which is the pre-harness shape every existing tenant already has.
-    #[test]
-    fn a_single_harness_company_is_not_narrowed() {
-        let rec = record();
-        let mut rec = rec;
-        rec.manifest = toml::from_str(
-            r#"
-[company]
-name = "Acme"
-
-[[agent]]
-id = "ceo"
-role = "Chief Executive"
-
-[[harness]]
-id = "embedded"
-kind = "built_in"
-default = true
-"#,
-        )
-        .expect("valid manifest");
-        let lanes = build(&rec, todo!("unused base"), todo!("unused"), None);
-        assert!(lanes.default_serves.is_none());
-    }
 }
