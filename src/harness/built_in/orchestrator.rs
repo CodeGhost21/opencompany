@@ -3817,6 +3817,49 @@ fn summarize_run(
         md.push_str("\nThe run reached its terminal node(s) without pausing for approval.\n");
     }
 
+    // Issue #981: what happened to the reports. Nothing here read `deliveries`,
+    // so a run whose report was refused closed with the sentence above and
+    // nothing else — and "reached its terminal node(s)" is true of exactly that
+    // run, which is what made the silence so convincing. The model then reports
+    // a clean run to whoever asked for one, and nobody learns the report is
+    // gone until somebody notices it never arrived.
+    //
+    // **Reason, never `detail`.** `DeliveryReason` is the log-safe half of the
+    // pair (issue #248): a mail transport's refusal quotes the mailbox it
+    // refused, and `detail` is for the operator's own surfaces. This summary is
+    // a model's tool result and goes wherever that turn goes, so it takes the
+    // closed set — which says what class of thing failed and has no field that
+    // could carry an address.
+    let undelivered: Vec<&crate::ports::DeliveryReport> = run
+        .deliveries
+        .iter()
+        .filter(|d| {
+            !matches!(
+                d.status,
+                crate::ports::DeliveryStatus::Sent | crate::ports::DeliveryStatus::Pending
+            )
+        })
+        .collect();
+    if !undelivered.is_empty() {
+        md.push_str(&format!(
+            "\n**{} report(s) did NOT reach a destination.** The graph ran and its work stands — \
+             delivery happens after the engine returns, so no node failed and none of the \
+             per-node lines above is wrong. But the report did not go out, and it will not \
+             without a change:\n",
+            undelivered.len()
+        ));
+        for report in &undelivered {
+            md.push_str(&format!(
+                "- `{}` ({}): {}\n",
+                report.node, report.kind, report.reason
+            ));
+        }
+        md.push_str(
+            "There is no retry: fix the destination or the runtime wiring and run the workflow \
+             again.\n",
+        );
+    }
+
     // Footer: the previews above are the *last* item of each node, clipped, so
     // name the follow-up that reads the rest. Only when there was node output to
     // read, and worded off the tool-name const so it can never drift from the
@@ -4621,6 +4664,7 @@ mod tests {
             global: false,
             id: id.to_string(),
             role: "Role".to_string(),
+            name: None,
             description: None,
             tier: tier.map(str::to_string),
             harness: None,
@@ -7659,6 +7703,7 @@ name = "Morning"
                 tools: vec!["publish_artifact".to_string()],
                 approval_ids: vec!["appr-1".to_string()],
                 unparkable: 0,
+                stranded: 0,
             }],
             approvals: vec![
                 crate::ports::WorkflowRunApprovalRow {
@@ -8818,6 +8863,89 @@ name = "Morning"
         assert!(md.contains("run drawer"), "{md}");
         assert!(md.contains("999 bytes"), "{md}");
         assert!(!md.contains("Read any node's full output"), "{md}");
+    }
+
+    /// Issue #981 (part 2): the summary says a report did not go out.
+    ///
+    /// Before this, `summarize_run` never read `deliveries`, so a run whose
+    /// report was refused closed with "The run reached its terminal node(s)
+    /// without pausing for approval" and nothing else — a true sentence about a
+    /// run that had just dropped its only output, which the model then reported
+    /// upward as a clean run.
+    #[test]
+    fn the_summary_says_when_a_report_did_not_go_out() {
+        let file = crate::company::parse_workflow(DEMO_WF).unwrap();
+        let dropped = WorkflowRun {
+            output: json!({ "nodes": { "worker": { "items": ["the report"] } } }),
+            pending_approvals: Vec::new(),
+            deliveries: vec![crate::ports::DeliveryReport {
+                node: "worker".into(),
+                kind: "channel".into(),
+                target: Some("operator".into()),
+                status: crate::ports::DeliveryStatus::Failed,
+                detail: "`operator` is not a workflow delivery channel — this runtime has:                          engineering"
+                    .into(),
+                reason: crate::ports::DeliveryReason::ChannelNotWired,
+            }],
+            cancelled: false,
+            nodes: Vec::new(),
+            notices: Vec::new(),
+            board: Vec::new(),
+            blocked_nodes: Vec::new(),
+            approvals: Vec::new(),
+        };
+        let md = summarize_run(&file, &dropped, "run-drop", RunOutputStored::Stored);
+        assert!(
+            md.contains("1 report(s) did NOT reach a destination"),
+            "{md}"
+        );
+        assert!(md.contains("`worker` (channel)"), "{md}");
+        // The reason, from the closed set — never `detail`, which quotes what a
+        // transport said and is for the operator's own surfaces (issue #248).
+        assert!(
+            md.contains(&crate::ports::DeliveryReason::ChannelNotWired.to_string()),
+            "{md}"
+        );
+        assert!(
+            !md.contains("this runtime has: engineering"),
+            "the operator-only `detail` must not ride the summary: {md}"
+        );
+        // And it does not claim the graph broke: the per-node line still reports
+        // what the node produced.
+        assert!(md.contains("1 item(s) — the report"), "{md}");
+
+        // A run that delivered fine says nothing about delivery at all, so an
+        // ordinary summary is unchanged.
+        let clean = WorkflowRun {
+            deliveries: vec![crate::ports::DeliveryReport {
+                node: "worker".into(),
+                kind: "owner".into(),
+                target: Some("ada@example.com".into()),
+                status: crate::ports::DeliveryStatus::Sent,
+                detail: "emailed the company's admin".into(),
+                reason: crate::ports::DeliveryReason::OwnerEmailed,
+            }],
+            ..dropped.clone()
+        };
+        let md = summarize_run(&file, &clean, "run-ok", RunOutputStored::Stored);
+        assert!(!md.contains("did NOT reach a destination"), "{md}");
+
+        // A report parked for an operator's approval is waiting on a person,
+        // not lost — counting it here would tell the model to go fix a queue
+        // that is working.
+        let parked = WorkflowRun {
+            deliveries: vec![crate::ports::DeliveryReport {
+                node: "worker".into(),
+                kind: "email".into(),
+                target: Some("new@example.com".into()),
+                status: crate::ports::DeliveryStatus::Pending,
+                detail: "waiting in Approvals".into(),
+                reason: crate::ports::DeliveryReason::ParkedForApproval,
+            }],
+            ..dropped.clone()
+        };
+        let md = summarize_run(&file, &parked, "run-parked", RunOutputStored::Stored);
+        assert!(!md.contains("did NOT reach a destination"), "{md}");
     }
 
     /// T3: a successful run populates the cache and the tool's JSON payload

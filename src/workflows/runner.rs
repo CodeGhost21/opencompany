@@ -284,7 +284,18 @@ async fn run_workflow_inner(
     let gated = if ctx.dry_run {
         Vec::new()
     } else {
-        super::gate::apply_policy_gates(&mut graph, record, &workflow.id, &ctx.run_id).await
+        super::gate::apply_policy_gates(
+            &mut graph,
+            record,
+            &workflow.id,
+            &ctx.run_id,
+            // Issue #1098: the company's live permission set, so a workflow the
+            // operator granted standing permission does not park again. Reached
+            // through the queue the rest of the approval round-trip already
+            // travels on, so nothing new threads through the runner.
+            &deps.approval_requests.grants(),
+        )
+        .await
     };
     // Issue #846: a node whose call already left the building in an earlier run
     // of this lineage replays its recorded result instead of calling again.
@@ -2238,6 +2249,7 @@ to = "done"
             tools: vec!["shell".to_string()],
             approval_ids: vec!["appr-1".to_string()],
             unparkable: 0,
+            stranded: 0,
         }];
         // No node row reported `Error` at all — a setup/validation failure the
         // engine raised before any node ran, for instance.
@@ -2258,6 +2270,7 @@ to = "done"
             tools: vec!["shell".to_string()],
             approval_ids: vec!["appr-1".to_string()],
             unparkable: 0,
+            stranded: 0,
         }];
         let nodes = vec![crate::ports::WorkflowRunNodeRow {
             node_id: "work".to_string(),
@@ -2277,6 +2290,7 @@ to = "done"
             tools: vec!["shell".to_string()],
             approval_ids: vec!["appr-1".to_string()],
             unparkable: 0,
+            stranded: 0,
         }];
         let nodes = vec![
             crate::ports::WorkflowRunNodeRow {
@@ -2461,6 +2475,7 @@ to = "boom"
             tools: vec!["shell".to_string()],
             approval_ids: Vec::new(),
             unparkable: 0,
+            stranded: 0,
         };
 
         let capture = serde_json::json!({

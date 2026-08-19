@@ -1248,6 +1248,7 @@ impl AgentRunner for HarnessAgentRunner {
                 tools: parked.tools.clone(),
                 approval_ids: parked.approval_ids.clone(),
                 unparkable: parked.unparkable,
+                stranded: 0,
             });
             return Err(EngineError::Capability(blocked_diagnosis(
                 node_id.as_deref(),
