@@ -371,11 +371,15 @@ pub struct StorageSettings {
     /// The hosted engine's credential (`OPENCOMPANY_MEMORY_API_KEY`).
     ///
     /// A raw credential, so it is kept out of [`Debug`] — see the impl below.
-    /// The key is a secret with env as its only channel; an earlier draft named a
-    /// [`SecretStore`](crate::ports::SecretStore) key instead and is preferred:
-    /// it is the convention every other integration follows, and it keeps the
-    /// credential out of the process environment. This env var exists because
-    /// the hosted manager injects environment, not manifests.
+    ///
+    /// Env is the only supported channel. A
+    /// [`SecretStore`](crate::ports::SecretStore) key — the convention every
+    /// other integration follows, and the one that would keep this out of the
+    /// process environment — is deliberately *not* accepted here: the store is
+    /// per-company and opened from the storage layer this setting is used to
+    /// build, so reading the memory credential out of it would be circular.
+    /// The hosted manager injects environment rather than manifests, which is
+    /// what makes env sufficient.
     pub memory_api_key: Option<String>,
 }
 
@@ -796,6 +800,8 @@ impl OwnershipStore for crate::store::MongoStore {
 mod test {
     use super::*;
 
+    use crate::test_support::EnvVarGuard;
+
     #[test]
     fn parses_storage_kinds() {
         assert_eq!("fs".parse::<StorageKind>().unwrap(), StorageKind::Fs);
@@ -959,18 +965,31 @@ mod test {
             memory_api_key: Some("k".into()),
             ..StorageSettings::default()
         };
-        if let Err(error) = open_memory_overlay(&settings) {
-            let error = error.to_string();
-            assert!(
-                !error.contains("ALLOW_UNPROVEN_REMOTE"),
-                "the retired knob must not be demanded: {error}"
-            );
+        match open_memory_overlay(&settings) {
+            // `Ok(None)` is the trap this arm exists to close: it is how a
+            // silently skipped remote overlay would look, and an
+            // error-message-only assertion would pass straight through it.
+            Ok(overlay) => assert!(
+                overlay.is_some(),
+                "a fully configured remote must bind an overlay, not skip one"
+            ),
+            Err(error) => {
+                let error = error.to_string();
+                assert!(
+                    !error.contains("ALLOW_UNPROVEN_REMOTE"),
+                    "the retired knob must not be demanded: {error}"
+                );
+            }
         }
     }
 
     #[cfg(feature = "tinymemory")]
     #[test]
-    fn remote_opens_once_the_operator_has_accepted_it() {
+    fn remote_binds_and_reports_its_driver() {
+        // The success half of the pair above: a complete configuration binds,
+        // and the descriptor it reports back names the driver that was asked
+        // for rather than a fallback. No acceptance step is involved — that
+        // knob is retired.
         let settings = StorageSettings {
             memory_backend: MemoryBackend::Remote,
             memory_driver: Some("supermemory".into()),
@@ -979,7 +998,7 @@ mod test {
             ..StorageSettings::default()
         };
         let overlay = open_memory_overlay(&settings)
-            .expect("an accepted, fully configured remote engine binds")
+            .expect("a fully configured remote engine binds")
             .expect("remote yields an overlay");
         assert_eq!(overlay.descriptor.backend, MemoryBackend::Remote);
         assert_eq!(overlay.descriptor.driver_id, "supermemory");
@@ -1013,7 +1032,19 @@ mod test {
             .expect("null binds an overlay");
         assert_eq!(overlay.descriptor.backend, MemoryBackend::Null);
         assert_eq!(overlay.descriptor.driver_id, "null");
+        // A bound provider serves all three seam partitions, not just facts.
+        // Asserting each one separately is what catches a partition that is
+        // wired to `None` at the construction site while the others are not —
+        // which reads downstream as "this engine has no scratch", not as a bug.
         assert!(overlay.facts.is_some(), "a provider serves facts too");
+        assert!(
+            overlay.inbound_context.is_some(),
+            "a provider serves the inbound-context partition"
+        );
+        assert!(
+            overlay.scratch.is_some(),
+            "a provider serves the scratch partition"
+        );
     }
 
     #[cfg(not(feature = "tinymemory"))]
@@ -1053,14 +1084,15 @@ mod test {
             "OPENCOMPANY_MEMORY_URL",
             "OPENCOMPANY_MEMORY_API_KEY",
         ];
-        // SAFETY: single-threaded test; restores prior state.
-        let prev: Vec<_> = KEYS.iter().map(|k| (*k, std::env::var(k).ok())).collect();
+        // Takes the crate-wide env lock for the whole body and restores every
+        // key on drop — including on panic, which the hand-rolled restore this
+        // replaced would have skipped, leaving a driver name set for whatever
+        // `from_env` test libtest scheduled next.
+        let env = EnvVarGuard::capture(&KEYS);
 
-        unsafe {
-            std::env::set_var(KEYS[0], "supermemory");
-            std::env::set_var(KEYS[1], "https://memory.example");
-            std::env::set_var(KEYS[2], "sk-test");
-        }
+        env.set(KEYS[0], "supermemory");
+        env.set(KEYS[1], "https://memory.example");
+        env.set(KEYS[2], "sk-test");
         let settings = StorageSettings::from_env().unwrap();
         assert_eq!(settings.memory_driver.as_deref(), Some("supermemory"));
         assert_eq!(
@@ -1071,55 +1103,36 @@ mod test {
 
         // Empty is absent, not an empty credential: `require` would otherwise
         // accept a blank key and defer the failure to the first call.
-        unsafe {
-            std::env::set_var(KEYS[0], "");
-            std::env::set_var(KEYS[2], "");
-        }
+        env.set(KEYS[0], "");
+        env.set(KEYS[2], "");
         let blank = StorageSettings::from_env().unwrap();
         assert_eq!(blank.memory_driver, None);
         assert_eq!(blank.memory_api_key, None);
 
-        unsafe {
-            for key in KEYS {
-                std::env::remove_var(key);
-            }
+        for key in KEYS {
+            env.remove(key);
         }
         let unset = StorageSettings::from_env().unwrap();
         assert_eq!(unset.memory_driver, None);
         assert_eq!(unset.memory_url, None);
         assert_eq!(unset.memory_api_key, None);
-
-        unsafe {
-            for (key, value) in prev {
-                match value {
-                    Some(value) => std::env::set_var(key, value),
-                    None => std::env::remove_var(key),
-                }
-            }
-        }
     }
 
     #[test]
     fn from_env_reads_memory_backend() {
-        // SAFETY: single-threaded test; restores prior state.
-        let prev = std::env::var("OPENCOMPANY_MEMORY").ok();
+        let env = EnvVarGuard::capture(&["OPENCOMPANY_MEMORY"]);
 
-        unsafe { std::env::set_var("OPENCOMPANY_MEMORY", "tinycortex") };
+        env.set("OPENCOMPANY_MEMORY", "tinycortex");
         assert_eq!(
             StorageSettings::from_env().unwrap().memory_backend,
             MemoryBackend::Tinycortex
         );
 
-        unsafe { std::env::remove_var("OPENCOMPANY_MEMORY") };
+        env.remove("OPENCOMPANY_MEMORY");
         assert_eq!(
             StorageSettings::from_env().unwrap().memory_backend,
             MemoryBackend::Store
         );
-
-        match prev {
-            Some(v) => unsafe { std::env::set_var("OPENCOMPANY_MEMORY", v) },
-            None => unsafe { std::env::remove_var("OPENCOMPANY_MEMORY") },
-        }
     }
 
     #[cfg(feature = "tinycortex")]
@@ -1162,6 +1175,23 @@ mod test {
             .await
             .unwrap();
         assert!(leaked.is_empty(), "cross-company recall must not bleed");
+
+        // The counterpart to the provider assertions above: the in-pod engine
+        // predates the seam and implements memory + context only, so all three
+        // provider partitions stay unset. Pinning that keeps the two overlay
+        // constructors from drifting into disagreeing about what `None` means.
+        assert!(
+            overlay.facts.is_none(),
+            "the embedded engine leaves facts on the base backend"
+        );
+        assert!(
+            overlay.inbound_context.is_none(),
+            "the embedded engine has no inbound-context partition"
+        );
+        assert!(
+            overlay.scratch.is_none(),
+            "the embedded engine has no scratch partition"
+        );
     }
 
     /// Refuse-to-open contract: `OPENCOMPANY_STORAGE=mongodb` makes `/data`
@@ -1242,60 +1272,48 @@ mod test {
 
     #[test]
     fn from_env_reads_tenant_id() {
-        // SAFETY: single-threaded test; restores prior state.
-        let prev = std::env::var("OPENCOMPANY_TENANT_ID").ok();
+        let env = EnvVarGuard::capture(&["OPENCOMPANY_TENANT_ID"]);
 
-        unsafe { std::env::set_var("OPENCOMPANY_TENANT_ID", "acme") };
+        env.set("OPENCOMPANY_TENANT_ID", "acme");
         assert_eq!(
             StorageSettings::from_env().unwrap().tenant_id.as_deref(),
             Some("acme")
         );
 
         // An empty value is filtered out, same as the mongodb vars.
-        unsafe { std::env::set_var("OPENCOMPANY_TENANT_ID", "") };
+        env.set("OPENCOMPANY_TENANT_ID", "");
         assert_eq!(StorageSettings::from_env().unwrap().tenant_id, None);
 
         // Unset leaves it `None` (the id-namespacing no-op).
-        unsafe { std::env::remove_var("OPENCOMPANY_TENANT_ID") };
+        env.remove("OPENCOMPANY_TENANT_ID");
         assert_eq!(StorageSettings::from_env().unwrap().tenant_id, None);
-
-        match prev {
-            Some(v) => unsafe { std::env::set_var("OPENCOMPANY_TENANT_ID", v) },
-            None => unsafe { std::env::remove_var("OPENCOMPANY_TENANT_ID") },
-        }
     }
 
     #[test]
     fn from_env_reads_data_dir() {
-        // SAFETY: single-threaded test; restores prior state.
-        let prev = std::env::var("OPENCOMPANY_DATA_DIR").ok();
+        let env = EnvVarGuard::capture(&["OPENCOMPANY_DATA_DIR"]);
 
         // An explicit data dir is threaded straight through into settings.
-        unsafe { std::env::set_var("OPENCOMPANY_DATA_DIR", "/srv/oc-data") };
+        env.set("OPENCOMPANY_DATA_DIR", "/srv/oc-data");
         assert_eq!(
             StorageSettings::from_env().unwrap().data_dir,
             Some(PathBuf::from("/srv/oc-data")),
             "OPENCOMPANY_DATA_DIR must be read into StorageSettings::data_dir"
         );
-
-        match prev {
-            Some(v) => unsafe { std::env::set_var("OPENCOMPANY_DATA_DIR", v) },
-            None => unsafe { std::env::remove_var("OPENCOMPANY_DATA_DIR") },
-        }
     }
 
     #[test]
     fn from_env_reads_allow_ephemeral_memory() {
-        // SAFETY: single-threaded test; restores prior state.
-        let prev = std::env::var("OPENCOMPANY_MEMORY_ALLOW_EPHEMERAL").ok();
+        const KEY: &str = "OPENCOMPANY_MEMORY_ALLOW_EPHEMERAL";
+        let env = EnvVarGuard::capture(&[KEY]);
 
         // Unset → the safe default: refuse (flag false).
-        unsafe { std::env::remove_var("OPENCOMPANY_MEMORY_ALLOW_EPHEMERAL") };
+        env.remove(KEY);
         assert!(!StorageSettings::from_env().unwrap().allow_ephemeral_memory);
 
         // Truthy values set the durability assertion.
         for truthy in ["1", "true", "YES", "On"] {
-            unsafe { std::env::set_var("OPENCOMPANY_MEMORY_ALLOW_EPHEMERAL", truthy) };
+            env.set(KEY, truthy);
             assert!(
                 StorageSettings::from_env().unwrap().allow_ephemeral_memory,
                 "{truthy:?} must read as durability asserted"
@@ -1304,16 +1322,11 @@ mod test {
 
         // Any non-truthy value stays false (fails safe toward refusal).
         for falsy in ["0", "false", "no", ""] {
-            unsafe { std::env::set_var("OPENCOMPANY_MEMORY_ALLOW_EPHEMERAL", falsy) };
+            env.set(KEY, falsy);
             assert!(
                 !StorageSettings::from_env().unwrap().allow_ephemeral_memory,
                 "{falsy:?} must read as not asserted"
             );
-        }
-
-        match prev {
-            Some(v) => unsafe { std::env::set_var("OPENCOMPANY_MEMORY_ALLOW_EPHEMERAL", v) },
-            None => unsafe { std::env::remove_var("OPENCOMPANY_MEMORY_ALLOW_EPHEMERAL") },
         }
     }
 

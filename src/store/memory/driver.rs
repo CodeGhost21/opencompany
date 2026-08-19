@@ -24,11 +24,41 @@
 //!
 //! This deployment already refuses that class of failure out loud (see the
 //! ephemeral-`/data` refusal in `crate::store::select`), so quietly introducing
-//! it through a contract migration would be a strange thing to do. Moving the
-//! embedded engine onto the provider seam needs a durable `Memory`
-//! implementation over the engine's KV tier first; until that exists, `embedded`
-//! keeps the durable path it has always had, and `remote` and `null` — which
-//! have no incumbent to regress — bind providers here.
+//! it through a contract migration would be a strange thing to do.
+//!
+//! ## What actually blocks it, precisely
+//!
+//! "The only concrete `Memory` implementation is in-memory" is true of the
+//! *vendored engine*, and it is worth saying where that stops being true, so
+//! nobody reads this note as waiting on something that already exists.
+//! `tinymemory-core` has `UnifiedMemory`, a durable SQLite store that does
+//! implement the contract's `Memory` trait (`core/src/store/memory_trait.rs`,
+//! reporting `name() == "namespace"`). What is missing is not durability:
+//!
+//! 1. **Nothing composes it into a driver.** The contract binds
+//!    `Arc<dyn MemoryProvider>`, not `Arc<dyn Memory>`. The wrapper that
+//!    bridges the two is `tinymemory::mandatory::MemoryTraitProvider`, which
+//!    this crate already has — but it advertises the mandatory three families
+//!    and nothing else, so composing `UnifiedMemory` this way would bind an
+//!    engine strictly less capable than the one it replaced.
+//! 2. **There is no id to bind it under.** The registry reserves `null`,
+//!    `tinycortex`, `supermemory`, `mem0` and `cognee`; `namespace` is not
+//!    among them, and admission refuses an unreserved id by design.
+//! 3. **It is a different store.** `UnifiedMemory` keeps its own schema;
+//!    today's companies have their data in the `EngineCortex` tables. Swapping
+//!    the incumbent mode over would strand that data, so this wants a migration
+//!    or a new mode beside `tinycortex`, not one in place of it.
+//! 4. **It costs the dependency this build is shaped to avoid.**
+//!    `UnifiedMemory` lives in `tinymemory-core`, which pulls `tinycortex`
+//!    (with `obsidian`, `persona`, `people`, `sync`) and `tinyagents/sqlite` —
+//!    exactly the bundled-SQLite weight the manifest keeps out of a tenant that
+//!    selected a hosted engine over HTTP (tinymemory#18 §D). `tinymemory-api`
+//!    and `tinymemory-remote` are all `remote` and `null` need.
+//!
+//! Those are decisions rather than missing pieces, but they are four of them.
+//! Until they are taken, `embedded` keeps the durable path it has always had,
+//! and `remote` and `null` — which have no incumbent to regress — bind
+//! providers here.
 
 use std::sync::Arc;
 
