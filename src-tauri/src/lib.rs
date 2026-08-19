@@ -92,10 +92,13 @@ pub fn run() {
         match embedded::start(data_dir.clone()).await {
             Ok(host) => Some(host),
             Err(error) => {
-                // Not fatal. Most often this is the data root already being held
-                // — by another window, or by an `opencompany serve` in a
-                // terminal — and the right answer is to launch anyway and let
-                // the operator connect to that host instead of this one.
+                // Not fatal. Most often this is the data root already being
+                // held by a second window of this app — the root above is the
+                // platform data directory, not the CLI's `~/.opencompany`, so a
+                // terminal `serve` only contends for it when something exported
+                // `OPENCOMPANY_DATA_DIR` at both. Either way the right answer is
+                // to launch anyway and let the operator connect to the host that
+                // holds it instead of this one.
                 tracing::warn!(%error, "no embedded host; remote connections still work");
                 None
             }
