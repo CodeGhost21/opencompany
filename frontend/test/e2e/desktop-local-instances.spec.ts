@@ -159,6 +159,17 @@ function seed(liveBaseUrl: string): Instance[] {
   ];
 }
 
+/**
+ * The host rows in the rail, counted without going through a role query.
+ *
+ * `getByRole` skips `aria-hidden` subtrees, and Radix marks the whole page
+ * behind an open dialog exactly that way — so a role-based count reads zero
+ * while the roster is open, which is when every one of these asserts.
+ */
+function railRows(page: Page) {
+  return page.locator('[data-testid^="connection-row-"]');
+}
+
 async function openTheRoster(page: Page): Promise<void> {
   await page.getByTestId("connection-add").click();
   await page.getByTestId("add-host-local").click();
@@ -174,10 +185,7 @@ test("a stopped instance is listed and startable, not a broken row", async ({
 
   // One connection, because one instance is listening. A stopped instance has
   // no address, so a row for it in the rail could only fail its probe forever.
-  await expect(page.getByTestId("connection-rail").getByRole("button")).toHaveCount(
-    // The hosts, plus the "add a host" button.
-    2,
-  );
+  await expect(railRows(page)).toHaveCount(1);
 
   await openTheRoster(page);
   const scratch = page.getByTestId("local-instance-scratch");
@@ -186,7 +194,7 @@ test("a stopped instance is listed and startable, not a broken row", async ({
 
   // Started, and now a host the console holds alongside the first.
   await expect(scratch).toHaveAttribute("data-running", "true");
-  await expect(page.getByTestId("connection-rail").getByRole("button")).toHaveCount(3);
+  await expect(railRows(page)).toHaveCount(2);
 });
 
 test("a host started here can be stopped again without losing the others", async ({
@@ -199,14 +207,14 @@ test("a host started here can be stopped again without losing the others", async
 
   const scratch = page.getByTestId("local-instance-scratch");
   await scratch.getByRole("button", { name: "Start" }).click();
-  await expect(page.getByTestId("connection-rail").getByRole("button")).toHaveCount(3);
+  await expect(railRows(page)).toHaveCount(2);
 
   await scratch.getByRole("button", { name: "Stop" }).click();
   await expect(scratch).toHaveAttribute("data-running", "false");
   // Back to the live host alone — and crucially *not* to zero: stopping one
   // instance must not prune the rows of the ones still running, which is the
   // failure the single-host prune would have produced.
-  await expect(page.getByTestId("connection-rail").getByRole("button")).toHaveCount(2);
+  await expect(railRows(page)).toHaveCount(1);
   await expect(page.getByTestId("local-instance-default")).toHaveAttribute(
     "data-running",
     "true",
@@ -226,5 +234,5 @@ test("a second company can be created on this computer", async ({ page, baseURL 
     "true",
   );
   // Three instances now, two of them listening: the new one and the original.
-  await expect(page.getByTestId("connection-rail").getByRole("button")).toHaveCount(3);
+  await expect(railRows(page)).toHaveCount(2);
 });
