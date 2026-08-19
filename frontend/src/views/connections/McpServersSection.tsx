@@ -391,8 +391,8 @@ export function McpServersSection({ client, company, canManage, chrome = "inline
         </div>
       )}
       <p className="text-sm text-muted-foreground">
-        Remote MCP tool servers your teammates can call. Add an HTTP endpoint and (optionally) a token —
-        the token is stored securely and never shown again.
+        Remote MCP tool servers your teammates can call. Add an HTTP endpoint and (optionally) a
+        token — the token is stored securely and never shown again.
       </p>
 
       {/* Issue #567: this screen's routes ship in every build, the agent-side

@@ -194,8 +194,8 @@ export function MemoryView({ client, company }: Props) {
           <div className="space-y-1">
             <h2 className="text-2xl font-semibold tracking-tight">Brain</h2>
             <p className="text-sm text-muted-foreground">
-              What your company remembers — facts, people, projects, and preferences your teammates can
-              recall.
+              What your company remembers — facts, people, projects, and preferences your
+              teammates can recall.
             </p>
           </div>
           <Button onClick={() => setAddOpen(true)} data-testid="memory-add">

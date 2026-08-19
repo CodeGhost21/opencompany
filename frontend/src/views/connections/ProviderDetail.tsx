@@ -314,8 +314,8 @@ function ComposioBody({
                   provider that has never been connected is a third. The empty
                   case says which of them this is rather than "not connected",
                   which would cover all three. */}
-              No Composio account is connected for {provider.label}, so its teammates have none of its
-              tools.
+              No Composio account is connected for {provider.label}, so its teammates have none of
+              its tools.
             </p>
           )}
         </section>

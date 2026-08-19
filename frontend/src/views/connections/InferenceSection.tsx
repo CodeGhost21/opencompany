@@ -369,9 +369,9 @@ export function InferenceSection({
       <p className="text-sm text-muted-foreground">
         Choose which model provider your teammates think with. Bring your own key for OpenRouter, a
         custom OpenAI-compatible endpoint, or a local Ollama server — the key is stored securely and
-        never shown again. Switching provider or model takes effect on the agents' next turn. Giving
-        inference to a company that started without any does not: the brain is chosen at startup, so
-        that first setup needs a restart.
+        never shown again. Switching provider or model takes effect on the teammates' next turn.
+        Giving inference to a company that started without any does not: the brain is chosen at
+        startup, so that first setup needs a restart.
       </p>
 
       {load === "loading" ? (

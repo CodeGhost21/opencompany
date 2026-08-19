@@ -133,8 +133,8 @@ export function ProvidersSection({
               <AlertTriangle className="mt-px size-3 shrink-0" />
               <span>
                 These accounts are connected, but this company does not grant the{" "}
-                <span className="font-mono">composio</span> tool namespace, so its teammates will not
-                receive their tools yet. Add <span className="font-mono">composio</span> to the
+                <span className="font-mono">composio</span> tool namespace, so its teammates will
+                not receive their tools yet. Add <span className="font-mono">composio</span> to the
                 company&apos;s tool grants.
               </span>
             </p>

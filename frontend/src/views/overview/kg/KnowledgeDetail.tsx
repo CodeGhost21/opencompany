@@ -115,7 +115,7 @@ export function DeptOverviewCard({
         )}
 
         <div className="mt-4">
-          <SectionLabel icon={User}>Agents ({agents.length})</SectionLabel>
+          <SectionLabel icon={User}>Teammates ({agents.length})</SectionLabel>
           <div className="flex flex-col gap-1.5">
             {agents.map((a) => (
               <Row key={a.id} color="var(--accent)" title={a.name} sub={`${a.role} · ${a.model}`} onClick={() => onAgent(a.id)} />
@@ -444,7 +444,7 @@ export function PersonDetailCard({
       <PanelHeader title={person.name} sub={person.role} color={color} onBack={onBack} onClose={onClose} />
       <div className="flex-1 overflow-y-auto px-3 py-2.5">
         <p className="mb-3 text-2xs leading-relaxed text-os-muted">
-          Leads <span className="font-semibold" style={{ color }}>{deptName}</span> — manages {agents.length} agent{agents.length === 1 ? '' : 's'}.
+          Leads <span className="font-semibold" style={{ color }}>{deptName}</span> — manages {agents.length} teammate{agents.length === 1 ? '' : 's'}.
         </p>
         <SectionLabel icon={FileText}>context</SectionLabel>
         <div className="mb-4"><WikiLink label={`${person.name.toLowerCase()}.md`} /></div>

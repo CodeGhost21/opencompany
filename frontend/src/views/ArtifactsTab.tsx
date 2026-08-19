@@ -487,8 +487,8 @@ function ArtifactDetail({
           // reading a refusal message should not have to work out why a blocker
           // is filed as a deliverable.
           <p className="mt-1.5 text-2xs italic text-muted-foreground">
-            Captured from the agent's chat reply before deliverables were published explicitly —
-            this is a record of what was said, not a file the teammate produced.
+            Captured from the teammate's chat reply before deliverables were published
+            explicitly — this is a record of what was said, not a file the teammate produced.
           </p>
         )}
         <p className="mt-2 text-2xs text-muted-foreground">
@@ -554,7 +554,7 @@ function ArtifactDetail({
       {editing ? (
         <div className="rounded-xl border bg-card p-3">
           <p className="mb-2 text-2xs text-muted-foreground">
-            Saving appends a new version authored by you. The agent's version is never
+            Saving appends a new version authored by you. The teammate's version is never
             overwritten — that is what keeps the diff answerable later.
           </p>
           <Textarea
