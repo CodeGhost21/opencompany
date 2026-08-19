@@ -83,7 +83,7 @@ use tokio::task::JoinHandle;
 
 use crate::company::{WorkflowFile, list_workflows_union};
 use crate::ports::types::CompanyId;
-use crate::ports::{DeliveryReport, DeliveryStatus, WorkflowRunContext};
+use crate::ports::{DeliveryReport, DeliveryStatus, WorkflowRunContext, is_undelivered};
 use crate::runtime::CompanyRegistry;
 use crate::runtime::WorkflowSpawn;
 use crate::runtime::cron::{CivilTime, CronExpr};
@@ -115,6 +115,21 @@ struct DeliveryCounts {
     skipped: usize,
     denied: usize,
     failed: usize,
+    /// Reports that did NOT reach their destination **and never will without a
+    /// change** — the number worth alerting on.
+    ///
+    /// A field rather than `skipped + denied + failed`, because that sum stopped
+    /// being the definition (issue #981): `skipped` also covers a report an
+    /// earlier run in the approval lineage already sent and a test run that
+    /// deliberately attempted nothing, and neither is a report that went
+    /// missing. [`is_undelivered`] is the one rung every surface stands on, so
+    /// this counts through it and the four per-status numbers stay exactly what
+    /// they are — a breakdown for the log line, not a classification.
+    ///
+    /// `pending` is excluded there for its own reason: it is awaiting a verdict,
+    /// not a fix, and folding it in would page someone for a queue that is
+    /// working as designed. It gets its own count on the summary line.
+    undelivered: usize,
 }
 
 impl DeliveryCounts {
@@ -128,18 +143,16 @@ impl DeliveryCounts {
                 DeliveryStatus::Denied => counts.denied += 1,
                 DeliveryStatus::Failed => counts.failed += 1,
             }
+            if is_undelivered(report) {
+                counts.undelivered += 1;
+            }
         }
         counts
     }
 
-    /// Reports that did NOT reach their destination **and never will without a
-    /// change** — the number worth alerting on.
-    ///
-    /// `pending` is deliberately excluded: it is awaiting a verdict, not a fix,
-    /// and folding it in here would page someone for a queue that is working as
-    /// designed. It gets its own count on the summary line.
+    /// See [`DeliveryCounts::undelivered`].
     fn undelivered(&self) -> usize {
-        self.skipped + self.denied + self.failed
+        self.undelivered
     }
 }
 
@@ -917,6 +930,16 @@ fn spawn_scheduled_run(
                         );
                         continue;
                     }
+                    // Issue #981: a row whose fate is accounted for is not a
+                    // problem to warn about. An approval-gate continuation
+                    // deliberately does not re-send a report an earlier run in
+                    // its lineage already delivered (issue #438), and warning
+                    // once a minute about a graph behaving exactly as designed
+                    // is how a real refusal gets scrolled past. The `skipped=`
+                    // number on the summary line below still carries it.
+                    if !is_undelivered(report) {
+                        continue;
+                    }
                     tracing::warn!(
                         %company,
                         workflow = %workflow_id,
@@ -1555,6 +1578,7 @@ to = "done"
                 skipped: 1,
                 denied: 1,
                 failed: 1,
+                undelivered: 3,
             }
         );
         // A parked report awaits a verdict, not a fix: it must NOT inflate the

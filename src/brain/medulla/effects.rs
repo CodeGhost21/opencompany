@@ -14,7 +14,6 @@ use crate::ports::types::{
     ChunkAddr, CompanyEvent, ContextChunk, ContextOp, ContextOpResult, Effect, EffectGroup,
     LedgerEntry, OutboundMessage, Verdict,
 };
-use crate::ports::workflow_runner::DeliveryStatus;
 
 use super::wire::{EffectFrame, Role, WireEvent};
 
@@ -383,10 +382,15 @@ pub(crate) fn wire_event(seq: u64, event: &CompanyEvent) -> WireEvent {
                     format!("{how} run of workflow {workflow_id} was stopped by an operator")
                 }
                 None => {
-                    let undelivered = deliveries
-                        .iter()
-                        .filter(|d| !matches!(d.status, DeliveryStatus::Sent))
-                        .count();
+                    // Issue #981: `crate::ports::is_undelivered`, not a fourth
+                    // transcription of the rule. The local filter this replaces
+                    // counted anything that was not `Sent` — which folded in
+                    // `Pending`, so a report parked for an operator's approval
+                    // was reported to the sidecar as "1 not delivered, 1 pending
+                    // approval" on the same line: the same row, counted twice,
+                    // once as a loss it is not. It also counted a test run's
+                    // rows and a continuation's already-sent ones.
+                    let undelivered = crate::ports::undelivered_count(deliveries);
                     format!(
                         "{how} run of workflow {workflow_id} finished — {} report(s) routed, \
                          {undelivered} not delivered, {} pending approval",
@@ -673,7 +677,7 @@ pub(crate) fn payload_bool(value: &Value, key: &str) -> Option<bool> {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::ports::workflow_runner::{DeliveryReason, DeliveryReport};
+    use crate::ports::workflow_runner::{DeliveryReason, DeliveryReport, DeliveryStatus};
 
     /// A recipient address for fixtures. `.invalid` is reserved by RFC 2606 and
     /// can never resolve, so a fixture that escapes names nobody.

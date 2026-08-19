@@ -1784,10 +1784,12 @@ fn summarize_event(event: &CompanyEvent) -> String {
                 // invite it to act on work an operator deliberately stopped.
                 None if *cancelled => format!("{how} workflow run stopped: {workflow_id}"),
                 None => {
-                    let undelivered = deliveries
-                        .iter()
-                        .filter(|d| !matches!(d.status, crate::ports::DeliveryStatus::Sent))
-                        .count();
+                    // Issue #981: the shared rung, not a local one. As in the
+                    // sidecar's projection, the filter this replaces counted
+                    // `Pending` — a report waiting on a human read to the
+                    // orchestrator as one that had been lost, and it would act
+                    // on that.
+                    let undelivered = crate::ports::undelivered_count(deliveries);
                     format!(
                         "{how} workflow run finished: {workflow_id} ({undelivered} not delivered)"
                     )
@@ -3915,12 +3917,7 @@ fn summarize_run(
     let undelivered: Vec<&crate::ports::DeliveryReport> = run
         .deliveries
         .iter()
-        .filter(|d| {
-            !matches!(
-                d.status,
-                crate::ports::DeliveryStatus::Sent | crate::ports::DeliveryStatus::Pending
-            )
-        })
+        .filter(|d| crate::ports::is_undelivered(d))
         .collect();
     if !undelivered.is_empty() {
         md.push_str(&format!(
