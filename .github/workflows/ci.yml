@@ -1,7 +1,23 @@
 name: CI
 
+# `push` is scoped to `main`. Unscoped, it fired alongside `pull_request` on
+# every push to every branch, so each push to an open PR started TWO complete
+# runs of this workflow — different `github.ref` values, therefore different
+# concurrency groups, therefore neither cancelled the other. The evidence is in
+# the run list: `push` and `pull_request` runs on `fix/1059-…`,
+# `feat/1070-…` and `feat/1113-…` created within two seconds of each other,
+# each carrying the same ~33-minute `Rust (openhuman, tinycortex)` lane. Every
+# minute of that was spent twice and half of it answered a question nobody
+# asked — the PR run is the one whose result is reported on the PR and required
+# by the ruleset.
+#
+# What the branch scope keeps: pushes to `main` (the post-merge verification the
+# concurrency block below exists to protect) and every pull request, including
+# ones from forks. What it drops: runs on branches with no PR open yet, which
+# are re-run in full the moment the PR is opened.
 on:
   push:
+    branches: [main]
   pull_request:
 
 # Issue #770. Cancellation is scoped to NON-DEFAULT refs, and the asymmetry is
