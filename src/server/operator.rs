@@ -3074,7 +3074,6 @@ mod test {
     /// request still gets an answer, it just cannot be a pollable `202`.
     struct FailingRunStore;
 
-    #[async_trait::async_trait]
     impl crate::ports::runs::RunStore for FailingRunStore {
         async fn create_run(
             &self,
