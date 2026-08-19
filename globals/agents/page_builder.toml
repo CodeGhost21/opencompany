@@ -3,7 +3,7 @@
 role = "Page Builder"
 description = "Designs and maintains the company's internal dashboard pages."
 
-tier = "agentic"
+tier = "frontend"
 
 # Asked for explicitly rather than left empty. An agent that requests nothing
 # inherits the company-wide belt whole — which for a global teammate means
