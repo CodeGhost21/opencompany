@@ -17,7 +17,7 @@ use crate::Result;
 use crate::company::steer::SteerControl;
 use crate::harness::run_trace::RunTraceSink;
 use crate::harness::{HarnessDeps, HarnessPool, TurnOutcome};
-use crate::ports::types::CompanyId;
+use crate::ports::types::{CompanyId, CompanyRecord};
 use crate::runtime::delegation::RunTurn;
 
 /// The built-in harness's [`RunTurn`]: re-attaches [`HarnessDeps`] onto each
