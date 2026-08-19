@@ -47,10 +47,16 @@ if [ "$#" -ne 0 ]; then
     exit 2
 fi
 
-# `curl` is only used to ask whether something is listening, so a non-2xx
-# answer is still a yes.
+# Whether *the console* is on the port — not merely whether something is.
+#
+# `-f` rejects a non-2xx answer and the marker rejects a 200 from somebody
+# else's service. Both matter: the shell loads whatever is at `devUrl` without
+# asking what it is, so reusing a stranger's port shows their page inside the
+# OpenCompany window, and an error page would show as a blank one.
+# `OpenCompany Console` is the `<title>` in `frontend/index.html`, which the
+# dev server serves verbatim.
 serving() {
-    curl -sS -o /dev/null --max-time 2 "${DEV_URL}/" 2>/dev/null
+    curl -fsS --max-time 2 "${DEV_URL}/" 2>/dev/null | grep -q 'OpenCompany Console'
 }
 
 DEV_SERVER_PID=""
@@ -66,22 +72,25 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-# Whichever package manager this checkout has. `pnpm` first because that is
-# what `pnpm-workspace.yaml` declares, `npm` second because that is what CI
-# installs with — and either can run the `dev` script whichever one populated
-# `node_modules`.
-if command -v pnpm >/dev/null 2>&1; then
-    PACKAGE_MANAGER=pnpm
-elif command -v npm >/dev/null 2>&1; then
-    PACKAGE_MANAGER=npm
-else
-    echo "desktop-dev: neither pnpm nor npm is on PATH" >&2
-    exit 1
-fi
-
 if serving; then
     echo "desktop-dev: reusing the console dev server already on ${DEV_URL}"
 else
+    # Resolved here rather than up front: reusing a server someone else started
+    # needs no package manager at all, and exiting for a missing `pnpm` on that
+    # path would refuse a run that was about to work.
+    #
+    # `pnpm` first because `pnpm-workspace.yaml` declares it, `npm` second
+    # because that is what CI installs with — either can run the `dev` script
+    # whichever one populated `node_modules`.
+    if command -v pnpm >/dev/null 2>&1; then
+        PACKAGE_MANAGER=pnpm
+    elif command -v npm >/dev/null 2>&1; then
+        PACKAGE_MANAGER=npm
+    else
+        echo "desktop-dev: neither pnpm nor npm is on PATH" >&2
+        exit 1
+    fi
+
     if [ ! -d "${REPO_ROOT}/frontend/node_modules" ]; then
         echo "desktop-dev: install the console's dependencies first:" >&2
         echo "    ${PACKAGE_MANAGER} --dir '${REPO_ROOT}/frontend' install" >&2
@@ -96,15 +105,17 @@ else
     # Waited for rather than slept past: the shell loads `devUrl` the moment it
     # opens its window, and a race here is exactly the blank screen this script
     # exists to prevent.
-    waited=0
+    # A wall-clock deadline, not an iteration count. Each `serving` call can
+    # burn its full 2s timeout, so counting iterations meant "30 seconds" was
+    # anywhere from 30 to 150 depending on how the failures happened to fall.
+    deadline=$(($(date +%s) + 30))
     until serving; do
         if ! kill -0 "${DEV_SERVER_PID}" 2>/dev/null; then
             echo "desktop-dev: the console dev server exited" >&2
             exit 1
         fi
-        waited=$((waited + 1))
-        if [ "${waited}" -gt 60 ]; then
-            echo "desktop-dev: nothing answered on ${DEV_URL} after 30s" >&2
+        if [ "$(date +%s)" -ge "${deadline}" ]; then
+            echo "desktop-dev: the console did not answer on ${DEV_URL} within 30s" >&2
             exit 1
         fi
         sleep 0.5
