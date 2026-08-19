@@ -476,7 +476,10 @@ fn hex_segment(value: &str) -> String {
 /// `publish_artifact` needs a card to attach a version to, which a run does not
 /// have, so a refusal there remains the truthful answer.
 pub struct HarnessAgentRunner {
-    pool: Arc<HarnessPool>,
+    /// The turn a workflow agent node runs on: the lane-aware router in a
+    /// multi-harness company, the default lane over the pool in a
+    /// single-harness one (see `run_workflow`'s single-pool entrypoint).
+    turn: Arc<dyn crate::runtime::delegation::RunTurn>,
     deps: HarnessDeps,
     /// The company record, for the board drain's desk/assignee resolution (issue
     /// #661 / M5) — the same record the rest of this bundle was built from, so a
