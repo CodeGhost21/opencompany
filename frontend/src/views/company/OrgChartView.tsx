@@ -113,11 +113,22 @@ interface Props {
    * operator just followed.
    */
   focusDeskId?: string | null;
+  /**
+   * The Company page's Cards ⇄ Org chart switch (issue #1141), rendered in this
+   * view's own header rather than above it.
+   *
+   * A slot rather than a wrapper, because the two halves of the Company page
+   * have different headers by design — this one offers "New desk" and "New
+   * teammate", the roster offers "Add teammate" — and hoisting them into a
+   * shared bar would have to render both modes' actions at once. Optional, so
+   * the chart still stands alone.
+   */
+  toolbar?: ReactNode;
 }
 
 type Load = "loading" | "ready" | "error";
 
-export function OrgChartView({ client, company, focusDeskId }: Props) {
+export function OrgChartView({ client, company, focusDeskId, toolbar }: Props) {
   const [load, setLoad] = useState<Load>("loading");
   const [tree, setTree] = useState<OrgTree | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
@@ -370,7 +381,8 @@ export function OrgChartView({ client, company, focusDeskId }: Props) {
               who leads.
             </p>
           </div>
-          <div className="flex shrink-0 flex-wrap justify-end gap-2">
+          <div className="ml-auto flex shrink-0 flex-wrap items-center justify-end gap-2">
+            {toolbar}
             <Button
               size="sm"
               variant="outline"

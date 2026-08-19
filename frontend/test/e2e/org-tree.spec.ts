@@ -301,6 +301,11 @@ const deskNode = (page: Page, name: string) =>
  */
 async function openChart(page: Page) {
   await page.goto("/#/company");
+  // The Company page leads with the teammate cards since #1141; the chart is
+  // the other half of its Cards ⇄ Org chart toggle. Clicked unconditionally —
+  // the toggle is in the header of both halves, and pressing the half already
+  // on screen is a no-op.
+  await page.getByTestId("company-mode-chart").click({ timeout: 30_000 });
   await expect(chart(page)).toBeVisible({ timeout: 30_000 });
 }
 
@@ -349,6 +354,10 @@ test("#311 the org chart is reachable, which it was not before", async ({
   // also the stronger claim: it proves the nav entry *routes*, which typing a
   // URL does not.
   await nav.click();
+  // Cards first (issue #1141): the nav entry lands on the teammates, and the
+  // chart is one toggle away rather than gone.
+  await expect(page.getByTestId("team-card").first()).toBeVisible({ timeout: 30_000 });
+  await page.getByTestId("company-mode-chart").click();
   await expect(chart(page)).toBeVisible({ timeout: 30_000 });
 
   // And the hash survives rather than being rewritten to the fallback view,
@@ -908,9 +917,9 @@ test("#1102 a teammate on the chart opens their detail page", async ({
   await expect(grace).toHaveAttribute("href", "#/team/grace");
   await grace.click();
   await expect.poll(() => page.url()).toContain("#/team/grace");
-  await expect(
-    page.getByRole("button", { name: "Back to team" }),
-  ).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByTestId("agent-breadcrumb-company")).toBeVisible({
+    timeout: 30_000,
+  });
 
   // The chips under "Not on a desk" name the same teammates and were the worse
   // half of #1102 — bordered pills that read as controls and did nothing.

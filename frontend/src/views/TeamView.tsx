@@ -1,10 +1,11 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { Mail, MoreHorizontal, Plus, Sparkles, UserPlus, Wallet } from "lucide-react";
 import { toast } from "sonner";
 
 import { listPeople, me as fetchMe, type Person } from "@/api/auth";
 import type { OpenCompanyClient } from "@/api/client";
 import { setInboxEnabled } from "@/api/inbox";
+import { listTasks } from "@/api/tasks";
 import { ApiError, type TeamMemberDto } from "@/api/types";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -29,7 +30,9 @@ import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
 import { emptyDraft, type AgentDraft, type AgentFieldKey } from "@/lib/agent";
+import { fetchBoardColumns } from "@/lib/board-columns";
 import { addMemberFailure, reportAddMember } from "@/lib/member-feedback";
+import { workloadByAssignee, type Workload } from "@/lib/team-workload";
 import {
   fromDto,
   initials,
@@ -62,6 +65,12 @@ interface Props {
    * nobody on it, so skipping the dialog is not a dead end.
    */
   onRunSetup?: () => void;
+  /**
+   * The Company page's Cards ⇄ Org chart switch (issue #1141), rendered in this
+   * view's header beside "Add teammate". See `CompanyView` for why it is a slot
+   * rather than a bar drawn above both halves.
+   */
+  toolbar?: ReactNode;
 }
 
 type Load = "loading" | "ready";
@@ -74,6 +83,7 @@ export function TeamView({
   onOpenAgent,
   refreshKey,
   onRunSetup,
+  toolbar,
 }: Props) {
   const [load, setLoad] = useState<Load>("loading");
   const [fromHost, setFromHost] = useState(false);
@@ -95,6 +105,15 @@ export function TeamView({
   const [people, setPeople] = useState<Person[]>([]);
   // The member whose budget dialog is open, if any.
   const [budgetFor, setBudgetFor] = useState<TeamMember | null>(null);
+  /**
+   * Open cards and running state per teammate (issue #1141), or `null` while
+   * nothing has been read and for a host that cannot answer.
+   *
+   * `null` and an empty map are the same *rendering* — no dot, no count — and
+   * that is the point: the alternative was a `0` on every card, which claims
+   * every teammate is free on a host that never said so. See `lib/team-workload.ts`.
+   */
+  const [workload, setWorkload] = useState<Map<string, Workload> | null>(null);
 
   /**
    * Hiding the budget controls from a non-admin is **courtesy, not enforcement**.
@@ -185,13 +204,37 @@ export function TeamView({
     }
   }, [client, company]);
 
+  /**
+   * The board, read for what it says about the people rather than the cards.
+   *
+   * Two reads, both best-effort and neither of them blocking: the roster is the
+   * page, and a host with no `…/tasks` route — or a network that dropped — must
+   * still render every teammate. Both failures land on `null`, which draws no
+   * status line at all rather than a fabricated "idle · 0 open".
+   *
+   * The columns come with it because "open" is the host's word, not this
+   * console's: `closed` is declared per column on the `tasks` ledger.
+   */
+  const loadWorkload = useCallback(async () => {
+    if (!company) {
+      setWorkload(null);
+      return;
+    }
+    const [tasks, columns] = await Promise.all([
+      listTasks(client, company).catch(() => null),
+      fetchBoardColumns(client, company).catch(() => null),
+    ]);
+    setWorkload(tasks && columns ? workloadByAssignee(tasks, columns) : null);
+  }, [client, company]);
+
   useEffect(() => {
     setLoad("loading");
     void boot();
     void loadViewer();
+    void loadWorkload();
     // `refreshKey` re-runs the read after setup staffs the company; without it
     // the operator lands on the roster they had before their team was built.
-  }, [boot, loadViewer, refreshKey]);
+  }, [boot, loadViewer, loadWorkload, refreshKey]);
 
   /**
    * Re-read the roster on the way back from the agent sub-page (issue #264).
@@ -351,16 +394,27 @@ export function TeamView({
   return (
     <div className="flex-1 overflow-y-auto">
       <div className="mx-auto w-full max-w-5xl space-y-6 px-4 py-6">
+        {/*
+          Headed "Company", not "Team" (issue #1141). This grid is no longer a
+          page of its own — bare `#/team` redirects to `#/company` — it is the
+          Company page's Cards half, and the org chart beside it heads the same
+          way. Two headings over one page's two halves is how an operator ends
+          up believing they are on two different pages.
+        */}
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="space-y-1">
-            <h2 className="text-2xl font-semibold tracking-tight">Team</h2>
+            <h2 className="text-2xl font-semibold tracking-tight">Company</h2>
             <p className="text-sm text-muted-foreground">
-              The teammates that make up your company. {fromHost ? "Defined by this company." : "Start from these and shape your own."}
+              The teammates that make up your company — what each does, and what
+              they're on. {fromHost ? "Defined by this company." : "Start from these and shape your own."}
             </p>
           </div>
-          <Button onClick={() => setAddOpen(true)}>
-            <UserPlus className="size-4" /> Add teammate
-          </Button>
+          <div className="ml-auto flex flex-wrap items-center justify-end gap-2">
+            {toolbar}
+            <Button onClick={() => setAddOpen(true)}>
+              <UserPlus className="size-4" /> Add teammate
+            </Button>
+          </div>
         </div>
 
         {/*
@@ -414,6 +468,14 @@ export function TeamView({
                 onRemoveCap={() => void applyBudget(m, null)}
                 onResetBudget={() => void resetBudget(m)}
                 setByLabel={m.budgetSetBy ? whoSet(m.budgetSetBy) : undefined}
+                // Looked up by roster id, so a card the board assigned to a
+                // *desk* is never attributed to the people on it.
+                //
+                // The two ways of having no entry are different facts and are
+                // kept apart here: the board answered and this teammate is on
+                // nothing (idle, zero — worth saying), versus the board never
+                // answered (undefined — the card says nothing at all).
+                workload={workload ? (workload.get(m.id) ?? IDLE) : undefined}
               />
             ))}
             <button
@@ -447,6 +509,14 @@ export function TeamView({
     </div>
   );
 }
+
+/**
+ * A teammate the board knows about and has given nothing to.
+ *
+ * Shared rather than rebuilt per card: it is a constant fact, and a fresh
+ * object per render would change `MemberCard`'s props on every pass.
+ */
+const IDLE: Workload = { open: 0, status: "idle" };
 
 /** The fields the add dialog collects. */
 interface AddMemberFields {
@@ -484,6 +554,7 @@ function MemberCard({
   onRemoveCap,
   onResetBudget,
   setByLabel,
+  workload,
 }: {
   member: TeamMember;
   inboxOn: boolean;
@@ -498,6 +569,11 @@ function MemberCard({
   onResetBudget: () => void;
   /** Who set the current override, already resolved to something readable. */
   setByLabel?: string;
+  /**
+   * What this teammate is on and carrying, or undefined when the board could
+   * not be read — in which case the card says nothing about either.
+   */
+  workload?: Workload;
 }) {
   const capped = member.budgetUsdDaily !== undefined;
   // An override exists (someone set this deliberately), as opposed to the cap
@@ -576,8 +652,11 @@ function MemberCard({
           </DropdownMenu>
         </div>
         {member.description && (
-          <p className="line-clamp-3 text-sm text-muted-foreground">{member.description}</p>
+          <p className="line-clamp-3 text-sm text-muted-foreground" data-testid="team-card-description">
+            {member.description}
+          </p>
         )}
+        {workload && <WorkloadLine workload={workload} />}
         <DailyBudgetLine member={member} setByLabel={setByLabel} />
         <div className="mt-auto flex items-center justify-between gap-2 border-t pt-3">
           <Badge variant="secondary" className="gap-1">
@@ -596,6 +675,47 @@ function MemberCard({
         </div>
       </CardContent>
     </Card>
+  );
+}
+
+/**
+ * What a teammate is on, and how much of it (issue #1141).
+ *
+ * One line for two facts an operator scanning the roster is actually asking:
+ * is anybody working on my behalf right now, and how much is queued behind
+ * them. Neither is a host field — both are derived from the board, and
+ * `lib/team-workload.ts` carries the reasoning.
+ *
+ * Coloured through the console's status vocabulary rather than a palette step,
+ * so `working` is the same cyan as a running workflow node and `idle` the same
+ * neutral as everything that is asking nothing of anyone. Both themes come from
+ * the tokens.
+ */
+function WorkloadLine({ workload }: { workload: Workload }) {
+  const working = workload.status === "working";
+  return (
+    <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
+      <span
+        className={cn(
+          "size-2 shrink-0 rounded-full",
+          working ? "bg-status-running" : "bg-status-idle",
+        )}
+        aria-hidden
+      />
+      <span
+        className={cn(
+          "font-medium",
+          working ? "text-status-running-text" : "text-status-idle-text",
+        )}
+        data-testid="team-card-status"
+      >
+        {working ? "Working" : "Idle"}
+      </span>
+      <span aria-hidden>·</span>
+      <span data-testid="team-card-tasks">
+        {workload.open === 1 ? "1 open task" : `${workload.open} open tasks`}
+      </span>
+    </p>
   );
 }
 

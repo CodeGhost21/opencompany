@@ -70,7 +70,7 @@ import { writeLastChannel } from "@/lib/last-channel";
 import { fromDto, type TeamMember } from "@/lib/team";
 import { agentDmThreads, defaultThreads, threadsFromDesks } from "@/lib/threads";
 import { Overview } from "@/views/Overview";
-import { OrgChartView } from "@/views/company/OrgChartView";
+import { CompanyView } from "@/views/company/CompanyView";
 import { ChatView } from "@/views/ChatView";
 import {
   channelIdForThread,
@@ -172,6 +172,15 @@ const NAV: NavItem[] = [
  * keep answering `#/conversation` and `#/team` until the chat covers the
  * last of what they still do better (a desk's persisted transcript).
  *
+ * `team` is here for a narrower reason than it used to be (issue #1141). Bare
+ * `#/team` no longer resolves to it at all — `REWRITE_RETIRED` sends that to
+ * `#/company`, whose Cards half is the grid it used to draw. What this line
+ * keeps alive is `#/team/<agentId>`: the teammate detail page, deliberately a
+ * page rather than a modal so it can be linked, and linked to today from the
+ * org chart's seats, its "Not on a desk" chips and the chat member pane. Drop
+ * `team` from this list and `useHashView` discards the head *and* its sub-page,
+ * so every one of those lands on Overview instead of the teammate they named.
+ *
  * `tasks` is here for a different reason than the rest, and it is the load-
  * bearing line of issue #1140. The board page is gone, but `#/tasks/<id>` is
  * the card detail — the timeline, the plan brief, the discussion, the attempts,
@@ -208,10 +217,18 @@ const VIEWS: View[] = [...NAV.map((i) => i.view), ...HIDDEN_VIEWS];
 const REWRITE_RETIRED = (
   head: string,
   sub: string | null,
-): [View, string | null] | null =>
-  head === "tasks" && taskIdFromSegment(sub) === null
-    ? ["ledgers", BOARD_LEDGER]
-    : null;
+): [View, string | null] | null => {
+  if (head === "tasks" && taskIdFromSegment(sub) === null) return ["ledgers", BOARD_LEDGER];
+  // Bare `#/team` is the Company page now (issue #1141). It rendered the
+  // teammate card grid from a route with no nav entry, so nobody arrived at it;
+  // the grid is Company's Cards half, and leaving `#/team` answering as well
+  // would leave two live addresses drawing one grid with no relationship
+  // between them. A named teammate is untouched — `#/team/<agentId>` is the
+  // detail sub-page (issue #264), it is what the org chart's rows and the chat
+  // pane's chips link to, and it is deliberately a page so it can be linked.
+  if (head === "team" && !sub) return ["company", null];
+  return null;
+};
 
 /** How many workflow run-progress frames (issue #371) the shell keeps for the
  * Workflows canvas. A run emits roughly one per node, so this holds many runs'
@@ -1366,7 +1383,7 @@ export function AppShell({
             <Overview client={client} company={company} />
           )}
           {view === "company" && (
-            <OrgChartView
+            <CompanyView
               client={client}
               company={company}
               // Issue #485: chat's member pane links in at a desk
@@ -1375,7 +1392,22 @@ export function AppShell({
               // had no per-desk address to link to. `useHashView` hands the
               // segment back unvalidated, so the chart resolves an unknown id
               // itself rather than this shell guessing which desks exist.
+              //
+              // Issue #1141: it also decides the mode. A desk address is an org
+              // chart address, so naming one puts the chart on screen whatever
+              // the operator's remembered preference is.
               focusDeskId={sub}
+              // The roster half's own sub-page is `#/team/<agentId>`, not a
+              // second segment of this view — the teammate detail page is a
+              // linkable address of its own (issue #264) and stays one.
+              onOpenAgent={(agentId) =>
+                agentId ? navigate("team", agentId) : navigate("company")
+              }
+              // Setup just staffed the company, so the roster read is stale.
+              refreshKey={teamBuilt}
+              // Skipping setup must not be a dead end: an unstaffed company keeps
+              // a visible way back in.
+              onRunSetup={() => setSetupForced(true)}
             />
           )}
           {view === "chat" && (
@@ -1477,16 +1509,24 @@ export function AppShell({
               onReviewApprovals={(taskId) => navigate("approvals", encodeURIComponent(taskId))}
             />
           )}
+          {/*
+            `#/team/<agentId>` only. Bare `#/team` is rewritten to `#/company`
+            below (issue #1141) — the grid it used to render is the Company
+            page's Cards half now, and two addresses drawing the same grid is
+            the ambiguity that rewrite exists to remove.
+
+            The sub-page comes back unvalidated, as `useHashView` documents:
+            only this view knows which ids exist, and the detail screen resolves
+            an unknown one against the host rather than guessing here.
+          */}
           {view === "team" && (
             <TeamView
               client={client}
               company={company}
-              // `#/team/<agentId>` opens that agent (issue #264). The sub-page
-              // comes back unvalidated, as `useHashView` documents: only this
-              // view knows which ids exist, and the detail screen resolves an
-              // unknown one against the host rather than guessing here.
               sub={sub}
-              onOpenAgent={(agentId) => navigate("team", agentId ?? undefined)}
+              onOpenAgent={(agentId) =>
+                agentId ? navigate("team", agentId) : navigate("company")
+              }
               // Setup just staffed the company, so the roster read is stale.
               refreshKey={teamBuilt}
               // Skipping setup must not be a dead end: an unstaffed company keeps

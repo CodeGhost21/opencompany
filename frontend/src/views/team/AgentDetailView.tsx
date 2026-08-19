@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useState, type ReactNode } from "react";
-import { ArrowLeft, Mail, Pencil, Sparkles, Users, Wrench } from "lucide-react";
+import { ChevronRight, Mail, Pencil, Sparkles, Users, Wrench } from "lucide-react";
 import { toast } from "sonner";
 
 import type { OpenCompanyClient } from "@/api/client";
+import { listTasks } from "@/api/tasks";
 import { ApiError, type AgentDetailDto } from "@/api/types";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -18,7 +19,9 @@ import {
   type AgentDraft,
   type AgentFieldKey,
 } from "@/lib/agent";
+import { fetchBoardColumns } from "@/lib/board-columns";
 import { initials, TEAM_TONES, toneFor } from "@/lib/team";
+import { workloadByAssignee, type Workload } from "@/lib/team-workload";
 import { cn } from "@/lib/utils";
 import { AgentFields } from "@/views/team/AgentFields";
 
@@ -99,6 +102,12 @@ export function AgentDetailView({
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState<AgentDraft>({ name: "", role: "", description: "" });
   const [saving, setSaving] = useState(false);
+  /**
+   * What this teammate is on and carrying (issue #1141), or `null` when the
+   * board could not be read — in which case the header states neither rather
+   * than an invented "idle · 0 open".
+   */
+  const [workload, setWorkload] = useState<Workload | null>(null);
 
   const boot = useCallback(async () => {
     setLoad("loading");
@@ -116,6 +125,36 @@ export function AgentDetailView({
   useEffect(() => {
     void boot();
   }, [boot]);
+
+  /**
+   * The board, read for this one teammate — the same derivation the Company
+   * cards use, from the same two reads (`lib/team-workload.ts`).
+   *
+   * Best-effort and never blocking: a host with no `…/tasks` route still opens
+   * a teammate, it just cannot say what they are on.
+   */
+  useEffect(() => {
+    let live = true;
+    if (!company) {
+      setWorkload(null);
+      return;
+    }
+    void (async () => {
+      const [tasks, columns] = await Promise.all([
+        listTasks(client, company).catch(() => null),
+        fetchBoardColumns(client, company).catch(() => null),
+      ]);
+      if (!live) return;
+      setWorkload(
+        tasks && columns
+          ? (workloadByAssignee(tasks, columns).get(agentId) ?? { open: 0, status: "idle" })
+          : null,
+      );
+    })();
+    return () => {
+      live = false;
+    };
+  }, [client, company, agentId]);
 
   async function save() {
     if (!agent) return;
@@ -147,9 +186,66 @@ export function AgentDetailView({
   return (
     <div className="flex-1 overflow-y-auto">
       <div className="mx-auto w-full max-w-3xl space-y-6 px-4 py-6">
-        <Button variant="ghost" size="sm" className="-ml-2" onClick={onBack}>
-          <ArrowLeft className="size-4" /> Back to team
-        </Button>
+        {/*
+          A breadcrumb rather than a Back button (issue #1141). Back said where
+          the operator had been; this says where they *are* — one teammate,
+          inside the company — which is the question a linked page has to answer,
+          and this page is linked from the org chart, the chat member pane and
+          every "Not on a desk" chip. Arriving from any of those, "Back to team"
+          named a page they had never seen.
+
+          The Edit affordance sits on the same row for the same reason. It
+          already existed, buried in the Instructions card halfway down, so a
+          teammate read as a read-only record; the page's one editing action
+          belongs where a page's actions go.
+        */}
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <nav aria-label="Breadcrumb" data-testid="agent-breadcrumb">
+            <ol className="flex flex-wrap items-center gap-1 text-sm">
+              <li>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="-ml-2 h-7 px-2 text-muted-foreground"
+                  onClick={onBack}
+                  data-testid="agent-breadcrumb-company"
+                >
+                  Company
+                </Button>
+              </li>
+              <li aria-hidden className="text-muted-foreground">
+                <ChevronRight className="size-3.5" />
+              </li>
+              <li aria-current="page" className="min-w-0 truncate font-medium">
+                {/* Named as soon as there is a name, and "Teammate" until then.
+                    A crumb that appeared only once the read landed would move
+                    the Edit button across the row as the page settled. */}
+                {agent ? (agent.name?.trim() || agent.role) : "Teammate"}
+              </li>
+            </ol>
+          </nav>
+          {load === "ready" && agent && !editing && (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setEditing(true)}
+              // Disabled with the reason, never absent. A manifest teammate is
+              // declared in version control and the host says so through its
+              // own `editable` list — an operator looking for the edit needs to
+              // find out *why* there isn't one, not to conclude the console
+              // forgot to build it.
+              disabled={agent.editable.length === 0}
+              title={
+                agent.editable.length === 0
+                  ? "This teammate is declared in your company blueprint (company.toml), so its name, role and instructions are edited there."
+                  : undefined
+              }
+              data-testid="agent-edit"
+            >
+              <Pencil className="size-4" /> Edit
+            </Button>
+          )}
+        </div>
 
         {load === "loading" && <Skeleton className="h-64 rounded-xl" />}
 
@@ -177,23 +273,14 @@ export function AgentDetailView({
         {load === "ready" && agent && (
           <>
             <Identity agent={agent} />
+            <FactLine agent={agent} workload={workload} />
 
+            {/* The Edit action used to render here. It is on the page header
+                now (issue #1141) — one editing action, in the place a page's
+                actions live, rather than halfway down inside one of its cards. */}
             <Section
               title="Instructions"
               subtitle="What this teammate was defined to do. It frames every turn they take."
-              action={
-                agent.editable.length > 0 &&
-                !editing && (
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() => setEditing(true)}
-                    data-testid="agent-edit"
-                  >
-                    <Pencil className="size-4" /> Edit
-                  </Button>
-                )
-              }
             >
               {editing ? (
                 <div className="grid gap-4">
@@ -237,7 +324,7 @@ export function AgentDetailView({
                     <p className="text-xs text-muted-foreground" data-testid="agent-readonly-note">
                       This teammate is part of your company blueprint, so its name, role and
                       instructions are set in company.toml. Its daily budget can still be changed
-                      from the team page.
+                      from its card on the Company page.
                     </p>
                   )}
                 </>
@@ -294,6 +381,66 @@ function Identity({ agent }: { agent: AgentDetailDto }) {
           </span>
         </div>
       </div>
+    </div>
+  );
+}
+
+/**
+ * The three running facts about a teammate, on one line (issue #1141): what
+ * they are on, how much is on them, and what today has cost.
+ *
+ * Every part is omitted independently when its source is silent, and none is
+ * defaulted. A host that cannot answer the board draws no status and no count —
+ * not "idle · 0 open", which is a claim — and an uncapped teammate draws no
+ * spend line, because absence *is* the uncapped signal on the wire and `$0.00`
+ * would read as a teammate capped at nothing.
+ */
+function FactLine({
+  agent,
+  workload,
+}: {
+  agent: AgentDetailDto;
+  workload: Workload | null;
+}) {
+  const capped = agent.budgetUsdDaily !== undefined;
+  if (!workload && !capped) return null;
+  const working = workload?.status === "working";
+  return (
+    <div
+      className="flex flex-wrap items-center gap-x-4 gap-y-2 text-sm text-muted-foreground"
+      data-testid="agent-facts"
+    >
+      {workload && (
+        <>
+          <span className="flex items-center gap-1.5">
+            <span
+              className={cn(
+                "size-2 shrink-0 rounded-full",
+                working ? "bg-status-running" : "bg-status-idle",
+              )}
+              aria-hidden
+            />
+            <span
+              className={cn(
+                "font-medium",
+                working ? "text-status-running-text" : "text-status-idle-text",
+              )}
+              data-testid="agent-status"
+            >
+              {working ? "Working" : "Idle"}
+            </span>
+          </span>
+          <span data-testid="agent-tasks">
+            {workload.open === 1 ? "1 open task" : `${workload.open} open tasks`}
+          </span>
+        </>
+      )}
+      {capped && (
+        <span data-testid="agent-spend">
+          Today ${(agent.spentTodayUsd ?? 0).toFixed(2)} of $
+          {(agent.budgetUsdDaily ?? 0).toFixed(2)}
+        </span>
+      )}
     </div>
   );
 }

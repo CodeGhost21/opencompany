@@ -37,7 +37,7 @@ const FIXTURE_SUBJECTS = ["Re: Spring campaign timeline"];
 test.skip("Inbox reads the host's per-agent store, not a seeded fixture", async ({ page }) => {
   // Switch on the first teammate's inbox from the Team page. The toggle writes
   // to the host keyed by agent id — the same key the ingest webhook files under.
-  await page.goto("/#/team");
+  await page.goto("/#/company");
   const toggle = page.getByTestId("team-inbox-toggle").first();
   await expect(toggle).toBeVisible({ timeout: 30_000 });
   if (!(await toggle.isChecked())) {
@@ -50,7 +50,7 @@ test.skip("Inbox reads the host's per-agent store, not a seeded fixture", async 
     localStorage.clear();
     sessionStorage.clear();
   });
-  await page.goto("/#/team");
+  await page.goto("/#/company");
   await expect(page.getByTestId("team-inbox-toggle").first()).toBeChecked({ timeout: 30_000 });
 
   // The Inbox page lists that inbox and shows only real mail. With no ingested
