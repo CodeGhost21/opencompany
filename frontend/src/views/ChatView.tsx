@@ -123,7 +123,7 @@ interface Props {
    * Turns accepted but not settled, by host thread id — including ones this
    * console never POSTed, which is what makes the indicator survive a reload.
    */
-  openTurns?: Record<string, OpenTurn>;
+  openTurns?: Record<string, OpenTurn[]>;
   /**
    * The in-flight tool timeline the shell folds out of the live turn frames,
    * keyed by **host thread id** — so this view has to resolve its channel to a
