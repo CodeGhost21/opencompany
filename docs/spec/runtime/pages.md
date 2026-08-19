@@ -111,7 +111,7 @@ internal dashboard page, not a public site):
 | Route | Serves |
 | --- | --- |
 | `GET {scope}/pages` | Every page's manifest as JSON — `[{ "slug", "title", "description", "icon", "navVisible" }]` — for the console nav. |
-| `GET {scope}/pages/{slug}` | A fixed HTML shell: an import map pointing `react` / `react-dom/client` / `react/jsx-runtime` at `/pages-sdk/react.mjs` and `@opencompany/site` at `/pages-sdk/index.mjs`, plus a `<script type="module">` that imports `./bundle.mjs` and mounts it with `ReactDOM.createRoot`. |
+| `GET {scope}/pages/{slug}` | A fixed HTML shell: an import map pointing `react` / `react-dom/client` / `react/jsx-runtime` at `/pages-sdk/react.mjs` and `@opencompany/site` at `/pages-sdk/index.mjs`, plus a `<script type="module">` that imports `./{slug}/bundle.mjs` — a path relative to the shell's own URL at `…/pages/{slug}` — and mounts it with `ReactDOM.createRoot`. |
 | `GET {scope}/pages/{slug}/bundle.mjs` | The page's `Page.compiled.mjs`, streamed with `Content-Type: application/javascript` and `Content-Disposition: inline`. |
 
 All three set:
@@ -119,7 +119,13 @@ All three set:
 ```text
 Content-Security-Policy: default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'none'; frame-ancestors 'self'
 X-Content-Type-Options: nosniff
+Cache-Control: no-store
 ```
+
+`Cache-Control: no-store` on every route: the shell, manifest and bundle are
+authenticated, company-specific content, so a browser — or an intermediary —
+must never serve a cached copy of one company's (or one session's) page to
+another request.
 
 as defense in depth, on top of the iframe sandbox described below, which is
 the boundary that actually holds.
