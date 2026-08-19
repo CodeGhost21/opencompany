@@ -239,7 +239,7 @@ async fn policy_field_reports_the_override_not_the_manifest() {
 
     let value = query(
         router(state),
-        r#"{"query":"{ company(id: \"acme\") { policy { mode manifestMode overridden setBy setAtMillis } } }"}"#,
+        r#"{"query":"{ company(id: \"acme\") { policy { mode manifestMode overridden setBy setAtMillis alwaysApprove manifestAlwaysApprove takesEffect tiers { value label description } } } }"}"#,
     )
     .await;
     let policy = &value["data"]["company"]["policy"];
@@ -257,6 +257,12 @@ async fn policy_field_reports_the_override_not_the_manifest() {
         policy["setAtMillis"], 1_700_000_000_000_f64,
         "epoch millis survive the f64 widening exactly: {value}"
     );
+    assert_eq!(policy["alwaysApprove"].as_array().unwrap().len(), 0, "{value}");
+    assert_eq!(policy["manifestAlwaysApprove"].as_array().unwrap().len(), 0, "{value}");
+    assert!(policy["takesEffect"].as_str().unwrap().contains("next turn"), "{value}");
+    let tiers = policy["tiers"].as_array().unwrap();
+    assert!(tiers.len() >= 4, "expected at least 4 tiers: {value}");
+    assert_eq!(tiers[0]["value"], "readonly");
 }
 
 /// **Auth parity with REST.** `GET {scope}/policy` answers 401 to an
