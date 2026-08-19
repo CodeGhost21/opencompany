@@ -32,7 +32,11 @@ impl From<serde_json::Error> for ApiError {
 impl ApiError {
     /// The HTTP status this error maps to.
     pub fn status(&self) -> StatusCode {
-        match &self.0 {
+        // Issue #1008: a failed workflow run wraps its cause so it can carry the
+        // partial run back for the journal. Classify the cause — a graph that
+        // failed validation is still a 400 whether or not partial rows rode home
+        // with it.
+        match self.0.unwrapped() {
             OpenCompanyError::CompanyNotFound(_) | OpenCompanyError::NotFound(_) => {
                 StatusCode::NOT_FOUND
             }

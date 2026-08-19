@@ -219,7 +219,7 @@ step waiting on a person is not a failure — and says so structurally:
 
 ```jsonc
 {
-  "output": null,
+  "output": { "nodes": { "draft": { "items": [ { "json": { "text": "…" } } ] } } },
   "pendingApprovals": ["spec"],
   "deliveries": [],
   "nodes": [ { "nodeId": "spec", "status": "blocked", "elapsedMs": 42000 } ],
@@ -232,6 +232,17 @@ step waiting on a person is not a failure — and says so structurally:
   ]
 }
 ```
+
+`output` carries what the nodes **upstream** of the block produced (issue
+#1008). It used to be `null`, so the run drawer showed nothing for a step that
+had just written a draft.
+
+The **blocked node itself has no entry**, here or in the durable snapshot behind
+`GET …/workflows/runs/{runId}/output`. A node refused inside its model's tool
+loop ends its turn by writing prose about being blocked, and filing that prose
+as the node's product would re-open, one surface over, exactly the confusion
+issue #881 fixed by stopping it reaching the next node. The node's `blocked`
+chip and the run's notice are what say what happened.
 
 `blockedNodes` and `approvals` are omitted entirely when empty, so a run that
 blocked on nobody is byte-unchanged. Both also ride the `WorkflowRunFinished`

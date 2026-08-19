@@ -54,6 +54,7 @@ use crate::feedback::service::FeedbackFiler;
 use crate::feedback::store::FeedbackStore;
 use crate::policy::ManifestApprovalGate;
 use crate::ports::{CompanyStore, ContextStore, EventLog, InboxStore, MemoryStore, SecretStore};
+use crate::runtime::blocked_nodes::BlockedNodeQueue;
 use crate::runtime::continuation::ContinuationQueue;
 use crate::runtime::grants::GrantSet;
 use crate::runtime::journal::RuntimeJournal;
@@ -92,6 +93,12 @@ pub struct RuntimeHandover {
     /// exactly — a successor that forgot them would re-ask about every gate of a
     /// partly-decided run.
     pub(crate) workflow_gates: WorkflowGateQueue,
+    /// Issue #899 (Stage 1): the blocked-agent-node stashes still awaiting a
+    /// decision. Inherited live for [`continuations`](Self::continuations)'
+    /// reason — a successor that forgot them would release a blocked node's
+    /// batch with nothing to spawn and tell the operator to re-run a workflow
+    /// that is in fact ready to continue.
+    pub(crate) blocked_nodes: BlockedNodeQueue,
     pub(crate) serial: Arc<TokioMutex<()>>,
     pub(crate) task_writes: Arc<TokioMutex<()>>,
     #[cfg(feature = "openhuman")]
@@ -128,6 +135,7 @@ impl CompanyRuntime {
             grants: self.grants.clone(),
             continuations: self.continuations.clone(),
             workflow_gates: self.workflow_gates.clone(),
+            blocked_nodes: self.blocked_nodes.clone(),
             serial: self.serial.clone(),
             task_writes: self.task_writes.clone(),
             #[cfg(feature = "openhuman")]

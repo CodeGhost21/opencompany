@@ -144,6 +144,36 @@ pub enum OpenCompanyError {
         limit: usize,
     },
 
+    /// A workflow run failed after some of its nodes had already done durable
+    /// work (issue #1008).
+    ///
+    /// # Why an error variant, rather than a message
+    ///
+    /// A run's outcome is journaled by the **caller**, off what
+    /// [`WorkflowRunner::run`](crate::ports::WorkflowRunner::run) returned — and
+    /// the error arm returned nothing but a string. So a run that opened two
+    /// board cards, parked an approval and then broke at a later node journaled
+    /// a `WorkflowRunFinished` with every one of those lists empty: the cards and
+    /// the approval were sitting in front of the operator while no run admitted
+    /// to opening them.
+    ///
+    /// This carries the partial run so the caller can list what did happen. It
+    /// **wraps** the underlying failure rather than replacing it, so
+    /// [`Display`](std::fmt::Display), [`code`](Self::code) and the HTTP status
+    /// are exactly what they were — a caller that never asks for the partial
+    /// cannot tell this variant apart from the error inside it, which is the
+    /// property that keeps it additive.
+    #[error("{source}")]
+    WorkflowRunFailed {
+        /// The failure as it would have been reported before this wrapper.
+        #[source]
+        source: Box<OpenCompanyError>,
+        /// What the run had done by the time it broke: its per-node rows and
+        /// output, and the durable board / approval / notice rows its nodes
+        /// already produced.
+        partial: Box<crate::ports::WorkflowRun>,
+    },
+
     /// An operation conflicts with the company's lifecycle state (e.g. the
     /// company is paused or archived).
     #[error("company is {0}")]
@@ -286,6 +316,32 @@ impl OpenCompanyError {
         }
     }
 
+    /// The partial run a [`WorkflowRunFailed`](Self::WorkflowRunFailed) carries,
+    /// if this is one (issue #1008).
+    ///
+    /// `None` for every other error, including a workflow failure raised before
+    /// the engine ran — there is no partial run in that case, and an empty one
+    /// would be a claim rather than an absence.
+    pub fn partial_run(&self) -> Option<&crate::ports::WorkflowRun> {
+        match self {
+            Self::WorkflowRunFailed { partial, .. } => Some(partial),
+            _ => None,
+        }
+    }
+
+    /// The failure underneath a [`WorkflowRunFailed`](Self::WorkflowRunFailed)
+    /// wrapper, or `self` when there is none (issue #1008).
+    ///
+    /// The wrapper is additive by design, so anything that classifies an error —
+    /// HTTP status, [`code`](Self::code) — asks for this first and is otherwise
+    /// unchanged.
+    pub fn unwrapped(&self) -> &Self {
+        match self {
+            Self::WorkflowRunFailed { source, .. } => source.unwrapped(),
+            other => other,
+        }
+    }
+
     /// A stable, machine-readable code for this error.
     ///
     /// Surfaced in the HTTP error envelope (`{ "error", "code" }`) so clients
@@ -317,6 +373,10 @@ impl OpenCompanyError {
             Self::BudgetExceeded(_) => "budget_exceeded".to_string(),
             Self::WorkspaceQuota(_) => "workspace_quota_exceeded".to_string(),
             Self::WorkflowRunLimit { .. } => "workflow_run_limit".to_string(),
+            // Issue #1008: delegated, not its own code. The wrapper adds a
+            // payload for the journal, never a new failure a client should
+            // branch on differently.
+            Self::WorkflowRunFailed { source, .. } => source.code(),
             Self::LifecycleConflict(_) => "lifecycle_conflict".to_string(),
             Self::EmergencyStop(_) => "emergency_stop".to_string(),
             Self::Conflict(_) => "conflict".to_string(),
