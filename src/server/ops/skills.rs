@@ -34,6 +34,19 @@ const DEFAULT_CATEGORY: &str = "Ops";
 /// The publisher stamped on shared-library skills (mirrors the GraphQL type).
 const REGISTRY_PUBLISHER: &str = "OpenCompany";
 
+/// Whether `slug` is a safe skill id: `^[a-z0-9][a-z0-9-]*$`. A slug is also a
+/// directory name in the agent's scratch tree (`skills/<slug>/`), so a
+/// traversal (`..`) or a path separator here would escape it. Mirrors
+/// `harness::built_in::skills::valid_slug`.
+fn valid_slug(slug: &str) -> bool {
+    let mut chars = slug.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_lowercase() || c.is_ascii_digit() => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+}
+
 /// Builds the skills route fragment.
 pub fn router() -> Router<AppState> {
     scoped("/skills/{slug}/install", post(install))
