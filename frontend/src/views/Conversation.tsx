@@ -111,7 +111,7 @@ export function Conversation({ client, company, threads, activeId, onSelect, set
         onSendEnd={onSendEnd}
         onSendDetached={onSendDetached}
         onSendFailed={onSendFailed}
-        openTurn={openTurns?.[active.id]}
+        openTurn={openTurns?.[active.id]?.[0]}
         onOpenList={() => setMobilePane("list")}
         className={cn("md:flex", mobilePane === "chat" ? "flex" : "hidden")}
       />
