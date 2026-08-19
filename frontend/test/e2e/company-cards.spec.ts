@@ -246,6 +246,28 @@ test("#1141 a host with no board says nothing, rather than idle", async ({ page 
   await expect(maya.getByTestId("team-card-tasks")).toHaveCount(0);
 });
 
+test("#1181 the card and the detail header wear the same mascot", async ({ page }) => {
+  await mockApi(page);
+  await page.goto("/#/company");
+
+  // A drawing, not two letters. Before #1181 both surfaces rendered `initials()`
+  // over a tone tile while the same teammate had a face in chat.
+  const onCard = card(page, "Maya").locator("img");
+  await expect(onCard).toBeVisible({ timeout: 30_000 });
+  const cardSrc = await onCard.getAttribute("src");
+  expect(cardSrc).toContain("/avatars/blob-");
+
+  await card(page, "Maya").getByTestId("team-card-open").click();
+  await expect(page.getByTestId("agent-name")).toHaveText("Maya", { timeout: 30_000 });
+
+  // The same file, not merely some mascot. A screenshot showing *a* face proves
+  // nothing — two surfaces seeding differently each look internally consistent,
+  // which is exactly why the mismatch survives review. See
+  // `test/unit/teammate-avatar-seed.test.ts` for the two seeds in play.
+  const onDetail = page.getByTestId("agent-avatar").locator("img");
+  await expect(onDetail).toHaveAttribute("src", cardSrc ?? "");
+});
+
 test("#1141 bare #/team is the Company page now", async ({ page }) => {
   await mockApi(page);
 

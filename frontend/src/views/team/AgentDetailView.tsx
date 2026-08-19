@@ -20,9 +20,10 @@ import {
   type AgentFieldKey,
 } from "@/lib/agent";
 import { fetchBoardColumns } from "@/lib/board-columns";
-import { initials, TEAM_TONES, toneFor } from "@/lib/team";
+import { toneFor } from "@/lib/team";
 import { workloadByAssignee, type Workload } from "@/lib/team-workload";
 import { cn } from "@/lib/utils";
+import { Avatar } from "@/views/chat/Avatar";
 import { AgentFields } from "@/views/team/AgentFields";
 
 type Load = "loading" | "ready" | "missing" | "unsupported" | "error";
@@ -348,15 +349,14 @@ function Identity({ agent }: { agent: AgentDetailDto }) {
   const tone = toneFor(agent.id || display);
   return (
     <div className="flex items-start gap-4">
-      <div
-        className={cn(
-          "flex size-14 shrink-0 items-center justify-center rounded-xl text-base font-semibold",
-          TEAM_TONES[tone] ?? "bg-muted text-muted-foreground",
-        )}
-        aria-hidden
-      >
-        {initials(display)}
-      </div>
+      {/* The header of the page a teammate *is* — the one screen that should
+          never be the one showing letters (issue #1181). 56px. */}
+      <Avatar
+        name={display}
+        tone={tone}
+        className="size-14 rounded-xl text-base"
+        data-testid="agent-avatar"
+      />
       <div className="min-w-0 flex-1 space-y-2">
         <div>
           <h2 className="truncate text-2xl font-semibold tracking-tight" data-testid="agent-name">

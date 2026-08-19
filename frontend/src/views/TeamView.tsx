@@ -32,15 +32,10 @@ import { Switch } from "@/components/ui/switch";
 import { emptyDraft, type AgentDraft, type AgentFieldKey } from "@/lib/agent";
 import { fetchBoardColumns } from "@/lib/board-columns";
 import { addMemberFailure, reportAddMember } from "@/lib/member-feedback";
+import { fromDto, newMember, type TeamMember } from "@/lib/team";
 import { workloadByAssignee, type Workload } from "@/lib/team-workload";
-import {
-  fromDto,
-  initials,
-  newMember,
-  TEAM_TONES,
-  type TeamMember,
-} from "@/lib/team";
 import { cn } from "@/lib/utils";
+import { Avatar } from "@/views/chat/Avatar";
 import { AgentDetailView } from "@/views/team/AgentDetailView";
 import { AgentFields } from "@/views/team/AgentFields";
 
@@ -589,15 +584,16 @@ function MemberCard({
     <Card data-testid="team-card">
       <CardContent className="flex h-full flex-col gap-3 py-4">
         <div className="flex items-start gap-3">
-          <div
-            className={cn(
-              "flex size-11 shrink-0 items-center justify-center rounded-xl text-sm font-semibold",
-              TEAM_TONES[member.tone] ?? "bg-muted text-muted-foreground",
-            )}
-            aria-hidden
-          >
-            {initials(member.name)}
-          </div>
+          {/*
+            The shared chat avatar, not a hand-rolled tile (issue #1181). This
+            drew `initials()` over a `TEAM_TONES` background — the same visual
+            language as chat, minus the mascot — so a teammate had a face in a DM
+            and letters on the page that is *about* them.
+
+            44px, comfortably above the ~24px floor under which a mascot is a
+            smudge and the bare tone tile is the honest fallback.
+          */}
+          <Avatar name={member.name} tone={member.tone} className="size-11 rounded-xl text-sm" />
           {onOpen ? (
             // The card's own name is the way in (issue #264). A whole-card
             // click would swallow the inbox switch and the actions menu, both
