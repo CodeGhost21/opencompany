@@ -300,7 +300,7 @@ const CLEAN_PLAN: &str = r#"```json
   "risks": ["the tag may not exist yet"],
   "verification": "the entry is in the file and reads correctly",
   "scope": "the changelog only",
-  "proposedAssignee": "maya"
+  "assigneeCandidates": [{"id": "maya", "reason": "writes everything the company ships"}]
 }
 ```"#;
 
@@ -314,7 +314,8 @@ const CLEAN_PLAN: &str = r#"```json
 fn a_fenced_or_narrated_answer_still_parses() {
     let fenced = parse_draft(CLEAN_PLAN).expect("a fenced answer parses");
     assert_eq!(fenced.steps.len(), 1);
-    assert_eq!(fenced.proposed_assignee.as_deref(), Some("maya"));
+    assert_eq!(fenced.assignee_candidates.len(), 1);
+    assert_eq!(fenced.assignee_candidates[0].id, "maya");
 
     let narrated = parse_draft(
         "Sure! Here is the plan:\n{\"description\":\"do it\",\"steps\":[]}\nLet me know.",
@@ -1166,6 +1167,7 @@ async fn an_operator_move_mid_pass_discards_the_pass() {
             verification: "v".to_string(),
             scope: "s".to_string(),
             proposed_assignee: None,
+            assignee_candidates: Vec::new(),
             planned_at_millis: 0,
         },
         "maya".to_string(),
@@ -1347,7 +1349,8 @@ async fn a_re_plan_does_not_erase_what_an_earlier_attempt_produced() {
 #[tokio::test]
 async fn a_card_with_no_valid_assignee_cannot_dispatch() {
     let reply = r#"{"description":"do it","steps":[],"prerequisites":[],"risks":[],
-        "verification":"v","scope":"s","proposedAssignee":"someone-who-left"}"#;
+        "verification":"v","scope":"s",
+        "assigneeCandidates":[{"id":"someone-who-left","reason":"used to own this"}]}"#;
     let (_home, runtime) = runtime_with(ScriptedModel::replying(reply)).await;
     runtime
         .tasks()
@@ -1365,6 +1368,263 @@ async fn a_card_with_no_valid_assignee_cannot_dispatch() {
         "a proposal the roster does not recognise is dropped rather than shown"
     );
     assert!(after.note.unwrap().contains("nobody on the roster"));
+}
+
+// ---------------------------------------------------------------------------
+// Ambiguous ownership (issue #1106)
+// ---------------------------------------------------------------------------
+
+/// A model answer naming both roster teammates, each with a reason.
+const AMBIGUOUS_PLAN: &str = r#"{"description":"do it","steps":[],"prerequisites":[],"risks":[],
+    "verification":"v","scope":"s","assigneeCandidates":[
+      {"id":"maya","reason":"owns the words"},
+      {"id":"sam","reason":"owns the tooling that publishes them"}]}"#;
+
+/// The defect: two teammates could take the card, so one was picked and the
+/// operator was never told there had been a choice.
+///
+/// The card now parks instead — in To-do, with the brief and both candidates on
+/// it, and nobody assigned. `settle_blocked` is the same disposition a card with
+/// *no* valid candidate already took; this only widens what reaches it.
+#[tokio::test]
+async fn two_plausible_teammates_park_the_card_instead_of_picking_one() {
+    let (_home, runtime) = runtime_with(ScriptedModel::replying(AMBIGUOUS_PLAN)).await;
+    runtime
+        .tasks()
+        .upsert(runtime.id(), &card("t-20", ""))
+        .await
+        .unwrap();
+
+    run_planning_pass(Arc::clone(&runtime), "t-20".to_string()).await;
+
+    let after = read(&runtime, "t-20").await;
+    assert_eq!(
+        after.column, COLUMN_TODO,
+        "an open choice waits for a person rather than dispatching"
+    );
+    assert_eq!(
+        after.assignee, "",
+        "nobody is picked — the whole point is that the host did not choose"
+    );
+
+    let plan = after.plan.expect("the brief is still written");
+    assert!(
+        plan.proposed_assignee.is_none(),
+        "two candidates is a question, not a proposal"
+    );
+    let ids: Vec<&str> = plan
+        .assignee_candidates
+        .iter()
+        .map(|c| c.id.as_str())
+        .collect();
+    assert_eq!(ids, vec!["maya", "sam"], "both survive, in the order given");
+
+    // The runner-up is recorded *with its reason* — a bare pair of ids would ask
+    // the operator to re-derive the judgement the planner already made.
+    let note = after.note.expect("the card says what it is waiting on");
+    assert!(
+        note.contains("more than one teammate could take it"),
+        "{note}"
+    );
+    assert!(note.contains("owns the words"), "{note}");
+    assert!(
+        note.contains("owns the tooling that publishes them"),
+        "{note}"
+    );
+}
+
+/// An assignee a person chose is never second-guessed, even when the planner
+/// could name others who would also have fitted.
+///
+/// This is the precedence `settled_assignee` already gave a proposal, and the
+/// ambiguity arm is deliberately gated behind it: an operator who has already
+/// answered the question must not be asked it again.
+#[tokio::test]
+async fn an_operator_assigned_card_dispatches_even_when_the_plan_is_ambiguous() {
+    let (_home, runtime) = runtime_with(ScriptedModel::replying(AMBIGUOUS_PLAN)).await;
+    runtime
+        .tasks()
+        .upsert(runtime.id(), &card("t-21", "sam"))
+        .await
+        .unwrap();
+
+    run_planning_pass(Arc::clone(&runtime), "t-21".to_string()).await;
+
+    let after = read(&runtime, "t-21").await;
+    assert_eq!(after.column, COLUMN_IN_PROGRESS, "it still dispatches");
+    assert_eq!(after.assignee, "sam");
+}
+
+/// One candidate is unchanged behaviour: it is applied, recorded as the
+/// proposal, and the card dispatches. The pre-#1106 shape.
+#[tokio::test]
+async fn a_single_candidate_still_fills_a_blank_assignee_and_dispatches() {
+    let (_home, runtime) = runtime_with(ScriptedModel::replying(CLEAN_PLAN)).await;
+    runtime
+        .tasks()
+        .upsert(runtime.id(), &card("t-22", ""))
+        .await
+        .unwrap();
+
+    run_planning_pass(Arc::clone(&runtime), "t-22".to_string()).await;
+
+    let after = read(&runtime, "t-22").await;
+    assert_eq!(after.assignee, "maya");
+    assert_eq!(after.column, COLUMN_IN_PROGRESS);
+    let plan = after.plan.expect("plan");
+    assert_eq!(plan.proposed_assignee.as_deref(), Some("maya"));
+    assert!(
+        plan.assignee_candidates.is_empty(),
+        "a card that was not ambiguous carries no candidate list, so the console \
+         renders it exactly as it did before this field existed"
+    );
+}
+
+/// The dedup is what makes "two candidates" mean two *teammates*.
+///
+/// A model that names one teammate twice — by id and again by display name, or
+/// in two casings — resolves to one canonical key both times. Without the dedup
+/// this card would park asking a person to choose between `maya` and `maya`.
+#[tokio::test]
+async fn one_teammate_named_twice_is_not_an_ambiguity() {
+    let reply = r#"{"description":"do it","steps":[],"prerequisites":[],"risks":[],
+        "verification":"v","scope":"s","assigneeCandidates":[
+          {"id":"maya","reason":"first spelling"},
+          {"id":"MAYA","reason":"second spelling of the same teammate"}]}"#;
+    let (_home, runtime) = runtime_with(ScriptedModel::replying(reply)).await;
+    runtime
+        .tasks()
+        .upsert(runtime.id(), &card("t-23", ""))
+        .await
+        .unwrap();
+
+    run_planning_pass(Arc::clone(&runtime), "t-23".to_string()).await;
+
+    let after = read(&runtime, "t-23").await;
+    assert_eq!(
+        after.column, COLUMN_IN_PROGRESS,
+        "one teammate spelled two ways is one candidate, so it dispatches"
+    );
+    assert_eq!(after.assignee, "maya");
+    assert_eq!(
+        after.plan.expect("plan").proposed_assignee.as_deref(),
+        Some("maya"),
+        "and the first spelling is the one kept"
+    );
+}
+
+/// A name the roster does not carry is dropped, so it cannot manufacture an
+/// ambiguity out of one real teammate and one hallucinated id.
+#[tokio::test]
+async fn an_unrecognised_candidate_is_dropped_rather_than_counted() {
+    let reply = r#"{"description":"do it","steps":[],"prerequisites":[],"risks":[],
+        "verification":"v","scope":"s","assigneeCandidates":[
+          {"id":"maya","reason":"real"},
+          {"id":"someone-who-left","reason":"not on the roster"}]}"#;
+    let (_home, runtime) = runtime_with(ScriptedModel::replying(reply)).await;
+    runtime
+        .tasks()
+        .upsert(runtime.id(), &card("t-24", ""))
+        .await
+        .unwrap();
+
+    run_planning_pass(Arc::clone(&runtime), "t-24".to_string()).await;
+
+    let after = read(&runtime, "t-24").await;
+    assert_eq!(
+        after.column, COLUMN_IN_PROGRESS,
+        "one real candidate remains, so there is nothing to ask about"
+    );
+    assert_eq!(after.assignee, "maya");
+}
+
+/// A desk is a legitimate candidate and stays a desk — it is the delegation
+/// address space the board already assigns to, and `AssigneeResolution` keeps a
+/// desk assignment from being rewritten to its lead.
+#[tokio::test]
+async fn a_desk_is_a_candidate_and_is_not_resolved_to_its_lead() {
+    let reply = r#"{"description":"do it","steps":[],"prerequisites":[],"risks":[],
+        "verification":"v","scope":"s","assigneeCandidates":[
+          {"id":"studio","reason":"the desk that owns published work"}]}"#;
+    let (_home, runtime) = runtime_with(ScriptedModel::replying(reply)).await;
+    runtime
+        .tasks()
+        .upsert(runtime.id(), &card("t-25", ""))
+        .await
+        .unwrap();
+
+    run_planning_pass(Arc::clone(&runtime), "t-25".to_string()).await;
+
+    let after = read(&runtime, "t-25").await;
+    assert_eq!(
+        after.assignee, "studio",
+        "the desk is assigned, not `maya` who leads it"
+    );
+}
+
+/// A card still carrying a teammate who has since left the roster has no usable
+/// owner, so it reaches the ambiguity arm rather than the "nobody could take it"
+/// one — which would be a false statement about a plan that named two.
+#[tokio::test]
+async fn a_stale_assignee_does_not_shield_the_card_from_the_question() {
+    let (_home, runtime) = runtime_with(ScriptedModel::replying(AMBIGUOUS_PLAN)).await;
+    runtime
+        .tasks()
+        .upsert(runtime.id(), &card("t-26", "someone-who-left"))
+        .await
+        .unwrap();
+
+    run_planning_pass(Arc::clone(&runtime), "t-26".to_string()).await;
+
+    let after = read(&runtime, "t-26").await;
+    assert_eq!(after.column, COLUMN_TODO);
+    let note = after.note.expect("a reason");
+    assert!(
+        note.contains("more than one teammate could take it"),
+        "the card asks the real question rather than claiming the plan named nobody: {note}"
+    );
+    assert_eq!(
+        after.plan.expect("plan").assignee_candidates.len(),
+        2,
+        "and both candidates are on the brief to answer it with"
+    );
+}
+
+/// Direct unit coverage of the resolver's caps and drops, so the rules hold
+/// independently of what any one scripted model happens to emit.
+#[test]
+fn the_candidate_resolver_caps_drops_and_dedups() {
+    let evidence = evidence();
+    let draft = |id: &str, reason: &str| CandidateDraft {
+        id: id.to_string(),
+        reason: reason.to_string(),
+    };
+
+    // Blank and unrecognised ids are dropped; a real one survives.
+    let resolved = resolve_assignee_candidates(
+        &evidence,
+        &[
+            draft("", "blank"),
+            draft("nobody_here", "unreal"),
+            draft("sam", "real"),
+        ],
+    );
+    assert_eq!(resolved.len(), 1);
+    assert_eq!(resolved[0].id, "sam");
+    assert_eq!(resolved[0].reason, "real");
+
+    // Never more than the cap, however many the model names.
+    let many: Vec<CandidateDraft> = ["maya", "sam", "studio", "empty_desk"]
+        .iter()
+        .map(|id| draft(id, "fits"))
+        .collect();
+    assert_eq!(
+        resolve_assignee_candidates(&evidence, &many).len(),
+        MAX_ASSIGNEE_CANDIDATES
+    );
+
+    // An empty answer is an empty list, not a fabricated candidate.
+    assert!(resolve_assignee_candidates(&evidence, &[]).is_empty());
 }
 
 /// The prompt carries names and booleans, and nothing else. This is the check
