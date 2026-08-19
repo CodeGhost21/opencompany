@@ -831,16 +831,34 @@ impl Tool for PagesWriteTool {
 
         // Compile BEFORE anything is written — a rejected import or a parse
         // error must leave the page exactly as it was (plan §2).
+        //
+        // `compile_page` is a full SWC parse/transform/codegen pass over up to
+        // `MAX_SOURCE_BYTES` of agent input — pure CPU synchronous work with no
+        // await points, so running it inline would occupy a tokio worker (one
+        // of the few concurrent tool slots) for its whole duration. Run it on
+        // the blocking pool instead. The source cap is what bounds swc's
+        // recursive-descent nesting depth, so a pathological page cannot drive
+        // the parser past what the pool's threads handle (issue #?): the error
+        // surface here stays a clean tool error, never a wedged runtime.
         let compiled = match source {
-            Some(source) => match compile_page(source) {
-                Ok(compiled) => Some(compiled),
-                Err(diagnostic) => {
-                    return Ok(ToolResult::error(format!(
-                        "Could not compile `{slug}`'s Page.tsx — nothing was written:\n\n\
-                         {diagnostic}"
-                    )));
+            Some(source) => {
+                let owned = source.to_string();
+                match tokio::task::spawn_blocking(move || compile_page(&owned)).await {
+                    Ok(Ok(compiled)) => Some(compiled),
+                    Ok(Err(diagnostic)) => {
+                        return Ok(ToolResult::error(format!(
+                            "Could not compile `{slug}`'s Page.tsx — nothing was written:\n\n\
+                             {diagnostic}"
+                        )));
+                    }
+                    Err(join) => {
+                        return Ok(ToolResult::error(format!(
+                            "Could not compile `{slug}`'s Page.tsx — the compiler worker \
+                             failed: {join}. Nothing was written."
+                        )));
+                    }
                 }
-            },
+            }
             None => None,
         };
 
