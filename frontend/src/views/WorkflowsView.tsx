@@ -1387,7 +1387,13 @@ export function WorkflowsView({
             onClick: () => {
               void (async () => {
                 try {
+                  const resumeCompany = company;
                   const updated = await setWorkflowEnabled(client, company, saved.id, true);
+                  // The operator may have switched companies while this Resume
+                  // was in flight. Discard the response — the new company's list
+                  // is what matters, and mutating state keyed to the old one
+                  // would overwrite it.
+                  if (companyRef.current !== resumeCompany) return;
                   // Newer than any list request already in flight.
                   localWriteRef.current += 1;
                   // The operator may have selected a different workflow while
