@@ -657,6 +657,81 @@ async fn conformance_fact_store() {
     conformance::assert_fact_store(engine().facts()).await;
 }
 
+/// The port conformance suite over the REAL `namespace` driver — not the fake.
+///
+/// Everything above proves the decorator against `FakeEngine`; the driver
+/// tests in `driver.rs` prove the namespace driver against the raw provider
+/// contract. Neither proves the two composed: that the three ports a company
+/// actually holds — traces, chunks with search, facts — round-trip through
+/// `BoundMemory`'s facades into `tinymemory-core`'s durable store and back.
+/// This is that proof, run over the same shared asserts every other backend
+/// answers, so the embedded contract driver cannot quietly drift below the
+/// bar the fs/sqlite/mongodb stores are held to.
+#[cfg(feature = "tinymemory-embedded")]
+mod namespace_driver_conformance {
+    use super::*;
+    use crate::store::{FsCompanyStore, FsEventLog};
+
+    /// A `BoundMemory` over the real driver, plus the tempdir keeping the
+    /// store alive for the test's duration.
+    fn real_engine() -> (tempfile::TempDir, BoundMemory) {
+        let dir = tempfile::tempdir().unwrap();
+        let config = crate::store::memory::MemoryDriverConfig {
+            mode: crate::store::memory::MemoryMode::Embedded,
+            driver_id: Some("namespace".into()),
+            url: None,
+            api_key: None,
+            data_dir: Some(dir.path().to_path_buf()),
+        };
+        let (provider, class) = crate::store::memory::open_driver(&config)
+            .expect("the namespace driver binds")
+            .expect("embedded with a driver named yields a provider");
+        (dir, BoundMemory::bind(provider, class).unwrap())
+    }
+
+    #[tokio::test]
+    async fn isolation_by_company_holds_on_the_namespace_driver() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store_dir, engine) = real_engine();
+        conformance::assert_isolation_by_company(
+            Arc::new(FsCompanyStore::new(dir.path().to_path_buf())),
+            Arc::new(FsEventLog::new(dir.path().to_path_buf())),
+            engine.memory(),
+            engine.context(),
+        )
+        .await;
+        drop(store_dir);
+    }
+
+    #[tokio::test]
+    async fn export_totality_holds_on_the_namespace_driver() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store_dir, engine) = real_engine();
+        conformance::assert_export_totality(
+            Arc::new(FsCompanyStore::new(dir.path().to_path_buf())),
+            Arc::new(FsEventLog::new(dir.path().to_path_buf())),
+            engine.memory(),
+            engine.context(),
+        )
+        .await;
+        drop(store_dir);
+    }
+
+    #[tokio::test]
+    async fn the_fact_store_contract_holds_on_the_namespace_driver() {
+        let (store_dir, engine) = real_engine();
+        conformance::assert_fact_store(engine.facts()).await;
+        drop(store_dir);
+    }
+
+    #[tokio::test]
+    async fn context_chunk_stamps_hold_on_the_namespace_driver() {
+        let (store_dir, engine) = real_engine();
+        conformance::assert_context_chunk_stamps(engine.context()).await;
+        drop(store_dir);
+    }
+}
+
 /// #914's acceptance names "taint survives export and re-import" and #1113
 /// found no test for it. This is the round trip: inbound content stored
 /// through the decorator (stamped `ExternalSync`), exported through the
