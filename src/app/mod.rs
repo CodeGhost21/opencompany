@@ -12,4 +12,6 @@ pub use doctor::{DoctorReport, report as doctor_report};
 pub use orphans::{
     DanglingOwner, OrphanReport, UnownedCompany, filter_to_tenant, find as find_orphans,
 };
-pub use types::{AppConfig, AppSpec, AppState, canonical_tenant, namespace_company_id};
+pub use types::{
+    AppConfig, AppSpec, AppState, canonical_tenant, namespace_company_id, validate_tenant_namespace,
+};
