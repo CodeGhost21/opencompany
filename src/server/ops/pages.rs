@@ -220,24 +220,13 @@ async fn list_pages(company: ScopedCompany) -> Result<Response, ApiError> {
     Ok(response)
 }
 
-/// `GET {scope}/pages/{slug}` — a fixed HTML shell that mounts the page.
-///
-/// Not agent content: the slug is validated and interpolated into a literal
-/// Rust format string, so nothing the page's own source contains ever reaches
-/// this response.
-async fn page_shell(
-    company: ScopedCompany,
-    Path(SlugPath { slug }): Path<SlugPath>,
-) -> Result<Response, ApiError> {
-    if !valid_slug(&slug) {
-        return Err(ApiError(OpenCompanyError::NotFound(format!("page {slug}"))));
-    }
-    let pages = all_pages(company.runtime.workspace().as_ref(), company.id()).await?;
-    if !pages.iter().any(|(name, _)| name == &slug) {
-        return Err(ApiError(OpenCompanyError::NotFound(format!("page {slug}"))));
-    }
-
-    let html = format!(
+/// The fixed HTML shell that mounts a page's compiled module (not agent
+/// content). Extracted from the route so the shell's load-bearing invariants
+/// — the React namespace import, the slug-relative bundle path, the absolute
+/// SDK CSS link, the import map — are unit-testable instead of living only in
+/// a route that needs a full workspace to exercise.
+fn page_shell_html(slug: &str) -> String {
+    format!(
         r#"<!doctype html>
 <html>
 <head>
@@ -269,7 +258,27 @@ async fn page_shell(
 </html>
 "#,
         slug = slug,
-    );
+    )
+}
+
+/// `GET {scope}/pages/{slug}` — a fixed HTML shell that mounts the page.
+///
+/// Not agent content: the slug is validated and interpolated into a literal
+/// Rust format string, so nothing the page's own source contains ever reaches
+/// this response.
+async fn page_shell(
+    company: ScopedCompany,
+    Path(SlugPath { slug }): Path<SlugPath>,
+) -> Result<Response, ApiError> {
+    if !valid_slug(&slug) {
+        return Err(ApiError(OpenCompanyError::NotFound(format!("page {slug}"))));
+    }
+    let pages = all_pages(company.runtime.workspace().as_ref(), company.id()).await?;
+    if !pages.iter().any(|(name, _)| name == &slug) {
+        return Err(ApiError(OpenCompanyError::NotFound(format!("page {slug}"))));
+    }
+
+    let html = page_shell_html(&slug);
 
     let mut response = Response::builder()
         .status(StatusCode::OK)
