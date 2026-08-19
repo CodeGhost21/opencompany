@@ -7,7 +7,6 @@ import type { TeamMemberDto } from "@/api/types";
 import {
   SETUP_STEPS,
   MAX_JOBS,
-  appendExample,
   jobItems,
   buildOutLabel,
   draftIsSubmittable,
@@ -200,21 +199,3 @@ describe("the job checklist", () => {
   }
 });
 
-describe("appendExample", () => {
-  it("starts the list, then extends it", () => {
-    expect(appendExample("", "paid ads")).toBe("paid ads");
-    expect(appendExample("paid ads", "order dispatch")).toBe("paid ads, order dispatch");
-  });
-
-  /** Clicking a chip twice should not stutter the list — the operator gets no
-   * feedback that it was already there, so the guard has to be here. */
-  it("does not repeat an example already mentioned", () => {
-    expect(appendExample("paid ads, order dispatch", "paid ads")).toBe(
-      "paid ads, order dispatch",
-    );
-  });
-
-  it("tidies a trailing comma rather than doubling it", () => {
-    expect(appendExample("paid ads, ", "invoices")).toBe("paid ads, invoices");
-  });
-});

@@ -68,35 +68,6 @@ export const SETUP_STEPS: SetupStepSpec[] = [
   },
 ];
 
-/**
- * Clickable examples under the automation question.
- *
- * Not a picker, and deliberately not exhaustive: they sit *beside* the free-text
- * field and append to it. A blank box after two questions is where people stall —
- * these give a shape to copy without narrowing what can be said, and someone who
- * ignores them entirely loses nothing.
- */
-export const AUTOMATE_EXAMPLES: readonly string[] = [
-  "social posts",
-  "paid ads",
-  "order dispatch",
-  "daily reports",
-  "customer support",
-  "invoices",
-  "content calendar",
-  "lead follow-up",
-];
-
-/** Adds an example to whatever the operator has already typed. */
-export function appendExample(current: string, example: string): string {
-  const trimmed = current.trim();
-  if (!trimmed) return example;
-  // Already mentioned — clicking twice should not stutter the list.
-  if (new RegExp(`(^|,\\s*)${example.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(,|$)`, "i").test(trimmed)) {
-    return trimmed;
-  }
-  return `${trimmed.replace(/,\s*$/, "")}, ${example}`;
-}
 
 /**
  * The jobs the operator named, split the way the **host** splits them.

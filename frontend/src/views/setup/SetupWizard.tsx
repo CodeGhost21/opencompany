@@ -51,8 +51,6 @@ import { TEAM_TONES, initials, toneFor } from "@/lib/team";
 import { fieldCopy, fieldPlaceholder } from "@/lib/setup-fields";
 import type { Step } from "@/components/ui/stepper";
 import {
-  AUTOMATE_EXAMPLES,
-  appendExample,
   emptySetupDraft,
   jobItems,
   type SetupDraft,
@@ -120,13 +118,6 @@ const ADVANCED_GROUPS: readonly {
     fields: ["auth_mode"],
   },
   {
-    id: "brain",
-    label: "Brain",
-    title: "Where the thinking runs",
-    hint: "The endpoints your teammates reason through. Defaults are the hosted ones.",
-    fields: ["brain_mode", "api_url", "openhuman_url"],
-  },
-  {
     id: "host",
     label: "Host",
     title: "How this host runs",
@@ -136,8 +127,8 @@ const ADVANCED_GROUPS: readonly {
   {
     id: "tools",
     label: "Tools",
-    title: "What this build can reach",
-    hint: "Compiled into the binary, so these are reported rather than chosen.",
+    title: "Repository access",
+    hint: "Lets agents read your code and open pull requests. You can add this later.",
     fields: ["github_token"],
   },
 ];
@@ -781,67 +772,6 @@ function SignInStep({
   );
 }
 
-/**
- * Tool surfaces. Read-only by nature: these are cargo features of the host's
- * build, so the honest thing is to report them rather than to offer switches
- * that write nothing.
- */
-function ToolsStep({ status }: { status: SetupStatus }) {
-  const rows: { label: string; on: boolean; note?: string }[] = [
-    {
-      label: "MCP tool servers",
-      on: status.build.mcp_in_build,
-      note: status.build.mcp_in_build
-        ? "Add servers in Settings → MCP Servers once you're in."
-        : "Not compiled into this build.",
-    },
-    {
-      label: "Agent harness",
-      on: status.build.harness_in_build,
-      note: status.build.harness_in_build ? undefined : "Not compiled into this build.",
-    },
-    {
-      label: "Third-party connections",
-      on: status.build.oauth_in_build,
-      note: status.build.oauth_in_build ? "Connect accounts in Settings → Connections." : undefined,
-    },
-    {
-      label: "Agent Client Protocol (ACP)",
-      // In-build is necessary but not sufficient: this host compiles the ACP
-      // session model without mounting a `/acp` route, so a client dialing it
-      // would get a 404. Reporting the transport separately is the difference
-      // between "not available" and "misconfigured".
-      on: status.build.acp_in_build && status.build.acp_transport_mounted,
-      note: !status.build.acp_in_build
-        ? "Not compiled into this build."
-        : status.build.acp_transport_mounted
-          ? undefined
-          : "Compiled in, but no endpoint is mounted yet — external ACP clients can't connect.",
-    },
-  ];
-
-  return (
-    <div>
-      {/* Same reason as SignInStep: the Advanced group above already titled
-          this, and repeating it split one section into two. */}
-      <div className="space-y-2">
-        {rows.map((r) => (
-          <div
-            key={r.label}
-            className="flex items-start justify-between gap-3 rounded-lg border p-3"
-            data-testid={`build-${r.label}`}
-          >
-            <div className="min-w-0">
-              <div className="text-sm font-medium">{r.label}</div>
-              {r.note && <div className="mt-0.5 text-xs text-muted-foreground">{r.note}</div>}
-            </div>
-            <Badge variant={r.on ? "default" : "outline"}>{r.on ? "Available" : "Off"}</Badge>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
 function FieldRow({
   field,
   value,
@@ -1561,7 +1491,6 @@ function AdvancedStep({
                 onChange={(v) => set("auth_mode", v)}
               />
             )}
-            {group.id === "tools" && <ToolsStep status={status} />}
             {fieldsFor(status, group.fields)
               // `auth_mode` is chosen with the three cards above. Rendering its
               // raw input underneath offered the same setting twice, and the
@@ -1649,21 +1578,6 @@ function BusinessStep({
           data-testid="setup-field-automate"
           onChange={(e) => onChange((d) => ({ ...d, automate: e.target.value }))}
         />
-        {/* Beside the field, not instead of it: they append, so the operator's
-            own words always survive. */}
-        <div className="mt-2 flex flex-wrap gap-1.5">
-          {AUTOMATE_EXAMPLES.map((example) => (
-            <button
-              key={example}
-              type="button"
-              onClick={() => onChange((d) => ({ ...d, automate: appendExample(d.automate, example) }))}
-              data-testid={`setup-example-${example.replace(/\s+/g, "-")}`}
-              className="rounded-full border px-2.5 py-1 text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-            >
-              + {example}
-            </button>
-          ))}
-        </div>
         {/* Their own words, split the way the host splits them — not a guess at
             what they meant. This is the checklist the roster is judged against,
             so showing it here is what makes a bad split fixable by the person
