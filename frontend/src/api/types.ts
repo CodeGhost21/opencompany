@@ -1241,10 +1241,40 @@ export interface FinancesDto {
   transactions: TransactionDto[];
 }
 
-/** Error envelope shape: `{ error, code }`. */
+/**
+ * One structured problem with a workflow graph the host refused (issue #1016).
+ *
+ * Field names are the **wire** names, not the console's usual camelCase. The
+ * host serialises `WorkflowProblem` with serde's defaults (`src/error.rs`), so
+ * the key really is `node_id`; renaming it here to match house style would
+ * compile, type-check, and silently read `undefined` at runtime for every
+ * problem — the failure this shape exists to prevent.
+ *
+ * Both locators are optional because a problem need not have one: a graph-level
+ * refusal (an inescapable cycle) names several nodes at once and owns neither.
+ * `message` is the only field always present, and it is prosumer language ready
+ * to render.
+ */
+export interface WorkflowProblem {
+  /** The node at fault, or the dangling endpoint for an edge problem. */
+  node_id?: string;
+  /** The config path at fault (`config.url`, `workflow_id`, `from`). */
+  field?: string;
+  /** The human-readable problem. */
+  message: string;
+}
+
+/**
+ * Error envelope shape: `{ error, code }`, plus `problems` on a refusal that
+ * has them.
+ *
+ * `problems` is additive and scoped to `workflow_invalid` on the host side, so
+ * it is absent from every other error and must stay optional here.
+ */
 export interface ApiErrorBody {
   error: string;
   code: string;
+  problems?: WorkflowProblem[];
 }
 
 export class ApiError extends Error {
@@ -1261,6 +1291,23 @@ export class ApiError extends Error {
    * that may sit in state for the life of the view.
    */
   detail?: string;
+
+  /**
+   * The per-node, per-field breakdown behind `message`, when the host sent one
+   * (issue #836).
+   *
+   * The host already computes this and puts it on the wire; before this field
+   * existed the console parsed the envelope's `error` and `code` and dropped
+   * `problems` on the floor, so an operator was told *that* a graph was refused
+   * and never *which node*. `message` remains the flattened sentence and stays
+   * the fallback — a renderer may show this list instead, never in addition to
+   * nothing.
+   *
+   * Absent for every error that is not a workflow refusal, and absent (rather
+   * than empty) when the host sent no array, so `problems?.length` distinguishes
+   * "no breakdown offered" from "a breakdown with nothing in it".
+   */
+  problems?: WorkflowProblem[];
 
   constructor(
     public status: number,
