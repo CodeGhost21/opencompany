@@ -684,6 +684,10 @@ mod tests {
 
     /// A manifest whose **only** inference lives in the default harness's
     /// `[harness.inference]` — no company-level `[inference]` section at all.
+    /// `openhuman`-gated like its only caller: under the default build the
+    /// harness-wiring path the fix targets is compiled out, and an unused
+    /// helper would trip `clippy -D warnings`.
+    #[cfg(feature = "openhuman")]
     fn manifest_with_harness_inference() -> CompanyManifest {
         toml::from_str(
             r#"[company]
