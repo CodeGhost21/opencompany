@@ -266,7 +266,7 @@ impl tinyflows::observability::RunObserver for ProgressObserver {
 /// The run itself, always executed inside a [`WORKFLOW_DEPTH`] scope so a
 /// nested run sees this one on the chain.
 async fn run_workflow_inner(
-    pool: Arc<HarnessPool>,
+    turn: Arc<dyn crate::runtime::delegation::RunTurn>,
     deps: HarnessDeps,
     record: &CompanyRecord,
     workflow: &WorkflowFile,
