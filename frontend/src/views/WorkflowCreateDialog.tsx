@@ -170,6 +170,34 @@ function scheduleProblem(schedule: string): string | null {
   return null;
 }
 
+/** What the console knows about the channels this company can deliver to
+ * (issue #981).
+ *
+ * Three states, deliberately not collapsed into `string[]`. They used to be:
+ * `[]` meant "loading", "the host has no such route", and "the host answered,
+ * this company has nowhere to deliver" all at once, and the pre-flight treated
+ * all three as "don't check". Only the last of those is knowledge, and it is
+ * the one the host refuses a channel target against — so the console skipped
+ * exactly the check the host applies, and skipped it on a timer.
+ *
+ * - `loading` — the request is in flight. We know nothing YET, and the answer
+ *   is coming: {@link destinationCheckDeferred} holds Save rather than passing.
+ * - `unavailable` — the request failed, or the host predates the route. We know
+ *   nothing and never will, so the channel target degrades to free text and the
+ *   host's save-time 400 is the only gate. Never blocks Save.
+ * - `ready` — the host answered. `ids` is the answer, **including `[]`**, which
+ *   means this company genuinely has nowhere to post a report.
+ */
+export type WiredChannels =
+  | { status: "loading" }
+  | { status: "unavailable" }
+  | { status: "ready"; ids: string[] };
+
+/** The `ids` a picker may offer: only a settled, non-empty answer has any. */
+function channelOptions(channels: WiredChannels): string[] {
+  return channels.status === "ready" ? channels.ids : [];
+}
+
 /** What is wrong with an output node's `destination.target` for `kind`, or
  * `null` when it is postable. Mirrors the host's per-kind target contract in
  * `src/company/workflow_file.rs`; `owner` and "no destination" carry no target
@@ -186,18 +214,7 @@ function scheduleProblem(schedule: string): string | null {
 export function destinationTargetProblem(
   kind: DraftNode["destinationKind"],
   target: string,
-  wiredChannels: string[],
-  /**
-   * Whether the wired-channel list has actually been answered (issue #1053).
-   *
-   * `wiredChannels.length > 0` used to stand in for this, which spells "the host
-   * offered none" and "we have not heard back yet" the same way — so an operator
-   * quick enough to press Create before the list landed got **weaker**
-   * validation than a slow one, and a wrong channel reached the host as a 400.
-   *
-   * Defaults to `true` so the pure callers that pass a real list are unchanged.
-   */
-  channelsLoaded = true,
+  channels: WiredChannels,
 ): string | null {
   const value = target.trim();
   if (kind === "email" && !value.includes("@")) {
@@ -209,31 +226,61 @@ export function destinationTargetProblem(
   // #813: when the host told us which channels it can deliver to, a target that
   // is not one of them is refused when the workflow is saved (#981) and, for a
   // graph saved before a desk went away, fails at delivery (`ChannelNotWired`) —
-  // catch it at author time instead. Skipped when the list is empty (host
-  // offered none), so a degraded free-text box is never wrongly rejected.
+  // catch it at author time instead.
   //
   // #981: the same sentence the host's save-time rejection carries, so an author
   // who trips the pre-flight and an author who trips the 400 are told the same
   // thing. `operator` is no longer in the list the host serves — it never was a
   // delivery target — so this is what now catches it.
-  // Issue #1053: the check cannot be made yet, so say so instead of passing.
-  // Skipping here is what made a fast operator's draft *less* validated than a
-  // slow one's — they pressed Create before the list landed and met the host's
-  // 400 instead of this sentence. On a failed read the loader still reports
-  // "answered" with an empty list, so this is transient by construction and
-  // cannot wedge the form.
-  if (kind === "channel" && value && !channelsLoaded) {
-    return "Still checking which channels this company can deliver to — try again in a moment.";
-  }
+  //
+  // Gated on `status === "ready"`, NOT on the list being non-empty. Those were
+  // the same test until the host started answering `[]` for a company with no
+  // desks and no connected channels (#981): that list is knowledge, and the
+  // host refuses every channel target against it, so the pre-flight must too.
+  // While the answer is still in flight, or when the request failed, we know
+  // nothing — {@link destinationCheckDeferred} is what keeps that from reading
+  // as a pass.
   if (
     kind === "channel" &&
     value &&
-    wiredChannels.length > 0 &&
-    !wiredChannels.includes(value)
+    channels.status === "ready" &&
+    !channels.ids.includes(value)
   ) {
-    return `\`${value}\` is not a workflow delivery channel — this runtime has: ${wiredChannels.join(", ")}.`;
+    return `\`${value}\` is not a workflow delivery channel — this runtime has: ${
+      channels.ids.length > 0 ? channels.ids.join(", ") : "no durable channels"
+    }.`;
   }
   return null;
+}
+
+/** Why the channel pre-flight cannot answer yet, or `null` when it can (or when
+ * there is nothing for it to check).
+ *
+ * Issue #981: {@link destinationTargetProblem} has to return `null` while the
+ * wired-channel list is loading — it genuinely does not know — and `null` is
+ * indistinguishable from "checked and fine". That made the check a race: an
+ * author who hit Save before the fetch settled got no pre-flight at all, while a
+ * slower one got the full one. Same draft, different validation, decided by
+ * network timing.
+ *
+ * So `validate()` asks this FIRST and defers instead: Save is held for as long
+ * as the answer is genuinely in flight, and released the moment it lands. A
+ * failed or absent request settles as `unavailable`, never `loading`, so a host
+ * that cannot answer degrades to free text and the host's own 400 rather than
+ * blocking the save forever.
+ *
+ * Not wired into the blur handler: a field is blurred constantly, and "still
+ * checking" is not a mistake the author made.
+ */
+export function destinationCheckDeferred(
+  kind: DraftNode["destinationKind"],
+  target: string,
+  channels: WiredChannels,
+): string | null {
+  if (kind !== "channel" || !target.trim() || channels.status !== "loading") {
+    return null;
+  }
+  return "still checking which channels this company can deliver to — try Save again in a moment.";
 }
 
 /** How a validation message names a node.
@@ -465,13 +512,12 @@ export function WorkflowCreateDialog({
   const [roster, setRoster] = useState<TeamMemberDto[]>([]);
   /** The chat channels this company can actually deliver to (#813): the picker
    * options for an output node's `channel` destination. Degrades to a free-text
-   * box when the host offers no list, so authoring is never blocked. */
-  const [wiredChannels, setWiredChannels] = useState<string[]>([]);
-  /**
-   * Whether the wired-channel read has answered (issue #1053) — success *or*
-   * failure. Both are answers; only "still in flight" is not.
-   */
-  const [channelsLoaded, setChannelsLoaded] = useState(false);
+   * box when the host offers no list, so authoring is never blocked. Carries
+   * its own load status (#981) — see {@link WiredChannels} for why an empty
+   * list and an unanswered request must not be the same value. */
+  const [wiredChannels, setWiredChannels] = useState<WiredChannels>({
+    status: "loading",
+  });
   /** The company's workflows, for the `sub_workflow` config picker (#541). The
    * graph's own id is dropped at render time — a sub-workflow can't call
    * itself. Degrades to a free-text id field when the host offers no list. */
@@ -597,9 +643,6 @@ export function WorkflowCreateDialog({
     // prefilled-draft branch below both re-latch it, because both arrive with an
     // id somebody already chose.
     setIdTouched(Boolean(workflow));
-    // Issue #1053: the read below re-runs on every open, so its answer is stale
-    // until it lands again.
-    setChannelsLoaded(false);
     // Issue #1052: a draft still in flight belongs to the contents being
     // replaced right now, not to these. Bumping first is what makes its
     // response land as `drop` instead of overwriting a freshly-reset form.
@@ -705,18 +748,19 @@ export function WorkflowCreateDialog({
     // Issue #813: the wired-channel picker's options. Same degrade-on-failure
     // shape — a host that can't list channels leaves the channel target a
     // free-text box rather than blocking authoring.
+    //
+    // #981: the two outcomes are recorded as DIFFERENT states. A settled answer
+    // is knowledge the pre-flight checks against (even when it is `[]`); a
+    // failure is not, and must never be mistaken for one. Reset to `loading` on
+    // every open so a reopened dialog re-asks rather than validating against the
+    // previous company's answer.
+    setWiredChannels({ status: "loading" });
     (async () => {
       try {
         const channels = await listWiredChannels(client, company);
-        if (live) {
-          setWiredChannels(channels);
-          setChannelsLoaded(true);
-        }
+        if (live) setWiredChannels({ status: "ready", ids: channels });
       } catch {
-        if (live) {
-          setWiredChannels([]);
-          setChannelsLoaded(true);
-        }
+        if (live) setWiredChannels({ status: "unavailable" });
       }
     })();
     return () => {
@@ -948,7 +992,6 @@ export function WorkflowCreateDialog({
         node.destinationKind,
         value,
         wiredChannels,
-        channelsLoaded,
       );
     } else if (field.startsWith("config:")) {
       const key = field.slice("config:".length);
@@ -1021,11 +1064,21 @@ export function WorkflowCreateDialog({
       // "destination on a non-output node" check: `changeKind` makes that state
       // unreachable, and re-adding the check would only recreate the trap of an
       // error the author has no visible control to clear.
+      //
+      // #981: ask the deferral FIRST. While the wired-channel list is in
+      // flight the target check below cannot answer, and its `null` would read
+      // as a pass — which made the strength of the pre-flight depend on how
+      // fast the author clicked Save.
+      const deferred = destinationCheckDeferred(
+        n.destinationKind,
+        n.destinationTarget,
+        wiredChannels,
+      );
+      if (deferred) return `Node \`${nodeLabel(n)}\`: ${deferred}`;
       const destinationProblem = destinationTargetProblem(
         n.destinationKind,
         n.destinationTarget,
         wiredChannels,
-        channelsLoaded,
       );
       if (destinationProblem) return `Node \`${nodeLabel(n)}\`: ${destinationProblem}`;
       // Kind-specific config (issue #541): required keys, malformed JSON, the
@@ -1627,7 +1680,6 @@ export function WorkflowCreateDialog({
                   company={company}
                   roster={roster}
                   wiredChannels={wiredChannels}
-                  channelsLoaded={channelsLoaded}
                   workflows={workflows}
                   createMode={!editing}
                   errors={{
@@ -1820,7 +1872,6 @@ function NodeRow({
   company,
   roster,
   wiredChannels,
-  channelsLoaded,
   workflows,
   createMode,
   errors,
@@ -1837,10 +1888,9 @@ function NodeRow({
   company: string | null;
   roster: TeamMemberDto[];
   /** The company's wired chat channels (#813): the output-node channel-destination
-   * picker's options. Empty → the channel target degrades to a free-text box. */
-  wiredChannels: string[];
-  /** Whether that list has answered yet (issue #1053 review). */
-  channelsLoaded: boolean;
+   * picker's options. Anything but a settled, non-empty answer degrades the
+   * channel target to a free-text box (#981). */
+  wiredChannels: WiredChannels;
   /** The company's workflows, for a `sub_workflow` node's picker (issue #541). */
   workflows: WorkflowSummary[];
   /** True while creating a new workflow (not editing an existing one), so the
@@ -1857,6 +1907,10 @@ function NodeRow({
 }) {
   const rowId = useId();
   const targetErrorId = `${rowId}-target-error`;
+  // The channels there are to offer, which is none until the host has answered
+  // (#981). A picker with no options is worse than the free-text fallback, so
+  // this drives both which control renders and which explanation sits under it.
+  const channelIds = channelOptions(wiredChannels);
   return (
     <div className="grid gap-2 rounded-lg border p-2 sm:grid-cols-[1fr_1fr_1.4fr_auto] sm:items-start">
       <div className="grid gap-1">
@@ -1971,7 +2025,7 @@ function NodeRow({
                 ))}
               </SelectContent>
             </Select>
-            {node.destinationKind === "channel" && wiredChannels.length > 0 && (
+            {node.destinationKind === "channel" && channelIds.length > 0 && (
               <>
                 {/* #813: pick from the channels this company can actually
                     deliver to, instead of a free-text box that only fails at
@@ -1990,7 +2044,7 @@ function NodeRow({
                     <SelectValue placeholder="pick a wired channel" />
                   </SelectTrigger>
                   <SelectContent>
-                    {wiredChannels.map((channelId) => (
+                    {channelIds.map((channelId) => (
                       <SelectItem key={channelId} value={channelId}>
                         {channelId}
                       </SelectItem>
@@ -2001,7 +2055,7 @@ function NodeRow({
               </>
             )}
             {(node.destinationKind === "email" ||
-              (node.destinationKind === "channel" && wiredChannels.length === 0)) && (
+              (node.destinationKind === "channel" && channelIds.length === 0)) && (
               <>
                 <Input
                   value={node.destinationTarget}
@@ -2021,29 +2075,40 @@ function NodeRow({
             )}
             {node.destinationKind === "email" && (
               <p className="text-2xs leading-snug text-muted-foreground">
-                Only sends if this company grants email and the recipient has
-                already written in.
+                Needs this company to grant email — the save is refused
+                otherwise — and the recipient to have already written in.
               </p>
             )}
             {/* #981: an empty list is now a legitimate answer — a company with
                 no desks and no connected channels has nowhere to post a report,
                 so the free-text box above is the honest fallback rather than a
                 picker of one bad option. Say why it is empty; without this the
-                author sees a blank box and no reason. */}
-            {/* Issue #1053 (review): only once the read has ANSWERED. An
-                unanswered `[]` used to render this, telling the author their
-                company has no channels while the list was still in flight — the
-                same defect the validator one layer up was fixed for, on the
-                surface the author actually reads. Pending shows nothing rather
-                than a claim that will be wrong a moment later. */}
+                author sees a blank box and no reason.
+
+                Gated on `ready`: while the request is in flight, or when it
+                failed, the box is equally empty and this sentence would be a
+                claim we cannot make. Each of those states says its own thing
+                below instead. */}
             {node.destinationKind === "channel" &&
-              channelsLoaded &&
-              wiredChannels.length === 0 && (
+              wiredChannels.status === "ready" &&
+              wiredChannels.ids.length === 0 && (
+                <p className="text-2xs leading-snug text-muted-foreground">
+                  No delivery channels are wired for this company — add a desk,
+                  or connect a channel, before a report can be posted to one.
+                </p>
+              )}
+            {node.destinationKind === "channel" && wiredChannels.status === "loading" && (
               <p className="text-2xs leading-snug text-muted-foreground">
-                No delivery channels are wired for this company — add a desk, or
-                connect a channel, before a report can be posted to one.
+                Checking which channels this company can deliver to…
               </p>
             )}
+            {node.destinationKind === "channel" &&
+              wiredChannels.status === "unavailable" && (
+                <p className="text-2xs leading-snug text-muted-foreground">
+                  This host did not say which channels it can deliver to, so the
+                  target is checked when the workflow is saved.
+                </p>
+              )}
           </>
         )}
         {/* The five kinds that need config to run (issue #541). Rendered here,
