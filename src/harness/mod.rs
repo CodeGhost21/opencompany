@@ -51,6 +51,12 @@ mod cap_turn_test;
 /// outruns its money — distinguishably from an iteration-cap pause. Test-only.
 #[cfg(test)]
 mod iteration_cap_turn_test;
+/// Agent-authored internal dashboard pages: `pages_list` / `pages_read` /
+/// `pages_write` / `pages_delete` over `Pages/<slug>/` in the same
+/// [`crate::ports::workspace::WorkspaceStore`], with `pages_write` compiling
+/// `Page.tsx` to `Page.compiled.mjs` via `swc_core`. See
+/// `docs/spec/runtime/pages.md`.
+pub mod pages_tools;
 
 /// The ACP `RunTurn`, under the path it had before the split.
 ///

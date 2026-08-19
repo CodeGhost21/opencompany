@@ -1166,6 +1166,15 @@ jobs:
       - run: npm run build
         working-directory: frontend
 
+      # The pages SDK (an ES module bundle and its embedded React) is built by
+      # `build:pages-sdk`, not by the main `build` step — it is its own Vite
+      # config and tsconfig, not reachable through `tsc -b` or the app build.
+      # This is its only CI gate; without it, a type error in the SDK's client
+      # or react-entry passes `typecheck` and goes undetected until a staging
+      # deploy first exercises the build. (oxoxDev, PR #985.)
+      - run: npm run build:pages-sdk
+        working-directory: frontend
+
       # The design system's token layer, asserted rather than trusted.
       #
       # 192 arbitrary font sizes, 87 raw palette colours and 26 stray hexes
