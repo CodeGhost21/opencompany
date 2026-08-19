@@ -220,12 +220,23 @@ function runStateOf(id: string): string | null {
   return null;
 }
 
+/**
+ * Render the view **on the workflow's detail page**, where the canvas is.
+ *
+ * `sub` names the graph (issue #1110). It used to be omitted: the view
+ * auto-selected the first — and only — row of the list, so a bare render landed
+ * on the canvas. `#/workflows` is the index now and has no canvas at all, so
+ * the deep link is how these tests reach one. The switch-away-and-back case
+ * still exercises exactly what it did: the clear effect keys on `company`, and
+ * that is the argument being changed.
+ */
 async function render(runEvents: Ev[], company = "acme") {
   await act(async () => {
     root.render(
       createElement(WorkflowsView, {
         client: fakeClient(),
         company,
+        sub: GRAPH.id,
         runEvents,
       }),
     );
