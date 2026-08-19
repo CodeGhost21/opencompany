@@ -1234,7 +1234,15 @@ export function WorkflowsView({
                   const updated = await setWorkflowEnabled(client, company, saved.id, true);
                   // Newer than any list request already in flight.
                   localWriteRef.current += 1;
-                  setGraph(updated);
+                  // The operator may have selected a different workflow while
+                  // this Resume was in flight. Only replace the displayed graph
+                  // when it still belongs to the selection — otherwise the
+                  // picker would identify the new workflow while the canvas
+                  // showed (and a later edit would mutate) the old one. The list
+                  // update below is safe unconditionally: it keys by id.
+                  if (selectedIdRef.current === updated.id) {
+                    setGraph(updated);
+                  }
                   setWorkflows((prev) =>
                     prev.map((w) =>
                       w.id === updated.id ? { ...w, enabled: updated.enabled } : w,
