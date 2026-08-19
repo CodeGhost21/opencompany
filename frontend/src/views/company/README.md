@@ -132,6 +132,20 @@ renders normally. `useHashView` hands the second segment back unvalidated, and a
 stale bookmark deserves the company, not a banner. The hash is never rewritten:
 `#/company/<deskId>` is a shareable address.
 
+## Two kinds of message in the desk creator
+
+`DeskCreateDialog` keeps field-level complaints apart from whole-form ones
+(issue #1100). "Give the desk a name." renders **at the Name field** — inline
+under the input, `role="alert"`, wired to the input by `aria-describedby` with
+`aria-invalid` on it — and an invalid submit focuses that input and scrolls it
+into view. What the host says when it refuses the create stays in the banner
+above the footer, because it is about the whole form.
+
+They used to share the banner slot, which put a complaint about the first field
+below the entire roster picker: off-screen in a `max-h-[85vh] overflow-y-auto`
+dialog on any real company, with nothing moving the operator to it, so Create
+read as inert. The distance grew with the roster.
+
 ## Files
 
 | | |
@@ -144,6 +158,9 @@ stale bookmark deserves the company, not a banner. The hash is never rewritten:
 
 `test/unit/org-tree.test.ts` covers the derivation — lead by position,
 provenance, the unresolvable seat, the unplaced roster, and the cap.
+`test/unit/desk-create-name-error.test.ts` covers the create dialog's two
+message slots — which node holds each, where it sits relative to the field, its
+ARIA wiring, and the focus move.
 `test/e2e/org-tree.spec.ts` covers the surface in a browser, including the
 reachability failure this issue is about, and asserts every write survives a
 reload against a stateful stub.

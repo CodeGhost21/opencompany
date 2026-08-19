@@ -943,7 +943,7 @@ function Unplaced({ tree }: { tree: OrgTree }) {
         <section className="space-y-2">
           <h3 className="text-sm font-medium">People</h3>
           <p className="text-xs text-muted-foreground">
-            The humans who can sign in. Desks staff agents, so the company
+            The humans who can sign in. Desks staff teammates, so the company
             declares no desk for a person, and this chart does not guess one.
           </p>
           <ul className="flex flex-wrap gap-1.5">

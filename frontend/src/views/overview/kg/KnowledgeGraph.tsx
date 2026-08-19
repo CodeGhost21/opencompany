@@ -52,7 +52,7 @@ const CAT: Record<KGNodeKind, { color: string; Icon: LucideIcon; label: string; 
   step: { color: 'var(--brain-2)', Icon: Milestone, label: 'Stages', r: 6 },
   task: { color: 'var(--muted)', Icon: ClipboardList, label: 'SOP tasks', r: 7 },
   person: { color: 'var(--warn)', Icon: UserRound, label: 'Humans', r: 10 },
-  employee: { color: 'var(--accent)', Icon: User, label: 'AI agents', r: 10 },
+  employee: { color: 'var(--accent)', Icon: User, label: 'AI teammates', r: 10 },
   tool: { color: 'var(--kg-tool)', Icon: Wrench, label: 'Tools', r: 7.5 },
 };
 
@@ -1508,7 +1508,7 @@ export function KnowledgeGraph({
         [
           { label: 'Notes', color: HUB_COLOR, Icon: CAT.self.Icon },
           { label: 'Human', color: CAT.person.color, Icon: CAT.person.Icon },
-          { label: 'AI agent', color: CAT.employee.color, Icon: CAT.employee.Icon },
+          { label: 'AI teammate', color: CAT.employee.color, Icon: CAT.employee.Icon },
           { label: 'Tool', color: CAT.tool.color, Icon: CAT.tool.Icon },
           { label: 'Workflow', color: CAT.workflow.color, Icon: CAT.workflow.Icon },
           { label: 'Stage', color: CAT.step.color, Icon: CAT.step.Icon },
@@ -1631,7 +1631,7 @@ export function KnowledgeGraph({
     <SopTaskDetailCard
       task={selectedTask}
       assigneeName={selectedTaskWorkerNode?.label ?? selectedTask.assigneeId}
-      assigneeKindLabel={selectedTask.assigneeKind === 'person' ? 'human employee' : 'AI agent'}
+      assigneeKindLabel={selectedTask.assigneeKind === 'person' ? 'human employee' : 'AI teammate'}
       assigneeColor={selectedTask.assigneeKind === 'person' ? 'var(--warn)' : 'var(--accent)'}
       runtime={taskRuntime}
       tools={toolChips(selectedTaskWorker)}
