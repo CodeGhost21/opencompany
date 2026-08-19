@@ -944,13 +944,34 @@ impl CompanyRuntime {
             .inert_board_reported
             .swap(true, std::sync::atomic::Ordering::Relaxed)
         {
+            // The remedy is per build, because there are two different causes
+            // and only one of them is "nobody called `with_harness`" (issue
+            // #1059 review). `RuntimeBuilder::with_harness` is itself
+            // `#[cfg(feature = "openhuman")]`, so in a default-feature build
+            // naming it sends the operator looking for a method that is not
+            // compiled into their binary — and that build is not hypothetical:
+            // `Dockerfile`'s `ARG FEATURES=""` ships it as a first-class
+            // configuration, and Cargo.toml describes the default as offline
+            // and echo-brained. There the thing that would actually help is to
+            // rebuild with the feature.
+            //
+            // Only the remedy is split. The symptom stays one literal shared by
+            // both builds, so the half that describes what happened cannot
+            // drift between them while the half that says what to do about it
+            // is the only thing the cfg decides.
+            #[cfg(feature = "openhuman")]
+            const REMEDY: &str = "Wire one with `RuntimeBuilder::with_harness(...)` (see \
+                 `src/bin/opencompany.rs`), or move the card by hand.";
+            #[cfg(not(feature = "openhuman"))]
+            const REMEDY: &str = "This binary was built without the `openhuman` feature, so it \
+                 has no harness to wire — rebuild with `--features openhuman` (the `FEATURES` \
+                 build arg in `Dockerfile`), or move the card by hand.";
             tracing::warn!(
                 company = %self.id,
                 task = %task.id,
                 "[board] a card was dispatched but this runtime has no agent pool, so nothing \
-                 will work it: the card stays in `in_progress` with no attempt row. Wire one with \
-                 `RuntimeBuilder::with_harness(...)` (see `src/bin/opencompany.rs`), or move the \
-                 card by hand. Reported once per runtime."
+                 will work it: the card stays in `in_progress` with no attempt row. {REMEDY} \
+                 Reported once per runtime."
             );
         }
         let _ = task;

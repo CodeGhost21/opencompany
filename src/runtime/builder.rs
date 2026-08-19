@@ -4060,6 +4060,13 @@ mod test {
     /// The second dispatch pins the latch. An inert board with fifty cards has
     /// one problem, not fifty, and a per-card warning is the kind of noise that
     /// gets a useful line filtered out.
+    ///
+    /// The remedy is asserted per build (issue #1059 review). "No agent pool"
+    /// has two causes with two different fixes — nobody called `with_harness`,
+    /// or the binary was built without the feature that compiles it — and a
+    /// message naming the wrong one is a dead end dressed as help. Each arm
+    /// pins the other's remedy *absent* as well as its own present, so a
+    /// message that hedged by carrying both would fail here.
     #[tokio::test]
     async fn an_inert_board_says_it_cannot_dispatch_once() {
         use std::sync::{Arc as StdArc, Mutex as StdMutex};
@@ -4176,10 +4183,38 @@ mod test {
             text.contains("no agent pool"),
             "an inert board must say why nothing will work the card: {text:?}"
         );
-        assert!(
-            text.contains("with_harness"),
-            "the warning must name the fix, not just the symptom: {text:?}"
-        );
+        // The remedy has to be the one that helps THIS build, and asserting
+        // its presence is only half of that (issue #1059 review). A message
+        // carrying both remedies would satisfy every "contains" assertion while
+        // still telling a default-build operator to call a method that is not
+        // in their binary — so each arm also pins the other's absence, which is
+        // what makes this prove the split rather than tolerate it.
+        #[cfg(feature = "openhuman")]
+        {
+            assert!(
+                text.contains("with_harness"),
+                "a build WITH the feature must name the call that wires a pool: {text:?}"
+            );
+            assert!(
+                !text.contains("--features openhuman"),
+                "the feature is already on; telling this operator to rebuild with it is \
+                 a remedy for a problem they do not have: {text:?}"
+            );
+        }
+        #[cfg(not(feature = "openhuman"))]
+        {
+            assert!(
+                text.contains("--features openhuman"),
+                "a default-feature build has no harness to wire, so rebuilding with the \
+                 feature is the only thing that helps: {text:?}"
+            );
+            assert!(
+                !text.contains("with_harness"),
+                "`RuntimeBuilder::with_harness` is itself `#[cfg(feature = \"openhuman\")]`, \
+                 so naming it here sends the operator after a method that is not compiled \
+                 into their binary: {text:?}"
+            );
+        }
         assert_eq!(
             text.matches("no agent pool").count(),
             1,
