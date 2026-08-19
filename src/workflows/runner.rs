@@ -2603,9 +2603,10 @@ to = "done"
         let pool = Arc::new(HarnessPool::new());
         let rec = record();
         let deps = deps(dir.path());
-        let turn = Arc::new(
-            crate::harness::built_in::run_turn::HarnessRunTurn::new(pool, Arc::new(deps.clone())),
-        );
+        let turn = Arc::new(crate::harness::built_in::run_turn::HarnessRunTurn::new(
+            pool,
+            Arc::new(deps.clone()),
+        ));
         let runner = HarnessWorkflowRunner::new(turn, deps, rec.clone());
 
         let file = parse_workflow(GREET).expect("workflow parses");
