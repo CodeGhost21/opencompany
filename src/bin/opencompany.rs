@@ -1312,39 +1312,70 @@ async fn async_main() -> Result<()> {
                 // regardless, since the registry only holds locally-loaded ones).
                 if let Some(ownership) = &handles.ownership {
                     let self_tenant = state.config().tenant_namespace.clone();
+                    // Read list() BEFORE owners() (issue #1077): provisioning
+                    // writes the owner row before the company (#1050), so a
+                    // provision crossing the two reads lands as a benign dangling
+                    // owner row rather than an alarming unowned company.
+                    let companies = match handles.company.list().await {
+                        Ok(c) => Some(c),
+                        // A failed listing must not abort a boot that would
+                        // otherwise succeed: this is a diagnostic, and the server
+                        // is perfectly able to serve every company whose ownership
+                        // *is* intact without it.
+                        Err(e) => {
+                            eprintln!("warning: could not check company ownership: {e}");
+                            None
+                        }
+                    };
                     let owners = ownership.owners().await?;
-                    // Issue #1077: say so when a company has no owner row.
+                    // Issue #1077: report companies orphaned from their tenant.
                     //
-                    // Such a company is unreachable by its own tenant —
-                    // `authorize_address` finds no owner and answers 403 — and
-                    // until now nothing anywhere reported it. #1050's fix
-                    // stopped provisioning creating new ones; it does nothing
-                    // for the rows already written, and this is the only place
-                    // in the product that holds both collections at once.
+                    // A company whose owner row is missing is unreachable by its
+                    // own tenant — `authorize_address` finds no owner and answers
+                    // 403 — and until now nothing anywhere reported it. #1050's
+                    // fix stopped provisioning creating new ones; it does nothing
+                    // for the rows the old behaviour already left behind.
                     //
-                    // Read-only, and deliberately: repairing one means guessing
-                    // its tenant from the id, and a wrong guess hands one
-                    // tenant's company to another. See `app::orphans`.
+                    // Gated on tenant_namespace: only tenant-namespace mode writes
+                    // durable owner rows at all, and without it every company
+                    // would appear orphaned on every boot.
                     //
-                    // Silent when there is nothing to report. A line on every
-                    // healthy boot is how an operator learns to skip the one
-                    // that matters.
-                    match handles.company.list().await {
-                        Ok(companies) => {
-                            let report = opencompany::app::find_orphans(&companies, &owners);
-                            if !report.is_empty() {
+                    // Filtered to this workload's own tenant: in shared-single-DB
+                    // the `owners` collection holds every tenant's rows, and
+                    // printing them all to one tenant pod's stderr would leak
+                    // other tenants' company ids and tenant strings.
+                    // `opencompany orphans` is the unfiltered, platform-scoped
+                    // form.
+                    if let Some(me) = &self_tenant {
+                        if let Some(companies) = &companies {
+                            let prefix = format!("{me}--");
+                            let report =
+                                opencompany::app::find_orphans(companies, &owners);
+                            let unowned: Vec<_> = report
+                                .unowned
+                                .into_iter()
+                                .filter(|c| c.id.as_ref().starts_with(&prefix))
+                                .collect();
+                            let dangling: Vec<_> = report
+                                .dangling
+                                .into_iter()
+                                .filter(|d| {
+                                    opencompany::app::canonical_tenant(&d.tenant)
+                                        == opencompany::app::canonical_tenant(me)
+                                })
+                                .collect();
+                            let filtered = opencompany::app::OrphanReport {
+                                unowned,
+                                dangling,
+                            };
+                            if !filtered.is_empty() {
                                 eprintln!(
                                     "warning: ownership rows and companies disagree \
                                      (`opencompany orphans` for this report)\n{}",
-                                    report.to_text()
+                                    filtered.to_text()
                                 );
                             }
                         }
-                        // A failed listing must not abort a boot that would
-                        // otherwise succeed: this is a diagnostic, and the
-                        // server is perfectly able to serve every company whose
-                        // ownership *is* intact without it.
-                        Err(e) => eprintln!("warning: could not check company ownership: {e}"),
                     }
                     for (id, tenant) in owners {
                         match &self_tenant {
