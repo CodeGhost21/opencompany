@@ -101,6 +101,7 @@ import { classifyRunError } from "@/views/workflows/run-error";
 import { runFailureFrom, type RunFailure } from "@/views/workflows/run-failure";
 import { RunFailurePanel } from "@/views/workflows/RunFailurePanel";
 import { RunResultPanel } from "@/views/workflows/RunResultPanel";
+import { CanvasShell } from "@/views/workflows/CanvasShell";
 import { approvalsForRun } from "@/views/workflows/run-approvals";
 import { NodeDetailPanel } from "@/views/workflows/NodeDetailPanel";
 import { type NodeOutputView, nodeOutputFor } from "@/views/workflows/run-output";
@@ -2133,7 +2134,30 @@ export function WorkflowsView({
         </div>
       )}
 
-      <div className="relative flex-1">
+      {/* Issue #1107: canvas and left rail side by side. `CanvasShell` owns the
+          view's column layout and documents which slot a new panel belongs in —
+          left rail, right overlay, or bottom strip. */}
+      <CanvasShell
+        rail={
+          historyOpen && historySupported ? (
+            <RunHistoryPanel
+              runs={historyRows}
+              graph={graph}
+              workflowName={selected?.name ?? selectedId ?? ""}
+              onClose={() => setHistoryOpen(false)}
+              selectedRunSeq={overlayRun?.seq ?? null}
+              onSelectRun={(picked) =>
+                // Clicking the row already shown clears it, so the control is a
+                // toggle rather than a one-way trip into overlay mode.
+                setOverlayRun((prev) => (prev?.seq === picked.seq ? null : picked))
+              }
+              onFixWithCopilot={handleFixWithCopilot}
+              fixingRunSeq={fixingRunSeq}
+              fixReason={fixReason}
+            />
+          ) : null
+        }
+      >
         {/* Issue #303: browsing REPLACES the canvas rather than squeezing in
             above it. A card grid needs the width, and the canvas is meaningless
             while the operator is deciding which workflow they want. Picking one
@@ -2257,7 +2281,7 @@ export function WorkflowsView({
             )}
           </>
         )}
-      </div>
+      </CanvasShell>
 
       {result && (
         <RunResultPanel
@@ -2286,24 +2310,6 @@ export function WorkflowsView({
         <RunFailurePanel
           failure={runFailure}
           onClose={() => setRunFailure(null)}
-        />
-      )}
-
-      {historyOpen && historySupported && (
-        <RunHistoryPanel
-          runs={historyRows}
-          graph={graph}
-          workflowName={selected?.name ?? selectedId ?? ""}
-          onClose={() => setHistoryOpen(false)}
-          selectedRunSeq={overlayRun?.seq ?? null}
-          onSelectRun={(picked) =>
-            // Clicking the row already shown clears it, so the control is a
-            // toggle rather than a one-way trip into overlay mode.
-            setOverlayRun((prev) => (prev?.seq === picked.seq ? null : picked))
-          }
-          onFixWithCopilot={handleFixWithCopilot}
-          fixingRunSeq={fixingRunSeq}
-          fixReason={fixReason}
         />
       )}
 
