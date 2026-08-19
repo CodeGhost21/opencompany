@@ -169,7 +169,7 @@ pub struct RunContext<'a> {
 /// rather than proceeding with effects pointed at a directory that does not
 /// exist. A dry run builds no workspace and is infallible.
 pub async fn build_capabilities(
-    turn: Arc<dyn crate::runtime::delegation::RunTurn>,
+    turn: Arc<dyn RunTurn>,
     deps: HarnessDeps,
     record: &CompanyRecord,
     run: RunContext<'_>,
@@ -479,7 +479,7 @@ pub struct HarnessAgentRunner {
     /// The turn a workflow agent node runs on: the lane-aware router in a
     /// multi-harness company, the default lane over the pool in a
     /// single-harness one (see `run_workflow`'s single-pool entrypoint).
-    turn: Arc<dyn crate::runtime::delegation::RunTurn>,
+    turn: Arc<dyn RunTurn>,
     deps: HarnessDeps,
     /// The company record, for the board drain's desk/assignee resolution (issue
     /// #661 / M5) — the same record the rest of this bundle was built from, so a
@@ -686,7 +686,7 @@ impl HarnessAgentRunner {
     /// a named-harness agent reaches that harness's engine.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        turn: Arc<dyn crate::runtime::delegation::RunTurn>,
+        turn: Arc<dyn RunTurn>,
         deps: HarnessDeps,
         record: CompanyRecord,
         company: CompanyId,
@@ -1614,7 +1614,7 @@ mod tests {
     /// wraps — what a workflow agent node runs on when no lanes are declared.
     fn single_turn(
         deps: &HarnessDeps,
-    ) -> Arc<dyn crate::runtime::delegation::RunTurn> {
+    ) -> Arc<dyn RunTurn> {
         Arc::new(crate::harness::built_in::run_turn::HarnessRunTurn::new(
             Arc::new(HarnessPool::new()),
             Arc::new(deps.clone()),
