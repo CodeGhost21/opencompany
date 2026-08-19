@@ -1953,7 +1953,23 @@ async fn run_copilot(
     let accepted: tools::AcceptedCell = Arc::new(StdMutex::new(None));
     let diag: tools::DiagCell = Arc::new(StdMutex::new(Vec::new()));
 
-    let mut copilot = agent::build_copilot_agent(deps, ctx, accepted.clone(), diag.clone())?;
+    // A UNIQUE PER-TURN workspace so the vendored turn's session-transcript
+    // persistence cannot bleed into the next turn's fresh, empty-history agent
+    // (issue #1042). Each create/fix is an independent turn; a fresh dir is always
+    // empty, so the turn's resume scan finds nothing to replay — statelessness by
+    // construction. The dir is reclaimed after the turn (below).
+    let turn_workspace = deps
+        .workspace_root
+        .join("workflow-copilot")
+        .join(generate_id());
+
+    let mut copilot = agent::build_copilot_agent(
+        deps,
+        ctx,
+        accepted.clone(),
+        diag.clone(),
+        turn_workspace.clone(),
+    )?;
 
     // A synchronous request (or a dead run's fix) mints no attempt row, but its
     // spend is still metered against a FRESH id under the copilot sentinel — the
@@ -1963,6 +1979,12 @@ async fn run_copilot(
     // ONE turn, under the same hard ceiling a card pass keeps. `run_single` drives
     // the bounded tool loop; the timeout bounds the whole turn.
     let outcome = tokio::time::timeout(BUILD_TIMEOUT, copilot.run_single(&user)).await;
+
+    // Reclaim the per-turn workspace now the turn is done — its transcript writes
+    // are synchronous within the turn, so nothing else needs it. Pure disk hygiene:
+    // correctness does NOT depend on this (a leftover dir is only ever scanned
+    // within its own already-empty scope, never by a later turn).
+    let _ = std::fs::remove_dir_all(&turn_workspace);
 
     // Meter the turn regardless of how it ended — the agent's own usage carries
     // backend-charged USD, so a charged turn records a non-zero cost even when the
@@ -2119,9 +2141,24 @@ fn not_automatable_reason(end: &TurnEnd, diag: &[String]) -> String {
                 )
             } else {
                 // The agent finished cleanly without proposing — it judged the work
-                // a one-off; take its own words as the reason.
+                // a one-off; take its own words as the reason. But a model that
+                // closes with the raw answer envelope ({"automatable": false,
+                // "reason": "…"}) instead of prose must NOT leak that JSON to the
+                // operator (issue #1042): pull out only the typed `reason` field.
+                let extracted = parse_draft(text)
+                    .map(|draft| draft.reason.trim().to_string())
+                    .filter(|reason| !reason.is_empty());
+                if let Some(reason) = extracted {
+                    return cap(&reason, MAX_REASON_CHARS);
+                }
+                // No parseable typed reason — fall back to the prose text, unless
+                // that itself still carries a JSON-object fragment (an envelope with
+                // no usable `reason`, or partial JSON), in which case a raw brace
+                // must never reach the operator: use a generic one-off message.
                 let stated = cap(text, MAX_REASON_CHARS);
-                if stated.is_empty() {
+                let looks_like_json = stated.contains("\"automatable\"")
+                    || (stated.contains('{') && stated.contains('}'));
+                if stated.is_empty() || looks_like_json {
                     "this is better done once than built into a reusable workflow".to_string()
                 } else {
                     stated

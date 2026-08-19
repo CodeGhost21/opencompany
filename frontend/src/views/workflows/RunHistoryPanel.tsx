@@ -465,10 +465,11 @@ function RunHistoryRow({
         // Wording is the review item here. "Parked N approvals", never "waiting
         // on N": nothing refreshes this row when the operator approves one, so
         // an outstanding count is stale on arrival, while a record of what the
-        // run parked stays true. And it says plainly that approving does not
-        // continue THIS run — an agent step is not resumable, so the operator
-        // has to run the workflow again or they will sit waiting for a
-        // continuation that never comes.
+        // run parked stays true. Since issue #899 (Stage 1), approving a parked
+        // call CONTINUES this run automatically — so the closing sentence says
+        // that, with the honest caveat that the continuation re-runs the agent's
+        // turn and may ask again if it diverges. The unparkable-only case still
+        // cannot continue and says so.
         <p
           className="text-2xs text-[var(--status-blocked-text)]"
           data-testid="workflow-run-blocked"
@@ -491,7 +492,7 @@ function RunHistoryRow({
           {unparkable > 0 &&
             `${unparkable} call${unparkable === 1 ? "" : "s"} could not be queued for approval at all, so you will not be asked about ${unparkable === 1 ? "it" : "them"}. `}
           {parked > 0
-            ? `Decide ${parked === 1 ? "it" : "them"} in Approvals, then run the workflow again — approving does not continue this run.`
+            ? `Approve ${parked === 1 ? "it" : "them"} in Approvals and this run continues on its own — approving re-runs the step, so a changed decision may ask again.`
             : "Nothing here can be approved; change the policy and run the workflow again."}
         </p>
       ) : run.running ? (

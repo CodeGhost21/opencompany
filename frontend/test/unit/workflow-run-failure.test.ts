@@ -78,6 +78,7 @@ const { formatDuration, runDuration } = await import("@/views/workflows/run-heal
 const GRAPH: WorkflowGraph = {
   id: "digest",
   name: "Weekly digest",
+  version: null,
   nodes: [
     { id: "start", kind: "trigger", name: "Monday morning" },
     { id: "n_3", kind: "agent", name: "Draft the digest", agent: "writer" },

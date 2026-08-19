@@ -298,6 +298,10 @@ export interface ApprovalSummary {
   /** The parked effect's dotted kind, e.g. "payment.send". */
   kind: string;
   amount_usd: number | null;
+  /**
+   * Epoch-millis the effect was parked — stamped in the same turn that composed
+   * its arguments, so it dates the **payload**, not the queue (#1024).
+   */
   at_millis: number;
   /**
    * Epoch-millis this approval default-denies if nobody decides it (#971) —
@@ -314,6 +318,19 @@ export interface ApprovalSummary {
    * than guessing one.
    */
   expires_at_millis?: number | null;
+  /**
+   * The host's consequence group for the parked effect (#1024).
+   *
+   * Derived server-side from the tool **and its arguments**, so a
+   * `composio_execute` carrying `GMAIL_SEND_EMAIL` arrives as `"send"` rather
+   * than as the catch-all its tool name alone implies. It cannot be computed
+   * here: for a harness tool call `kind` is the tool name, so a console keying
+   * on `kind` would miss exactly the outbound sends this marks.
+   *
+   * Optional, and that is how an old host degrades: no field, no age label,
+   * exactly the pre-#1024 card.
+   */
+  group?: "spend" | "send" | "sign" | "publish" | "hire" | "identity" | "other";
   /**
    * Which board task this approval was parked for (#333). Mirrors `TaskLink` in
    * `src/runtime/journal.rs`.

@@ -1429,6 +1429,12 @@ pub(crate) async fn rollback_company_workflow(
 /// last-write-wins is what a light switch already means. Requiring a token would
 /// also make a seed-backed workflow untoggleable, since only overlay bodies have
 /// one.
+///
+/// `mail_configured` and `wired_channels` are the deployment's delivery
+/// capability (issue #1046) — whether a mailbox is wired and which channels are
+/// deliverable — which the arm-time undeliverable-schedule check needs and the
+/// caller reads off the runtime.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn set_company_workflow_enabled(
     company: &CompanyId,
     source_dir: Option<&Path>,
@@ -1436,6 +1442,8 @@ pub(crate) async fn set_company_workflow_enabled(
     events: Option<&Arc<dyn EventLog>>,
     wid: &str,
     enabled: bool,
+    mail_configured: bool,
+    wired_channels: &[String],
 ) -> Result<bool> {
     if !is_safe_workflow_id(wid) {
         return Err(OpenCompanyError::InvalidRequest(
@@ -1531,6 +1539,38 @@ pub(crate) async fn set_company_workflow_enabled(
     {
         return Err(OpenCompanyError::InvalidRequest(
             crate::company::STAGELESS_SCHEDULE_REFUSAL.to_string(),
+        ));
+    }
+
+    // Issue #1046: the delivery-side sibling of the stage-less refusal above. A
+    // scheduled graph that runs a stage but can only deliver its report to a
+    // place this deployment cannot reach — `owner` with no mailbox (which falls
+    // back to the operator channel and is discarded), or a channel that isn't
+    // wired — fires on time, runs, and drops the report unseen every time. So
+    // arming, where the delivery promise is made, is where it is checked.
+    //
+    // Reuses the `file` already parsed for the stage-less check and the journal
+    // name — zero extra load. `mail_configured` and `wired_channels` are the
+    // deployment's delivery capability, computed by the caller from
+    // `runtime.mail()` and `runtime.deliverable_channel_ids()` (the console
+    // picker's own source of truth, #813) — the arm path cannot see them
+    // otherwise.
+    //
+    // None-vs-any, matching the stage-less guard's minimalism: refuse only when
+    // the graph *asks* to deliver somewhere (`has_output_destination`) and
+    // **nothing** it asks for can land (`!has_deliverable_output`). A
+    // drawer-only graph (outputs with no destination) promises no delivery and
+    // is left alone; a partially-deliverable graph still arms. Switching such a
+    // workflow OFF stays allowed, and a manual (unscheduled) graph is untouched
+    // — same reasoning as the guard above.
+    if enabled
+        && let Some(file) = file.as_ref()
+        && file.trigger_schedule().is_some()
+        && file.has_output_destination()
+        && !file.has_deliverable_output(mail_configured, wired_channels)
+    {
+        return Err(OpenCompanyError::InvalidRequest(
+            crate::company::UNDELIVERABLE_SCHEDULE_REFUSAL.to_string(),
         ));
     }
 
@@ -1826,8 +1866,79 @@ mod tests {
         ) -> Result<Vec<StoredEvent>> {
             Ok(Vec::new())
         }
-        fn subscribe(&self, _id: &CompanyId) -> BoxStream<'static, StoredEvent> {
+        fn subscribe(
+            &self,
+            _id: &CompanyId,
+        ) -> BoxStream<'static, crate::ports::events::EventStreamItem> {
             Box::pin(stream::empty())
+        }
+    }
+
+    /// An in-memory [`EventLog`] whose [`subscribe`](EventLog::subscribe) stream
+    /// actually delivers what [`append`](EventLog::append) writes — the property
+    /// [`MemLog`] above deliberately lacks (its `subscribe` is empty). This is
+    /// what lets a test stand in for the live SSE fan-out: the console's picker
+    /// re-reads off exactly this broadcast (issue #1045), so a create/delete
+    /// that reaches a live subscriber here is evidence that in-process delivery
+    /// is intact and a stale picker is a console-side defect, not a lost frame.
+    struct BroadcastMemLog {
+        tx: tokio::sync::broadcast::Sender<StoredEvent>,
+        next_seq: StdMutex<u64>,
+    }
+
+    impl BroadcastMemLog {
+        fn new() -> Self {
+            Self {
+                tx: tokio::sync::broadcast::channel(64).0,
+                next_seq: StdMutex::new(0),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl EventLog for BroadcastMemLog {
+        async fn append(&self, id: &CompanyId, event: CompanyEvent) -> Result<EventSeq> {
+            let seq = {
+                let mut n = self.next_seq.lock().unwrap();
+                *n += 1;
+                *n
+            };
+            let stored = StoredEvent {
+                seq: EventSeq::new(seq),
+                company: id.clone(),
+                event,
+                at_millis: now_millis(),
+            };
+            // No live subscriber is not an error — a send with zero receivers
+            // just means nobody is watching yet.
+            let _ = self.tx.send(stored);
+            Ok(EventSeq::new(seq))
+        }
+        async fn read_from(
+            &self,
+            _id: &CompanyId,
+            _seq: EventSeq,
+            _limit: usize,
+        ) -> Result<Vec<StoredEvent>> {
+            Ok(Vec::new())
+        }
+        fn subscribe(
+            &self,
+            _id: &CompanyId,
+        ) -> BoxStream<'static, crate::ports::events::EventStreamItem> {
+            let rx = self.tx.subscribe();
+            Box::pin(stream::unfold(rx, |mut rx| async move {
+                // Each call to this closure produces exactly one item and hands
+                // the receiver back as continuation state, so there is no loop
+                // here.
+                match rx.recv().await {
+                    Ok(event) => Some((crate::ports::events::EventStreamItem::Event(event), rx)),
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(missed)) => {
+                        Some((crate::ports::events::EventStreamItem::Gap { missed }, rx))
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => None,
+                }
+            }))
         }
     }
 
@@ -2597,6 +2708,8 @@ to = "done"
             None,
             "campaign",
             true,
+            true,
+            &[],
         )
         .await
         .expect_err("a schedule that cannot run must not be armed");
@@ -2635,9 +2748,18 @@ to = "done"
         .await
         .expect("saves");
 
-        set_company_workflow_enabled(&company, Some(dir.path()), &store, None, "campaign", false)
-            .await
-            .expect("pausing must never be refused");
+        set_company_workflow_enabled(
+            &company,
+            Some(dir.path()),
+            &store,
+            None,
+            "campaign",
+            false,
+            true,
+            &[],
+        )
+        .await
+        .expect("pausing must never be refused");
     }
 
     /// A graph with a real stage arms normally. Without this the refusal above
@@ -2657,9 +2779,273 @@ to = "done"
             .await
             .expect("saves");
 
-        set_company_workflow_enabled(&company, Some(dir.path()), &store, None, "greeter", true)
+        set_company_workflow_enabled(
+            &company,
+            Some(dir.path()),
+            &store,
+            None,
+            "greeter",
+            true,
+            true,
+            &[],
+        )
+        .await
+        .expect("a graph that can actually run may be armed");
+    }
+
+    // --- Undeliverable-schedule refusal (issue #1046) ------------------------
+
+    /// A scheduled `trigger → agent → output` draft whose output delivers to
+    /// `(dest_kind, dest_target)`. The shape #1046 guards: a graph that runs a
+    /// stage but whose only report may land nowhere.
+    fn scheduled_output_draft(
+        id: &str,
+        name: &str,
+        dest_kind: &str,
+        dest_target: Option<&str>,
+    ) -> RawWorkflow {
+        let mut draft = valid_draft(id, name);
+        draft.nodes[0].schedule = Some("0 9 * * *".to_string());
+        let output = draft
+            .nodes
+            .iter_mut()
+            .find(|node| node.kind == "output")
+            .expect("valid_draft carries an output node");
+        output.destination = Some(WorkflowDestinationDef {
+            kind: dest_kind.to_string(),
+            target: dest_target.map(str::to_string),
+        });
+        draft
+    }
+
+    /// The core of #1046: a scheduled graph whose only report goes to the owner
+    /// on a company with no mailbox is refused at arm time. `owner` with no
+    /// mailbox falls back to the operator channel, which delivery discards, so a
+    /// schedule would fire and drop the report unseen every time.
+    #[tokio::test]
+    async fn arming_a_scheduled_owner_output_with_no_mailbox_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let company = CompanyId::new("acme");
+        let store = store_of(MemStore::seeded(record(
+            &company,
+            manifest_with_assistant(),
+        )));
+
+        create_company_workflow(
+            &company,
+            Some(dir.path()),
+            &store,
+            None,
+            scheduled_output_draft("digest", "Digest", "owner", None),
+        )
+        .await
+        .expect("saving a stub is legitimate and must succeed");
+
+        let err = set_company_workflow_enabled(
+            &company,
+            Some(dir.path()),
+            &store,
+            None,
+            "digest",
+            true,
+            // No mailbox, no wired channels: nowhere for an owner report to land.
+            false,
+            &[],
+        )
+        .await
+        .expect_err("a schedule whose report cannot be delivered must not arm");
+
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("nowhere to land"),
+            "the operator is told WHAT is wrong: {rendered}"
+        );
+        assert!(
+            rendered.contains("mailbox") && rendered.contains("wired channel"),
+            "...and the two things they can do about it: {rendered}"
+        );
+    }
+
+    /// The manual half of the fix: the same undeliverable graph, but with **no**
+    /// schedule on its trigger, enables freely. Running a stub by hand — knowing
+    /// its report only reaches the run drawer — is the operator's own business;
+    /// only a *schedule* makes a delivery promise nobody is watching.
+    #[tokio::test]
+    async fn a_manual_undeliverable_graph_is_not_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let company = CompanyId::new("acme");
+        let store = store_of(MemStore::seeded(record(
+            &company,
+            manifest_with_assistant(),
+        )));
+
+        // owner output, no mailbox — but drop the schedule so it is manual.
+        let mut draft = scheduled_output_draft("digest", "Digest", "owner", None);
+        draft.nodes[0].schedule = None;
+        create_company_workflow(&company, Some(dir.path()), &store, None, draft)
             .await
-            .expect("a graph that can actually run may be armed");
+            .expect("saves");
+
+        set_company_workflow_enabled(
+            &company,
+            Some(dir.path()),
+            &store,
+            None,
+            "digest",
+            true,
+            false,
+            &[],
+        )
+        .await
+        .expect("a manual graph is never refused for undeliverable output");
+    }
+
+    /// The refusal is delivery-capability-specific, not a blanket ban on
+    /// owner outputs: the identical scheduled owner graph arms once a mailbox is
+    /// configured, because owner delivery can then email the company's admins.
+    #[tokio::test]
+    async fn arming_a_scheduled_owner_output_with_a_mailbox_arms() {
+        let dir = tempfile::tempdir().unwrap();
+        let company = CompanyId::new("acme");
+        let store = store_of(MemStore::seeded(record(
+            &company,
+            manifest_with_assistant(),
+        )));
+
+        create_company_workflow(
+            &company,
+            Some(dir.path()),
+            &store,
+            None,
+            scheduled_output_draft("digest", "Digest", "owner", None),
+        )
+        .await
+        .expect("saves");
+
+        set_company_workflow_enabled(
+            &company,
+            Some(dir.path()),
+            &store,
+            None,
+            "digest",
+            true,
+            // A mailbox is configured: owner reports can be emailed.
+            true,
+            &[],
+        )
+        .await
+        .expect("an owner report can land once a mailbox exists");
+    }
+
+    /// A scheduled output to a wired channel arms even with no mailbox — the
+    /// channel is a real write path.
+    #[tokio::test]
+    async fn arming_a_scheduled_channel_output_to_a_wired_channel_arms() {
+        let dir = tempfile::tempdir().unwrap();
+        let company = CompanyId::new("acme");
+        let store = store_of(MemStore::seeded(record(
+            &company,
+            manifest_with_assistant(),
+        )));
+
+        create_company_workflow(
+            &company,
+            Some(dir.path()),
+            &store,
+            None,
+            scheduled_output_draft("digest", "Digest", "channel", Some("engineering")),
+        )
+        .await
+        .expect("saves");
+
+        set_company_workflow_enabled(
+            &company,
+            Some(dir.path()),
+            &store,
+            None,
+            "digest",
+            true,
+            false,
+            &["engineering".to_string()],
+        )
+        .await
+        .expect("a report to a wired channel can land");
+    }
+
+    /// A scheduled output to the operator channel is refused: the operator
+    /// channel is an in-memory spy with no durable reader, so a report posted
+    /// there reaches nobody. `deliverable_channel_ids` never lists it, and the
+    /// predicate excludes it by name for good measure.
+    #[tokio::test]
+    async fn arming_a_scheduled_channel_output_to_operator_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let company = CompanyId::new("acme");
+        let store = store_of(MemStore::seeded(record(
+            &company,
+            manifest_with_assistant(),
+        )));
+
+        create_company_workflow(
+            &company,
+            Some(dir.path()),
+            &store,
+            None,
+            scheduled_output_draft("digest", "Digest", "channel", Some("operator")),
+        )
+        .await
+        .expect("saves");
+
+        let err = set_company_workflow_enabled(
+            &company,
+            Some(dir.path()),
+            &store,
+            None,
+            "digest",
+            true,
+            false,
+            // Even if a caller passed a rawer list carrying `operator`, it is refused.
+            &["operator".to_string()],
+        )
+        .await
+        .expect_err("the operator channel is not a delivery surface");
+
+        assert!(err.to_string().contains("nowhere to land"), "{err}");
+    }
+
+    /// Switching an undeliverable scheduled graph **off** is always allowed — an
+    /// operator must be able to stop a thing, the same rule the stage-less guard
+    /// keeps.
+    #[tokio::test]
+    async fn an_undeliverable_scheduled_graph_can_still_be_switched_off() {
+        let dir = tempfile::tempdir().unwrap();
+        let company = CompanyId::new("acme");
+        let store = store_of(MemStore::seeded(record(
+            &company,
+            manifest_with_assistant(),
+        )));
+
+        create_company_workflow(
+            &company,
+            Some(dir.path()),
+            &store,
+            None,
+            scheduled_output_draft("digest", "Digest", "owner", None),
+        )
+        .await
+        .expect("saves");
+
+        set_company_workflow_enabled(
+            &company,
+            Some(dir.path()),
+            &store,
+            None,
+            "digest",
+            false,
+            false,
+            &[],
+        )
+        .await
+        .expect("pausing must never be refused");
     }
 
     /// A manifest-`enabled` id with no body in either source is shown by the
@@ -3083,6 +3469,96 @@ to = "done"
                 assert_eq!(name, "Greeter");
             }
             other => panic!("expected WorkflowDeleted, got {other:?}"),
+        }
+    }
+
+    /// Issue #1045: the REST create/delete persist path puts
+    /// `WorkflowCreated` / `WorkflowDeleted` on a stream a **live subscriber**
+    /// actually receives — the in-process delivery the console's SSE picker
+    /// depends on. A green characterization: it locates the reported "graph
+    /// authored elsewhere stays invisible" defect on the console side, not in a
+    /// dropped host frame.
+    ///
+    /// The projection of these variants onto the `{type, workflowId, name}` wire
+    /// frame the console keys on is asserted next to `project_event` itself
+    /// (`server::operator` — `projects_workflow_created_without_the_actor`,
+    /// `projects_workflow_updated_and_deleted_without_the_actor`). This test
+    /// closes the remaining link: that the persist path emits those variants,
+    /// carrying the same id and name, onto a stream `subscribe` delivers.
+    #[tokio::test]
+    async fn create_and_delete_reach_a_live_subscriber() {
+        use futures::StreamExt;
+
+        let company = CompanyId::new("acme");
+        let store = store_of(MemStore::seeded(record(
+            &company,
+            manifest_with_assistant(),
+        )));
+        let log = Arc::new(BroadcastMemLog::new());
+        let log_dyn: Arc<dyn EventLog> = log.clone();
+        // Subscribe before the writes, exactly as the SSE handler does.
+        let mut stream = log_dyn.subscribe(&company);
+
+        create_company_workflow(
+            &company,
+            None,
+            &store,
+            Some(&log_dyn),
+            valid_draft("greeter", "Greeter"),
+        )
+        .await
+        .expect("creates");
+
+        let created = stream
+            .next()
+            .await
+            .expect("workflow_created delivered live");
+        let created_event = match created {
+            crate::ports::events::EventStreamItem::Event(ev) => ev,
+            other => panic!("expected a live Event frame, got {other:?}"),
+        };
+        match &created_event.event {
+            CompanyEvent::WorkflowCreated {
+                workflow_id, name, ..
+            } => {
+                assert_eq!(workflow_id, "greeter");
+                assert_eq!(name, "Greeter");
+            }
+            other => panic!("expected WorkflowCreated on the wire, got {other:?}"),
+        }
+
+        // Delete the same graph over the same persist path. `None` expected
+        // version skips the optimistic-concurrency check — this test is about
+        // the emitted frame, not the token.
+        delete_company_workflow(
+            &company,
+            None,
+            &store,
+            &revs(),
+            Some(&fires()),
+            Some(&log_dyn),
+            "greeter",
+            None,
+        )
+        .await
+        .expect("deletes");
+
+        let deleted = stream
+            .next()
+            .await
+            .expect("workflow_deleted delivered live");
+        let deleted_event = match deleted {
+            crate::ports::events::EventStreamItem::Event(ev) => ev,
+            other => panic!("expected a live Event frame, got {other:?}"),
+        };
+        match &deleted_event.event {
+            CompanyEvent::WorkflowDeleted {
+                workflow_id, name, ..
+            } => {
+                assert_eq!(workflow_id, "greeter");
+                assert_eq!(name, "Greeter");
+            }
+            other => panic!("expected WorkflowDeleted on the wire, got {other:?}"),
         }
     }
 
@@ -4282,6 +4758,8 @@ to = "done"
             Some(&log_dyn),
             "digest",
             true,
+            true,
+            &[],
         )
         .await
         .expect("arms");
@@ -4388,6 +4866,8 @@ to = "done"
             Some(&log_dyn),
             "greeter",
             false,
+            true,
+            &[],
         )
         .await
         .expect("pauses");
@@ -4410,6 +4890,8 @@ to = "done"
             Some(&log_dyn),
             "greeter",
             false,
+            true,
+            &[],
         )
         .await
         .expect("no-ops");
@@ -4429,6 +4911,8 @@ to = "done"
                 Some(&log_dyn),
                 "greeter",
                 true,
+                true,
+                &[],
             )
             .await
             .expect("arms")
@@ -4462,6 +4946,8 @@ to = "done"
             None,
             "nowhere",
             false,
+            true,
+            &[],
         )
         .await
         .expect_err("unknown id");
@@ -4470,10 +4956,18 @@ to = "done"
             "{err:?}"
         );
 
-        let err =
-            set_company_workflow_enabled(&company, Some(dir.path()), &store, None, "ghost", false)
-                .await
-                .expect_err("bodiless id");
+        let err = set_company_workflow_enabled(
+            &company,
+            Some(dir.path()),
+            &store,
+            None,
+            "ghost",
+            false,
+            true,
+            &[],
+        )
+        .await
+        .expect_err("bodiless id");
         assert!(matches!(err, OpenCompanyError::Conflict(_)), "{err:?}");
     }
 
@@ -4507,6 +5001,8 @@ to = "done"
                 Some(&log_dyn),
                 "broken",
                 false,
+                true,
+                &[],
             )
             .await
             .expect("an unreadable graph is still pausable")
@@ -4571,6 +5067,8 @@ to = "done"
                 None,
                 "seeded",
                 false,
+                true,
+                &[],
             )
             .await
             .expect("pauses a seed-defined workflow")
@@ -4853,7 +5351,7 @@ to = "done"
         create_company_workflow(&company, None, &store, None, scheduled)
             .await
             .expect("create scheduled");
-        set_company_workflow_enabled(&company, None, &store, None, "greeter", true)
+        set_company_workflow_enabled(&company, None, &store, None, "greeter", true, true, &[])
             .await
             .expect("arm it");
 

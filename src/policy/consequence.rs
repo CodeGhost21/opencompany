@@ -305,6 +305,16 @@ pub(crate) const COMPOSIO_ACTION_KEY: &str = "tool";
 /// name (issue #875).
 pub const SHELL: &str = "shell";
 
+/// The git tool, classified by the `operation` it was handed rather than by
+/// this name (issue #877).
+pub const GIT_OPERATIONS: &str = "git_operations";
+
+/// The argument `git_operations` names its subcommand in. Shared with the
+/// fixtures for the reason [`COMPOSIO_ACTION_KEY`] is: a key hard-coded
+/// separately in a test is a test that stops reaching the classifier without
+/// saying so (issue #470).
+pub(crate) const GIT_OPERATION_KEY: &str = "operation";
+
 /// The argument key [`SHELL`] carries the command line under.
 ///
 /// A required parameter of the vendored tool's schema, so a call that omits it
@@ -725,6 +735,66 @@ const DECLARED: &[Declared] = &[
     // whenever" is exactly the grant the `Standing` field refuses to describe,
     // and every push already parks as its own approval regardless.
     d("repo_publish", EffectGroup::Publish, Reach::Nothing),
+    // ---- Hosting (issue #1079) ---------------------------------------------
+    //
+    // The six `hosting_*` tools openhuman ships in `src/openhuman/hosting/`.
+    // Declared here rather than left to `undeclared()`, which is what that
+    // fallback's own doc asks for: it is "a courtesy for an unregistered read,
+    // not a second classifier to trust with an unreviewed capability".
+    //
+    // **Why the fallback gets these wrong, and why it is not being taught to
+    // get them right.** `undeclared()` decides "is this a read?" with
+    // `READ_ONLY_PREFIXES` matched by `name.starts_with(p)`. Every name here
+    // begins with `hosting_`, so `list`/`get`/`read` can never match — the
+    // prefix test cannot see past the namespace, and all six come back
+    // `Consequence`. Widening that test to look inside a namespace is the
+    // tempting general fix and is the wrong one: the fallback runs ONLY for
+    // tools no belt registered (a registered one is caught by
+    // `every_registered_tool_is_declared`), so making it cleverer extends trust
+    // to exactly the population that has had no review. It would also trade a
+    // fail-CLOSED miss — a read that parks, which costs an approval — for a
+    // fail-OPEN one, an effect that reads as a read. Declaring is the fix the
+    // file already prescribes.
+    //
+    // Three reads, per openhuman's own `hosting/README.md`, which labels each
+    // of them "Read-only.". They ask the provider what exists and what it did;
+    // nothing leaves this company and nothing is spent.
+    d(
+        "hosting_deployment_status",
+        EffectGroup::Other,
+        Reach::Nothing,
+    ),
+    d("hosting_list_sites", EffectGroup::Other, Reach::Nothing),
+    d("hosting_analytics", EffectGroup::Other, Reach::Nothing),
+    // The public deployment itself: it spends money and changes what the world
+    // sees at an address. `Publish` is the label an operator's card needs, and
+    // the fallback gave it `Other` — its name contains no `deploy`, `publish` or
+    // `post`, while the *status read* contains `deploy` and was labelled
+    // `Publish`. The two were inverted, which is worse than both being vague.
+    d(
+        "hosting_launch_site",
+        EffectGroup::Publish,
+        Reach::Consequence,
+    ),
+    // Attaching a domain is the other half of "what the world sees at an
+    // address", so it carries the same label as the launch it points at.
+    d(
+        "hosting_add_domain",
+        EffectGroup::Publish,
+        Reach::Consequence,
+    ),
+    // `hosting_set_env` is the one the issue left open, and the tool's own
+    // description settles it: "The site must be redeployed afterwards for a
+    // build-time variable to take effect." It changes what the NEXT deployment
+    // serves; it does not itself deploy. `Publish` would tell an operator a
+    // deployment is happening when none is, which is the same misdescription
+    // this change exists to remove — so `Other`, and `Consequence` because it
+    // still writes provider state and can store secrets write-only there.
+    d("hosting_set_env", EffectGroup::Other, Reach::Consequence),
+    // NOTE: a `hosting_rollback` tool is in flight (issue #913). It will need a
+    // row here too — it is an outward effect on a live site, so `Publish` /
+    // `Consequence` is the shape to start from, but it is left to that change to
+    // declare rather than guessed at now.
 ];
 
 /// A per-call declaration — the default. `const fn` so [`DECLARED`] stays a
@@ -778,6 +848,12 @@ pub fn consequence_of(tool: &str, args: &serde_json::Value) -> Consequence {
     // operator the same interruption as `rm -rf /`.
     if name == SHELL {
         return shell_consequence(args);
+    }
+    // Issue #877: the fourth. `git_operations` is how an agent orients in its own
+    // workspace, and classifying the NAME charged a `git status` the same
+    // interruption as a `git push` to a configured remote.
+    if name == GIT_OPERATIONS {
+        return git_operations_consequence(args);
     }
     match DECLARED.iter().find(|d| d.tool == name) {
         Some(found) => Consequence {
@@ -1183,6 +1259,102 @@ fn shell_consequence(args: &serde_json::Value) -> Consequence {
     gated
 }
 
+/// Classify a `git_operations` call from its `operation` argument (issue #877).
+///
+/// # ⚠️ The exposure this downgrade accepts
+///
+/// **Read this before widening [`GIT_READ_ONLY_OPERATIONS`].** `git_operations`
+/// runs against the agent's own workspace — `GitOperationsTool::new(security,
+/// workspace)` in [`crate::harness::toolbelt::code_tools`] — through the
+/// vendored `run_git_command_in`, which is a bare
+/// `Command::new("git").args(args).current_dir(cwd)` with **no
+/// `GIT_CONFIG_NOSYSTEM`, no `-c` overrides and no environment scrub**. Several
+/// git config keys name a command to run (`core.fsmonitor`, `core.pager`,
+/// `diff.external`, `core.sshCommand`), and the repository config lives in a
+/// directory `file_write` can write to — so a `.git/config` the agent authored
+/// can decide what executes when any of these operations runs.
+///
+/// That is the identical primitive `read_workspace_state` is gated for, and its
+/// note in [`DECLARED`] says to revert that stopgap "once a hardened `run_git`
+/// is vendored, **and not before**", tracking the work at
+/// `tinyhumansai/openhuman#5494`. Downgrading here accepts that exposure for
+/// these six operations ahead of that hardening; it is a deliberate scope
+/// decision recorded on issue #877, not an oversight. When #5494 lands, the two
+/// tools should be reconciled — either both downgraded or both gated — because
+/// today they run the same command against the same directory.
+///
+/// # Fail-closed, by the [`shell_consequence`] template
+///
+/// Five mechanisms, all of which must hold for a call to be downgraded:
+///
+/// 1. The gated verdict is built first and every early return uses it.
+/// 2. A missing or non-string `operation` gates — the tool's own schema
+///    requires it, so such a call could not have run.
+/// 3. Only **affirmative** membership of [`GIT_READ_ONLY_OPERATIONS`]
+///    downgrades. `push`, `pull`, `fetch`, `merge`, `rebase` and `clone` are in
+///    neither upstream list, so they are unclassified — and unclassified gates,
+///    by construction rather than by a rule someone has to remember.
+/// 4. Comparison is exact and case-sensitive, matching upstream's `matches!`.
+/// 5. There is no self-declared hint to honour here, so there is nothing that
+///    could lower the verdict — the escalate-only rule `shell` needs is
+///    satisfied vacuously.
+///
+/// # Why a local list rather than the vendored hook
+///
+/// `Tool::external_effect_with_args` is the only public route into upstream's
+/// judgement, and it is **tier-coupled**:
+///
+/// ```text
+/// self.requires_write_access(operation)
+///     && self.security.gate_decision(CommandClass::Write) == GateDecision::Prompt
+/// ```
+///
+/// Calling it here would import OpenHuman's desktop tier into a gate that
+/// answers the tier question one layer up — and under a policy whose
+/// `gate_decision` is not `Prompt` it returns `false` for a genuine **write**,
+/// i.e. it fails **open**. `requires_write_access` and `is_read_only` are
+/// private inherent methods, so there is no untainted route to borrow.
+///
+/// A second list that can drift is exactly what issue #877 warns against, so
+/// the vendored hook is used as a **test oracle** instead —
+/// `the_read_only_set_matches_the_vendored_classifier` drives it at
+/// `AutonomyLevel::Supervised`, where `gate_decision(Write)` *is* `Prompt` and
+/// the conjunction reduces to the operation test alone. A list that cannot
+/// drift silently is not the failure mode being warned about.
+fn git_operations_consequence(args: &serde_json::Value) -> Consequence {
+    let gated = Consequence {
+        group: EffectGroup::Other,
+        reach: Reach::Consequence,
+        standing: Standing::PerCall,
+    };
+    let Some(operation) = args.get(GIT_OPERATION_KEY).and_then(|v| v.as_str()) else {
+        // The tool's own schema marks `operation` required, so this is a call
+        // that could not have run. Gate it rather than guess.
+        return gated;
+    };
+    if GIT_READ_ONLY_OPERATIONS.contains(&operation) {
+        return Consequence {
+            group: EffectGroup::Other,
+            reach: Reach::Nothing,
+            standing: Standing::PerCall,
+        };
+    }
+    gated
+}
+
+/// The `git_operations` subcommands that only read the repository.
+///
+/// Mirrors the vendored `GitOperationsTool::is_read_only` set exactly. It is a
+/// copy, and the copy is load-bearing — see the "why a local list" note on
+/// [`git_operations_consequence`] for why the vendored hook cannot be called
+/// from here, and `the_read_only_set_matches_the_vendored_classifier` for the
+/// oracle that fails if upstream ever reclassifies one of these.
+///
+/// Everything absent from this list gates, including the operations upstream
+/// itself does not classify (`push`, `pull`, `fetch`, `merge`, `rebase`,
+/// `clone`).
+const GIT_READ_ONLY_OPERATIONS: &[&str] = &["status", "diff", "log", "show", "branch", "rev-parse"];
+
 /// Lexical backstop for [`shell_consequence`]: does any whitespace-separated
 /// token in `command` name a location outside the agent's working directory?
 ///
@@ -1544,6 +1716,130 @@ mod tests {
 
     fn c(tool: &str) -> Consequence {
         consequence_of(tool, &json!({}))
+    }
+
+    // ── hosting (issue #1079) ───────────────────────────────────────────────
+
+    /// The three tools openhuman's `hosting/README.md` labels "Read-only." ask
+    /// the provider what exists and what it did. Asking whether a build
+    /// finished must not cost an operator an approval.
+    #[test]
+    fn a_hosting_read_does_not_park() {
+        for tool in [
+            "hosting_deployment_status",
+            "hosting_list_sites",
+            "hosting_analytics",
+        ] {
+            let consequence = c(tool);
+            assert_eq!(
+                consequence.reach,
+                Reach::Nothing,
+                "`{tool}` only reads the provider"
+            );
+            assert!(
+                !consequence.parks_under_auto(),
+                "`{tool}` must not interrupt anybody"
+            );
+        }
+    }
+
+    /// The outward effects still park. Without this the downgrade above would
+    /// pass against a table that stopped gating the whole namespace.
+    #[test]
+    fn a_hosting_effect_still_parks() {
+        for tool in [
+            "hosting_launch_site",
+            "hosting_add_domain",
+            "hosting_set_env",
+        ] {
+            let consequence = c(tool);
+            assert_eq!(
+                consequence.reach,
+                Reach::Consequence,
+                "`{tool}` changes provider state"
+            );
+            assert!(
+                consequence.parks_under_auto(),
+                "`{tool}` must still park under auto"
+            );
+        }
+    }
+
+    /// **The label inversion this fixes.** Before declaring these, the fallback's
+    /// `undeclared_group` matched on substrings: `hosting_launch_site` — the
+    /// actual public deployment — contains no `deploy`/`publish`/`post` and fell
+    /// through to `Other`, while `hosting_deployment_status` — a read — contains
+    /// `deploy` and came back `Publish`. The operator's card described the
+    /// risky call as nothing in particular and the harmless one as a publish.
+    #[test]
+    fn the_deployment_is_labelled_publish_and_the_status_read_is_not() {
+        assert_eq!(c("hosting_launch_site").group, EffectGroup::Publish);
+        assert_eq!(c("hosting_add_domain").group, EffectGroup::Publish);
+        assert_ne!(
+            c("hosting_deployment_status").group,
+            EffectGroup::Publish,
+            "a status read must not announce itself as a deployment"
+        );
+    }
+
+    /// `hosting_set_env` is `Other`, not `Publish`, and the tool's own
+    /// description is why: "The site must be redeployed afterwards for a
+    /// build-time variable to take effect." It changes what the NEXT deployment
+    /// serves and does not itself deploy, so a `Publish` card would tell an
+    /// operator a deployment is happening when none is.
+    #[test]
+    fn setting_env_is_not_labelled_as_a_deployment() {
+        let consequence = c("hosting_set_env");
+        assert_eq!(consequence.group, EffectGroup::Other);
+        assert_eq!(consequence.reach, Reach::Consequence);
+    }
+
+    /// Every hosting tool answers from the table, not from `undeclared()`.
+    ///
+    /// This is the regression guard for the mechanism itself: the fallback's
+    /// `READ_ONLY_PREFIXES` are matched with `name.starts_with`, so a
+    /// `hosting_`-prefixed read can never match one and the fallback cannot
+    /// classify any of these correctly. If a row is dropped, the tool silently
+    /// returns to that fallback rather than erroring — so the coverage is
+    /// asserted directly.
+    #[test]
+    fn every_hosting_tool_is_declared() {
+        let declared: std::collections::BTreeSet<&str> = declared_tools().collect();
+        for tool in [
+            "hosting_deployment_status",
+            "hosting_list_sites",
+            "hosting_analytics",
+            "hosting_launch_site",
+            "hosting_add_domain",
+            "hosting_set_env",
+        ] {
+            assert!(
+                declared.contains(tool),
+                "`{tool}` fell back to `undeclared()`, where the `hosting_` prefix \
+                 defeats the read test — declare it in DECLARED"
+            );
+        }
+    }
+
+    /// The mechanism, pinned on a name that is *not* declared: a namespaced read
+    /// still cannot be seen by the prefix test.
+    ///
+    /// Kept as documentation of why declaring is the fix rather than teaching
+    /// the fallback to split on `_`. Widening that test would extend trust to
+    /// tools no belt registered and no reviewer saw, and would turn a
+    /// fail-closed miss into a fail-open one.
+    #[test]
+    fn the_fallback_cannot_see_a_read_verb_behind_a_namespace() {
+        assert_eq!(
+            c("hosting_list_something_undeclared").reach,
+            Reach::Consequence,
+            "an undeclared namespaced read gates — inconvenient, and the safe direction"
+        );
+        assert_eq!(
+            c("list_something_undeclared").reach,
+            Reach::Nothing,
+            "the same verb at the front is seen, which is what makes the namespace the problem"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -3036,6 +3332,163 @@ mod tests {
                 "`{command}` must still park under auto"
             );
         }
+    }
+
+    // ── git_operations, graded by its `operation` (issue #877) ─────────────
+
+    fn git(operation: &str) -> Consequence {
+        consequence_of(GIT_OPERATIONS, &json!({ GIT_OPERATION_KEY: operation }))
+    }
+
+    /// Orienting in your own workspace should not cost an operator anything.
+    #[test]
+    fn a_git_read_operation_does_not_park() {
+        for operation in GIT_READ_ONLY_OPERATIONS {
+            let c = git(operation);
+            assert_eq!(
+                c.reach,
+                Reach::Nothing,
+                "`git {operation}` only reads the repository"
+            );
+            assert!(
+                !c.parks_under_auto(),
+                "`git {operation}` must not interrupt anybody"
+            );
+        }
+    }
+
+    /// The writes upstream names still park. Without this the downgrade above
+    /// would pass against a build that stopped gating everything.
+    #[test]
+    fn a_git_write_operation_still_parks() {
+        for operation in ["commit", "add", "checkout", "stash", "reset", "revert"] {
+            let c = git(operation);
+            assert_eq!(c.reach, Reach::Consequence, "`git {operation}` acts");
+            assert!(
+                c.parks_under_auto(),
+                "`git {operation}` must still park under auto"
+            );
+        }
+    }
+
+    /// **The fail-closed requirement.** An operation this classifier does not
+    /// recognise must still ask.
+    ///
+    /// The first six are real git subcommands in **neither** upstream list —
+    /// `requires_write_access` does not name them and `is_read_only` does not
+    /// either — so they are genuinely unclassified rather than merely absent
+    /// from a list somebody forgot to extend. `push` is the one that matters
+    /// most: it reaches a configured remote, which is an address this layer
+    /// never sees. The last two are a typo and an invented name, which is what
+    /// a model produces on a bad day.
+    ///
+    /// This passing is the whole safety argument for the downgrade: membership
+    /// is affirmative, so the failure mode of an unknown operation is an extra
+    /// approval, never a silent act.
+    #[test]
+    fn an_unrecognised_git_operation_still_parks() {
+        for operation in [
+            "push",
+            "pull",
+            "fetch",
+            "merge",
+            "rebase",
+            "clone",
+            "stauts",
+            "frobnicate",
+        ] {
+            let c = git(operation);
+            assert_eq!(
+                c.reach,
+                Reach::Consequence,
+                "`git {operation}` is not provably a read, so it must ask"
+            );
+            assert!(
+                c.parks_under_auto(),
+                "`git {operation}` must park under auto"
+            );
+        }
+    }
+
+    /// An argument that cannot be read gates. The tool's schema marks
+    /// `operation` required, so each of these is a call that could not have run
+    /// — guessing at one would be inventing a verdict for a call that never
+    /// happened.
+    #[test]
+    fn a_git_call_with_no_readable_operation_parks() {
+        for args in [
+            json!({}),
+            json!({ GIT_OPERATION_KEY: null }),
+            json!({ GIT_OPERATION_KEY: 7 }),
+            json!({ GIT_OPERATION_KEY: ["status"] }),
+            json!({ "op": "status" }),
+        ] {
+            let c = consequence_of(GIT_OPERATIONS, &args);
+            assert_eq!(
+                c.reach,
+                Reach::Consequence,
+                "unreadable args must park: {args}"
+            );
+        }
+    }
+
+    /// Case matters, matching upstream's `matches!`. `STATUS` is not `status`,
+    /// and a classifier that normalised case here would be answering a question
+    /// upstream does not ask.
+    #[test]
+    fn git_operation_matching_is_case_sensitive() {
+        for operation in ["STATUS", "Status", "LOG"] {
+            assert_eq!(
+                git(operation).reach,
+                Reach::Consequence,
+                "`{operation}` is not the operation upstream classifies"
+            );
+        }
+    }
+
+    /// **The oracle.** [`GIT_READ_ONLY_OPERATIONS`] is a copy of a vendored
+    /// list, and a copy that can drift silently is exactly what issue #877
+    /// warns against. This drives the vendored judgement directly, so upstream
+    /// reclassifying any of these fails the build here rather than quietly
+    /// widening what runs unattended.
+    ///
+    /// It asserts the safety-relevant direction: **none of the operations this
+    /// crate downgrades is a write upstream**. The converse is not assertable —
+    /// `is_read_only` is a private inherent method — but it is also not the
+    /// dangerous direction: an operation upstream calls read-only that we
+    /// nonetheless gate costs an approval, while the reverse would run a write
+    /// unattended.
+    ///
+    /// `SecurityPolicy::default()` is `AutonomyLevel::Supervised`, where
+    /// `gate_decision(Write)` is `Prompt` — so the tier half of
+    /// `external_effect_with_args`'s conjunction is `true` and the expression
+    /// reduces to `requires_write_access(operation)` alone. That is the only
+    /// configuration in which this hook answers the question this crate is
+    /// asking, which is why the gate itself must not call it (see
+    /// [`git_operations_consequence`]).
+    #[test]
+    #[cfg(feature = "openhuman")]
+    fn the_read_only_set_matches_the_vendored_classifier() {
+        use openhuman_core::openhuman::security::SecurityPolicy;
+        use openhuman_core::openhuman::tools::{GitOperationsTool, Tool};
+
+        let policy = std::sync::Arc::new(SecurityPolicy::default());
+        let tool = GitOperationsTool::new(policy, std::path::PathBuf::from("."));
+
+        for operation in GIT_READ_ONLY_OPERATIONS {
+            assert!(
+                !tool.external_effect_with_args(&json!({ GIT_OPERATION_KEY: operation })),
+                "upstream now treats `git {operation}` as a write — this crate is downgrading \
+                 something that acts. Remove it from GIT_READ_ONLY_OPERATIONS."
+            );
+        }
+
+        // And the pairing that proves the oracle is live rather than vacuous: a
+        // known write must come back `true` through the same call.
+        assert!(
+            tool.external_effect_with_args(&json!({ GIT_OPERATION_KEY: "commit" })),
+            "the oracle answered `false` for a commit, so it is not testing anything"
+        );
     }
 
     /// The classifier takes the maximum across segments, so a read cannot carry
