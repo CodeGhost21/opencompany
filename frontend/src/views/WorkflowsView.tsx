@@ -2797,6 +2797,13 @@ export function WorkflowsView({
                 colorMode={resolvedTheme === "dark" ? "dark" : "light"}
                 fitView
                 fitViewOptions={{ padding: 0.2 }}
+                // Issue #1261: the library default (0.5) is above the scale
+                // most shipped templates need to fit — an 8-10 node single-row
+                // pipeline needs roughly 0.3. Left at the default, `fitView`
+                // clamps to 0.5 and permanently crops the first/last node,
+                // and the canvas's own Zoom Out control is disabled from
+                // load because the viewport is already pinned at the floor.
+                minZoom={0.1}
                 nodesDraggable={false}
                 nodesConnectable={false}
                 elementsSelectable
