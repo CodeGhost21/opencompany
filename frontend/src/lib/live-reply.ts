@@ -316,13 +316,14 @@ export function mergeOpenTurns(
     const current = out[threadId] ?? [];
     const merged = [...current];
     const indexOfTurn = new Map<string, number>(
-      merged.map((t, i) => [t.turnId ?? "", i]),
+      merged.flatMap((t, i) => (t.turnId ? [[t.turnId, i] as [string, number]] : [])),
     );
     for (const turn of turns) {
-      const key = turn.turnId ?? "";
-      const at = indexOfTurn.get(key);
+      // A turn with no row cannot be matched against anything, so it is always
+      // its own entry: two id-less turns are two turns, not one.
+      const at = turn.turnId ? indexOfTurn.get(turn.turnId) : undefined;
       if (at === undefined) {
-        indexOfTurn.set(key, merged.length);
+        if (turn.turnId) indexOfTurn.set(turn.turnId, merged.length);
         merged.push(turn);
       } else {
         merged[at] = { ...merged[at], ...turn };
