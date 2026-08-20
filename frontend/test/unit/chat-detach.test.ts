@@ -450,6 +450,19 @@ describe("merging armed turn lists", () => {
     expect(merged.main).toEqual([{ turnId: "turn-1", queued: false }]);
   });
 
+  it("keeps id-less turns as separate entries", () => {
+    const merged = mergeOpenTurns(
+      { main: [{ queued: true }] },
+      { main: [{ queued: false }, { queued: true }] },
+    );
+
+    expect(merged.main).toEqual([
+      { queued: true },
+      { queued: false },
+      { queued: true },
+    ]);
+  });
+
   it("never evicts an existing row a re-arm does not repeat", () => {
     // The re-arm came back listing only the newer turn; the running row the
     // POST leg registered must survive the merge, not be replaced by it.
