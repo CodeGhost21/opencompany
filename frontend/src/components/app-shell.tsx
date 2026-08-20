@@ -53,6 +53,7 @@ import { type AgentReplyEvent, type CompanyStreamEvent, useEvents } from "@/hook
 import type { WorkspaceEvent } from "@/views/WorkspaceView";
 import { useHashView } from "@/hooks/use-hash-view";
 import { BOARD_LEDGER } from "@/lib/board-columns";
+import { isFullBleed } from "@/lib/shell-frame";
 import { taskIdFromSegment } from "@/lib/task-route";
 import { toast } from "sonner";
 
@@ -170,25 +171,6 @@ const NAV: NavItem[] = [
   // { view: "pages", label: "Pages", icon: AppWindow },
   { view: "settings", label: "Settings", icon: Settings2 },
 ];
-
-/**
- * The views that render edge-to-edge instead of on the inset card (issue
- * #1178).
- *
- * Both are canvases sized against the box they are given rather than pages laid
- * out inside it, so a 12px frame is not a margin to them — it is a crop.
- *
- *   - `overview` is the force-directed knowledge graph, laid out against
- *     `h-svh` and clipped by its own `overflow-hidden`. Framed, it would
- *     measure the window and be drawn into a box 24px smaller in both axes.
- *   - `workflows` is the React Flow canvas, whose viewport transform and
- *     minimap viewbox are both computed from the container's measured rect.
- *     That is precisely the surface #1259 and #1261 just finished un-cropping.
- *
- * Everything else is a document — headers, cards, tables, prose — and reads
- * better on a sheet with an edge. See `ContentSurface`.
- */
-const FULL_BLEED_VIEWS: ReadonlySet<View> = new Set<View>(["overview", "workflows"]);
 
 /**
  * Routable without a nav entry — reachable by URL, absent from the sidebar.
@@ -1479,7 +1461,7 @@ export function AppShell({
             #1178). A `div`, not `main` — `SidebarInset` above is already the
             console's one `<main>` landmark, and a second nested one gave every
             page two identical "skip to content" destinations (issue #1221). */}
-        <ContentSurface unframed={FULL_BLEED_VIEWS.has(view)}>
+        <ContentSurface unframed={isFullBleed(view, sub)}>
           {view === "overview" && (
             <Overview client={client} company={company} companyName={feed.status.name} />
           )}
