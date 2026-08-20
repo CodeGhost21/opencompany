@@ -825,13 +825,31 @@ export function cancelWorkflowRun(
 /**
  * One page of {@link listWorkflowRuns} (issue #1012).
  *
- * `hasMore` says whether an older page exists behind `beforeSeq` — the run
+ * `hasMore` says whether an older page exists behind `nextBeforeSeq` — the run
  * history drawer's "Load older" affordance is gated on it, so a truncated
  * history never silently reads as the whole thing.
  */
 export interface WorkflowRunsPage {
   runs: WorkflowRunOutcome[];
   hasMore: boolean;
+  /**
+   * The cursor to pass back as `beforeSeq` for the page behind this one — the
+   * page's **lowest** `seq`, which is not in general the last row in display
+   * order.
+   *
+   * Server-issued rather than derived here, and that is the point. The host
+   * cuts a page by `seq` (monotonic, and the key its journal read is bounded
+   * by) and then sorts it for display by `(atMillis, seq)`; `atMillis` is
+   * wall-clock, so a clock regression makes the two orders disagree and
+   * `runs.at(-1)!.seq` is no longer the boundary. Paging off the last
+   * displayed row then skips runs permanently — the very bug #1012 is about.
+   *
+   * **Absent on a host predating this field.** That must fall back to the old
+   * `runs.at(-1)?.seq` derivation, never to "there are no more pages": the
+   * latter would ship this fix as a fresh silent truncation. `hasMore` remains
+   * the only thing that says whether to keep going.
+   */
+  nextBeforeSeq?: number;
 }
 
 /**
@@ -841,10 +859,10 @@ export interface WorkflowRunsPage {
  *
  * `workflow` narrows to one graph's runs; `limit` caps the page (the host
  * defaults to a short recent list and clamps a large ask). `beforeSeq` pages
- * further back: pass the `seq` of the oldest run already held to fetch the
- * page before it (issue #1012) — `hasMore` on the returned page says whether
- * one exists. A host predating this route answers 404 — callers should treat
- * that as "no history yet" rather than an error, since the console still works
+ * further back: pass the previous page's {@link WorkflowRunsPage.nextBeforeSeq}
+ * to fetch the page before it (issue #1012) — `hasMore` says whether one
+ * exists. A host predating this route answers 404 — callers should treat that
+ * as "no history yet" rather than an error, since the console still works
  * without it.
  */
 export function listWorkflowRuns(
@@ -855,7 +873,10 @@ export function listWorkflowRuns(
   const params = new URLSearchParams();
   if (options?.workflow) params.set("workflow", options.workflow);
   if (options?.limit) params.set("limit", String(options.limit));
-  if (options?.beforeSeq) params.set("before_seq", String(options.beforeSeq));
+  // `!== undefined`, not truthiness: `0` is a legitimate cursor (the journal's
+  // first row) and a truthy check drops it, silently asking for the newest
+  // page again and looping the caller on the same rows.
+  if (options?.beforeSeq !== undefined) params.set("before_seq", String(options.beforeSeq));
   const query = params.toString();
   return client.get<WorkflowRunsPage>(
     `${client.scopeFor(company)}/workflows/runs${query ? `?${query}` : ""}`,
