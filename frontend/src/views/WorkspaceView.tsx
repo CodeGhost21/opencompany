@@ -88,7 +88,9 @@ import { rosterDisplayName, rosterNameMap, type RosterNames } from "@/lib/roster
 import { fromDto } from "@/lib/team";
 import { cn } from "@/lib/utils";
 import {
+  ancestorFolderIds,
   applyRepair,
+  breadcrumbOf,
   childrenOf,
   clearLegacyLocal,
   ensureMdExt,
@@ -97,7 +99,6 @@ import {
   hasLegacyLocal,
   isDerivedNode,
   nodeById,
-  pathOf,
   readLegacyLocalNodes,
   subtreeCounts,
   subtreeIds,
@@ -396,6 +397,16 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
   const [searchError, setSearchError] = useState<string | null>(null);
 
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
+  /**
+   * The node the explorer should bring into view next (issue #1371).
+   *
+   * Separate from `openId` because revealing is a one-shot *event*, not a piece
+   * of state: scrolling on every render that happens to have a note open would
+   * yank the tree back under an operator who had deliberately scrolled away
+   * from it to look at something else.
+   */
+  const [revealId, setRevealId] = useState<string | null>(null);
+  const onRevealed = useCallback(() => setRevealId(null), []);
   const [prompt, setPrompt] = useState<PromptState | null>(null);
   const [moving, setMoving] = useState<FsNode | null>(null);
   const [showExplorer, setShowExplorer] = useState(true);
@@ -832,6 +843,25 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [initialNodeId]);
 
+  /* ---- reveal the open note in the tree (#1371) ---- */
+
+  // Expanding runs off `nodes` as well as `openId`, and that is the whole
+  // point: on the deep-link route the note is opened before the tree has
+  // loaded, so the first pass has no ancestors to find and the second — once
+  // the nodes arrive — is the one that does the work. Expanding is idempotent,
+  // so re-running it costs nothing.
+  useEffect(() => {
+    if (!openId) return;
+    const ancestors = ancestorFolderIds(nodes, openId);
+    if (ancestors.length > 0) {
+      setExpanded((prev) => {
+        if (ancestors.every((id) => prev.has(id))) return prev;
+        return new Set([...prev, ...ancestors]);
+      });
+    }
+    setRevealId(openId);
+  }, [openId, nodes]);
+
   /* ---- migration off the retired localStorage scratchpad ---- */
 
   useEffect(() => {
@@ -903,11 +933,11 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
     setSaveState("idle");
     setOpenFile(null);
     setFileError(null);
-    setExpanded((prev) => {
-      const next = new Set(prev);
-      for (const a of pathOf(nodes, id)) if (a.kind === "folder") next.add(a.id);
-      return next;
-    });
+    // The ancestors are expanded by the reveal effect below rather than here.
+    // Doing it here read `nodes` out of this closure, and on the deep-link route
+    // (`#/workspace/<id>`) that closure runs before the tree has arrived — so
+    // `pathOf` walked an empty array, expanded nothing, and the note the
+    // operator had just been sent to was nowhere in the explorer (issue #1371).
     // A payload has no text body to fetch, and the host refuses the text read
     // for one — asking anyway would put an error in `fileError` for a file that
     // is perfectly fine (issue #553). `BinaryNodeView` fetches the bytes it
@@ -933,15 +963,24 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
   async function openHit(hit: SearchHit) {
     if (hit.kind === "folder") {
       setSearchInput("");
-      setExpanded((prev) => {
-        const next = new Set(prev);
-        for (const a of pathOf(nodes, hit.id)) if (a.kind === "folder") next.add(a.id);
-        next.add(hit.id);
-        return next;
-      });
+      setExpanded((prev) => new Set([...prev, ...ancestorFolderIds(nodes, hit.id), hit.id]));
+      setRevealId(hit.id);
       return;
     }
     await open(hit.id);
+  }
+
+  /**
+   * Show a folder in the tree, from a breadcrumb crumb (issue #1371).
+   *
+   * Expands it as well as its ancestors — clicking the folder you are inside of
+   * means "show me what else is in here", and revealing it collapsed would
+   * answer a question nobody asked.
+   */
+  function revealFolder(id: string) {
+    setSearchInput("");
+    setExpanded((prev) => new Set([...prev, ...ancestorFolderIds(nodes, id), id]));
+    setRevealId(id);
   }
 
   function toggle(id: string) {
@@ -1350,6 +1389,8 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
               depth={0}
               expanded={expanded}
               openId={openId}
+              revealId={revealId}
+              onRevealed={onRevealed}
               rosterNames={rosterNames}
               onToggle={toggle}
               onOpen={(id) => void open(id)}
@@ -1423,7 +1464,16 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
               <IconBtn label="Toggle explorer" onClick={() => setShowExplorer((s) => !s)}>
                 <PanelLeft className="size-4" />
               </IconBtn>
-              <span className="truncate text-sm font-medium">{titleOf(openNode)}</span>
+              <span className="flex min-w-0 items-baseline gap-1.5">
+                {/* Where this note lives (issue #1371). The header used to name
+                    the file and nothing else, which in a tree five deep with
+                    three notes called README answered neither "which one is
+                    this?" nor "what sits beside it?". Search already knew — it
+                    returns a `path` on every hit — and threw the answer away at
+                    exactly the moment it became useful. */}
+                <Breadcrumb nodes={nodes} nodeId={openNode.id} onOpenFolder={revealFolder} />
+                <span className="truncate text-sm font-medium">{titleOf(openNode)}</span>
+              </span>
               <Authorship
                 createdBy={openFile?.createdBy ?? openNode.createdBy}
                 updatedBy={openFile?.updatedBy ?? openNode.updatedBy}
@@ -1580,6 +1630,57 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
   );
 }
 
+/**
+ * Where the open note lives, above its name (issue #1371).
+ *
+ * Rendered as separate clickable crumbs rather than one path string, because a
+ * path is only half an answer: the operator who has just discovered that this
+ * note is the one under `Rust/API design` almost always wants to see what else
+ * is in there, and a string cannot be clicked. Each crumb expands that folder
+ * and scrolls the tree to it.
+ *
+ * Nothing renders at the workspace root — a note with no folders above it has no
+ * location worth stating, and an empty crumb rail would be a line of chrome that
+ * says "top level" in the space where a real path would go.
+ */
+function Breadcrumb({
+  nodes,
+  nodeId,
+  onOpenFolder,
+}: {
+  nodes: FsNode[];
+  nodeId: string;
+  onOpenFolder: (id: string) => void;
+}) {
+  const crumbs = breadcrumbOf(nodes, nodeId);
+  if (crumbs.length === 0) return null;
+  return (
+    <span
+      className="hidden min-w-0 shrink items-baseline gap-1 text-xs text-muted-foreground sm:flex"
+      data-testid="workspace-breadcrumb"
+    >
+      {crumbs.map((crumb, i) =>
+        crumb === null ? (
+          <span key={`gap-${i}`} aria-hidden="true">
+            …/
+          </span>
+        ) : (
+          <span key={crumb.id} className="flex min-w-0 items-baseline">
+            <button
+              type="button"
+              onClick={() => onOpenFolder(crumb.id)}
+              className="truncate rounded-sm hover:text-foreground hover:underline"
+            >
+              {crumb.name}
+            </button>
+            <span aria-hidden="true">/</span>
+          </span>
+        ),
+      )}
+    </span>
+  );
+}
+
 /** The editor's save indicator: quiet when idle, explicit when it matters. */
 function SaveStatus({ state }: { state: SaveState }) {
   if (state === "idle") return null;
@@ -1607,6 +1708,10 @@ interface TreeProps {
   depth: number;
   expanded: Set<string>;
   openId: string | null;
+  /** The node to scroll into view once its row exists (issue #1371). */
+  revealId: string | null;
+  /** Called by the row that scrolled itself, so the reveal fires once. */
+  onRevealed: () => void;
   /** id -> display name for roster ids (issue #973). See {@link isAgentsFolder}. */
   rosterNames: RosterNames;
   onToggle: (id: string) => void;
@@ -1707,7 +1812,19 @@ function sameOrigin(a: WorkspaceOrigin, b: WorkspaceOrigin): boolean {
 }
 
 function TreeRow({ node, ...props }: TreeProps & { node: FsNode }) {
-  const { depth, expanded, openId, onToggle, onOpen, nodes, rosterNames } = props;
+  const { depth, expanded, openId, onToggle, onOpen, nodes, rosterNames, revealId, onRevealed } =
+    props;
+  const rowRef = useRef<HTMLDivElement | null>(null);
+  // Scrolling belongs to the row rather than to the pane because only the row
+  // knows when it exists: the ancestors expand first, and the row this reveal
+  // is about is mounted by that render, not the one that asked for it
+  // (issue #1371). `block: "nearest"` so a row already on screen — the ordinary
+  // case, a click in the tree — does not move at all.
+  useEffect(() => {
+    if (revealId !== node.id) return;
+    rowRef.current?.scrollIntoView({ block: "nearest" });
+    onRevealed();
+  }, [revealId, node.id, onRevealed]);
   const isFolder = node.kind === "folder";
   const isOpen = expanded.has(node.id);
   const active = node.id === openId;
@@ -1722,6 +1839,7 @@ function TreeRow({ node, ...props }: TreeProps & { node: FsNode }) {
   return (
     <>
       <div
+        ref={rowRef}
         className={cn(
           "group flex items-center gap-1 rounded-md px-1.5 py-1 text-sm",
           active ? "bg-accent font-medium" : "hover:bg-accent/50",
