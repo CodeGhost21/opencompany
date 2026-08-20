@@ -208,10 +208,24 @@ jobs:
           # alone (opencompany-microservice#38).
           #
           # Updating a ConfigMap does not touch the Deployment, so nothing rolls.
-          if kubectl -n "${K8S_NAMESPACE}" get deploy "${MANAGER_DEPLOY}" \
-               -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="OCM_TENANT_IMAGE_FILE")].value}' \
-             | grep -q .; then
+          # Resolved once and reused by the closing report, so the two can never
+          # disagree about which source is actually governing provisioning.
+          MOUNT_PATH=$(kubectl -n "${K8S_NAMESPACE}" get deploy "${MANAGER_DEPLOY}" \
+            -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="OCM_TENANT_IMAGE_FILE")].value}')
+          if [ -n "${MOUNT_PATH}" ]; then
             echo "Publishing OCM_TENANT_IMAGE=${IMAGE} via ConfigMap (no manager restart)"
+
+            # Captured BEFORE the write so a failed verification can put the
+            # cluster back as it was. `HAD_CM` distinguishes "no ConfigMap yet"
+            # from "ConfigMap with an empty value", which need different undos.
+            HAD_CM=no
+            PRIOR_IMAGE=
+            if kubectl -n "${K8S_NAMESPACE}" get configmap "${TENANT_IMAGE_CM}" >/dev/null 2>&1; then
+              HAD_CM=yes
+              PRIOR_IMAGE=$(kubectl -n "${K8S_NAMESPACE}" get configmap "${TENANT_IMAGE_CM}" \
+                -o jsonpath='{.data.image}' 2>/dev/null || true)
+            fi
+
             kubectl -n "${K8S_NAMESPACE}" create configmap "${TENANT_IMAGE_CM}" \
               --from-literal=image="${IMAGE}" --dry-run=client -o yaml \
             | kubectl apply -f -
@@ -220,8 +234,6 @@ jobs:
             # minute. Confirm the manager actually SEES the new value rather than
             # assuming the write reached it — a silent miss here would provision
             # new tenants on the previous image with nothing to indicate it.
-            MOUNT_PATH=$(kubectl -n "${K8S_NAMESPACE}" get deploy "${MANAGER_DEPLOY}" \
-              -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="OCM_TENANT_IMAGE_FILE")].value}')
             seen=no
             for _ in $(seq 1 40); do
               current=$(kubectl -n "${K8S_NAMESPACE}" exec "deploy/${MANAGER_DEPLOY}" \
@@ -232,6 +244,21 @@ jobs:
             if [ "${seen}" != yes ]; then
               echo "ERROR: manager still does not see ${IMAGE} at ${MOUNT_PATH} after 200s" >&2
               echo "       it currently reads: ${current:-<empty>}" >&2
+              # Put the ConfigMap back. Leaving the new value in place would mean
+              # a FAILED deploy still eventually governs provisioning, once the
+              # kubelet gets round to refreshing the mount -- new tenants coming
+              # up on an image this deploy explicitly could not verify. That is
+              # the silent miss the verification exists to prevent, arriving late
+              # instead of never.
+              if [ "${HAD_CM}" = yes ]; then
+                echo "       restoring previous value: ${PRIOR_IMAGE:-<empty>}" >&2
+                kubectl -n "${K8S_NAMESPACE}" create configmap "${TENANT_IMAGE_CM}" \
+                  --from-literal=image="${PRIOR_IMAGE}" --dry-run=client -o yaml \
+                | kubectl apply -f - >&2
+              else
+                echo "       removing the ConfigMap this deploy created" >&2
+                kubectl -n "${K8S_NAMESPACE}" delete configmap "${TENANT_IMAGE_CM}" --ignore-not-found >&2
+              fi
               exit 1
             fi
             echo "Manager sees ${IMAGE}"
@@ -370,11 +397,15 @@ jobs:
             exit 1
           }
 
-          # Report the value that actually governs provisioning: the ConfigMap
-          # when the manager reads one, the env var otherwise.
-          if kubectl -n "${K8S_NAMESPACE}" get configmap "${TENANT_IMAGE_CM}" >/dev/null 2>&1; then
-            echo "fleet tenant image (ConfigMap): $(kubectl -n "${K8S_NAMESPACE}" get configmap "${TENANT_IMAGE_CM}" -o jsonpath='{.data.image}')"
+          # Exactly one source, chosen by the same capability check that decided
+          # where the value was written. Keying this on ConfigMap EXISTENCE
+          # instead would print a stale ConfigMap left by an earlier deploy
+          # alongside the env var, with nothing to say which one a tenant would
+          # actually get.
+          if [ -n "${MOUNT_PATH}" ]; then
+            echo "fleet tenant image (ConfigMap, authoritative): $(kubectl -n "${K8S_NAMESPACE}" get configmap "${TENANT_IMAGE_CM}" -o jsonpath='{.data.image}' 2>/dev/null)"
+          else
+            kubectl -n "${K8S_NAMESPACE}" get deploy "${MANAGER_DEPLOY}" \
+              -o jsonpath='{range .spec.template.spec.containers[0].env[?(@.name=="OCM_TENANT_IMAGE")]}fleet tenant image (env, authoritative)={.value}{"\n"}{end}'
           fi
-          kubectl -n "${K8S_NAMESPACE}" get deploy "${MANAGER_DEPLOY}" \
-            -o jsonpath='{range .spec.template.spec.containers[0].env[?(@.name=="OCM_TENANT_IMAGE")]}OCM_TENANT_IMAGE (fallback)={.value}{"\n"}{end}'
           EOF
