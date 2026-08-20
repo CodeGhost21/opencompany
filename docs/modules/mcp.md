@@ -182,8 +182,10 @@ always on.
 
 * The **official registry** is always queried. Most of its entries declare no
   remote endpoint, so the hosted-transport filter discards them — correctly:
-  this deployment cannot launch a local subprocess. A live search for `slack`
-  fetched 17 entries and kept 0.
+  this deployment cannot launch a local subprocess. The survival rate is very
+  low: one live `slack` search fetched 17 entries and kept none; a second, paged
+  differently, kept one across three pages. Not literally empty, but far too
+  thin to look like a working directory.
 * **Smithery** carries the hosted servers (all 20 of its `slack` results report
   `isDeployed: true`) and upstream's `enabled_registries` adds it **only when a
   key resolves**.
@@ -215,6 +217,13 @@ intuitive guess and would leave an operator afraid to rotate.
 
 Resolved per call rather than held on `McpRuntime`, so an admin's rotation lands
 on the next search with no restart.
+
+**A bad key degrades, it does not break.** Upstream's `registry_search_with`
+treats a single registry's failure as a partial outage (`!any_ok` → empty
+catalogue, never `Err`), so a wrong or expired Smithery key still returns the
+official registry's rows rather than failing the search. Verified live against a
+local host with a deliberately invalid key: `200`, official rows still present,
+Smithery contributing nothing.
 
 ### Delete dispatches
 
