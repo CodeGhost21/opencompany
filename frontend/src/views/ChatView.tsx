@@ -13,7 +13,7 @@ import { toast } from "sonner";
 
 import { listPeople, me as fetchMe, type Person } from "@/api/auth";
 import type { OpenCompanyClient } from "@/api/client";
-import { deleteTask, type MessageIntent, type TaskDeliverable } from "@/api/tasks";
+import { deleteTask, type MessageIntent } from "@/api/tasks";
 import { setInboxEnabled } from "@/api/inbox";
 import {
   ApiError,
