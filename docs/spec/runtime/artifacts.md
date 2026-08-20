@@ -179,7 +179,7 @@ What was wrong was who heard about it. The refusal was told to the model and to
 `tracing::warn!`, and to nobody else. The model wrote an apology, the apology
 became the node's `text` output, the `=items` binding delivered it downstream as
 though it were the deliverable, and the run settled clean — the same shape issue
-#881 fixed for the *gated* case, which the `Unclaimed` case never got.
+`#881` fixed for the *gated* case, which the `Unclaimed` case never got.
 
 The refusal is now a **typed fact recorded where it is raised**: a second bucket
 on `PendingPublishQueue` (`push_refusal` / `drain_refusals`), drained after every
