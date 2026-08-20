@@ -1996,6 +1996,26 @@ impl TokenUsage {
 }
 
 /// Everything the brain needs to run one cycle.
+///
+/// **A cycle carries no working memory.** The struct once also carried
+/// `compressed_history` (32 recent [`CompressedTrace`]s) and `context_index`
+/// (every [`ChunkMeta`] in the company, unbounded), loaded from the
+/// [`MemoryStore`](crate::ports::MemoryStore) and
+/// [`ContextStore`](crate::ports::ContextStore) on every cycle — and read by no
+/// [`Brain`](crate::ports::Brain) implementation. Two facts made them dead
+/// rather than merely unused: no summariser exists anywhere in the crate, so a
+/// trace's `summary` is a constant string like `harness cycle handled 3
+/// event(s)`, and no brain ever consulted either field. A `roster` field was
+/// dead on the same terms; every brain re-derives the roster from the company
+/// record. Issue #1175 removed all three, so the cycle stops paying an
+/// unbounded full scan per turn for a `Vec` it drops.
+///
+/// The one live recall path is elsewhere and is untouched by this: before each
+/// turn `HarnessPool::run` retrieves the top-5 prior task outcomes from the
+/// `ContextStore` and injects them as text (`src/harness/memory_loop.rs`, under
+/// the `openhuman` feature). Traces are still *written* every cycle
+/// (they travel with the export bundle); nothing reads them back. Do not
+/// re-add a field here until something consumes it.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CycleRequest {
     /// Unique id for this cycle.
@@ -2011,12 +2031,6 @@ pub struct CycleRequest {
     /// idempotent `POST /events` on the durable log seq.
     #[serde(default)]
     pub event_seqs: Vec<EventSeq>,
-    /// Compressed traces of prior cycles.
-    pub compressed_history: Vec<CompressedTrace>,
-    /// The company roster (agent ids).
-    pub roster: Vec<String>,
-    /// The context index available to the brain.
-    pub context_index: Vec<ChunkMeta>,
 }
 
 /// The brain's output from one cycle.
@@ -2931,17 +2945,26 @@ impl OverlayBlob {
 }
 
 /// Ids [`CompanyRecord::mint_agent_id`] will never hand to a teammate, however
-/// free the roster leaves them: the always-present operator channel and the two
-/// workspace system roots.
+/// free the roster leaves them: the always-present operator channel, the two
+/// workspace system roots, and the author the runtime speaks under.
 ///
 /// Held as references to the real constants rather than re-typed literals, so a
-/// rename of any of the three moves this list with it instead of quietly
+/// rename of any of the four moves this list with it instead of quietly
 /// unreserving a name. Compared case-insensitively, which is why `Agents` and
 /// `Desks` cover a minted (always-lowercase) `agents` / `desks`.
-pub const RESERVED_AGENT_IDS: [&str; 3] = [
+///
+/// [`SYSTEM_AUTHOR`](crate::ports::SYSTEM_AUTHOR) earns its place for the same
+/// reason `OPERATOR_CHANNEL` does, and issue #966 is why it was noticed: it
+/// reaches the console's centred system pill **by value**, so a teammate minted
+/// onto it would render as the host. `"system"` is an ordinary legal slug —
+/// `agent_slug("System")` produces it — which is what separates it from
+/// [`CONFINED_AGENT_ID`](crate::ports::CONFINED_AGENT_ID), unmintable by
+/// construction because slugs never emit a hyphen.
+pub const RESERVED_AGENT_IDS: [&str; 4] = [
     crate::runtime::OPERATOR_CHANNEL,
     crate::company::workspace_scaffold::AGENTS_ROOT,
     crate::company::workspace_scaffold::DESKS_ROOT,
+    crate::ports::SYSTEM_AUTHOR,
 ];
 
 /// A durable company record: charter/roster (manifest) plus ledger and
@@ -5036,7 +5059,38 @@ mod test {
         assert_eq!(record.mint_agent_id("Operator"), "operator_2");
         assert_eq!(record.mint_agent_id("Agents"), "agents_2");
         assert_eq!(record.mint_agent_id("desks"), "desks_2");
-        assert_eq!(RESERVED_AGENT_IDS, ["operator", "Agents", "Desks"]);
+        assert_eq!(record.mint_agent_id("System"), "system_2");
+        assert_eq!(
+            RESERVED_AGENT_IDS,
+            ["operator", "Agents", "Desks", "system"]
+        );
+    }
+
+    /// Issue #966: the host's own author is not a name a teammate can be given.
+    ///
+    /// `SYSTEM_AUTHOR` reaches the console's centred system pill by value —
+    /// `MessageView` projects an `AgentReply`'s `agent_id` straight into
+    /// `author`, and the console keys on the string. A teammate holding that id
+    /// would therefore render *as the host*, which is a worse confusion than the
+    /// one this issue set out to fix, and the value it replaces (`"operator"`)
+    /// was already reserved.
+    ///
+    /// Its sibling `CONFINED_AGENT_ID` needs no entry here: `agent_slug` emits
+    /// only lowercase alphanumerics and underscores, so `"workflow-copilot"` is
+    /// unmintable by construction. `"system"` is an ordinary legal slug.
+    #[test]
+    fn mint_agent_id_never_returns_the_host_author() {
+        let record = desk_record("[company]\nname = \"Acme\"\n", Vec::new());
+        assert_eq!(
+            agent_slug("System"),
+            crate::ports::SYSTEM_AUTHOR,
+            "the guard is needed precisely because this is a legal slug"
+        );
+        assert_ne!(
+            record.mint_agent_id("System"),
+            crate::ports::SYSTEM_AUTHOR,
+            "a teammate must never be minted onto the id the runtime speaks under"
+        );
     }
 
     /// Issue #1162: the resolve every surface that takes a teammate key runs.
