@@ -240,6 +240,17 @@ describe("planLabels vs node icons (issue #1258)", () => {
     expect(planLabels([named], { x: 0, y: 0, w: W * 10 }, W, [above]).size).toBe(0);
   });
 
+  it("stays pan-invariant, the property that lets the caller cache this", () => {
+    // the module only re-runs the pass when the ZOOM changes, on the grounds
+    // that a pan moves every box by one shared vector. Icons have to move with
+    // them, or a graph you dragged would silently label itself differently.
+    const tool = icon({ id: "tool", x: 0, y: 20, r: 7 });
+    const panned = planLabels([named], { x: -400, y: 250, w: W }, W, [tool]);
+    // pinned so the comparison cannot pass by both sides dropping everything
+    expect(panned.get("named")).toBe(-20);
+    expect(panned).toEqual(planLabels([named], { x: 0, y: 0, w: W }, W, [tool]));
+  });
+
   it("ignores an icon the caller left out, so hidden nodes never block", () => {
     // the caller only nominates circles it actually draws; a carousel node
     // faded to nothing must not take a name off a node you can see
