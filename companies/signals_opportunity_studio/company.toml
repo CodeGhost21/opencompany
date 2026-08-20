@@ -61,7 +61,7 @@ skills = [
 
 # The opportunity-review desk validates the weekly signal synthesis before it reaches the operator.
 [[group_chat]]
-id = "opportunity-review"
+id = "opportunity_review"
 name = "Opportunity review desk"
 description = "Coordinate signal evidence, opportunity ranking, and the weekly brief."
 members = ["signal_scout", "opportunity_analyst", "research_agent"]
