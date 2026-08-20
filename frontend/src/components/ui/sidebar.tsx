@@ -140,7 +140,15 @@ function SidebarProvider({
           } as React.CSSProperties
         }
         className={cn(
-          "group/sidebar-wrapper flex h-svh min-h-svh w-full has-data-[variant=inset]:bg-sidebar",
+          // `bg-chrome` (issue #1178): this element is the chrome layer, and
+          // the ONE place it is painted. Both the sidebar column
+          // (`sidebar-inner`) and the content column (`SidebarInset`) are
+          // transparent, so they are this fill showing through — which is what
+          // makes them read as one continuous surface rather than two tinted
+          // panes meeting at a seam. It lives here rather than on the caller so
+          // the primitive is self-sufficient: a second provider anywhere would
+          // otherwise render an unpainted shell with no error.
+          "group/sidebar-wrapper flex h-svh min-h-svh w-full bg-chrome has-data-[variant=inset]:bg-sidebar",
           className
         )}
         {...props}
@@ -672,7 +680,12 @@ function SidebarMenuDot({
       aria-label={label}
       title={label}
       className={cn(
-        "pointer-events-none absolute top-1.5 right-1.5 hidden size-2 rounded-full bg-[var(--status-blocked)] ring-2 ring-sidebar select-none group-data-[collapsible=icon]:block",
+        // `ring-chrome`, not `ring-sidebar` (issue #1178). The ring is a
+        // CUT-OUT: 2px of the ground punched around the dot so it reads off
+        // whatever is behind it. The collapsed rail — the only state this dot
+        // renders in — sits on the window chrome now, so a ring painted
+        // `--sidebar` draws a mismatched halo instead of a cut-out.
+        "pointer-events-none absolute top-1.5 right-1.5 hidden size-2 rounded-full bg-[var(--status-blocked)] ring-2 ring-chrome select-none group-data-[collapsible=icon]:block",
         className
       )}
       {...props}

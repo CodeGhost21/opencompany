@@ -90,10 +90,11 @@ describe("chrome tokens", () => {
     // `inline` is load-bearing: a plain `@theme` resolves the variable at build
     // time, baking the light value in, and the `.dark` override above would
     // then reach nothing.
-    const theme = indexCss
-      .split("@theme inline {")
-      .slice(1)
-      .join("\n");
+    // Brace-matched, NOT split-to-end-of-file: `index.css` carries a plain
+    // `@theme { … }` after this block, and a search that ran to the end of the
+    // file would accept an alias that had been moved into it — which is the
+    // exact regression this case exists to catch.
+    const theme = block("@theme inline");
     expect(declaration(theme, "color-chrome")).toBe("var(--chrome)");
     expect(declaration(theme, "color-chrome-border")).toBe("var(--chrome-border)");
   });

@@ -10,20 +10,20 @@ import { isFullBleed } from "@/lib/shell-frame";
 /**
  * The card half of the two-layer shell (issue #1178).
  *
- * Two properties are worth a test rather than a screenshot, because both are
- * regressions that look like nothing until somebody opens the surface they
- * broke:
+ * Two properties, and they are covered at different levels on purpose:
  *
- *   1. **Framed and unframed differ in the right direction.** A framed card is
- *      inset and rounded; an unframed one is neither. The first attempt at this
- *      issue shipped an inset so small it read as a rendering artefact, so the
- *      assertions below name the margin and the radius rather than "has some
- *      class".
+ *   1. **Framed and unframed differ, and in the right direction.** The cases
+ *      below pin the contract — which classes each mode carries, and that both
+ *      keep the same scroll container. They cannot tell 12px from 1px; that is
+ *      a fact about pixels, and `test/e2e/shell-two-layer.spec.ts` measures it
+ *      in a real browser. What they do catch is the frame, the radius or the
+ *      edge quietly going missing, and `min-h-0` being dropped — which moves
+ *      every view's scroll to the window.
  *   2. **The right surfaces get each mode.** `isFullBleed` is asked of the
  *      whole address, not the view, because Workflows is a document at
  *      `#/workflows` and a canvas at `#/workflows/<id>`. Getting that wrong
  *      crops the React Flow canvas, which is exactly what #1259 and #1261 were
- *      filed for.
+ *      filed for. That one IS a property, and it is tested as one.
  */
 
 let container: HTMLDivElement;

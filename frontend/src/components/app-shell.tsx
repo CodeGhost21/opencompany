@@ -1361,14 +1361,9 @@ export function AppShell({
   });
 
   return (
-    <SidebarProvider
-      // The chrome layer, and the ONE place it is painted (issue #1178). The
-      // sidebar column and the frame around the content card are both this
-      // surface showing through, which is what makes them read as continuous;
-      // tinting each pane on its own lands them on different values and
-      // reintroduces the seam the two-layer shell exists to remove.
-      className="h-svh overflow-hidden bg-chrome"
-    >
+    // `SidebarProvider` paints the chrome layer itself — see its own note on
+    // why that fill lives there and not here (issue #1178).
+    <SidebarProvider className="h-svh overflow-hidden">
       <Sidebar collapsible="icon">
         <SidebarHeader>
           {/* The header is the column talking about itself: which host this
@@ -1754,7 +1749,11 @@ export function AppShell({
             wrapper's flex-1 height (and every view's own overflow-y-auto
             within it) already stops short of it. No view needs to know this
             control exists. */}
-        <div className="flex shrink-0 items-center bg-transparent px-3 pb-3 md:hidden">
+        {/* `p-3`, not `pb-3`: the row's spacing has to be its own. A framed
+            card supplies the gap above it through its own bottom margin, but an
+            unframed one (Overview, a workflow canvas) runs flush to the bottom
+            edge and would leave this control sitting on the canvas's cut. */}
+        <div className="flex shrink-0 items-center bg-transparent p-3 md:hidden">
           <SidebarTrigger aria-label="Toggle sidebar" />
         </div>
       </SidebarInset>

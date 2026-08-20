@@ -2,7 +2,16 @@ import { expect, test, type Page } from "@playwright/test";
 
 /**
  * The console's scrollbars are themed, thin, and only bright while a pane is
- * moving (issues #1109 and #1178).
+ * moving (issue #1109).
+ *
+ * # This is characterisation cover, and it passes on `main`
+ *
+ * Nothing here is new behaviour. #1109 landed the themed scrollbars and the
+ * `data-scrolling` mark; what it did not land was a browser test, and every
+ * property below is one only a browser can see. It is written now because
+ * issue #1178 rebuilt the shell those panes live in and asked for the
+ * scrollbars to be verified — so the honest thing is a test that describes what
+ * already ships, rather than one that claims to prove a change it did not make.
  *
  * Three properties, and each one is invisible to a unit test:
  *
@@ -36,7 +45,14 @@ test.beforeEach(async ({ page }) => {
 /** Mark the deepest pane on the page that can actually scroll, and report it. */
 async function findScroller(page: Page): Promise<string> {
   const id = await page.evaluate(() => {
-    const panes = [...document.querySelectorAll<HTMLElement>("*")].filter((el) => {
+    // Scoped to the content column, and that is load-bearing. A document-wide
+    // query walks the sidebar first, and `SidebarContent` is `.no-scrollbar` —
+    // which sets `scrollbar-width: none`, the very standard property this spec
+    // asserts is left alone. The moment the nav column overflowed, the test
+    // would fail on a pane that is *meant* to opt out.
+    const root = document.querySelector('[data-slot="sidebar-inset"]');
+    if (!root) return null;
+    const panes = [...root.querySelectorAll<HTMLElement>("*")].filter((el) => {
       const overflow = getComputedStyle(el).overflowY;
       return (
         (overflow === "auto" || overflow === "scroll") && el.scrollHeight > el.clientHeight + 40
