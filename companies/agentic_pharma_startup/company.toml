@@ -9,7 +9,7 @@ human_role = "Laboratory work"
 
 # The research-review desk pairs candidate evidence with the trial plan before lab work begins.
 [[group_chat]]
-id = "research-review"
+id = "research_review"
 name = "Research review desk"
 description = "Coordinate candidate evidence and trial planning for laboratory review."
 members = ["molecule_discovery", "simulation_agent", "trial_planner"]

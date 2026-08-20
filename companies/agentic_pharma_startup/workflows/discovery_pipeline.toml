@@ -58,7 +58,7 @@ summary = "Report candidates and plan to the operator."
 # The research-review desk assembles the candidate evidence and trial plan for lab review.
 [node.destination]
 kind = "channel"
-target = "research-review"
+target = "research_review"
 
 [[edge]]
 from = "target"
