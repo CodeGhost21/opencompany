@@ -69,6 +69,12 @@ enum FailureKind {
     /// Distinct from [`FailureKind::OauthRequired`] because the operator's next
     /// action is the opposite one — paste a static token, rather than press a
     /// Sign in button that cannot succeed.
+    ///
+    /// Only ever constructed by `refine_oauth_capability`, which is itself
+    /// gated on `feature = "mcp"` (no `mcp` feature means no `oauth/start`
+    /// route, so there is nothing to downgrade) — so this variant is
+    /// legitimately unconstructed in builds without that feature.
+    #[cfg_attr(not(feature = "mcp"), allow(dead_code))]
     StaticTokenRequired,
     /// Anything not otherwise recognised.
     Unknown,
