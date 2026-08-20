@@ -160,15 +160,22 @@ pub type UpdateSink = Arc<dyn Fn(Value) + Send + Sync>;
 
 impl AcpClient {
     /// Spawns `command` and starts reading it.
+    ///
+    /// `env` is added on top of this process's own inherited environment —
+    /// not a replacement for it — so a harness that also needs `PATH`, `HOME`,
+    /// etc. keeps them. Callers that need no extra vars (every one before
+    /// issue #1245) pass `&[]`.
     pub async fn spawn(
         command: &str,
         args: &[&str],
         cwd: &Path,
+        env: &[(&str, &str)],
         handler: Arc<dyn ClientHandler>,
         updates: UpdateSink,
     ) -> Result<Self, AcpError> {
         let mut child = Command::new(command)
             .args(args)
+            .envs(env.iter().copied())
             .current_dir(cwd)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

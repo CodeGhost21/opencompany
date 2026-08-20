@@ -64,12 +64,35 @@ kind = "acp"
 [harness.acp]
 transport = "local"
 agent     = "claude"
+model     = "claude-opus-4-5"       # optional — see "Model", below
 ```
 
 `[harness.inference]` and `[harness.acp]` attach to the **most recently
 declared** `[[harness]]`. That is ordinary TOML array-of-tables sub-table
 syntax, but it is easy to misread as a company-level section, so it is worth
 reading twice.
+
+### Model
+
+`[harness.acp].model` is a hint forwarded to the agent's own startup lever —
+not a credential, so it does not join `[harness.inference]`'s prohibition on
+`acp` harnesses (see [Validation](#validation)). Optional; a harness with none
+runs whatever the agent's own config or CLI default resolves to.
+
+Whether it actually does anything depends on whether this build knows a
+startup lever for that `agent` — confirmed live against the real adapters
+(issue #1245), not guessed:
+
+| `agent` | lever |
+|---|---|
+| `claude` | `ANTHROPIC_MODEL` |
+| `goose` | `GOOSE_MODEL` |
+| `codex` | none known yet — `model` is accepted and validated, but not injected |
+
+`transport = "local"` only, for now: the `runner` wire protocol does not carry
+`model`, so validation rejects it there rather than accepting and silently
+dropping it — the same "my model setting does nothing" failure mode
+[Validation](#validation) already guards against for `[harness.inference]`.
 
 ### Binding an agent
 
@@ -106,6 +129,8 @@ engine, which is never true.
 - `[harness.inference]` on an `acp` kind, or `[harness.acp]` on a `built_in` one
 - `transport = "local"` with no `agent`, or naming a `runner`; and the reverse
   for `transport = "runner"`
+- an empty `model`, or one set on `transport = "runner"` (see
+  [Model](#model))
 
 A section on the wrong kind is an **error, not an ignored key**. This is the
 same rule [agents.md](agents.md) applies to a bundle carrying both roster forms,
@@ -127,16 +152,26 @@ transport = "runner"     # reach one that dialed in
 runner    = "stevens_laptop"
 ```
 
-**A remote runner is a transport, not a third kind.**
-`src/runner/dispatch.rs::RunnerDispatch` already implements the same `AcpAgent`
-port the local subprocess does, so the only thing that differs is how bytes
-reach the agent. Modelling it as a third kind would add a resolution path that
-resolves to the same place.
+**A remote runner is a transport, not a third kind.** `transport = "local"` and
+`transport = "runner"` resolve to the same `AcpAgent` port
+(`crate::ports::acp::AcpAgent`); only how bytes reach the agent differs.
+Modelling the runner as a third kind would add a resolution path that resolves
+to the same place.
 
 The transports differ in where they live, which is why `AcpAgent` is a **port**
 rather than an ACP client in the host crate: a subprocess over stdio belongs to
 the desktop shell, a WebSocket to the runner lane. The same inversion the
-storage ports use.
+storage ports use — and, concretely, why the port itself lives at
+`crate::ports::acp`, ungated, rather than under `crate::harness` (behind
+`openhuman`): the desktop shell that supplies the `local` implementation does
+not enable that feature. See that module's own docs for the full reasoning.
+
+`local` has a real implementation as of issue #1245 — `LocalAcpAgent`
+(`src-tauri/src/acp/local_agent.rs`), wired through `AppState::with_acp_agents`
+and `desktop::register`. `runner` does not yet: `src/runner/dispatch.rs`
+declares `RunnerDispatch`, but it does not implement `AcpAgent`, and nothing
+wires it into `lanes::build`. A `runner`-transport harness resolves
+`unavailable` on every build today, `local` included.
 
 ### Readiness
 
@@ -187,14 +222,19 @@ All three methods route. A method forwarding to a fixed engine would send
 
 ### A harness with no engine fails the turn
 
-A harness can be declared, valid, and still have no engine. Today that is every
-`acp` harness on a server build: the transports live in the desktop shell (a
-stdio subprocess) and the runner lane (a socket), and neither is wired into the
-server. Those turns fail, naming the harness and the fix.
+A harness can be declared, valid, and still have no engine. That is every `acp`
+harness on a server build (no transport is wired there at all), every
+`runner`-transport harness on any build (its socket transport isn't wired
+yet), and a `local`-transport harness on a desktop build that was not given an
+`AcpAgentFactory` (`AppState::with_acp_agents` — every embedder but the
+packaged desktop app). Those turns fail, naming the harness and the fix.
 
 They MUST NOT fall back to another harness's engine. That is the worst outcome
 available: the turn would succeed, on a model and a credential nobody chose, and
-the only evidence would be a billing line.
+the only evidence would be a billing line. This also covers the agent itself
+failing to start (not installed, not signed in, or a spawn error) — that
+surfaces as the same kind of failure, naming the harness and the reason, not a
+silent fallback either.
 
 ---
 
@@ -204,7 +244,12 @@ the only evidence would be a billing line.
   cognition seam *within* the built-in harness.
 - **Tools, policy, budgets, desks.** All company- or agent-scoped, and unchanged
   by which engine runs the turn. An ACP agent is still subject to the company's
-  approval policy.
+  approval policy — **not yet true for `local`'s own permission prompts**
+  (`session/request_permission`): `LocalAcpAgent` fails closed on every one it
+  was not explicitly configured to allow, rather than routing it through
+  `ApprovalRequestQueue`. Safe (a refusal is a visible, actionable failure; a
+  silent auto-approval would not be), but a known gap, not the intended
+  end state.
 - **Which model an agent's `tier` means.** A tier names a workload and is
   resolved against whatever provider its harness turns out to use, so an agent
   keeps its tier when it moves between harnesses. See
@@ -216,12 +261,16 @@ the only evidence would be a billing line.
 
 | concern | where |
 |---|---|
-| manifest types, kind/transport vocabularies | `src/company/types.rs` |
+| manifest types, kind/transport/model vocabulary | `src/company/types.rs` |
 | validation, `effective_harnesses`, `harness_for` | `src/company/manifest.rs` |
 | per-agent dispatch | `src/harness/router.rs` |
-| building the lanes at boot | `src/harness/lanes.rs` |
+| building the lanes at boot, resolving `acp` engines | `src/harness/lanes.rs` |
 | the built-in engine | `src/harness/built_in/` |
-| the ACP `RunTurn` and its port | `src/harness/acp/run_turn.rs` |
-| local transport: discovery, spawn, codec | `src-tauri/src/acp/` |
-| runner transport | `src/runner/dispatch.rs` |
+| the `AcpAgent`/`AcpAgentFactory` ports (ungated) | `src/ports/acp.rs` |
+| the ACP `RunTurn` (folds a port `AcpTurn` into `TurnStep`) | `src/harness/acp/run_turn.rs` |
+| wiring an `AcpAgentFactory` onto a host | `AppState::with_acp_agents` (`src/app/types.rs`), consumed by `desktop::register` |
+| local transport: discovery, spawn, codec | `src-tauri/src/acp/` (`client.rs`, `discovery.rs`, `confine.rs`) |
+| the `local` `AcpAgentFactory` implementation | `src-tauri/src/acp/local_agent.rs` (`LocalAcpAgent`/`LocalAcpAgentFactory`) |
+| the desktop's own wiring | `src-tauri/src/embedded.rs` |
+| runner transport (declared, not yet an engine) | `src/runner/dispatch.rs` |
 | per-harness roster narrowing | `HarnessDeps::serves` |

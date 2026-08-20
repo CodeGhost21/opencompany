@@ -54,6 +54,7 @@ async fn connect(root: &Path, handler: Arc<dyn ClientHandler>) -> (AcpClient, Up
         "python3",
         &[fixture().to_str().unwrap()],
         root,
+        &[],
         handler,
         updates.sink(),
     )
