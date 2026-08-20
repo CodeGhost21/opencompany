@@ -9,7 +9,7 @@ import { Avatar } from "./Avatar";
 import { MessageRow } from "./MessageRow";
 import { StepTimeline } from "./StepTimeline";
 import { WorkingIndicator } from "./WorkingIndicator";
-import { channelTitle, type Channel, type TimelineItem } from "./model";
+import { channelSubtitle, channelTitle, type Channel, type TimelineItem } from "./model";
 
 interface Props {
   channel: Channel;
@@ -268,6 +268,14 @@ function ChannelIntro({
   loading: boolean;
   onAddPeople?: () => void;
 }) {
+  // Every branch below appends this to a sentence that has already named the
+  // channel, so it goes through the same guard the header does: without it the
+  // DM line read "…your direct message with Backend Engineer — backend
+  // engineer." for any teammate the host sends no name for (issue #1180). A
+  // `null` here drops the clause rather than the sentence — where you are is
+  // still worth saying, the tautology after it is not.
+  const subtitle = channelSubtitle(channel);
+
   return (
     <div className={cn("px-4 pb-3", empty ? "pt-16" : "pt-6")}>
       <Avatar
@@ -284,10 +292,14 @@ function ChannelIntro({
           and stays either way, so the pane still says where you are. */}
       <p className="mt-1 max-w-prose text-sm text-muted-foreground">
         {loading
-          ? sentence(channel.purpose)
+          ? subtitle
+            ? sentence(subtitle)
+            : ""
           : channel.kind === "dm"
-            ? `This is the start of your direct message with ${channel.name} — ${lower(channel.purpose)}.`
-            : `This is the very beginning of ${channelTitle(channel)}. ${sentence(channel.purpose)}`}
+            ? subtitle
+              ? `This is the start of your direct message with ${channel.name} — ${lower(subtitle)}.`
+              : `This is the start of your direct message with ${channel.name}.`
+            : `This is the very beginning of ${channelTitle(channel)}.${subtitle ? ` ${sentence(subtitle)}` : ""}`}
       </p>
       {/* The two openings a new channel actually has. Held back until the
           history has answered, for the same reason the sentence above is:

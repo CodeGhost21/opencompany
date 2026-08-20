@@ -159,7 +159,17 @@ export function buildChannels(members: TeamMember[], desks: Desk[] = defaultDesk
     id: dmChannelId(m),
     name: m.name,
     kind: "dm" as const,
-    purpose: m.role,
+    // The teammate's **description**, which is the field parallel to a desk's
+    // `blurb` above — both answer "what is this line for", and neither repeats
+    // what the title already said. This used to read `m.role`, an identity
+    // field in a description slot, and that is precisely what made the header
+    // say the same words twice (issue #1180): `fromDto` falls back
+    // `dto.name?.trim() || dto.role`, so a company that names roles rather than
+    // people has name === role, and the title and the slot after the divider
+    // resolved to one string. The role is still the fallback — for a teammate
+    // the host *did* name it is a real second fact — and {@link channelSubtitle}
+    // is what declines to render even that when it just echoes the title.
+    purpose: m.description.trim() || m.role,
     tone: m.tone,
     member: m,
   }));
@@ -294,6 +304,35 @@ export function channelMembers(channel: Channel, roster: TeamMember[]): TeamMemb
 /** How a channel is titled in the header and the rail. */
 export function channelTitle(channel: Channel): string {
   return channel.kind === "dm" ? channel.name : `#${channel.name}`;
+}
+
+/**
+ * The line that goes *beside* the title — the muted slot after the header's
+ * divider, the rail row's tooltip, the conversation intro's clause — or `null`
+ * when there is nothing to say that the title has not already said.
+ *
+ * `null` rather than the empty string, and a rule rather than a DM special
+ * case. A subtitle exists to add a second fact; one that repeats the first is
+ * not a hierarchy, it is the same word twice with two type styles, and the
+ * honest render of "nothing more to say" is nothing. Issue #1180 is what that
+ * looks like when it ships: every agent in a company that declares roles and no
+ * names read `Backend Engineer │ Backend Engineer` across the top of its DM.
+ *
+ * The comparison is case- and whitespace-insensitive because the duplicate is a
+ * duplicate to a reader either way — a manifest whose description restates the
+ * role in sentence case is the same non-fact as one that restates it verbatim.
+ *
+ * Kind-agnostic on purpose. A DM is where this bites today, but a desk whose
+ * blurb is just its own name is the identical duplicate under `#`, and a rule
+ * that only fires for DMs would let that one through. Channels are otherwise
+ * untouched: a blurb that says something the slug does not — which is every
+ * desk that bothered to write one — comes back exactly as before.
+ */
+export function channelSubtitle(channel: Channel): string | null {
+  const purpose = channel.purpose.trim();
+  if (!purpose) return null;
+  if (purpose.toLowerCase() === channel.name.trim().toLowerCase()) return null;
+  return purpose;
 }
 
 /**
