@@ -65,7 +65,7 @@ summary = "Send the deal to the operator to approve."
 # The investment committee reviews the acquisition case before the purchase decision.
 [node.destination]
 kind = "channel"
-target = "investment-committee"
+target = "investment_committee"
 
 [[edge]]
 from = "lead"

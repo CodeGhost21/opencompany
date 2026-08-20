@@ -9,7 +9,7 @@ human_role = "Purchase approvals"
 
 # The investment committee reviews the deal, underwriting, and rehabilitation plan together.
 [[group_chat]]
-id = "investment-committee"
+id = "investment_committee"
 name = "Investment committee"
 description = "Coordinate acquisition diligence, underwriting, and property plans."
 members = ["property_scout", "deal_underwriter", "contractor_coordinator"]
