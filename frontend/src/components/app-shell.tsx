@@ -1450,7 +1450,11 @@ export function AppShell({
           strip held the "Done" column, which is why a card could not be dragged
           into it (issue #334); every view was losing the same strip. */}
       <SidebarInset className="min-h-0 min-w-0">
-        <main className="flex min-h-0 flex-1 flex-col overflow-hidden">
+        {/* A `div`, not `main`: `SidebarInset` above is already the console's
+            one `<main>` landmark. This is only a flex/scroll container — a
+            second nested `<main>` here gave every page two identical
+            "skip to content" destinations (issue #1221). */}
+        <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
           {view === "overview" && (
             <Overview client={client} company={company} companyName={feed.status.name} />
           )}
@@ -1733,7 +1737,7 @@ export function AppShell({
             />
           )}
           {view === "feedback" && <FeedbackView client={client} company={company} />}
-        </main>
+        </div>
       </SidebarInset>
 
       <FeedbackDialog

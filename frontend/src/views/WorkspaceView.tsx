@@ -1202,6 +1202,10 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
 
   return (
     <div className="flex flex-1 overflow-hidden">
+      {/* The file tree and editor are the page, with no title of their own
+          (issue #1221) — this names the page for a screen reader the same
+          way every other view's title does. */}
+      <h1 className="sr-only">Workspace</h1>
       {/* Explorer */}
       <aside
         className={cn(
