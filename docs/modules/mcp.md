@@ -6,14 +6,16 @@ An agent granted a server reaches it through the generic bridge tools
 `mcp_client` registry, its HTTP transport, and its prompt-injection safety
 filter over remote tool metadata.
 
-Hosted v1 boundary: **HTTP transport only**. Out of scope for v1: stdio /
-subprocess servers (rejected with a clear error), Smithery browsing,
-MCP-server OAuth, and live pool invalidation.
+Hosted v1 boundary: **HTTP transport only**. Stdio / subprocess servers are
+rejected with a clear error — the tenant image ships no Node, Python or package
+manager to launch one with. Still out of scope: live pool invalidation.
+
+Directory browsing landed in issue #1270; see [The directory](#the-directory).
 
 ## Where servers come from
 
-A company's *effective* MCP servers are the union of two sources, merged by
-name (a runtime entry overrides a manifest server of the same name but keeps
+A company's *effective* MCP servers are the union of the sources below, merged
+by name (a runtime entry overrides a manifest server of the same name but keeps
 its `manifest` badge):
 
 1. **Manifest** — `[[mcp_server]]` entries in `company.toml`
@@ -32,6 +34,14 @@ its `manifest` badge):
 2. **Runtime** — servers the operator adds through the console, persisted as a
    single JSON index in the [`SecretStore`](../../src/ports/secrets.rs) under
    `mcp/servers`.
+
+3. **Default** — `[[default_mcp_server]]` in the instance `config.toml`
+   (issue #527): shipped by the install, present for every company, and badged
+   `default` so it is never mistaken for something this operator added.
+
+4. **Registry** — installed from an upstream MCP directory (issue #1270), badged
+   `registry`. Keyed by a stable `serverId` rather than by name; see
+   [The directory](#the-directory).
 
 Validation (manifest + API): unique names, an `http(s)://` endpoint, and no
 stdio `command`. See [`company::mcp`](../../src/company/mcp.rs).
@@ -98,12 +108,108 @@ alias `…/company/…`). See [`server::ops::mcp`](../../src/server/ops/mcp.rs).
 | `GET` | `…/mcp/servers` | Effective servers (`authConfigured`, never the token). |
 | `POST` | `…/mcp/servers` | Add a runtime server (+ optional write-only `token`). |
 | `PUT` | `…/mcp/servers/{name}` | Enable/disable, edit tool lists/endpoint, rotate token. A manifest server gets a runtime override entry. |
-| `DELETE` | `…/mcp/servers/{name}` | Remove a runtime server. `409` for a manifest server (disable it instead). |
+| `DELETE` | `…/mcp/servers/{name}` | Remove a server, dispatching on where it lives. `409` for a manifest or default server (disable it instead). |
 | `GET` | `…/mcp/servers/{name}/tools` | Live tool discovery through the registry. |
+| `GET` | `…/mcp/registry/search?q=&page=&pageSize=` | Browse the upstream directories. |
+| `GET` | `…/mcp/registry/entry?qualifiedName=` | One entry, with the install decision already made. |
+| `POST` | `…/mcp/registry/install` | Install an entry (+ write-only `env` values) and connect it. |
+| `POST` | `…/mcp/registry/{serverId}/connect` | Dial an installed server. |
+| `POST` | `…/mcp/registry/{serverId}/disconnect` | Drop the live session, keeping the install. |
+| `PUT` | `…/mcp/registry/{serverId}/env` | Rotate an install's credentials (write-only). |
+| `DELETE` | `…/mcp/registry/{serverId}` | Uninstall. |
+
+The `…/mcp/registry/…` routes are gated on the `mcp` feature and report
+`not_wired` without it, matching `…/oauth/start`. Every registry **mutation**
+takes the admin guard: an install hands *every* teammate a new set of callable
+tools, so it settles what the company can reach. Browsing decides nothing and
+takes the ordinary company scope.
 
 Discovery is gated on the `openhuman` feature (the MCP transport lives there);
 without it the route reports `not_wired` and the console falls back to the
 declared tool lists. Every mutating response carries a `note` reminder.
+
+## The directory
+
+Issue #1270. Before it, the tab could only contain what somebody already knew
+the address of: an operator arrived with a URL or the list stayed empty. Nothing
+in `src/server/` reached `McpRuntime`
+([`harness::mcp`](../../src/harness/built_in/mcp.rs)), the wrapper over
+OpenHuman's own MCP registry — two upstream directories (Smithery.ai and
+`modelcontextprotocol/registry`), a SQLite store of installs, named write-only
+env credentials, boot-time connect and a supervisor — even though it is
+constructed for every company.
+
+[`server::ops::mcp_registry`](../../src/server/ops/mcp_registry.rs) is that
+routing layer.
+
+### One list, not two sections
+
+`GET …/mcp/servers` returns declared servers **and** directory installs as one
+list, each row badged with its provenance. A server present in both — installed
+from the directory *and* typed in by URL — is **one reconciled row**, matched on
+the normalised endpoint: lowercased scheme and host, default port dropped, query
+and fragment stripped, trailing slash dropped.
+
+The query string has to go, because a declared server may carry its credential
+as a query parameter; a comparison that kept it would never match, and the
+operator would get the same server twice with two credentials and two health
+badges disagreeing.
+
+**The declared side wins the provenance.** `source` decides the badge and
+whether the console offers a delete, and both must answer to the declared list: a
+manifest server cannot be deleted, only disabled, so an install must not be able
+to capture that row and relabel it deletable. The deeper reason is that the
+declared list is what the *agents* reach — `registry_for_agent` builds each
+agent's registry from it and scopes it by `mcp:<name>` grants. Nothing is lost:
+`serverId` rides on the reconciled row, so the registry routes still address it.
+
+The registry contributes only what the declared side has no field for —
+`serverId`, `qualifiedName`, `iconUrl`, `transport`, a `description` where there
+was none, and a `health` where the server has never been probed (a real probe
+wins, since it dials the way the agents' bridge tools do). `authConfigured` is
+the union. All four registry fields are omitted when absent, so a declared row's
+JSON is byte-identical to what it was before this existed.
+
+### Delete dispatches
+
+`DELETE …/mcp/servers/{name}` removes what the row actually has: the
+runtime-index entry, the upstream install, or **both** for a reconciled row.
+Dropping only the index row there would leave the install connected with its
+tools still on every belt — a delete the operator watches fail. Manifest and
+default rows stay `409`.
+
+### Hosted transport only
+
+Directory search is pinned to the hosted-transport filter, so a stdio-only entry
+never reaches the operator's screen; the install route refuses one again by name,
+because a caller can POST a qualified name search never offered. The blocker is
+not the read-only root filesystem — tenants mount a writable `/data` — but that
+the runtime image is `debian:bookworm-slim` plus `ca-certificates`, `curl`,
+`libssl3` and X11 libs. A stdio install would fail on `npx: not found`.
+
+### Nothing crosses the wire blind
+
+Env values are write-only exactly like a declared server's `token`. Upstream's
+catalogue DTOs end in a flattened `extra` map that round-trips every key the
+registries emit, so each projection names the fields it forwards. An install's
+raw `last_error` is **dropped**, not scrubbed: the scrubber's redaction pass
+needs the credential values to replace, and this surface deliberately never
+loads them — only the stable `auth_hint` code and a fixed sentence per status
+cross the wire.
+
+### A failing registry does not break the read
+
+An unreadable store or a directory that will not answer resolves to "no
+installs", and `GET …/mcp/servers` still returns the declared list. The declared
+half is what governs what the agents reach, so it is the half that must survive.
+
+### Per-agent scoping does not apply to installs
+
+`harness::built_in::build` pushes the registry bridge tools onto **every**
+agent's belt with no grant check, so every teammate can call every installed
+server. Issue #1270 leaves that in place deliberately and makes it visible: a
+registry row's `reachableBy` lists the whole roster (and nobody when the install
+is disabled) rather than claiming a scope the harness does not apply.
 
 ## Which builds can honour a server (issue #567)
 
