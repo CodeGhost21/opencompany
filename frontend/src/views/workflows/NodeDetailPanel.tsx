@@ -39,7 +39,13 @@ export function NodeDetailPanel({
     !(typeof node.config === "object" && Object.keys(node.config as object).length === 0);
 
   return (
-    <div className="absolute right-3 top-3 bottom-3 z-10 flex w-72 flex-col overflow-hidden rounded-xl border bg-card/95 shadow-lg backdrop-blur sm:w-80">
+    <div
+      // Issue #1231: the overlay's geometry is asserted, not assumed —
+      // `RevealSelectedNode` pans the canvas so the inspected node clears
+      // this box, and the e2e spec measures both.
+      data-testid="workflow-node-detail"
+      className="absolute right-3 top-3 bottom-3 z-10 flex w-72 flex-col overflow-hidden rounded-xl border bg-card/95 shadow-lg backdrop-blur sm:w-80"
+    >
       <div className="flex items-start justify-between gap-2 border-b px-3 py-2">
         <div className="flex min-w-0 items-center gap-2">
           <span className="text-base leading-none" aria-hidden>
