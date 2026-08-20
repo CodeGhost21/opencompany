@@ -9,15 +9,18 @@ import {
   searchMcpRegistry,
   type McpCatalogueDetail,
   type McpCatalogueEntry,
+  type McpDirectoryCredentialSource,
 } from "@/api/mcp-registry";
 import { ApiError } from "@/api/types";
 import {
+  directoryEmptyNotice,
   missingEnvKeys,
   REGISTRY_UNWIRED_NOTICE,
   registryOutage,
   type McpRegistryOutage,
 } from "@/lib/mcp-registry";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import { McpDirectoryCredentialCard } from "@/views/connections/McpDirectoryCredentialCard";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -30,7 +33,14 @@ type Results =
   | { kind: "idle" }
   | { kind: "loading" }
   | { kind: "outage"; outage: McpRegistryOutage }
-  | { kind: "ready"; page: number; totalPages: number; servers: McpCatalogueEntry[] };
+  | {
+      kind: "ready";
+      page: number;
+      totalPages: number;
+      servers: McpCatalogueEntry[];
+      /** Which Smithery key this search presented (issue #1287). */
+      directoryCredential: McpDirectoryCredentialSource;
+    };
 
 /** The install dialog's state for the one entry an operator picked. */
 type Picked =
@@ -112,6 +122,7 @@ export function McpRegistryBrowser({ client, company, onInstalled }: Props) {
           page: found.page,
           totalPages: found.totalPages,
           servers: found.servers,
+          directoryCredential: found.directoryCredential,
         });
       } catch (err) {
         if (generation.current !== mine) return;
@@ -221,8 +232,7 @@ export function McpRegistryBrowser({ client, company, onInstalled }: Props) {
       {results.kind === "ready" &&
         (results.servers.length === 0 ? (
           <p className="text-sm text-muted-foreground" data-testid="mcp-registry-empty">
-            No hosted servers matched that. The directory only offers servers this host can dial
-            over HTTP — one that runs as a local subprocess is not listed.
+            {directoryEmptyNotice(results.directoryCredential)}
           </p>
         ) : (
           <>
@@ -293,6 +303,19 @@ export function McpRegistryBrowser({ client, company, onInstalled }: Props) {
             )}
           </>
         ))}
+
+      {/* The key that decides whether any of the above has hosted servers to
+          show (issue #1287). Below the results rather than above them: the
+          search box is what an operator came here for, and the empty-result
+          notice points down here in as many words when it is the thing standing
+          in their way. A save re-runs the current search, so setting the key
+          fills the list they are already looking at instead of leaving them to
+          guess it worked. */}
+      <McpDirectoryCredentialCard
+        client={client}
+        company={company}
+        onChanged={() => void runSearch(1)}
+      />
     </div>
   );
 }

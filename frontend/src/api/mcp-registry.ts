@@ -47,11 +47,52 @@ export interface McpCatalogueEntry {
   websiteUrl?: string;
 }
 
+/**
+ * Which Smithery key the host's directory calls present (issue #1287).
+ *
+ * - `company` — this company's own key.
+ * - `environment` — one key set for the whole host, so every company on it
+ *   browses through the same Smithery account. Working, and shared.
+ * - `none` — Smithery is not queried at all, so a search sees only the open
+ *   registry, whose hosted entries are few.
+ *
+ * Not a boolean on purpose: `configured` would either be true of both working
+ * tiers (hiding that one is shared) or false for a company whose directory
+ * works. Both are the #886 failure.
+ */
+export type McpDirectoryCredentialSource = "company" | "environment" | "none";
+
 /** A page of directory results. */
 export interface McpCatalogueSearch {
   servers: McpCatalogueEntry[];
   page: number;
   totalPages: number;
+  /**
+   * The tier this search presented. Rides on the search response rather than a
+   * second request, because the console needs it in the same moment it renders
+   * zero rows — and two fetches can land out of order and describe different
+   * states.
+   */
+  directoryCredential: McpDirectoryCredentialSource;
+}
+
+/** The directory credential's status. Never carries the key. */
+export interface McpDirectoryCredential {
+  /** Whether this company set its **own** key. False with a working host key. */
+  configured: boolean;
+  /** Which key a directory call presents right now. */
+  source: McpDirectoryCredentialSource;
+  /**
+   * What the tier means, worded by the host so the console cannot drift from
+   * what the host actually does. Rendered verbatim.
+   */
+  notice: string;
+}
+
+/** A mutating response: the resulting status plus a plain-language note. */
+export interface McpDirectoryCredentialMutation {
+  status: McpDirectoryCredential;
+  note: string;
 }
 
 /**
@@ -114,7 +155,16 @@ export function expectCatalogue(body: unknown): McpCatalogueSearch {
     servers: page.servers,
     page: typeof page.page === "number" ? page.page : 1,
     totalPages: typeof page.totalPages === "number" ? page.totalPages : 0,
+    // An unrecognised tier degrades to `none`, which only ever offers the
+    // operator MORE explanation than the truth. Guessing `company` from an
+    // unknown string would tell them their key is working when it may not be.
+    directoryCredential: directoryTier(page.directoryCredential),
   };
+}
+
+/** Narrows an unvalidated tier string; anything unknown reads as `none`. */
+function directoryTier(raw: unknown): McpDirectoryCredentialSource {
+  return raw === "company" || raw === "environment" ? raw : "none";
 }
 
 /** Browse the upstream directories. An empty `q` is the directory's own front page. */
@@ -219,5 +269,40 @@ export function uninstallMcpRegistryServer(
 ): Promise<void> {
   return client.del<void>(
     `${client.scopeFor(company)}/mcp/registry/${encodeURIComponent(serverId)}`,
+  );
+}
+
+/**
+ * The company's Smithery key status. Never carries the key.
+ *
+ * Unlike every other route in this module, this one is **not** behind the host's
+ * `mcp` feature: the credential is a secret slot, and an unwired build still has
+ * to let an admin set the key a wired one will spend. So it does not answer
+ * `not_wired` and callers need not classify it as an outage.
+ */
+export function getMcpDirectoryCredential(
+  client: OpenCompanyClient,
+  company: string | null,
+): Promise<McpDirectoryCredential> {
+  return client.get<McpDirectoryCredential>(
+    `${client.scopeFor(company)}/mcp/registry/credential`,
+  );
+}
+
+/**
+ * Set / rotate / clear the company's Smithery key. A non-empty value sets or
+ * rotates it; an empty string clears it, falling back to whatever the host
+ * offers. Admin-only — a member gets a 403.
+ *
+ * Write-only: the key goes out and is never returned by any read.
+ */
+export function setMcpDirectoryCredential(
+  client: OpenCompanyClient,
+  company: string | null,
+  key: string,
+): Promise<McpDirectoryCredentialMutation> {
+  return client.put<McpDirectoryCredentialMutation>(
+    `${client.scopeFor(company)}/mcp/registry/credential`,
+    { key },
   );
 }

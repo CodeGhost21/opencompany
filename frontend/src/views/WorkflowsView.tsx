@@ -99,6 +99,11 @@ import {
   windowHasRunStart,
 } from "@/views/workflows/graph";
 import { WorkflowMiniMap } from "@/views/workflows/WorkflowMiniMap";
+// Issue #1231: keeps the inspector from opening on top of the node it describes.
+import {
+  RevealSelectedNode,
+  type RevealSelectedNodeHandle,
+} from "@/views/workflows/RevealSelectedNode";
 import { LastRunChip, RunHistoryPanel } from "@/views/workflows/RunHistoryPanel";
 import { WorkflowIndex, type IndexMode } from "@/views/workflows/WorkflowIndex";
 import { CopilotPanel } from "@/views/workflows/CopilotPanel";
@@ -2051,6 +2056,24 @@ export function WorkflowsView({
     setSelectedNodeId(node.id);
   }, []);
 
+  // Issue #1231: the reveal pan below has to know when the operator takes the
+  // canvas over, so it can stop having an opinion about where the canvas
+  // belongs. `onMove` forwards d3-zoom's `sourceEvent`, which React Flow leaves
+  // null for a programmatic transition and sets to the real pointer or wheel
+  // event for a gesture on the canvas. Truthy means theirs.
+  //
+  // "Programmatic" covers the reveal's own pan and `WorkflowMiniMap`'s
+  // `setCenter`, so a minimap drag would not register here. That is not a hole
+  // today only because the minimap sits at the canvas's bottom-right, which is
+  // exactly where the inspector overlay is: the panel covers it whenever there
+  // is a reveal to take over from. Anything that gives the operator a
+  // programmatic way to move the canvas WHILE the inspector is open has to call
+  // `operatorTookOver` itself.
+  const revealRef = useRef<RevealSelectedNodeHandle | null>(null);
+  const onMove = useCallback((event: MouseEvent | TouchEvent | null) => {
+    if (event) revealRef.current?.operatorTookOver();
+  }, []);
+
   // Issue #1007: what the history drawer renders — the host's rows, with one
   // optimistic row on top while this console has a run in flight that the host
   // has not journaled yet.
@@ -2808,6 +2831,7 @@ export function WorkflowsView({
                 nodesConnectable={false}
                 elementsSelectable
                 onNodeClick={onNodeClick}
+                onMove={onMove}
                 onPaneClick={() => setSelectedNodeId(null)}
                 proOptions={{ hideAttribution: true }}
               >
@@ -2816,6 +2840,17 @@ export function WorkflowsView({
                 {/* Issue #1259: a custom minimap, not React Flow's built-in
                     `<MiniMap>` — see WorkflowMiniMap.tsx for why. */}
                 <WorkflowMiniMap nodes={nodes} className="!hidden sm:!block" />
+                {/* Issue #1231: renders nothing — it pans the selected node out
+                    from under the inspector overlay, and pans back on close.
+                    A child of `<ReactFlow>` because that is the only provider
+                    `useReactFlow` can find in this view. It is handed the
+                    INSPECTOR's node, not `selectedNodeId`: the copilot shares
+                    the slot and wins while open (#303), and it has no one node
+                    it must not hide. */}
+                <RevealSelectedNode
+                  handleRef={revealRef}
+                  nodeId={!copilotOpen && selectedNode ? selectedNode.id : null}
+                />
               </ReactFlow>
               {/* Issue #303: the copilot and the node inspector share the canvas's
                   right edge, and the copilot wins while it is open — it was

@@ -552,6 +552,27 @@ impl McpRuntime {
         Self { config }
     }
 
+    /// This runtime's config with the company's Smithery key applied, for the
+    /// three calls that reach an upstream **directory** (issue #1287).
+    ///
+    /// Per call, not stored on the runtime, and that is the point: the key lives
+    /// in the tenant's secret store and an admin can rotate it from the console
+    /// at any moment. A copy cached here at construction would keep serving the
+    /// previous key until the company runtime was rebuilt, so a rotation would
+    /// appear to do nothing.
+    ///
+    /// `None` leaves the field unset, which is not the same as disabling
+    /// Smithery by hand: upstream's `smithery_api_key` then falls back to the
+    /// host's `SMITHERY_API_KEY`, exactly the tier
+    /// [`smithery::resolve`](crate::company::smithery::resolve) reports as
+    /// `environment`. Passing the resolved value straight through keeps one
+    /// precedence chain rather than two that can disagree.
+    fn directory_config(&self, smithery_key: Option<String>) -> oh::config::Config {
+        let mut config = self.config.clone();
+        config.mcp_client.registry_auth.smithery_api_key = smithery_key;
+        config
+    }
+
     /// Search the upstream MCP directories — Smithery.ai and the official
     /// `modelcontextprotocol/registry` — merged, paged, and SQLite-cached
     /// upstream (issue #1270).
@@ -564,12 +585,13 @@ impl McpRuntime {
     /// as a parameter — see that constant for why.
     pub async fn search(
         &self,
+        smithery_key: Option<String>,
         query: Option<String>,
         page: Option<u32>,
         page_size: Option<u32>,
     ) -> crate::Result<serde_json::Value> {
         oh::mcp::registry::ops::mcp_clients_registry_search(
-            &self.config,
+            &self.directory_config(smithery_key),
             query,
             Some(HOSTED_TRANSPORT.to_string()),
             page,
@@ -581,11 +603,18 @@ impl McpRuntime {
     }
 
     /// One directory entry in full, routed back to the registry it came from.
-    pub async fn registry_get(&self, qualified_name: String) -> crate::Result<serde_json::Value> {
-        oh::mcp::registry::ops::mcp_clients_registry_get(&self.config, qualified_name)
-            .await
-            .map(|outcome| outcome.value)
-            .map_err(|e| OpenCompanyError::Harness(format!("mcp registry lookup failed: {e}")))
+    pub async fn registry_get(
+        &self,
+        smithery_key: Option<String>,
+        qualified_name: String,
+    ) -> crate::Result<serde_json::Value> {
+        oh::mcp::registry::ops::mcp_clients_registry_get(
+            &self.directory_config(smithery_key),
+            qualified_name,
+        )
+        .await
+        .map(|outcome| outcome.value)
+        .map_err(|e| OpenCompanyError::Harness(format!("mcp registry lookup failed: {e}")))
     }
 
     /// Installs a directory entry by qualified name and returns the resulting
@@ -603,11 +632,12 @@ impl McpRuntime {
     /// that was already on disk is left alone, since it is not ours to remove.
     pub async fn install_from_directory(
         &self,
+        smithery_key: Option<String>,
         qualified_name: String,
         env: HashMap<String, String>,
     ) -> crate::Result<InstalledServer> {
         let outcome = oh::mcp::registry::ops::mcp_clients_install(
-            &self.config,
+            &self.directory_config(smithery_key),
             qualified_name.clone(),
             env,
             None,
