@@ -367,24 +367,16 @@ function SidebarInput({
   )
 }
 
-// `forwardRef`, unlike its siblings here (issue #1178). This block's height is
-// what the content card's top edge aligns to, and that height is measured
-// rather than written down — see `AppShell`. Under React 18 a plain function
-// component silently drops a `ref`, so the measurement would read null and the
-// card would fall back to an even inset with no error anywhere.
-const SidebarHeader = React.forwardRef<HTMLDivElement, React.ComponentProps<"div">>(
-  function SidebarHeader({ className, ...props }, ref) {
-    return (
-      <div
-        ref={ref}
-        data-slot="sidebar-header"
-        data-sidebar="header"
-        className={cn("flex flex-col gap-2 p-2", className)}
-        {...props}
-      />
-    )
-  }
-)
+function SidebarHeader({ className, ...props }: React.ComponentProps<"div">) {
+  return (
+    <div
+      data-slot="sidebar-header"
+      data-sidebar="header"
+      className={cn("flex flex-col gap-2 p-2", className)}
+      {...props}
+    />
+  )
+}
 
 function SidebarFooter({ className, ...props }: React.ComponentProps<"div">) {
   return (

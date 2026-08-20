@@ -217,25 +217,14 @@ switcher's status dot — take `ring-chrome`. `ring-sidebar` there paints a halo
 
 ### The frame
 
-| Side | Value |
-| --- | --- |
-| Left, right, bottom | `--frame-inset` (12px) |
-| Top | `--app-frame-top` |
+`ContentSurface` is inset by `--frame-inset` (12px) on all four sides — one
+quantity, spent four times, so the frame is even by construction rather than by
+four numbers that happen to agree.
 
-One quantity for the inset, spent on all four sides, so the frame is even by
-construction rather than by four numbers that happen to agree.
-
-The top is not a margin but an **alignment**: the card starts half way down the
-sidebar's header block, so a band of chrome carries the host switcher across the
-top of the window. That height is **measured**, not written down — the header
-follows its own padding and type size, and it changes outright when the column
-collapses and the switcher stops sharing a row with the collapse button.
-`AppShell` observes it and publishes `--sidebar-header-height`; `index.css`
-halves it, floors it at `--frame-inset`, and reverts to a plain even inset below
-`md`, where the sidebar is a sheet and there is no header column to align to.
-
-Two numbers written down beside each other would agree today and drift the first
-time either moved, by an amount small enough that nobody notices for weeks.
+The top was briefly a special case, aligned to the sidebar's header block and
+measured at runtime to stay aligned as the header changed. That is gone, and so
+is the measurement: an even frame is what this needs, and a mechanism kept for a
+rule that no longer exists is a thing that rots.
 
 ### Every page is framed
 

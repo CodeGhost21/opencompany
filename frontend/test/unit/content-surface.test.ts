@@ -56,13 +56,9 @@ describe("ContentSurface", () => {
     // edge is what the closed first attempt shipped, and it produced a sliver
     // rather than a frame.
     expect(classes).toContain("m-(--frame-inset)");
-    // The top is an alignment rather than a margin: it meets the bottom of the
-    // sidebar's header block. Ordered after `m-*` so it wins the merge — the
-    // reverse order silently loses, and the card would sit at the plain inset.
-    expect(classes).toContain("mt-(--app-frame-top)");
-    expect(classes.indexOf("mt-(--app-frame-top)")).toBeGreaterThan(
-      classes.indexOf("m-(--frame-inset)"),
-    );
+    // And nothing overrides one side of it: an even frame is the contract, so
+    // a stray `mt-*`/`pt-*` reintroducing a special case fails here.
+    expect(classes.filter((c) => /^m[trbl]-/.test(c))).toEqual([]);
     expect(classes).toContain("rounded-2xl");
     // The edge carries the chrome hairline, and the sheet is opaque: it is the
     // only opaque surface in the shell, so anything a page draws stacks on it.

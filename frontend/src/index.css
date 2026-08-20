@@ -694,52 +694,17 @@
  * The app frame — how far the content card is inset from the window chrome
  * (issue #1178).
  *
- * `--frame-inset` is the whole quantity: `ContentSurface` spends it on all four
- * sides, so the frame is even by construction rather than by four numbers that
- * happen to agree.
+ * One quantity, spent on all four sides by `ContentSurface`, so the frame is
+ * even by construction rather than by four numbers that happen to agree.
  *
- * The top is the one exception, and it is an alignment rather than a margin.
- * The card's top edge sits HALF WAY down the sidebar's header block — the host
- * switcher and the collapse button — so a band of chrome runs across the top of
- * the window with the switcher standing in it, and the card begins partway down
- * the switcher rather than under it. Half rather than the full height because
- * the full height reads as a gap; half reads as an alignment.
- *
- * That height is MEASURED, not written down. The header is a flex box whose
- * height follows its own padding, its type size, and whether the column is
- * collapsed (collapsed, it stacks the switcher above the button and gets
- * taller). Two numbers that match today would drift the first time any of those
- * changed, and the misalignment would be small enough to go unnoticed for
- * weeks. `AppShell` observes the header and publishes its height here as
- * `--sidebar-header-height`; this is the default for the moment before the
- * first measurement lands.
- *
- * Below `md` the sidebar is a sheet rather than a column, so there is no header
- * band to align to and the top reverts to the same inset as the other three
- * sides. Deliberate: an open sheet DOES mount a header, and without this the
- * card would jump every time it opened.
+ * It was briefly a special case on top, aligned to the sidebar's header block
+ * and measured at runtime to stay aligned. That is gone, along with the
+ * measurement that fed it: an even frame is what this needs, and a mechanism
+ * kept for a rule that no longer exists is a thing that rots.
  * ========================================================================== */
 
 :root {
     --frame-inset: 0.75rem;
-}
-
-[data-slot="sidebar-wrapper"] {
-    --app-frame-top: var(--frame-inset);
-}
-
-@media (min-width: 48rem) {
-    [data-slot="sidebar-wrapper"] {
-        /* `max()` does two jobs at once. Before the first measurement lands
-           `--sidebar-header-height` is unset, so the halved term is `0px` and
-           the plain inset wins — no flash of a card jammed against the top
-           edge. And it guarantees the top is never TIGHTER than the other three
-           sides, whatever a future header measures. */
-        --app-frame-top: max(
-            var(--frame-inset),
-            calc(var(--sidebar-header-height, 0px) / 2)
-        );
-    }
 }
 
 :root {

@@ -36,13 +36,6 @@ import type { ReactNode } from "react";
  * four numbers that happen to agree — and so it reads as a deliberate frame
  * rather than the hairline sliver a three-sided inset gives.
  *
- * The top is then overridden with `--app-frame-top`, which is an *alignment*
- * rather than a margin: the card starts half way down the sidebar's header
- * block, so a band of chrome carries the host switcher across the top of the
- * window. That value is derived from the header's measured height on a desktop
- * layout and falls back to `--frame-inset` below `md`, where there is no header
- * column to align to. See the app-frame block in `index.css`.
- *
  * `min-h-0` is what lets a view's own `overflow-y-auto` actually scroll: a flex
  * item's default `min-height: auto` floors it at its content's height, so
  * without this the surface grows to fit the page and the scroll happens on the
@@ -60,7 +53,7 @@ import type { ReactNode } from "react";
  */
 const CARD =
   "relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden " +
-  "m-(--frame-inset) mt-(--app-frame-top) rounded-2xl border border-chrome-border bg-background shadow-sm";
+  "m-(--frame-inset) rounded-2xl border border-chrome-border bg-background shadow-sm";
 
 export function ContentSurface({ children }: { children: ReactNode }) {
   return (

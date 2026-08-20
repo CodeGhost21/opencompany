@@ -86,7 +86,6 @@ async function shell(page: Page) {
     };
 
     const root = q('[data-slot="sidebar-wrapper"]');
-    const header = q('[data-slot="sidebar-header"]');
     const sidebar = q('[data-slot="sidebar-inner"]');
     const sidebarColumn = q('[data-slot="sidebar-container"]');
     const inset = q('[data-slot="sidebar-inset"]');
@@ -108,9 +107,6 @@ async function shell(page: Page) {
       unframed: card?.getAttribute("data-unframed") ?? null,
       insetBox: box(inset),
       cardBox: box(card),
-      headerBox: box(header),
-      // The resolved top inset, so a failure says which value was in play.
-      frameTop: root ? getComputedStyle(root).getPropertyValue("--app-frame-top").trim() : null,
     };
   });
 }
@@ -146,60 +142,24 @@ for (const theme of ["light", "dark"] as const) {
     expect(frame).not.toBeNull();
     expect(card).not.toBeNull();
 
-    // A frame, not a sliver: at least 8px of chrome on every side, including the
-    // bottom and the right, which the closed first attempt left flush.
-    for (const [side, gap] of [
-      ["left", card!.left - frame!.left],
-      ["top", card!.top - frame!.top],
-      ["right", frame!.right - card!.right],
-      ["bottom", frame!.bottom - card!.bottom],
-    ] as const) {
+    // A frame, not a sliver, and an EVEN one: the four sides come from a single
+    // `--frame-inset`, so they are equal by construction rather than by four
+    // numbers that happen to agree. The closed first attempt at this issue
+    // inset three sides and left the fourth flush, which is what produced a
+    // sliver instead of a frame.
+    const insets = {
+      left: card!.left - frame!.left,
+      top: card!.top - frame!.top,
+      right: frame!.right - card!.right,
+      bottom: frame!.bottom - card!.bottom,
+    };
+    for (const [side, gap] of Object.entries(insets)) {
       expect(gap, `${side} inset`).toBeGreaterThanOrEqual(8);
+      expect(gap, `${side} inset matches the left`).toBeCloseTo(insets.left, 0);
     }
 
     expect(s.cardRadius).toBeGreaterThanOrEqual(8);
     expect(s.cardBorderWidth).toBeGreaterThan(0);
-  });
-
-  test(`the card's top edge sits half way down the sidebar header (${theme})`, async ({
-    page,
-  }) => {
-    await open(page, theme, "/#/settings");
-    const s = await shell(page);
-
-    // The top inset is an *alignment*, not a margin: a band of chrome runs
-    // across the top of the window with the host switcher standing in it, and
-    // the card begins part way down it. Asserted as a ratio of the header's own
-    // measured height rather than against a number, because the number is
-    // measured at runtime — which is the point. A hardcoded inset beside a
-    // hardcoded header height would agree today and drift the first time either
-    // moved, by an amount too small for anyone to notice for weeks.
-    expect(s.headerBox).not.toBeNull();
-    expect(s.cardBox!.top).toBeCloseTo(s.headerBox!.bottom / 2, 0);
-
-    // And it is genuinely lower than the other three sides, so the band exists.
-    expect(s.cardBox!.top - s.insetBox!.top).toBeGreaterThan(
-      s.cardBox!.left - s.insetBox!.left,
-    );
-  });
-
-  test(`collapsing the sidebar moves the card's top edge with it (${theme})`, async ({
-    page,
-  }) => {
-    await open(page, theme, "/#/settings");
-    const before = await shell(page);
-
-    // Collapsing stacks the switcher above the collapse button instead of
-    // sharing a row with it, so the header block gets TALLER. This is the case
-    // a fixed inset cannot follow, and the reason the value is measured.
-    await page.getByRole("button", { name: "Collapse sidebar" }).first().click();
-    await expect
-      .poll(async () => (await shell(page)).headerBox!.bottom)
-      .toBeGreaterThan(before.headerBox!.bottom);
-
-    const after = await shell(page);
-    expect(after.cardBox!.top).toBeCloseTo(after.headerBox!.bottom / 2, 0);
-    expect(after.cardBox!.top).toBeGreaterThan(before.cardBox!.top);
   });
 
   test(`the knowledge graph fills the card without spilling out of it (${theme})`, async ({
@@ -208,14 +168,24 @@ for (const theme of ["light", "dark"] as const) {
     await open(page, theme, "/#/overview");
 
     const graph = await page.evaluate(() => {
-      const card = document.querySelector('[data-testid="content-surface"]');
+      const card = document.querySelector('[data-testid="content-surface"]')!;
       const kg = document.querySelector(".oc-kg");
+      const box = card.getBoundingClientRect();
+      // The card's INNER box. Its 1px hairline is part of its border box, so the
+      // content starts one pixel in on every side — `clientLeft`/`clientTop` are
+      // exactly that border, and `clientWidth`/`clientHeight` the box inside it.
+      const inner = {
+        left: box.left + card.clientLeft,
+        top: box.top + card.clientTop,
+        right: box.left + card.clientLeft + card.clientWidth,
+        bottom: box.top + card.clientTop + card.clientHeight,
+      };
       const rect = (el: Element | null) => {
         if (!el) return null;
         const r = el.getBoundingClientRect();
         return { left: r.left, top: r.top, right: r.right, bottom: r.bottom };
       };
-      return { card: rect(card), kg: rect(kg) };
+      return { inner, kg: rect(kg) };
     });
 
     // Every page is framed now, the graph included. What matters is that it
@@ -224,10 +194,10 @@ for (const theme of ["light", "dark"] as const) {
     // viewport lays the graph out taller than the box that clips it and crops
     // the bottom band — the legend with it.
     expect(graph.kg).not.toBeNull();
-    expect(graph.kg!.left).toBeCloseTo(graph.card!.left, 0);
-    expect(graph.kg!.top).toBeCloseTo(graph.card!.top, 0);
-    expect(graph.kg!.right).toBeCloseTo(graph.card!.right, 0);
-    expect(graph.kg!.bottom).toBeCloseTo(graph.card!.bottom, 0);
+    expect(graph.kg!.left).toBeCloseTo(graph.inner.left, 0);
+    expect(graph.kg!.top).toBeCloseTo(graph.inner.top, 0);
+    expect(graph.kg!.right).toBeCloseTo(graph.inner.right, 0);
+    expect(graph.kg!.bottom).toBeCloseTo(graph.inner.bottom, 0);
   });
 }
 
@@ -236,15 +206,23 @@ test("the workflow canvas fills the card and keeps its minimap inside it", async
   await openFirstWorkflow(page);
 
   const canvas = await page.evaluate(() => {
-    const card = document.querySelector('[data-testid="content-surface"]');
+    const card = document.querySelector('[data-testid="content-surface"]')!;
     const flow = document.querySelector(".react-flow");
     const mini = document.querySelector(".react-flow__minimap");
+    const box = card.getBoundingClientRect();
+    // The card's inner box — its hairline is part of the border box, so the
+    // content it clips starts one pixel in on every side.
+    const inner = {
+      left: box.left + card.clientLeft,
+      right: box.left + card.clientLeft + card.clientWidth,
+      bottom: box.top + card.clientTop + card.clientHeight,
+    };
     const rect = (el: Element | null) => {
       if (!el) return null;
       const r = el.getBoundingClientRect();
       return { left: r.left, right: r.right, bottom: r.bottom, width: r.width, height: r.height };
     };
-    return { card: rect(card), flow: rect(flow), mini: rect(mini) };
+    return { inner, flow: rect(flow), mini: rect(mini) };
   });
 
   // React Flow computes its viewport transform and its minimap viewbox from the
@@ -252,32 +230,14 @@ test("the workflow canvas fills the card and keeps its minimap inside it", async
   // measures is the card — not a box wider than the one it is clipped to. That
   // is the crop class of bug #1259 and #1261 were filed for.
   expect(canvas.flow).not.toBeNull();
-  expect(canvas.flow!.left).toBeCloseTo(canvas.card!.left, 0);
-  expect(canvas.flow!.right).toBeCloseTo(canvas.card!.right, 0);
+  expect(canvas.flow!.left).toBeCloseTo(canvas.inner.left, 0);
+  expect(canvas.flow!.right).toBeCloseTo(canvas.inner.right, 0);
 
   // And the minimap, pinned to the canvas's bottom-right, is inside the card
   // rather than under its rounded corner or past its edge.
   expect(canvas.mini).not.toBeNull();
-  expect(canvas.mini!.right).toBeLessThanOrEqual(canvas.card!.right);
-  expect(canvas.mini!.bottom).toBeLessThanOrEqual(canvas.card!.bottom);
+  expect(canvas.mini!.right).toBeLessThanOrEqual(canvas.inner.right);
+  expect(canvas.mini!.bottom).toBeLessThanOrEqual(canvas.inner.bottom);
   expect(canvas.mini!.width).toBeGreaterThan(0);
   expect(canvas.mini!.height).toBeGreaterThan(0);
-});
-
-test("below md there is no header band, so the top inset is even again", async ({ page }) => {
-  // The sidebar is a sheet at this width, not a column, so there is no header
-  // block for the card to align to. Deliberately reverted to the plain inset
-  // rather than left to whatever an open sheet happens to measure — without
-  // this the card would jump every time the sheet opened.
-  await page.setViewportSize({ width: 390, height: 844 });
-  await open(page, "light", "/#/settings");
-  const s = await shell(page);
-
-  const { insetBox: frame, cardBox: card } = s;
-  const top = card!.top - frame!.top;
-  const left = card!.left - frame!.left;
-  const right = frame!.right - card!.right;
-  expect(top).toBeCloseTo(left, 0);
-  expect(top).toBeCloseTo(right, 0);
-  expect(top).toBeGreaterThanOrEqual(8);
 });
