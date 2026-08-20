@@ -30,10 +30,19 @@
 // is in flight this reasons about the viewport it asked for, not the one on
 // screen. `settledAtRef` is when that stops being true.
 //
+// That in-flight window is also why the canvas has to TELL this component when
+// the operator takes over. While a reveal is settling its own opinion of the
+// viewport outranks the live one, so an operator who pans mid-animation would
+// otherwise be invisible here — and closing the panel would put the canvas back
+// over the top of what they just did. `onMove` on `<ReactFlow>` distinguishes
+// the two for us: React Flow forwards d3-zoom's `sourceEvent`, which is null
+// for a programmatic transition (ours) and a real pointer or wheel event for
+// theirs. `operatorTookOver` is the seam; `WorkflowsView` wires it.
+//
 // See `node-reveal.ts` for the arithmetic and for why this pans rather than
 // zooms or reflows.
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useImperativeHandle, useRef, useState } from "react";
 import { useReactFlow, useStore } from "@xyflow/react";
 
 import { NODE_H, NODE_W } from "./graph";
@@ -80,8 +89,14 @@ function usePrefersReducedMotion(): boolean {
   return reduced;
 }
 
+/** What `WorkflowsView` calls when the operator moves the canvas themselves. */
+export interface RevealSelectedNodeHandle {
+  operatorTookOver(): void;
+}
+
 export function RevealSelectedNode({
   nodeId,
+  handleRef,
 }: {
   /**
    * The node the inspector is open on, or `null` when it is closed.
@@ -91,6 +106,8 @@ export function RevealSelectedNode({
    * conversation about the whole workflow has no one node it must not hide.
    */
   nodeId: string | null;
+  /** Where this component publishes {@link RevealSelectedNodeHandle}. */
+  handleRef?: React.RefObject<RevealSelectedNodeHandle | null>;
 }) {
   const { getInternalNode, getViewport, setViewport } = useReactFlow();
   const paneWidth = useStore((s) => s.width);
@@ -105,6 +122,16 @@ export function RevealSelectedNode({
   const appliedRef = useRef<Viewport | null>(null);
   /** When that animation stops being ours. See the note at the top. */
   const settledAtRef = useRef(0);
+
+  /** The operator has panned or zoomed: the canvas is theirs now, so drop every
+   * claim on it. Nothing is restored on close, and the next reveal anchors on
+   * the view they chose rather than on one from two selections ago. */
+  const operatorTookOver = useCallback(() => {
+    restoreRef.current = null;
+    appliedRef.current = null;
+    settledAtRef.current = 0;
+  }, []);
+  useImperativeHandle(handleRef, () => ({ operatorTookOver }), [operatorTookOver]);
 
   useEffect(() => {
     const applied = appliedRef.current;

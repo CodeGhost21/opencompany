@@ -236,3 +236,51 @@ test("with reduced motion the reveal is a cut, and still clears the panel both w
     ).toBeLessThan(2);
   }).toPass({ timeout: 5_000 });
 });
+
+test("a pan of the operator's own outlives the inspector", async ({ page }) => {
+  // The restore must never yank the canvas back from under someone who moved it
+  // themselves. "Their view is theirs" is the half of the promise that keeps
+  // the other half safe to make.
+  //
+  // Scope, stated so nobody reads more into a green: this drives the settled
+  // path, where the decision is made from the live viewport. The narrower case
+  // — a pan AND a close both inside the reveal's ~280ms animation window, where
+  // the component is deliberately trusting the viewport it asked for over the
+  // live one — is handled by `<ReactFlow>`'s `onMove` reporting the operator's
+  // gesture (d3's `sourceEvent` is null for our transition and a real pointer
+  // event for theirs). Playwright cannot reliably land two interactions inside
+  // 280ms, so a spec that claimed to cover it would be claiming a timing it
+  // does not control; it was checked by hand instead.
+  const { flow, node, before } = await setup(page, 1440);
+
+  // Empty canvas, well above the single row of nodes and clear of the overlay.
+  const graph = await box(flow);
+  const from = { x: graph.x + 400, y: graph.y + 80 };
+
+  await node.click();
+  await page.mouse.move(from.x, from.y);
+  await page.mouse.down();
+  await page.mouse.move(from.x - 80, from.y + 40, { steps: 4 });
+  await page.mouse.up();
+
+  const panel = inspector(page);
+  await expect(panel).toBeVisible();
+  const moved = await box(node);
+  expect(
+    Math.abs(moved.x - before.x),
+    "the drag must actually have panned the canvas",
+  ).toBeGreaterThan(2);
+
+  await panel.getByRole("button", { name: "Close" }).click();
+  await expect(panel).toBeHidden();
+
+  // Given the full restore animation's worth of time to misbehave in.
+  await expect(async () => {
+    const after = await box(node);
+    expect(
+      Math.abs(after.x - moved.x),
+      "the operator's own view survives the close",
+    ).toBeLessThan(2);
+    expect(Math.abs(after.y - moved.y)).toBeLessThan(2);
+  }).toPass({ timeout: 5_000 });
+});
