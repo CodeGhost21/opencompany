@@ -75,8 +75,9 @@ import {
 import { Textarea } from "@/components/ui/textarea";
 
 /** A node row being edited. `key` is a stable React key, independent of the
- * user-editable `id` field (which can be blank or duplicated mid-edit). */
-interface DraftNode {
+ * user-editable `id` field (which can be blank or duplicated mid-edit).
+ * Exported for direct unit testing, same as {@link WiredChannels}. */
+export interface DraftNode {
   key: string;
   id: string;
   kind: string;
@@ -386,7 +387,7 @@ function nextKey(): string {
  * Anything added to `DraftNode` behind a `node.kind === …` control belongs in
  * this reset.
  */
-function changeKind(kind: string): Partial<DraftNode> {
+export function changeKind(kind: string): Partial<DraftNode> {
   return {
     kind,
     agent: "",
@@ -401,6 +402,16 @@ function changeKind(kind: string): Partial<DraftNode> {
     config: undefined,
     configDraft: blankConfigDraft(kind),
     configExtra: undefined,
+    // `repeatable` is valid on `tool_call`/`http_request` only (issue #850);
+    // the host rejects it on every other kind. This dialog has no control to
+    // author or clear it — it only round-trips a value set through the write
+    // route (see `DraftNode.repeatable`) — so a kind change is the one place
+    // left to reset it, same as `config` above: unconditionally, on ANY kind
+    // change including between the two kinds that could both hold it, so
+    // there is one rule rather than a kind-pair special case. Otherwise
+    // switching away from a call node leaves a value `submit()` still sends,
+    // and the save fails on a field the author can no longer see.
+    repeatable: undefined,
   };
 }
 
