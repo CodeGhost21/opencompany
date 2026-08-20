@@ -18,7 +18,64 @@
     -->
   </head>
   <body>
-    <div id="root"></div>
+    <!--
+      Boot placeholder, replaced by React on mount.
+
+      A hosted company scales to zero when idle, so the first request to a quiet
+      one is *held* by the platform while its pod boots — measured at 8-13s. For
+      that whole window the browser has an empty document: no bundle, no React,
+      not even the theme. The page rendered plain white and was indistinguishable
+      from a broken deployment (#1241).
+
+      This is deliberately inert: inline styles and markup only, no script and no
+      stylesheet link, so it paints on the first byte of HTML rather than waiting
+      for anything else to load. It matches the app's own `--surface-*-bg`
+      primitives and follows `prefers-color-scheme`, so the handover to the real
+      shell is not a flash of a different colour.
+
+      The copy says "waking" rather than "loading" because that is the true
+      claim: nothing is broken and nothing is slow, a machine is being started.
+    -->
+    <div id="root">
+      <div id="boot" style="
+        position:fixed; inset:0; display:flex; flex-direction:column;
+        align-items:center; justify-content:center; gap:14px;
+        background:#F7F7FC; color:#6B6B7B;
+        font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;
+        font-size:14px; letter-spacing:.01em;
+      ">
+        <div style="
+          width:22px; height:22px; border-radius:50%;
+          border:2px solid currentColor; border-top-color:transparent;
+          animation:boot-spin .8s linear infinite; opacity:.55;
+        "></div>
+        <div>Waking this company&hellip;</div>
+        <div id="boot-hint" style="font-size:12px; opacity:.6;">Idle companies start on demand, which takes a few seconds.</div>
+        <div id="boot-slow" style="font-size:12px; opacity:0; max-width:34ch; text-align:center;">
+          This is taking longer than a normal wake. If it does not finish, the
+          company may have failed to start rather than be starting.
+        </div>
+      </div>
+    </div>
+    <style>
+      @keyframes boot-spin { to { transform: rotate(360deg) } }
+      /* After a wake budget's worth of waiting, stop claiming this is normal.
+         Done in CSS rather than script so the placeholder stays inert: a
+         message that says "waking" forever would be a worse lie than the blank
+         page it replaces. 35s is comfortably past both the measured 8-13s wake
+         and the manager's 30s startup timeout. */
+      @keyframes boot-reveal { to { opacity:.75 } }
+      @keyframes boot-fade   { to { opacity:0 } }
+      #boot-slow { animation: boot-reveal .4s ease 35s forwards }
+      #boot-hint { animation: boot-fade .4s ease 35s forwards }
+      /* Reduced motion: keep the indicator, drop the spin. */
+      @media (prefers-reduced-motion: reduce) {
+        #boot [style*="boot-spin"] { animation: none !important }
+      }
+      @media (prefers-color-scheme: dark) {
+        #boot { background:#08090B !important; color:#8A8A9A !important }
+      }
+    </style>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
