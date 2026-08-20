@@ -472,6 +472,16 @@ pub struct RuntimeBuilder {
     /// consumed when a company **explicitly** grants the `search` namespace.
     #[cfg(feature = "openhuman")]
     search_backend: Option<crate::harness::search::SearchBackend>,
+    /// Issue #1245: builds the engine for a `transport = "local"` `acp`
+    /// harness. `None` — the default — leaves every such harness
+    /// `unavailable`, exactly as before this existed; only the desktop shell
+    /// (the only implementation this crate does not itself provide) sets it.
+    ///
+    /// Gated on `acp` specifically, not `openhuman` — `AcpAgentFactory` lives
+    /// behind the narrower feature (`acp = ["openhuman"]`), so an
+    /// `openhuman`-only build (no `acp`) does not have the type to name here.
+    #[cfg(feature = "acp")]
+    acp_agents: Option<Arc<dyn crate::harness::acp::run_turn::AcpAgentFactory>>,
     /// Issue #290: the live state of the runtime this build is *replacing*.
     ///
     /// Present only on a rebuild. It supplies the per-instance pieces a second
@@ -551,6 +561,8 @@ impl RuntimeBuilder {
             media_backend: None,
             #[cfg(feature = "openhuman")]
             search_backend: None,
+            #[cfg(feature = "acp")]
+            acp_agents: None,
             handover: None,
         }
     }
@@ -964,6 +976,21 @@ impl RuntimeBuilder {
         model_override: Option<String>,
     ) -> Self {
         self.harness_inference = Some((config, model_override));
+        self
+    }
+
+    /// Issue #1245: sets the factory that builds the engine for a
+    /// `transport = "local"` `acp` harness. Only the desktop shell has an
+    /// implementation to give this — a server build leaves it unset, so
+    /// `lanes::build` records every such harness `unavailable` instead of
+    /// having anything to spawn a subprocess with. Feature-gated on `acp`
+    /// specifically; see the field's own doc for why.
+    #[cfg(feature = "acp")]
+    pub fn with_acp_agents(
+        mut self,
+        factory: Arc<dyn crate::harness::acp::run_turn::AcpAgentFactory>,
+    ) -> Self {
+        self.acp_agents = Some(factory);
         self
     }
 
@@ -2651,12 +2678,23 @@ impl RuntimeBuilder {
                             // `serves`) could build the whole roster on the
                             // default provider regardless of which agents it
                             // actually serves.
+                            //
+                            // `self.acp_agents` only exists under `acp`
+                            // (narrower than this whole block's `openhuman`
+                            // gate) — an `openhuman`-only build has nothing to
+                            // pass, so every `local` acp harness resolves to
+                            // `unavailable` there, same as before issue #1245.
+                            #[cfg(feature = "acp")]
+                            let acp_agents = self.acp_agents.as_deref();
+                            #[cfg(not(feature = "acp"))]
+                            let acp_agents = None;
                             let lanes = crate::harness::lanes::build(
                                 &record,
                                 pool.clone(),
                                 &deps,
                                 secrets.clone(),
                                 env_default,
+                                acp_agents,
                             );
                             if !lanes.lanes.is_empty() || !lanes.unavailable.is_empty() {
                                 tracing::info!(

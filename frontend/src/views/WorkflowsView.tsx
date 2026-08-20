@@ -2175,9 +2175,9 @@ export function WorkflowsView({
                 {/* Navigation is not identity. The hairline says so, so the
                     name reads as a heading rather than as the next link. */}
                 <span aria-hidden className="h-4 w-px shrink-0 bg-border" />
-                <h2 className="min-w-0 truncate text-sm font-semibold" data-testid="workflow-detail-name">
+                <h1 className="min-w-0 truncate text-sm font-semibold" data-testid="workflow-detail-name">
                   {selected?.name ?? graph?.name ?? selectedId}
-                </h2>
+                </h1>
                 {/* Issue #228: the last run's outcome at a glance — including for
                     a scheduled run nobody watched, which is the case the issue is
                     about. Absent until this workflow has run at least once. */}
@@ -2476,7 +2476,7 @@ export function WorkflowsView({
              act on the list rather than on any workflow in it. */
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div className="flex min-w-0 items-center gap-2">
-              <h2 className="text-sm font-semibold">Workflows</h2>
+              <h1 className="text-sm font-semibold">Workflows</h1>
               <Badge variant="secondary">{workflows.length}</Badge>
             </div>
             <div className="flex min-w-0 flex-wrap items-center justify-end gap-2">
@@ -2797,6 +2797,13 @@ export function WorkflowsView({
                 colorMode={resolvedTheme === "dark" ? "dark" : "light"}
                 fitView
                 fitViewOptions={{ padding: 0.2 }}
+                // Issue #1261: the library default (0.5) is above the scale
+                // most shipped templates need to fit — an 8-10 node single-row
+                // pipeline needs roughly 0.3. Left at the default, `fitView`
+                // clamps to 0.5 and permanently crops the first/last node,
+                // and the canvas's own Zoom Out control is disabled from
+                // load because the viewport is already pinned at the floor.
+                minZoom={0.1}
                 nodesDraggable={false}
                 nodesConnectable={false}
                 elementsSelectable

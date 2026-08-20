@@ -9245,6 +9245,7 @@ agent = "claude"
             &brain.deps,
             secrets,
             None,
+            None,
         );
 
         assert!(

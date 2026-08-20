@@ -3186,6 +3186,7 @@ dependencies = [
  "tinyflows",
  "tinymemory",
  "tinymemory-api",
+ "tinymemory-conformance",
  "tinymemory-core",
  "tinymemory-remote",
  "tinymemory-tinycortex",
@@ -5319,6 +5320,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "tinymemory-conformance"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "serde_json",
+ "tinymemory-api",
+]
+
+[[package]]
 name = "tinymemory-core"
 version = "0.1.0"
 dependencies = [
@@ -5356,6 +5367,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "futures",
  "reqwest",
  "serde",
  "serde_json",

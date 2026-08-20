@@ -70,6 +70,8 @@ import { taskApprovalBlock } from "@/lib/task-approvals";
 import {
   byline,
   composableFields,
+  composeDialogDescription,
+  composeDialogTitle,
   deleteEntry,
   EVERY_STATUS,
   filteredEmptyNotice,
@@ -267,6 +269,21 @@ export function LedgersView({
   const taskById = useMemo(
     () => new Map(tasks.map((task) => [task.id, task])),
     [tasks],
+  );
+
+  /**
+   * Ids the compose dialog can currently confirm exist (issue #1264).
+   *
+   * `read.entries` is server-filtered by the search box and status filter, so
+   * this can under-report — a row hidden by the current filter or truncated
+   * past the fetched page reads as "does not exist" here. Accepted: this is a
+   * display-copy fix for the dialog title, not a data-fetching change, and the
+   * common case (a brand-new row's id typed for the first time) never matches
+   * anything anyway.
+   */
+  const existingIds = useMemo(
+    () => new Set((read?.entries ?? []).map((entry) => entry.id)),
+    [read],
   );
 
   /** The clock the "blocked since" labels measure against (issue #883). */
@@ -779,6 +796,7 @@ export function LedgersView({
         <ComposeDialog
           ledger={ledger}
           composing={composing}
+          existingIds={existingIds}
           saving={saving}
           onChange={setComposing}
           onCancel={() => setComposing(null)}
@@ -1060,6 +1078,7 @@ function EntryCard({
 function ComposeDialog({
   ledger,
   composing,
+  existingIds,
   saving,
   onChange,
   onCancel,
@@ -1067,6 +1086,7 @@ function ComposeDialog({
 }: {
   ledger: LedgerSummary;
   composing: Composing;
+  existingIds: ReadonlySet<string>;
   saving: boolean;
   onChange: (next: Composing) => void;
   onCancel: () => void;
@@ -1083,16 +1103,10 @@ function ComposeDialog({
       <DialogContent className="max-h-[85vh] max-w-2xl overflow-y-auto">
         <DialogHeader>
           <DialogTitle>
-            {composing.closing
-              ? `Close ${composing.id}`
-              : composing.id
-                ? `Amend ${composing.id}`
-                : `New row on ${ledger.title}`}
+            {composeDialogTitle(ledger, composing, existingIds)}
           </DialogTitle>
           <DialogDescription>
-            {composing.id
-              ? "Only what you change is written; everything else on the row is left alone."
-              : "Give it a short, readable id — it is how anybody names this row later."}
+            {composeDialogDescription(composing, existingIds)}
           </DialogDescription>
         </DialogHeader>
 
