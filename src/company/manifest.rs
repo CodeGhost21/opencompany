@@ -817,8 +817,22 @@ impl CompanyManifest {
                          A runner advertises the harnesses it can drive — this host does not choose one for it."
                     ));
                 }
+                if acp.model.is_some() {
+                    problems.push(format!(
+                        "`[[harness]]` `{id}` uses `transport = \"runner\"` but names a `model`. \
+                         Model overrides aren't supported for a runner yet — the runner wire \
+                         protocol doesn't carry them."
+                    ));
+                }
             }
             _ => unreachable!("transport was checked against ACP_TRANSPORTS above"),
+        }
+
+        if acp.model.as_deref().is_some_and(|m| m.trim().is_empty()) {
+            problems.push(format!(
+                "`[[harness]]` `{id}`'s `[harness.acp].model` is set but empty. Drop the key \
+                 to use the agent's own default, rather than naming an empty one."
+            ));
         }
 
         problems
@@ -2249,6 +2263,43 @@ provider = "openrouter"
                 "`{acp}` should be valid: {:?}",
                 harness_problems(&manifest)
             );
+        }
+    }
+
+    /// Issue #1245: `model` is a hint forwarded to the agent's own startup
+    /// lever, not a credential — so unlike `[harness.inference]` it is
+    /// perfectly valid on a `local` acp harness. It is rejected on `runner`
+    /// (no wire protocol yet) and when set to an empty string (nothing to
+    /// forward, and silently accepting it invites "my model setting does
+    /// nothing").
+    #[test]
+    fn model_is_valid_on_local_rejected_on_runner_and_must_not_be_empty() {
+        let cases: &[(&str, Option<&str>)] = &[
+            (
+                "transport = \"local\"\nagent = \"claude\"\nmodel = \"claude-opus-4-5\"\n",
+                None,
+            ),
+            (
+                "transport = \"runner\"\nrunner = \"laptop\"\nmodel = \"claude-opus-4-5\"\n",
+                Some("but names a `model`"),
+            ),
+            (
+                "transport = \"local\"\nagent = \"claude\"\nmodel = \"   \"\n",
+                Some("is set but empty"),
+            ),
+        ];
+        for (acp, expected) in cases {
+            let manifest = parse(&format!(
+                "{BASE}\n[[harness]]\nid = \"a\"\nkind = \"acp\"\ndefault = true\n\n[harness.acp]\n{acp}"
+            ));
+            let problems = harness_problems(&manifest);
+            match expected {
+                None => assert!(problems.is_empty(), "`{acp}` should be valid: {problems:?}"),
+                Some(msg) => assert!(
+                    problems.iter().any(|p| p.contains(msg)),
+                    "`{acp}` should report {msg:?}, got {problems:?}"
+                ),
+            }
         }
     }
 

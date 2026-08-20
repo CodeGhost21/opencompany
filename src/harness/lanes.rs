@@ -35,6 +35,15 @@
 //! the default the same way as every other harness, in this one place, is what
 //! closes that gap for good instead of leaving a second opinion for a future
 //! caller to reintroduce.
+//!
+//! ## `local` acp harnesses, when a factory is wired (issue #1245)
+//!
+//! `transport = "local"` now has a real engine wherever the caller supplies an
+//! [`AcpAgentFactory`](crate::harness::acp::run_turn::AcpAgentFactory) — the
+//! desktop shell, which owns the only implementation this crate does not
+//! provide itself. A server build, or a desktop build asked to run a `runner`
+//! harness (its socket transport is still unwired), passes `None`/leaves it
+//! `unavailable` exactly as before.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -48,6 +57,16 @@ use crate::ports::SecretStore;
 use crate::ports::types::{CompanyId, CompanyRecord};
 use crate::runtime::delegation::RunTurn;
 
+/// The type `build`'s `acp_agents` parameter takes. Real under `acp`
+/// (`crate::harness::acp::run_turn` — the `AcpAgent`/`AcpRunTurn` types — only
+/// exists there); an uninhabited placeholder otherwise, so callers built
+/// under plain `openhuman` (no `acp`) still compile and simply can never pass
+/// `Some`.
+#[cfg(feature = "acp")]
+pub type AcpFactory<'a> = &'a dyn crate::harness::acp::run_turn::AcpAgentFactory;
+#[cfg(not(feature = "acp"))]
+pub type AcpFactory<'a> = &'a std::convert::Infallible;
+
 /// Why a declared harness of `kind` has no engine on this host — the one
 /// message both the default-harness path and the named-harness loop use, so
 /// they cannot drift into saying different things about the same gap.
@@ -58,6 +77,55 @@ fn unavailable_reason(kind: &str) -> String {
             .to_string(),
         other => format!("`{other}` is not a harness kind this build knows how to run"),
     }
+}
+
+/// Resolves one `kind = "acp"` harness to an engine, or records why it has
+/// none. Shared by the default-harness resolution and the named-harness loop
+/// so the two cannot describe the same gap differently.
+#[cfg(feature = "acp")]
+fn resolve_acp_engine(
+    harness: &Harness,
+    acp_agents: Option<AcpFactory<'_>>,
+    workspace_root: &std::path::Path,
+) -> std::result::Result<Arc<dyn RunTurn>, String> {
+    // Validation guarantees `acp` is `Some` and `transport` is one of
+    // `ACP_TRANSPORTS` on every harness that reaches here — this crate's own
+    // `CompanyManifest::validate`, not a caller-supplied invariant.
+    let acp = harness
+        .acp
+        .as_ref()
+        .ok_or_else(|| unavailable_reason("acp"))?;
+
+    if acp.transport != "local" {
+        // `runner` (a remote socket dispatch) has no engine on any build yet —
+        // a materially different, larger piece of work than the local
+        // subprocess case, and out of scope here.
+        return Err(
+            "it uses `transport = \"runner\"` and this build has no runner transport wired yet"
+                .to_string(),
+        );
+    }
+
+    let factory = acp_agents.ok_or_else(|| unavailable_reason("acp"))?;
+    let agent_id = acp.agent.as_deref().unwrap_or_default();
+    factory
+        .build(agent_id, acp.model.as_deref(), workspace_root)
+        .map(|agent| {
+            Arc::new(crate::harness::acp::run_turn::AcpRunTurn::new(agent)) as Arc<dyn RunTurn>
+        })
+        .map_err(|error| format!("`{agent_id}` could not be started: {error}"))
+}
+
+/// The `openhuman`-without-`acp` build: unconditionally unavailable, exactly
+/// as every `acp` harness was before issue #1245 — `acp_agents` can only ever
+/// be `None` here (its type is uninhabited), so there is nothing to build.
+#[cfg(not(feature = "acp"))]
+fn resolve_acp_engine(
+    _harness: &Harness,
+    _acp_agents: Option<AcpFactory<'_>>,
+    _workspace_root: &std::path::Path,
+) -> std::result::Result<Arc<dyn RunTurn>, String> {
+    Err(unavailable_reason("acp"))
 }
 
 /// The engines a company's declared harnesses resolve to on this host.
@@ -116,6 +184,7 @@ pub fn build(
     base: &HarnessDeps,
     secrets: Arc<dyn SecretStore>,
     env_default: Option<EnvDefault>,
+    acp_agents: Option<AcpFactory<'_>>,
 ) -> Lanes {
     let declared = record.manifest.effective_harnesses();
     let default_harness = record.manifest.default_harness();
@@ -131,6 +200,13 @@ pub fn build(
         "built_in" => {
             Some(Arc::new(HarnessRunTurn::new(pool, Arc::new(base.clone()))) as Arc<dyn RunTurn>)
         }
+        "acp" => match resolve_acp_engine(&default_harness, acp_agents, &base.workspace_root) {
+            Ok(engine) => Some(engine),
+            Err(reason) => {
+                unavailable.push((default_harness_id.clone(), reason));
+                None
+            }
+        },
         kind => {
             unavailable.push((default_harness_id.clone(), unavailable_reason(kind)));
             None
@@ -150,6 +226,10 @@ pub fn build(
                     &default_harness_id,
                 ),
             )),
+            "acp" => match resolve_acp_engine(harness, acp_agents, &base.workspace_root) {
+                Ok(engine) => lanes.push((harness.id.clone(), engine)),
+                Err(reason) => unavailable.push((harness.id.clone(), reason)),
+            },
             kind => unavailable.push((harness.id.clone(), unavailable_reason(kind))),
         }
     }
