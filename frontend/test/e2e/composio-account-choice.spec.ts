@@ -177,17 +177,31 @@ test.afterAll(async ({ playwright }, testInfo) => {
  * issue #1303, and is not a test's to fix.
  */
 async function clickClearOfToasts(target: Locator): Promise<void> {
-  const closers = target.page().locator("[data-sonner-toast] [data-close-button]");
+  // `:not([data-removed])` because sonner keeps a dismissed toast mounted for
+  // its exit animation. Without it the front × stays the one already clicked
+  // for those frames, and the sweep spends its budget re-closing it.
+  const closers = target
+    .page()
+    .locator('[data-sonner-toast]:not([data-removed="true"]) [data-close-button]');
 
   // Separate from the retry below so that "the control never rendered" and "a
   // toast held the corner" fail with different messages.
   await target.waitFor({ state: "visible", timeout: 15_000 });
 
   await expect(async () => {
-    for (const closer of await closers.all()) {
-      // A toast that leaves on its own mid-sweep takes its × with it, which is
-      // the outcome this loop wanted anyway.
-      await closer.click({ timeout: 1_000 }).catch(() => {});
+    // Always the FRONT ×, re-queried every time. A snapshot of the stack
+    // (`closers.all()`) hands back index-bound handles, and closing one
+    // renumbers the rest — the second handle would then address a toast that
+    // moved, or nothing, and leave one standing. Bounded by the count this pass
+    // started with: a toast that arrives mid-sweep is the outer retry's, not an
+    // excuse for an unbounded loop against an agent that keeps raising them.
+    for (let left = await closers.count(); left > 0; left--) {
+      await closers
+        .first()
+        .click({ timeout: 1_000 })
+        .catch(() => {
+          /* it left on its own, which is the outcome this loop wanted */
+        });
     }
     await target.click({ timeout: 2_000 });
   }).toPass({ timeout: 15_000, intervals: [250] });
