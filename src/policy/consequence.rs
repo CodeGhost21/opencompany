@@ -2288,6 +2288,10 @@ mod tests {
             "csv_export",
             "edit",
             "file_write",
+            // Forgetting one of the agent's own memories is the same class
+            // as storing one: a mutation of the company's own memory, no
+            // counterparty, no address.
+            "memory_forget",
             "memory_store",
             // Issue #903, and the one entry that is not the agent's private
             // sandbox: it writes into the company's shared workspace. Declared
@@ -2781,6 +2785,7 @@ mod tests {
             "edit",
             "apply_patch",
             "csv_export",
+            "memory_forget",
             "memory_store",
         ] {
             let verdict = c(tool);
@@ -3191,6 +3196,7 @@ mod tests {
     fn a_tool_whose_name_says_everything_has_no_scope() {
         for tool in [
             "file_write",
+            "memory_forget",
             "memory_store",
             "shell",
             "workspace_write",
