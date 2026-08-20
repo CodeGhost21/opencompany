@@ -142,6 +142,28 @@ pub enum WorkflowRunVerdict {
     /// An operator stopped it (issue #383). Not a fault, and deliberately not
     /// grouped with `failed`: nothing about the graph went wrong.
     Stopped,
+    /// Every person this run stopped for has **nothing left to answer**, and
+    /// the run cannot go on (issue #1189).
+    ///
+    /// The reading that did not exist, and whose absence is the whole defect:
+    /// a run whose gates have no card left in the queue went on scoring
+    /// [`AwaitingApproval`](Self::AwaitingApproval) forever, so a third of one
+    /// tenant's history claimed to be waiting on a person who had nothing to
+    /// decide. There was no honest word for it, so it kept the dishonest one.
+    ///
+    /// Above [`Blocked`](Self::Blocked) and [`AwaitingApproval`](Self::AwaitingApproval)
+    /// because it *contradicts* them rather than refining them: both tell an
+    /// operator to go and decide something, and this is the state in which
+    /// there is nothing to decide. The more specific fact wins, exactly as
+    /// `failed` wins over `undelivered`.
+    ///
+    /// **It claims nothing about why.** Approving a gate does not continue the
+    /// parent run — `resume_run` spawns a *new* run with a new id and records
+    /// no link back — so a run whose gates were all approved and a run whose
+    /// cards were lost are indistinguishable from here. What is observable, and
+    /// all this word means, is that nothing in the queue is waiting on this run
+    /// any more and no decision can move it.
+    Stranded,
     /// A node stopped short because a tool call inside its turn is waiting on a
     /// person (issue #881). Not a failure and not a pause — the run will not
     /// continue on its own.
@@ -173,6 +195,7 @@ impl WorkflowRunVerdict {
             Self::Running => "running",
             Self::Failed => "failed",
             Self::Stopped => "stopped",
+            Self::Stranded => "stranded",
             Self::Blocked => "blocked",
             Self::Undelivered => "undelivered",
             Self::AwaitingApproval => "awaiting-approval",
@@ -194,6 +217,11 @@ impl WorkflowRunVerdict {
     /// * `stopped` before the delivery reads (issue #383) — a stop somebody
     ///   asked for is not a fault, and a cancelled run has no deliveries to
     ///   weigh anyway.
+    /// * `stranded` above both of them (issue #1189) — a run every one of whose
+    ///   gates has lost its card is the one state in which "go and decide it"
+    ///   is false, and `blocked` and `awaiting-approval` both say exactly that.
+    ///   A run only **partly** stranded keeps its old verdict: something there
+    ///   really is still decidable, and the per-node count carries the rest.
     /// * `blocked` before the delivery reads (issue #881) — a blocked run
     ///   carries no error, is not cancelled, is not running and routed no
     ///   report, which is precisely the shape that fell through every check.
@@ -212,6 +240,9 @@ impl WorkflowRunVerdict {
         }
         if facts.cancelled {
             return Self::Stopped;
+        }
+        if facts.fully_stranded() {
+            return Self::Stranded;
         }
         if facts.blocked_nodes > 0 {
             return Self::Blocked;
@@ -252,6 +283,13 @@ pub struct RunVerdictFacts<'a> {
     pub deliveries: &'a [DeliveryReport],
     /// How many nodes the run is waiting on a human for.
     pub pending_approvals: usize,
+    /// How many of those nodes have **no live card left** (issue #1189) — the
+    /// output of [`stranded_approvals`], which is where the join lives.
+    ///
+    /// Never greater than [`pending_approvals`](Self::pending_approvals), since
+    /// it is a filter over the same list. Zero for every caller that cannot
+    /// reconcile against the queue, which is the pre-#1189 reading.
+    pub stranded_approvals: usize,
 }
 
 impl RunVerdictFacts<'_> {
@@ -263,6 +301,34 @@ impl RunVerdictFacts<'_> {
     /// run neither of them can explain.
     fn failed(&self) -> bool {
         self.error.is_some_and(|e| !e.is_empty())
+    }
+
+    /// Whether **every** person this run stopped for has nothing left to answer
+    /// (issue #1189).
+    ///
+    /// Three conditions, and each excludes a run that is still actionable:
+    ///
+    /// * it stopped for somebody at all — a run with no gates was never
+    ///   awaiting anything, and `stranded` is a correction to `awaiting`, not a
+    ///   new way to score a clean run;
+    /// * **all** of those gates lost their card. A partly stranded run keeps
+    ///   its old verdict, because a decision that can still be made must still
+    ///   be offered; the per-node count is what says the rest was lost;
+    /// * no report is parked either. A `pending` delivery row is a *second*
+    ///   thing waiting on a person, on its own queue, and it is untouched by
+    ///   the gate join — so a run holding one is still genuinely awaiting.
+    ///
+    /// `==` rather than `>=` on purpose: the count is a filter over the same
+    /// list and cannot exceed it, so a larger value means a caller built the
+    /// facts by hand and got them wrong — in which case falling through to the
+    /// old reading is the safe direction.
+    fn fully_stranded(&self) -> bool {
+        self.pending_approvals > 0
+            && self.stranded_approvals == self.pending_approvals
+            && !self
+                .deliveries
+                .iter()
+                .any(|d| matches!(d.status, DeliveryStatus::Pending))
     }
 }
 
@@ -430,6 +496,7 @@ mod test {
             blocked_nodes: 0,
             deliveries: &[],
             pending_approvals: 0,
+            stranded_approvals: 0,
         }
     }
 
@@ -510,6 +577,9 @@ mod test {
             blocked_nodes: 1,
             deliveries: &dropped,
             pending_approvals: 1,
+            // Issue #1189: the one gate this run stopped for has no card left,
+            // so the facts satisfy `stranded` too.
+            stranded_approvals: 1,
         };
         assert_eq!(
             WorkflowRunVerdict::of(everything),
@@ -530,11 +600,24 @@ mod test {
             }),
             WorkflowRunVerdict::Stopped
         );
+        // Issue #1189. It sits ABOVE `blocked` and above `awaiting-approval`,
+        // and these facts satisfy both — which is the whole claim: a run whose
+        // every gate lost its card must not be told to go and decide it.
         assert_eq!(
             WorkflowRunVerdict::of(RunVerdictFacts {
                 running: false,
                 error: None,
                 cancelled: false,
+                ..everything
+            }),
+            WorkflowRunVerdict::Stranded
+        );
+        assert_eq!(
+            WorkflowRunVerdict::of(RunVerdictFacts {
+                running: false,
+                error: None,
+                cancelled: false,
+                stranded_approvals: 0,
                 ..everything
             }),
             WorkflowRunVerdict::Blocked
@@ -544,6 +627,7 @@ mod test {
                 running: false,
                 error: None,
                 cancelled: false,
+                stranded_approvals: 0,
                 blocked_nodes: 0,
                 ..everything
             }),
@@ -554,6 +638,7 @@ mod test {
                 running: false,
                 error: None,
                 cancelled: false,
+                stranded_approvals: 0,
                 blocked_nodes: 0,
                 deliveries: &[],
                 ..everything
@@ -608,7 +693,7 @@ mod test {
         );
     }
 
-    /// The wire tokens are the console's seven words, and `as_str` may not
+    /// The wire tokens are the console's eight words, and `as_str` may not
     /// drift from them.
     #[test]
     fn the_wire_tokens_are_the_consoles_words() {
@@ -616,6 +701,7 @@ mod test {
             (WorkflowRunVerdict::Running, "running"),
             (WorkflowRunVerdict::Failed, "failed"),
             (WorkflowRunVerdict::Stopped, "stopped"),
+            (WorkflowRunVerdict::Stranded, "stranded"),
             (WorkflowRunVerdict::Blocked, "blocked"),
             (WorkflowRunVerdict::Undelivered, "undelivered"),
             (WorkflowRunVerdict::AwaitingApproval, "awaiting-approval"),
@@ -716,6 +802,101 @@ mod test {
                 );
             }
         }
+    }
+
+    // ── Issue #1189: a run nobody can act on any more ────────────────────────
+
+    /// The marketing tenant's 34 runs: three gate nodes on `pendingApprovals`,
+    /// no blocked-node rows at all, and an empty approvals queue.
+    ///
+    /// Before this arm they scored `awaiting-approval` forever — a third of the
+    /// tenant's whole history claiming to wait on a person with nothing to
+    /// answer, and #1143's reconciliation could not reach them because it joins
+    /// on approval ids this shape never had.
+    #[test]
+    fn a_run_whose_every_gate_lost_its_card_is_stranded_not_awaiting() {
+        let verdict = WorkflowRunVerdict::of(RunVerdictFacts {
+            pending_approvals: 3,
+            stranded_approvals: 3,
+            ..clean()
+        });
+        assert_eq!(verdict, WorkflowRunVerdict::Stranded);
+        assert_ne!(
+            verdict,
+            WorkflowRunVerdict::AwaitingApproval,
+            "nothing in the queue is waiting on this run, so it must not say so"
+        );
+    }
+
+    /// The negative that makes the test above mean anything.
+    ///
+    /// A rule that fired on *any* stranded gate would satisfy it and be worse
+    /// than no rule: it would retire a run with a decision still sitting in the
+    /// queue. Two of the three are gone; the third can still be made, so the
+    /// verdict must go on saying so and the per-node count carries the loss.
+    #[test]
+    fn a_partly_stranded_run_is_still_awaiting() {
+        assert_eq!(
+            WorkflowRunVerdict::of(RunVerdictFacts {
+                pending_approvals: 3,
+                stranded_approvals: 1,
+                ..clean()
+            }),
+            WorkflowRunVerdict::AwaitingApproval
+        );
+    }
+
+    /// A parked **report** is a second thing waiting on a person, on its own
+    /// queue, and the gate join does not look at it. So a run whose gates are
+    /// all stranded but whose report is still parked is genuinely awaiting —
+    /// there really is a card to decide.
+    #[test]
+    fn a_stranded_run_with_a_parked_report_is_still_awaiting() {
+        let parked = [row(
+            DeliveryStatus::Pending,
+            DeliveryReason::ParkedForApproval,
+        )];
+        assert_eq!(
+            WorkflowRunVerdict::of(RunVerdictFacts {
+                deliveries: &parked,
+                pending_approvals: 2,
+                stranded_approvals: 2,
+                ..clean()
+            }),
+            WorkflowRunVerdict::AwaitingApproval
+        );
+    }
+
+    /// The `feature_pipeline` shape from the issue: a blocked node whose every
+    /// card the queue has lost. #1143 already says so in the blocked-node list;
+    /// this is the verdict finally agreeing with it instead of reading
+    /// `blocked` — which, like `awaiting-approval`, tells the operator to go
+    /// and decide something that is not there.
+    #[test]
+    fn a_fully_stranded_blocked_run_reads_stranded_not_blocked() {
+        let verdict = WorkflowRunVerdict::of(RunVerdictFacts {
+            blocked_nodes: 1,
+            pending_approvals: 1,
+            stranded_approvals: 1,
+            ..clean()
+        });
+        assert_eq!(verdict, WorkflowRunVerdict::Stranded);
+        assert_ne!(verdict, WorkflowRunVerdict::Blocked);
+    }
+
+    /// A run with no gates at all is not stranded, whatever else is true of it.
+    /// `stranded` is a correction to `awaiting`, never a new way to score a run
+    /// that was waiting on nobody.
+    #[test]
+    fn a_run_that_stopped_for_nobody_is_never_stranded() {
+        assert_eq!(
+            WorkflowRunVerdict::of(RunVerdictFacts {
+                pending_approvals: 0,
+                stranded_approvals: 0,
+                ..clean()
+            }),
+            WorkflowRunVerdict::Ok
+        );
     }
 
     // ── Issue #1189: the fold that reconciles a gate against the live queue ──

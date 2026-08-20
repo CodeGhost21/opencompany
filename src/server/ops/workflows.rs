@@ -1475,6 +1475,13 @@ async fn run_workflow(
                 blocked_nodes: run.blocked_nodes.len(),
                 deliveries: &run.deliveries,
                 pending_approvals: run.pending_approvals.len(),
+                // Issue #1189: deliberately not reconciled here, and a literal
+                // rather than a lookup. This body is written microseconds after
+                // `park_pending_gates` minted the cards, so joining against the
+                // queue would be a guaranteed-zero query on the hot path — the
+                // reconciliation is a fact about a run somebody comes back to,
+                // which is what the history route is for.
+                stranded_approvals: 0,
             });
             Ok(RunWorkflowOk::Settled(Box::new(RunWorkflowResponse {
                 output: run.output,
@@ -2475,6 +2482,7 @@ impl WorkflowRunOutcome {
             blocked_nodes: self.blocked_nodes.len(),
             deliveries: &self.deliveries,
             pending_approvals: self.pending_approvals.len(),
+            stranded_approvals: 0,
         })
     }
 }
