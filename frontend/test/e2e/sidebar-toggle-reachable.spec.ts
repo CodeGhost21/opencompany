@@ -95,6 +95,16 @@ test.describe("sidebar toggle reachability", () => {
     await expect(expand).toBeVisible();
     await expect(expand).toBeInViewport();
 
+    // `data-state` flips on the click; the column takes `duration-200` to get
+    // there. Poll rather than sample, or this measures a sidebar caught half
+    // way and reports a button that fits as one that does not.
+    await expect
+      .poll(
+        async () => (await page.locator("[data-slot=sidebar-container]").boundingBox())?.width,
+        { message: "the collapsed column settles at the icon rail's width" },
+      )
+      .toBe(RAIL_WIDTH);
+
     const railBox = await expand.boundingBox();
     expect(railBox, "the collapsed control should have a box").not.toBeNull();
     expect(railBox!.x, "…inside the rail, not hanging off its left edge").toBeGreaterThanOrEqual(0);
