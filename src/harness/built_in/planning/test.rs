@@ -1857,16 +1857,29 @@ fn prefer_company_over_baseline_drops_only_a_true_mixed_tie() {
         vec!["maya"]
     );
 
-    // A teammate and a desk: neither resolves to a baseline agent, so both
-    // count as company-side and the tie is untouched — #1106's case, and the
-    // reason an unresolved id (a desk) must default to company-side rather
-    // than silently misfiring as baseline.
+    // A teammate and a desk: no baseline teammate in the tie (the desk isn't
+    // one), so nothing is dropped — #1106's case.
     let teammate_and_desk =
         prefer_company_over_baseline(&evidence, vec![candidate("maya"), candidate("studio")]);
     assert_eq!(
         teammate_and_desk.len(),
         2,
         "no baseline teammate in the tie"
+    );
+
+    // A baseline teammate and a desk: a desk is not the company's own choice
+    // of *teammate*, so its presence must not stand in for one and silently
+    // knock the real baseline candidate out of a tie nobody actually resolved
+    // in the company's favour.
+    let baseline_and_desk =
+        prefer_company_over_baseline(&evidence, vec![candidate("sam"), candidate("studio")]);
+    assert_eq!(
+        baseline_and_desk
+            .iter()
+            .map(|c| c.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["sam", "studio"],
+        "a desk is neutral: it neither triggers the drop nor gets dropped by it"
     );
 
     // A single baseline candidate, alone: nothing to prefer it over.

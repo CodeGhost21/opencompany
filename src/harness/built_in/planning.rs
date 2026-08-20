@@ -1884,29 +1884,48 @@ fn resolve_assignee_candidates(
 /// baseline teammates, or between two company teammates, carries no such
 /// signal and is left untouched — issue #1106's park-and-ask stands for both.
 ///
-/// A candidate id that does not resolve to a manifest agent (a desk, or an
-/// overlay teammate — [`OverlayAgent`](crate::ports::types::OverlayAgent) has
-/// no `global` field, so it can never be one) counts as company-side: only a
-/// manifest agent explicitly marked `global` is baseline.
+/// A candidate id resolves to exactly one of three provenances: a manifest
+/// agent marked `global` is [`Baseline`](Provenance::Baseline); a manifest
+/// agent that is not, or an overlay teammate — which
+/// [`OverlayAgent`](crate::ports::types::OverlayAgent) can never be, having no
+/// `global` field at all — is [`Company`](Provenance::Company); anything else
+/// `resolve_assignee_candidates` could still have handed back (a desk) is
+/// neither. A desk is not the company's own choice of *teammate*, so its mere
+/// presence must not stand in for a real one: it neither triggers the drop nor
+/// is dropped by it, on either side of the tie.
+enum Provenance {
+    Baseline,
+    Company,
+}
+
+fn provenance_of(evidence: &Evidence, id: &str) -> Option<Provenance> {
+    if let Some(agent) = evidence.record.manifest.agents.iter().find(|a| a.id == id) {
+        return Some(if agent.global {
+            Provenance::Baseline
+        } else {
+            Provenance::Company
+        });
+    }
+    if evidence.record.overlay_agents.iter().any(|a| a.id == id) {
+        return Some(Provenance::Company);
+    }
+    None
+}
+
 fn prefer_company_over_baseline(
     evidence: &Evidence,
     candidates: Vec<AssigneeCandidate>,
 ) -> Vec<AssigneeCandidate> {
-    let is_baseline = |id: &str| {
-        evidence
-            .record
-            .manifest
-            .agents
-            .iter()
-            .find(|a| a.id == id)
-            .is_some_and(|a| a.global)
-    };
-    let has_company_side = candidates.iter().any(|c| !is_baseline(&c.id));
-    let has_baseline = candidates.iter().any(|c| is_baseline(&c.id));
-    if has_company_side && has_baseline {
+    let has_company = candidates
+        .iter()
+        .any(|c| matches!(provenance_of(evidence, &c.id), Some(Provenance::Company)));
+    let has_baseline = candidates
+        .iter()
+        .any(|c| matches!(provenance_of(evidence, &c.id), Some(Provenance::Baseline)));
+    if has_company && has_baseline {
         candidates
             .into_iter()
-            .filter(|c| !is_baseline(&c.id))
+            .filter(|c| !matches!(provenance_of(evidence, &c.id), Some(Provenance::Baseline)))
             .collect()
     } else {
         candidates
