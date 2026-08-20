@@ -23,7 +23,7 @@ import {
   type AgentFieldKey,
 } from "@/lib/agent";
 import { fetchBoardColumns } from "@/lib/board-columns";
-import { avatarFor, toneFor } from "@/lib/team";
+import { avatarFor, roleSubtitle, toneFor } from "@/lib/team";
 import { workloadByAssignee, type Workload } from "@/lib/team-workload";
 import { cn } from "@/lib/utils";
 import { AgentFields } from "@/views/team/AgentFields";
@@ -402,6 +402,10 @@ function Identity({ agent }: { agent: AgentDetailDto }) {
   // change this teammate's face on the one screen that should never be
   // showing letters (issue #1181, and issue #1185 for the seed itself).
   const avatar = avatarFor(seed);
+  // #1208, on the page a teammate *is*. `display` already falls back to the
+  // role, and a manifest-declared agent has no `name` at all, so the line under
+  // the title was the title again on every teammate in every shipped company.
+  const subtitle = roleSubtitle(display, agent.role);
   return (
     <div className="flex items-start gap-4">
       {/* The header of the page a teammate *is* — the one screen that should
@@ -418,9 +422,11 @@ function Identity({ agent }: { agent: AgentDetailDto }) {
           <h2 className="truncate text-2xl font-semibold tracking-tight" data-testid="agent-name">
             {display}
           </h2>
-          <p className="truncate text-sm text-muted-foreground" data-testid="agent-role">
-            {agent.role}
-          </p>
+          {subtitle && (
+            <p className="truncate text-sm text-muted-foreground" data-testid="agent-role">
+              {subtitle}
+            </p>
+          )}
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <Badge variant="secondary" className="gap-1" data-testid="agent-tier">
