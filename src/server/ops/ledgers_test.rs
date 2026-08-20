@@ -169,6 +169,33 @@ async fn a_ledger_round_trips_under_both_scope_forms() {
     assert_eq!(read["entries"][0]["id"], "vendor-slip");
 }
 
+/// **The wire regression, pinned.** `StatusSpec::needs_reason` used to
+/// serialize snake_case like every other declaration field, but the console
+/// reads `LedgerStatus.needsReason` — camelCase, matching `LedgerSummary`'s
+/// own `#[serde(rename_all = "camelCase")]`. The mismatch meant
+/// `statusNeedsReason()` always read `undefined` and never fired the console's
+/// "ask for a reason before closing" guard on any declared ledger (issue
+/// #1266). This reads the same field off the same response shape the
+/// frontend receives.
+#[tokio::test]
+async fn a_status_that_needs_a_reason_carries_camel_case_on_the_wire() {
+    let (state, _home) = state().await;
+    let (status, created) = send(&state, "POST", "/api/v1/company/ledgers", Some(risks())).await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+
+    let closed_status = created["statuses"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["name"] == "closed")
+        .expect("the closed status");
+    assert_eq!(closed_status["needsReason"], true, "{closed_status}");
+    assert!(
+        closed_status.get("needs_reason").is_none(),
+        "wire response must not also carry the snake_case key: {closed_status}"
+    );
+}
+
 /// The console renders the same Markdown the workspace holds, served from the
 /// derivation rather than by reading the file back — so a workspace write that
 /// failed can never show a stale page.
