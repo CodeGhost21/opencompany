@@ -589,6 +589,7 @@ async fn apply_workflow_proposal(
         company.runtime.store(),
         Some(company.runtime.events()),
         draft,
+        None,
     )
     .await
     {

@@ -704,6 +704,7 @@ impl Tool for UpdateWorkflowTool {
             self.admin.events.as_ref(),
             draft,
             Some(&expected_version),
+            None,
         )
         .await
         {

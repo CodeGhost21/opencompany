@@ -528,7 +528,7 @@ pub async fn run_workflow_build_pass(
             return;
         }
     };
-    if let Err(err) = courtesy_validate_draft(&draft, &evidence.record) {
+    if let Err(err) = courtesy_validate_draft(&draft, &evidence.record, None) {
         settle_to_todo(
             &runtime,
             &task_id,

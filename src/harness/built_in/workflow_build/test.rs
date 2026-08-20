@@ -1346,6 +1346,7 @@ async fn seed_workflow(runtime: &Arc<CompanyRuntime>, id: &str, name: &str) {
         runtime.store(),
         Some(runtime.events()),
         raw,
+        None,
     )
     .await
     .expect("seed workflow");

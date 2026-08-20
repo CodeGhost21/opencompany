@@ -4607,6 +4607,7 @@ impl Tool for CreateWorkflowTool {
             &self.store,
             self.events.as_ref(),
             draft,
+            None,
         )
         .await
         {
