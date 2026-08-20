@@ -26,7 +26,7 @@ allow = ["*", "media", "composio", "search"]
 
 # The matter-review desk aligns research, drafting, and compliance before legal approval.
 [[group_chat]]
-id = "matter-review"
+id = "matter_review"
 name = "Matter review desk"
 description = "Coordinate legal research, draft review, and compliance checks."
 members = ["legal_researcher", "contract_drafter", "compliance_agent"]
