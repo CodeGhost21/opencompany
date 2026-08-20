@@ -438,9 +438,14 @@ const DECLARED: &[Declared] = &[
     d_grantable("apply_patch", EffectGroup::Other, Reach::Consequence),
     d_grantable("csv_export", EffectGroup::Other, Reach::Consequence),
     d_grantable("memory_store", EffectGroup::Other, Reach::Consequence),
-    // Forgetting is a write with the same blast radius as storing: durable
-    // company state changes. Same group, same reach, same grantability.
-    d_grantable("memory_forget", EffectGroup::Other, Reach::Consequence),
+    // Per-call, like every other delete in this table (`delete_workflow`,
+    // `workspace_delete`, `pages_delete`) and for their stated reason: a
+    // standing grant on deletion is the shape that turns one bad turn into a
+    // memory that is quietly empty by the end of it. The own-prefix
+    // confinement is not grounds for a lower price — a memory row has no
+    // revision history and no artifact chain, so a wrong forget is simply
+    // gone.
+    d("memory_forget", EffectGroup::Other, Reach::Consequence),
     // `git_operations` is deliberately NOT grantable alongside its filesystem
     // siblings: it can push to a configured remote, so it reaches an address
     // this layer does not get to see.
@@ -2288,10 +2293,6 @@ mod tests {
             "csv_export",
             "edit",
             "file_write",
-            // Forgetting one of the agent's own memories is the same class
-            // as storing one: a mutation of the company's own memory, no
-            // counterparty, no address.
-            "memory_forget",
             "memory_store",
             // Issue #903, and the one entry that is not the agent's private
             // sandbox: it writes into the company's shared workspace. Declared
@@ -2785,7 +2786,6 @@ mod tests {
             "edit",
             "apply_patch",
             "csv_export",
-            "memory_forget",
             "memory_store",
         ] {
             let verdict = c(tool);

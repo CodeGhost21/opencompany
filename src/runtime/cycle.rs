@@ -469,10 +469,7 @@ impl<'a> CycleRunner<'a> {
             // never pruned, and a cycle needs the link for at most the couple of
             // `ApprovalResolved` ids in its own batch.
             cycle_task_id(&request.events, |id| self.rt.journal.approval_task(id)),
-            request
-                .events
-                .iter()
-                .any(|e| matches!(e, CompanyEvent::WebhookReceived { .. })),
+            cycle_is_external(&request.events),
             // Issue #379: and which conversation, on the same terms — read off
             // the same trigger events, from the same retained origins. Issue
             // #435 widened this to the channel *and* the thread within it, in
@@ -1878,6 +1875,18 @@ fn short_thread_digest(thread: &str) -> String {
 /// [`TaskLink::Unlinked`](crate::runtime::journal::TaskLink::Unlinked): honest,
 /// and deliberately *not* a fall-back to the run window, which would put the
 /// approval right back on whichever card was running.
+/// Whether a cycle's trigger batch contains content that arrived from
+/// OUTSIDE — a `WebhookReceived` (a channel message, an email, a third-party
+/// callback). Operator speech (`OperatorMessage`), dispatches, schedule fires
+/// and payment notifications are the company's own machinery: Internal, per
+/// the operator-facts authorship precedent. Named and pure so the boundary is
+/// testable — see `CycleHostImpl::external_trigger` for what rides on it.
+fn cycle_is_external(events: &[CompanyEvent]) -> bool {
+    events
+        .iter()
+        .any(|event| matches!(event, CompanyEvent::WebhookReceived { .. }))
+}
+
 fn cycle_task_id(
     events: &[CompanyEvent],
     approval_task: impl Fn(&ApprovalId) -> Option<Option<TaskLink>>,
@@ -5437,6 +5446,91 @@ mod test {
             .unwrap();
 
         assert!(recipient_is_established(&rt, "X@EXT.COM").await);
+    }
+
+    /// Issue #1113: the trigger boundary, named event by event. Only a
+    /// webhook (external content) makes a cycle external; the company's own
+    /// machinery — operator speech, dispatches, schedule fires — stays
+    /// Internal, per the operator-facts authorship precedent.
+    #[test]
+    fn only_webhooks_make_a_cycle_external() {
+        use crate::ports::types::Actor;
+        let webhook = CompanyEvent::WebhookReceived {
+            channel: "telegram".into(),
+            body: serde_json::json!({"text": "raw payload"}),
+        };
+        let operator = CompanyEvent::OperatorMessage {
+            text: "please do the thing".into(),
+            by: Option::<Actor>::None,
+            chat: None,
+            parent: None,
+            deliverable: None,
+        };
+        assert!(cycle_is_external(&[webhook]));
+        assert!(!cycle_is_external(&[operator]));
+        assert!(!cycle_is_external(&[]));
+    }
+
+    /// The routing the flag drives: an externally-triggered cycle's
+    /// `ContextOp::Put` lands on the inbound (taint-stamping) port, an
+    /// ordinary cycle's on the plain context port — proven with two disjoint
+    /// stores, so a write to the wrong one is a visible row, not a guess.
+    #[tokio::test]
+    async fn external_cycles_put_through_the_inbound_port() {
+        use crate::ports::ContextStore;
+        use crate::store::FsContextStore;
+
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
+        let plain_dir = tempfile::tempdir().unwrap();
+        let inbound_dir = tempfile::tempdir().unwrap();
+        let plain: Arc<dyn ContextStore> =
+            Arc::new(FsContextStore::new(plain_dir.path().to_path_buf()));
+        let inbound: Arc<dyn ContextStore> =
+            Arc::new(FsContextStore::new(inbound_dir.path().to_path_buf()));
+        let rt = RuntimeBuilder::new(home, manifest("full"))
+            .with_context(plain.clone())
+            .with_inbound_context(inbound.clone())
+            .build()
+            .await
+            .unwrap();
+
+        for (external, cycle) in [(false, "cyc-int"), (true, "cyc-ext")] {
+            let host = CycleHostImpl::new(
+                rt.id().clone(),
+                cycle.into(),
+                &rt,
+                None,
+                external,
+                ApprovalConversation::default(),
+            );
+            host.context_op(ContextOp::Put(crate::ports::types::ContextChunk {
+                label: format!("probe/{cycle}"),
+                body: format!("body {cycle}"),
+            }))
+            .await
+            .unwrap();
+        }
+
+        let company = rt.id().clone();
+        let plain_rows = plain.list(&company, "probe/").await.unwrap();
+        let inbound_rows = inbound.list(&company, "probe/").await.unwrap();
+        assert_eq!(
+            plain_rows
+                .iter()
+                .map(|m| m.label.as_str())
+                .collect::<Vec<_>>(),
+            ["probe/cyc-int"],
+            "the ordinary cycle writes the plain port, and only it"
+        );
+        assert_eq!(
+            inbound_rows
+                .iter()
+                .map(|m| m.label.as_str())
+                .collect::<Vec<_>>(),
+            ["probe/cyc-ext"],
+            "the external cycle writes the inbound port, and only it"
+        );
     }
 
     #[tokio::test]

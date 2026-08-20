@@ -342,7 +342,7 @@ hosted) is a possible future refinement of *routing*, not of selection.
 
 ## Depth: taint, deliberate memory, and what is deliberately not wired
 
-Three determinations from the depth pass (issue #1113), recorded so nobody
+Four determinations from the depth pass (issue #1113), recorded so nobody
 re-derives them:
 
 - **Taint routing is by trigger, at the cycle.** A cycle triggered by

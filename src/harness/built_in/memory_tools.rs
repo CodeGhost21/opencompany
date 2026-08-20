@@ -366,18 +366,34 @@ impl Tool for MemoryForgetTool {
         // deliberate-memory prefix. Checked against the store's own index at
         // call time — not against anything the model asserted — so a copied or
         // hallucinated address outside the prefix is refused, never deleted.
-        let own = self
-            .mem
-            .context
-            .list(&self.mem.company, &self.mem.own_prefix())
-            .await?;
-        if !own.iter().any(|m| m.addr.as_ref() == addr) {
+        //
+        // And checked against the WHOLE index, not just the agent's slice:
+        // chunks are content-addressed, so `ContextStore::delete` removes the
+        // address — every label pointing at that body goes with it. If any
+        // OTHER row (another agent's byte-identical memory, a task outcome
+        // with the same text) shares this address, deleting it would delete
+        // theirs too; refuse instead, naming why.
+        let all = self.mem.context.list(&self.mem.company, "").await?;
+        let own_prefix = self.mem.own_prefix();
+        let at_addr: Vec<&str> = all
+            .iter()
+            .filter(|m| m.addr.as_ref() == addr)
+            .map(|m| m.label.as_str())
+            .collect();
+        if !at_addr.iter().any(|label| label.starts_with(&own_prefix)) {
             return Ok(ToolResult::error(format!(
                 "`{addr}` is not one of your own stored memories, so it cannot be forgotten from \
                  here. Task outcomes are the turn loop's record, and operator facts belong to \
                  the operator (Brain view). Use `memory_recall` to see addresses; yours are the \
-                 ones under `{}`.",
-                self.mem.own_prefix()
+                 ones under `{own_prefix}`."
+            )));
+        }
+        if at_addr.iter().any(|label| !label.starts_with(&own_prefix)) {
+            return Ok(ToolResult::error(format!(
+                "`{addr}` is shared: this content is stored under other labels too (memory is \
+                 content-addressed, and identical text shares one address), so deleting it would \
+                 delete theirs as well. It stays. If your copy stops being true, store a \
+                 correction with `memory_store` instead."
             )));
         }
         let removed = self
@@ -491,6 +507,46 @@ mod test {
             // And the row must still be there.
             context.peek(&company, addr, None).await.unwrap();
         }
+    }
+
+    /// Content addressing means byte-identical bodies share ONE address, and
+    /// the port deletes by address. A forget whose address is shared with any
+    /// other row — another agent's identical memory here — must refuse, and
+    /// both rows must survive.
+    #[tokio::test]
+    async fn forget_refuses_a_shared_address_instead_of_deleting_both() {
+        let dir = tempfile::tempdir().unwrap();
+        let company = CompanyId::new("acme");
+        let context = ctx(dir.path());
+
+        let (ceo_store, _, ceo_forget) = tools_for(dir.path(), "acme", "ceo");
+        let (them_store, _, _) = tools_for(dir.path(), "acme", "researcher");
+        let mine = ceo_store
+            .execute(json!({"title": "Fiscal year", "body": "Starts in February."}))
+            .await
+            .unwrap();
+        let addr = addr_from(&mine.text());
+        them_store
+            .execute(json!({"title": "Fiscal year", "body": "Starts in February."}))
+            .await
+            .unwrap();
+
+        let refused = ceo_forget
+            .execute(json!({"addr": addr.clone()}))
+            .await
+            .unwrap();
+        assert!(refused.is_error, "shared address must refuse: {refused:?}");
+        assert!(refused.text().contains("shared"));
+        // Both label rows survive.
+        let rows = context
+            .list(&company, AGENT_MEMORY_LABEL_PREFIX)
+            .await
+            .unwrap();
+        assert_eq!(
+            rows.iter().filter(|m| m.addr.as_ref() == addr).count(),
+            2,
+            "no row may vanish on a refusal"
+        );
     }
 
     #[tokio::test]
