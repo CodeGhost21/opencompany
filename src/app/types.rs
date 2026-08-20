@@ -1030,11 +1030,13 @@ impl AppState {
                 backend: crate::store::MemoryBackend::Store.as_str(),
                 driver_id: None,
                 capabilities: Vec::new(),
+                healthy: None,
             },
             Some(overlay) => MemorySpec {
                 backend: overlay.descriptor.backend.as_str(),
                 driver_id: Some(overlay.descriptor.driver_id.clone()),
                 capabilities: overlay.descriptor.capabilities.clone(),
+                healthy: overlay.descriptor.healthy,
             },
         }
     }
@@ -1127,6 +1129,15 @@ pub struct MemorySpec {
     /// provider. An operator reads this to see what a hosted engine does *not*
     /// support before a cycle discovers it.
     pub capabilities: Vec<String>,
+    /// Whether the boot-time reachability probe answered `Ready`.
+    ///
+    /// Absent means "not probed": the base backend serves memory, the in-pod
+    /// engine is driven directly, or this host predates the probe — a client
+    /// must treat absence as unknown, not unhealthy. `false` is a bound
+    /// engine whose probe failed at boot: still bound, and the first cycle
+    /// that needs memory will fail until the endpoint or credential is fixed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub healthy: Option<bool>,
 }
 
 #[cfg(test)]

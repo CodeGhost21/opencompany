@@ -591,6 +591,12 @@ export interface MemorySpec {
   driver_id?: string;
   /** Capability families negotiated at bind time; empty = not negotiated. */
   capabilities: string[];
+  /**
+   * Whether the boot-time reachability probe answered ready. Absent = not
+   * probed (base store, direct engine, or an older host) — treat as unknown,
+   * not unhealthy.
+   */
+  healthy?: boolean;
 }
 
 export interface AppSpec {

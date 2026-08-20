@@ -913,6 +913,12 @@ mod tests {
         let body = spec_body(state).await;
         assert_eq!(body["memory"]["backend"], "remote");
         assert_eq!(body["memory"]["driver_id"], "supermemory");
+        // Unprobed here (the probe is `serve`'s boot step, not `bind`'s), and
+        // the field is skipped when absent so old clients see the old shape.
+        assert!(
+            body["memory"]["healthy"].is_null(),
+            "an unprobed engine must not report health"
+        );
         // The mandatory three a hosted adapter advertises, so an operator can
         // see the tree/graph families it does not have.
         let caps = body["memory"]["capabilities"].to_string();
