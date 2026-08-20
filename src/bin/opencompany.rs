@@ -898,37 +898,13 @@ async fn live_ports(
     Option<Arc<dyn opencompany::ports::FactStore>>,
 )> {
     use opencompany::store::{
-        FsCompanyStore, FsContextStore, FsEventLog, FsMemoryStore, FsOps, MemoryBackend,
-        StorageKind, StorageSettings, open_memory_overlay, open_storage,
+        FsCompanyStore, FsContextStore, FsEventLog, FsMemoryStore, FsOps, StorageSettings,
+        open_memory_overlay, open_storage,
     };
     let settings = StorageSettings::from_env()?;
-    let live = settings.kind != StorageKind::Fs || settings.memory_backend != MemoryBackend::Store;
-    if settings.memory_backend == MemoryBackend::Null {
-        return Err(opencompany::error::OpenCompanyError::Config(
-            "OPENCOMPANY_MEMORY=null retains nothing: an export would capture no memory and an \
-             import would discard every record while reporting success. Unset OPENCOMPANY_MEMORY \
-             for bundle operations."
-                .into(),
-        ));
-    }
-    if live && home_was_flagged {
-        return Err(opencompany::error::OpenCompanyError::Config(format!(
-            "--home names an fs data set, but this environment selects storage `{}` and memory \
-             `{}` — the bundle would mix two deployments. Unset OPENCOMPANY_STORAGE and \
-             OPENCOMPANY_MEMORY* to operate on the fs home, or drop --home to operate on the \
-             live deployment.",
-            settings.kind.as_str(),
-            settings.memory_backend.as_str()
-        )));
-    }
-    if live && std::env::var("OPENCOMPANY_TENANT_ID").is_ok_and(|t| !t.trim().is_empty()) {
-        return Err(opencompany::error::OpenCompanyError::Config(
-            "shared-single-DB tenant mode (OPENCOMPANY_TENANT_ID) namespaces company ids and \
-             owner rows at the app layer; bundle operations write neither. Run them without \
-             tenant mode, from the manager path."
-                .into(),
-        ));
-    }
+    // Every refusal lives in the lib (`store::select::refuse_bundle_env`)
+    // where the feature lanes execute its tests; the bin only reports.
+    opencompany::store::refuse_bundle_env(&settings, home_was_flagged)?;
     let (store, events, mut memory, mut context, mut facts) = match open_storage(&settings, home)
         .await?
     {
@@ -1171,6 +1147,20 @@ async fn import_from_dir(dir: &std::path::Path, home: Option<PathBuf>) -> Result
     let ((store, events, memory, context), facts) = live_ports(&home, home_was_flagged).await?;
     let id = import_bundle(&root, store, events, memory, context, facts).await?;
     restore_fs_artifacts(&root, Bundle::new(home.clone(), &id).dir()).await?;
+    // On a non-fs base backend the records above went to the live backend
+    // while these artifacts (secrets/, keys/) are fs-only by design and land
+    // under the resolved home. Same split serve itself runs with there — but
+    // say it, so a restore onto a fresh pod knows to mount that home.
+    let settings = opencompany::store::StorageSettings::from_env()?;
+    if settings.kind != opencompany::store::StorageKind::Fs {
+        eprintln!(
+            "note: records imported into the live `{}` backend; fs-only artifacts (secrets/, \
+             keys/) restored under {} — on an ephemeral filesystem, re-provision them there \
+             after a pod replacement.",
+            settings.kind.as_str(),
+            home.display()
+        );
+    }
     println!("imported company `{id}` into {}", home.display());
     Ok(())
 }
@@ -1184,9 +1174,9 @@ async fn import_from_dir(dir: &std::path::Path, home: Option<PathBuf>) -> Result
 /// `store` default and the EngineCortex overlay are refused by name.
 #[cfg(feature = "tinymemory")]
 async fn run_memory_cmd(cmd: MemoryCmd) -> Result<()> {
-    use opencompany::store::memory::driver::{MemoryDriverConfig, MemoryMode, open_driver};
+    use opencompany::store::StorageSettings;
+    use opencompany::store::memory::driver::{MemoryMode, open_driver};
     use opencompany::store::memory::migrate::migrate;
-    use opencompany::store::{MemoryBackend, StorageSettings};
 
     let MemoryCmd::Migrate {
         to,
@@ -1199,125 +1189,40 @@ async fn run_memory_cmd(cmd: MemoryCmd) -> Result<()> {
     } = cmd;
 
     let settings = StorageSettings::from_env()?;
-    let from_mode = match settings.memory_backend {
-        MemoryBackend::Store => {
-            return Err(opencompany::error::OpenCompanyError::Config(
-                "OPENCOMPANY_MEMORY=store: the base backend serves memory directly and has no \
-                 provider seam to export through. Use `opencompany export` for a bundle instead."
-                    .into(),
-            ));
-        }
-        MemoryBackend::Null => {
-            return Err(opencompany::error::OpenCompanyError::Config(
-                "OPENCOMPANY_MEMORY=null retains nothing; there is nothing to migrate.".into(),
-            ));
-        }
-        MemoryBackend::Tinycortex
-            if settings
-                .memory_driver
-                .as_deref()
-                .map(str::trim)
-                .filter(|d| !d.is_empty())
-                .is_none() =>
-        {
-            return Err(opencompany::error::OpenCompanyError::Config(
-                "OPENCOMPANY_MEMORY=embedded without OPENCOMPANY_MEMORY_DRIVER is the \
-                 EngineCortex overlay, which is driven directly rather than through the \
-                 provider seam — its data cannot migrate through this command. Use \
-                 `opencompany export` for a bundle of what it holds."
-                    .into(),
-            ));
-        }
-        MemoryBackend::Tinycortex => MemoryMode::Embedded,
-        MemoryBackend::Remote => MemoryMode::Remote,
-    };
-    let from_config = MemoryDriverConfig {
-        mode: from_mode,
-        driver_id: settings.memory_driver.clone(),
-        url: settings.memory_url.clone(),
-        api_key: settings.memory_api_key.clone(),
-        data_dir: settings.data_dir.clone(),
-    };
+    // The credential prefers the environment: argv is world-readable in
+    // /proc/<pid>/cmdline for the whole (possibly long) run. --to-api-key
+    // stays for compatibility but the env var is the documented channel.
+    let to_api_key = to_api_key.or_else(|| {
+        std::env::var("OPENCOMPANY_MEMORY_TARGET_API_KEY")
+            .ok()
+            .map(|k| k.trim().to_string())
+            .filter(|k| !k.is_empty())
+    });
+    // Every refusal and both configurations come from the lib
+    // (`store::memory::migrate::resolve_migrate_configs`), where the feature
+    // lanes execute the guards' tests; the bin drives the loop and reports.
+    let (from_config, to_config) = opencompany::store::memory::migrate::resolve_migrate_configs(
+        &settings,
+        &to,
+        to_url,
+        to_api_key,
+        to_data_dir,
+    )?;
 
-    let to_config = match to.as_str() {
-        "namespace" => {
-            // The same durability refusal `open_provider` enforces at boot
-            // (src/store/select.rs): on a mongodb base, /data is ephemeral
-            // scratch, and a migration that "succeeds" into it is data loss
-            // with a success message — worse than the refusal.
-            if settings.kind == opencompany::store::StorageKind::Mongodb
-                && !settings.allow_ephemeral_memory
-            {
-                return Err(opencompany::error::OpenCompanyError::Config(
-                    "OPENCOMPANY_STORAGE=mongodb treats the data dir as ephemeral scratch, and \
-                     the boot path refuses the namespace driver there for exactly that reason. \
-                     Migrating into it would report success on data the next container \
-                     replacement deletes. If the data dir is genuinely a durable volume, assert \
-                     it with OPENCOMPANY_MEMORY_ALLOW_EPHEMERAL=1."
-                        .into(),
-                ));
-            }
-            MemoryDriverConfig {
-                mode: MemoryMode::Embedded,
-                driver_id: Some(to.clone()),
-                url: None,
-                api_key: None,
-                data_dir: to_data_dir.clone().or_else(|| settings.data_dir.clone()),
-            }
-        }
-        "supermemory" | "mem0" | "cognee" => MemoryDriverConfig {
-            mode: MemoryMode::Remote,
-            driver_id: Some(to.clone()),
-            url: to_url.clone(),
-            api_key: to_api_key.clone(),
-            data_dir: None,
-        },
-        "null" => {
-            return Err(opencompany::error::OpenCompanyError::Config(
-                "--to null would discard every record; that is `null`'s contract, not a \
-                 migration."
-                    .into(),
-            ));
-        }
-        other => {
-            return Err(opencompany::error::OpenCompanyError::Config(format!(
-                "--to {other} names no migratable driver: namespace, supermemory, mem0, cognee."
-            )));
-        }
+    // The same exclusive root lock serve holds, whenever an embedded store is
+    // on either side: a migration reading a SQLite store a live host is
+    // writing walks a shifting export cursor (skipped or repeated records).
+    // Hosted-to-hosted has no local store to lock; the pause-first
+    // precondition printed below still applies to the remote writer.
+    let _home_lock = if matches!(from_config.mode, MemoryMode::Embedded)
+        || matches!(to_config.mode, MemoryMode::Embedded)
+    {
+        Some(opencompany::store::lock::acquire(&resolve_home_migrated(
+            None,
+        )?)?)
+    } else {
+        None
     };
-
-    // Same engine, same target = a copy onto itself: on the embedded store it
-    // is one SQLite file open twice; on a hosted store the export cursor
-    // shifts under the concurrent writes and records skip or repeat. Compared
-    // mode-aware and normalized, because the naive field-equality version
-    // could never fire remote-to-remote (the source carries the env data_dir,
-    // the target None) and let trailing-slash or whitespace spellings of the
-    // same location through.
-    let norm_id = |id: &Option<String>| id.as_deref().map(str::trim).map(str::to_owned);
-    let norm_url = |url: &Option<String>| {
-        url.as_deref()
-            .map(str::trim)
-            .map(|u| u.trim_end_matches('/').to_owned())
-    };
-    let norm_dir = |dir: &Option<PathBuf>| {
-        dir.as_ref()
-            .map(|d| d.components().collect::<std::path::PathBuf>())
-    };
-    let same_engine = from_config.mode == to_config.mode
-        && norm_id(&from_config.driver_id) == norm_id(&to_config.driver_id)
-        && match to_config.mode {
-            MemoryMode::Remote => norm_url(&from_config.url) == norm_url(&to_config.url),
-            MemoryMode::Embedded => {
-                norm_dir(&from_config.data_dir) == norm_dir(&to_config.data_dir)
-            }
-            MemoryMode::Null => true,
-        };
-    if same_engine {
-        return Err(opencompany::error::OpenCompanyError::Config(
-            "the source and the target are the same engine at the same location; nothing to do."
-                .into(),
-        ));
-    }
 
     let (from, _) = open_driver(&from_config)?.ok_or_else(|| {
         opencompany::error::OpenCompanyError::Config(
@@ -1331,23 +1236,12 @@ async fn run_memory_cmd(cmd: MemoryCmd) -> Result<()> {
     // writing anything" must mean the filesystem too.
     if dry_run {
         let resumed = resume_cursor.is_some();
-        let mut total: u64 = 0;
-        let mut cursor = resume_cursor;
-        loop {
-            let page = from
-                .export_page(cursor.as_deref(), page_size)
-                .await
-                .map_err(|e| {
-                    opencompany::error::OpenCompanyError::Store(format!(
-                        "source export failed: {e}"
-                    ))
-                })?;
-            total += page.records.len() as u64;
-            match page.next_cursor {
-                Some(next) => cursor = Some(next),
-                None => break,
-            }
-        }
+        let total = opencompany::store::memory::migrate::count_records(
+            &from,
+            resume_cursor.clone(),
+            page_size,
+        )
+        .await?;
         if resumed {
             println!(
                 "dry run (from --resume-cursor): {} records remain to migrate {} -> {}",
@@ -1404,11 +1298,34 @@ async fn run_memory_cmd(cmd: MemoryCmd) -> Result<()> {
     .await?;
     match outcome {
         Ok(summary) => {
-            println!(
-                "done: {} exported, {} imported, {} already present, over {} pages. Now flip \
-                 OPENCOMPANY_MEMORY* to the target, restart, and verify /spec.",
-                summary.exported, summary.imported, summary.skipped, summary.pages
-            );
+            // The receipt: count the TARGET's own export, so the operator's
+            // evidence is the target's answer rather than the migration's own
+            // counters. Costs one enumeration of the target — the same order
+            // of work the migration itself just did. Best-effort: a target
+            // that cannot re-export right now degrades the receipt to a
+            // warning, not the completed migration to a failure.
+            match opencompany::store::memory::migrate::count_records(&target, None, page_size).await
+            {
+                Ok(target_total) => {
+                    println!(
+                        "done: {} exported, {} imported, {} already present, over {} pages. \
+                         Target now exports {target_total} records (its own count, not ours). \
+                         Now flip OPENCOMPANY_MEMORY* to the target, restart, and verify /spec.",
+                        summary.exported, summary.imported, summary.skipped, summary.pages
+                    );
+                }
+                Err(e) => {
+                    println!(
+                        "done: {} exported, {} imported, {} already present, over {} pages. Now \
+                         flip OPENCOMPANY_MEMORY* to the target, restart, and verify /spec.",
+                        summary.exported, summary.imported, summary.skipped, summary.pages
+                    );
+                    eprintln!(
+                        "note: could not verify by re-counting the target ({e}); the counters \
+                         above are the migration's own."
+                    );
+                }
+            }
             Ok(())
         }
         Err(stopped) => {

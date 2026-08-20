@@ -1885,7 +1885,7 @@ mod test {
 
     /// The third knowledge port finally travels: facts written on the source
     /// come back from the imported bundle, and the bundle carries them in
-    /// `memory/facts.jsonl` beside the traces they conceptually sit with.
+    /// `facts.jsonl (bundle root)` beside the traces they conceptually sit with.
     #[tokio::test]
     async fn operator_facts_travel_with_the_bundle() {
         use crate::ports::facts::FactStore;
@@ -1996,9 +1996,16 @@ mod test {
         .await
         .unwrap();
         let (s4, e4, m4, c4) = fs_ports(&home4);
-        let err = import_bundle(&dest2, s4, e4, m4, c4, None)
+        let err = import_bundle(&dest2, s4.clone(), e4, m4, c4, None)
             .await
             .expect_err("facts with no target port must refuse");
         assert!(err.to_string().contains("fact"), "{err}");
+        // The property the refuse-before-write ordering exists for: NOTHING
+        // landed. A refusal after `store.save` would leave a half-import
+        // whose append-only retry duplicates history.
+        assert!(
+            s4.load(&id2).await.unwrap().is_none(),
+            "the refusal must precede every write"
+        );
     }
 }

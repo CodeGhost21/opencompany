@@ -370,9 +370,13 @@ switched engine starts empty by design), the data step comes first.
    namespace the source credential can see crosses, which is exactly right
    when each tenant has its own hosted account and credential — and exactly
    wrong if two tenants ever shared one, so keep hosted memory credentials
-   per-tenant. And the target credential arrives as a CLI flag: run the
-   command through `kubectl exec` (or equivalent) without a shell history,
-   the same care the env patch itself gets.
+   per-tenant. And pass the target credential through
+   `OPENCOMPANY_MEMORY_TARGET_API_KEY`, not `--to-api-key`: a flag sits in
+   `/proc/<pid>/cmdline`, world-readable for the whole (possibly long) run,
+   which no shell-history hygiene fixes. The flag remains only for
+   compatibility. On completion the command re-counts the **target's own**
+   export as a receipt, so the evidence is the target's answer rather than
+   the migration's own counters.
 2. **Set the variables** for the target engine (the `.env.example` block names
    all five). A hosted engine needs the build to carry the `tinymemory`
    feature; `namespace` needs `tinymemory-embedded`. A feature-less build
