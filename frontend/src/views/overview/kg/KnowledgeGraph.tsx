@@ -16,7 +16,7 @@ import { ClipboardList, Info, Milestone, Sparkles, User, UserRound, Users, Workf
 import { DERIVED_NOTICE } from './adapter';
 import { orderGraphDepartments, SELF_ID, toolSlugOf, type KGNode, type KGNodeKind, type KnowledgeGraph as KGData } from './model';
 import { branchPath, branchWidth, cyclicDeltaF, edgeArc, focusWheel, radialRestLayout, responsiveRingR, rotateAbout, shortestAngleDelta, treeLayout, wheelPoint, wheelStageGeom, wheelStageSpot, type RestLayoutResult, type TreeLayoutResult, type TreeNodePos } from './tree-layout';
-import { focusLabelIds, LABEL_PRIORITY, planLabels, type LabelCandidate } from './label-plan';
+import { focusLabelIds, LABEL_PRIORITY, planLabels, type LabelCandidate, type LabelIcon } from './label-plan';
 import { rafThrottle } from './raf-throttle';
 import { buildToolWiki, isMcpSlug, prettifySlug } from './agent-wiki';
 import { cameraRect, lerpRect, memoryNodePos, pickRestTier, R_CORE, type MemoryGraph, type Rect } from './memory-core';
@@ -1830,11 +1830,22 @@ export function KnowledgeGraph({
   const selectedOrgId = selectedAgentId ?? selectedHumanId ?? selectedTaskId ?? selectedToolId;
   const focusChildren = focusTree ? focusLabelIds(focusTree.branches, focusId) : null;
   const labelCandidates: LabelCandidate[] = [];
+  // Every circle solid enough to read is a circle solid enough to hide text
+  // (issue #1258), so the declutter gets the icons as obstacles too — not just
+  // the nodes eligible for a label. Tools and SOP tasks are the ones that
+  // matter: numerous, tightly packed, and never named at rest, so they used to
+  // contribute no box at all and a neighbour's label sailed straight over them.
+  // The memory constellation's backdrop disc is deliberately NOT modelled here;
+  // it is a separate, transition-scaled footprint, and feeding a mid-flight
+  // animation into this pass is exactly the flicker the plan measures around.
+  const labelIcons: LabelIcon[] = [];
   for (const n of nodes) {
     const v = visuals.get(n.id)!;
     // a node faded to a whisper has nothing to label, and a label there would
-    // still take a box from a node you can actually see
+    // still take a box from a node you can actually see — the same cut decides
+    // whether its icon is opaque enough to obscure a neighbour's name
     if (v.opacity < 0.3) continue;
+    labelIcons.push({ id: n.id, x: n.x, y: n.y, r: v.r });
     let priority: number | null = null;
     if (hoverId === n.id) priority = LABEL_PRIORITY.hovered;
     else if (selectedOrgId === n.id) priority = LABEL_PRIORITY.selected;
@@ -1861,7 +1872,7 @@ export function KnowledgeGraph({
   // `camK` (state) rather than the live ref: reading it here is what ties the
   // declutter to the zoom, and `camK * W` is the camera width it was published
   // from. x/y come off the ref — they only move every box by a shared vector.
-  const labelSet = planLabels(labelCandidates, { x: camRectRef.current.x, y: camRectRef.current.y, w: camK * W }, W);
+  const labelSet = planLabels(labelCandidates, { x: camRectRef.current.x, y: camRectRef.current.y, w: camK * W }, W, labelIcons);
 
   // ── the graph itself (reused inline + fullscreen) ───────────────────────────
   const graphInner = (

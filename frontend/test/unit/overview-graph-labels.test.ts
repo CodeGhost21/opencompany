@@ -1,10 +1,13 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  boxHitsCircle,
   focusLabelIds,
   LABEL_PRIORITY,
+  labelBoxPx,
   planLabels,
   type LabelCandidate,
+  type LabelIcon,
 } from "@/views/overview/kg/label-plan";
 
 /**
@@ -28,6 +31,14 @@ import {
  *    that matters, because zooming out is what packs nodes together. That
  *    regression would restore the pile-up this issue is about while every unit
  *    of the layout still looked right.
+ * 3. **Node icons are obstacles, not just other labels** (issue #1258). The
+ *    circles most likely to sit on a name belong to tools and SOP tasks, which
+ *    are never named at rest and so contributed no box of their own — a label
+ *    could clear every other label and still render as `[icon]folio Support`.
+ *    The two rules that keep that pass from over-correcting are worth pinning
+ *    down too: a label may sit on its OWN node's icon (it hangs off that very
+ *    circle, so at low zoom it always overlaps it), and a label with nowhere
+ *    clear is dropped rather than drawn illegibly.
  */
 
 const W = 880;
@@ -105,6 +116,118 @@ describe("planLabels", () => {
       cand({ id: "row-1", x: 0, dy: 40, priority: LABEL_PRIORITY.worker }),
     ];
     expect(planLabels(stacked, { x: 0, y: 0, w: W }, W)).toEqual(new Set(["row-0", "row-1"]));
+  });
+});
+
+describe("planLabels vs node icons (issue #1258)", () => {
+  const icon = (over: Partial<LabelIcon> & { id: string }): LabelIcon => ({
+    x: 0,
+    y: 0,
+    r: 7,
+    ...over,
+  });
+
+  // "AAAA" at fontPx 10 hanging on dy 20, at one px per graph unit, is the box
+  // x -15..15, y 12..22 — the numbers every case below is placed against.
+  const named = cand({ id: "named", priority: LABEL_PRIORITY.worker });
+
+  it("drops a label that lands on an unnamed neighbour's icon", () => {
+    // the tool sits squarely in the middle of the word — no other LABEL is
+    // anywhere near, which is exactly why the old pass let this through
+    const tool = icon({ id: "tool", x: 0, y: 20, r: 7 });
+    expect(planLabels([named], { x: 0, y: 0, w: W }, W, [])).toEqual(new Set(["named"]));
+    expect(planLabels([named], { x: 0, y: 0, w: W }, W, [tool]).size).toBe(0);
+  });
+
+  it("lets a label through its own node's icon", () => {
+    // one circle, two readings: as the label's own node it is exempt, as
+    // anyone else's it blocks. r 18 reaches the box from the node's centre.
+    const own = icon({ id: "named", x: 0, y: 0, r: 18 });
+    expect(planLabels([named], { x: 0, y: 0, w: W }, W, [own])).toEqual(new Set(["named"]));
+    expect(planLabels([named], { x: 0, y: 0, w: W }, W, [{ ...own, id: "someone-else" }]).size).toBe(
+      0,
+    );
+  });
+
+  it("keeps the self exemption load-bearing at every depth", () => {
+    // zoomed out, `dy` has shrunk with the graph while the font has not, so
+    // the box straddles its own node whatever that node's radius is. Without
+    // the exemption this would drop every label at once rather than the one in
+    // the way — the failure would read as "labels stopped working when I
+    // zoomed out", not as a collision bug.
+    const own = icon({ id: "named", x: 0, y: 0, r: 7 });
+    expect(planLabels([named], { x: 0, y: 0, w: W * 4 }, W, [own])).toEqual(new Set(["named"]));
+  });
+
+  it("gives no label a way through an icon, however high its priority", () => {
+    // an icon is not a competitor that can lose a tie — it is drawn either
+    // way, so the hovered name would render underneath it
+    const hovered = cand({ id: "hovered", priority: LABEL_PRIORITY.hovered });
+    const tool = icon({ id: "tool", x: 0, y: 20, r: 7 });
+    expect(planLabels([hovered], { x: 0, y: 0, w: W }, W, [tool]).size).toBe(0);
+  });
+
+  it("drops the blocked label without disturbing the ones that fit", () => {
+    // the no-valid-placement policy is 'drop', and it is local: a name with
+    // nowhere clear costs only itself
+    const blocked = cand({ id: "blocked", x: 0, priority: LABEL_PRIORITY.hovered });
+    const clear = cand({ id: "clear", x: 200, priority: LABEL_PRIORITY.worker });
+    const tool = icon({ id: "tool", x: 0, y: 20, r: 7 });
+    expect(planLabels([blocked, clear], { x: 0, y: 0, w: W }, W, [tool])).toEqual(
+      new Set(["clear"]),
+    );
+  });
+
+  it("measures icons in screen space too, so zooming out drops what 1:1 kept", () => {
+    // a radius RIDES the graph, unlike the font, so it must be projected
+    // through the camera rather than compared against px as-is. 30 units clear
+    // at 1:1; pulled back to a tenth, the box is still 10px tall while that
+    // gap has collapsed to 3px and the icon is inside the word.
+    const above = icon({ id: "tool", x: 0, y: -30, r: 6 });
+    expect(planLabels([named], { x: 0, y: 0, w: W }, W, [above])).toEqual(new Set(["named"]));
+    expect(planLabels([named], { x: 0, y: 0, w: W * 10 }, W, [above]).size).toBe(0);
+  });
+
+  it("ignores an icon the caller left out, so hidden nodes never block", () => {
+    // the caller only nominates circles it actually draws; a carousel node
+    // faded to nothing must not take a name off a node you can see
+    expect(planLabels([named], { x: 0, y: 0, w: W }, W)).toEqual(new Set(["named"]));
+  });
+});
+
+describe("boxHitsCircle", () => {
+  const box = { x0: 0, y0: 0, x1: 10, y1: 10 };
+
+  it("is a disc test, not a bounding-box one", () => {
+    // (13,13) is 4.24 from the corner: its bounding SQUARE overlaps the box at
+    // r 4, the circle itself does not. Getting this wrong throws away labels
+    // that clear the drawn avatar with room to spare.
+    expect(boxHitsCircle(box, 13, 13, 4)).toBe(false);
+    expect(boxHitsCircle(box, 13, 13, 5)).toBe(true);
+  });
+
+  it("catches a circle that swallows the box outright", () => {
+    expect(boxHitsCircle(box, 5, 5, 1)).toBe(true);
+    expect(boxHitsCircle(box, 5, 5, 100)).toBe(true);
+  });
+
+  it("treats touching as clear, matching the label-vs-label rule", () => {
+    expect(boxHitsCircle(box, 15, 5, 5)).toBe(false);
+    expect(boxHitsCircle(box, 15, 5, 5.01)).toBe(true);
+  });
+
+  it("says no to a zero or negative radius", () => {
+    expect(boxHitsCircle(box, 5, 5, 0)).toBe(false);
+    expect(boxHitsCircle(box, 5, 5, -3)).toBe(false);
+  });
+
+  it("agrees with the box the planner actually measures", () => {
+    // guards the two staying in the same units: labelBoxPx is px, so the
+    // circle handed to boxHitsCircle has to be projected the same way
+    const b = labelBoxPx(cand({ id: "x" }), { x: 0, y: 0, w: W }, 1);
+    expect(b).toEqual({ x0: -15, x1: 15, y0: 12, y1: 22 });
+    expect(boxHitsCircle(b, 0, 20, 7)).toBe(true);
+    expect(boxHitsCircle(b, 0, 0, 7)).toBe(false);
   });
 });
 

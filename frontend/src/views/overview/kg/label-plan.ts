@@ -12,11 +12,23 @@
  *
  * 1. the component nominates **candidates** with a priority (the roster at
  *    rest, the focused node and its direct children in focus, plus whatever is
- *    hovered or selected);
+ *    hovered or selected), alongside the **icons** — every node circle actually
+ *    drawn, whether or not it is ever named;
  * 2. {@link planLabels} runs a greedy declutter over them — highest priority
- *    placed first, and any later label whose box overlaps one already placed is
- *    dropped. Every node keeps a `<title>`, so a dropped label still has a
- *    native tooltip underneath it.
+ *    placed first, and any later label whose box overlaps one already placed,
+ *    or lands on a node's icon, is dropped. Every node keeps a `<title>`, so a
+ *    dropped label still has a native tooltip underneath it.
+ *
+ * ## Why icons are obstacles too (issue #1258)
+ *
+ * The first cut of this pass only compared a label against other *labels*, and
+ * that is half the picture. The nodes most likely to sit in a text box's path
+ * are tools and SOP tasks — numerous, closely packed, and deliberately left
+ * unnamed at rest, so they contributed no box of their own to collide with. A
+ * label could dodge every other label and still land squarely on a neighbour's
+ * circle avatar, which is how "Portfolio Support" came to render as
+ * `[icon]folio Support`. Icons are circles with a radius, not boxes, so the
+ * test against them is {@link boxHitsCircle}, not {@link overlaps}.
  *
  * ## Why the collision pass measures in SCREEN space
  *
@@ -49,6 +61,23 @@ export type LabelCandidate = {
   fontPx: number;
   /** higher wins a collision; ties break on the order given */
   priority: number;
+};
+
+/**
+ * A node's drawn circle avatar — an obstacle no label may sit on (issue #1258).
+ *
+ * Unlike a label, an icon rides the graph completely: both its centre and its
+ * radius are in graph units, so zooming in makes it cover more pixels. `id`
+ * matches the {@link LabelCandidate} of the same node, which is how a label is
+ * let through its OWN icon; see {@link planLabels}.
+ */
+export type LabelIcon = {
+  id: string;
+  /** the node's centre, in graph units */
+  x: number;
+  y: number;
+  /** the drawn radius, in graph units */
+  r: number;
 };
 
 /**
@@ -112,6 +141,30 @@ const overlaps = (a: LabelBox, b: LabelBox): boolean =>
   a.x0 < b.x1 && b.x0 < a.x1 && a.y0 < b.y1 && b.y0 < a.y1;
 
 /**
+ * Does a label box touch a circle? All four values are screen px.
+ *
+ * An icon is a disc, so the box's bounding square would reject placements that
+ * clear the drawn circle by a comfortable margin at every corner. The exact
+ * test is the cheap one anyway: clamp the centre into the box to get the
+ * nearest point on it, then ask whether that point is inside the radius. A
+ * centre that lands *inside* the box clamps to itself, distance zero, which is
+ * the fully-covered case and reads true as it should.
+ */
+export function boxHitsCircle(
+  box: LabelBox,
+  cx: number,
+  cy: number,
+  r: number,
+): boolean {
+  if (r <= 0) return false;
+  const nx = Math.min(Math.max(cx, box.x0), box.x1);
+  const ny = Math.min(Math.max(cy, box.y0), box.y1);
+  const dx = cx - nx;
+  const dy = cy - ny;
+  return dx * dx + dy * dy < r * r;
+}
+
+/**
  * The ids whose labels survive the declutter, measured in screen px.
  *
  * `canvasW` is the width the camera rect maps onto — the nominal SVG width, so
@@ -119,20 +172,43 @@ const overlaps = (a: LabelBox, b: LabelBox): boolean =>
  * highest priority first; a label that collides with one already placed is
  * dropped rather than nudged, because nudging is what the old two-row stagger
  * did and it only moved the pile-up.
+ *
+ * `icons` are the node circles actually drawn — pass every visible node, not
+ * just the ones eligible for a label, since an unnamed tool hides text exactly
+ * as well as a named agent does. Two rules make them behave:
+ *
+ * - **a label may sit on its own node's icon.** Its box hangs off that very
+ *   node by `dy`, which rides the graph while the font does not, so zoomed far
+ *   enough out every box overlaps its own circle. Blocking on that would drop
+ *   every label at once rather than the one in the way.
+ * - **a label with nowhere clear is dropped, not shrunk or drawn anyway.** That
+ *   is already what an unwinnable label-vs-label collision does, and the node
+ *   still carries a `<title>`, so the name stays one hover away instead of
+ *   being rendered illegibly under an avatar.
  */
 export function planLabels(
   candidates: readonly LabelCandidate[],
   cam: LabelCamera,
   canvasW: number,
+  icons: readonly LabelIcon[] = [],
 ): Set<string> {
   const scale = cam.w > 0 ? canvasW / cam.w : 1;
   const order = candidates.map((c, i) => ({ c, i }));
   order.sort((a, b) => b.c.priority - a.c.priority || a.i - b.i);
+  // icons never move or drop out, so project them once rather than per label
+  const discs = icons.map((n) => ({
+    id: n.id,
+    cx: (n.x - cam.x) * scale,
+    cy: (n.y - cam.y) * scale,
+    // a radius rides the graph, so unlike `fontPx` it scales with the camera
+    r: n.r * scale,
+  }));
   const placed: LabelBox[] = [];
   const kept = new Set<string>();
   for (const { c } of order) {
     const box = labelBoxPx(c, cam, scale);
     if (placed.some((p) => overlaps(p, box))) continue;
+    if (discs.some((d) => d.id !== c.id && boxHitsCircle(box, d.cx, d.cy, d.r))) continue;
     placed.push(box);
     kept.add(c.id);
   }
