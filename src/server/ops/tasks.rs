@@ -547,8 +547,15 @@ async fn delete_task(
 /// [`RawWorkflow`](crate::company::RawWorkflow) from the **stored** `ops` — the
 /// host is the authority, the browser's copy is never trusted — and runs it
 /// through [`create_company_workflow`], which takes the company write lock,
-/// re-validates shape + roster + id/name uniqueness, and (issue #276) lands any
-/// schedule-carrying graph switched off until a person arms it.
+/// re-validates shape + roster + destinations + id/name uniqueness, and (issue
+/// #276) lands any schedule-carrying graph switched off until a person arms it.
+///
+/// "The same validation an editor save runs" is the whole contract here, and
+/// until issue #1191 it was not true: the channel-destination rule lived on the
+/// two write routes rather than in the shared core, so this path — the ONE path
+/// where the operator did not author the graph, the path #836 exists because of
+/// — was the path with no check. A proposal naming a channel nobody wired was
+/// persisted and the card marked Done.
 ///
 /// On success the card is stamped with a [`TaskOutput`] linking the created
 /// workflow to the build attempt (issue #339) and moved to **Done**, and the
@@ -583,12 +590,19 @@ async fn apply_workflow_proposal(
     })?;
     let draft = raw_workflow_from_spec(&spec)?;
 
+    // Issue #1191: the deliverable channel set, read off the SAME runtime the
+    // console's destination picker is served from. Apply is a save, and it used
+    // to be the one save that skipped the channel rule — so a proposal naming a
+    // channel nobody wired was persisted, the card was marked Done, and the
+    // resulting workflow could not be saved again from the editor without first
+    // fixing a destination the operator never chose.
     let file = match create_company_workflow(
         company.id(),
         company.runtime.source_dir(),
         company.runtime.store(),
         Some(company.runtime.events()),
         draft,
+        Some(&company.runtime.deliverable_channel_ids()),
     )
     .await
     {
