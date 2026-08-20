@@ -128,12 +128,22 @@ export function MessageTimeline({
   // dependency, not `items.length` — two channels can hold the same number of
   // rows, and an effect keyed on the count would not fire for that switch at
   // all, leaving the new channel wearing the old one's scroll offset.
+  //
+  // `historyPending` is the second dependency, and it is what makes the rule
+  // true rather than merely well-intentioned (issue #1224). A cold load mounts
+  // this component *before* the transcript exists: history is still on the wire
+  // (`historyPending`), the box is one screen tall, and "scroll to the bottom"
+  // is a no-op against content that has not arrived. Keyed on the channel
+  // alone, this effect then never ran again, and the operator was left at the
+  // top of a transcript that appeared under them a hundred milliseconds later.
+  // Re-anchoring as the history lands is the same jump, against the real
+  // transcript this time.
   useLayoutEffect(() => {
     const el = scroller.current;
     if (!el) return;
     el.scrollTop = el.scrollHeight;
     following.current = true;
-  }, [channel.id]);
+  }, [channel.id, historyPending]);
 
   // Rule 2 — growth while the channel is open. Each new tool row grows the
   // block at the bottom, so the scroll has to follow it as the turn works, not
@@ -150,9 +160,18 @@ export function MessageTimeline({
       settledOn.current = channel.id;
       return;
     }
+    // Nothing to follow while the transcript is still on the wire (#1224).
+    // `scrollTo` captures a **pixel offset**, not the idea of "the bottom", so
+    // an animation started against a one-screen box eases to a number the
+    // arriving history makes meaningless — and the scroll events it emits on
+    // the way there are indistinguishable from a person scrolling, so
+    // `trackFollowing` reads the grown transcript as "they scrolled away" and
+    // the channel stops following for the rest of the session. Rule 1 above
+    // owns the anchor until the history has landed.
+    if (historyPending) return;
     if (!following.current) return;
     el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
-  }, [channel.id, items.length, typing, liveStepCount]);
+  }, [channel.id, historyPending, items.length, typing, liveStepCount]);
 
   return (
     <div ref={scroller} onScroll={trackFollowing} className="flex-1 overflow-y-auto">
