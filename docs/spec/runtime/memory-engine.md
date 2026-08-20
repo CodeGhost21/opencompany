@@ -354,9 +354,12 @@ data step comes first.
 Misconfiguration never falls back: an unknown mode, a missing driver, URL or
 key, or a missing cargo feature is a boot refusal naming the knob to change.
 
-> **`namespace` caveat (2026-08-20):** the embedded contract driver has two
-> open correctness defects — #1201 (writes corrupted by the PII scrubber's
-> digit redaction inside the stored envelope) and #1238 (a dropped context
-> chunk and reordered traces under the port conformance suite). Fixes are in
-> flight; until both land and the union CI lane is green over them, prefer the
-> incumbent `embedded` engine overlay or a hosted engine for anything real.
+> **`namespace` caveat (2026-08-20):** #1201 (writes corrupted by the PII
+> scrubber redacting Luhn-valid digit runs — most often `at_millis` timestamps
+> — into broken JSON) is fixed in this change's own stack: the scrubber now
+> corroborates before redacting, and two regression nets pin it (the
+> Luhn-timestamp round-trip, and the survival contract in
+> `store::memory::upstream_conformance_test`). One defect remains open —
+> #1238 (a dropped context chunk and reordered traces under the port
+> conformance suite). Until it lands, prefer the incumbent `embedded` engine
+> overlay or a hosted engine for anything real.

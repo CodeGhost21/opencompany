@@ -254,29 +254,20 @@ impl MemoryOverlay {
     /// overlay path, or a build without the provider seam.
     #[cfg(feature = "tinymemory")]
     pub async fn refresh_health(&mut self, timeout: std::time::Duration) {
-        use tinymemory_api::health::MemoryHealth;
         let Some(probe) = &self.probe else {
             return;
         };
-        let healthy = match tokio::time::timeout(timeout, probe.health()).await {
-            Ok(MemoryHealth::Ready) => true,
-            Ok(status) => {
-                tracing::warn!(
-                    driver_id = %self.descriptor.driver_id,
-                    status = ?status,
-                    "memory engine bound but not healthy; cycles that need memory will fail"
-                );
-                false
-            }
-            Err(_) => {
-                tracing::warn!(
-                    driver_id = %self.descriptor.driver_id,
-                    timeout_secs = timeout.as_secs(),
-                    "memory engine health probe timed out; the endpoint may be unreachable"
-                );
-                false
-            }
-        };
+        let answer = tokio::time::timeout(timeout, probe.health()).await.ok();
+        let healthy = probe_answer_is_healthy(&answer);
+        if !healthy {
+            tracing::warn!(
+                driver_id = %self.descriptor.driver_id,
+                status = ?answer,
+                timeout_secs = timeout.as_secs(),
+                "memory engine bound but its health probe did not answer Ready or Degraded; \
+                 cycles that need memory will fail until the endpoint or credential is fixed"
+            );
+        }
         self.descriptor.healthy = Some(healthy);
     }
 
@@ -284,6 +275,21 @@ impl MemoryOverlay {
     /// `None` ("not probed"), which is the truth.
     #[cfg(not(feature = "tinymemory"))]
     pub async fn refresh_health(&mut self, _timeout: std::time::Duration) {}
+}
+
+/// Maps a probe outcome (`None` = timed out) onto the `healthy` bit.
+///
+/// `Ready` AND `Degraded` are healthy: a degraded engine is still serving —
+/// reduced, not absent — and reporting it as down would tell an operator to
+/// fix an endpoint that is answering. Only `Down` and a timeout mean the
+/// first cycle that needs memory will fail.
+#[cfg(feature = "tinymemory")]
+fn probe_answer_is_healthy(answer: &Option<tinymemory_api::health::MemoryHealth>) -> bool {
+    use tinymemory_api::health::MemoryHealth;
+    matches!(
+        answer,
+        Some(MemoryHealth::Ready) | Some(MemoryHealth::Degraded { .. })
+    )
 }
 
 impl std::fmt::Debug for MemoryOverlay {
@@ -1176,6 +1182,28 @@ mod test {
             overlay.descriptor.healthy,
             Some(true),
             "the probe's answer must land on the descriptor"
+        );
+    }
+
+    /// The whole health vocabulary, pinned per outcome: `Degraded` is still
+    /// serving — reduced, not absent — so it must read healthy; only `Down`
+    /// and a timeout mean the next memory-needing cycle fails.
+    #[cfg(feature = "tinymemory")]
+    #[test]
+    fn probe_mapping_counts_degraded_as_healthy_and_down_or_timeout_as_not() {
+        use tinymemory_api::health::MemoryHealth;
+        assert!(super::probe_answer_is_healthy(&Some(MemoryHealth::Ready)));
+        assert!(super::probe_answer_is_healthy(&Some(
+            MemoryHealth::Degraded {
+                reason: "index rebuilding".into()
+            }
+        )));
+        assert!(!super::probe_answer_is_healthy(&Some(MemoryHealth::Down {
+            reason: "connection refused".into()
+        })));
+        assert!(
+            !super::probe_answer_is_healthy(&None),
+            "a timed-out probe must read unhealthy, not unknown"
         );
     }
 

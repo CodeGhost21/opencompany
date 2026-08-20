@@ -933,4 +933,34 @@ mod tests {
             "/spec leaked the memory endpoint: {rendered}"
         );
     }
+
+    /// The other half of the health contract on the wire: once the boot probe
+    /// has run, `/spec` serves its answer. The `null` driver's `health()` is
+    /// `Ready` by contract, so this covers the probed-`true` serialization
+    /// deterministically; the unprobed case is asserted `null` above, and the
+    /// mapping of degraded/down/timeout onto the bit is pinned in
+    /// `store::select`.
+    #[cfg(feature = "tinymemory")]
+    #[tokio::test]
+    async fn spec_serves_the_boot_probes_health_answer() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut overlay = crate::store::open_memory_overlay(&crate::store::StorageSettings {
+            memory_backend: crate::store::MemoryBackend::Null,
+            ..Default::default()
+        })
+        .expect("null binds")
+        .expect("null yields an overlay");
+        overlay
+            .refresh_health(std::time::Duration::from_secs(5))
+            .await;
+
+        let state = AppState::new(AppConfig::default())
+            .with_home(dir.path().to_path_buf())
+            .with_memory_overlay(overlay);
+        let body = spec_body(state).await;
+        assert_eq!(
+            body["memory"]["healthy"], true,
+            "probed health must reach /spec"
+        );
+    }
 }
