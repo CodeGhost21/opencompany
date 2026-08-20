@@ -792,23 +792,41 @@ export function cancelWorkflowRun(
 }
 
 /**
- * The company's finished workflow runs, **newest first** (issue #228).
+ * One page of {@link listWorkflowRuns} (issue #1012).
+ *
+ * `hasMore` says whether an older page exists behind `beforeSeq` — the run
+ * history drawer's "Load older" affordance is gated on it, so a truncated
+ * history never silently reads as the whole thing.
+ */
+export interface WorkflowRunsPage {
+  runs: WorkflowRunOutcome[];
+  hasMore: boolean;
+}
+
+/**
+ * The company's finished workflow runs, **newest first** (issue #228) — now
+ * genuinely true of the *displayed* `seq`/`atMillis`, not just the order two
+ * runs started in (issue #1012).
  *
  * `workflow` narrows to one graph's runs; `limit` caps the page (the host
- * defaults to a short recent list and clamps a large ask). A host predating this
- * route answers 404 — callers should treat that as "no history yet" rather than
- * an error, since the console still works without it.
+ * defaults to a short recent list and clamps a large ask). `beforeSeq` pages
+ * further back: pass the `seq` of the oldest run already held to fetch the
+ * page before it (issue #1012) — `hasMore` on the returned page says whether
+ * one exists. A host predating this route answers 404 — callers should treat
+ * that as "no history yet" rather than an error, since the console still works
+ * without it.
  */
 export function listWorkflowRuns(
   client: OpenCompanyClient,
   company: string | null,
-  options?: { workflow?: string; limit?: number },
-): Promise<WorkflowRunOutcome[]> {
+  options?: { workflow?: string; limit?: number; beforeSeq?: number },
+): Promise<WorkflowRunsPage> {
   const params = new URLSearchParams();
   if (options?.workflow) params.set("workflow", options.workflow);
   if (options?.limit) params.set("limit", String(options.limit));
+  if (options?.beforeSeq) params.set("before_seq", String(options.beforeSeq));
   const query = params.toString();
-  return client.get<WorkflowRunOutcome[]>(
+  return client.get<WorkflowRunsPage>(
     `${client.scopeFor(company)}/workflows/runs${query ? `?${query}` : ""}`,
   );
 }
