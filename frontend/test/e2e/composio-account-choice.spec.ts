@@ -177,8 +177,9 @@ test.afterAll(async ({ playwright }, testInfo) => {
  * issue #1303, and is not a test's to fix.
  */
 async function clickClearOfToasts(target: Locator): Promise<void> {
-  // `:not([data-removed])` because sonner keeps a dismissed toast mounted for
-  // its exit animation. Without it the front × stays the one already clicked
+  // `:not([data-removed="true"])` because sonner keeps a dismissed toast
+  // mounted for its exit animation, flipping that attribute rather than
+  // unmounting. Without the filter the front × stays the one already clicked
   // for those frames, and the sweep spends its budget re-closing it.
   const closers = target
     .page()
