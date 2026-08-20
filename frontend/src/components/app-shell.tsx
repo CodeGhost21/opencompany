@@ -1432,7 +1432,7 @@ export function AppShell({
       <SidebarInset className="min-h-0 min-w-0">
         <main className="flex min-h-0 flex-1 flex-col overflow-hidden">
           {view === "overview" && (
-            <Overview client={client} company={company} />
+            <Overview client={client} company={company} companyName={feed.status.name} />
           )}
           {view === "company" && (
             <CompanyView
