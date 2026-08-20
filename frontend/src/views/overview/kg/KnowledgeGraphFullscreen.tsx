@@ -16,7 +16,7 @@ import { ToolDetailCard, type DeptLite } from './KnowledgeDetail';
  */
 export function KnowledgeGraphFullscreen({
   deptList, currentTeamId, currentDept,
-  toolWiki, extraDetail, coreOpen = false, onCollapseCore, searchSlot, legendSlot,
+  toolWiki, extraDetail, coreOpen = false, onCollapseCore, searchSlot, legendSlot, statusSlot,
   onNavDept, onBack, children,
 }: {
   deptList: DeptLite[];
@@ -34,6 +34,8 @@ export function KnowledgeGraphFullscreen({
   searchSlot?: React.ReactNode;
   /** compact kind legend, rendered bottom-left */
   legendSlot?: React.ReactNode;
+  /** the snapshot line and its Refresh control, rendered top-right */
+  statusSlot?: React.ReactNode;
   onNavDept: (teamId: string) => void;
   onBack: () => void;
   children: React.ReactNode;
@@ -41,6 +43,32 @@ export function KnowledgeGraphFullscreen({
   const [mounted, setMounted] = useState(false);
   useEffect(() => setMounted(true), []);
   const hasDetail = !!(toolWiki || extraDetail);
+  /**
+   * How the right-edge chrome gets out of the detail rail's way (issue #1307).
+   *
+   * The rail is an absolute overlay on purpose — resizing the canvas under it
+   * reflowed the graph on every open and close, which is the glitch the
+   * comment on the `<aside>` below is about. So the canvas keeps its size and
+   * the two controls that live on the right edge move instead: `right-2` is
+   * inside the 300px rail, and the rail is `z-30`, so without this they are
+   * both covered *and* unclickable rather than merely obscured.
+   *
+   * Above 820px the rail is that 300px column, and the offset is its width
+   * plus the inset the control already had. At or below it the rail is a
+   * bottom sheet (`max-h-[62vh]`, anchored bottom) — the right edge is clear
+   * again, so the offset is reverted and the paddles rise into the band the
+   * sheet leaves instead of staying centred underneath it.
+   */
+  const clearOfRail = hasDetail ? 'right-[316px] max-[820px]:right-2' : 'right-2';
+  /**
+   * Mid-height normally; in the band above the bottom sheet when there is one.
+   *
+   * The sheet is `max-h-[62vh]` anchored to the bottom, so its top edge sits at
+   * 38vh and a paddle centred at 50vh is underneath it. 19vh is the middle of
+   * what is left. Only applies at or below 820px, because that is the only
+   * width where the rail becomes a sheet.
+   */
+  const paddleTop = hasDetail ? 'top-1/2 max-[820px]:top-[19vh]' : 'top-1/2';
   const idx = deptList.findIndex((d) => d.teamId === currentTeamId);
   const step = (dir: number) => {
     if (deptList.length === 0) return;
@@ -123,19 +151,36 @@ export function KnowledgeGraphFullscreen({
           </div>
         )}
 
+        {/* the snapshot line — top-right, clear of the detail rail (issue
+            #1307). `z-40` so it stays above the rail even when the offset
+            above puts it beside rather than behind it, and `top-5`/`right-5`
+            so it sits on the same 20px inset as the pillar selector and the
+            legend rather than the 12px one it used to carry alone. */}
+        {statusSlot && (
+          <div
+            className={`absolute top-5 z-40 flex flex-col items-end gap-1.5 transition-[right] duration-200 ease-standard ${
+              hasDetail ? 'right-[316px] max-[820px]:right-5' : 'right-5'
+            }`}
+          >
+            {statusSlot}
+          </div>
+        )}
+
         {/* compact legend — bottom-left, always on */}
         {legendSlot && <div className="absolute bottom-5 left-5 z-10">{legendSlot}</div>}
 
         {/* side paddles: slim, hugging the canvas edges at mid-height — you
             turn the wheel from where you're already looking, never the top.
-            The right paddle steps aside when the detail panel is open. */}
+            The right paddle steps aside when the detail panel is open — see
+            `clearOfRail`, which is what finally made that sentence true
+            (issue #1307). */}
         {!coreOpen && (
           <>
             <button
               onClick={() => step(-1)}
               aria-label="Previous department"
               title="Previous pillar (←)"
-              className="absolute left-2 top-1/2 z-20 flex h-32 w-12 -translate-y-1/2 items-center justify-center rounded-sm-t border border-os-border bg-os-bg/70 text-os-muted backdrop-blur transition-colors hover:border-os-border-strong hover:text-os-text"
+              className={`absolute left-2 z-40 flex h-32 w-12 -translate-y-1/2 items-center justify-center rounded-sm-t border border-os-border bg-os-bg/70 text-os-muted backdrop-blur transition-all duration-200 ease-standard hover:border-os-border-strong hover:text-os-text ${paddleTop}`}
             >
               <ChevronLeft className="h-7 w-7" />
             </button>
@@ -143,7 +188,7 @@ export function KnowledgeGraphFullscreen({
               onClick={() => step(1)}
               aria-label="Next department"
               title="Next pillar (→)"
-              className="absolute right-2 top-1/2 z-20 flex h-32 w-12 -translate-y-1/2 items-center justify-center rounded-sm-t border border-os-border bg-os-bg/70 text-os-muted backdrop-blur transition-colors hover:border-os-border-strong hover:text-os-text"
+              className={`absolute z-40 flex h-32 w-12 -translate-y-1/2 items-center justify-center rounded-sm-t border border-os-border bg-os-bg/70 text-os-muted backdrop-blur transition-all duration-200 ease-standard hover:border-os-border-strong hover:text-os-text ${clearOfRail} ${paddleTop}`}
             >
               <ChevronRight className="h-7 w-7" />
             </button>

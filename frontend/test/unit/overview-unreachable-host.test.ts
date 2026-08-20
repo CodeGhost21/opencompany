@@ -25,7 +25,11 @@ import type { DeskDto, TeamMemberDto } from "@/api/types";
  */
 
 vi.mock("@/views/overview/kg/KnowledgeGraph", () => ({
-  KnowledgeGraph: () => null,
+  // The snapshot corner is a slot the graph's shell positions (issue #1307),
+  // because only the shell knows how wide the detail rail is. The stand-in
+  // therefore has to render that slot — a mock that dropped it would take the
+  // whole surface under test with it and pass by drawing nothing.
+  KnowledgeGraph: ({ statusSlot }: { statusSlot?: unknown }) => statusSlot ?? null,
 }));
 
 const { Overview } = await import("@/views/Overview");

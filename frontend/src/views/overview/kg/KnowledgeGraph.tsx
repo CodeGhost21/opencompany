@@ -214,11 +214,24 @@ type SimLink = { source: SimNode | string; target: SimNode | string; kind: strin
  */
 export function KnowledgeGraph({
   graph, agents = [], departments = [], people = [], tasks = [], memory, runsByAgent = {}, toolLabels = {},
+  statusSlot,
   repelDefault = 150, linkDistDefault = 60, centerDefault = 0.32,
 }: {
   graph: KGData; agents?: Agent[]; departments?: Department[]; people?: Person[]; tasks?: SopTask[];
   /** the distilled memory constellation drawn at the core */
   memory?: MemoryGraph;
+  /**
+   * The snapshot line — when this picture was read, and the control that reads
+   * it again — owned by `Overview` and positioned by the shell (issue #1307).
+   *
+   * It is a slot rather than something `Overview` positions itself because the
+   * detail rail is the only thing that knows how much of the right edge is
+   * still visible, and `Overview` cannot see it. Positioned separately, the
+   * chip sat at `right-3` under a `z-30` rail: the staleness signal, the
+   * Refresh control and the outage alert all vanished behind the first card an
+   * operator opened.
+   */
+  statusSlot?: React.ReactNode;
   /** latest run per agent id, for the harness card */
   runsByAgent?: Record<string, AgentRun>;
   /** Tool slug → display name, so a card can name a tool as its source does. */
@@ -2396,6 +2409,7 @@ export function KnowledgeGraph({
         onCollapseCore={clearAll}
         searchSlot={vaultSearchInput}
         legendSlot={compactLegend}
+        statusSlot={statusSlot}
         onNavDept={navDept}
         onBack={clearDetail}
       >
