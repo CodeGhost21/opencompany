@@ -42,9 +42,10 @@ async function findScroller(page: Page): Promise<string> {
         (overflow === "auto" || overflow === "scroll") && el.scrollHeight > el.clientHeight + 40
       );
     });
-    // Deepest first: an outer pane that also scrolls would let the assertion
-    // about *which* element gets marked pass for the wrong reason.
-    const pane = panes.at(-1);
+    // The innermost one — a pane that contains another candidate is an outer
+    // wrapper, and marking it would let the assertion about *which* element
+    // gets the mark pass for the wrong reason.
+    const pane = panes.find((el) => !panes.some((other) => other !== el && el.contains(other)));
     if (!pane) return null;
     pane.setAttribute("data-e2e-scroller", "");
     return "[data-e2e-scroller]";
@@ -59,15 +60,77 @@ async function openSettings(page: Page) {
   return findScroller(page);
 }
 
-test("scroll panes carry the console's own thin gutter, not the platform's", async ({ page }) => {
+test("scroll panes are styled by the console, not by the platform", async ({ page }) => {
   const scroller = await openSettings(page);
 
-  const gutter = await page.locator(scroller).evaluate((el: HTMLElement) => el.offsetWidth - el.clientWidth);
+  const styling = await page.evaluate((selector) => {
+    // Every rule in the cascade, flattened out of the `@layer` / `@media` /
+    // `@supports` blocks Tailwind v4 emits them inside.
+    const selectors: string[] = [];
+    const declarations = new Map<string, string>();
+    const walk = (rules: CSSRuleList) => {
+      for (const rule of rules) {
+        if (rule instanceof CSSStyleRule) {
+          selectors.push(rule.selectorText);
+          if (rule.selectorText.includes("::-webkit-scrollbar")) {
+            for (const property of rule.style) {
+              declarations.set(`${rule.selectorText}|${property}`, rule.style.getPropertyValue(property));
+            }
+          }
+        }
+        const nested = (rule as CSSGroupingRule).cssRules;
+        if (nested) walk(nested);
+      }
+    };
+    for (const sheet of document.styleSheets) {
+      try {
+        walk(sheet.cssRules);
+      } catch {
+        // A cross-origin sheet cannot be read. None of ours are.
+      }
+    }
 
-  // 10px is `--scrollbar-size`. Chromium's own bar is 15px, so this fails if
-  // the `::-webkit-scrollbar` block is dropped — or disabled, which is what
-  // setting `scrollbar-width`/`scrollbar-color` alongside it does.
-  expect(gutter).toBe(10);
+    const pane = document.querySelector(selector)!;
+    const paneStyle = getComputedStyle(pane);
+    const root = getComputedStyle(document.documentElement);
+    return {
+      selectors,
+      declarations: [...declarations],
+      // The standard properties, which must stay untouched — see below.
+      scrollbarWidth: paneStyle.scrollbarWidth,
+      scrollbarColor: paneStyle.scrollbarColor,
+      size: root.getPropertyValue("--scrollbar-size").trim(),
+      rest: root.getPropertyValue("--scrollbar-thumb-rest").trim(),
+      active: root.getPropertyValue("--scrollbar-thumb-active").trim(),
+    };
+  }, scroller);
+
+  // The gutter is 10px wide, and the width comes from a token rather than a
+  // literal. Deliberately not measured as `offsetWidth - clientWidth`: macOS
+  // Chromium paints an overlay scrollbar that reserves no layout space, so that
+  // measurement reads 0 there and 10 on Linux CI — a test that only fails on
+  // the machine nobody runs it on.
+  expect(styling.size).toBe("10px");
+  expect(styling.declarations).toContainEqual(["::-webkit-scrollbar|width", "var(--scrollbar-size)"]);
+
+  // The rule that makes the bar lift while the pane is moving. Without it the
+  // `data-scrolling` mark the next test asserts would be stamped on nothing.
+  expect(styling.selectors).toContain("[data-scrolling]::-webkit-scrollbar-thumb");
+
+  // Rest and active are different weights of the same colour. Equal values
+  // would mean the bar never changes, which is the always-on platform bar this
+  // replaced.
+  expect(styling.rest).not.toBe("");
+  expect(styling.active).not.toBe("");
+  expect(styling.rest).not.toBe(styling.active);
+
+  // The trap `index.css` warns about at length: Chromium honours
+  // `::-webkit-scrollbar` ONLY while the standard properties are untouched. Set
+  // either one on a scroller and it throws the custom scrollbar away and paints
+  // its own, silently — every rule asserted above would still be in the sheet
+  // and none of it would reach the screen.
+  expect(styling.scrollbarWidth).toBe("auto");
+  expect(styling.scrollbarColor).toBe("auto");
 });
 
 test("scrolling marks the pane that moved, and only until it settles", async ({ page }) => {

@@ -36,7 +36,10 @@ const indexCss = readFileSync(
 /** The body of the first top-level block opened by `selector`, brace-matched. */
 function block(selector: string): string {
   const open = indexCss.indexOf(`${selector} {`);
-  expect(open, `no \`${selector} {\` block in index.css`).toBeGreaterThanOrEqual(0);
+  // Thrown rather than asserted: this runs while the suite is being collected,
+  // where a failed `expect` is reported as a collection error rather than as
+  // the failing test it belongs to.
+  if (open < 0) throw new Error(`no \`${selector} {\` block in index.css`);
   let depth = 0;
   for (let i = indexCss.indexOf("{", open); i < indexCss.length; i += 1) {
     if (indexCss[i] === "{") depth += 1;
