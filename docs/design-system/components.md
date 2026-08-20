@@ -196,7 +196,7 @@ The console's window is two layers, not two panes (issue #1178).
 | Layer | What paints it | Fill |
 | --- | --- | --- |
 | Chrome | the shell root (`SidebarProvider`) | `bg-chrome` |
-| Card | `ContentSurface` | `bg-background`, `m-3`, `rounded-2xl`, `border-chrome-border`, `shadow-sm` |
+| Card | `ContentSurface` | `bg-background`, `rounded-2xl`, `border-chrome-border`, `shadow-sm` |
 
 The chrome is painted **once**. The sidebar column and the frame around the card
 are the same surface showing through: `Sidebar`'s inner container and
@@ -210,25 +210,48 @@ own `bg-card` panels, its dialogs — stacks on top of it, which is why it keeps
 `--background` rather than a colour of its own: page contrast is exactly what it
 was before the shell was rebuilt.
 
-### `unframed`
+**Anything that cuts a hole in the chrome must ask for the chrome.** A `ring-2`
+around a status dot is a cut-out of the ground behind it, not a decoration. The
+two in the shell — `SidebarMenuDot` on the collapsed rail and the host
+switcher's status dot — take `ring-chrome`. `ring-sidebar` there paints a halo.
 
-`ContentSurface` takes an `unframed` prop that renders the page edge to edge:
-no margin, no radius, no edge. It is for surfaces that are **drawings**, not
-documents — a canvas sized against the box it is handed, for which a 12px frame
-is not a margin but a crop.
+### The frame
 
-`src/lib/shell-frame.ts` decides it, and it asks the whole address rather than
-the view, because Workflows is both:
+| Side | Value |
+| --- | --- |
+| Left, right, bottom | `--frame-inset` (12px) |
+| Top | `--app-frame-top` |
 
-| Address | Mode | Why |
-| --- | --- | --- |
-| `#/overview` | unframed | the force-directed knowledge graph, laid out against `h-svh` |
-| `#/workflows` | framed | the browse list — cards, a count, a toolbar |
-| `#/workflows/<id>` | unframed | React Flow, whose viewport and minimap are computed from the container's rect (#1259, #1261) |
-| everything else | framed | documents |
+One quantity for the inset, spent on all four sides, so the frame is even by
+construction rather than by four numbers that happen to agree.
 
-Adding a view? It is framed unless it draws its own full-window canvas. If you
-reach for `unframed`, say which measurement breaks without it.
+The top is not a margin but an **alignment**: the card starts half way down the
+sidebar's header block, so a band of chrome carries the host switcher across the
+top of the window. That height is **measured**, not written down — the header
+follows its own padding and type size, and it changes outright when the column
+collapses and the switcher stops sharing a row with the collapse button.
+`AppShell` observes it and publishes `--sidebar-header-height`; `index.css`
+halves it, floors it at `--frame-inset`, and reverts to a plain even inset below
+`md`, where the sidebar is a sheet and there is no header column to align to.
+
+Two numbers written down beside each other would agree today and drift the first
+time either moved, by an amount small enough that nobody notices for weeks.
+
+### Every page is framed
+
+There is no full-bleed escape hatch, deliberately. `ContentSurface` carried an
+`unframed` prop and two surfaces used it — the Overview knowledge graph and the
+React Flow workflow canvas — and both are framed now. The reference shell keeps
+that prop for a constraint this console does not have: CEF composited its
+provider webviews *above* the HTML layer, so a rounded card underneath showed
+four square corners punching through, maskable by no CSS. Nothing here draws
+above the HTML layer.
+
+If a surface ever genuinely cannot be framed, the prop goes back — with the
+surface that needs it, not before. What a full-bleed page must not do meanwhile
+is size itself against the *viewport*: Overview claimed `h-svh`, which inside a
+card shorter than the window laid the graph out taller than the box clipping it
+and cropped its bottom band. Take the height the card gives you.
 
 ---
 
