@@ -2069,17 +2069,20 @@ async fn fix_from_run(
     .ok_or_else(|| {
         ApiError(OpenCompanyError::CompanyNotFound(format!("workflow {wid}"))).into_response()
     })?;
-    // `workflow_spec_from_graph` below has no `on_error`/`retry` field on
-    // `WorkflowNodeSpec` (the builder never authors them — see its own doc
-    // comment), so a node that had either set loses it silently once the
-    // operator saves the correction. Correlating retry/error policy across a
-    // copilot rewrite that may rename or drop nodes is the harder problem this
-    // PR does not take on; naming it in a note at least makes the loss visible
-    // instead of silent.
-    let dropped_error_policy_nodes: Vec<String> = file
+    // `workflow_spec_from_graph` below has no `on_error`/`retry`/`repeatable`
+    // field on `WorkflowNodeSpec` (the builder never authors them — see its
+    // own doc comment), so a node that had any of the three set loses it
+    // silently once the operator saves the correction. `repeatable` is the
+    // safety declaration issue #850 exists to protect — a correction that
+    // drops it with no warning can leave a continuation free to replay a call
+    // its author explicitly marked non-repeatable. Correlating this policy
+    // across a copilot rewrite that may rename or drop nodes is the harder
+    // problem this PR does not take on; naming it in a note at least makes the
+    // loss visible instead of silent.
+    let dropped_policy_nodes: Vec<String> = file
         .nodes
         .iter()
-        .filter(|n| n.on_error.is_some() || n.retry.is_some())
+        .filter(|n| n.on_error.is_some() || n.retry.is_some() || n.repeatable.is_some())
         .map(|n| n.name.clone())
         .collect();
     let spec = crate::company::workflow_spec_from_graph(file);
@@ -2125,11 +2128,12 @@ async fn fix_from_run(
             mut notes,
         }) => {
             let (ok, advisories) = workflow_readiness(&spec);
-            if !dropped_error_policy_nodes.is_empty() {
+            if !dropped_policy_nodes.is_empty() {
                 notes.push(format!(
-                    "on_error/retry on {} — this correction does not carry per-node error \
-                     policy through; reapply it after reviewing if the node is still there.",
-                    dropped_error_policy_nodes.join(", ")
+                    "on_error/retry/repeatable on {} — this correction does not carry these \
+                     per-node policies through; reapply them after reviewing if the node is \
+                     still there.",
+                    dropped_policy_nodes.join(", ")
                 ));
             }
             Ok(Json(FixFromRunResponse::Fixed {
@@ -4965,6 +4969,109 @@ mod tests {
                 "body: {body}"
             );
             assert!(body["readiness"]["ok"].is_boolean(), "body: {body}");
+        }
+
+        /// A node declared `repeatable = false` is named in the correction's
+        /// notes, alongside `on_error`/`retry` (issue #850).
+        ///
+        /// `WorkflowNodeSpec` — what the copilot's builder actually authors —
+        /// has no `repeatable` field, so a corrected graph silently drops the
+        /// declaration unless `fix_from_run` names it in `notes`. Without this,
+        /// an operator who saves a copilot correction over a workflow with a
+        /// `repeatable: false` node loses that guard with no warning at all.
+        #[cfg(feature = "openhuman")]
+        #[tokio::test]
+        async fn fix_from_run_notes_a_dropped_repeatable_declaration() {
+            use crate::harness::provider::HarnessModel;
+            use crate::harness::workflow_build::WorkflowBuilder;
+            use crate::harness::workflow_build::test::{
+                NativeCopilotModel, NativeStep, agent_deps, propose_step,
+            };
+
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let (state, _store, id) = hosted_state(&home).await;
+
+            let model = NativeCopilotModel::scripting(vec![
+                propose_step(
+                    "dropped the unwired step",
+                    serde_json::json!({
+                        "name": "Greeter",
+                        "nodes": [
+                            { "id": "start", "kind": "trigger", "name": "Start" },
+                            { "id": "done", "kind": "output", "name": "Report" }
+                        ],
+                        "edges": [ { "from": "start", "to": "done" } ]
+                    }),
+                ),
+                NativeStep::done("Corrected the workflow."),
+            ]);
+            {
+                let mut runtime =
+                    std::sync::Arc::into_inner(state.registry().remove(&id).expect("registered"))
+                        .expect("uniquely held in this test");
+                let deps = agent_deps(&runtime, model.clone() as std::sync::Arc<dyn HarnessModel>);
+                runtime.set_builder(std::sync::Arc::new(WorkflowBuilder::new(
+                    model as std::sync::Arc<dyn HarnessModel>,
+                    "test-model",
+                )));
+                runtime.set_workflow_harness_deps(deps);
+                state
+                    .registry()
+                    .insert(id.clone(), std::sync::Arc::new(runtime));
+            }
+
+            // Seed a workflow whose middle node declares `repeatable: false` —
+            // the exact declaration `fix_from_run`'s correction cannot carry
+            // through the builder's `WorkflowNodeSpec`.
+            let mut body = create_body();
+            body["nodes"].as_array_mut().unwrap().insert(
+                1,
+                serde_json::json!({
+                    "id": "publish",
+                    "kind": "tool_call",
+                    "name": "Publish",
+                    "config": { "slug": "shell", "args": { "command": "./bin/announce" } },
+                    "repeatable": false
+                }),
+            );
+            body["edges"] = serde_json::json!([
+                { "from": "start", "to": "publish" },
+                { "from": "publish", "to": "done" }
+            ]);
+            let created = router(state.clone())
+                .oneshot(request("POST", "/api/v1/company/workflows", Some(body)))
+                .await
+                .unwrap();
+            assert_eq!(created.status(), StatusCode::OK);
+
+            journal_run_with_id(
+                &state,
+                &id,
+                "greeter",
+                "run-1",
+                "the tool `web_search` is not wired on this deployment",
+            )
+            .await;
+
+            let response = router(state)
+                .oneshot(request(
+                    "POST",
+                    "/api/v1/company/workflows/greeter/fix-from-run",
+                    Some(serde_json::json!({ "runId": "run-1" })),
+                ))
+                .await
+                .unwrap();
+            let status = response.status();
+            let body = json_body(response).await;
+            assert_eq!(status, StatusCode::OK, "body: {body}");
+            let notes = body["notes"].as_array().cloned().unwrap_or_default();
+            assert!(
+                notes.iter().any(|n| n
+                    .as_str()
+                    .is_some_and(|s| s.contains("repeatable") && s.contains("Publish"))),
+                "notes must name the dropped repeatable declaration on `Publish`: {body}"
+            );
         }
 
         /// Issue #783: the per-workflow copilot's tool-grounding read answers
