@@ -1,10 +1,10 @@
 import { MessageSquareReply } from "lucide-react";
 
-import { Button } from "@/components/ui/button";
 import { Markdown } from "@/components/markdown";
+import { TeammateAvatar } from "@/components/teammate-avatar";
+import { Button } from "@/components/ui/button";
 import { isHostMessageId, type ChatMessage } from "@/lib/chat";
 import { cn } from "@/lib/utils";
-import { Avatar } from "./Avatar";
 import {
   formatTime,
   hasReacted,
@@ -76,7 +76,13 @@ export function MessageRow({ entry, threadOpen, onOpenThread, onReact }: Props) 
             {formatTime(message.at)}
           </span>
         ) : (
-          <Avatar name={sender.name} tone={sender.tone} company={sender.kind === "company"} className="size-9" />
+          <TeammateAvatar
+            name={sender.name}
+            tone={sender.tone}
+            avatar={sender.avatar}
+            company={sender.kind === "company"}
+            className="size-9"
+          />
         )}
       </div>
 
@@ -265,7 +271,7 @@ function ReplyFacepile({ replies }: { replies: ChatMessage[] }) {
   return (
     <span className="flex -space-x-1.5" aria-hidden>
       {shown.map((r) => (
-        <Avatar
+        <TeammateAvatar
           key={r.id}
           name={r.from === "you" ? "You" : (r.channel ?? "Company")}
           tone={r.channel}

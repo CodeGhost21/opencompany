@@ -6,6 +6,7 @@ import type { OpenCompanyClient } from "@/api/client";
 import { setInboxEnabled } from "@/api/inbox";
 import { listTasks } from "@/api/tasks";
 import { ApiError, type AgentDetailDto } from "@/api/types";
+import { TeammateAvatar } from "@/components/teammate-avatar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -22,10 +23,9 @@ import {
   type AgentFieldKey,
 } from "@/lib/agent";
 import { fetchBoardColumns } from "@/lib/board-columns";
-import { toneFor } from "@/lib/team";
+import { avatarFor, toneFor } from "@/lib/team";
 import { workloadByAssignee, type Workload } from "@/lib/team-workload";
 import { cn } from "@/lib/utils";
-import { Avatar } from "@/views/chat/Avatar";
 import { AgentFields } from "@/views/team/AgentFields";
 
 type Load = "loading" | "ready" | "missing" | "unsupported" | "error";
@@ -396,14 +396,20 @@ export function AgentDetailView({
 /** Name, role, id, and the two facts that classify an agent. */
 function Identity({ agent }: { agent: AgentDetailDto }) {
   const display = agent.name?.trim() || agent.role;
-  const tone = toneFor(agent.id || display);
+  const seed = agent.id || display;
+  const tone = toneFor(seed);
+  // Same seed as `tone` — the id where there is one — so a rename doesn't
+  // change this teammate's face on the one screen that should never be
+  // showing letters (issue #1181, and issue #1185 for the seed itself).
+  const avatar = avatarFor(seed);
   return (
     <div className="flex items-start gap-4">
       {/* The header of the page a teammate *is* — the one screen that should
           never be the one showing letters (issue #1181). 56px. */}
-      <Avatar
+      <TeammateAvatar
         name={display}
         tone={tone}
+        avatar={avatar}
         className="size-14 rounded-xl text-base"
         data-testid="agent-avatar"
       />

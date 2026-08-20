@@ -7,6 +7,7 @@ import type { OpenCompanyClient } from "@/api/client";
 import { setInboxEnabled } from "@/api/inbox";
 import { listTasks } from "@/api/tasks";
 import { ApiError, type TeamMemberDto } from "@/api/types";
+import { TeammateAvatar } from "@/components/teammate-avatar";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import {
@@ -39,7 +40,6 @@ import {
 import { fromDto, newMember, roleSubtitle, type TeamMember } from "@/lib/team";
 import { workloadByAssignee, type Workload } from "@/lib/team-workload";
 import { cn } from "@/lib/utils";
-import { Avatar } from "@/views/chat/Avatar";
 import { AgentDetailView } from "@/views/team/AgentDetailView";
 import { AgentFields } from "@/views/team/AgentFields";
 
@@ -581,7 +581,7 @@ function MemberCard({
             44px, comfortably above the ~24px floor under which a mascot is a
             smudge and the bare tone tile is the honest fallback.
           */}
-          <Avatar name={member.name} tone={member.tone} className="size-11 rounded-xl text-sm" />
+          <TeammateAvatar name={member.name} tone={member.tone} avatar={member.avatar} className="size-11 rounded-xl text-sm" />
           {onOpen ? (
             // The card's own name is the way in (issue #264). A whole-card
             // click would swallow the inbox switch and the actions menu, both

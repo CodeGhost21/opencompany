@@ -2,7 +2,7 @@ import { Building2 } from "lucide-react";
 
 import { TEAM_TONES, avatarFor, avatarSrc } from "@/lib/team";
 import { cn } from "@/lib/utils";
-import { initials } from "./model";
+import { initials } from "@/views/chat/model";
 
 interface Props {
   name: string;
@@ -44,7 +44,7 @@ interface Props {
  * avatar from a contact-list one — DM rows, message gutters, and the member
  * pane all draw the same tile at different sizes.
  */
-export function Avatar({
+export function TeammateAvatar({
   name,
   tone,
   company,
