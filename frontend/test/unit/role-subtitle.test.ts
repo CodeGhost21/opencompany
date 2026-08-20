@@ -11,7 +11,7 @@
 import { describe, expect, it } from "vitest";
 
 import { fromDto, roleSubtitle } from "@/lib/team";
-import type { TeamMemberDto } from "@/api/types";
+import type { AgentDetailDto, TeamMemberDto } from "@/api/types";
 
 describe("roleSubtitle", () => {
   it("keeps a role that says something the name does not", () => {
@@ -51,6 +51,18 @@ describe("roleSubtitle", () => {
 
     expect(member.name).toBe("Backend Engineer");
     expect(roleSubtitle(member.name, member.role)).toBeNull();
+  });
+
+  /**
+   * The agent detail page derives its title the same way, from a different DTO
+   * (`AgentDetailDto`, not the roster row), so the repeat reached that page too.
+   */
+  it("silences the repeat on the agent detail header, which derives its title separately", () => {
+    const agent = { id: "backend_engineer", role: "Backend Engineer" } as AgentDetailDto;
+    const display = agent.name?.trim() || agent.role;
+
+    expect(display).toBe("Backend Engineer");
+    expect(roleSubtitle(display, agent.role)).toBeNull();
   });
 
   /** A teammate the operator named keeps both lines, which is the whole point. */
