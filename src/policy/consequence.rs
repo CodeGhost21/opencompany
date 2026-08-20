@@ -438,6 +438,14 @@ const DECLARED: &[Declared] = &[
     d_grantable("apply_patch", EffectGroup::Other, Reach::Consequence),
     d_grantable("csv_export", EffectGroup::Other, Reach::Consequence),
     d_grantable("memory_store", EffectGroup::Other, Reach::Consequence),
+    // Per-call, like every other delete in this table (`delete_workflow`,
+    // `workspace_delete`, `pages_delete`) and for their stated reason: a
+    // standing grant on deletion is the shape that turns one bad turn into a
+    // memory that is quietly empty by the end of it. The own-prefix
+    // confinement is not grounds for a lower price — a memory row has no
+    // revision history and no artifact chain, so a wrong forget is simply
+    // gone.
+    d("memory_forget", EffectGroup::Other, Reach::Consequence),
     // `git_operations` is deliberately NOT grantable alongside its filesystem
     // siblings: it can push to a configured remote, so it reaches an address
     // this layer does not get to see.
@@ -3188,6 +3196,7 @@ mod tests {
     fn a_tool_whose_name_says_everything_has_no_scope() {
         for tool in [
             "file_write",
+            "memory_forget",
             "memory_store",
             "shell",
             "workspace_write",
