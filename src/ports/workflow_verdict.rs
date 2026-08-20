@@ -50,7 +50,9 @@ use std::collections::HashSet;
 
 use serde::{Deserialize, Serialize};
 
-use crate::ports::workflow_runner::{DeliveryReason, DeliveryReport, DeliveryStatus};
+use crate::ports::workflow_runner::{
+    DeliveryReason, DeliveryReport, DeliveryStatus, WorkflowBlockedNode,
+};
 
 /// The approvals queue as it is **right now**, in the two shapes a workflow run
 /// can be joined against it by (issue #1189).
@@ -340,6 +342,66 @@ pub fn awaiting_count(deliveries: &[DeliveryReport], pending_approvals: usize) -
             .iter()
             .filter(|d| matches!(d.status, DeliveryStatus::Pending))
             .count()
+}
+
+/// How many of a run's pending gate nodes have **no live card left** — the
+/// question "is anything here still decidable?", answered against the queue as
+/// it is now (issue #1189).
+///
+/// `awaiting_count` reads `pendingApprovals` raw, which is a receipt of where
+/// the run stopped and cannot go stale — but the *question* each entry points at
+/// can, and does. `ApprovalParked` is journaled at `Durability::Process` on the
+/// reasoning that losing it is harmless because "the agent parks it again on its
+/// next attempt"; that holds for a chat turn, which retries, and is false for a
+/// workflow run, which halted at the gate and never re-enters it.
+///
+/// # A node is live if EITHER join finds it
+///
+/// * `(run_id, node)` is a parked `workflow.approve` card — the gate shape.
+/// * any of the node's [`WorkflowBlockedNode::approval_ids`] is still parked —
+///   the blocked-node shape, whose cards are tool-call effects carrying no node
+///   id of their own.
+///
+/// **Any** live id on a blocked node makes the node live: while one of its
+/// gated calls can still be decided, the node is still a question, and the
+/// per-node `stranded` count that #1143 renders is what carries the nuance of a
+/// partial loss.
+///
+/// # A run with no id answers 0
+///
+/// A row journaled before issue #371 carries no `run_id`, so the gate join has
+/// no key — and calling every node of it stranded on the strength of a missing
+/// field would retire live work an operator can still act on. Zero is the
+/// pre-#1189 reading, which is the safe direction here for exactly the reason
+/// `denied_in_input` is tolerant: inventing a dead end is worse than missing
+/// one.
+pub fn stranded_approvals(
+    run_id: Option<&str>,
+    pending_approvals: &[String],
+    blocked: &[WorkflowBlockedNode],
+    live: &LiveApprovals,
+) -> usize {
+    let Some(run_id) = run_id else {
+        return 0;
+    };
+    pending_approvals
+        .iter()
+        .filter(|node| !node_still_decidable(run_id, node, blocked, live))
+        .count()
+}
+
+/// Whether either join still finds a card for this run's gate node.
+fn node_still_decidable(
+    run_id: &str,
+    node: &str,
+    blocked: &[WorkflowBlockedNode],
+    live: &LiveApprovals,
+) -> bool {
+    live.holds_gate(run_id, node)
+        || blocked
+            .iter()
+            .filter(|b| b.node_id == node)
+            .any(|b| b.approval_ids.iter().any(|id| live.holds_id(id)))
 }
 
 #[cfg(test)]
@@ -654,6 +716,103 @@ mod test {
                 );
             }
         }
+    }
+
+    // ── Issue #1189: the fold that reconciles a gate against the live queue ──
+
+    /// A blocked node carrying `approval_ids`, for the id-keyed half of the
+    /// join.
+    fn blocked_node(node: &str, ids: &[&str]) -> WorkflowBlockedNode {
+        WorkflowBlockedNode {
+            node_id: node.to_string(),
+            tools: vec!["shell".to_string()],
+            approval_ids: ids.iter().map(|id| id.to_string()).collect(),
+            unparkable: 0,
+            stranded: 0,
+        }
+    }
+
+    fn nodes(names: &[&str]) -> Vec<String> {
+        names.iter().map(|n| n.to_string()).collect()
+    }
+
+    /// The marketing tenant's shape: gate nodes on `pendingApprovals`, no
+    /// blocked-node rows at all, and an empty queue.
+    #[test]
+    fn a_gate_with_no_card_left_is_stranded() {
+        let live = LiveApprovals::default();
+        assert_eq!(
+            stranded_approvals(
+                Some("run-1"),
+                &nodes(&["fetch_bbc", "fetch_espn", "fetch_guardian"]),
+                &[],
+                &live
+            ),
+            3
+        );
+    }
+
+    /// The negative that makes the one above mean anything: a fold that marked
+    /// everything stranded would satisfy it and be worse than no fold at all.
+    #[test]
+    fn a_gate_whose_card_is_still_parked_is_not_stranded() {
+        let mut live = LiveApprovals::default();
+        live.insert_gate("run-1", "fetch_bbc");
+        assert_eq!(
+            stranded_approvals(Some("run-1"), &nodes(&["fetch_bbc"]), &[], &live),
+            0
+        );
+    }
+
+    /// Keyed on the **pair**. Two runs of one workflow park the same node id, so
+    /// a node-only key would keep every historical run of `daily-sports-news`
+    /// advertised as approvable for as long as any one of them has a live card.
+    #[test]
+    fn the_same_node_parked_under_a_different_run_does_not_count() {
+        let mut live = LiveApprovals::default();
+        live.insert_gate("run-2", "fetch_bbc");
+        assert_eq!(
+            stranded_approvals(Some("run-1"), &nodes(&["fetch_bbc"]), &[], &live),
+            1
+        );
+    }
+
+    /// The id-keyed half: a blocked node's cards carry no node id, so the node
+    /// is reached through `approval_ids`.
+    #[test]
+    fn a_blocked_node_is_live_if_any_of_its_approvals_is() {
+        let mut live = LiveApprovals::default();
+        live.insert_id("appr-2");
+        let blocked = [blocked_node("backend", &["appr-1", "appr-2", "appr-3"])];
+        assert_eq!(
+            stranded_approvals(Some("run-1"), &nodes(&["backend"]), &blocked, &live),
+            0,
+            "one decidable call still makes the node a question"
+        );
+    }
+
+    /// …and the same node with every id gone is stranded, which is the
+    /// `feature_pipeline` shape issue #1189 opens on.
+    #[test]
+    fn a_blocked_node_whose_every_approval_is_gone_is_stranded() {
+        let live = LiveApprovals::default();
+        let blocked = [blocked_node("backend", &["appr-1", "appr-2", "appr-3"])];
+        assert_eq!(
+            stranded_approvals(Some("run-1"), &nodes(&["backend"]), &blocked, &live),
+            1
+        );
+    }
+
+    /// A pre-#371 row has no run id, so the gate join has no key. Marking its
+    /// nodes stranded on the strength of a missing field would retire work an
+    /// operator can still act on.
+    #[test]
+    fn a_run_with_no_id_is_never_stranded() {
+        let live = LiveApprovals::default();
+        assert_eq!(
+            stranded_approvals(None, &nodes(&["fetch_bbc"]), &[], &live),
+            0
+        );
     }
 
     /// `sent` and `pending` are excused by **status**, so no reason can pull
