@@ -7,7 +7,6 @@ import type { OpenCompanyClient } from "@/api/client";
 import { setInboxEnabled } from "@/api/inbox";
 import { listTasks } from "@/api/tasks";
 import { ApiError, type TeamMemberDto } from "@/api/types";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import {
@@ -645,20 +644,21 @@ function MemberCard({
         {workload && <WorkloadLine workload={workload} />}
         <DailyBudgetLine member={member} setByLabel={setByLabel} />
         {/*
-          The Inbox switch used to sit here (issue #1190). It was the only
-          control on the card that *wrote* to the host, at the same weight as
-          the name, on a grid of thirteen — a card is for recognising a
-          teammate, and a mis-click while scanning silently changed a per-
-          teammate setting with no confirmation.
+          The card's footer is gone with the Inbox switch it existed to hold
+          (issue #1190).
 
-          It moved to the teammate's own page, which already reported inbox
-          state as a badge and offered no way to change it. See `AgentDetailView`.
+          The switch was the only control on the card that *wrote* to the host,
+          at the same weight as the name, on a grid of thirteen — a card is for
+          recognising a teammate, and a mis-click while scanning silently
+          changed a per-teammate setting with no confirmation. It moved to the
+          teammate's own page, which already reported inbox state as a badge and
+          offered no way to change it. See `AgentDetailView`.
+
+          Its companion — a "Teammate" badge — went with it rather than being
+          left behind a border rule on its own. On a page whose every card is a
+          teammate it labelled nothing, and a bordered band holding one inert
+          chip reads as something that failed to load.
         */}
-        <div className="mt-auto flex items-center gap-2 border-t pt-3">
-          <Badge variant="secondary" className="gap-1">
-            <Sparkles className="size-3" /> Teammate
-          </Badge>
-        </div>
       </CardContent>
     </Card>
   );
