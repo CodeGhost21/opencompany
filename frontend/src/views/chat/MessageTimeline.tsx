@@ -2,10 +2,10 @@ import { useCallback, useEffect, useLayoutEffect, useRef } from "react";
 import { Bot, UserPlus } from "lucide-react";
 
 import type { ApprovalSummary, GrantScope, TurnStep, Verdict } from "@/api/types";
+import { TeammateAvatar } from "@/components/teammate-avatar";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
 import { ApprovalRow } from "./ApprovalRow";
-import { Avatar } from "./Avatar";
 import { MessageRow } from "./MessageRow";
 import { StepTimeline } from "./StepTimeline";
 import { WorkingIndicator } from "./WorkingIndicator";
@@ -297,9 +297,10 @@ function ChannelIntro({
 }) {
   return (
     <div className={cn("px-4 pb-3", empty ? "pt-16" : "pt-6")}>
-      <Avatar
+      <TeammateAvatar
         name={channel.voice ?? channel.name}
         tone={channel.tone}
+        avatar={channel.member?.avatar}
         company={channel.kind === "channel" && channel.id === "main"}
         className="mb-3 size-12 rounded-lg text-base"
       />
@@ -430,9 +431,10 @@ function HistorySkeleton() {
 function LiveTurnRow({ channel, steps }: { channel: Channel; steps: TurnStep[] }) {
   return (
     <div className="flex items-start gap-2.5 px-4 py-1">
-      <Avatar
+      <TeammateAvatar
         name={channel.voice ?? channel.name}
         tone={channel.tone}
+        avatar={channel.member?.avatar}
         company={channel.kind === "channel" && channel.id === "main"}
         className="size-9 shrink-0"
       />
@@ -449,9 +451,10 @@ function LiveTurnRow({ channel, steps }: { channel: Channel; steps: TurnStep[] }
 function TypingRow({ channel }: { channel: Channel }) {
   return (
     <div className="flex items-center gap-2.5 px-4 py-1">
-      <Avatar
+      <TeammateAvatar
         name={channel.voice ?? channel.name}
         tone={channel.tone}
+        avatar={channel.member?.avatar}
         company={channel.kind === "channel" && channel.id === "main"}
         className="size-9"
       />
