@@ -104,26 +104,33 @@ afterEach(async () => {
 
 /**
  * Mounts `ManageListsView` with a `ledgerNav` whose `refresh()` re-renders
- * with an empty list — simulating the shared hook re-reading after a retire
- * actually lands, without pulling the real hook (and a real fetch) into this
- * unit test.
+ * with whatever `del` has retired so far — simulating the shared hook
+ * re-reading, without pulling the real hook (and a real fetch) into this unit
+ * test. `ManageListsView` itself calls `refresh()` once on mount (so opening
+ * it always shows the current set), so this has to answer "still there" until
+ * the confirm button actually retires it, not jump straight to empty.
  */
 async function mount(del: (path: string) => Promise<unknown>, onBack = vi.fn()) {
-  const client = fakeClient(del);
-  const render = (ledgers: LedgerSummary[]) => {
+  let retired = false;
+  const client = fakeClient(async (path: string) => {
+    const result = await del(path);
+    retired = true;
+    return result;
+  });
+  const render = () => {
     const ledgerNav: LedgerNav = {
-      ledgers,
+      ledgers: retired ? [] : [LEDGER],
       faults: [],
       remaining: 3,
       loading: false,
-      refresh: async () => render([]),
+      refresh: async () => render(),
     };
     root.render(
       createElement(ManageListsView, { client, company: "acme", ledgerNav, onBack }),
     );
   };
   await act(async () => {
-    render([LEDGER]);
+    render();
   });
   return onBack;
 }

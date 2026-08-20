@@ -6,7 +6,7 @@
 // live instead. A list's own screen (`LedgersView`) is only ever about its
 // rows from here on.
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { AlertTriangle, ArrowLeft, Lock, Plus } from "lucide-react";
 import { toast } from "sonner";
 
@@ -45,6 +45,17 @@ export function ManageListsView({ client, company, ledgerNav, onBack }: Props) {
 
   const { ledgers, faults, remaining, loading, refresh } = ledgerNav;
 
+  // `app-shell.tsx`'s `useLedgerNav` reads once on mount/company-change and
+  // is otherwise only refreshed by an action taken *through* it (declaring or
+  // retiring here). This is the settings page for the set of lists that
+  // exist, so opening it should always show the current set — including a
+  // list a teammate's `define_ledger` tool call declared, or another operator
+  // retired, since this page was last open.
+  useEffect(() => {
+    void refresh();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   if (!company) {
     return (
       <div className="p-6 text-sm text-muted-foreground">
@@ -73,7 +84,13 @@ export function ManageListsView({ client, company, ledgerNav, onBack }: Props) {
   return (
     <div className="flex h-full min-h-0 flex-col gap-4 p-6">
       <header className="space-y-2">
-        <Button variant="ghost" size="sm" className="w-fit" onClick={onBack}>
+        <Button
+          variant="ghost"
+          size="sm"
+          className="w-fit"
+          onClick={onBack}
+          data-testid="lists-breadcrumb-company"
+        >
           <ArrowLeft className="mr-2 size-4" />
           Company
         </Button>
