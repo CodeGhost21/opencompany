@@ -38,6 +38,7 @@ import {
   SidebarRail,
   SidebarTrigger,
 } from "@/components/ui/sidebar";
+import { ContentSurface } from "@/components/content-surface";
 import { FeedbackDialog } from "@/components/feedback-dialog";
 import { HostSwitcher } from "@/components/host-switcher";
 import {
@@ -1379,6 +1380,8 @@ export function AppShell({
   });
 
   return (
+    // `SidebarProvider` paints the chrome layer itself — see its own note on
+    // why that fill lives there and not here (issue #1178).
     <SidebarProvider className="h-svh overflow-hidden">
       <Sidebar collapsible="icon">
         <SidebarHeader>
@@ -1467,11 +1470,12 @@ export function AppShell({
           strip held the "Done" column, which is why a card could not be dragged
           into it (issue #334); every view was losing the same strip. */}
       <SidebarInset className="min-h-0 min-w-0">
-        {/* A `div`, not `main`: `SidebarInset` above is already the console's
-            one `<main>` landmark. This is only a flex/scroll container — a
-            second nested `<main>` here gave every page two identical
-            "skip to content" destinations (issue #1221). */}
-        <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+        {/* The card half of the two-layer shell: the one opaque sheet in the
+            console, floating on the chrome the shell root paints (issue
+            #1178). A `div`, not `main` — `SidebarInset` above is already the
+            console's one `<main>` landmark, and a second nested one gave every
+            page two identical "skip to content" destinations (issue #1221). */}
+        <ContentSurface>
           {view === "overview" && (
             <Overview client={client} company={company} companyName={feed.status.name} />
           )}
@@ -1784,7 +1788,7 @@ export function AppShell({
             />
           )}
           {view === "feedback" && <FeedbackView client={client} company={company} />}
-        </div>
+        </ContentSurface>
 
         {/* Mobile only: dedicated chrome for the way back to navigation, not an
             overlay on top of it. A `fixed` trigger here used to float over
@@ -1794,7 +1798,12 @@ export function AppShell({
             wrapper's flex-1 height (and every view's own overflow-y-auto
             within it) already stops short of it. No view needs to know this
             control exists. */}
-        <div className="flex shrink-0 items-center border-t bg-background p-2 md:hidden">
+        {/* `p-3` on all four sides, matching `--frame-inset`, so this control
+            lines up with the card's own margin instead of hanging off a
+            different number. The card already supplies the gap above it through
+            that bottom margin — every page is framed now, so there is no longer
+            a flush-to-the-edge case for this row to compensate for. */}
+        <div className="flex shrink-0 items-center bg-transparent p-3 md:hidden">
           <SidebarTrigger aria-label="Toggle sidebar" />
         </div>
       </SidebarInset>
