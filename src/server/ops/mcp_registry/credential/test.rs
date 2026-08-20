@@ -269,11 +269,10 @@ async fn the_shared_host_tier_is_reported_as_shared() {
     .await
     .expect("resolve");
     assert_eq!(resolved.source(), DirectoryKeySource::Environment);
-    assert_eq!(
-        crate::company::smithery::key_configured(runtime.id(), runtime.secrets().as_ref())
+    assert!(
+        !crate::company::smithery::key_configured(runtime.id(), runtime.secrets().as_ref())
             .await
             .expect("configured"),
-        false,
         "the host's key is not this company's own, and the two must not be conflated"
     );
 }
