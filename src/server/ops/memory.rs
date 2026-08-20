@@ -12,11 +12,13 @@
 //!
 //! ## Known limitation (flagged seam)
 //!
-//! [`ContextStore`] is append-only (no delete port), so deleting a fact removes
-//! it from the `FactStore` and the console but its mirrored chunk stays
-//! agent-recallable until a delete port lands. The `operator-fact/{id}` label
-//! makes that future reap trivial. We deliberately do NOT fork the retrieval
-//! path to work around this — the seam is documented, not hidden.
+//! Deleting a fact removes it from the `FactStore` AND reaps its mirrored
+//! `operator-fact/{id}` context chunk — the delete port this comment once
+//! said was missing landed with #1290, and leaving the reap unwired would
+//! have kept showing the operator "deleted" while agents still recalled it.
+//! The reap honors the shared-address rule: chunks are content-addressed, so
+//! a mirror whose byte-identical body is indexed under any OTHER label is
+//! left in place rather than deleting someone else's row.
 
 use axum::extract::{Path, Query};
 use axum::http::StatusCode;
@@ -31,6 +33,33 @@ use crate::ports::types::{CompanyEvent, ContextChunk};
 use crate::ports::{generate_id, now_millis};
 use crate::server::error::ApiError;
 use crate::server::ops::{ScopedCompany, scoped};
+
+/// The deliberate-memory label family's prefix, with its separator.
+///
+/// A LOCAL copy: the authoring module (`crate::harness::built_in::memory_tools`,
+/// `AGENT_MEMORY_LABEL_PREFIX`) is `openhuman`-gated and this file is not, so
+/// the constant cannot be imported on every shape. The gated test below pins
+/// the two spellings together, which makes the lockstep compiler-checked on
+/// exactly the lanes that build both.
+fn const_format_prefix() -> &'static str {
+    "agent-memory/"
+}
+
+#[cfg(all(test, feature = "openhuman"))]
+mod label_lockstep_test {
+    /// A rename of the tool module's prefix must break here, not silently
+    /// mis-attribute every deliberate memory in the Brain view.
+    #[test]
+    fn the_brain_view_parses_the_prefix_the_tools_write() {
+        assert_eq!(
+            super::const_format_prefix(),
+            format!(
+                "{}/",
+                crate::harness::built_in::memory_tools::AGENT_MEMORY_LABEL_PREFIX
+            )
+        );
+    }
+}
 
 /// Label prefix for the [`ContextStore`](crate::ports::ContextStore) mirror of
 /// an operator-authored fact. Keyed by fact id so a future delete port can reap
@@ -180,7 +209,14 @@ fn context_entries(chunks: Vec<RawChunk>, query: Option<&str>) -> Vec<MemoryEntr
                     &mut task_outcomes,
                 )
             } else {
-                let who = chunk.label.split('/').next().filter(|s| !s.is_empty());
+                // Deliberate memories live one segment deeper —
+                // `agent-memory/<agent>/<slug>` — so the naive first-segment
+                // parse attributed every one of them to the literal
+                // "agent-memory" (the #1290 review's M2).
+                let who = match chunk.label.strip_prefix(const_format_prefix()) {
+                    Some(rest) => rest.split('/').next().filter(|s| !s.is_empty()),
+                    None => chunk.label.split('/').next().filter(|s| !s.is_empty()),
+                };
                 (
                     MemoryOrigin::AgentMemory,
                     who.unwrap_or("an agent").to_string(),
@@ -423,10 +459,12 @@ async fn delete_fact(
         .delete(company.id(), &fact_id)
         .await?
     {
-        // Journal the operator deletion to the event log (audit trail). Note the
-        // mirrored `operator-fact/{fact_id}` chunk is NOT removed here: the
-        // ContextStore has no delete port, so it stays agent-recallable until
-        // one lands (documented seam, module doc).
+        // Reap the mirrored context chunk so recall stops serving a fact the
+        // operator just deleted. Best-effort: the fact row is already gone,
+        // and a reap failure leaves only the pre-#1290 status quo (a stale
+        // mirror), which must not turn the successful delete into an error.
+        let _ = reap_fact_mirror(company.runtime.context.as_ref(), company.id(), &fact_id).await;
+        // Journal the operator deletion to the event log (audit trail).
         company
             .runtime
             .events()
@@ -442,6 +480,94 @@ async fn delete_fact(
         Err(ApiError(OpenCompanyError::CompanyNotFound(format!(
             "fact {fact_id}"
         ))))
+    }
+}
+
+/// Removes the `operator-fact/{fact_id}` mirror chunk(s), shared-address
+/// aware: an address also carrying any label OUTSIDE this mirror's own is
+/// skipped — deleting it would delete that other row too (content
+/// addressing; the same rule `memory_forget` enforces).
+pub(crate) async fn reap_fact_mirror(
+    context: &dyn crate::ports::ContextStore,
+    company: &crate::ports::CompanyId,
+    fact_id: &str,
+) -> crate::Result<()> {
+    let mirror_label = format!("operator-fact/{fact_id}");
+    let all = context.list(company, "").await?;
+    for meta in all.iter().filter(|m| m.label == mirror_label) {
+        let shared = all
+            .iter()
+            .any(|m| m.addr == meta.addr && m.label != mirror_label);
+        if !shared {
+            context.delete(company, &meta.addr).await?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod reap_test {
+    use super::*;
+    use crate::ports::ContextStore;
+    use crate::ports::types::{CompanyId, ContextChunk};
+    use crate::store::FsContextStore;
+    use std::sync::Arc;
+
+    /// Deleting a fact reaps its mirror; a mirror whose content is shared
+    /// with another label survives (the other row must not vanish).
+    #[tokio::test]
+    async fn the_mirror_is_reaped_unless_its_address_is_shared() {
+        let dir = tempfile::tempdir().unwrap();
+        let context: Arc<dyn ContextStore> =
+            Arc::new(FsContextStore::new(dir.path().to_path_buf()));
+        let company = CompanyId::new("acme");
+
+        let lone = context
+            .put(
+                &company,
+                ContextChunk {
+                    label: "operator-fact/f1".into(),
+                    body: "fact one".into(),
+                },
+            )
+            .await
+            .unwrap();
+        reap_fact_mirror(context.as_ref(), &company, "f1")
+            .await
+            .unwrap();
+        assert!(
+            context.peek(&company, &lone, None).await.is_err(),
+            "the unshared mirror must be reaped"
+        );
+
+        // Identical bodies share one address: the reap must leave it.
+        let shared = context
+            .put(
+                &company,
+                ContextChunk {
+                    label: "operator-fact/f2".into(),
+                    body: "shared text".into(),
+                },
+            )
+            .await
+            .unwrap();
+        context
+            .put(
+                &company,
+                ContextChunk {
+                    label: "agent-memory/ceo/note".into(),
+                    body: "shared text".into(),
+                },
+            )
+            .await
+            .unwrap();
+        reap_fact_mirror(context.as_ref(), &company, "f2")
+            .await
+            .unwrap();
+        context
+            .peek(&company, &shared, None)
+            .await
+            .expect("a shared-address mirror must survive the reap");
     }
 }
 
@@ -499,6 +625,25 @@ mod combined_list_tests {
         // Title/body split off the first line.
         assert_eq!(entries[0].title, "Learned a thing");
         assert_eq!(entries[0].body, "more detail");
+    }
+
+    /// The #1290 review's M2 red-proof, now green: a deliberate memory's
+    /// `agent-memory/<agent>/<slug>` label attributes to the AGENT, not to
+    /// the literal first segment "agent-memory".
+    #[test]
+    fn deliberate_memories_are_attributed_to_the_storing_agent() {
+        let chunks = vec![chunk(
+            "agent-memory/ceo/fiscal-year",
+            "Fiscal year\n\nFebruary",
+        )];
+        let entries = context_entries(chunks, None);
+        assert_eq!(entries.len(), 1);
+        assert!(matches!(entries[0].origin, MemoryOrigin::AgentMemory));
+        assert_eq!(
+            entries[0].source, "ceo",
+            "the Brain view must name the agent that stored the memory"
+        );
+        assert_eq!(entries[0].title, "Fiscal year");
     }
 
     #[test]

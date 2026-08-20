@@ -1857,7 +1857,6 @@ description = "Runs Acme."
             provider_slug: "mock".to_string(),
             serves: None,
             context: Arc::new(FsContextStore::new(dir)),
-            inbound_context: None,
             store: Arc::new(FsCompanyStore::new(dir)),
             meter: Some(Arc::new(FsOps::new(dir))),
             workspace_root: dir.to_path_buf(),

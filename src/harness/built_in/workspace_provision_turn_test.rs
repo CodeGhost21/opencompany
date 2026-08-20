@@ -263,7 +263,6 @@ fn build_brain(
         provider_slug: "managed".to_string(),
         serves: None,
         context: Arc::new(FsContextStore::new(dir)),
-        inbound_context: None,
         store: Arc::new(FsCompanyStore::new(dir)),
         meter: Some(ops.clone()),
         // The agent workspaces hang off here. Nothing has created a single

@@ -549,6 +549,38 @@ mod test {
         );
     }
 
+    /// The regression lock the #1290 review found missing: deleting the
+    /// trailing slash from own_prefix() — the exact #936 Namespace class —
+    /// survived every existing test. `ann` and `anna` are both legal
+    /// snake_case agent ids; ann's guard must neither see nor delete anna's
+    /// rows.
+    #[tokio::test]
+    async fn the_prefix_boundary_is_a_namespace_not_a_string_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        let company = CompanyId::new("acme");
+        let context = ctx(dir.path());
+        let (anna_store, _, _) = tools_for(dir.path(), "acme", "anna");
+        let stored = anna_store
+            .execute(json!({"title": "Annas note", "body": "hers alone"}))
+            .await
+            .unwrap();
+        let addr = addr_from(&stored.text());
+
+        let (_, _, ann_forget) = tools_for(dir.path(), "acme", "ann");
+        let refused = ann_forget
+            .execute(json!({"addr": addr.clone()}))
+            .await
+            .unwrap();
+        assert!(
+            refused.is_error,
+            "ann must not reach agent-memory/anna/ rows: {refused:?}"
+        );
+        context
+            .peek(&company, &crate::ports::types::ChunkAddr::new(addr), None)
+            .await
+            .expect("anna's row must survive ann's attempt");
+    }
+
     #[tokio::test]
     async fn tools_are_company_isolated() {
         // Two companies over one store root: what alpha stores, beta's tools

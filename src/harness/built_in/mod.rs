@@ -225,9 +225,7 @@ pub struct HarnessDeps {
     pub serves: Option<std::collections::HashSet<String>>,
     /// Context store backing every agent's [`OcMemory`](memory::OcMemory).
     pub context: Arc<dyn ContextStore>,
-    /// The taint-stamping port for external content (issue #1113). `None`
-    /// falls back to `context` — see [`HarnessDeps::inbound_context`].
-    pub inbound_context: Option<Arc<dyn ContextStore>>,
+
     /// Company store the cost hook appends ledger entries to.
     pub store: Arc<dyn CompanyStore>,
     /// Optional usage meter (WS5 seam); `None` skips usage sampling.
@@ -578,17 +576,6 @@ pub struct HarnessDeps {
     /// simply means nothing is ever recorded for deletion — the boot sweep is
     /// the backstop.
     pub checkouts: repo::CheckoutLedger,
-}
-
-impl HarnessDeps {
-    /// The port external-content writes go through: the taint-stamping
-    /// `inbound_context` when the engine serves one, else the plain context
-    /// store (the write still lands, stamped Internal — the base backends'
-    /// only representable truth). One fallback point, so no call site ever
-    /// re-derives the rule.
-    pub fn inbound(&self) -> &Arc<dyn ContextStore> {
-        self.inbound_context.as_ref().unwrap_or(&self.context)
-    }
 }
 
 /// One live openhuman agent, keyed by its manifest id.
@@ -2561,8 +2548,8 @@ impl HarnessPool {
         // that stamps operator facts Internal — while channel/webhook content
         // enters through the cycle path, which routes its puts through the
         // inbound port (`CycleHostImpl::external_trigger`). If a harness turn
-        // ever takes a webhook trigger, that turn must switch to
-        // `deps.inbound()` — the accessor exists for exactly that day.
+        // ever takes a webhook trigger, that turn must route its store half
+        // through the runtime's inbound port — the cycle path shows the shape.
         if !matches!(
             steer.and_then(SteerControl::pending),
             Some(SteerAction::Cancel)
@@ -3235,7 +3222,6 @@ pub(crate) fn workflow_wiring_deps(
         provider_slug: "mock".to_string(),
         serves: None,
         context: runtime.context.clone(),
-        inbound_context: None,
         store: runtime.store.clone(),
         meter,
         workspace_root: std::env::temp_dir(),
@@ -3709,7 +3695,6 @@ description = "Builds the product."
                 provider_slug: "mock".to_string(),
                 serves: None,
                 context: Arc::new(MockContext::default()),
-                inbound_context: None,
                 store: store.clone(),
                 meter: Some(meter.clone()),
                 workspace_root: dir.path().to_path_buf(),
@@ -3924,7 +3909,6 @@ description = "Builds the product."
             provider_slug: "mock".to_string(),
             serves: None,
             context: Arc::new(MockContext::default()),
-            inbound_context: None,
             store: Arc::new(RecordingStore::default()),
             meter: None,
             workspace_root: dir.path().to_path_buf(),
@@ -4649,7 +4633,6 @@ description = "Builds the product."
             provider_slug: "scripted".to_string(),
             serves: None,
             context: Arc::new(MockContext::default()),
-            inbound_context: None,
             store: Arc::new(RecordingStore::default()),
             meter: None,
             workspace_root: dir.path().to_path_buf(),
@@ -4837,7 +4820,6 @@ description = "Builds the product."
             provider_slug: "mock".to_string(),
             serves: None,
             context: Arc::new(MockContext::default()),
-            inbound_context: None,
             store: Arc::new(RecordingStore::default()),
             meter: None,
             workspace_root: dir.path().to_path_buf(),
@@ -5510,7 +5492,6 @@ description = "Builds the product."
             provider_slug: "mock".to_string(),
             serves: None,
             context: Arc::new(MockContext::default()),
-            inbound_context: None,
             store: live_store.clone(),
             meter: None,
             workspace_root: dir.path().to_path_buf(),
@@ -5693,7 +5674,6 @@ description = "Sets direction."
             provider_slug: "mock".to_string(),
             serves: None,
             context: Arc::new(MockContext::default()),
-            inbound_context: None,
             store: Arc::new(RecordingStore::default()),
             meter: Some(meter.clone()),
             workspace_root: dir.path().to_path_buf(),
@@ -5854,7 +5834,6 @@ description = "Sets direction."
             provider_slug: "mock".to_string(),
             serves: None,
             context,
-            inbound_context: None,
             store: Arc::new(RecordingStore::default()),
             meter,
             workspace_root: dir.to_path_buf(),

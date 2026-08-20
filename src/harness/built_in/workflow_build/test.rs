@@ -816,7 +816,6 @@ pub(crate) fn agent_deps(
         provider_slug: "managed".to_string(),
         serves: None,
         context: runtime.context.clone(),
-        inbound_context: None,
         store: runtime.store().clone(),
         meter: None,
         workspace_root: std::env::temp_dir(),

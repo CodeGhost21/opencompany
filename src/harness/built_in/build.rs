@@ -1696,7 +1696,6 @@ mod tests {
             provider_slug: "mock".to_string(),
             serves: None,
             context: Arc::new(PinContext),
-            inbound_context: None,
             store: Arc::new(PinStore),
             meter: None,
             workspace_root,

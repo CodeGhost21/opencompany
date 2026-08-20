@@ -2445,7 +2445,6 @@ impl RuntimeBuilder {
                                 provider_slug: "managed".to_string(),
                                 serves: None,
                                 context: context.clone(),
-                                inbound_context: Some(inbound_context.clone()),
                                 store: store.clone(),
                                 meter: Some(fs_ops.clone()),
                                 workspace_root: home.join("harness"),

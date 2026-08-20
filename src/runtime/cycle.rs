@@ -1881,10 +1881,20 @@ fn short_thread_digest(thread: &str) -> String {
 /// and payment notifications are the company's own machinery: Internal, per
 /// the operator-facts authorship precedent. Named and pure so the boundary is
 /// testable — see `CycleHostImpl::external_trigger` for what rides on it.
+///
+/// `A2aTaskReceived` sits WITH `WebhookReceived`: it is a remote agent's raw
+/// payload (the operator surface calls both "raw third-party payloads", and
+/// the A2A route promptguard-sanitizes it for exactly that reason) — the #68
+/// sibling review's M1 caught it missing here. `FeedbackFiled` is a
+/// deliberate Internal: feedback is filed through the company's own console
+/// by its own people — operator authorship, not outside content.
 fn cycle_is_external(events: &[CompanyEvent]) -> bool {
-    events
-        .iter()
-        .any(|event| matches!(event, CompanyEvent::WebhookReceived { .. }))
+    events.iter().any(|event| {
+        matches!(
+            event,
+            CompanyEvent::WebhookReceived { .. } | CompanyEvent::A2aTaskReceived { .. }
+        )
+    })
 }
 
 fn cycle_task_id(
@@ -5469,6 +5479,28 @@ mod test {
         assert!(cycle_is_external(&[webhook]));
         assert!(!cycle_is_external(&[operator]));
         assert!(!cycle_is_external(&[]));
+    }
+
+    /// The #68 sibling review's M1: an A2A task is a remote agent's payload —
+    /// third-party content, external. Mixed batches over-taint (any(), not
+    /// all()): the safe direction, asserted in both orderings.
+    #[test]
+    fn a2a_tasks_are_external_and_mixed_batches_over_taint() {
+        use crate::ports::types::Actor;
+        let a2a = || CompanyEvent::A2aTaskReceived {
+            from: "remote-agent".into(),
+            task: serde_json::json!({"text": "do the thing"}),
+        };
+        let operator = || CompanyEvent::OperatorMessage {
+            text: "hi".into(),
+            by: Option::<Actor>::None,
+            chat: None,
+            parent: None,
+            deliverable: None,
+        };
+        assert!(cycle_is_external(&[a2a()]));
+        assert!(cycle_is_external(&[operator(), a2a()]));
+        assert!(cycle_is_external(&[a2a(), operator()]));
     }
 
     /// The routing the flag drives: an externally-triggered cycle's

@@ -197,7 +197,6 @@ fn deps(model_url: String, dir: &std::path::Path) -> HarnessDeps {
         provider_slug: "managed".to_string(),
         serves: None,
         context: Arc::new(FsContextStore::new(dir)),
-        inbound_context: None,
         store: Arc::new(FsCompanyStore::new(dir)),
         meter: None,
         workspace_root: dir.to_path_buf(),
