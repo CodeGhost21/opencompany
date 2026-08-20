@@ -91,10 +91,13 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Export a company's bundle: read everything through the storage ports and
-    /// write the canonical filesystem layout. With `--features export` the output
-    /// is a single `.tar`; otherwise an unpacked bundle directory. Secrets and
-    /// keys are excluded unless `--include-secrets` is set.
+    /// Export a company's bundle: read everything through the storage ports —
+    /// the env-selected backend (`OPENCOMPANY_STORAGE`) with the env-selected
+    /// memory engine (`OPENCOMPANY_MEMORY*`) overlaid, so the bundle captures
+    /// what the deployment actually remembers, operator facts included — and
+    /// write the canonical filesystem layout. With `--features export` the
+    /// output is a single `.tar`; otherwise an unpacked bundle directory.
+    /// Secrets and keys are excluded unless `--include-secrets` is set.
     Export {
         /// Company id (slug) to export.
         company: String,
@@ -111,7 +114,9 @@ enum Command {
         home: Option<PathBuf>,
     },
     /// Import a company bundle (a `.tar` under `--features export`, else an
-    /// unpacked bundle directory) into a home through the storage ports.
+    /// unpacked bundle directory) through the storage ports — the same
+    /// env-selected backend + memory engine an export reads, so a bundle
+    /// lands on whatever this deployment actually runs.
     Import {
         /// Bundle `.tar` or unpacked bundle directory to import.
         path: PathBuf,
@@ -119,6 +124,13 @@ enum Command {
         /// `$HOME/.opencompany`, with bundles under `companies/<slug>`.
         #[arg(long)]
         home: Option<PathBuf>,
+    },
+    /// Memory-engine operations: today, migrating every record from the
+    /// env-selected engine into another one — the data half of the
+    /// engine-switch runbook (`docs/spec/runtime/memory-engine.md`).
+    Memory {
+        #[command(subcommand)]
+        cmd: MemoryCmd,
     },
     /// Launch a sibling OpenHuman checkout: the core binary (`--mode core`)
     /// or the Tauri desktop host (`--mode desktop`). Desktop calls `cargo tauri`
@@ -147,6 +159,70 @@ enum Command {
         #[arg(last = true)]
         args: Vec<String>,
     },
+}
+
+/// The `memory` subcommands.
+#[derive(clap::Subcommand)]
+enum MemoryCmd {
+    /// Copy every record from the env-selected memory engine (the FROM side —
+    /// `OPENCOMPANY_MEMORY*`, exactly what a boot would bind today) into
+    /// another engine, over the contract's Portability family. Namespaces,
+    /// record kinds and provenance taint round-trip untouched. Run it BEFORE
+    /// flipping the environment: migrate, then set the variables, restart,
+    /// and verify `/spec`.
+    Migrate {
+        /// Target driver: `namespace`, `supermemory`, `mem0`, or `cognee`.
+        #[arg(long)]
+        to: String,
+        /// Target endpoint (hosted engines only).
+        #[arg(long)]
+        to_url: Option<String>,
+        /// Target credential (hosted engines only).
+        #[arg(long)]
+        to_api_key: Option<String>,
+        /// Target data root (`namespace` only). Defaults to the env data dir —
+        /// refused when that resolves to the source's own store.
+        #[arg(long)]
+        to_data_dir: Option<PathBuf>,
+        /// Records per page.
+        #[arg(long, default_value_t = 500)]
+        page_size: usize,
+        /// Count what would move without writing anything.
+        #[arg(long)]
+        dry_run: bool,
+        /// Re-enter a stopped migration at the cursor it printed.
+        #[arg(long)]
+        resume_cursor: Option<String>,
+    },
+}
+
+impl std::fmt::Debug for MemoryCmd {
+    /// Renders the target identity and never the credential — the same
+    /// `<set>` convention as `StorageSettings`' manual impl, because the
+    /// parent `Command` derives `Debug` and a derived impl here would carry
+    /// the key into any future `{:?}` of the parsed CLI.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Migrate {
+                to,
+                to_url,
+                to_api_key,
+                to_data_dir,
+                page_size,
+                dry_run,
+                resume_cursor,
+            } => f
+                .debug_struct("Migrate")
+                .field("to", to)
+                .field("to_url", &to_url.as_ref().map(|_| "<set>"))
+                .field("to_api_key", &to_api_key.as_ref().map(|_| "<set>"))
+                .field("to_data_dir", to_data_dir)
+                .field("page_size", page_size)
+                .field("dry_run", dry_run)
+                .field("resume_cursor", &resume_cursor.is_some())
+                .finish(),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -793,15 +869,49 @@ fn resolve_home_migrated(flag: Option<PathBuf>) -> Result<PathBuf> {
     Ok(home)
 }
 
-/// Builds the four fs storage ports over `home` as trait objects.
-fn fs_ports(home: &std::path::Path) -> opencompany::store::export::Ports {
-    use opencompany::store::{FsCompanyStore, FsContextStore, FsEventLog, FsMemoryStore};
-    (
-        Arc::new(FsCompanyStore::new(home.to_path_buf())),
-        Arc::new(FsEventLog::new(home.to_path_buf())),
-        Arc::new(FsMemoryStore::new(home.to_path_buf())),
-        Arc::new(FsContextStore::new(home.to_path_buf())),
-    )
+/// The bundle ports plus the fact port, resolved the way `serve` resolves
+/// them: the env-selected storage backend (`OPENCOMPANY_STORAGE`), with the
+/// env-selected memory engine (`OPENCOMPANY_MEMORY*`) overlaid on top.
+///
+/// Export and import used to hardwire the fs ports over `home`, which made a
+/// bundle capture the *base* stores rather than what the deployment actually
+/// remembers — on a host running a memory engine (or a sqlite/mongodb base),
+/// that is the wrong data, silently. Routing through the same selection
+/// `serve` uses means a bundle now reads and writes the live engine, and a
+/// misconfigured engine refuses here exactly as it refuses a boot.
+async fn live_ports(
+    home: &std::path::Path,
+) -> Result<(
+    opencompany::store::export::Ports,
+    Option<Arc<dyn opencompany::ports::FactStore>>,
+)> {
+    use opencompany::store::{
+        FsCompanyStore, FsContextStore, FsEventLog, FsMemoryStore, FsOps, StorageSettings,
+        open_memory_overlay, open_storage,
+    };
+    let settings = StorageSettings::from_env()?;
+    let (store, events, mut memory, mut context, mut facts) = match open_storage(&settings, home)
+        .await?
+    {
+        Some(h) => (h.company, h.events, h.memory, h.context, Some(h.facts)),
+        // The fs default: the same ports the old hardwired path built,
+        // plus the fs fact store the old path silently left behind.
+        None => (
+            Arc::new(FsCompanyStore::new(home.to_path_buf())) as _,
+            Arc::new(FsEventLog::new(home.to_path_buf())) as _,
+            Arc::new(FsMemoryStore::new(home.to_path_buf())) as _,
+            Arc::new(FsContextStore::new(home.to_path_buf())) as _,
+            Some(Arc::new(FsOps::new(home.to_path_buf())) as Arc<dyn opencompany::ports::FactStore>),
+        ),
+    };
+    if let Some(overlay) = open_memory_overlay(&settings)? {
+        memory = overlay.memory;
+        context = overlay.context;
+        if let Some(f) = overlay.facts {
+            facts = Some(f);
+        }
+    }
+    Ok(((store, events, memory, context), facts))
 }
 
 /// A process-unique temporary path under the system temp dir. Used only by the
@@ -825,12 +935,12 @@ async fn export_to_dir(
     use opencompany::store::export::{ExportOpts, export_bundle};
     use opencompany::store::paths::Bundle;
 
-    let (store, events, memory, context) = fs_ports(home);
+    let ((store, events, memory, context), facts) = live_ports(home).await?;
     let opts = ExportOpts {
         include_secrets,
         fs_bundle: Some(Bundle::new(home.to_path_buf(), id).dir().to_path_buf()),
     };
-    export_bundle(id, dest, store, events, memory, context, opts).await
+    export_bundle(id, dest, store, events, memory, context, facts, opts).await
 }
 
 /// Default build: export writes an unpacked bundle directory (no `.tar` support
@@ -1008,11 +1118,228 @@ async fn import_from_dir(dir: &std::path::Path, home: Option<PathBuf>) -> Result
 
     let home = resolve_home_migrated(home)?;
     let root = find_bundle_root(dir)?;
-    let (store, events, memory, context) = fs_ports(&home);
-    let id = import_bundle(&root, store, events, memory, context).await?;
+    let ((store, events, memory, context), facts) = live_ports(&home).await?;
+    let id = import_bundle(&root, store, events, memory, context, facts).await?;
     restore_fs_artifacts(&root, Bundle::new(home.clone(), &id).dir()).await?;
     println!("imported company `{id}` into {}", home.display());
     Ok(())
+}
+
+/// `memory migrate`: the data half of the engine-switch runbook.
+///
+/// FROM is deliberately not a flag: it is the env-selected engine, exactly
+/// what a boot would bind — you migrate *before* flipping the environment, so
+/// the environment still names the source. Only provider-backed engines can
+/// migrate (the seam is what `export_page`/`import_records` live on); the
+/// `store` default and the EngineCortex overlay are refused by name.
+#[cfg(feature = "tinymemory")]
+async fn run_memory_cmd(cmd: MemoryCmd) -> Result<()> {
+    use opencompany::store::memory::driver::{MemoryDriverConfig, MemoryMode, open_driver};
+    use opencompany::store::memory::migrate::migrate;
+    use opencompany::store::{MemoryBackend, StorageSettings};
+
+    let MemoryCmd::Migrate {
+        to,
+        to_url,
+        to_api_key,
+        to_data_dir,
+        page_size,
+        dry_run,
+        resume_cursor,
+    } = cmd;
+
+    let settings = StorageSettings::from_env()?;
+    let from_mode = match settings.memory_backend {
+        MemoryBackend::Store => {
+            return Err(opencompany::error::OpenCompanyError::Config(
+                "OPENCOMPANY_MEMORY=store: the base backend serves memory directly and has no \
+                 provider seam to export through. Use `opencompany export` for a bundle instead."
+                    .into(),
+            ));
+        }
+        MemoryBackend::Null => {
+            return Err(opencompany::error::OpenCompanyError::Config(
+                "OPENCOMPANY_MEMORY=null retains nothing; there is nothing to migrate.".into(),
+            ));
+        }
+        MemoryBackend::Tinycortex
+            if settings
+                .memory_driver
+                .as_deref()
+                .map(str::trim)
+                .filter(|d| !d.is_empty())
+                .is_none() =>
+        {
+            return Err(opencompany::error::OpenCompanyError::Config(
+                "OPENCOMPANY_MEMORY=embedded without OPENCOMPANY_MEMORY_DRIVER is the \
+                 EngineCortex overlay, which is driven directly rather than through the \
+                 provider seam — its data cannot migrate through this command. Use \
+                 `opencompany export` for a bundle of what it holds."
+                    .into(),
+            ));
+        }
+        MemoryBackend::Tinycortex => MemoryMode::Embedded,
+        MemoryBackend::Remote => MemoryMode::Remote,
+    };
+    let from_config = MemoryDriverConfig {
+        mode: from_mode,
+        driver_id: settings.memory_driver.clone(),
+        url: settings.memory_url.clone(),
+        api_key: settings.memory_api_key.clone(),
+        data_dir: settings.data_dir.clone(),
+    };
+
+    let to_config = match to.as_str() {
+        "namespace" => MemoryDriverConfig {
+            mode: MemoryMode::Embedded,
+            driver_id: Some(to.clone()),
+            url: None,
+            api_key: None,
+            data_dir: to_data_dir.clone().or_else(|| settings.data_dir.clone()),
+        },
+        "supermemory" | "mem0" | "cognee" => MemoryDriverConfig {
+            mode: MemoryMode::Remote,
+            driver_id: Some(to.clone()),
+            url: to_url.clone(),
+            api_key: to_api_key.clone(),
+            data_dir: None,
+        },
+        "null" => {
+            return Err(opencompany::error::OpenCompanyError::Config(
+                "--to null would discard every record; that is `null`'s contract, not a \
+                 migration."
+                    .into(),
+            ));
+        }
+        other => {
+            return Err(opencompany::error::OpenCompanyError::Config(format!(
+                "--to {other} names no migratable driver: namespace, supermemory, mem0, cognee."
+            )));
+        }
+    };
+
+    // Same engine, same target = a copy onto itself: every record would come
+    // back `skipped` at best, and on the embedded store it is the same SQLite
+    // file open twice.
+    if from_config.driver_id == to_config.driver_id
+        && from_config.url == to_config.url
+        && from_config.data_dir == to_config.data_dir
+    {
+        return Err(opencompany::error::OpenCompanyError::Config(
+            "the source and the target are the same engine at the same location; nothing to do."
+                .into(),
+        ));
+    }
+
+    let (from, _) = open_driver(&from_config)?.ok_or_else(|| {
+        opencompany::error::OpenCompanyError::Config(
+            "the source configuration bound no provider (host bug — the routing above should \
+             have refused)."
+                .into(),
+        )
+    })?;
+    let (target, target_class) = open_driver(&to_config)?.ok_or_else(|| {
+        opencompany::error::OpenCompanyError::Config(
+            "the target configuration bound no provider (host bug).".into(),
+        )
+    })?;
+
+    if dry_run {
+        let mut total: u64 = 0;
+        let mut cursor = resume_cursor;
+        loop {
+            let page = from
+                .export_page(cursor.as_deref(), page_size)
+                .await
+                .map_err(|e| {
+                    opencompany::error::OpenCompanyError::Store(format!(
+                        "source export failed: {e}"
+                    ))
+                })?;
+            total += page.records.len() as u64;
+            match page.next_cursor {
+                Some(next) => cursor = Some(next),
+                None => break,
+            }
+        }
+        println!(
+            "dry run: {} records would migrate {} -> {}",
+            total,
+            from.driver_id(),
+            target.driver_id()
+        );
+        return Ok(());
+    }
+
+    if matches!(target_class, tinymemory::registry::DriverClass::External) {
+        eprintln!(
+            "note: `{}` is a hosted engine — its exact-CRUD writes are enumeration-based, so a \
+             large import is slow and chatty. Prefer off-peak, and expect wall-clock to grow \
+             with store size.",
+            target.driver_id()
+        );
+    }
+
+    // The one operational precondition this command cannot enforce itself:
+    // there is no dual-write, so live cycles writing the source mid-copy are
+    // lost to the target. Said here as well as in the runbook, because the
+    // runbook is optional reading and this line is not.
+    eprintln!(
+        "note: pause the workload first — writes landing on the source during the copy do not \
+         reach the target."
+    );
+    println!(
+        "migrating {} -> {} ({} records/page)…",
+        from.driver_id(),
+        target.driver_id(),
+        page_size
+    );
+    let outcome = migrate(&from, &target, page_size, resume_cursor, |progress| {
+        println!(
+            "  page {}: {} exported, {} imported, {} skipped",
+            progress.pages, progress.exported, progress.imported, progress.skipped
+        );
+    })
+    .await?;
+    match outcome {
+        Ok(summary) => {
+            println!(
+                "done: {} exported, {} imported, {} already present, over {} pages. Now flip \
+                 OPENCOMPANY_MEMORY* to the target, restart, and verify /spec.",
+                summary.exported, summary.imported, summary.skipped, summary.pages
+            );
+            Ok(())
+        }
+        Err(stopped) => {
+            for error in &stopped.errors {
+                eprintln!("target error: {error}");
+            }
+            let resume = stopped
+                .resume_cursor
+                .as_deref()
+                .map(|c| format!("--resume-cursor {c}"))
+                .unwrap_or_else(|| "the beginning (the first page failed)".into());
+            Err(opencompany::error::OpenCompanyError::Store(format!(
+                "migration stopped after {} imported / {} skipped of {} exported; fix the \
+                 target and re-run with {resume} — already-present records re-import as \
+                 `skipped`, so re-running the failed page is safe.",
+                stopped.summary.imported, stopped.summary.skipped, stopped.summary.exported
+            )))
+        }
+    }
+}
+
+/// Without the provider seam there is nothing to migrate through; refuse by
+/// naming the feature, the same shape as the selection refusals in
+/// `store::select`.
+#[cfg(not(feature = "tinymemory"))]
+async fn run_memory_cmd(cmd: MemoryCmd) -> Result<()> {
+    let MemoryCmd::Migrate { .. } = cmd;
+    Err(opencompany::error::OpenCompanyError::Config(
+        "`memory migrate` requires a build with the `tinymemory` feature (the provider seam \
+         its Portability family lives on)."
+            .into(),
+    ))
 }
 
 /// Handle the `openhuman` subcommand: build the launch request, reject
@@ -1694,6 +2021,7 @@ async fn async_main() -> Result<()> {
             home,
         }) => run_export(company, out, include_secrets, home).await,
         Some(Command::Import { path, home }) => run_import(path, home).await,
+        Some(Command::Memory { cmd }) => run_memory_cmd(cmd).await,
         Some(Command::OpenHuman {
             root,
             mode,
