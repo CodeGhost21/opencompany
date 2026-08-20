@@ -72,15 +72,25 @@ test("the wizard declares a real list, which appears in Manage Lists and the sid
   await page.locator("label", { hasText: "Owner" }).getByRole("switch").click();
   await page.getByRole("button", { name: "Next" }).click();
 
-  // Step 5 — review, then submit. Scoped to `main`: the review text and the
-  // eventual Manage Lists row both carry the title, and once this list also
-  // has a sidebar row (checked below) the title exists on screen twice —
-  // `getByText` unscoped would then match both and fail Playwright's
-  // single-match requirement.
-  const main = page.getByRole("main");
-  await expect(main.getByText(title)).toBeVisible();
-  await expect(main.getByText(/open → closed/)).toBeVisible();
+  // Step 5 — review, then submit. Unscoped here on purpose: the wizard is a
+  // Dialog portaled onto `document.body`, so its own review text is the only
+  // place `title` exists on screen at this point — no ambiguity yet, since
+  // neither the Manage Lists row nor the sidebar row exist until Create
+  // actually lands.
+  await expect(page.getByText(title)).toBeVisible();
+  await expect(page.getByText(/open → closed/)).toBeVisible();
   await page.getByRole("button", { name: "Create list" }).click();
+
+  // Once the list exists, its title is on screen twice — the Manage Lists
+  // card and the sidebar's own row (shell chrome, present on every route) —
+  // so `main` scopes every check below to "on this page", leaving the
+  // sidebar to `navRow`-style locators instead. `page.locator("main")`
+  // (a plain element query), not `getByRole("main")`: the retire confirm
+  // below opens an AlertDialog that inerts the rest of the page for
+  // accessibility, which prunes `<main>` from the accessibility tree — a
+  // role-based query would then find nothing while a role-agnostic one still
+  // sees the (occluded but present) DOM.
+  const main = page.locator("main");
 
   try {
     // Lands back on Manage Lists with the new row live — no reload needed.
@@ -104,11 +114,18 @@ test("retiring a declared list asks before it deletes, then removes it everywher
   page,
   request,
 }) => {
-  const slug = `e2e-retire-${Date.now()}`;
+  // Unique per run, title included: a title fixed across runs would collide
+  // with whatever a previous *failed* run of this same test left behind (this
+  // test declares and then deletes its own fixture, so nothing should
+  // survive it — but a run that fails between the two must not poison every
+  // run after it with a duplicate "on screen twice" match).
+  const marker = Date.now();
+  const slug = `e2e-retire-${marker}`;
+  const title = `E2E retire target ${marker}`;
   const declared = await request.post(`${API}/ledgers`, {
     data: {
       slug,
-      title: "E2E retire target",
+      title,
       purpose: "A list this spec retires through the UI.",
       fields: [
         { name: "id", role: "id" },
@@ -121,31 +138,46 @@ test("retiring a declared list asks before it deletes, then removes it everywher
   });
   expect(declared.ok()).toBeTruthy();
 
-  const main = page.getByRole("main");
-  await openManageLists(page);
-  await expect(main.getByText("E2E retire target")).toBeVisible({ timeout: 15_000 });
-  // The sidebar is shell chrome, present on every route — it already picked
-  // this list up from the seed above, before the confirm below removes it.
-  const sidebarRow = page.locator(`[data-tour="nav-ledgers-${slug}"]`).getByRole("button");
-  await expect(sidebarRow).toBeVisible({ timeout: 15_000 });
+  try {
+    // `page.locator("main")`, not `getByRole("main")`: the retire confirm
+    // below opens an AlertDialog that inerts the rest of the page for
+    // accessibility, which prunes `<main>` from the accessibility tree
+    // entirely — a role-based query would find nothing while a role-agnostic
+    // one still sees the (occluded but present) DOM.
+    const main = page.locator("main");
+    await openManageLists(page);
+    await expect(main.getByText(title)).toBeVisible({ timeout: 15_000 });
+    // The sidebar is shell chrome, present on every route — it already
+    // picked this list up from the seed above, before the confirm below
+    // removes it. A plain CSS descendant (`button`), not `.getByRole`: the
+    // same aria-hidden pruning `main` needs a role-agnostic locator for
+    // below applies here too once the confirm dialog inerts the sidebar.
+    const sidebarRow = page.locator(`[data-tour="nav-ledgers-${slug}"] button`);
+    await expect(sidebarRow).toBeVisible({ timeout: 15_000 });
 
-  // Scoped to the one Card carrying this list's title, not any `div` that
-  // happens to contain the text — several ancestor divs do, and only the
-  // card itself has the Retire button as a sibling rather than a stranger.
-  const row = page.locator('[data-slot="card"]', { hasText: "E2E retire target" });
-  await row.getByRole("button", { name: "Retire" }).click();
+    // Scoped to the one Card carrying this list's title, not any `div` that
+    // happens to contain the text — several ancestor divs do, and only the
+    // card itself has the Retire button as a sibling rather than a stranger.
+    const row = page.locator('[data-slot="card"]', { hasText: title });
+    await row.getByRole("button", { name: "Retire" }).click();
 
-  const confirm = page.getByTestId("ledger-retire-confirm");
-  await expect(confirm).toBeVisible();
-  // Not gone yet — the confirm has not been pressed. `toBeAttached`, not
-  // `toBeVisible`: the open AlertDialog dims and inerts the rest of the page
-  // (confirmed live — the row and the sidebar are still in the DOM, just
-  // occluded), so a visibility check here would be asserting the modal's own
-  // backdrop rather than whether the retire actually happened.
-  await expect(main.getByText("E2E retire target")).toBeAttached();
-  await expect(sidebarRow).toBeAttached();
+    const confirm = page.getByTestId("ledger-retire-confirm");
+    await expect(confirm).toBeVisible();
+    // Not gone yet — the confirm has not been pressed. `toBeAttached`, not
+    // `toBeVisible`: the open AlertDialog dims and inerts the rest of the
+    // page (confirmed live — the row and the sidebar are still in the DOM,
+    // just occluded), so a visibility check here would be asserting the
+    // modal's own backdrop rather than whether the retire actually happened.
+    await expect(main.getByText(title)).toBeAttached();
+    await expect(sidebarRow).toBeAttached();
 
-  await confirm.click();
-  await expect(main.getByText("E2E retire target")).toHaveCount(0, { timeout: 15_000 });
-  await expect(sidebarRow).toHaveCount(0);
+    await confirm.click();
+    await expect(main.getByText(title)).toHaveCount(0, { timeout: 15_000 });
+    await expect(sidebarRow).toHaveCount(0);
+  } finally {
+    // Idempotent: the happy path above already retired it. A failure partway
+    // through must not leave this run's fixture for the next run to collide
+    // with, the way the fixed-title version of this test used to.
+    await request.delete(`${API}/ledgers/${slug}`);
+  }
 });
