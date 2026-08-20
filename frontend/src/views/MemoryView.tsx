@@ -507,7 +507,51 @@ function AddMemoryDialog({
 }
 
 /** The three families every provider-backed engine must serve. */
-const MANDATORY_FAMILIES = ["core", "recall", "portability"];
+/**
+ * Frontend copy of the backend's mandatory-family contract. There is no
+ * generated contract to import, so this can drift silently if the backend
+ * renames a family — the authoritative assertions live in
+ * `src/server/routes.rs` (spec_memory_capability_names) and
+ * `src/store/memory/test.rs`; a rename must touch all three or the
+ * mandatory-floor note below silently stops rendering.
+ */
+export const MANDATORY_FAMILIES = ["core", "recall", "portability"];
+
+/**
+ * What the engine panel does for a given `/spec` answer, as a pure decision
+ * so it is unit-testable without a DOM:
+ * - `hidden`: no `/spec` yet or an old host (`engine` undefined), or the base
+ *   `store` backend — memory served by the host's own stores, nothing to say.
+ * - `discard`: the `null` engine — bound, probed, and **throwing every write
+ *   away**; the one case that must render as a warning, not a healthy row.
+ * - `normal`: a real engine (embedded or remote).
+ */
+export function enginePanelMode(
+  engine: MemorySpec | undefined,
+): "hidden" | "normal" | "discard" {
+  if (!engine || engine.backend === "store") return "hidden";
+  if (engine.backend === "null") return "discard";
+  return "normal";
+}
+
+/**
+ * The boot-probe line, total over the field's whole domain: `true`, `false`,
+ * and anything else (absent field, old host, or a literal `null` from a
+ * future serializer change) — the render must never be an empty label.
+ */
+export function probeLabel(healthy: boolean | undefined | null): string {
+  if (healthy === true) return "reachable at boot";
+  if (healthy === false) return "unreachable at boot — check the endpoint and credential";
+  return "not probed";
+}
+
+/** Whether the negotiated families are exactly the mandatory floor. */
+export function isMandatoryOnly(capabilities: string[]): boolean {
+  return (
+    capabilities.length === MANDATORY_FAMILIES.length &&
+    MANDATORY_FAMILIES.every((f) => capabilities.includes(f))
+  );
+}
 
 /**
  * The read-only memory-engine panel: which engine is bound, what it
@@ -522,15 +566,14 @@ const MANDATORY_FAMILIES = ["core", "recall", "portability"];
  * Renders nothing for the `store` default (no separate engine to describe) and
  * for a host predating the `/spec` memory field.
  */
-function EnginePanel({ engine }: { engine: MemorySpec | undefined }) {
-  if (!engine || engine.backend === "store") return null;
+export function EnginePanel({ engine }: { engine: MemorySpec | undefined }) {
+  const mode = enginePanelMode(engine);
+  if (mode === "hidden" || !engine) return null;
 
   // Exactly the mandatory three means a hosted engine serving the contract
   // floor: worth saying out loud, because the spec's operator rights assume
   // richer families that live only engine-side.
-  const mandatoryOnly =
-    engine.capabilities.length === MANDATORY_FAMILIES.length &&
-    MANDATORY_FAMILIES.every((f) => engine.capabilities.includes(f));
+  const mandatoryOnly = isMandatoryOnly(engine.capabilities);
 
   return (
     <Card data-testid="memory-engine-panel">
@@ -555,16 +598,30 @@ function EnginePanel({ engine }: { engine: MemorySpec | undefined }) {
             <span
               className={cn(
                 "size-2 rounded-full",
-                engine.healthy === true && "bg-status-done",
-                engine.healthy === false && "bg-status-failed",
-                engine.healthy === undefined && "bg-muted-foreground/40",
+                // The null engine's green would be a lie beside a write
+                // button: reachable, yes — retaining, no. Amber, always.
+                mode === "discard"
+                  ? "bg-status-blocked"
+                  : engine.healthy === true
+                    ? "bg-status-done"
+                    : engine.healthy === false
+                      ? "bg-status-failed"
+                      : "bg-muted-foreground/40",
               )}
             />
-            {engine.healthy === true && "reachable at boot"}
-            {engine.healthy === false && "unreachable at boot — check the endpoint and credential"}
-            {engine.healthy === undefined && "not probed"}
+            {probeLabel(engine.healthy)}
           </span>
         </div>
+        {mode === "discard" && (
+          <Alert variant="destructive" data-testid="memory-engine-discard">
+            <AlertDescription>
+              This engine accepts and discards every write — nothing this company is told will
+              be remembered, and every read comes back empty, indistinguishable from a company
+              that simply hasn't learned anything yet. Adding memories here does nothing until
+              the infra operator unsets <code className="text-xs">OPENCOMPANY_MEMORY=null</code>.
+            </AlertDescription>
+          </Alert>
+        )}
         <div className="flex flex-wrap items-center gap-1.5">
           <span className="text-muted-foreground">Capabilities</span>
           {engine.capabilities.length === 0 ? (
@@ -581,8 +638,8 @@ function EnginePanel({ engine }: { engine: MemorySpec | undefined }) {
         </div>
         {mandatoryOnly && (
           <p className="text-xs text-muted-foreground">
-            The mandatory contract families. Richer families (trees, graph, sources) live
-            engine-side and are not served over a hosted engine.
+            The mandatory contract families. Richer families (summary tree, graph, taint) live
+            engine-side; this engine serves only the floor.
           </p>
         )}
       </CardContent>

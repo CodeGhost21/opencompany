@@ -163,8 +163,8 @@ const NAV: NavItem[] = [
   // "something an agent built" surfaces, as opposed to the fixed views above.
   // Pages is deliberately not offered in the nav. The view and its `#/pages`
   // route stay live, so an address or an existing link still resolves — this
-  // is the same treatment `feedback`, `inbox`, `memory`, `finances`,
-  // `conversation` and `team` already get. Do not "fix" the omission by
+  // is the same treatment `feedback`, `inbox`, `finances`, `conversation`
+  // and `team` already get. Do not "fix" the omission by
   // adding it back.
   // { view: "pages", label: "Pages", icon: AppWindow },
   { view: "settings", label: "Settings", icon: Settings2 },

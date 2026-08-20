@@ -348,6 +348,7 @@ function MemoryEngineCard({ client }: { client: OpenCompanyClient }) {
   }, [client]);
 
   if (!engine || engine.backend === "store") return null;
+  const discarding = engine.backend === "null";
   return (
     <Card data-testid="settings-memory-engine">
       <CardHeader>
@@ -355,6 +356,8 @@ function MemoryEngineCard({ client }: { client: OpenCompanyClient }) {
         <CardDescription>
           Set by the infra operator (<code className="text-xs">OPENCOMPANY_MEMORY*</code>, read
           at boot). Instance-wide; read-only here by design.
+          {discarding &&
+            " This engine accepts and discards every write — nothing this company is told will be remembered."}
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-0 divide-y">
@@ -373,9 +376,11 @@ function MemoryEngineCard({ client }: { client: OpenCompanyClient }) {
         </InfoRow>
         <InfoRow label="Boot probe">
           <span className="text-sm">
-            {engine.healthy === true && "reachable"}
-            {engine.healthy === false && "unreachable — check the endpoint and credential"}
-            {engine.healthy === undefined && "not probed"}
+            {engine.healthy === true
+              ? "reachable"
+              : engine.healthy === false
+                ? "unreachable — check the endpoint and credential"
+                : "not probed"}
           </span>
         </InfoRow>
       </CardContent>

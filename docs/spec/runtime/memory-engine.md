@@ -342,12 +342,9 @@ hosted) is a possible future refinement of *routing*, not of selection.
 
 ## Switching engines — the operator runbook
 
-Engine selection is **infra-operator only**: instance-wide, env-driven, read
-once at boot. There is no per-company choice, no API setter, and no Console
-setter — a Console admin must never be able to repoint a deployment's storage.
-Switching is therefore an env flip plus a restart, and because **nothing
-migrates between engines** (a switched engine starts empty by design), the
-data step comes first.
+Selection is infra-operator only (previous section), so switching is an env
+flip plus a restart — and because **nothing migrates between engines** (a
+switched engine starts empty by design), the data step comes first.
 
 1. **Export what the live engine holds** (until `export` reads the live
    overlay, capture what matters by hand — the gap is tracked in the P1
