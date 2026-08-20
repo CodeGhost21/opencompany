@@ -2339,6 +2339,14 @@ struct RunsQuery {
     limit: Option<usize>,
 }
 
+/// `skip_serializing_if` predicate for a count that is almost always zero —
+/// the same one `crate::ports::workflow_runner` uses for the per-node
+/// `unparkable` / `stranded` pair, so the two counts are omitted on identical
+/// terms.
+fn is_zero(n: &usize) -> bool {
+    *n == 0
+}
+
 /// One finished run as the console's history panel renders it (camelCase).
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -2452,6 +2460,24 @@ struct WorkflowRunOutcome {
     /// count becomes a fresh lie the moment somebody approves one.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     approvals: Vec<crate::ports::WorkflowRunApprovalRow>,
+    /// How many of [`pending_approvals`](Self::pending_approvals) have **no
+    /// live card left in the queue** (issue #1189).
+    ///
+    /// The gate-shaped sibling of `blockedNodes[].stranded`, and the number the
+    /// console needs to stop telling an operator to go and decide something
+    /// that is not there. #1143's per-node count is keyed on approval ids, and
+    /// a gate parked by `park_pending_gates` records none — no approval-row
+    /// receipt and no blocked-node row, only its node id here — so that count
+    /// structurally cannot describe this shape. On the marketing tenant it is
+    /// the shape of 34 of 60 runs.
+    ///
+    /// **Computed on the read, never journaled**, on exactly the terms
+    /// `WorkflowBlockedNode::stranded` is: the journal records what happened and
+    /// is not edited to reflect what is true now, and a stored "still waiting"
+    /// count is a fresh lie the moment the queue moves. Skipped when zero, which
+    /// is every healthy run, so an unaffected row's wire shape is unchanged.
+    #[serde(skip_serializing_if = "is_zero")]
+    stranded_approvals: usize,
     /// What this run adds up to, in one word (issue #981).
     ///
     /// **Always serialized**, and **derived in a single pass** once the fold
@@ -2482,7 +2508,9 @@ impl WorkflowRunOutcome {
             blocked_nodes: self.blocked_nodes.len(),
             deliveries: &self.deliveries,
             pending_approvals: self.pending_approvals.len(),
-            stranded_approvals: 0,
+            // Issue #1189: filled in by the join below, which is why the verdict
+            // pass now runs AFTER it. See `list_runs`.
+            stranded_approvals: self.stranded_approvals,
         })
     }
 }
@@ -2637,6 +2665,10 @@ async fn list_runs(
                     // True of a row that has only a start — and re-derived
                     // anyway by the single pass below, which is what makes it
                     // right for a row the finish or the settle changes.
+                    // Issue #1189: filled by the join in the tail, on the rows
+                    // actually being returned. Zero here is the honest default —
+                    // this row has not been reconciled against the queue yet.
+                    stranded_approvals: 0,
                     verdict: WorkflowRunVerdict::Running,
                 });
             }
@@ -2768,6 +2800,10 @@ async fn list_runs(
                     blocked_nodes,
                     approvals,
                     // Re-derived by the single pass below, like the start arm's.
+                    // Issue #1189: filled by the join in the tail, on the rows
+                    // actually being returned. Zero here is the honest default —
+                    // this row has not been reconciled against the queue yet.
+                    stranded_approvals: 0,
                     verdict: WorkflowRunVerdict::Running,
                 });
             }
@@ -2989,62 +3025,84 @@ async fn list_runs(
         }
     }
 
-    // Issue #981: the run verdicts, read in ONE pass, here — after the fold has
-    // settled every open row and after the #1009 cross-check has flipped the
-    // dead ones to `error: INTERRUPTED_BY_RESTART`.
-    //
-    // Position is the correctness argument. Every input the verdict reads is
-    // written by the settle arm *after* its row was pushed (`running`, `error`,
-    // `cancelled`, `deliveries`, `pendingApprovals`, `blockedNodes`), and two of
-    // them are written again by the cross-check above. Deriving at construction
-    // would score the row the fold had at the time and never revisit it — the
-    // exact staleness a *stored* verdict would have, reintroduced by placement.
-    for run in &mut runs {
-        run.verdict = run.derive_verdict();
-    }
-
     // Newest first: a history panel leads with the run that just happened. The
     // `limit` now cuts *runs* rather than journal rows, which is the number the
     // caller was asking about all along.
+    //
+    // Issue #1189 moved this ABOVE the verdict pass. Neither `reverse` nor
+    // `truncate` touches a single field of a row — they reorder and drop whole
+    // rows — so the invariant the verdict pass is placed on ("derive after
+    // everything that can still change its inputs") is not weakened by running
+    // them first. It is *extended*: the reconciliation below genuinely does
+    // change an input, and with the old ordering the verdict was read before it.
     runs.reverse();
     runs.truncate(limit);
 
-    // Issue #1143. A blocked node's `approval_ids` is a receipt of what the run
-    // parked, and a receipt cannot go stale — but the *question* it points at
-    // can. `ApprovalParked` is journaled at `Durability::Process` on the stated
-    // reasoning that losing it is harmless because "the agent parks it again on
-    // its next attempt". That holds for a chat turn, which retries; it is false
-    // for a workflow run, which halted at the blocked node and never re-enters
-    // the gate. So a run that outlived its own approvals goes on reporting that
-    // it waits on cards the queue does not have, and the drawer's "decide in
-    // Approvals" links land on an empty page. #1145 carries the durability
-    // decision; this reconciliation deliberately does not pre-empt it.
+    // Issues #1143 + #1189. A run's record of what it stopped for is a receipt
+    // and cannot go stale — but the *question* it points at can. `ApprovalParked`
+    // is journaled at `Durability::Process` on the stated reasoning that losing
+    // it is harmless because "the agent parks it again on its next attempt".
+    // That holds for a chat turn, which retries; it is false for a workflow run,
+    // which halted at the gate and never re-enters it. So a run that outlived
+    // its own approvals goes on reporting that it waits on cards the queue does
+    // not have. #1145 carries the durability decision; this reconciliation
+    // deliberately does not pre-empt it.
+    //
+    // TWO joins, because a run has two ways to stop for a person and they leave
+    // different traces:
+    //
+    // * `blockedNodes[].approvalIds` — the ids an agent node's gated calls
+    //   parked. Those cards are tool-call effects and carry no node id, so the
+    //   only key is the id (issue #1143).
+    // * `pendingApprovals` — the gate nodes the engine paused at. Their cards
+    //   are `workflow.approve` effects that record no receipt and no
+    //   blocked-node row at all, so #1143's id-keyed join structurally could not
+    //   reach them; they are joined on `(run_id, node_id)` instead (issue
+    //   #1189). This is the bigger half: 34 of the marketing tenant's 60 runs.
     //
     // Done HERE, on the read, for the same reason `relabel_blocked` above
     // relabels rather than rewriting the durable node rows: the journal records
     // what happened and is not edited to reflect what is true now. After the
     // truncate, so the join costs one journal snapshot and covers only the rows
     // actually being returned — and skipped entirely when no returned run
-    // parked anything, which is nearly every read.
-    if runs
-        .iter()
-        .any(|r| r.blocked_nodes.iter().any(|b| !b.approval_ids.is_empty()))
-    {
-        let live: std::collections::HashSet<String> = company
-            .runtime
-            .pending_approvals()
-            .into_iter()
-            .map(|a| a.id.as_ref().to_string())
-            .collect();
+    // stopped for anybody, which is nearly every read.
+    if runs.iter().any(|r| {
+        !r.pending_approvals.is_empty()
+            || r.blocked_nodes.iter().any(|b| !b.approval_ids.is_empty())
+    }) {
+        let live = company.runtime.live_approvals();
         for run in &mut runs {
             for blocked in &mut run.blocked_nodes {
                 blocked.stranded = blocked
                     .approval_ids
                     .iter()
-                    .filter(|id| !live.contains(id.as_str()))
+                    .filter(|id| !live.holds_id(id))
                     .count();
             }
+            run.stranded_approvals = crate::ports::workflow_verdict::stranded_approvals(
+                run.run_id.as_deref(),
+                &run.pending_approvals,
+                &run.blocked_nodes,
+                &live,
+            );
         }
+    }
+
+    // Issue #981: the run verdicts, read in ONE pass, here — after the fold has
+    // settled every open row, after the #1009 cross-check has flipped the dead
+    // ones to `error: INTERRUPTED_BY_RESTART`, and (issue #1189) after the
+    // reconciliation above.
+    //
+    // Position is the correctness argument. Every input the verdict reads is
+    // written by the settle arm *after* its row was pushed (`running`, `error`,
+    // `cancelled`, `deliveries`, `pendingApprovals`, `blockedNodes`), two of
+    // them are written again by the cross-check, and `strandedApprovals` is
+    // written by the join. Deriving at construction — or, as it was until
+    // #1189, before the join — scores the row against inputs that have since
+    // moved underneath it: the exact staleness a *stored* verdict would have,
+    // reintroduced by placement.
+    for run in &mut runs {
+        run.verdict = run.derive_verdict();
     }
 
     Ok(Json(runs))
@@ -6029,6 +6087,15 @@ mod tests {
                 "an approval id the journal no longer holds must read as stranded, \
                  or the drawer goes on linking to an empty queue: {body}"
             );
+            // Issue #1189, and the assertion that pins the reordering: the
+            // verdict pass now runs AFTER this join, so it can see what the join
+            // wrote. With the old ordering the row read `blocked` here — the
+            // blocked-node list said "cannot be continued" and the run's own
+            // one-word reading said "go and decide it", on the same row.
+            assert_eq!(
+                body[0]["verdict"], "stranded",
+                "the verdict must be derived after the reconciliation, not before it: {body}"
+            );
         }
 
         /// The other direction, and the reason the test above proves anything.
@@ -6113,6 +6180,200 @@ mod tests {
                 body[0]["blockedNodes"][0].get("stranded").is_none(),
                 "a parked approval is still decidable, so nothing may be marked \
                  stranded: {body}"
+            );
+            assert_eq!(
+                body[0]["verdict"], "blocked",
+                "a run with a live card is still blocked, not stranded: {body}"
+            );
+        }
+
+        /// Issue #1189, THE regression test for the bigger half of the defect.
+        ///
+        /// The marketing tenant's shape, verbatim: gate nodes on
+        /// `pendingApprovals`, `blockedNodes` empty, `approvals` empty, and an
+        /// empty queue. #1143's join is keyed on approval ids this shape never
+        /// records, so it could not touch these rows — 34 of the tenant's 60
+        /// runs went on scoring `awaiting-approval` about a person with nothing
+        /// to answer.
+        #[tokio::test]
+        async fn run_history_scores_a_gate_run_with_no_live_card_as_stranded() {
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let (state, _store, id) = hosted_state(&home).await;
+
+            journal_start(&state, &id, "sports_blog", "run-g", true).await;
+            let runtime = state.registry().get(&id).expect("registered");
+            runtime
+                .events()
+                .append(
+                    &id,
+                    CompanyEvent::WorkflowRunFinished {
+                        workflow_id: "sports_blog".to_string(),
+                        scheduled: true,
+                        run_id: Some("run-g".to_string()),
+                        deliveries: Vec::new(),
+                        pending_approvals: vec!["fetch_bbc".to_string(), "fetch_espn".to_string()],
+                        error: None,
+                        cancelled: false,
+                        notices: Vec::new(),
+                        board: Vec::new(),
+                        // The whole point of this shape: a paused gate writes
+                        // NEITHER of the two things #1143 reads.
+                        blocked_nodes: Vec::new(),
+                        approvals: Vec::new(),
+                    },
+                )
+                .await
+                .expect("append");
+
+            let response = router(state)
+                .oneshot(request("GET", "/api/v1/company/workflows/runs", None))
+                .await
+                .unwrap();
+            let body = json_body(response).await;
+            assert_eq!(
+                body[0]["strandedApprovals"], 2,
+                "both gates lost their card, and nothing else on this row says so: {body}"
+            );
+            assert_eq!(
+                body[0]["verdict"], "stranded",
+                "nothing in the queue is waiting on this run: {body}"
+            );
+        }
+
+        /// The negative twin, and the reason the test above proves anything.
+        ///
+        /// A join that marked every gate run stranded would satisfy it and be
+        /// far worse than no join: it would retire runs an operator can still
+        /// act on. Here the gate's card is genuinely parked — a real
+        /// `workflow.approve` effect carrying this run's id and this node's id,
+        /// which is the pair the join keys on — so the run stays awaiting and
+        /// `strandedApprovals` is skipped off the wire entirely.
+        #[tokio::test]
+        async fn run_history_leaves_a_gate_run_with_a_live_card_awaiting() {
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let (state, _store, id) = hosted_state(&home).await;
+            let runtime = state.registry().get(&id).expect("registered");
+
+            // Built by the same `gate_effect` the runner parks with, so the
+            // shape the join reads is the shape the park writes.
+            let effect = crate::runtime::workflow_resume::gate_effect(
+                "sports_blog",
+                "fetch_bbc",
+                &serde_json::json!({}),
+                "run-live-gate",
+                &[],
+                &[],
+                None,
+            );
+            let approval_id = runtime
+                .approvals
+                .park(runtime.id(), effect.clone())
+                .await
+                .expect("park");
+            runtime
+                .journal()
+                .record_parked(
+                    &approval_id,
+                    &effect,
+                    crate::ports::now_millis(),
+                    crate::runtime::journal::TaskLink::Unlinked,
+                    crate::runtime::journal::ApprovalConversation {
+                        thread: None,
+                        parent: None,
+                    },
+                    None,
+                )
+                .await
+                .expect("record");
+
+            journal_start(&state, &id, "sports_blog", "run-live-gate", true).await;
+            runtime
+                .events()
+                .append(
+                    &id,
+                    CompanyEvent::WorkflowRunFinished {
+                        workflow_id: "sports_blog".to_string(),
+                        scheduled: true,
+                        run_id: Some("run-live-gate".to_string()),
+                        deliveries: Vec::new(),
+                        pending_approvals: vec!["fetch_bbc".to_string()],
+                        error: None,
+                        cancelled: false,
+                        notices: Vec::new(),
+                        board: Vec::new(),
+                        blocked_nodes: Vec::new(),
+                        approvals: Vec::new(),
+                    },
+                )
+                .await
+                .expect("append");
+
+            let response = router(state)
+                .oneshot(request("GET", "/api/v1/company/workflows/runs", None))
+                .await
+                .unwrap();
+            let body = json_body(response).await;
+            assert!(
+                body[0].get("strandedApprovals").is_none(),
+                "the gate's card is on the queue, so nothing may be marked stranded: {body}"
+            );
+            assert_eq!(
+                body[0]["verdict"], "awaiting-approval",
+                "a decidable gate is still awaiting a person: {body}"
+            );
+        }
+
+        /// A row journaled before issue #371 carries no `run_id`, so the
+        /// `(run, node)` join has no key at all.
+        ///
+        /// It must therefore be left exactly as it read before #1189. Calling
+        /// its gates stranded on the strength of a *missing field* would retire
+        /// live work — the failure mode that is strictly worse than the one this
+        /// issue closes, because an operator cannot argue with a run the console
+        /// says is over.
+        #[tokio::test]
+        async fn run_history_leaves_a_pre_371_row_unreconciled() {
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let (state, _store, id) = hosted_state(&home).await;
+            let runtime = state.registry().get(&id).expect("registered");
+            runtime
+                .events()
+                .append(
+                    &id,
+                    CompanyEvent::WorkflowRunFinished {
+                        workflow_id: "sports_blog".to_string(),
+                        scheduled: true,
+                        // The pre-#371 shape: no correlation id, and so no start
+                        // row to pair with either.
+                        run_id: None,
+                        deliveries: Vec::new(),
+                        pending_approvals: vec!["fetch_bbc".to_string()],
+                        error: None,
+                        cancelled: false,
+                        notices: Vec::new(),
+                        board: Vec::new(),
+                        blocked_nodes: Vec::new(),
+                        approvals: Vec::new(),
+                    },
+                )
+                .await
+                .expect("append");
+
+            let response = router(state)
+                .oneshot(request("GET", "/api/v1/company/workflows/runs", None))
+                .await
+                .unwrap();
+            let body = json_body(response).await;
+            assert!(
+                body[0].get("strandedApprovals").is_none(),
+                "a row with no run id cannot be joined, so it must report nothing: {body}"
+            );
+            assert_eq!(
+                body[0]["verdict"], "awaiting-approval",
+                "an unjoinable row keeps the reading it had before #1189: {body}"
             );
         }
 
