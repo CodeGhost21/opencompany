@@ -1137,9 +1137,12 @@ jobs:
         run: scripts/ci/run-scoped-suite.sh "tinymemory selection" acp,runner,tinymemory store::select
 
       # Issue #1113 gave `tinymemory-embedded` its own lane; these two steps are
-      # that lane moved onto the UNION every shipped tenant will actually run —
-      # `openhuman` + `tinycortex` + the provider seam in one binary. Until now
-      # that union existed only as `Check (--all-features)`: never linked as a
+      # that lane moved onto the union of the openhuman+tinycortex core and the
+      # provider seam — the first lane that LINKS AND EXECUTES the two together
+      # (the shipped tenant set is neither a subset nor a superset of this lane;
+      # what matters is that the combination stops existing only as a
+      # typecheck). Until now that union existed only as
+      # `Check (--all-features)`: never linked as a
       # binary, never executed, which is precisely the crack a feature-gated
       # merge collision (the duplicated-struct-field kind that `fmt`, clippy and
       # two green suites all missed once already) slips through. The union also
