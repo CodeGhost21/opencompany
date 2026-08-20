@@ -53,7 +53,6 @@ import { type AgentReplyEvent, type CompanyStreamEvent, useEvents } from "@/hook
 import type { WorkspaceEvent } from "@/views/WorkspaceView";
 import { useHashView } from "@/hooks/use-hash-view";
 import { BOARD_LEDGER } from "@/lib/board-columns";
-import { isFullBleed } from "@/lib/shell-frame";
 import { taskIdFromSegment } from "@/lib/task-route";
 import { toast } from "sonner";
 
@@ -1360,12 +1359,51 @@ export function AppShell({
     }, []),
   });
 
+  // The height of the sidebar's header block, published to CSS so the content
+  // card's top edge can meet its bottom edge (issue #1178).
+  //
+  // MEASURED rather than written down, because the header's height is not a
+  // constant: it follows its own padding and type size, and it changes outright
+  // when the column collapses — the switcher and the collapse button stop
+  // sharing a row and stack, which makes the block taller. A number hardcoded
+  // beside a number would agree today and drift the first time either moved,
+  // and the misalignment is small enough that nobody would notice for weeks.
+  //
+  // `ResizeObserver` reports the new height in the same frame the layout
+  // changes, so the two edges move together; there is deliberately no
+  // transition on the card's margin, which would make it lag the header it is
+  // supposed to be aligned with.
+  //
+  // The unit is px because that is what was measured. `index.css` decides where
+  // this applies — below `md` the sidebar is a sheet and the card falls back to
+  // an even inset, which is why this can publish unconditionally.
+  const headerRef = useRef<HTMLDivElement>(null);
+  const [headerHeight, setHeaderHeight] = useState<number | null>(null);
+  useEffect(() => {
+    const header = headerRef.current;
+    if (!header || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(() => {
+      // `getBoundingClientRect`, not `contentRect`: the border box is what the
+      // next element down starts after, and it is what the card has to clear.
+      setHeaderHeight(Math.round(header.getBoundingClientRect().height));
+    });
+    observer.observe(header);
+    return () => observer.disconnect();
+  }, []);
+
   return (
     // `SidebarProvider` paints the chrome layer itself — see its own note on
     // why that fill lives there and not here (issue #1178).
-    <SidebarProvider className="h-svh overflow-hidden">
+    <SidebarProvider
+      className="h-svh overflow-hidden"
+      style={
+        headerHeight === null
+          ? undefined
+          : ({ "--sidebar-header-height": `${headerHeight}px` } as React.CSSProperties)
+      }
+    >
       <Sidebar collapsible="icon">
-        <SidebarHeader>
+        <SidebarHeader ref={headerRef}>
           {/* The header is the column talking about itself: which host this
               console is looking at, and whether the column is showing.
               Everything BELOW it — the nav group and the footer's standing
@@ -1456,7 +1494,7 @@ export function AppShell({
             #1178). A `div`, not `main` — `SidebarInset` above is already the
             console's one `<main>` landmark, and a second nested one gave every
             page two identical "skip to content" destinations (issue #1221). */}
-        <ContentSurface unframed={isFullBleed(view, sub)}>
+        <ContentSurface>
           {view === "overview" && (
             <Overview client={client} company={company} companyName={feed.status.name} />
           )}

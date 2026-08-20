@@ -86,6 +86,7 @@ async function shell(page: Page) {
     };
 
     const root = q('[data-slot="sidebar-wrapper"]');
+    const header = q('[data-slot="sidebar-header"]');
     const sidebar = q('[data-slot="sidebar-inner"]');
     const sidebarColumn = q('[data-slot="sidebar-container"]');
     const inset = q('[data-slot="sidebar-inset"]');
@@ -107,6 +108,9 @@ async function shell(page: Page) {
       unframed: card?.getAttribute("data-unframed") ?? null,
       insetBox: box(inset),
       cardBox: box(card),
+      headerBox: box(header),
+      // The resolved top inset, so a failure says which value was in play.
+      frameTop: root ? getComputedStyle(root).getPropertyValue("--app-frame-top").trim() : null,
     };
   });
 }
@@ -157,7 +161,50 @@ for (const theme of ["light", "dark"] as const) {
     expect(s.cardBorderWidth).toBeGreaterThan(0);
   });
 
-  test(`the knowledge graph gets the whole pane, uncropped (${theme})`, async ({ page }) => {
+  test(`the card's top edge sits half way down the sidebar header (${theme})`, async ({
+    page,
+  }) => {
+    await open(page, theme, "/#/settings");
+    const s = await shell(page);
+
+    // The top inset is an *alignment*, not a margin: a band of chrome runs
+    // across the top of the window with the host switcher standing in it, and
+    // the card begins part way down it. Asserted as a ratio of the header's own
+    // measured height rather than against a number, because the number is
+    // measured at runtime — which is the point. A hardcoded inset beside a
+    // hardcoded header height would agree today and drift the first time either
+    // moved, by an amount too small for anyone to notice for weeks.
+    expect(s.headerBox).not.toBeNull();
+    expect(s.cardBox!.top).toBeCloseTo(s.headerBox!.bottom / 2, 0);
+
+    // And it is genuinely lower than the other three sides, so the band exists.
+    expect(s.cardBox!.top - s.insetBox!.top).toBeGreaterThan(
+      s.cardBox!.left - s.insetBox!.left,
+    );
+  });
+
+  test(`collapsing the sidebar moves the card's top edge with it (${theme})`, async ({
+    page,
+  }) => {
+    await open(page, theme, "/#/settings");
+    const before = await shell(page);
+
+    // Collapsing stacks the switcher above the collapse button instead of
+    // sharing a row with it, so the header block gets TALLER. This is the case
+    // a fixed inset cannot follow, and the reason the value is measured.
+    await page.getByRole("button", { name: "Collapse sidebar" }).first().click();
+    await expect
+      .poll(async () => (await shell(page)).headerBox!.bottom)
+      .toBeGreaterThan(before.headerBox!.bottom);
+
+    const after = await shell(page);
+    expect(after.cardBox!.top).toBeCloseTo(after.headerBox!.bottom / 2, 0);
+    expect(after.cardBox!.top).toBeGreaterThan(before.cardBox!.top);
+  });
+
+  test(`the knowledge graph fills the card without spilling out of it (${theme})`, async ({
+    page,
+  }) => {
     await open(page, theme, "/#/overview");
 
     const graph = await page.evaluate(() => {
@@ -168,13 +215,14 @@ for (const theme of ["light", "dark"] as const) {
         const r = el.getBoundingClientRect();
         return { left: r.left, top: r.top, right: r.right, bottom: r.bottom };
       };
-      return { unframed: card?.getAttribute("data-unframed") ?? null, card: rect(card), kg: rect(kg) };
+      return { card: rect(card), kg: rect(kg) };
     });
 
-    // Full bleed: no margin to shrink the graph, and no rounded clip to cut its
-    // corners off. The graph lays itself out against the viewport, so a framed
-    // card would draw it 24px larger than the box that clips it.
-    expect(graph.unframed).toBe("true");
+    // Every page is framed now, the graph included. What matters is that it
+    // takes the height the card actually has rather than the height of the
+    // window: it used to claim `h-svh`, which inside a card shorter than the
+    // viewport lays the graph out taller than the box that clips it and crops
+    // the bottom band — the legend with it.
     expect(graph.kg).not.toBeNull();
     expect(graph.kg!.left).toBeCloseTo(graph.card!.left, 0);
     expect(graph.kg!.top).toBeCloseTo(graph.card!.top, 0);
@@ -183,20 +231,9 @@ for (const theme of ["light", "dark"] as const) {
   });
 }
 
-test("the workflow index is framed and its canvas is not", async ({ page }) => {
+test("the workflow canvas fills the card and keeps its minimap inside it", async ({ page }) => {
   await open(page, "light", "/#/workflows");
-
-  // The browse list is a document — cards, a count, a toolbar — so it reads
-  // better with an edge.
-  const surface = page.locator('[data-testid="content-surface"]');
-  await expect(surface).not.toHaveAttribute("data-unframed", "true");
-
   await openFirstWorkflow(page);
-
-  // Opening one hands the React Flow canvas the whole pane. Its viewport
-  // transform and its minimap viewbox are both computed from this container's
-  // measured rect, which is the surface #1259 and #1261 un-cropped.
-  await expect(surface).toHaveAttribute("data-unframed", "true");
 
   const canvas = await page.evaluate(() => {
     const card = document.querySelector('[data-testid="content-surface"]');
@@ -205,17 +242,42 @@ test("the workflow index is framed and its canvas is not", async ({ page }) => {
     const rect = (el: Element | null) => {
       if (!el) return null;
       const r = el.getBoundingClientRect();
-      return { left: r.left, right: r.right, bottom: r.bottom };
+      return { left: r.left, right: r.right, bottom: r.bottom, width: r.width, height: r.height };
     };
-    return { card: rect(card), flow: rect(flow), mini: rect(mini), viewport: window.innerWidth };
+    return { card: rect(card), flow: rect(flow), mini: rect(mini) };
   });
 
+  // React Flow computes its viewport transform and its minimap viewbox from the
+  // container's measured rect, so the thing to prove is that the container it
+  // measures is the card — not a box wider than the one it is clipped to. That
+  // is the crop class of bug #1259 and #1261 were filed for.
   expect(canvas.flow).not.toBeNull();
-  // The canvas spans the pane edge to edge horizontally — the axis a frame
-  // would have taken 24px out of.
   expect(canvas.flow!.left).toBeCloseTo(canvas.card!.left, 0);
   expect(canvas.flow!.right).toBeCloseTo(canvas.card!.right, 0);
-  // And the minimap, which is pinned to the canvas's bottom-right, is still
-  // inside the window rather than clipped past its edge.
-  if (canvas.mini) expect(canvas.mini.right).toBeLessThanOrEqual(canvas.viewport);
+
+  // And the minimap, pinned to the canvas's bottom-right, is inside the card
+  // rather than under its rounded corner or past its edge.
+  expect(canvas.mini).not.toBeNull();
+  expect(canvas.mini!.right).toBeLessThanOrEqual(canvas.card!.right);
+  expect(canvas.mini!.bottom).toBeLessThanOrEqual(canvas.card!.bottom);
+  expect(canvas.mini!.width).toBeGreaterThan(0);
+  expect(canvas.mini!.height).toBeGreaterThan(0);
+});
+
+test("below md there is no header band, so the top inset is even again", async ({ page }) => {
+  // The sidebar is a sheet at this width, not a column, so there is no header
+  // block for the card to align to. Deliberately reverted to the plain inset
+  // rather than left to whatever an open sheet happens to measure — without
+  // this the card would jump every time the sheet opened.
+  await page.setViewportSize({ width: 390, height: 844 });
+  await open(page, "light", "/#/settings");
+  const s = await shell(page);
+
+  const { insetBox: frame, cardBox: card } = s;
+  const top = card!.top - frame!.top;
+  const left = card!.left - frame!.left;
+  const right = frame!.right - card!.right;
+  expect(top).toBeCloseTo(left, 0);
+  expect(top).toBeCloseTo(right, 0);
+  expect(top).toBeGreaterThanOrEqual(8);
 });
