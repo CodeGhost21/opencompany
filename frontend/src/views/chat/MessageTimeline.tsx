@@ -9,7 +9,7 @@ import { Avatar } from "./Avatar";
 import { MessageRow } from "./MessageRow";
 import { StepTimeline } from "./StepTimeline";
 import { WorkingIndicator } from "./WorkingIndicator";
-import { channelSubtitle, channelTitle, type Channel, type TimelineItem } from "./model";
+import { channelIntroSentence, channelTitle, type Channel, type TimelineItem } from "./model";
 
 interface Props {
   channel: Channel;
@@ -268,14 +268,6 @@ function ChannelIntro({
   loading: boolean;
   onAddPeople?: () => void;
 }) {
-  // Every branch below appends this to a sentence that has already named the
-  // channel, so it goes through the same guard the header does: without it the
-  // DM line read "…your direct message with Backend Engineer — backend
-  // engineer." for any teammate the host sends no name for (issue #1180). A
-  // `null` here drops the clause rather than the sentence — where you are is
-  // still worth saying, the tautology after it is not.
-  const subtitle = channelSubtitle(channel);
-
   return (
     <div className={cn("px-4 pb-3", empty ? "pt-16" : "pt-6")}>
       <Avatar
@@ -291,15 +283,7 @@ function ChannelIntro({
           conversation (issue #934). The identity block above is not a claim
           and stays either way, so the pane still says where you are. */}
       <p className="mt-1 max-w-prose text-sm text-muted-foreground">
-        {loading
-          ? subtitle
-            ? sentence(subtitle)
-            : ""
-          : channel.kind === "dm"
-            ? subtitle
-              ? `This is the start of your direct message with ${channel.name} — ${lower(subtitle)}.`
-              : `This is the start of your direct message with ${channel.name}.`
-            : `This is the very beginning of ${channelTitle(channel)}.${subtitle ? ` ${sentence(subtitle)}` : ""}`}
+        {channelIntroSentence(channel, loading)}
       </p>
       {/* The two openings a new channel actually has. Held back until the
           history has answered, for the same reason the sentence above is:
@@ -447,13 +431,4 @@ function TypingRow({ channel }: { channel: Channel }) {
       <WorkingIndicator srLabel="Replying…" />
     </div>
   );
-}
-
-function lower(s: string): string {
-  return s.charAt(0).toLowerCase() + s.slice(1);
-}
-
-function sentence(s: string): string {
-  const t = s.trim();
-  return /[.!?]$/.test(t) ? t : `${t}.`;
 }
