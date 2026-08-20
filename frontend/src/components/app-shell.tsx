@@ -1798,10 +1798,11 @@ export function AppShell({
             wrapper's flex-1 height (and every view's own overflow-y-auto
             within it) already stops short of it. No view needs to know this
             control exists. */}
-        {/* `p-3`, not `pb-3`: the row's spacing has to be its own. A framed
-            card supplies the gap above it through its own bottom margin, but an
-            unframed one (Overview, a workflow canvas) runs flush to the bottom
-            edge and would leave this control sitting on the canvas's cut. */}
+        {/* `p-3` on all four sides, matching `--frame-inset`, so this control
+            lines up with the card's own margin instead of hanging off a
+            different number. The card already supplies the gap above it through
+            that bottom margin — every page is framed now, so there is no longer
+            a flush-to-the-edge case for this row to compensate for. */}
         <div className="flex shrink-0 items-center bg-transparent p-3 md:hidden">
           <SidebarTrigger aria-label="Toggle sidebar" />
         </div>
