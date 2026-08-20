@@ -30,10 +30,21 @@ async function dismissTour(page: import("@playwright/test").Page) {
   const skip = page.getByRole("button", { name: "Skip for now" });
   try {
     await skip.waitFor({ state: "visible", timeout: 10_000 });
-    await skip.click();
   } catch {
     // The signed-in browser profile may already have completed the tour.
+    return;
   }
+  await skip.click();
+  // The welcome dialog's backdrop is `fixed inset-0`, so it covers the WHOLE
+  // viewport — not just the card it frames. Base UI runs a close animation
+  // before unmounting it (`data-closed` + `data-ending-style`, `duration-100`),
+  // and a click resolving does not wait for that: the backdrop is still in the
+  // DOM, still hit-testable, for up to ~100ms after "Skip for now" is clicked.
+  // A later `elementFromPoint` call anywhere on screen — including at a target
+  // scrolled to the bottom of an unrelated page — can land on that fading
+  // backdrop instead of the real content under it. Wait for the overlay itself
+  // to detach, not just for the click to resolve.
+  await expect(page.locator('[data-slot="dialog-overlay"]')).toHaveCount(0);
 }
 
 /** `--sidebar-width-icon`, in px. The whole width the collapsed control has. */
@@ -82,19 +93,19 @@ test.describe("sidebar toggle reachability", () => {
     );
 
     // And the corner it used to cover hit-tests as the content now, not the
-    // trigger — the concrete symptom from the issue's repro.
+    // trigger — the concrete symptom from the issue's repro. Assert the hit
+    // POSITIVELY resolves to the flag button, not just that it misses the
+    // trigger: a hit-test landing on neither would satisfy the weaker check.
     const flagCenterX = flagBox!.x + flagBox!.width / 2;
     const flagCenterY = flagBox!.y + flagBox!.height / 2;
     const hit = await page.evaluate(
       ([x, y]) => {
         const el = document.elementFromPoint(x, y);
-        return el?.getAttribute("aria-label") ?? el?.textContent ?? el?.tagName ?? null;
+        return el instanceof Element ? (el.closest("button")?.textContent?.trim() ?? null) : null;
       },
       [flagCenterX, flagCenterY],
     );
-    expect(hit, "the flag button's own point hits the flag button, not the trigger").not.toBe(
-      "Toggle sidebar",
-    );
+    expect(hit, "the flag button's own point hits the flag button").toBe("Flag something");
 
     // Still reachable and still functional in its own right.
     await trigger.click();
