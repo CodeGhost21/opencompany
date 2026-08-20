@@ -26,7 +26,7 @@ allow = ["*", "media", "composio", "search"]
 
 # The engagement-delivery desk aligns the recommendation, client deck, and implementation plan.
 [[group_chat]]
-id = "engagement-delivery"
+id = "engagement_delivery"
 name = "Engagement delivery desk"
 description = "Coordinate the client-ready strategy and implementation materials."
 members = ["strategist", "deck_builder", "implementation_planner"]
