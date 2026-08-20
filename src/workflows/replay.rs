@@ -234,9 +234,34 @@ pub(crate) fn outward_calls_performed(
     let mut performed = Vec::new();
     let mut unreplayable = Vec::new();
     let declared = declared_unrepeatable(authored);
+    let declared_names = declared_call_names(authored);
 
     for node in &graph.nodes {
-        let Some(slug) = outward_call_of(node, declared.contains(node.id.as_str())) else {
+        let is_declared = declared.contains(node.id.as_str());
+        // `replay_performed` overwrites a replayed node's own config with the
+        // `REPLAY_SLUG` sentinel *before* this run's engine ever sees it, so by
+        // the time the settled output reaches here the node's own `slug` no
+        // longer names the call it made — it names the sentinel (issue #850 +
+        // #846 interaction). Recording that sentinel verbatim would put
+        // `__opencompany.already_performed` on the operator's approval card in
+        // place of the real tool name. A declared node has to keep tracking
+        // under its own name instead — dropping it (the naive fix) would stop
+        // guarding it after this hop, so a third run downstream of a second
+        // gate would find an empty ledger entry and call it for real, which is
+        // exactly what the declaration exists to prevent. An undeclared node's
+        // replay is dropped here exactly as it already, if accidentally, was:
+        // it falls to `outward_call_of`'s classifier below, which cannot
+        // classify the sentinel either — this just makes that explicit instead
+        // of leaning on the policy table never having an opinion about it.
+        let is_replay_sentinel = matches!(node.kind, NodeKind::ToolCall)
+            && node.config.get("slug").and_then(Value::as_str) == Some(REPLAY_SLUG);
+        let Some(slug) = (if is_replay_sentinel {
+            is_declared
+                .then(|| declared_names.get(node.id.as_str()).cloned())
+                .flatten()
+        } else {
+            outward_call_of(node, is_declared)
+        }) else {
             continue;
         };
         // Not reached, or reached and produced nothing: there is nothing to
@@ -389,6 +414,44 @@ fn declared_unrepeatable(authored: &WorkflowFile) -> std::collections::HashSet<&
                 )
         })
         .map(|node| node.id.as_str())
+        .collect()
+}
+
+/// The outward-call identity a declared-unrepeatable node's own authored
+/// config names, keyed by node id.
+///
+/// Consulted only when [`outward_calls_performed`] finds a node whose compiled
+/// config has already been overwritten by [`replay_performed`] with the
+/// [`REPLAY_SLUG`] sentinel: at that point the graph itself has nothing left
+/// to classify, so the name has to be read back off `authored` — the same
+/// source [`declared_unrepeatable`] reads, for the same reason.
+fn declared_call_names(authored: &WorkflowFile) -> std::collections::HashMap<&str, String> {
+    authored
+        .nodes
+        .iter()
+        .filter(|node| node.repeatable == Some(false))
+        .filter_map(|node| {
+            let name = match node.kind {
+                WorkflowNodeKind::ToolCall => node
+                    .config
+                    .as_ref()
+                    .and_then(|c| c.get("slug"))
+                    .and_then(Value::as_str)?
+                    .to_string(),
+                WorkflowNodeKind::HttpRequest => {
+                    let method = node
+                        .config
+                        .as_ref()
+                        .and_then(|c| c.get("method"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("GET")
+                        .to_uppercase();
+                    format!("http_request {method}")
+                }
+                _ => return None,
+            };
+            Some((node.id.as_str(), name))
+        })
         .collect()
 }
 
@@ -655,6 +718,52 @@ mod tests {
         assert_eq!(performed.len(), 1, "{performed:?}");
         assert_eq!(performed[0].node, "publish");
         assert_eq!(performed[0].tool, "shell");
+    }
+
+    /// A replayed declared node still records its own tool name, not the
+    /// replay sentinel (issue #850 + #846 interaction).
+    ///
+    /// `replay_performed` overwrites a declared node's own config with the
+    /// `REPLAY_SLUG` sentinel before this run's engine ever executes it, so by
+    /// the time `outward_calls_performed` looks at the graph, the node's
+    /// `slug` reads `__opencompany.already_performed`, not `shell`. Recording
+    /// that sentinel verbatim would put it on the operator's approval card in
+    /// place of the tool name — and dropping the node instead (the naive fix)
+    /// would stop tracking it after this hop: a third run downstream of a
+    /// second gate would find an empty ledger entry for it and call `shell`
+    /// for real, which is exactly the violation issue #850 exists to prevent.
+    /// This pins both: the name stays correct, and the node stays guarded.
+    #[test]
+    fn a_replayed_declared_node_keeps_its_own_name() {
+        let authored = {
+            let mut file = authored(&[("publish", WorkflowNodeKind::ToolCall, Some(false))]);
+            file.nodes[0].config = Some(json!({
+                "slug": "shell",
+                "args": { "command": "./bin/announce" }
+            }));
+            file
+        };
+        // What `replay_performed` leaves behind on the second hop: the node's
+        // own config is gone, replaced by the sentinel.
+        let g = graph(vec![node(
+            "publish",
+            NodeKind::ToolCall,
+            json!({ "slug": REPLAY_SLUG, "args": { "__replayed_result": "\"sent\"" } }),
+        )]);
+        let (performed, unreplayable) = outward_calls_performed(
+            &g,
+            &settled("publish", json!({ "stdout": "sent" })),
+            &authored,
+        );
+        assert!(unreplayable.is_empty(), "{unreplayable:?}");
+        assert_eq!(performed.len(), 1, "{performed:?}");
+        assert_eq!(performed[0].node, "publish");
+        assert_eq!(
+            performed[0].tool, "shell",
+            "must record the authored tool name, not the replay sentinel — recording the \
+             sentinel is a display bug on the operator's card, and dropping the node instead \
+             would silently let it run for real on the hop after next"
+        );
     }
 
     /// A declaration only ever ADDS a guard.
