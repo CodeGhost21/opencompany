@@ -1800,6 +1800,41 @@ async fn two_baseline_teammates_still_park_with_both() {
     );
 }
 
+/// Issue #1196. The prompt marks a baseline teammate as such, so the model
+/// has the provenance evidence directly — even on a pass where the host-side
+/// precedence never has to act on it, as here: one company teammate proposed,
+/// no tie in play.
+#[tokio::test]
+async fn the_prompt_marks_a_baseline_teammate_from_the_shared_baseline() {
+    let model = ScriptedModel::replying(CLEAN_PLAN);
+    let (_home, runtime) = runtime_with(Arc::clone(&model)).await;
+    runtime
+        .tasks()
+        .upsert(runtime.id(), &card("t-31", ""))
+        .await
+        .unwrap();
+
+    run_planning_pass(Arc::clone(&runtime), "t-31".to_string()).await;
+
+    let prompt = model.last_prompt();
+    let writer_line = prompt
+        .lines()
+        .find(|l| l.contains("`writer`"))
+        .unwrap_or_else(|| panic!("the merged baseline puts `writer` on the roster:\n{prompt}"));
+    assert!(
+        writer_line.contains("— from the shared baseline"),
+        "{writer_line}"
+    );
+    let maya_line = prompt
+        .lines()
+        .find(|l| l.contains("`maya`"))
+        .unwrap_or_else(|| panic!("the company's own roster is still shown:\n{prompt}"));
+    assert!(
+        !maya_line.contains("— from the shared baseline"),
+        "a company-authored teammate is never mis-marked:\n{maya_line}"
+    );
+}
+
 /// Direct unit coverage of the precedence filter, independent of the planning
 /// pass and any one scripted model.
 #[test]
