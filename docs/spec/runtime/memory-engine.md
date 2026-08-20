@@ -343,8 +343,9 @@ hosted) is a possible future refinement of *routing*, not of selection.
 ## Switching engines — the operator runbook
 
 Selection is infra-operator only (previous section), so switching is an env
-flip plus a restart — and because **nothing migrates between engines** (a
-switched engine starts empty by design), the data step comes first.
+flip plus a restart — and because **the flip alone moves no data** (a
+switched engine starts empty until something puts records in it), the
+migration below is the step that moves it, and it comes first.
 
 0. **Stop the writes.** Pause the workload (or scale the tenant to zero)
    before migrating: the copy is page-by-page with no dual-write, so anything

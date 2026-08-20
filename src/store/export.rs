@@ -313,6 +313,16 @@ impl BundleContents {
                 self.facts.len()
             )));
         }
+        // Facts land FIRST, for the same append-only reason the refusal above
+        // fires first: `upsert` is idempotent, so a failure here leaves a
+        // retry-safe state — whereas a fact failure AFTER `store.save` and the
+        // ledger/event appends would leave a half-import whose retry
+        // duplicates history.
+        if let Some(port) = &facts {
+            for fact in &self.facts {
+                port.upsert(&self.id, fact).await?;
+            }
+        }
         // The manifest + lifecycle; ledger is appended separately so the store's
         // append-only ledger stays authoritative.
         store
@@ -342,11 +352,6 @@ impl BundleContents {
         }
         for trace in &self.traces {
             memory.save_trace(&self.id, trace.clone()).await?;
-        }
-        if let Some(port) = &facts {
-            for fact in &self.facts {
-                port.upsert(&self.id, fact).await?;
-            }
         }
         for chunk in &self.context {
             context
@@ -403,9 +408,22 @@ impl BundleContents {
         .await?;
         // Only when there are any: an empty file would make every new export
         // differ from an old host's byte-for-byte for no information. At the
-        // bundle root, matching `paths::Bundle::facts_jsonl`.
+        // bundle root, matching `paths::Bundle::facts_jsonl`. A factless
+        // export must also REMOVE a stale file a previous export left in the
+        // same directory — otherwise a later import resurrects facts that are
+        // absent from the selected source.
         if !self.facts.is_empty() {
             write_file(&dest.join(FACTS_JSONL), jsonl(&self.facts)?.as_bytes()).await?;
+        } else {
+            match tokio::fs::remove_file(dest.join(FACTS_JSONL)).await {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => {
+                    return Err(OpenCompanyError::Store(format!(
+                        "cannot remove a stale facts file from the bundle: {e}"
+                    )));
+                }
+            }
         }
 
         let context_dir = dest.join(CONTEXT_DIR);
@@ -2006,6 +2024,133 @@ mod test {
         assert!(
             s4.load(&id2).await.unwrap().is_none(),
             "the refusal must precede every write"
+        );
+    }
+    /// The fact-port failure case of the ordering guarantee: facts are the
+    /// FIRST write, so a failing fact port leaves zero company state behind —
+    /// the retry-safety claim, asserted rather than narrated.
+    #[tokio::test]
+    async fn a_failing_fact_port_leaves_nothing_written() {
+        use crate::ports::facts::FactStore;
+        use crate::ports::{FactKind, FactRecord};
+        use crate::store::FsOps;
+
+        struct FailingFacts;
+        #[async_trait::async_trait]
+        impl FactStore for FailingFacts {
+            async fn list(
+                &self,
+                _: &CompanyId,
+                _: Option<&str>,
+                _: Option<FactKind>,
+            ) -> crate::Result<Vec<FactRecord>> {
+                Ok(Vec::new())
+            }
+            async fn upsert(&self, _: &CompanyId, _: &FactRecord) -> crate::Result<()> {
+                Err(crate::error::OpenCompanyError::Store(
+                    "injected fact-port failure".into(),
+                ))
+            }
+            async fn delete(&self, _: &CompanyId, _: &str) -> crate::Result<bool> {
+                Ok(false)
+            }
+        }
+
+        let home_src = tmp_root("factfail-src");
+        let home_dst = tmp_root("factfail-dst");
+        let dest = tmp_root("factfail-bundle");
+        let id = CompanyId::new("factfail-co");
+        let (s1, e1, m1, c1) = fs_ports(&home_src);
+        s1.save(&company_record(&id)).await.unwrap();
+        let f1: Arc<dyn FactStore> = Arc::new(FsOps::new(home_src.clone()));
+        f1.upsert(
+            &id,
+            &FactRecord {
+                id: "f".into(),
+                kind: FactKind::Fact,
+                title: "t".into(),
+                body: "b".into(),
+                source: "s".into(),
+                updated_at_millis: 1,
+            },
+        )
+        .await
+        .unwrap();
+        export_bundle(&id, &dest, s1, e1, m1, c1, Some(f1), ExportOpts::default())
+            .await
+            .unwrap();
+
+        let (s2, e2, m2, c2) = fs_ports(&home_dst);
+        let err = import_bundle(&dest, s2.clone(), e2, m2, c2, Some(Arc::new(FailingFacts)))
+            .await
+            .expect_err("the injected fact failure must surface");
+        assert!(err.to_string().contains("injected"), "{err}");
+        assert!(
+            s2.load(&id).await.unwrap().is_none(),
+            "a fact-port failure must precede every append-only write"
+        );
+    }
+
+    /// Re-exporting a now-factless company into the SAME directory must not
+    /// leave the previous export's facts behind for a later import to
+    /// resurrect.
+    #[tokio::test]
+    async fn a_factless_reexport_removes_the_stale_facts_file() {
+        use crate::ports::facts::FactStore;
+        use crate::ports::{FactKind, FactRecord};
+        use crate::store::FsOps;
+
+        let home = tmp_root("stale-src");
+        let dest = tmp_root("stale-bundle");
+        let id = CompanyId::new("stale-co");
+        let (s1, e1, m1, c1) = fs_ports(&home);
+        s1.save(&company_record(&id)).await.unwrap();
+        let facts: Arc<dyn FactStore> = Arc::new(FsOps::new(home.clone()));
+        facts
+            .upsert(
+                &id,
+                &FactRecord {
+                    id: "f".into(),
+                    kind: FactKind::Fact,
+                    title: "t".into(),
+                    body: "b".into(),
+                    source: "s".into(),
+                    updated_at_millis: 1,
+                },
+            )
+            .await
+            .unwrap();
+        export_bundle(
+            &id,
+            &dest,
+            s1.clone(),
+            e1.clone(),
+            m1.clone(),
+            c1.clone(),
+            Some(facts.clone()),
+            ExportOpts::default(),
+        )
+        .await
+        .unwrap();
+        assert!(dest.join(FACTS_JSONL).is_file());
+
+        // The operator deletes the fact, then re-exports into the same dir.
+        assert!(facts.delete(&id, "f").await.unwrap());
+        export_bundle(
+            &id,
+            &dest,
+            s1,
+            e1,
+            m1,
+            c1,
+            Some(facts),
+            ExportOpts::default(),
+        )
+        .await
+        .unwrap();
+        assert!(
+            !dest.join(FACTS_JSONL).exists(),
+            "a factless re-export must remove the stale facts file"
         );
     }
 }

@@ -896,6 +896,7 @@ async fn live_ports(
 ) -> Result<(
     opencompany::store::export::Ports,
     Option<Arc<dyn opencompany::ports::FactStore>>,
+    opencompany::store::StorageKind,
 )> {
     use opencompany::store::{
         FsCompanyStore, FsContextStore, FsEventLog, FsMemoryStore, FsOps, StorageSettings,
@@ -926,7 +927,7 @@ async fn live_ports(
             facts = Some(f);
         }
     }
-    Ok(((store, events, memory, context), facts))
+    Ok(((store, events, memory, context), facts, settings.kind))
 }
 
 /// A process-unique temporary path under the system temp dir. Used only by the
@@ -955,7 +956,7 @@ async fn export_to_dir(
     // is writing is torn, and the refusal here names the running process
     // instead of silently racing it.
     let _home_lock = opencompany::store::lock::acquire(home)?;
-    let ((store, events, memory, context), facts) = live_ports(home, home_was_flagged).await?;
+    let ((store, events, memory, context), facts, _) = live_ports(home, home_was_flagged).await?;
     let opts = ExportOpts {
         include_secrets,
         fs_bundle: Some(Bundle::new(home.to_path_buf(), id).dir().to_path_buf()),
@@ -1144,20 +1145,23 @@ async fn import_from_dir(dir: &std::path::Path, home: Option<PathBuf>) -> Result
     // Exclusive, same as `serve`: an import into stores a running host has
     // open is the single-writer violation the lock module exists to prevent.
     let _home_lock = opencompany::store::lock::acquire(&home)?;
-    let ((store, events, memory, context), facts) = live_ports(&home, home_was_flagged).await?;
+    let ((store, events, memory, context), facts, storage_kind) =
+        live_ports(&home, home_was_flagged).await?;
     let id = import_bundle(&root, store, events, memory, context, facts).await?;
     restore_fs_artifacts(&root, Bundle::new(home.clone(), &id).dir()).await?;
     // On a non-fs base backend the records above went to the live backend
     // while these artifacts (secrets/, keys/) are fs-only by design and land
     // under the resolved home. Same split serve itself runs with there — but
     // say it, so a restore onto a fresh pod knows to mount that home.
-    let settings = opencompany::store::StorageSettings::from_env()?;
-    if settings.kind != opencompany::store::StorageKind::Fs {
+    // The kind comes back from live_ports rather than a second from_env():
+    // an env re-read that failed HERE would report an error for an import
+    // that already committed.
+    if storage_kind != opencompany::store::StorageKind::Fs {
         eprintln!(
             "note: records imported into the live `{}` backend; fs-only artifacts (secrets/, \
              keys/) restored under {} — on an ephemeral filesystem, re-provision them there \
              after a pod replacement.",
-            settings.kind.as_str(),
+            storage_kind.as_str(),
             home.display()
         );
     }
@@ -1189,15 +1193,16 @@ async fn run_memory_cmd(cmd: MemoryCmd) -> Result<()> {
     } = cmd;
 
     let settings = StorageSettings::from_env()?;
-    // The credential prefers the environment: argv is world-readable in
-    // /proc/<pid>/cmdline for the whole (possibly long) run. --to-api-key
-    // stays for compatibility but the env var is the documented channel.
-    let to_api_key = to_api_key.or_else(|| {
-        std::env::var("OPENCOMPANY_MEMORY_TARGET_API_KEY")
-            .ok()
-            .map(|k| k.trim().to_string())
-            .filter(|k| !k.is_empty())
-    });
+    // The credential prefers the environment — and the environment WINS over
+    // the flag, not just fills its absence: argv is world-readable in
+    // /proc/<pid>/cmdline for the whole (possibly long) run, so when both are
+    // set the one that was passed safely is the one that counts. --to-api-key
+    // stays only for compatibility.
+    let to_api_key = std::env::var("OPENCOMPANY_MEMORY_TARGET_API_KEY")
+        .ok()
+        .map(|k| k.trim().to_string())
+        .filter(|k| !k.is_empty())
+        .or(to_api_key);
     // Every refusal and both configurations come from the lib
     // (`store::memory::migrate::resolve_migrate_configs`), where the feature
     // lanes execute the guards' tests; the bin drives the loop and reports.

@@ -835,12 +835,11 @@ mod test {
 
     #[test]
     fn source_backends_without_a_seam_refuse() {
+        // Each needle is the refusal's distinctive phrase, asserted whole — a
+        // first-word shortcut here reduced the Store case to "no", which any
+        // refusal contains.
         for (backend, driver, needle) in [
-            (
-                MemoryBackend::Store,
-                None,
-                "no \\\n                 provider seam",
-            ),
+            (MemoryBackend::Store, None, "provider seam"),
             (MemoryBackend::Null, None, "nothing to migrate"),
             (MemoryBackend::Tinycortex, None, "EngineCortex overlay"),
         ] {
@@ -852,11 +851,7 @@ mod test {
             let err = resolve(&settings, "mem0", Some("https://t.example"), None)
                 .expect_err("must refuse")
                 .to_string();
-            let plain = needle.replace("\\\n                 ", " ");
-            assert!(
-                err.contains(plain.split_whitespace().next().unwrap()),
-                "backend {backend:?}: {err}"
-            );
+            assert!(err.contains(needle), "backend {backend:?}: {err}");
         }
     }
 
