@@ -108,6 +108,7 @@ async fn main() -> anyhow::Result<()> {
         provider_slug: "managed".to_string(),
         serves: None,
         context: Arc::new(FsContextStore::new(dir.path())),
+        inbound_context: None,
         store: Arc::new(FsCompanyStore::new(dir.path())),
         meter: Some(meter.clone()),
         workspace_root: dir.path().join("harness"),

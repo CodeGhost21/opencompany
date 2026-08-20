@@ -3653,6 +3653,7 @@ mode = "full"
             provider_slug: "mock".to_string(),
             serves: None,
             context: Arc::new(FsContextStore::new(home.to_path_buf())),
+            inbound_context: None,
             store: Arc::new(FsCompanyStore::new(home.to_path_buf())),
             meter: Some(Arc::new(FsOps::new(home.to_path_buf()))),
             workspace_root: home.to_path_buf(),

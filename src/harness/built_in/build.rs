@@ -1678,6 +1678,13 @@ mod tests {
         async fn search(&self, _: &CompanyId, _: &str, _: usize) -> crate::Result<Vec<ChunkHit>> {
             Ok(Vec::new())
         }
+        async fn delete(
+            &self,
+            _: &CompanyId,
+            _: &crate::ports::types::ChunkAddr,
+        ) -> crate::Result<bool> {
+            Ok(false)
+        }
     }
 
     /// A no-op company store — `build_agent` only needs a handle; nothing here
@@ -1716,6 +1723,7 @@ mod tests {
             provider_slug: "mock".to_string(),
             serves: None,
             context: Arc::new(PinContext),
+            inbound_context: None,
             store: Arc::new(PinStore),
             meter: None,
             workspace_root,

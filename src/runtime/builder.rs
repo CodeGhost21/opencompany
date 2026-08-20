@@ -373,6 +373,15 @@ pub struct RuntimeBuilder {
     events: Option<Arc<dyn EventLog>>,
     memory: Option<Arc<dyn MemoryStore>>,
     context: Option<Arc<dyn ContextStore>>,
+    /// The context port for writes whose content arrived from OUTSIDE — a
+    /// channel message, a webhook body, fetched web text. Same store and
+    /// namespace as `context`, but the engine facade behind it stamps
+    /// `MemoryTaint::ExternalSync` instead of `Internal`, so an engine that
+    /// enforces taint policy can tell the company's own conclusions from what
+    /// the outside world said (issue #1113). `None` — the base backends and
+    /// the legacy engine overlay, which cannot represent taint — falls back
+    /// to `context` at build time: today's exact behavior, no regression.
+    inbound_context: Option<Arc<dyn ContextStore>>,
     tools: Option<Arc<dyn ToolProvider>>,
     channels: Option<Vec<Arc<dyn ChannelAdapter>>>,
     economy: Option<Arc<dyn AgentEconomy>>,
@@ -513,6 +522,7 @@ impl RuntimeBuilder {
             events: None,
             memory: None,
             context: None,
+            inbound_context: None,
             tools: None,
             channels: None,
             economy: None,
@@ -651,6 +661,12 @@ impl RuntimeBuilder {
         self
     }
 
+    /// Swaps the inbound (external-content) context store. See the field doc.
+    pub fn with_inbound_context(mut self, inbound: Arc<dyn ContextStore>) -> Self {
+        self.inbound_context = Some(inbound);
+        self
+    }
+
     /// Swaps every durable port at once from one opened storage backend
     /// (see [`crate::store::select`]).
     pub fn with_stores(mut self, handles: &crate::store::StorageHandles) -> Self {
@@ -693,9 +709,15 @@ impl RuntimeBuilder {
     /// three ports. Taking whichever the overlay offers is what keeps one
     /// company's memory on one engine instead of split across two (issue #914).
     pub fn with_memory_overlay(self, overlay: &crate::store::MemoryOverlay) -> Self {
-        let builder = self
+        let mut builder = self
             .with_memory(overlay.memory.clone())
             .with_context(overlay.context.clone());
+        // The taint-stamping write path. Dropping it here was the break that
+        // left the whole firewall dead — the overlay carried the port and
+        // nothing downstream ever saw it (issue #1113).
+        if let Some(inbound) = &overlay.inbound_context {
+            builder = builder.with_inbound_context(inbound.clone());
+        }
         match &overlay.facts {
             Some(facts) => builder.with_facts(facts.clone()),
             None => builder,
@@ -1156,6 +1178,15 @@ impl RuntimeBuilder {
             .map(|h| h.context.clone())
             .or(self.context)
             .unwrap_or_else(|| Arc::new(FsContextStore::new(home.clone())));
+        // Resolved to a real port here so nothing downstream carries the
+        // Option: absent (base backends, legacy engine overlay) means the
+        // plain context store — the write still lands, it is merely stamped
+        // Internal, which is today's exact behavior on those backends.
+        let inbound_context: Arc<dyn ContextStore> = handover
+            .as_ref()
+            .map(|h| h.inbound_context.clone())
+            .or(self.inbound_context)
+            .unwrap_or_else(|| context.clone());
         // Effective grants narrow the company allow-list by per-agent tools.
         let grants = effective_grants(&self.manifest);
         let openhuman = self.openhuman;
@@ -2414,6 +2445,7 @@ impl RuntimeBuilder {
                                 provider_slug: "managed".to_string(),
                                 serves: None,
                                 context: context.clone(),
+                                inbound_context: Some(inbound_context.clone()),
                                 store: store.clone(),
                                 meter: Some(fs_ops.clone()),
                                 workspace_root: home.join("harness"),
@@ -2922,6 +2954,7 @@ impl RuntimeBuilder {
             events,
             memory,
             context,
+            inbound_context,
             tools,
             channels,
             economy.clone(),

@@ -303,6 +303,7 @@ fn deps_for(base_url: String, dir: &std::path::Path) -> (HarnessDeps, Arc<FsOps>
         provider_slug: "managed".to_string(),
         serves: None,
         context: Arc::new(FsContextStore::new(dir)),
+        inbound_context: None,
         store: Arc::new(FsCompanyStore::new(dir)),
         meter: Some(ops.clone()),
         workspace_root: dir.to_path_buf(),
