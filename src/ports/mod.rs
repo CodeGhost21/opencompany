@@ -90,7 +90,7 @@ pub use workflow_runner::{
     WorkflowRunBoardRow, WorkflowRunContext, WorkflowRunNodeRow, WorkflowRunner,
 };
 pub use workflow_verdict::{
-    RunVerdictFacts, WorkflowRunVerdict, awaiting_count, undelivered_count,
+    RunVerdictFacts, WorkflowRunVerdict, awaiting_count, is_undelivered, undelivered_count,
 };
 pub use workspace::{NodeKind, WorkspaceNode, WorkspaceOrigin, WorkspaceStore};
 
