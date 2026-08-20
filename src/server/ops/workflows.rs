@@ -6252,7 +6252,7 @@ mod tests {
             // blocked-node list said "cannot be continued" and the run's own
             // one-word reading said "go and decide it", on the same row.
             assert_eq!(
-                body[0]["verdict"], "stranded",
+                body["runs"][0]["verdict"], "stranded",
                 "the verdict must be derived after the reconciliation, not before it: {body}"
             );
         }
@@ -6341,7 +6341,7 @@ mod tests {
                  stranded: {body}"
             );
             assert_eq!(
-                body[0]["verdict"], "blocked",
+                body["runs"][0]["verdict"], "blocked",
                 "a run with a live card is still blocked, not stranded: {body}"
             );
         }
@@ -6391,11 +6391,11 @@ mod tests {
                 .unwrap();
             let body = json_body(response).await;
             assert_eq!(
-                body[0]["strandedApprovals"], 2,
+                body["runs"][0]["strandedApprovals"], 2,
                 "both gates lost their card, and nothing else on this row says so: {body}"
             );
             assert_eq!(
-                body[0]["verdict"], "stranded",
+                body["runs"][0]["verdict"], "stranded",
                 "nothing in the queue is waiting on this run: {body}"
             );
         }
@@ -6475,11 +6475,11 @@ mod tests {
                 .unwrap();
             let body = json_body(response).await;
             assert!(
-                body[0].get("strandedApprovals").is_none(),
+                body["runs"][0].get("strandedApprovals").is_none(),
                 "the gate's card is on the queue, so nothing may be marked stranded: {body}"
             );
             assert_eq!(
-                body[0]["verdict"], "awaiting-approval",
+                body["runs"][0]["verdict"], "awaiting-approval",
                 "a decidable gate is still awaiting a person: {body}"
             );
         }
@@ -6527,11 +6527,11 @@ mod tests {
                 .unwrap();
             let body = json_body(response).await;
             assert!(
-                body[0].get("strandedApprovals").is_none(),
+                body["runs"][0].get("strandedApprovals").is_none(),
                 "a row with no run id cannot be joined, so it must report nothing: {body}"
             );
             assert_eq!(
-                body[0]["verdict"], "awaiting-approval",
+                body["runs"][0]["verdict"], "awaiting-approval",
                 "an unjoinable row keeps the reading it had before #1189: {body}"
             );
         }
