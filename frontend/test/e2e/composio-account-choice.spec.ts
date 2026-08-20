@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Locator, type Page } from "@playwright/test";
 
 import {
   COMPOSIO,
@@ -149,7 +149,7 @@ test.afterAll(async ({ playwright }, testInfo) => {
 });
 
 /**
- * Wait for the toast stack to clear before clicking something under it.
+ * Click a control without racing the toast stack for it.
  *
  * The notification region is `position: fixed` in the bottom-right corner, over
  * whatever the page has scrolled under it. Playwright scrolls a click target
@@ -157,16 +157,20 @@ test.afterAll(async ({ playwright }, testInfo) => {
  * land right there — and then the click deadlocks rather than merely waiting:
  * sonner PAUSES a toast's auto-dismiss timer while it is hovered (see
  * `toast-dismissal.spec.ts`), and Playwright's retry loop hovers the point it
- * is trying to click. The toast that would have gone in three seconds stays for
- * the whole test timeout, and the log reads "subtree intercepts pointer
- * events" on every attempt.
+ * is trying to click. The CI log reads "subtree intercepts pointer events" on
+ * every attempt until the test times out.
  *
- * Waiting first, without hovering, lets the timer run. This is about reaching
- * the control, not about what the control does — no assertion below depends on
- * it.
+ * Waiting for the stack to empty does not fix it either — an approval notice
+ * can outlive the wait, and a fresh turn puts up another.
+ *
+ * So the fix is geometric, and it depends on nothing: centre the control in its
+ * own scrollport first. The bottom-right corner is then somewhere the target is
+ * not. This is about reaching the control; no assertion below depends on it.
  */
-async function toastsCleared(page: Page) {
-  await expect(page.locator("[data-sonner-toast]")).toHaveCount(0, { timeout: 30_000 });
+async function clickClearOfToasts(target: Locator) {
+  await target.scrollIntoViewIfNeeded();
+  await target.evaluate((el) => el.scrollIntoView({ block: "center", inline: "center" }));
+  await target.click();
 }
 
 test("an operator names the account, and the page says so", async ({ page }) => {
@@ -185,11 +189,9 @@ test("an operator names the account, and the page says so", async ({ page }) => 
   // rather than pointing at a row it cannot back up (#819's argument).
   await expect(gmail).toContainText("Composio picks");
 
-  await toastsCleared(page);
-  await gmail
-    .getByTestId("account-ca_billing")
-    .getByRole("button", { name: "Act as this" })
-    .click();
+  await clickClearOfToasts(
+    gmail.getByTestId("account-ca_billing").getByRole("button", { name: "Act as this" }),
+  );
 
   // The claim is the host's, re-read: the mark is drawn from `GET
   // …/composio/connections`, so a passing assertion here means the choice was
@@ -334,12 +336,12 @@ test.describe("the agent acts as the chosen account", () => {
     await openConnections(page);
     // The approval just decided above leaves a toast in the bottom-right
     // corner, and this button can sit under it once the pane is scrolled.
-    await toastsCleared(page);
-    await page
-      .getByTestId("accounts-gmail")
-      .getByTestId("account-ca_billing")
-      .getByRole("button", { name: "Act as this" })
-      .click();
+    await clickClearOfToasts(
+      page
+        .getByTestId("accounts-gmail")
+        .getByTestId("account-ca_billing")
+        .getByRole("button", { name: "Act as this" }),
+    );
     await expect(
       page.getByTestId("accounts-gmail").getByTestId("account-ca_billing"),
     ).toContainText("teammates act as this");
