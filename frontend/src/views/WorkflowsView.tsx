@@ -2770,7 +2770,7 @@ export function WorkflowsView({
       )}
 
       {/* Issue #1204: where the toolbar's run-input box went.
-          
+
           Both dispatches live here, not just Run. The box fed the toolbar's Run
           AND its Test run, so a dialog offering only Run would have quietly
           taken "prove this graph against a real input, without sending
