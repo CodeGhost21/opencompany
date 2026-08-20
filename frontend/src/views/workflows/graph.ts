@@ -19,6 +19,29 @@ import {
 const COL_GAP = 300;
 const ROW_GAP = 150;
 
+/**
+ * A nominal node size, for consumers that read the node object we hand React
+ * Flow rather than the size React Flow measured (issue #1230).
+ *
+ * The minimap is the one that matters. `MiniMapNodes` reads
+ * `node.internals.userNode` — the object THIS function returns — and skips any
+ * node for which `measured ?? width ?? initialWidth` is undefined. This layout
+ * is a `useMemo` that rebuilds every node on every run-state repaint, so React
+ * Flow's measurement never survives onto that object and the minimap painted
+ * **nothing**: an empty 200x150 box in every workflow, in both themes, while
+ * `fitView` worked fine because it reads `node.internals` instead.
+ *
+ * `initialWidth`/`initialHeight` rather than `width`/`height` on purpose: they
+ * are a hint, and `measured` still wins for layout, hit-testing and the fit. So
+ * nothing on the canvas moves — only the minimap gains something to draw.
+ *
+ * Measured values on a real graph run 180-204 x 56-71 (the node grows with a
+ * summary line); these are the middle of that, which is all a 200px-wide
+ * overview needs.
+ */
+const NODE_W = 190;
+const NODE_H = 64;
+
 /** The result of folding the SSE frame window down to one run's canvas state. */
 export interface LiveRun {
   runId: string;
@@ -427,6 +450,11 @@ export function layout(
     return {
       id: n.id,
       type: "oc",
+      // See NODE_W/NODE_H: a size hint the minimap can read off the node we
+      // hand over, since this array is rebuilt on every repaint and React
+      // Flow's own measurement does not survive that.
+      initialWidth: NODE_W,
+      initialHeight: NODE_H,
       position: { x: layer * COL_GAP, y: row * ROW_GAP },
       data: {
         kind: n.kind,

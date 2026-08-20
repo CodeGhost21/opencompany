@@ -161,7 +161,16 @@ export function RunResultPanel({
   const canDecideHere = runRows.length > 0 && !!onDecide;
 
   return (
-    <div className="border-t bg-card/60" data-testid="workflow-run-result">
+    // Issue #1205: a right rail at `xl`, the bottom strip it used to always be
+    // below that — the same pattern `RunHistoryPanel` proved on the left for
+    // issue #1107, mirrored. `border-l` (not `border-r`) because this rail
+    // sits on the canvas's right, so it borders the canvas on its OWN left
+    // edge; `CanvasShell` owns the placement and the width.
+    <aside
+      aria-label="Run result"
+      className="flex h-full flex-col border-t bg-card/60 xl:border-t-0 xl:border-l"
+      data-testid="workflow-run-result"
+    >
       <div className="flex items-center justify-between px-4 py-2">
         <div className="flex items-center gap-2">
           <span className="text-sm font-medium">Run result</span>
@@ -224,7 +233,11 @@ export function RunResultPanel({
           Dismiss
         </Button>
       </div>
-      <div className="max-h-72 overflow-auto px-4 pb-3">
+      {/* Capped as a strip, growing as a rail — same as `RunHistoryPanel`'s
+          body. `min-h-0` is what actually lets it scroll inside the column;
+          without it the flex item floors at its content height and the rail
+          overflows the view instead. */}
+      <div className="max-h-72 overflow-auto px-4 pb-3 xl:min-h-0 xl:max-h-none xl:flex-1">
         {request && (
           <p className="mb-2 text-xs text-muted-foreground">
             <span className="font-medium text-foreground">Requested:</span>{" "}
@@ -339,7 +352,7 @@ export function RunResultPanel({
           </pre>
         </details>
       </div>
-    </div>
+    </aside>
   );
 }
 
