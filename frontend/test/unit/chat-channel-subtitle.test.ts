@@ -107,6 +107,23 @@ describe("channelSubtitle on a DM", () => {
     );
     expect(channelSubtitle(dm)).toBeNull();
   });
+
+  it("catches a duplicate with doubled internal whitespace, not just outer padding", () => {
+    // The doc comment on `channelSubtitle` promises "whitespace-insensitive"
+    // without qualifying it to the ends of the string. A description
+    // copy-pasted from the role with an extra space or a stray newline typed
+    // in the middle is still the same non-fact to a reader, and a comparison
+    // that only trims the outer edges would miss it.
+    const dm = dmFor(
+      member({
+        id: "agent_backend",
+        name: "Backend Engineer",
+        role: "Backend Engineer",
+        description: "Backend   Engineer",
+      }),
+    );
+    expect(channelSubtitle(dm)).toBeNull();
+  });
 });
 
 describe("channelSubtitle on a channel", () => {

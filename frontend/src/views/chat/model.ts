@@ -331,7 +331,13 @@ export function channelTitle(channel: Channel): string {
 export function channelSubtitle(channel: Channel): string | null {
   const purpose = channel.purpose.trim();
   if (!purpose) return null;
-  if (purpose.toLowerCase() === channel.name.trim().toLowerCase()) return null;
+  // Collapse runs of internal whitespace too, not just the outer trim — a
+  // manifest description copy-pasted from the role with a doubled space or a
+  // stray newline in the middle is still the same duplicate to a reader, and
+  // the doc comment above promises "whitespace-insensitive" without
+  // qualification.
+  const normalize = (s: string) => s.trim().replace(/\s+/g, " ").toLowerCase();
+  if (normalize(purpose) === normalize(channel.name)) return null;
   return purpose;
 }
 
