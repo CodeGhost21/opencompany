@@ -33,7 +33,7 @@
 // See `node-reveal.ts` for the arithmetic and for why this pans rather than
 // zooms or reflows.
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useReactFlow, useStore } from "@xyflow/react";
 
 import { NODE_H, NODE_W } from "./graph";
@@ -48,9 +48,40 @@ const REVEAL_MS = 200;
  * again — one or two frames of transition teardown. */
 const SETTLE_SLACK_MS = 80;
 
+const REDUCED_MOTION = "(prefers-reduced-motion: reduce)";
+
+/**
+ * Whether the operator has asked for less motion.
+ *
+ * `index.css` already honours the preference globally — "the quality floor …
+ * rather than remembering to do it per animation" — but that block can only
+ * reach CSS animations and transitions, and this one is neither: React Flow
+ * drives the viewport by setting a `transform` from a d3 timer, which no
+ * stylesheet can shorten. So this animation is one of the few that has to ask
+ * for itself. Reduced motion makes the reveal a cut rather than removing it —
+ * the node still has to come out from under the panel.
+ */
+function usePrefersReducedMotion(): boolean {
+  const [reduced, setReduced] = useState(
+    () => typeof window !== "undefined" &&
+      typeof window.matchMedia === "function" &&
+      window.matchMedia(REDUCED_MOTION).matches,
+  );
+  useEffect(() => {
+    if (typeof window === "undefined" || typeof window.matchMedia !== "function") {
+      return;
+    }
+    const query = window.matchMedia(REDUCED_MOTION);
+    const onChange = () => setReduced(query.matches);
+    onChange();
+    query.addEventListener("change", onChange);
+    return () => query.removeEventListener("change", onChange);
+  }, []);
+  return reduced;
+}
+
 export function RevealSelectedNode({
   nodeId,
-  duration = REVEAL_MS,
 }: {
   /**
    * The node the inspector is open on, or `null` when it is closed.
@@ -60,11 +91,10 @@ export function RevealSelectedNode({
    * conversation about the whole workflow has no one node it must not hide.
    */
   nodeId: string | null;
-  /** Overridable so a test can take the animation out of the way. */
-  duration?: number;
 }) {
   const { getInternalNode, getViewport, setViewport } = useReactFlow();
   const paneWidth = useStore((s) => s.width);
+  const duration = usePrefersReducedMotion() ? 0 : REVEAL_MS;
 
   /** The viewport to go back to — captured before the FIRST reveal of a run of
    * selections, so walking node to node with the panel open and then closing it

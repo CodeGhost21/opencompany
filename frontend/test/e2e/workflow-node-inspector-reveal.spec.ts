@@ -198,3 +198,41 @@ test("a node nowhere near the panel does not move the canvas at all", async ({
     expect(Math.abs(after.x - before.x), "the canvas must not twitch").toBeLessThan(2);
   }).toPass({ timeout: 2_000 });
 });
+
+test("with reduced motion the reveal is a cut, and still clears the panel both ways", async ({
+  page,
+}) => {
+  // A different code path, not merely a faster one: the reveal drops to a
+  // zero-duration `setViewport`, so nothing arcs and nothing is in flight.
+  // `index.css` cannot shorten this animation for us — it is a d3 timer writing
+  // a transform, not a CSS transition — so the component asks for the
+  // preference itself, and that ask has to keep working.
+  //
+  // Emulated on the page rather than declared with `test.use({ reducedMotion })`:
+  // this Playwright's `PlaywrightTestOptions` does not carry that key, so the
+  // fixture form compiles under `npm run e2e` and fails `npm run typecheck:e2e`
+  // — a split the suite has been bitten by before (issue #406).
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  const { node, before } = await setup(page, 1440);
+
+  await node.click();
+  const panel = inspector(page);
+  await expect(panel).toBeVisible();
+  await expect(async () => {
+    const shown = await box(node);
+    const overlay = await box(panel);
+    expect(
+      shown.x + shown.width,
+      "the inspected node must clear the panel that describes it",
+    ).toBeLessThanOrEqual(overlay.x + 1);
+  }).toPass({ timeout: 5_000 });
+
+  await panel.getByRole("button", { name: "Close" }).click();
+  await expect(panel).toBeHidden();
+  await expect(async () => {
+    expect(
+      Math.abs((await box(node)).x - before.x),
+      "the canvas returns to where it was",
+    ).toBeLessThan(2);
+  }).toPass({ timeout: 5_000 });
+});
