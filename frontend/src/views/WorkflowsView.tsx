@@ -95,10 +95,13 @@ import {
   foldLiveRun,
   initialRunState,
   layout,
+  LEGIBLE_FIT_ZOOM,
   statesFromRun,
   windowHasRunStart,
 } from "@/views/workflows/graph";
 import { WorkflowMiniMap } from "@/views/workflows/WorkflowMiniMap";
+// Issue #1361: opens a long pipeline at a zoom its node titles survive.
+import { FitGraphToPane } from "@/views/workflows/FitGraphToPane";
 // Issue #1231: keeps the inspector from opening on top of the node it describes.
 import {
   RevealSelectedNode,
@@ -2819,13 +2822,23 @@ export function WorkflowsView({
                 nodeTypes={NODE_TYPES}
                 colorMode={resolvedTheme === "dark" ? "dark" : "light"}
                 fitView
-                fitViewOptions={{ padding: 0.2 }}
+                // Issue #1361: `minZoom` here is the floor on the FIT, not on
+                // zooming — `FitGraphToPane` below explains the difference and
+                // `LEGIBLE_FIT_ZOOM` explains the number. Set on the options as
+                // well as corrected by that component so that a fit which runs
+                // before the pane is measured still cannot open the canvas
+                // below the point where a node title is words.
+                fitViewOptions={{ padding: 0.2, minZoom: LEGIBLE_FIT_ZOOM }}
                 // Issue #1261: the library default (0.5) is above the scale
                 // most shipped templates need to fit — an 8-10 node single-row
                 // pipeline needs roughly 0.3. Left at the default, `fitView`
                 // clamps to 0.5 and permanently crops the first/last node,
                 // and the canvas's own Zoom Out control is disabled from
                 // load because the viewport is already pinned at the floor.
+                //
+                // Unchanged by #1361, which floors the initial fit and nothing
+                // else: an operator who reaches for Zoom Out to see a whole
+                // pipeline's shape still gets all the way down to 0.1.
                 minZoom={0.1}
                 nodesDraggable={false}
                 nodesConnectable={false}
@@ -2851,6 +2864,13 @@ export function WorkflowsView({
                   handleRef={revealRef}
                   nodeId={!copilotOpen && selectedNode ? selectedNode.id : null}
                 />
+                {/* Issue #1361: renders nothing — it anchors the opening
+                    viewport at the graph's start when the fit was clamped at
+                    `LEGIBLE_FIT_ZOOM`, so a long pipeline opens readable and
+                    at its trigger instead of unreadable and in its middle. A
+                    child of `<ReactFlow>` for the same reason its two siblings
+                    above are. */}
+                <FitGraphToPane nodes={nodes} graphId={graph?.id ?? null} />
               </ReactFlow>
               {/* Issue #303: the copilot and the node inspector share the canvas's
                   right edge, and the copilot wins while it is open — it was
