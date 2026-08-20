@@ -356,76 +356,85 @@ impl MongoStore {
                 nonunique(doc! {"company_id": 1, "workflow_id": 1, "created_ms": -1}),
             ),
         ];
-        for (name, index) in plans {
-            self.collection(name)
-                .create_index(index)
-                .await
-                .map_err(mongo_err)?;
-        }
-        self.collection("owners")
-            .create_index(unique(doc! {"company_id": 1}))
-            .await
-            .map_err(mongo_err)?;
-        // Issue #241: the cross-replica arbiter. This unique compound index is
-        // what turns two replicas racing one schedule minute into one winning
-        // `insert_one` and one `E11000` — the case that actually matters, since
-        // hosted replicas share the tenant database. Created outside the array
-        // above so adding it does not disturb that array's fixed length.
-        self.collection("schedule_fires")
-            .create_index(unique(
-                doc! {"company_id": 1, "schedule_id": 1, "scheduled_for": 1},
-            ))
-            .await
-            .map_err(mongo_err)?;
-        // Issue #596: one durable per-node output snapshot per run. The unique
-        // `(company_id, run_id)` index makes the upsert last-write-wins per run;
-        // the recency index backs the newest-N prune. Created outside the fixed
-        // array above so adding it does not disturb that array's length.
-        self.collection("run_outputs")
-            .create_index(unique(doc! {"company_id": 1, "run_id": 1}))
-            .await
-            .map_err(mongo_err)?;
-        self.collection("run_outputs")
-            .create_index(nonunique(doc! {"company_id": 1, "at_ms": -1}))
-            .await
-            .map_err(mongo_err)?;
-        // Issue #726: the runtime journal. `(company_id, seq)` is unique because
-        // two records sharing a sequence would order arbitrarily on replay, and
-        // an at-most-once key replayed before the resolution that consumed it is
-        // the failure the journal exists to prevent. The import receipt is one
-        // document per company. Created outside the fixed array above so adding
-        // them does not disturb its length.
-        self.collection(JOURNAL)
-            .create_index(unique(doc! {"company_id": 1, "seq": 1}))
-            .await
-            .map_err(mongo_err)?;
-        self.collection(JOURNAL_IMPORTS)
-            .create_index(unique(doc! {"company_id": 1}))
-            .await
-            .map_err(mongo_err)?;
-        // Issue #749: durable notifications. The recency index backs the
-        // newest-first feed `NotificationStore::list` returns; the per-person
-        // read marker is unique on `(company_id, user_id, notification_id)` so a
-        // re-mark is a no-op `E11000` and read stays a latch. Created outside the
-        // fixed array above so adding them does not disturb its length.
-        self.collection("notifications")
-            .create_index(nonunique(
-                doc! {"company_id": 1, "created_ms": -1, "id": -1},
-            ))
-            .await
-            .map_err(mongo_err)?;
-        // Unique per (company_id, id): makes `append` idempotent — a duplicate
-        // id within a company is rejected, matching the sqlite primary key.
-        self.collection("notifications")
-            .create_index(unique(doc! {"company_id": 1, "id": 1}))
-            .await
-            .map_err(mongo_err)?;
-        self.collection("notification_reads")
-            .create_index(unique(
-                doc! {"company_id": 1, "user_id": 1, "notification_id": 1},
-            ))
-            .await
-            .map_err(mongo_err)?;
+        // Every index below is issued CONCURRENTLY rather than one at a time.
+        //
+        // Each `create_index` is a round trip, and against a remote cluster the
+        // round trips are the whole cost: measured on staging (MongoDB Atlas),
+        // boot spent ~3.5s in this function — most of an ~8s cold start — and it
+        // was paid on every single boot to re-create indexes that already
+        // existed.
+        //
+        // Safe to parallelise: index creation is independent per index and
+        // idempotent, there is no ordering between any two of these, and
+        // re-creating an existing index is a server-side no-op. Nothing here
+        // reads what another one writes.
+        //
+        // Bounded rather than unbounded because the driver's connection pool is
+        // finite (10 by default); more in flight than that would queue inside
+        // the pool anyway, while making the burst look less deliberate than it
+        // is.
+        const INDEX_CONCURRENCY: usize = 10;
+
+        let extra: [(&str, IndexModel); 9] = [
+            ("owners", unique(doc! {"company_id": 1})),
+            // Issue #241: the cross-replica arbiter. This unique compound index
+            // is what turns two replicas racing one schedule minute into one
+            // winning `insert_one` and one `E11000` — the case that actually
+            // matters, since hosted replicas share the tenant database.
+            (
+                "schedule_fires",
+                unique(doc! {"company_id": 1, "schedule_id": 1, "scheduled_for": 1}),
+            ),
+            // Issue #596: one durable per-node output snapshot per run. The
+            // unique `(company_id, run_id)` index makes the upsert
+            // last-write-wins per run; the recency index backs the newest-N
+            // prune.
+            ("run_outputs", unique(doc! {"company_id": 1, "run_id": 1})),
+            (
+                "run_outputs",
+                nonunique(doc! {"company_id": 1, "at_ms": -1}),
+            ),
+            // Issue #726: the runtime journal. `(company_id, seq)` is unique
+            // because two records sharing a sequence would order arbitrarily on
+            // replay, and an at-most-once key replayed before the resolution
+            // that consumed it is the failure the journal exists to prevent. The
+            // import receipt is one document per company.
+            (JOURNAL, unique(doc! {"company_id": 1, "seq": 1})),
+            (JOURNAL_IMPORTS, unique(doc! {"company_id": 1})),
+            // Issue #749: durable notifications. The recency index backs the
+            // newest-first feed `NotificationStore::list` returns.
+            (
+                "notifications",
+                nonunique(doc! {"company_id": 1, "created_ms": -1, "id": -1}),
+            ),
+            // Unique per (company_id, id): makes `append` idempotent — a
+            // duplicate id within a company is rejected, matching the sqlite
+            // primary key.
+            ("notifications", unique(doc! {"company_id": 1, "id": 1})),
+            // The per-person read marker is unique on
+            // `(company_id, user_id, notification_id)` so a re-mark is a no-op
+            // `E11000` and read stays a latch.
+            (
+                "notification_reads",
+                unique(doc! {"company_id": 1, "user_id": 1, "notification_id": 1}),
+            ),
+        ];
+
+        // Scoped import: the file deliberately avoids a blanket `StreamExt`,
+        // since `map` would then be ambiguous with `Iterator::map`.
+        use futures::StreamExt as _;
+
+        futures::stream::iter(plans.into_iter().chain(extra))
+            .map(|(name, index)| async move {
+                self.collection(name)
+                    .create_index(index)
+                    .await
+                    .map(|_| ())
+                    .map_err(mongo_err)
+            })
+            .buffer_unordered(INDEX_CONCURRENCY)
+            .try_collect::<()>()
+            .await?;
         Ok(())
     }
 
