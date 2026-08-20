@@ -72,6 +72,14 @@ fn encode<T: Serialize>(record: &T) -> Result<String> {
 /// written by a version we do not understand. A single unreadable row must not
 /// fail a whole `list`: on a shared hosted engine the store may legitimately
 /// hold rows this build did not write.
+///
+/// A row *inside* our namespace that fails to parse is different: nothing else
+/// writes there, so it is a record this host stored and can no longer read — a
+/// corrupted write, not foreign data. It is still skipped (one bad row must not
+/// fail the list), but loudly: #1201 was exactly this shape — the embedded
+/// driver's PII scrubber redacted digits out of the JSON envelope, and the
+/// silent `None` here made a corrupted record indistinguishable from one that
+/// was never written.
 fn decode<T: DeserializeOwned>(entry: &MemoryEntry, namespace: &Namespace) -> Option<T> {
     let reported = entry.namespace.as_deref().unwrap_or_default();
     if !namespace.contains(reported) {
@@ -82,8 +90,29 @@ fn decode<T: DeserializeOwned>(entry: &MemoryEntry, namespace: &Namespace) -> Op
         );
         return None;
     }
-    let envelope: Envelope<T> = serde_json::from_str(&entry.content).ok()?;
-    (envelope.v == ENVELOPE_VERSION).then_some(envelope.record)
+    let envelope: Envelope<T> = match serde_json::from_str(&entry.content) {
+        Ok(envelope) => envelope,
+        Err(error) => {
+            tracing::warn!(
+                namespace = namespace.as_str(),
+                key = %entry.key,
+                %error,
+                "memory entry in our namespace failed to decode; dropping it \
+                 (a record we wrote and can no longer read — see #1201)"
+            );
+            return None;
+        }
+    };
+    if envelope.v != ENVELOPE_VERSION {
+        tracing::debug!(
+            namespace = namespace.as_str(),
+            key = %entry.key,
+            version = envelope.v,
+            "memory entry has an envelope version this build does not understand; skipping it"
+        );
+        return None;
+    }
+    Some(envelope.record)
 }
 
 /// Maps a provider error onto the crate error type.
