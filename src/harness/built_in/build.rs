@@ -114,7 +114,7 @@ use crate::harness::tool_dispatcher::AttrTolerantXmlDispatcher;
 use crate::harness::toolbelt;
 use crate::ports::skills_state::SkillState;
 use crate::ports::types::CompanyId;
-use crate::runtime::tools::extends_on_boundary;
+use crate::runtime::tools::{NAMESPACE_SEPARATORS, extends_on_boundary};
 
 /// The per-tool-result byte budget every OpenCompany agent runs under.
 ///
@@ -1173,12 +1173,6 @@ fn memory_tools(memory: &Arc<dyn Memory>) -> Vec<Box<dyn Tool>> {
     let _ = memory;
     Vec::new()
 }
-
-/// The namespace separator for a `[tools].allow` grant: only `.`, because a
-/// namespace grant is written dotted (`docs.read`). Deliberately narrower than
-/// [`crate::runtime::tools`]'s tool-name set — `files_scratch` is not a grant
-/// under the `files` namespace, and never was.
-const NAMESPACE_SEPARATORS: &[char] = &['.'];
 
 /// Whether an agent's effective `grants` cover a tool `namespace`.
 ///
