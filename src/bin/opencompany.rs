@@ -879,17 +879,56 @@ fn resolve_home_migrated(flag: Option<PathBuf>) -> Result<PathBuf> {
 /// that is the wrong data, silently. Routing through the same selection
 /// `serve` uses means a bundle now reads and writes the live engine, and a
 /// misconfigured engine refuses here exactly as it refuses a boot.
+///
+/// One deployment per bundle, enforced: with a non-default environment
+/// (`OPENCOMPANY_STORAGE` or `OPENCOMPANY_MEMORY` set), an explicit `--home`
+/// is refused rather than mixed in — the base ports would come from the flag
+/// while the engine roots at `OPENCOMPANY_DATA_DIR`, and a bundle spanning
+/// two deployments is a company that never existed. Under the fs+store
+/// default the environment is inert and `--home` means exactly what it
+/// always has. `null` is refused in both directions (an export of nothing,
+/// an import into a black hole, both exiting 0), and so is shared-single-DB
+/// tenant mode (bundle ops write no owner rows; raw slugs would miss the
+/// `<tenant>--` namespaced ids).
 async fn live_ports(
     home: &std::path::Path,
+    home_was_flagged: bool,
 ) -> Result<(
     opencompany::store::export::Ports,
     Option<Arc<dyn opencompany::ports::FactStore>>,
 )> {
     use opencompany::store::{
-        FsCompanyStore, FsContextStore, FsEventLog, FsMemoryStore, FsOps, StorageSettings,
-        open_memory_overlay, open_storage,
+        FsCompanyStore, FsContextStore, FsEventLog, FsMemoryStore, FsOps, MemoryBackend,
+        StorageKind, StorageSettings, open_memory_overlay, open_storage,
     };
     let settings = StorageSettings::from_env()?;
+    let live = settings.kind != StorageKind::Fs || settings.memory_backend != MemoryBackend::Store;
+    if settings.memory_backend == MemoryBackend::Null {
+        return Err(opencompany::error::OpenCompanyError::Config(
+            "OPENCOMPANY_MEMORY=null retains nothing: an export would capture no memory and an \
+             import would discard every record while reporting success. Unset OPENCOMPANY_MEMORY \
+             for bundle operations."
+                .into(),
+        ));
+    }
+    if live && home_was_flagged {
+        return Err(opencompany::error::OpenCompanyError::Config(format!(
+            "--home names an fs data set, but this environment selects storage `{}` and memory \
+             `{}` — the bundle would mix two deployments. Unset OPENCOMPANY_STORAGE and \
+             OPENCOMPANY_MEMORY* to operate on the fs home, or drop --home to operate on the \
+             live deployment.",
+            settings.kind.as_str(),
+            settings.memory_backend.as_str()
+        )));
+    }
+    if live && std::env::var("OPENCOMPANY_TENANT_ID").is_ok_and(|t| !t.trim().is_empty()) {
+        return Err(opencompany::error::OpenCompanyError::Config(
+            "shared-single-DB tenant mode (OPENCOMPANY_TENANT_ID) namespaces company ids and \
+             owner rows at the app layer; bundle operations write neither. Run them without \
+             tenant mode, from the manager path."
+                .into(),
+        ));
+    }
     let (store, events, mut memory, mut context, mut facts) = match open_storage(&settings, home)
         .await?
     {
@@ -925,9 +964,10 @@ fn unique_temp(tag: &str) -> PathBuf {
     std::env::temp_dir().join(format!("opencompany-{tag}-{}-{nanos}", std::process::id()))
 }
 
-/// Exports `id`'s bundle over the fs ports into the directory `dest`.
+/// Exports `id`'s bundle over the selected ports into the directory `dest`.
 async fn export_to_dir(
     home: &std::path::Path,
+    home_was_flagged: bool,
     id: &CompanyId,
     include_secrets: bool,
     dest: &std::path::Path,
@@ -935,7 +975,11 @@ async fn export_to_dir(
     use opencompany::store::export::{ExportOpts, export_bundle};
     use opencompany::store::paths::Bundle;
 
-    let ((store, events, memory, context), facts) = live_ports(home).await?;
+    // The same exclusive root lock `serve` holds: a bundle read while the host
+    // is writing is torn, and the refusal here names the running process
+    // instead of silently racing it.
+    let _home_lock = opencompany::store::lock::acquire(home)?;
+    let ((store, events, memory, context), facts) = live_ports(home, home_was_flagged).await?;
     let opts = ExportOpts {
         include_secrets,
         fs_bundle: Some(Bundle::new(home.to_path_buf(), id).dir().to_path_buf()),
@@ -952,10 +996,11 @@ async fn run_export(
     include_secrets: bool,
     home: Option<PathBuf>,
 ) -> Result<()> {
+    let home_was_flagged = home.is_some();
     let home = resolve_home_migrated(home)?;
     let id = CompanyId::new(company);
     let dest = out.unwrap_or_else(|| PathBuf::from(format!("{}-bundle", id.as_ref())));
-    export_to_dir(&home, &id, include_secrets, &dest).await?;
+    export_to_dir(&home, home_was_flagged, &id, include_secrets, &dest).await?;
     println!(
         "exported bundle for `{id}` to {} (build with --features export to produce a .tar)",
         dest.display()
@@ -1059,6 +1104,7 @@ async fn run_export(
 ) -> Result<()> {
     use opencompany::store::export::pack_tar;
 
+    let home_was_flagged = home.is_some();
     let home = resolve_home_migrated(home)?;
     let id = CompanyId::new(company);
     let out = out.unwrap_or_else(|| PathBuf::from(format!("{}.tar", id.as_ref())));
@@ -1067,7 +1113,7 @@ async fn run_export(
     let staging = unique_temp("export");
     let bundle_dir = staging.join(id.as_ref());
     let result = async {
-        export_to_dir(&home, &id, include_secrets, &bundle_dir).await?;
+        export_to_dir(&home, home_was_flagged, &id, include_secrets, &bundle_dir).await?;
         pack_tar(&bundle_dir, &out)
     }
     .await;
@@ -1113,12 +1159,16 @@ async fn run_import(path: PathBuf, home: Option<PathBuf>) -> Result<()> {
 /// Imports the bundle rooted under `dir` into `home` through the fs ports,
 /// restoring any fs-only secrets/keys the bundle carried.
 async fn import_from_dir(dir: &std::path::Path, home: Option<PathBuf>) -> Result<()> {
+    let home_was_flagged = home.is_some();
     use opencompany::store::export::{find_bundle_root, import_bundle, restore_fs_artifacts};
     use opencompany::store::paths::Bundle;
 
     let home = resolve_home_migrated(home)?;
     let root = find_bundle_root(dir)?;
-    let ((store, events, memory, context), facts) = live_ports(&home).await?;
+    // Exclusive, same as `serve`: an import into stores a running host has
+    // open is the single-writer violation the lock module exists to prevent.
+    let _home_lock = opencompany::store::lock::acquire(&home)?;
+    let ((store, events, memory, context), facts) = live_ports(&home, home_was_flagged).await?;
     let id = import_bundle(&root, store, events, memory, context, facts).await?;
     restore_fs_artifacts(&root, Bundle::new(home.clone(), &id).dir()).await?;
     println!("imported company `{id}` into {}", home.display());
@@ -1190,13 +1240,31 @@ async fn run_memory_cmd(cmd: MemoryCmd) -> Result<()> {
     };
 
     let to_config = match to.as_str() {
-        "namespace" => MemoryDriverConfig {
-            mode: MemoryMode::Embedded,
-            driver_id: Some(to.clone()),
-            url: None,
-            api_key: None,
-            data_dir: to_data_dir.clone().or_else(|| settings.data_dir.clone()),
-        },
+        "namespace" => {
+            // The same durability refusal `open_provider` enforces at boot
+            // (src/store/select.rs): on a mongodb base, /data is ephemeral
+            // scratch, and a migration that "succeeds" into it is data loss
+            // with a success message — worse than the refusal.
+            if settings.kind == opencompany::store::StorageKind::Mongodb
+                && !settings.allow_ephemeral_memory
+            {
+                return Err(opencompany::error::OpenCompanyError::Config(
+                    "OPENCOMPANY_STORAGE=mongodb treats the data dir as ephemeral scratch, and \
+                     the boot path refuses the namespace driver there for exactly that reason. \
+                     Migrating into it would report success on data the next container \
+                     replacement deletes. If the data dir is genuinely a durable volume, assert \
+                     it with OPENCOMPANY_MEMORY_ALLOW_EPHEMERAL=1."
+                        .into(),
+                ));
+            }
+            MemoryDriverConfig {
+                mode: MemoryMode::Embedded,
+                driver_id: Some(to.clone()),
+                url: None,
+                api_key: None,
+                data_dir: to_data_dir.clone().or_else(|| settings.data_dir.clone()),
+            }
+        }
         "supermemory" | "mem0" | "cognee" => MemoryDriverConfig {
             mode: MemoryMode::Remote,
             driver_id: Some(to.clone()),
@@ -1218,13 +1286,33 @@ async fn run_memory_cmd(cmd: MemoryCmd) -> Result<()> {
         }
     };
 
-    // Same engine, same target = a copy onto itself: every record would come
-    // back `skipped` at best, and on the embedded store it is the same SQLite
-    // file open twice.
-    if from_config.driver_id == to_config.driver_id
-        && from_config.url == to_config.url
-        && from_config.data_dir == to_config.data_dir
-    {
+    // Same engine, same target = a copy onto itself: on the embedded store it
+    // is one SQLite file open twice; on a hosted store the export cursor
+    // shifts under the concurrent writes and records skip or repeat. Compared
+    // mode-aware and normalized, because the naive field-equality version
+    // could never fire remote-to-remote (the source carries the env data_dir,
+    // the target None) and let trailing-slash or whitespace spellings of the
+    // same location through.
+    let norm_id = |id: &Option<String>| id.as_deref().map(str::trim).map(str::to_owned);
+    let norm_url = |url: &Option<String>| {
+        url.as_deref()
+            .map(str::trim)
+            .map(|u| u.trim_end_matches('/').to_owned())
+    };
+    let norm_dir = |dir: &Option<PathBuf>| {
+        dir.as_ref()
+            .map(|d| d.components().collect::<std::path::PathBuf>())
+    };
+    let same_engine = from_config.mode == to_config.mode
+        && norm_id(&from_config.driver_id) == norm_id(&to_config.driver_id)
+        && match to_config.mode {
+            MemoryMode::Remote => norm_url(&from_config.url) == norm_url(&to_config.url),
+            MemoryMode::Embedded => {
+                norm_dir(&from_config.data_dir) == norm_dir(&to_config.data_dir)
+            }
+            MemoryMode::Null => true,
+        };
+    if same_engine {
         return Err(opencompany::error::OpenCompanyError::Config(
             "the source and the target are the same engine at the same location; nothing to do."
                 .into(),
@@ -1238,13 +1326,11 @@ async fn run_memory_cmd(cmd: MemoryCmd) -> Result<()> {
                 .into(),
         )
     })?;
-    let (target, target_class) = open_driver(&to_config)?.ok_or_else(|| {
-        opencompany::error::OpenCompanyError::Config(
-            "the target configuration bound no provider (host bug).".into(),
-        )
-    })?;
-
+    // Dry run touches ONLY the source: opening the target would create its
+    // store (a namespace target mints the SQLite dir on open), and "without
+    // writing anything" must mean the filesystem too.
     if dry_run {
+        let resumed = resume_cursor.is_some();
         let mut total: u64 = 0;
         let mut cursor = resume_cursor;
         loop {
@@ -1262,14 +1348,29 @@ async fn run_memory_cmd(cmd: MemoryCmd) -> Result<()> {
                 None => break,
             }
         }
-        println!(
-            "dry run: {} records would migrate {} -> {}",
-            total,
-            from.driver_id(),
-            target.driver_id()
-        );
+        if resumed {
+            println!(
+                "dry run (from --resume-cursor): {} records remain to migrate {} -> {}",
+                total,
+                from.driver_id(),
+                to
+            );
+        } else {
+            println!(
+                "dry run: {} records would migrate {} -> {}",
+                total,
+                from.driver_id(),
+                to
+            );
+        }
         return Ok(());
     }
+
+    let (target, target_class) = open_driver(&to_config)?.ok_or_else(|| {
+        opencompany::error::OpenCompanyError::Config(
+            "the target configuration bound no provider (host bug).".into(),
+        )
+    })?;
 
     if matches!(target_class, tinymemory::registry::DriverClass::External) {
         eprintln!(
@@ -1321,8 +1422,8 @@ async fn run_memory_cmd(cmd: MemoryCmd) -> Result<()> {
                 .unwrap_or_else(|| "the beginning (the first page failed)".into());
             Err(opencompany::error::OpenCompanyError::Store(format!(
                 "migration stopped after {} imported / {} skipped of {} exported; fix the \
-                 target and re-run with {resume} — already-present records re-import as \
-                 `skipped`, so re-running the failed page is safe.",
+                 target and re-run with {resume} — import is idempotent by (namespace, key), \
+                 so re-running the failed page cannot duplicate.",
                 stopped.summary.imported, stopped.summary.skipped, stopped.summary.exported
             )))
         }
@@ -1814,9 +1915,15 @@ async fn async_main() -> Result<()> {
             // backend. A selected-but-unavailable engine aborts boot, same as
             // the storage backend.
             if let Some(mut overlay) = opencompany::store::open_memory_overlay(&storage_settings)? {
-                // One bounded reachability probe, so a dead endpoint or a
+                // One bounded reachability probe — after `BoundMemory::bind`,
+                // BEFORE the TCP listener binds — so a dead endpoint or a
                 // revoked key shows on `/spec` at boot instead of surfacing as
-                // a mid-cycle failure days later. Advisory: it warns and
+                // a mid-cycle failure days later. The placement means a
+                // blackholed hosted endpoint costs up to the timeout on a cold
+                // wake (the manager's wake proxy blocks on `/healthz`); taken
+                // knowingly — it only fires when OPENCOMPANY_MEMORY selects an
+                // engine, and moving it post-listen needs a mutable descriptor
+                // seam this deliberately avoids. Advisory: it warns and
                 // records, never refuses — config errors already refused
                 // above, and a transient vendor outage must not crash-loop
                 // the tenant.

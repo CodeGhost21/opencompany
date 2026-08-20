@@ -45,9 +45,10 @@ const EVENTS_JSONL: &str = "events.jsonl";
 const LEDGER_JSONL: &str = "ledger.jsonl";
 const MEMORY_DIR: &str = "memory";
 const TRACES_JSONL: &str = "traces.jsonl";
-/// Operator facts, beside the traces they conceptually sit with. Absent from
-/// bundles written before facts joined the export (issue: the spec promised
-/// "all three knowledge ports travel with the bundle" while only two did);
+/// Operator facts, at the bundle ROOT — the same place the live fs bundle
+/// keeps them (`paths::Bundle::facts_jsonl`), so an export stays diffable
+/// against a live home and a direct reader finds them where the canonical
+/// layout says. Absent from bundles written before facts joined the export;
 /// `read_jsonl` treats an absent file as empty, so both directions stay
 /// compatible — an old importer ignores the new file, a new importer accepts
 /// an old bundle.
@@ -303,6 +304,15 @@ impl BundleContents {
         context: Arc<dyn ContextStore>,
         facts: Option<Arc<dyn FactStore>>,
     ) -> Result<()> {
+        // Refused BEFORE anything is written: the event log and ledger are
+        // append-only, so a refusal after `store.save`/`append` would leave a
+        // half-imported company whose retry duplicates history.
+        if facts.is_none() && !self.facts.is_empty() {
+            return Err(OpenCompanyError::Store(format!(
+                "bundle carries {} operator facts but the import target serves no fact port",
+                self.facts.len()
+            )));
+        }
         // The manifest + lifecycle; ledger is appended separately so the store's
         // append-only ledger stays authoritative.
         store
@@ -337,14 +347,6 @@ impl BundleContents {
             for fact in &self.facts {
                 port.upsert(&self.id, fact).await?;
             }
-        } else if !self.facts.is_empty() {
-            // A bundle carrying facts imported into a target with no fact port
-            // would drop them silently — the exact shape this field exists to
-            // end. Refuse, naming what would be lost.
-            return Err(OpenCompanyError::Store(format!(
-                "bundle carries {} operator facts but the import target serves no fact port",
-                self.facts.len()
-            )));
         }
         for chunk in &self.context {
             context
@@ -400,13 +402,10 @@ impl BundleContents {
         )
         .await?;
         // Only when there are any: an empty file would make every new export
-        // differ from an old host's byte-for-byte for no information.
+        // differ from an old host's byte-for-byte for no information. At the
+        // bundle root, matching `paths::Bundle::facts_jsonl`.
         if !self.facts.is_empty() {
-            write_file(
-                &memory_dir.join(FACTS_JSONL),
-                jsonl(&self.facts)?.as_bytes(),
-            )
-            .await?;
+            write_file(&dest.join(FACTS_JSONL), jsonl(&self.facts)?.as_bytes()).await?;
         }
 
         let context_dir = dest.join(CONTEXT_DIR);
@@ -470,7 +469,7 @@ impl BundleContents {
         let traces =
             read_jsonl::<CompressedTrace>(&src.join(MEMORY_DIR).join(TRACES_JSONL)).await?;
         // Absent on bundles that predate facts-in-the-bundle: empty, not an error.
-        let facts = read_jsonl::<FactRecord>(&src.join(MEMORY_DIR).join(FACTS_JSONL)).await?;
+        let facts = read_jsonl::<FactRecord>(&src.join(FACTS_JSONL)).await?;
 
         let context_dir = src.join(CONTEXT_DIR);
         let index = read_jsonl::<IndexEntry>(&context_dir.join(CONTEXT_INDEX_JSONL)).await?;
@@ -575,6 +574,11 @@ fn scrub_redacted_discussion(events: Vec<StoredEvent>) -> Vec<StoredEvent> {
 /// backend's private on-disk shape. When [`ExportOpts::include_secrets`] is set
 /// and [`ExportOpts::fs_bundle`] points at the source fs bundle, the fs-only
 /// `secrets/` and `keys/` directories are copied verbatim.
+// Eight arguments is over clippy's default ceiling, taken knowingly: five of
+// them are the durable ports, and folding them into a struct is a wider
+// refactor than this addition warrants (the repo carries the same allow at
+// its other port-heavy seams).
+#[allow(clippy::too_many_arguments)]
 pub async fn export_bundle(
     id: &CompanyId,
     dest: &Path,
@@ -1914,8 +1918,9 @@ mod test {
             .await
             .unwrap();
         assert!(
-            dest.join(MEMORY_DIR).join(FACTS_JSONL).is_file(),
-            "the bundle must carry the facts file"
+            dest.join(FACTS_JSONL).is_file(),
+            "the bundle must carry the facts file at the bundle root, where \
+             the live fs layout keeps it"
         );
 
         let (s2, e2, m2, c2) = fs_ports(&home2);
@@ -1948,7 +1953,7 @@ mod test {
         export_bundle(&id, &dest, s1, e1, m1, c1, None, ExportOpts::default())
             .await
             .unwrap();
-        assert!(!dest.join(MEMORY_DIR).join(FACTS_JSONL).exists());
+        assert!(!dest.join(FACTS_JSONL).exists());
         let (s2, e2, m2, c2) = fs_ports(&home2);
         let f2: Arc<dyn FactStore> = Arc::new(FsOps::new(home2.clone()));
         let imported = import_bundle(&dest, s2, e2, m2, c2, Some(f2.clone()))

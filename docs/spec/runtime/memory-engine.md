@@ -358,8 +358,9 @@ switched engine starts empty by design), the data step comes first.
    environment yet, so it still names the old engine) into the target, over
    the contract's Portability family: namespaces, record kinds and provenance
    taint round-trip untouched. `--dry-run` counts first; a stopped run prints
-   the `--resume-cursor` to re-enter at (already-present records re-import as
-   `skipped`, so re-running a failed page is safe). Hosted targets warn about
+   the `--resume-cursor` to re-enter at (import is idempotent by
+   `(namespace, key)`, so re-running a failed page cannot duplicate — drivers
+   that detect presence report `skipped`, the rest overwrite in place). Hosted targets warn about
    their enumeration-based write cost. The `store` default and the
    EngineCortex overlay have no provider seam and are refused by name — for
    those, `opencompany export` now reads the live engine (base backend plus

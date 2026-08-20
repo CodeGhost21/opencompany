@@ -17,9 +17,10 @@
 //! 500 from a real rejection. It therefore never retries (an import retried
 //! into a driver that half-applied the page could double-write) and instead
 //! stops at the first failed page, reporting the cursor that *started* that
-//! page. `--resume-cursor` re-enters there: `import_records` reports
-//! already-present records as `skipped`, which is what makes re-running the
-//! failed page safe.
+//! page. `--resume-cursor` re-enters there safely because import is
+//! idempotent by `(namespace, key)`: a driver that recognises a present
+//! record reports it `skipped`, and one that does not simply overwrites in
+//! place — either way, re-running the failed page cannot duplicate.
 
 use std::sync::Arc;
 
@@ -32,12 +33,14 @@ use crate::error::OpenCompanyError;
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct MigrateSummary {
     /// Pages pulled from the source.
-    pub pages: u32,
+    pub pages: u64,
     /// Records the source exported.
     pub exported: u64,
     /// Records the target wrote.
     pub imported: u64,
-    /// Records the target recognised as already present (a resumed run).
+    /// Records the target recognised as already present (a resumed run, on a
+    /// driver that detects presence — upsert-style drivers report a re-import
+    /// under `imported` instead, having overwritten in place).
     pub skipped: u64,
 }
 
@@ -90,6 +93,21 @@ pub async fn migrate(
             })?;
         summary.pages += 1;
         summary.exported += page.records.len() as u64;
+
+        // A cursor that comes back unchanged would loop this function forever,
+        // re-importing the same page (a driver bug, or a paginated API that
+        // clamps an unknown cursor to the first page). Checked before the
+        // import so the echoed page is not even re-written once.
+        if page.next_cursor.is_some() && page.next_cursor == page_start {
+            return Ok(Err(Box::new(MigrateStopped {
+                summary,
+                resume_cursor: page_start,
+                errors: vec![format!(
+                    "source engine `{}` returned a cursor that did not advance; refusing to loop",
+                    from.driver_id()
+                )],
+            })));
+        }
 
         if !page.records.is_empty() {
             let outcome = match to.import_records(page.records).await {
@@ -186,10 +204,14 @@ mod test {
         );
     }
 
-    /// A resumed run re-imports the failed page; the target reports the
-    /// already-present half as skipped rather than double-writing it.
+    /// A full re-run cannot duplicate: import is idempotent by
+    /// `(namespace, key)`. The reference driver overwrites in place (so the
+    /// re-run reports `imported` again, `skipped` stays 0 — presence
+    /// detection is optional in the contract); what must hold on every
+    /// driver is the count: the target ends with exactly the source's
+    /// records, however the outcome buckets them.
     #[tokio::test]
-    async fn a_rerun_skips_what_already_crossed() {
+    async fn a_rerun_cannot_duplicate() {
         let (from, to) = (provider(), provider());
         seed(&from, 5).await;
         let first = migrate(&from, &to, 2, None, |_| {})
@@ -201,9 +223,16 @@ mod test {
             .await
             .expect("ok")
             .expect("complete");
-        assert_eq!(second.imported, 0, "nothing new to write");
-        assert_eq!(second.skipped, 5, "everything recognised as present");
-        assert_eq!(count(&to).await, 5, "no duplicates");
+        assert_eq!(
+            second.imported + second.skipped,
+            5,
+            "every record accounted for, in whichever bucket the driver uses"
+        );
+        assert_eq!(
+            count(&to).await,
+            5,
+            "no duplicates, however it was bucketed"
+        );
     }
 
     /// An empty source completes with zero of everything rather than erroring —
