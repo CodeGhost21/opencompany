@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ListChecks, Mail, MoreHorizontal, Network, Plus, Sparkles, UserPlus } from "lucide-react";
+import { Mail, MoreHorizontal, Network, Plus, Sparkles, UserPlus } from "lucide-react";
 import { toast } from "sonner";
 
 import { listPeople, me as fetchMe, type Person } from "@/api/auth";
@@ -72,16 +72,6 @@ interface Props {
    * this view still stands alone.
    */
   onManageDesks?: () => void;
-  /**
-   * Go to Manage Lists — where a list (`tasks`, `goals`, `decisions`, or
-   * whatever this company declared) is created and retired (issue #1284).
-   *
-   * The same shape `onManageDesks` set: not another rendering of this roster,
-   * but the settings-style surface that owns the set of lists that exist,
-   * reached from here the way desk creation is. Optional, so this view still
-   * stands alone.
-   */
-  onManageLists?: () => void;
 }
 
 type Load = "loading" | "ready";
@@ -95,7 +85,6 @@ export function TeamView({
   refreshKey,
   onRunSetup,
   onManageDesks,
-  onManageLists,
 }: Props) {
   const [load, setLoad] = useState<Load>("loading");
   const [fromHost, setFromHost] = useState(false);
@@ -380,11 +369,6 @@ export function TeamView({
               {onManageDesks && (
                 <Button variant="outline" onClick={onManageDesks} data-testid="company-manage-desks">
                   <Network className="size-4" /> Manage desks
-                </Button>
-              )}
-              {onManageLists && (
-                <Button variant="outline" onClick={onManageLists} data-testid="company-manage-lists">
-                  <ListChecks className="size-4" /> Manage lists
                 </Button>
               )}
               <Button onClick={() => setAddOpen(true)}>

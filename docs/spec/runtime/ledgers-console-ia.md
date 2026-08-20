@@ -199,45 +199,68 @@ maintenance cost with no offsetting benefit, and the reasoning for *why* it
 does not apply here is preserved in this paragraph, not in a comment on dead
 code nobody will read next to the code that replaced it.
 
-## Rule 3: declaring a list moves out of the main nav
+## Rule 3: declaring and retiring live in Work, not Company
 
 Today "New ledger" is a button in `LedgersView`'s own toolbar, reachable
-the moment an operator opens what used to be the single Ledgers page. The
-tab strip Rule 2 lands on is a screen for *working a list's rows*, tab by
-tab — putting a "New list" control there would mean an operator sitting on
-the Goals tab sees a button for creating an unrelated new list, which is a
-settings action wearing a data-page's chrome, and it would have to be
-findable from whichever tab happens to be open rather than from one obvious
-place.
+the moment an operator opens what used to be the single Ledgers page. A
+list's own screen (Rule 2) is for *working its rows* — putting a "New list"
+control there would mean an operator looking at Goals sees a button for
+creating an unrelated new list, which is a settings action wearing a
+data-page's chrome.
 
-This follows the precedent `CompanyView` already set for desks
-(`frontend/src/views/company/CompanyView.tsx`): the Company page
-(`#/company`) is the roster, and desk creation, deletion, and restaffing live
-one click away at `#/company/desks` (`OrgChartView`), reached through a
-"Manage Desks" button on the roster. Lists get the same shape:
+**First cut, corrected.** The original version of this rule put Manage Lists
+under the Company page — "the same precedent `CompanyView` set for desks:
+`#/company/desks` for desk creation, so `#/company/lists` for list
+creation." That analogy does not hold. A desk **is** company structure, so
+managing desks belongs on the page that already shows the org chart. A list
+is a work record, and — because the switcher (Rule 2) is the only real entry
+point to any of them — an operator declaring or retiring one is reached
+almost entirely *from Work*, not from Company. Routing that flow through
+Company meant every visit crossed a section boundary and came back
+(Work → Company → Work), which read as arbitrary because it was: the
+placement modeled the wrong analogy.
 
-- The Company page grows a **Manage Lists** button beside Manage Desks,
-  opening `#/company/lists`.
-- That page is where a list is created (the wizard, Rule 4), and where a
-  company-declared list is retired. Both are "manage the set of lists that
-  exist" actions, as distinct from "work the rows of one list" — the same
-  line `CompanyView`'s doc comment draws between the roster and the chart.
-  Retiring currently lives on each list's own toolbar
-  (`LedgersView`'s "Retire" button, gated on `!ledger.builtin`); it moves to
-  Manage Lists alongside creation, so a list's own screen is only ever about
-  its rows — search, filter, board/list toggle, compose, delete a row — never
-  about the existence of the list itself.
-- A list's page keeps the two other things `docs/spec/runtime/ledgers.md`'s
+**What ships:** Manage Lists lives inside Work, at `#/ledgers/manage` — a
+segment `LedgersView` reserves (`MANAGE_SEGMENT`) the same way
+`CompanyView.DESKS_SEGMENT` reserves `desks`, checked in `app-shell.tsx`
+*before* `LedgersView` itself ever mounts, since its own hooks read and write
+real list rows keyed on `sub` and would misfire against a slug that names no
+list. The switcher's menu is the only entry point — no Company-page button
+duplicates it — and its own "Back" returns wherever the operator actually
+came from (`history.back()`, not a fixed destination), since that screen no
+longer has exactly one canonical parent.
+
+- Manage Lists shows every list the company holds — built-in and declared,
+  including `tasks` — each with its title, purpose, row counts, and whether
+  it is retireable. `tasks`, `goals`, and `decisions` cannot be retired (they
+  are not `LedgerSummary.builtin === false`), so the row shows why rather
+  than hiding the control inconsistently with how Manage Desks always shows
+  every desk.
+- **Declaring**, specifically, has two paths now, both producing the same
+  `LedgerSpec` (Rule 4): Manage Lists' own "New list" button, for an operator
+  already browsing the full roster; and the switcher's own "New list" menu
+  item, which opens the wizard **in place** — layered over whatever list was
+  already on screen, no navigation at all. The in-place path is the one that
+  matters day to day: it is reachable from any list's title in one click,
+  and it is what makes "declare a new axis" cost the same whether an
+  operator is already on Manage Lists or three tabs away from it.
+- A list's own page keeps the two other things `docs/spec/runtime/ledgers.md`'s
   console section already documents as deliberately visible rather than
   hidden: row-level delete (person-only, "Close" offered first), and a native
   list's `writtenBy` sentence in place of a compose box.
 
-Manage Lists shows every list the company holds — built-in and declared,
-including `tasks` — each with its title, purpose, row counts, and whether it
-is retireable. `tasks`, `goals`, and `decisions` cannot be retired (they are
-not `LedgerSummary.builtin === false`), so the row shows why rather than
-hiding the control inconsistently with how Manage Desks always shows every
-desk.
+**The in-place wizard needs a URL, or Back breaks it.** Local component state
+with no history entry meant the browser Back button, pressed while the
+wizard was open, skipped past both the wizard *and* Manage Lists in one jump
+— the exact "moves so randomly" failure this correction exists to fix.
+`hooks/use-hash-flag.ts` is the fix: a boolean riding the current hash's
+*query* suffix (`#/ledgers/goals?new`), which `useHashView`'s own segment
+parsing already ignores (it strips everything from `?` onward), so it
+coexists with the ordinary `view`/`sub` routing rather than replacing it.
+Setting it is a real `window.location.hash` assignment — a genuine history
+entry — so popping it via Back is an ordinary `hashchange` the hook already
+listens for. The wizard's five internal steps do not each get their own
+history entry; only "is the wizard open at all" needs to survive Back.
 
 ## Rule 4: the declare dialog becomes a plain-language wizard
 

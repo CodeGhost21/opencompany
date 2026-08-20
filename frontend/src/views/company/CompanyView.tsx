@@ -31,10 +31,15 @@
 //
 // which means the chart survives a reload, can be linked, and is reached by
 // asking for it rather than by flipping a switch and hoping.
+//
+// Manage Lists (issue #1284) is deliberately NOT a segment of this page — an
+// early cut put it here, "parallel to Manage Desks", and that analogy was
+// wrong: desks are company *structure*, so managing them belongs here; lists
+// are work records, reached almost entirely from the title switcher on Work's
+// own screen. See `docs/spec/runtime/ledgers-console-ia.md`'s Rule 2 and
+// `LedgersView.MANAGE_SEGMENT`.
 
 import type { OpenCompanyClient } from "@/api/client";
-import type { LedgerNav } from "@/hooks/use-ledger-nav";
-import { ManageListsView } from "@/views/company/ManageListsView";
 import { OrgChartView } from "@/views/company/OrgChartView";
 import { TeamView } from "@/views/TeamView";
 
@@ -49,28 +54,18 @@ import { TeamView } from "@/views/TeamView";
  */
 export const DESKS_SEGMENT = "desks";
 
-/**
- * The sub-page segment for Manage Lists (issue #1284) — the settings surface
- * where a list is declared and retired, parallel to {@link DESKS_SEGMENT}.
- *
- * Checked before the generic desk branch below: unlike a desk id, this
- * segment names no desk and must not fall through to `OrgChartView`.
- */
-export const LISTS_SEGMENT = "lists";
-
 interface Props {
   client: OpenCompanyClient;
   company: string | null;
   /**
-   * The hash's second segment: nothing, {@link DESKS_SEGMENT},
-   * {@link LISTS_SEGMENT}, or a desk id.
+   * The hash's second segment: nothing, {@link DESKS_SEGMENT}, or a desk id.
    *
    * Handed back unvalidated, as `useHashView` documents — only the chart knows
    * which desks exist, so an id naming none is its own silent no-op rather than
    * something this component guesses at.
    */
   sub: string | null;
-  /** Go to the chart, a desk, Manage Lists, or back to the roster. */
+  /** Go to the chart, a desk, or back to the roster. */
   onNavigate: (sub: string | null) => void;
   /**
    * Open a teammate, or return to this page with `null`.
@@ -84,12 +79,6 @@ interface Props {
   refreshKey?: number;
   /** Reopen first-run setup, so skipping it is not a dead end. */
   onRunSetup?: () => void;
-  /**
-   * The company's lists, shared with the sidebar's own rows (issue #1284) —
-   * `ManageListsView` reads and mutates through this same instance, so a
-   * declare or a retire shows up in the sidebar without a reload.
-   */
-  ledgerNav: LedgerNav;
 }
 
 export function CompanyView({
@@ -100,19 +89,7 @@ export function CompanyView({
   onOpenAgent,
   refreshKey,
   onRunSetup,
-  ledgerNav,
 }: Props) {
-  if (sub === LISTS_SEGMENT) {
-    return (
-      <ManageListsView
-        client={client}
-        company={company}
-        ledgerNav={ledgerNav}
-        onBack={() => onNavigate(null)}
-      />
-    );
-  }
-
   if (sub) {
     return (
       <OrgChartView
@@ -134,7 +111,6 @@ export function CompanyView({
       refreshKey={refreshKey}
       onRunSetup={onRunSetup}
       onManageDesks={() => onNavigate(DESKS_SEGMENT)}
-      onManageLists={() => onNavigate(LISTS_SEGMENT)}
     />
   );
 }

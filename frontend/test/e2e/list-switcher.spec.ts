@@ -14,7 +14,14 @@ import { expect, test, type Page } from "@playwright/test";
  *
  * This spec covers: opening the menu, selecting a list, the address
  * updating, a deep link straight to a non-default list, the back button, and
- * that `#/tasks/<id>` (the card detail page) still resolves untouched.
+ * that `#/tasks/<id>` (the card detail page) still resolves untouched. Plus a
+ * round of fixes from real usage: "New list" opens the wizard in place
+ * (rather than silently navigating to Manage Lists, which is what its
+ * `onClick` handler collided with `onManageLists` into doing), the browser
+ * Back button closes that wizard instead of skipping past it and Manage
+ * Lists, Manage Lists lives in Work rather than Company, every count shows
+ * (zero included, so it never reads as "no information"), and an unknown or
+ * retired list's address still recovers through the same switcher.
  */
 
 const API = "/api/v1/company";
@@ -125,13 +132,81 @@ test("#/tasks/<id> still opens the card detail page, untouched by the switcher",
   expect(new URL(page.url()).hash).toBe(`#/tasks/${id}`);
 });
 
-test("New list and Manage lists open Manage Lists from the switcher", async ({ page }) => {
+test("Manage lists opens from the switcher, in Work — not Company", async ({ page }) => {
   await page.goto("/#/ledgers");
   await dismissTour(page);
 
   await switcherTrigger(page).click();
-  await page.getByTestId("list-switcher-new").click();
+  await page.getByTestId("list-switcher-manage").click();
+  await expect.poll(() => new URL(page.url()).hash).toBe("#/ledgers/manage");
   await expect(page.getByRole("heading", { name: "Manage lists" })).toBeVisible({
     timeout: 15_000,
   });
+
+  // The Company page never gets a Manage Lists button of its own (issue
+  // #1284) — the switcher is the only way in.
+  await page.getByTestId("lists-back").click();
+  await page.locator('[data-tour="nav-company"]').getByRole("button").click();
+  await expect(page.getByTestId("company-manage-lists")).toHaveCount(0);
+});
+
+test("New list opens the declare wizard in place, over the current list", async ({ page }) => {
+  await page.goto("/#/ledgers/goals");
+  await dismissTour(page);
+
+  await switcherTrigger(page).click();
+  await page.getByTestId("list-switcher-new").click();
+  await expect(page.getByRole("heading", { name: "New list" })).toBeVisible();
+
+  // "In place" means literally that: the address still names Goals, the
+  // wizard is layered over it, not a navigation to Manage Lists.
+  expect(new URL(page.url()).hash).toContain("#/ledgers/goals");
+  await expect(page.getByRole("heading", { name: "Manage lists" })).toHaveCount(0);
+});
+
+test("the browser Back button closes the in-place wizard rather than skipping past it", async ({
+  page,
+}) => {
+  await page.goto("/#/ledgers/goals");
+  await dismissTour(page);
+
+  await switcherTrigger(page).click();
+  await page.getByTestId("list-switcher-new").click();
+  await expect(page.getByRole("heading", { name: "New list" })).toBeVisible();
+
+  await page.goBack();
+
+  // Closed, not skipped past — still on Goals, not bounced out to Manage
+  // Lists or Tasks the way local-only dialog state would let Back do.
+  await expect(page.getByRole("heading", { name: "New list" })).toHaveCount(0);
+  await expect(switcherTrigger(page)).toHaveText(/Goals/);
+  await expect.poll(() => new URL(page.url()).hash).toBe("#/ledgers/goals");
+});
+
+test("counts show zero, not nothing, so a zero never reads as missing information", async ({
+  page,
+}) => {
+  await page.goto("/#/ledgers");
+  await dismissTour(page);
+
+  await switcherTrigger(page).click();
+  // Every entry — including a list with zero open rows — carries a number.
+  const goalsCount = switcherItem(page, "goals").locator("span").last();
+  await expect(goalsCount).toHaveText(/^\d+$/);
+});
+
+test("an unknown or retired list's address recovers through the same switcher", async ({
+  page,
+}) => {
+  await page.goto("/#/ledgers/this-slug-does-not-exist");
+  await dismissTour(page);
+
+  await expect(switcherTrigger(page)).toHaveText(/Not found/);
+  await expect(page.getByText(/Pick another from the title menu/)).toBeVisible();
+
+  // The switcher itself is still the way back — no dead end.
+  await switcherTrigger(page).click();
+  await switcherItem(page, "tasks").click();
+  await expect.poll(() => new URL(page.url()).hash).toBe("#/ledgers/tasks");
+  await expect(switcherTrigger(page)).toHaveText(/Tasks/);
 });

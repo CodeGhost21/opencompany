@@ -1,10 +1,22 @@
-// Manage Lists (issue #1284): where a list is created and retired, off the
-// Company page — the same shape `OrgChartView` already gave desks. Every
-// list has its own sidebar row now (`app-shell.tsx`'s `navItems`), so there
-// is no longer a single "Ledgers" screen for "New ledger" to live on; this is
-// where that control — and Retire, ported from the old per-list toolbar —
-// live instead. A list's own screen (`LedgersView`) is only ever about its
-// rows from here on.
+// Manage Lists (issue #1284): where a list is retired, and — for an operator
+// who wants the full roster rather than the title switcher's menu — declared.
+//
+// Lives inside Work (`#/ledgers/manage`, a reserved segment `LedgersView`
+// checks for — see `MANAGE_SEGMENT`), not under Company. The first cut of
+// this screen put it there, on the reasoning that it was "parallel to Manage
+// Desks" — that analogy was wrong: desks are company *structure*, so
+// managing them belongs on the Company page; lists are work records, and the
+// operator reaches this screen almost entirely from the Work switcher. A
+// route that lived under Company while being opened from Work meant every
+// visit crossed a section boundary and came back (Work → Company → Work),
+// which is what made the whole flow feel arbitrary. One parent now: Work.
+//
+// Retire is here — ported from the old per-list toolbar before issue #1284 —
+// so a list's own screen (`LedgersView`) stays about its rows and never about
+// whether the list itself continues to exist. Declaring a list, by contrast,
+// no longer has to happen here: the switcher's own "New list" opens the
+// wizard in place over whatever list was already on screen. This page's
+// "New list" stays too, for browsing the full roster before adding one.
 
 import { useEffect, useState } from "react";
 import { AlertTriangle, ArrowLeft, Lock, Plus } from "lucide-react";
@@ -28,6 +40,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import type { LedgerNav } from "@/hooks/use-ledger-nav";
+import { RESERVED_SEGMENTS } from "@/views/LedgersView";
 import { BOARD_LEDGER } from "@/lib/board-columns";
 import { DeclareListWizard } from "@/views/company/DeclareListWizard";
 
@@ -84,23 +97,27 @@ export function ManageListsView({ client, company, ledgerNav, onBack }: Props) {
   return (
     <div className="flex h-full min-h-0 flex-col gap-4 p-6">
       <header className="space-y-2">
+        {/* `history.back()`, not a fixed destination (issue #1284): this
+            screen is reached from wherever a list's own switcher was open,
+            not from one canonical parent, so the way back has to be
+            wherever the operator actually came from. */}
         <Button
           variant="ghost"
           size="sm"
           className="w-fit"
           onClick={onBack}
-          data-testid="lists-breadcrumb-company"
+          data-testid="lists-back"
         >
           <ArrowLeft className="mr-2 size-4" />
-          Company
+          Back
         </Button>
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
             <h1 className="text-xl font-semibold">Manage lists</h1>
             <p className="text-sm text-muted-foreground">
               Every list this company tracks — its own board, plus whatever
-              else it records. Each one gets its own place in the sidebar the
-              moment it exists here.
+              else it records. Reach any of them from the switcher on its own
+              title; retire one here.
             </p>
           </div>
           <Button
@@ -182,7 +199,7 @@ export function ManageListsView({ client, company, ledgerNav, onBack }: Props) {
                       <AlertDialogHeader>
                         <AlertDialogTitle>Retire “{held.title}”?</AlertDialogTitle>
                         <AlertDialogDescription>
-                          This list leaves the sidebar and its{" "}
+                          This list leaves the switcher's menu and its{" "}
                           <code>{held.derived}</code> file stops being
                           rewritten. Its rows are kept, but nothing in the
                           console lists them afterward — re-declaring{" "}
@@ -213,7 +230,7 @@ export function ManageListsView({ client, company, ledgerNav, onBack }: Props) {
         <DeclareListWizard
           client={client}
           company={company}
-          existingSlugs={ledgers.map((l) => l.slug)}
+          existingSlugs={[...ledgers.map((l) => l.slug), ...RESERVED_SEGMENTS]}
           remaining={remaining}
           onCancel={() => setDeclaring(false)}
           onCreated={async (created) => {

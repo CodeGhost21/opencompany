@@ -72,7 +72,8 @@ import { writeLastChannel } from "@/lib/last-channel";
 import { fromDto, type TeamMember } from "@/lib/team";
 import { agentDmThreads, defaultThreads, threadsFromDesks } from "@/lib/threads";
 import { Overview } from "@/views/Overview";
-import { CompanyView, LISTS_SEGMENT } from "@/views/company/CompanyView";
+import { CompanyView } from "@/views/company/CompanyView";
+import { ManageListsView } from "@/views/company/ManageListsView";
 import { ChatView } from "@/views/ChatView";
 import {
   channelIdForThread,
@@ -87,7 +88,7 @@ import {
 import { Conversation } from "@/views/Conversation";
 import { TeamView } from "@/views/TeamView";
 import { ApprovalsView } from "@/views/ApprovalsView";
-import { LedgersView } from "@/views/LedgersView";
+import { LedgersView, MANAGE_SEGMENT } from "@/views/LedgersView";
 import { TaskDetailRoute } from "@/views/TaskDetailRoute";
 import { InboxView } from "@/views/InboxView";
 import { MemoryView } from "@/views/MemoryView";
@@ -1511,11 +1512,6 @@ export function AppShell({
               // Skipping setup must not be a dead end: an unstaffed company keeps
               // a visible way back in.
               onRunSetup={() => setSetupForced(true)}
-              // Manage Lists (issue #1284) declares and retires lists from
-              // here; the sidebar's own rows read the same `useLedgerNav`
-              // instance, so this is what makes a declare or a retire show up
-              // there without a reload.
-              ledgerNav={ledgerNav}
             />
           )}
           {view === "chat" && (
@@ -1585,7 +1581,28 @@ export function AppShell({
               onLeave={() => navigate("ledgers", BOARD_LEDGER)}
             />
           )}
-          {view === "ledgers" && (
+          {/*
+            `MANAGE_SEGMENT` is checked *here*, before `LedgersView` ever
+            mounts — not inside it (issue #1284). `LedgersView`'s own hooks
+            read and write real list rows keyed on `sub`; running that
+            machinery against a slug that names no list (`manage`, `new`)
+            would be all cost and no ledger. Manage Lists lives in Work, not
+            Company, on purpose: it is reached almost entirely from the title
+            switcher's own menu, and a route that lived under Company while
+            being opened from Work meant every visit crossed a section
+            boundary and came back. `onBack` is `history.back()`, not a fixed
+            destination, because this screen is reached from wherever a
+            list's switcher was open, not from one canonical parent.
+          */}
+          {view === "ledgers" && sub === MANAGE_SEGMENT && (
+            <ManageListsView
+              client={client}
+              company={company}
+              ledgerNav={ledgerNav}
+              onBack={() => window.history.back()}
+            />
+          )}
+          {view === "ledgers" && sub !== MANAGE_SEGMENT && (
             <LedgersView
               client={client}
               company={company}
@@ -1593,6 +1610,7 @@ export function AppShell({
               // (issue #1284) — this view no longer fetches the list itself.
               ledgers={ledgerNav.ledgers}
               ledgersLoading={ledgerNav.loading}
+              remaining={ledgerNav.remaining}
               // `#/ledgers/<slug>` opens that list. Unvalidated here, like
               // every other sub-page: only this view knows which slugs
               // exist, and it resolves an unknown one against the host
@@ -1619,11 +1637,10 @@ export function AppShell({
               // filter lands in the hash and survives a refresh and the Back
               // button, like every other sub-page.
               onReviewApprovals={(taskId) => navigate("approvals", encodeURIComponent(taskId))}
-              // The title switcher's "New list" / "Manage lists" menu items
-              // (issue #1284) — the same settings surface Rule 3 already
-              // gives Company → Manage Lists, reached from wherever the
-              // operator happens to be looking at a list.
-              onManageLists={() => navigate("company", LISTS_SEGMENT)}
+              // The switcher's in-place wizard declared a new list — re-read
+              // the shared list so it shows up in the menu (and Manage
+              // Lists, which reads the same instance) with no reload.
+              onListsChanged={ledgerNav.refresh}
             />
           )}
           {/*

@@ -5,13 +5,19 @@ import { expect, test, type Page } from "@playwright/test";
  *
  * Declaring a list used to mean editing a JSON `fields[]`/`statuses[]`
  * template in a dialog reached from the Ledgers screen's own toolbar. This
- * drives the real replacement against a live host: Company → Manage lists →
- * New list → the four plain-language steps and a review → Create, then
- * confirms the result is a real, retireable list — reachable both from Manage
- * Lists and as an entry in the title switcher's menu (`list-switcher.spec.ts`
- * covers the switcher itself) — and that retiring it asks first, the same
- * confirm-before-destroy assertion `ledger-retire-confirm.test.ts` makes at
- * unit level.
+ * drives the real replacement against a live host: Work's title switcher →
+ * Manage lists → New list → the four plain-language steps and a review →
+ * Create, then confirms the result is a real, retireable list — reachable
+ * both from Manage Lists and as an entry in the title switcher's own menu
+ * (`list-switcher.spec.ts` covers the switcher and its in-place wizard) —
+ * and that retiring it asks first, the same confirm-before-destroy
+ * assertion `ledger-retire-confirm.test.ts` makes at unit level.
+ *
+ * Manage Lists lives in Work now, not Company (`#/ledgers/manage`) — an
+ * earlier cut put it under Company, "parallel to Manage Desks", and that
+ * placement meant every visit crossed a section boundary (Work → Company →
+ * Work) since the switcher is the only real entry point. See
+ * `docs/spec/runtime/ledgers-console-ia.md`'s Rule 2.
  */
 
 const API = "/api/v1/company";
@@ -36,16 +42,17 @@ async function dismissTour(page: Page) {
 }
 
 async function openManageLists(page: Page) {
-  await page.goto("/#/overview");
+  await page.goto("/#/ledgers");
   await dismissTour(page);
-  await page.locator('[data-tour="nav-company"]').getByRole("button").click();
-  await page.getByTestId("company-manage-lists").click();
+  await page.getByTestId("list-switcher-trigger").click();
+  await page.getByTestId("list-switcher-manage").click();
+  await expect.poll(() => new URL(page.url()).hash).toBe("#/ledgers/manage");
   await expect(page.getByRole("heading", { name: "Manage lists" })).toBeVisible({
     timeout: 15_000,
   });
 }
 
-test("the wizard declares a real list, which appears in Manage Lists and the sidebar", async ({
+test("the wizard declares a real list from Manage Lists, which appears in the switcher", async ({
   page,
   request,
 }) => {
@@ -76,21 +83,12 @@ test("the wizard declares a real list, which appears in Manage Lists and the sid
   // Step 5 — review, then submit. Unscoped here on purpose: the wizard is a
   // Dialog portaled onto `document.body`, so its own review text is the only
   // place `title` exists on screen at this point — no ambiguity yet, since
-  // neither the Manage Lists row nor the sidebar row exist until Create
-  // actually lands.
+  // neither the Manage Lists row nor the switcher's menu item exist until
+  // Create actually lands.
   await expect(page.getByText(title)).toBeVisible();
   await expect(page.getByText(/open → closed/)).toBeVisible();
   await page.getByRole("button", { name: "Create list" }).click();
 
-  // Once the list exists, its title is on screen more than once once the
-  // switcher is visited too (the Manage Lists card and the switcher's own
-  // menu item), so `main` scopes every check here to "on this page". A plain
-  // element query (`page.locator("main")`), not `getByRole("main")`: the
-  // retire confirm in the next test opens an AlertDialog that inerts the
-  // rest of the page for accessibility, pruning `<main>` from the
-  // accessibility tree — a role-based query would find nothing there while a
-  // role-agnostic one still sees the (occluded but present) DOM. Used here
-  // too, for consistency with that test.
   const main = page.locator("main");
 
   try {
@@ -103,8 +101,7 @@ test("the wizard declares a real list, which appears in Manage Lists and the sid
     // And it is a live entry in the switcher's menu the moment it exists
     // (issue #1284's core claim: no list is more than one click away,
     // direct, no picker).
-    await page.getByTestId("lists-breadcrumb-company").click();
-    await page.locator('[data-tour="nav-ledgers"]').getByRole("button").click();
+    await page.getByTestId("lists-back").click();
     await page.getByTestId("list-switcher-trigger").click();
     await expect(page.getByTestId(`list-switcher-${slug}`)).toBeVisible({ timeout: 15_000 });
   } finally {
@@ -154,12 +151,12 @@ test("retiring a declared list asks before it deletes, then removes it everywher
     // switcher read the same shared list, so declaring it (via the API seed
     // above) already made it one before this test ever opened the retire
     // confirm.
-    await page.locator('[data-tour="nav-ledgers"]').getByRole("button").click();
+    await page.getByTestId("lists-back").click();
     await page.getByTestId("list-switcher-trigger").click();
     await expect(page.getByTestId(`list-switcher-${slug}`)).toBeVisible({ timeout: 15_000 });
     await page.keyboard.press("Escape");
-    await page.locator('[data-tour="nav-company"]').getByRole("button").click();
-    await page.getByTestId("company-manage-lists").click();
+    await page.getByTestId("list-switcher-trigger").click();
+    await page.getByTestId("list-switcher-manage").click();
 
     // Scoped to the one Card carrying this list's title, not any `div` that
     // happens to contain the text — several ancestor divs do, and only the
@@ -180,7 +177,7 @@ test("retiring a declared list asks before it deletes, then removes it everywher
     await expect(main.getByText(title)).toHaveCount(0, { timeout: 15_000 });
 
     // And it is gone from the switcher's menu too, with no reload.
-    await page.locator('[data-tour="nav-ledgers"]').getByRole("button").click();
+    await page.getByTestId("lists-back").click();
     await page.getByTestId("list-switcher-trigger").click();
     await expect(page.getByTestId(`list-switcher-${slug}`)).toHaveCount(0, { timeout: 15_000 });
   } finally {

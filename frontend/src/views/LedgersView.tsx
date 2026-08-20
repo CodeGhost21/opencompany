@@ -44,6 +44,8 @@
 // plan, discussion and attempts this screen does not try to reproduce.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useHashFlag } from "@/hooks/use-hash-flag";
+import { DeclareListWizard } from "@/views/company/DeclareListWizard";
 import {
   AlertTriangle,
   Check,
@@ -133,6 +135,8 @@ interface Props {
   ledgers: LedgerSummary[];
   /** Whether `ledgers`'s first read is still in flight. */
   ledgersLoading: boolean;
+  /** How many more lists this company may declare (`useLedgerNav`). */
+  remaining: number;
   /** The list named in `#/ledgers/<slug>`, when the address carries one. */
   sub?: string | null;
   /**
@@ -185,13 +189,40 @@ interface Props {
   /** Opens the Approvals page filtered to one card (issue #883). */
   onReviewApprovals?: (taskId: string) => void;
   /**
-   * Opens Manage Lists (`#/company/lists`) — where a list is declared and
-   * retired (Rule 3, issue #1284). Reached from the "New list" / "Manage
-   * lists" items at the foot of the title switcher's menu, so declaring one
-   * is one click from wherever an operator is already looking at a list.
+   * Re-reads the shared list (`useLedgerNav.refresh`) — called after the
+   * switcher's in-place wizard declares a new one, so it shows up in the
+   * menu (and Manage Lists, which reads the same instance) with no reload.
    */
-  onManageLists?: () => void;
+  onListsChanged?: () => Promise<void>;
 }
+
+/**
+ * The reserved `sub` segment for Manage Lists (issue #1284): `#/ledgers/manage`,
+ * checked by `app-shell.tsx` *before* it ever mounts this component, not
+ * inside it — `LedgersView`'s own hooks read and write real list rows keyed
+ * on `sub`, and running that machinery against a slug that names no list
+ * would be all cost and no ledger. See the doc comment on `MANAGE_SEGMENT`'s
+ * use in `app-shell.tsx`.
+ *
+ * Cheaply reserved the same way `CompanyView.DESKS_SEGMENT` is: a company
+ * could in principle declare a list whose slug collides with it, which is why
+ * every caller that derives a slug for a *new* list (`DeclareListWizard`)
+ * excludes this word (and `NEW_SEGMENT` below) from what it will derive —
+ * see `RESERVED_SEGMENTS`.
+ */
+export const MANAGE_SEGMENT = "manage";
+
+/**
+ * The reserved query flag for the in-place declare wizard (issue #1284):
+ * `#/ledgers/<slug>?new`. Unlike `MANAGE_SEGMENT` this never reaches the
+ * router at all — `useHashView`'s segment parsing strips everything from `?`
+ * onward — so it coexists with whichever list is on screen underneath the
+ * wizard rather than replacing it. See `hooks/use-hash-flag.ts`.
+ */
+export const NEW_LIST_FLAG = "new";
+
+/** Slugs a declared list may not take — reserved for routing, not data. */
+export const RESERVED_SEGMENTS: readonly string[] = [MANAGE_SEGMENT, NEW_LIST_FLAG];
 
 /**
  * A stable empty default for `approvals`.
@@ -216,6 +247,7 @@ export function LedgersView({
   company,
   ledgers,
   ledgersLoading,
+  remaining,
   sub,
   onOpenLedger,
   onOpenCard,
@@ -223,8 +255,13 @@ export function LedgersView({
   approvals = EMPTY_APPROVALS,
   now,
   onReviewApprovals,
-  onManageLists,
+  onListsChanged,
 }: Props) {
+  // The declare wizard, opened in place over whatever list is already on
+  // screen (issue #1284): riding the hash's query suffix rather than plain
+  // `useState` is what makes the browser Back button close it, instead of
+  // bouncing two levels out past both the wizard and Manage Lists.
+  const [declaring, setDeclaring] = useHashFlag(NEW_LIST_FLAG);
   const [read, setRead] = useState<LedgerRead | null>(null);
   const [reading, setReading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -604,17 +641,34 @@ export function LedgersView({
                       )}
                     />
                     <span className="flex-1 truncate">{held.title}</span>
-                    {held.open > 0 && (
-                      <span className="text-xs text-muted-foreground">{held.open}</span>
-                    )}
+                    {/* Always rendered, zero included (issue #1284): a count
+                        that only shows up for a positive number reads as "no
+                        count information" for the zero case, not as "zero" —
+                        the same ambiguity `filteredEmptyNotice` exists to
+                        rule out elsewhere in this file. */}
+                    <span className="text-xs text-muted-foreground">{held.open}</span>
                   </DropdownMenuItem>
                 ))}
                 <DropdownMenuSeparator />
-                <DropdownMenuItem data-testid="list-switcher-new" onClick={() => onManageLists?.()}>
+                <DropdownMenuItem
+                  data-testid="list-switcher-new"
+                  disabled={remaining <= 0}
+                  title={
+                    remaining <= 0
+                      ? "This company is at the list cap. Retire one nothing reads first."
+                      : undefined
+                  }
+                  onClick={() => {
+                    if (remaining > 0) setDeclaring(true);
+                  }}
+                >
                   <Plus className="size-4" />
                   New list
                 </DropdownMenuItem>
-                <DropdownMenuItem data-testid="list-switcher-manage" onClick={() => onManageLists?.()}>
+                <DropdownMenuItem
+                  data-testid="list-switcher-manage"
+                  onClick={() => onOpenLedger?.(MANAGE_SEGMENT)}
+                >
                   Manage lists
                 </DropdownMenuItem>
               </DropdownMenuContent>
@@ -914,6 +968,22 @@ export function LedgersView({
           }}
           client={client}
           company={company}
+        />
+      )}
+
+      {declaring && company && (
+        <DeclareListWizard
+          client={client}
+          company={company}
+          existingSlugs={[...ledgers.map((l) => l.slug), ...RESERVED_SEGMENTS]}
+          remaining={remaining}
+          onCancel={() => setDeclaring(false)}
+          onCreated={async (created) => {
+            setDeclaring(false);
+            await onListsChanged?.();
+            toast.success(`Declared ${created.title}.`);
+            onOpenLedger?.(created.slug);
+          }}
         />
       )}
 
