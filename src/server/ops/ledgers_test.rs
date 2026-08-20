@@ -425,3 +425,44 @@ async fn the_derived_file_appears_in_the_workspace_and_is_read_only() {
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     assert!(format!("{body}").contains("risks"), "{body}");
 }
+
+/// A row's byline names the signed-in person, not their opaque id (issue
+/// #1263). `seed_fixed_admin` seeds a user whose id is a generated internal
+/// id but whose email is `harness-admin@example.test` — exactly the id/email
+/// split the console needs to show something a reader recognizes.
+#[tokio::test]
+async fn a_row_s_byline_names_the_person_by_email_not_id() {
+    let (state, _home) = state().await;
+    send(&state, "POST", "/api/v1/company/ledgers", Some(risks())).await;
+
+    let (status, entry) = send(
+        &state,
+        "POST",
+        "/api/v1/company/ledgers/risks/entries",
+        Some(json!({
+            "id": "vendor-slip",
+            "fields": { "risk": "the vendor misses the date" },
+            "status": "open"
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{entry}");
+    assert_eq!(entry["updatedBy"]["kind"], "human");
+    assert_eq!(entry["updatedBy"]["label"], "harness-admin@example.test");
+    let id = entry["updatedBy"]["id"]
+        .as_str()
+        .expect("updatedBy carries an id");
+    assert!(!id.is_empty());
+    assert_ne!(
+        id, "harness-admin@example.test",
+        "the id and the label must no longer be the same opaque value"
+    );
+    assert_eq!(entry["openedBy"]["label"], "harness-admin@example.test");
+
+    let (status, read) = send(&state, "GET", "/api/v1/company/ledgers/risks", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        read["entries"][0]["updatedBy"]["label"],
+        "harness-admin@example.test"
+    );
+}
