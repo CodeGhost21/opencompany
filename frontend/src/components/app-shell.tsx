@@ -53,6 +53,7 @@ import { useLedgerNav } from "@/hooks/use-ledger-nav";
 import type { WorkspaceEvent } from "@/views/WorkspaceView";
 import { useHashView } from "@/hooks/use-hash-view";
 import { BOARD_LEDGER } from "@/lib/board-columns";
+import { VIEWS, type View } from "@/lib/console-routes";
 import { taskIdFromSegment } from "@/lib/task-route";
 import { toast } from "sonner";
 
@@ -112,23 +113,11 @@ const FinancesView = lazy(() =>
 // as the other heavier, less-visited surfaces.
 const PagesView = lazy(() => import("@/views/PagesView").then((m) => ({ default: m.PagesView })));
 
-export type View =
-  | "overview"
-  | "company"
-  | "chat"
-  | "conversation"
-  | "inbox"
-  | "tasks"
-  | "ledgers"
-  | "team"
-  | "workspace"
-  | "memory"
-  | "approvals"
-  | "workflows"
-  | "pages"
-  | "finances"
-  | "settings"
-  | "feedback";
+// The route table lives in `@/lib/console-routes` — a plain module the unit
+// lane can import, and the single place a surface is declared routable (issue
+// #1311). Re-exported because the console has always imported `View` from the
+// shell that renders those views.
+export type { View };
 
 interface NavItem {
   view: View;
@@ -173,58 +162,22 @@ const NAV: NavItem[] = [
   // Agent-authored internal dashboard pages, rendered in a sandboxed iframe
   // (docs/spec/runtime/pages.md). Placed beside Workflows: both are the
   // "something an agent built" surfaces, as opposed to the fixed views above.
-  // Pages is deliberately not offered in the nav. The view and its `#/pages`
-  // route stay live, so an address or an existing link still resolves — this
-  // is the same treatment `feedback`, `inbox`, `finances`, `conversation`
-  // and `team` already get. Do not "fix" the omission by
-  // adding it back.
+  // Pages is deliberately not offered in the nav (issues #1171, #1172). Do not
+  // "fix" the omission by adding it back. What keeps `#/pages` answering is its
+  // entry in `@/lib/console-routes`, NOT this commented row — a commented row
+  // routes nothing, which is exactly how the address died for four months
+  // (issue #1311). Remove a nav row here and the surface is hidden; remove it
+  // from `console-routes.ts` and the surface is gone.
   // { view: "pages", label: "Pages", icon: AppWindow },
   { view: "settings", label: "Settings", icon: Settings2 },
 ];
 
-/**
- * Routable without a nav entry — reachable by URL, absent from the sidebar.
- *
- * Feedback is linked from the sidebar footer instead. The rest are parked
- * rather than retired (issue #302 for Inbox and Finances — Brain was parked
- * there too and is re-listed above with the memory-engine work; the chat
- * rebuild for Conversation and Team): their host routes, stores and e2e specs
- * are untouched, and re-listing one in `NAV` above is all it takes to bring it
- * back. Conversation and Team are the surfaces the Chat workspace replaces —
- * everything they can do it can do in one screen, including the teammate
- * budget controls `MembersPane` ported from Team (issue #360) — but
- * Conversation keeps answering `#/conversation` until the chat covers the
- * last of what it still does better (a desk's persisted transcript).
- *
- * `team` is here for a narrower reason than it used to be (issue #1141). Bare
- * `#/team` no longer resolves to it at all — `REWRITE_RETIRED` sends that to
- * `#/company`, whose Cards half is the grid it used to draw. What this line
- * keeps alive is `#/team/<agentId>`: the teammate detail page, deliberately a
- * page rather than a modal so it can be linked, and linked to today from the
- * org chart's seats, its "Not on a desk" chips and the chat member pane. Drop
- * `team` from this list and `useHashView` discards the head *and* its sub-page,
- * so every one of those lands on Overview instead of the teammate they named.
- *
- * `tasks` is here for a different reason than the rest, and it is the load-
- * bearing line of issue #1140. The board page is gone, but `#/tasks/<id>` is
- * the card detail — the timeline, the plan brief, the discussion, the attempts,
- * the steer controls — and it is linked from chat, from an approval card, from
- * a workflow run's rows and from every card on the board. Ledgers deliberately
- * does not reproduce any of it. Drop `tasks` from this list and `useHashView`
- * discards the head *and* its sub-page, so every one of those links quietly
- * lands on Overview instead of the card it named.
- *
- */
-const HIDDEN_VIEWS: View[] = [
-  "feedback",
-  "inbox",
-  "finances",
-  "conversation",
-  "team",
-  "tasks",
-];
-
-const VIEWS: View[] = [...NAV.map((i) => i.view), ...HIDDEN_VIEWS];
+// Which views are routable is decided in `@/lib/console-routes`, not here.
+// `NAV` above is presentation: a row means a surface is offered in the sidebar,
+// and its absence means only that the surface is not offered. `VIEWS` is every
+// surface this shell renders, complete by construction, so a view can never be
+// rendered by the block below and unreachable by address at the same time —
+// which is what happened to Pages between #1172 and #1311.
 
 /**
  * Views whose **nav row always means the parent page**, never the sub-page the
