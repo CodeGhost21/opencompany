@@ -1,8 +1,9 @@
-import { Building2, MessageSquareWarning, PanelLeft } from "lucide-react";
+import { Building2, MessageSquareWarning, PanelLeftClose, PanelLeftOpen } from "lucide-react";
 
 import type { CompanyStatus } from "@/api/types";
 import type { View } from "@/components/app-shell";
 
+import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -15,6 +16,7 @@ import {
   SidebarMenuItem,
   useSidebar,
 } from "@/components/ui/sidebar";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { DiscordIcon } from "@/components/discord-icon";
 import { lifecycle } from "@/lib/language";
 import { DISCORD_INVITE_URL } from "@/lib/links";
@@ -79,11 +81,12 @@ interface Props {
  * The sidebar's standing controls.
  *
  * No page carries a header of its own any more, so what is left of the old top
- * bar lives here: the company's state and the switcher. Collapsing is its own
- * control at the top of the sidebar (`SidebarCollapseToggle`). Theming and
- * flagging are deliberately absent — Settings owns both, under Appearance and
- * "Something off?", and a second entry point would just be two places to keep
- * in step.
+ * bar lives here: the company's state and the switcher. Collapsing is NOT one
+ * of these — it is chrome rather than a destination, so it is a button in the
+ * sidebar's header beside the host switcher (`SidebarCollapseButton`, below)
+ * rather than a row in either menu. Theming and flagging are deliberately
+ * absent — Settings owns both, under Appearance and "Something off?", and a
+ * second entry point would just be two places to keep in step.
  */
 export function SidebarControls({
   lifecycleState,
@@ -194,35 +197,106 @@ export function SidebarControls({
 }
 
 /**
- * The collapse toggle, at the top of the sidebar.
+ * Show or hide the sidebar. A button in the header, not a row in the nav.
  *
- * It sits above the nav rather than among the footer controls, because it is
- * the one control here that acts on the sidebar itself — everything below it
- * navigates. Expanded, it stays quiet and reads as another row; collapsed, it
- * takes the primary fill, so the single control that gets the rail back is the
- * one thing standing out in a column of identical icons.
+ * ## Why it is not a row (issue #1177)
+ *
+ * It used to be a `SidebarMenuButton` — full width, icon then label, `h-8`,
+ * `bg-sidebar-accent` on hover — sitting directly under the host switcher and
+ * directly above Overview. That is the nav row shape exactly, so the eye filed
+ * it as the first destination in the list. It is not a destination: everything
+ * else in that column takes you somewhere, and this one changes the chrome and
+ * leaves you where you are.
+ *
+ * Colouring it differently would not have fixed that; the shape is what says
+ * "row". So it stops using the row primitive altogether and becomes the
+ * console's ordinary icon button, in the sidebar's header — which is the part
+ * of the column that talks about the panel rather than about the company.
+ * `SidebarContent` below it is the destinations, and the header/content
+ * boundary now means something.
+ *
+ * ## Why it does not crowd the host switcher (issue #1174)
+ *
+ * The switcher beside it is `h-12`, carries a filled glyph, a two-line
+ * nameplate and the cross-host status dot. This is 28px, ghost, and dimmed at
+ * rest. They also sit in separate elements, so hovering one never lights the
+ * other — which is what stops the pair reading as a single control with a
+ * chevron at one end and a panel glyph at the other.
+ *
+ * ## The collapsed rail
+ *
+ * The rail is `--sidebar-width-icon` (3rem) and `SidebarHeader` is `p-2`, so
+ * there are 32px of content box — exactly the switcher's glyph, and no room
+ * for anything beside it. The header row therefore becomes a column on the
+ * rail (see `app-shell.tsx`), and this button grows to `size-8` there so it
+ * lands on the same 32px rhythm as every nav icon below it.
+ *
+ * It deliberately drops the `bg-primary` fill it used to take when collapsed.
+ * That fill existed to make it findable in a column of identical nav icons; up
+ * here it has only the switcher for company, and the switcher's glyph is
+ * *already* a filled primary square. Two of those stacked would read as one
+ * control, which is the failure the paragraph above exists to prevent.
  */
-export function SidebarCollapseToggle() {
-  const { toggleSidebar, state } = useSidebar();
-  const collapsed = state === "collapsed";
+export function SidebarCollapseButton() {
+  const { toggleSidebar, state, isMobile } = useSidebar();
+  // `state` tracks the DESKTOP open flag; the sheet has its own (`openMobile`).
+  // Reading it unguarded labels an open sheet "Expand sidebar" whenever the
+  // desktop state happens to be collapsed — which, since issue #1176 stopped
+  // the sidebar auto-collapsing, is now a state an operator can leave behind
+  // and come back to on a phone.
+  const collapsed = !isMobile && state === "collapsed";
+  const label = collapsed ? "Expand sidebar" : "Collapse sidebar";
+  const Icon = collapsed ? PanelLeftOpen : PanelLeftClose;
 
   return (
-    <SidebarMenu>
-      <SidebarMenuItem>
-        <SidebarMenuButton
-          tooltip={collapsed ? "Expand sidebar" : "Collapse sidebar"}
-          onClick={toggleSidebar}
-          className={cn(
-            collapsed
-              ? "bg-primary text-primary-foreground hover:bg-primary/90 hover:text-primary-foreground active:bg-primary/90 active:text-primary-foreground"
-              : RESTING_ROW,
-          )}
-        >
-          <PanelLeft className={cn("transition-transform", collapsed && "rotate-180")} />
-          <span>Collapse</span>
-        </SidebarMenuButton>
-      </SidebarMenuItem>
-    </SidebarMenu>
+    <Tooltip>
+      <TooltipTrigger
+        render={
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-sm"
+            // The accessible name, and the only name this control has — an
+            // icon-only button with no label is otherwise announced as
+            // "button". The tooltip says the same words, but a tooltip is a
+            // visual affordance and cannot be relied on for the name.
+            aria-label={label}
+            // …and it reports the state it toggles, so the control is not
+            // write-only to a screen reader. No `aria-controls`: the sidebar
+            // has no stable id to point at, and a dangling one is worse than
+            // none.
+            aria-expanded={!collapsed}
+            data-testid="sidebar-collapse"
+            onClick={toggleSidebar}
+            className={cn(
+              "shrink-0 text-sidebar-foreground/60",
+              // `sidebar-accent`, NOT `Button`'s stock `hover:bg-muted`. The
+              // muted tint is tuned against the canvas, and this button is on
+              // the sidebar's surface — which is a different rung, and about
+              // to move again (issue #1178).
+              "hover:bg-sidebar-accent hover:text-sidebar-accent-foreground",
+              "focus-visible:ring-sidebar-ring/50",
+              // 28px beside a 48px nameplate, 32px on the rail. See the note
+              // on the collapsed rail above.
+              "group-data-[collapsible=icon]:size-8",
+            )}
+          />
+        }
+      >
+        <Icon />
+      </TooltipTrigger>
+      {/*
+        The raw tooltip primitive rather than `SidebarMenuButton`'s `tooltip`
+        prop, which renders its content with `hidden={state !== "collapsed"}`.
+        That is right for a nav row — expanded, the row already carries its
+        label — and wrong here: this button is icon-only in BOTH states, and
+        expanded is the state in which a reader has never seen the word.
+
+        `side="right"` in both states, matching every other tooltip in this
+        column, and the one side that is clear of the sidebar either way.
+      */}
+      <TooltipContent side="right">{label}</TooltipContent>
+    </Tooltip>
   );
 }
 

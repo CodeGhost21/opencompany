@@ -41,7 +41,7 @@ import { FeedbackDialog } from "@/components/feedback-dialog";
 import { HostSwitcher } from "@/components/host-switcher";
 import {
   RESTING_ROW,
-  SidebarCollapseToggle,
+  SidebarCollapseButton,
   SidebarControls,
 } from "@/components/sidebar-controls";
 import { SetupController } from "@/setup/SetupController";
@@ -1337,21 +1337,39 @@ export function AppShell({
       {/* Mobile turns the sidebar into a sheet, so its own collapse control is
           not mounted while it is closed. Keep the way back fixed to the
           viewport and below the page controls rather than competing with a
-          view's toolbar. Desktop keeps the labelled collapse row in the
-          sidebar itself. */}
+          view's toolbar. Desktop keeps its own collapse button in the
+          sidebar's header. */}
       <SidebarTrigger
         aria-label="Toggle sidebar"
         className="fixed bottom-4 left-4 z-50 md:hidden"
       />
       <Sidebar collapsible="icon">
         <SidebarHeader>
-          {/* Which host, and how every host is doing. It sits above the collapse
-              toggle because it names where you are — the first thing the column
-              should answer — and it is the only control here that can take you
-              somewhere else entirely. See `host-switcher.tsx`; it replaced the
-              icon rail that used to stand outside this sidebar (issue #1142). */}
-          <HostSwitcher companyName={feed.status.name} />
-          <SidebarCollapseToggle />
+          {/* The header is the column talking about itself: which host this
+              console is looking at, and whether the column is showing.
+              Everything BELOW it — the nav group and the footer's standing
+              controls — takes you somewhere. Collapse used to be the first row
+              under the switcher, which put a chrome control at the head of a
+              list of destinations and made it read as one (issue #1177).
+
+              `flex-col` on the rail is not a preference. The collapsed column
+              is `--sidebar-width-icon` (3rem) and this block is `p-2`, leaving
+              32px — the exact width of the switcher's glyph, with nothing left
+              over to put beside it. See `SidebarCollapseButton`. */}
+          <div className="flex items-center gap-1.5 group-data-[collapsible=icon]:flex-col group-data-[collapsible=icon]:gap-1">
+            {/* Which host, and how every host is doing. It leads because it
+                names where you are — the first thing the column should answer
+                — and it is the only control here that can take you somewhere
+                else entirely. See `host-switcher.tsx`; it replaced the icon
+                rail that used to stand outside this sidebar (issue #1142).
+
+                `min-w-0` so the nameplate truncates instead of pushing the
+                button off the end of a 13.5rem column. */}
+            <div className="min-w-0 flex-1 group-data-[collapsible=icon]:w-full group-data-[collapsible=icon]:flex-none">
+              <HostSwitcher companyName={feed.status.name} />
+            </div>
+            <SidebarCollapseButton />
+          </div>
         </SidebarHeader>
         <SidebarContent data-tour="sidebar">
           <SidebarGroup>
