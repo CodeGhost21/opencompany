@@ -91,6 +91,17 @@ import {
 } from "@/api/ledgers";
 import { Markdown } from "@/components/markdown";
 import { Alert, AlertDescription } from "@/components/ui/alert";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -205,6 +216,8 @@ export function LedgersView({
   const [composing, setComposing] = useState<Composing | null>(null);
   const [saving, setSaving] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState<LedgerEntry | null>(null);
+  /** The ledger about to be retired, pending confirmation (issue #1216). */
+  const [confirmRetire, setConfirmRetire] = useState<LedgerSummary | null>(null);
   const [declaring, setDeclaring] = useState(false);
   const [rendered, setRendered] = useState<string | null>(null);
   /**
@@ -530,12 +543,15 @@ export function LedgersView({
     }
   };
 
-  const retire = async (slug: string) => {
+  const retire = async (target: LedgerSummary) => {
     if (!company) return;
     try {
-      await retireLedger(client, company, slug);
+      await retireLedger(client, company, target.slug);
       await refreshList();
-      toast.success(`Retired ${slug}. Its rows were kept.`);
+      // The address named this ledger; it no longer exists, so the hash must
+      // stop naming it rather than keep pointing at a dead slug (issue #1216).
+      onOpenLedger?.(null);
+      toast.success(`Retired ${target.slug}. Its rows were kept.`);
     } catch (e) {
       toast.error(e instanceof Error ? e.message : String(e));
     }
@@ -767,13 +783,57 @@ export function LedgersView({
                   )
                 )}
                 {!ledger.builtin && (
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={() => void retire(ledger.slug)}
-                  >
-                    Retire
-                  </Button>
+                  <>
+                    {/* Separates the one control on this row that deletes
+                        something from the ones that don't — Retire used to sit
+                        8px from Record with nothing between them (issue #1216). */}
+                    <div className="mx-1 h-6 w-px bg-border" aria-hidden />
+                    <AlertDialog
+                      open={confirmRetire?.slug === ledger.slug}
+                      onOpenChange={(open) => setConfirmRetire(open ? ledger : null)}
+                    >
+                      <AlertDialogTrigger
+                        render={
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            className="text-destructive hover:text-destructive"
+                          >
+                            Retire
+                          </Button>
+                        }
+                      />
+                      <AlertDialogContent>
+                        <AlertDialogHeader>
+                          <AlertDialogTitle>Retire “{ledger.title}”?</AlertDialogTitle>
+                          <AlertDialogDescription>
+                            This ledger leaves this screen and its{" "}
+                            <code>{ledger.derived}</code> file stops being
+                            rewritten. Its rows are kept, but nothing in the
+                            console lists them afterward — re-declaring{" "}
+                            <code>{ledger.slug}</code> is the only way back.
+                          </AlertDialogDescription>
+                        </AlertDialogHeader>
+                        <AlertDialogFooter>
+                          <AlertDialogCancel>Keep it</AlertDialogCancel>
+                          <AlertDialogAction
+                            onClick={() => {
+                              // Close FIRST: the title above reads `ledger`,
+                              // and retiring changes which ledger is selected
+                              // out from under a dialog left mounted (same
+                              // reasoning as WorkflowsView's delete confirm).
+                              setConfirmRetire(null);
+                              void retire(ledger);
+                            }}
+                            className="bg-destructive text-white hover:bg-destructive/90"
+                            data-testid="ledger-retire-confirm"
+                          >
+                            Retire ledger
+                          </AlertDialogAction>
+                        </AlertDialogFooter>
+                      </AlertDialogContent>
+                    </AlertDialog>
+                  </>
                 )}
               </div>
 
