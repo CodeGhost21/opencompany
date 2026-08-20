@@ -419,38 +419,41 @@ export function OrgChartView({ client, company, focusDeskId, onBack }: Props) {
             </ol>
           </nav>
         )}
-        <div className="flex items-start justify-between gap-4">
-          <div className="space-y-1">
+        <div className="space-y-1">
+          <div
+            className="flex flex-wrap items-center justify-between gap-3"
+            data-testid="desks-header"
+          >
             <h2 className="text-2xl font-semibold tracking-tight">Desks</h2>
-            <p className="text-sm text-muted-foreground">
-              How your company is organised: the desks it works from and who
-              staffs each one. Add a desk, move someone between desks, or change
-              who leads.
-            </p>
+            <div className="ml-auto flex flex-wrap items-center justify-end gap-2">
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={load === "loading"}
+                onClick={() => setCreateOpen(true)}
+              >
+                <Plus className="mr-1.5 size-4" />
+                New desk
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={load === "loading"}
+                onClick={() => {
+                  setAddMemberDeskId(null);
+                  setAddMemberOpen(true);
+                }}
+              >
+                <UserPlus className="mr-1.5 size-4" />
+                New teammate
+              </Button>
+            </div>
           </div>
-          <div className="ml-auto flex shrink-0 flex-wrap items-center justify-end gap-2">
-            <Button
-              size="sm"
-              variant="outline"
-              disabled={load === "loading"}
-              onClick={() => setCreateOpen(true)}
-            >
-              <Plus className="mr-1.5 size-4" />
-              New desk
-            </Button>
-            <Button
-              size="sm"
-              variant="outline"
-              disabled={load === "loading"}
-              onClick={() => {
-                setAddMemberDeskId(null);
-                setAddMemberOpen(true);
-              }}
-            >
-              <UserPlus className="mr-1.5 size-4" />
-              New teammate
-            </Button>
-          </div>
+          <p className="text-sm text-muted-foreground">
+            How your company is organised: the desks it works from and who
+            staffs each one. Add a desk, move someone between desks, or change
+            who leads.
+          </p>
         </div>
 
         {error && (
