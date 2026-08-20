@@ -1156,8 +1156,10 @@ pub struct MemorySpec {
     /// Absent means "not probed": the base backend serves memory, the in-pod
     /// engine is driven directly, or this host predates the probe — a client
     /// must treat absence as unknown, not unhealthy. `false` is a bound
-    /// engine whose probe failed at boot: still bound, and the first cycle
-    /// that needs memory will fail until the endpoint or credential is fixed.
+    /// engine whose probe failed at boot: still bound. A boot-time snapshot,
+    /// not a live gauge — the provider can recover (or fail) after boot
+    /// without this bit moving, so treat `false` as "was unreachable at
+    /// boot", never "the next operation will fail".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub healthy: Option<bool>,
 }

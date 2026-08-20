@@ -594,8 +594,9 @@ export interface MemorySpec {
   /**
    * Whether the boot-time reachability probe found the engine usable — ready
    * or degraded (reachable, possibly reduced); only a down engine is `false`.
-   * Absent = not probed (base store, direct engine, or an older host) — treat
-   * as unknown, not unhealthy.
+   * A boot-time snapshot, not a live gauge: the provider can recover or fail
+   * after boot without this moving. Absent = not probed (base store, direct
+   * engine, or an older host) — treat as unknown, not unhealthy.
    */
   healthy?: boolean;
 }
