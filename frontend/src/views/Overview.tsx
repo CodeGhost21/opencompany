@@ -294,10 +294,14 @@ export function Overview({ client, company, companyName }: Props) {
   );
 
   return (
-    // The whole viewport: the shell hides its top bar for this view, so there
-    // is nothing above to subtract.
+    // Fills whatever the shell gives it. It used to claim `h-svh` — the whole
+    // viewport — which was true while the page ran edge to edge. It sits on the
+    // inset content card now (issue #1178), a box shorter than the viewport by
+    // the frame, and a child insisting on `100svh` inside it is laid out taller
+    // than the box that clips it: the bottom band of the graph, legend included,
+    // would be cropped away. `flex-1 min-h-0` takes the height the card has.
     <div
-      className="oc-kg relative h-svh min-h-0 w-full min-w-0 overflow-hidden"
+      className="oc-kg relative flex-1 min-h-0 w-full min-w-0 overflow-hidden"
       // The guided tour's Overview stop anchors here. It used to spotlight the
       // quick-action row this page had before it became the graph; the graph is
       // the page now, so the graph is what gets spotlighted.
