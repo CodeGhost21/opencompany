@@ -607,8 +607,30 @@ function MemberCard({
             {member.description}
           </p>
         )}
-        {workload && <WorkloadLine workload={workload} />}
-        <DailyBudgetLine member={member} setByLabel={setByLabel} />
+        {/*
+          Pinned to the bottom of the card, not left floating under whatever
+          length the description happened to be.
+
+          `CardContent` is a `h-full` column inside a stretched grid row, so
+          every card in a row is the same height — but the content was all
+          top-aligned, and the description is `line-clamp-3`. A one-line
+          description therefore put this block ~36px higher than the two-line
+          card beside it, and the status line is the one thing a roster is
+          scanned for: "who is working, and how much is on them" was on two or
+          three different baselines in every row, with dead space underneath
+          each card.
+
+          `mt-auto` takes the slack instead, so the running facts line up
+          across a row and the card has no empty tail. Wrapped rather than
+          applied to `WorkloadLine` directly because a host that cannot answer
+          the board renders no workload at all (see `IDLE` and the `workload`
+          prop) — the budget line has to inherit the same anchor, or the two
+          shapes of card disagree again.
+        */}
+        <div className="mt-auto space-y-1.5 empty:hidden">
+          {workload && <WorkloadLine workload={workload} />}
+          <DailyBudgetLine member={member} setByLabel={setByLabel} />
+        </div>
         {/*
           The card's footer is gone with the Inbox switch it existed to hold
           (issue #1190).
