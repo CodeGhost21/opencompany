@@ -42,6 +42,77 @@ const ROW_GAP = 150;
 const NODE_W = 190;
 const NODE_H = 64;
 
+/** Default minimap container size — React Flow's own defaults, kept as the
+ * ceiling so a graph with real vertical spread renders exactly as before. */
+const MINIMAP_WIDTH = 200;
+const MINIMAP_MAX_HEIGHT = 150;
+/** Floor so the minimap never shrinks to an unusable, unclickable strip. */
+const MINIMAP_MIN_HEIGHT = 32;
+/**
+ * The minimum fraction of the minimap's own rendered height that a laid-out
+ * node's real height should occupy (issue #1259).
+ *
+ * React Flow's `<MiniMap>` "contain"-fits the content bounding box into
+ * whatever width/height it is given — `viewScale = Math.max(scaledWidth,
+ * scaledHeight)`, not overridable via any prop (verified against the vendored
+ * `@xyflow/react` source). A graph whose nodes sit at zero vertical spread
+ * (every shipped company workflow template: one node per depth layer, `layout`
+ * below never gives two nodes the same x) has a content box tens of pixels
+ * tall and thousands of pixels wide. Fit into the default 200x150 container,
+ * that padded the viewBox's height ~30-40x past the real content, squashing
+ * every node rect into an imperceptible sliver — #1230 made the rects exist,
+ * but they were still invisible in practice.
+ *
+ * Rather than fight React Flow's fit algorithm, shrink the CONTAINER it fits
+ * into so its aspect ratio approaches the content's — `minimapDimensions`
+ * below picks a height low enough that a node's real height fills at least
+ * this fraction of it, floored so the minimap never becomes an unusable
+ * sliver itself, and capped at the previous default so a graph with real
+ * vertical spread (siblings sharing a layer) renders exactly as it did before
+ * this existed.
+ */
+const NODE_MIN_VISIBLE_FRACTION = 0.25;
+
+/**
+ * The minimap's own container size for a laid-out node array (issue #1259).
+ *
+ * Derived from the same size hint the minimap itself reads (`initialWidth`/
+ * `initialHeight` — see NODE_W/NODE_H above), not React Flow's post-mount DOM
+ * measurement, so it is available synchronously off the same array `layout()`
+ * just produced.
+ */
+export function minimapDimensions(
+  nodes: Node<WorkflowNodeData>[],
+): { width: number; height: number } {
+  if (nodes.length === 0) {
+    return { width: MINIMAP_WIDTH, height: MINIMAP_MAX_HEIGHT };
+  }
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  for (const n of nodes) {
+    const w = n.initialWidth ?? NODE_W;
+    const h = n.initialHeight ?? NODE_H;
+    minX = Math.min(minX, n.position.x);
+    minY = Math.min(minY, n.position.y);
+    maxX = Math.max(maxX, n.position.x + w);
+    maxY = Math.max(maxY, n.position.y + h);
+  }
+  const boundsWidth = maxX - minX;
+  const boundsHeight = maxY - minY;
+  if (boundsWidth <= 0 || boundsHeight <= 0) {
+    return { width: MINIMAP_WIDTH, height: MINIMAP_MAX_HEIGHT };
+  }
+  const idealHeight =
+    (boundsHeight * MINIMAP_WIDTH) / (boundsWidth * NODE_MIN_VISIBLE_FRACTION);
+  const height = Math.min(
+    MINIMAP_MAX_HEIGHT,
+    Math.max(MINIMAP_MIN_HEIGHT, idealHeight),
+  );
+  return { width: MINIMAP_WIDTH, height };
+}
+
 /** The result of folding the SSE frame window down to one run's canvas state. */
 export interface LiveRun {
   runId: string;

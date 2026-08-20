@@ -96,6 +96,7 @@ import {
   foldLiveRun,
   initialRunState,
   layout,
+  minimapDimensions,
   statesFromRun,
   windowHasRunStart,
 } from "@/views/workflows/graph";
@@ -1979,6 +1980,12 @@ export function WorkflowsView({
     [graph, paintedStates, paintedElapsed, paintedUndelivered],
   );
 
+  // Issue #1259: size the minimap's own container to the graph's aspect
+  // ratio (capped at React Flow's 200x150 default) so a linear/low-spread
+  // graph's node rects don't get padded into an invisible sliver by the
+  // minimap's own contain-fit. See minimapDimensions in graph.ts.
+  const minimapSize = useMemo(() => minimapDimensions(nodes), [nodes]);
+
   const selected = workflows.find((w) => w.id === selectedId) ?? null;
 
   // The full node model (kind/name/summary/agent/config) for the clicked node,
@@ -2806,7 +2813,12 @@ export function WorkflowsView({
               >
                 <Background variant={BackgroundVariant.Dots} gap={20} size={1} />
                 <Controls showInteractive={false} />
-                <MiniMap pannable zoomable className="!hidden sm:!block" />
+                <MiniMap
+                  pannable
+                  zoomable
+                  className="!hidden sm:!block"
+                  style={minimapSize}
+                />
               </ReactFlow>
               {/* Issue #303: the copilot and the node inspector share the canvas's
                   right edge, and the copilot wins while it is open — it was
