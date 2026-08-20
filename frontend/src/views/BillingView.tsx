@@ -243,9 +243,13 @@ export function BillingView({ client, company }: Props) {
     );
   }
 
-  const connected = status.apiKeyConfigured && !!status.site;
+  const connected =
+    status.inBuild && status.granted && status.apiKeyConfigured && !!status.site;
   const paypalConnected =
-    !!paypal?.clientIdConfigured && !!paypal?.clientSecretConfigured;
+    !!paypal?.inBuild &&
+    !!paypal?.granted &&
+    !!paypal?.clientIdConfigured &&
+    !!paypal?.clientSecretConfigured;
 
   return (
     // `flex-1 overflow-y-auto` is load-bearing, not cosmetic: without it this

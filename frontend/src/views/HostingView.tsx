@@ -148,7 +148,7 @@ export function HostingView({ client, company }: Props) {
     );
   }
 
-  const connected = status.apiKeyConfigured;
+  const connected = status.inBuild && status.granted && status.apiKeyConfigured;
 
   return (
     <div className="flex-1 overflow-y-auto" data-testid="hosting-view">
