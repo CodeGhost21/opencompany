@@ -5,6 +5,7 @@ import {
   ChevronDown,
   ChevronRight,
   Info,
+  KeyRound,
   Loader2,
   LogIn,
   Plug,
@@ -36,6 +37,32 @@ import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
 import { ProviderDetail } from "@/views/connections/ProviderDetail";
+
+/**
+ * What a server's health entitles its row to offer (issue #1260).
+ *
+ * A rule rather than two inline conditions, because the two OAuth states differ
+ * by exactly one thing an operator cannot see: whether the server advertises
+ * dynamic client registration. `oauth_required` means the server asked for
+ * OAuth; only the host knows whether this console can complete one, and it says
+ * so by sending `static_token_required` instead. Reading them as the same state
+ * is what put a Sign in button on a Slack row that could never sign in.
+ */
+export function credentialAffordance(
+  authHint: string | undefined,
+): "sign_in" | "add_token" | "none" {
+  switch (authHint) {
+    case "oauth_required":
+      return "sign_in";
+    case "static_token_required":
+    // A plain credential prompt wants the same field; it simply never had a
+    // sign-in button to withdraw.
+    case "credential_required":
+      return "add_token";
+    default:
+      return "none";
+  }
+}
 
 type McpLoad = "loading" | "ready" | "unavailable" | "error";
 type ToolsState =
@@ -96,6 +123,17 @@ export function McpServersSection({ client, company, canManage, chrome = "inline
   // A name rather than the row itself, so an open panel re-derives from
   // `servers` after a refresh instead of showing the row as it was when clicked.
   const [opened, setOpened] = useState<string | null>(null);
+  /**
+   * The server whose inline credential field is open, and its draft value
+   * (issue #1260).
+   *
+   * Per-row rather than a shared field: the add form's Token creates a *new*
+   * server, so pointing an operator at it to fix an existing one would have
+   * them add a second copy. The host has accepted a credential rotation on
+   * `PUT …/mcp/servers/{name}` all along — this is the control that was missing.
+   */
+  const [credentialFor, setCredentialFor] = useState<string | null>(null);
+  const [credentialDraft, setCredentialDraft] = useState("");
   // Set by the unmount cleanup below. A sign-in poll that is mid-`await` when
   // this component goes away has already removed its own timer entry, so the
   // cleanup has nothing left to cancel — it checks this instead of re-arming.
@@ -210,7 +248,12 @@ export function McpServersSection({ client, company, canManage, chrome = "inline
       // Exception: an OAuth-required result is not an error to shout about — the
       // amber "needs config" badge carries a Sign in button, so a red alert here
       // would be redundant and misleading.
-      if (res.test && res.test.status !== "ok" && res.test.authHint !== "oauth_required") {
+      if (
+        res.test &&
+        res.test.status !== "ok" &&
+        res.test.authHint !== "oauth_required" &&
+        res.test.authHint !== "static_token_required"
+      ) {
         setAddError(res.test.message);
       } else if (res.warning) {
         setAddError(res.warning);
@@ -253,6 +296,32 @@ export function McpServersSection({ client, company, canManage, chrome = "inline
   // Browser OAuth sign-in (issue #90): open the authorization URL in a new tab,
   // then poll the server's health until it flips to `ok` (the host stores the
   // token on its callback route) so the amber badge turns green on its own.
+  /**
+   * Rotate one server's credential from its own row (issue #1260).
+   *
+   * Re-tests on success rather than trusting the write: the whole point of the
+   * flow is that the operator does not know whether the token is the right one
+   * until the server answers, and a silent save would leave the amber badge
+   * sitting there with no way to tell "wrong token" from "not saved".
+   */
+  async function saveCredential(server: McpServer) {
+    if (busy) return;
+    const token = credentialDraft.trim();
+    if (!token) return;
+    setBusy(server.name);
+    try {
+      await updateMcpServer(client, company, server.name, { token, authKind: "bearer" });
+      setCredentialFor(null);
+      setCredentialDraft("");
+      await refresh();
+      await test(server);
+    } catch (err) {
+      toast.error(err instanceof ApiError ? err.message : "Couldn't save the token.");
+    } finally {
+      setBusy(null);
+    }
+  }
+
   async function signIn(server: McpServer) {
     // Guard both the shared `busy` flag and a per-server poll already in flight:
     // the poll outlives `busy`, so without the second check a repeat click would
@@ -474,7 +543,32 @@ export function McpServersSection({ client, company, canManage, chrome = "inline
                             onCheckedChange={(v) => void toggle(server, v)}
                             aria-label={`Enable ${server.name}`}
                           />
-                          {health?.authHint === "oauth_required" && canManage && (
+                          {/* Issue #1260: `oauth_required` means the server asked for
+                              OAuth; it does NOT mean this console can complete one. A
+                              server advertising no dynamic client registration — Slack's
+                              MCP endpoint, for one — has no client for us to mint, so
+                              Sign in cannot succeed and the host says so with a distinct
+                              hint. Offering the button anyway spends a click to reach an
+                              error naming something the operator cannot act on, which is
+                              the same trade `hub_providers` already refuses to make for
+                              the Google and GitHub buttons. */}
+                          {credentialAffordance(health?.authHint) === "add_token" &&
+                            canManage &&
+                            credentialFor !== server.name && (
+                              <Button
+                                variant="default"
+                                size="sm"
+                                data-testid="mcp-add-token"
+                                disabled={busy === server.name}
+                                onClick={() => {
+                                  setCredentialDraft("");
+                                  setCredentialFor(server.name);
+                                }}
+                              >
+                                <KeyRound className="size-4" /> Add token
+                              </Button>
+                            )}
+                          {credentialAffordance(health?.authHint) === "sign_in" && canManage && (
                             <Button
                               variant="default"
                               size="sm"
@@ -557,6 +651,47 @@ export function McpServersSection({ client, company, canManage, chrome = "inline
                         ))}
                       {health && health.status !== "ok" && health.message && (
                         <p className="text-xs text-muted-foreground">{health.message}</p>
+                      )}
+                      {credentialFor === server.name && canManage && (
+                        <div className="flex items-end gap-2" data-testid="mcp-token-inline">
+                          <div className="flex-1 space-y-1">
+                            <Label htmlFor={`mcp-token-${server.name}`} className="text-xs">
+                              API token for {server.name}
+                            </Label>
+                            <Input
+                              id={`mcp-token-${server.name}`}
+                              type="password"
+                              autoComplete="new-password"
+                              placeholder="write-only"
+                              value={credentialDraft}
+                              onChange={(e) => setCredentialDraft(e.target.value)}
+                              onKeyDown={(e) => {
+                                if (e.key === "Enter") void saveCredential(server);
+                                if (e.key === "Escape") setCredentialFor(null);
+                              }}
+                            />
+                          </div>
+                          <Button
+                            size="sm"
+                            data-testid="mcp-token-save"
+                            disabled={busy === server.name || !credentialDraft.trim()}
+                            onClick={() => void saveCredential(server)}
+                          >
+                            {busy === server.name ? (
+                              <Loader2 className="size-4 animate-spin" />
+                            ) : (
+                              "Save"
+                            )}
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            disabled={busy === server.name}
+                            onClick={() => setCredentialFor(null)}
+                          >
+                            Cancel
+                          </Button>
+                        </div>
                       )}
                       <McpToolsList state={tools[server.name] ?? { kind: "idle" }} />
                     </li>
