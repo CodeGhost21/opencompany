@@ -99,6 +99,8 @@ import {
   windowHasRunStart,
 } from "@/views/workflows/graph";
 import { WorkflowMiniMap } from "@/views/workflows/WorkflowMiniMap";
+// Issue #1231: keeps the inspector from opening on top of the node it describes.
+import { RevealSelectedNode } from "@/views/workflows/RevealSelectedNode";
 import { LastRunChip, RunHistoryPanel } from "@/views/workflows/RunHistoryPanel";
 import { WorkflowIndex, type IndexMode } from "@/views/workflows/WorkflowIndex";
 import { CopilotPanel } from "@/views/workflows/CopilotPanel";
@@ -2816,6 +2818,16 @@ export function WorkflowsView({
                 {/* Issue #1259: a custom minimap, not React Flow's built-in
                     `<MiniMap>` — see WorkflowMiniMap.tsx for why. */}
                 <WorkflowMiniMap nodes={nodes} className="!hidden sm:!block" />
+                {/* Issue #1231: renders nothing — it pans the selected node out
+                    from under the inspector overlay, and pans back on close.
+                    A child of `<ReactFlow>` because that is the only provider
+                    `useReactFlow` can find in this view. It is handed the
+                    INSPECTOR's node, not `selectedNodeId`: the copilot shares
+                    the slot and wins while open (#303), and it has no one node
+                    it must not hide. */}
+                <RevealSelectedNode
+                  nodeId={!copilotOpen && selectedNode ? selectedNode.id : null}
+                />
               </ReactFlow>
               {/* Issue #303: the copilot and the node inspector share the canvas's
                   right edge, and the copilot wins while it is open — it was
