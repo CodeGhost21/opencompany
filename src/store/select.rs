@@ -233,10 +233,15 @@ pub struct MemoryOverlay {
     pub descriptor: MemoryDescriptor,
     /// The bound provider, kept solely so [`Self::refresh_health`] can probe
     /// it once at boot. `None` on the engine-overlay path, which drives the
-    /// in-pod engine directly and has no provider to ask. Never used for
-    /// reads or writes — the ports above are the only data path.
+    /// in-pod engine directly and has no provider to ask.
+    ///
+    /// Private on purpose: `MemoryCore` is a supertrait of `MemoryProvider`,
+    /// so a public handle here would let anything holding an `AppState` call
+    /// `store("<any namespace>", …)` directly — re-opening exactly the
+    /// raw-namespace door `store::memory`'s module docs promise is closed by
+    /// construction. The ports above are the only data path.
     #[cfg(feature = "tinymemory")]
-    pub probe: Option<Arc<dyn tinymemory_api::provider::MemoryProvider>>,
+    probe: Option<Arc<dyn tinymemory_api::provider::MemoryProvider>>,
 }
 
 impl MemoryOverlay {
