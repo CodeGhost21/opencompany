@@ -46,9 +46,81 @@
 //! neither `failed` nor `ok` — and every existing consumer of `error`,
 //! `cancelled`, `running` and `nodes[].status` sees exactly what it saw before.
 
+use std::collections::HashSet;
+
 use serde::{Deserialize, Serialize};
 
 use crate::ports::workflow_runner::{DeliveryReason, DeliveryReport, DeliveryStatus};
+
+/// The approvals queue as it is **right now**, in the two shapes a workflow run
+/// can be joined against it by (issue #1189).
+///
+/// # Why two shapes and not one
+///
+/// A run has two ways to stop for a person, and they leave different traces.
+///
+/// * A **blocked node** — an agent node whose gated tool calls were parked by
+///   `park_gated_calls` — records the ids those parks returned on
+///   [`WorkflowBlockedNode::approval_ids`](crate::ports::WorkflowBlockedNode).
+///   Those cards are ordinary tool-call effects (the policy stamps an `agent`
+///   on them), so they carry no node id and can only be joined **by id**. That
+///   is the join issue #1143 added.
+/// * A **gate** — a `requires_approval` node the engine paused at — is parked by
+///   `park_pending_gates` as a `workflow.approve` effect and records *nothing*:
+///   no approval-row receipt, no blocked-node row, only the node id on the run's
+///   `pendingApprovals`. Its card is the only thing that knows the pair, and it
+///   knows it exactly: `Effect::run_id` is the run that paused and
+///   `payload.node_id` is the gate. So that shape is joined **by
+///   `(run_id, node_id)`**.
+///
+/// #1143's join is keyed on ids the second shape does not have, which is why it
+/// could not reach it — and the gate shape is the larger half of the defect.
+///
+/// # Built where the raw effects are
+///
+/// Assembled by `CompanyRuntime::live_approvals`, off the journal's parked
+/// effects, so no raw `Effect` has to reach the HTTP layer. The projected
+/// [`ApprovalSummary`](crate::runtime::ApprovalSummary) is not a substitute: its
+/// `payload` is `display_payload` — redacted and node-budget-bounded — so a
+/// node id read back out of it would be reading a rendering, and would drift
+/// the day the redaction rules change.
+#[derive(Clone, Debug, Default)]
+pub struct LiveApprovals {
+    ids: HashSet<String>,
+    gates: HashSet<(String, String)>,
+}
+
+impl LiveApprovals {
+    /// Records a live approval id — every parked card, whatever shape it is.
+    pub fn insert_id(&mut self, id: impl Into<String>) {
+        self.ids.insert(id.into());
+    }
+
+    /// Records a live `(run, gate node)` pair — a parked `workflow.approve`
+    /// card, which is the only shape that knows both halves.
+    pub fn insert_gate(&mut self, run_id: impl Into<String>, node_id: impl Into<String>) {
+        self.gates.insert((run_id.into(), node_id.into()));
+    }
+
+    /// Whether the queue still holds this approval id.
+    pub fn holds_id(&self, id: &str) -> bool {
+        self.ids.contains(id)
+    }
+
+    /// Whether the queue still holds a gate card for this run's node.
+    ///
+    /// Keyed on the pair rather than the node alone: two runs of the same
+    /// workflow park the same node id, and answering "some run's `fetch_bbc` is
+    /// still parked" about *this* run would keep a stranded run advertised as
+    /// approvable for as long as any sibling run has a live card.
+    pub fn holds_gate(&self, run_id: &str, node_id: &str) -> bool {
+        // Borrowed lookup without allocating a `(String, String)`: the set is
+        // small, and this is called once per pending node per returned run.
+        self.gates
+            .iter()
+            .any(|(run, node)| run == run_id && node == node_id)
+    }
+}
 
 /// What a workflow run adds up to, as a closed set (issue #981).
 ///
