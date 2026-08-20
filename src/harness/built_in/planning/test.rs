@@ -191,6 +191,7 @@ fn evidence() -> Evidence {
             role: a.role.clone(),
             description: a.description.clone(),
             grants: crate::runtime::builder::agent_effective_grants(&allow, &a.tools),
+            global: a.global,
         })
         .collect();
     Evidence {
@@ -1720,6 +1721,125 @@ async fn a_manifest_teammate_and_a_runtime_one_can_be_the_ambiguous_pair() {
         ids,
         vec!["maya".to_string(), "social_manager".to_string()],
         "the runtime teammate survives resolution exactly like the manifest one"
+    );
+}
+
+/// Issue #1196. A tie between a company-authored teammate and a baseline one
+/// is not the tie #1106 exists for: the company already expressed a
+/// preference by staffing its own `Writer` (`maya`), so the baseline `writer`
+/// (`globals/agents/writer.toml`, merged into every company's roster) steps
+/// aside and the card dispatches instead of parking. Mirrors issue #1196's own
+/// worked example — a company `Writer` tying against the global `writer`.
+#[tokio::test]
+async fn a_company_teammate_beats_a_baseline_tie_and_dispatches_without_parking() {
+    let reply = r#"{"description":"do it","steps":[],"prerequisites":[],"risks":[],
+        "verification":"v","scope":"s","assigneeCandidates":[
+          {"id":"maya","reason":"the company's own writer"},
+          {"id":"writer","reason":"the shared baseline writer"}]}"#;
+    let (_home, runtime) = runtime_with(ScriptedModel::replying(reply)).await;
+    runtime
+        .tasks()
+        .upsert(runtime.id(), &card("t-29", ""))
+        .await
+        .unwrap();
+
+    run_planning_pass(Arc::clone(&runtime), "t-29".to_string()).await;
+
+    let after = read(&runtime, "t-29").await;
+    assert_eq!(
+        after.column, COLUMN_IN_PROGRESS,
+        "the company's own pick dispatches rather than parking"
+    );
+    assert_eq!(after.assignee, "maya");
+    let plan = after.plan.expect("the brief is still written");
+    assert_eq!(
+        plan.proposed_assignee.as_deref(),
+        Some("maya"),
+        "the baseline candidate is dropped, leaving one proposal"
+    );
+    assert!(
+        plan.assignee_candidates.is_empty(),
+        "with one candidate left there is no ownership question to persist"
+    );
+}
+
+/// The baseline exists for a company that never staffed a role itself — so a
+/// tie between two baseline teammates carries no company preference and must
+/// keep parking exactly like #1106's original case.
+#[tokio::test]
+async fn two_baseline_teammates_still_park_with_both() {
+    let reply = r#"{"description":"do it","steps":[],"prerequisites":[],"risks":[],
+        "verification":"v","scope":"s","assigneeCandidates":[
+          {"id":"writer","reason":"could turn this into copy"},
+          {"id":"researcher","reason":"could dig up the source material first"}]}"#;
+    let (_home, runtime) = runtime_with(ScriptedModel::replying(reply)).await;
+    runtime
+        .tasks()
+        .upsert(runtime.id(), &card("t-30", ""))
+        .await
+        .unwrap();
+
+    run_planning_pass(Arc::clone(&runtime), "t-30".to_string()).await;
+
+    let after = read(&runtime, "t-30").await;
+    assert_eq!(
+        after.column, COLUMN_TODO,
+        "neither baseline teammate outranks the other"
+    );
+    assert_eq!(after.assignee, "");
+    assert_eq!(
+        after
+            .plan
+            .expect("plan")
+            .assignee_candidates
+            .iter()
+            .map(|c| c.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["writer", "researcher"],
+        "both survive, the same as any other unresolved tie"
+    );
+}
+
+/// Direct unit coverage of the precedence filter, independent of the planning
+/// pass and any one scripted model.
+#[test]
+fn prefer_company_over_baseline_drops_only_a_true_mixed_tie() {
+    let mut evidence = evidence();
+    for agent in evidence.record.manifest.agents.iter_mut() {
+        if agent.id == "sam" {
+            agent.global = true;
+        }
+    }
+    let candidate = |id: &str| AssigneeCandidate {
+        id: id.to_string(),
+        reason: String::new(),
+    };
+
+    // A company teammate and a baseline one: the baseline is dropped.
+    let mixed = prefer_company_over_baseline(&evidence, vec![candidate("maya"), candidate("sam")]);
+    assert_eq!(
+        mixed.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(),
+        vec!["maya"]
+    );
+
+    // A teammate and a desk: neither resolves to a baseline agent, so both
+    // count as company-side and the tie is untouched — #1106's case, and the
+    // reason an unresolved id (a desk) must default to company-side rather
+    // than silently misfiring as baseline.
+    let teammate_and_desk =
+        prefer_company_over_baseline(&evidence, vec![candidate("maya"), candidate("studio")]);
+    assert_eq!(
+        teammate_and_desk.len(),
+        2,
+        "no baseline teammate in the tie"
+    );
+
+    // A single baseline candidate, alone: nothing to prefer it over.
+    let solo_baseline = prefer_company_over_baseline(&evidence, vec![candidate("sam")]);
+    assert_eq!(
+        solo_baseline.len(),
+        1,
+        "a lone baseline candidate is not a tie"
     );
 }
 

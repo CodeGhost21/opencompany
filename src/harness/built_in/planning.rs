@@ -352,6 +352,7 @@ pub async fn run_planning_pass(runtime: Arc<CompanyRuntime>, task_id: String) {
 
     let prerequisites = verify_prerequisites(&runtime, &evidence, &draft.prerequisites).await;
     let candidates = resolve_assignee_candidates(&evidence, &draft.assignee_candidates);
+    let candidates = prefer_company_over_baseline(&evidence, candidates);
     // Issue #1106. One surviving candidate is a proposal and behaves exactly as
     // it did before this change. Two or more is an open question, and a question
     // is not something to answer by taking the first element — so nothing is
@@ -692,6 +693,10 @@ struct TeammateBrief {
     description: Option<String>,
     /// Effective tool grants — namespace names only, never a credential.
     grants: Vec<String>,
+    /// Whether this teammate came from the global baseline rather than the
+    /// company's own roster (mirrors [`crate::company::types::Agent::global`]).
+    /// An overlay teammate is never global — it always has an author.
+    global: bool,
 }
 
 /// Everything the host gathered before the model was asked anything.
@@ -839,6 +844,7 @@ async fn gather_evidence(
             role: a.role.clone(),
             description: a.description.clone(),
             grants: crate::runtime::builder::agent_effective_grants(&allow, &a.tools),
+            global: a.global,
         })
         .collect();
     teammates.extend(
@@ -851,6 +857,7 @@ async fn gather_evidence(
                 role: overlay.role.clone(),
                 description: overlay.description.clone(),
                 grants: crate::runtime::builder::agent_effective_grants(&allow, &overlay.tools),
+                global: false,
             }),
     );
 
@@ -1345,6 +1352,9 @@ fn evidence_prompt(e: &Evidence) -> String {
         out.push_str(&format!("- `{}` — {} — may use: {grants}", t.id, t.role));
         if let Some(description) = &t.description {
             out.push_str(&format!(" — {description}"));
+        }
+        if t.global {
+            out.push_str(" — from the shared baseline");
         }
         out.push('\n');
     }
@@ -1860,6 +1870,47 @@ fn resolve_assignee_candidates(
         }
     }
     out
+}
+
+/// Issue #1196. Drops baseline candidates from a tie that also names a
+/// company-authored teammate.
+///
+/// `resolve_assignee_candidates` only validates names — it stays that way.
+/// This runs as a separate pass over its output because the tie it resolves
+/// is not about which name is real, it is about provenance: every company
+/// carries the same four baseline teammates ([`crate::globals`]), and when one
+/// of them ties against a role the company chose to staff itself, the company
+/// has already expressed the answer by staffing that role. A tie between two
+/// baseline teammates, or between two company teammates, carries no such
+/// signal and is left untouched — issue #1106's park-and-ask stands for both.
+///
+/// A candidate id that does not resolve to a manifest agent (a desk, or an
+/// overlay teammate — [`OverlayAgent`](crate::ports::types::OverlayAgent) has
+/// no `global` field, so it can never be one) counts as company-side: only a
+/// manifest agent explicitly marked `global` is baseline.
+fn prefer_company_over_baseline(
+    evidence: &Evidence,
+    candidates: Vec<AssigneeCandidate>,
+) -> Vec<AssigneeCandidate> {
+    let is_baseline = |id: &str| {
+        evidence
+            .record
+            .manifest
+            .agents
+            .iter()
+            .find(|a| a.id == id)
+            .is_some_and(|a| a.global)
+    };
+    let has_company_side = candidates.iter().any(|c| !is_baseline(&c.id));
+    let has_baseline = candidates.iter().any(|c| is_baseline(&c.id));
+    if has_company_side && has_baseline {
+        candidates
+            .into_iter()
+            .filter(|c| !is_baseline(&c.id))
+            .collect()
+    } else {
+        candidates
+    }
 }
 
 /// The note line a card parks with when the pass declined to choose.
