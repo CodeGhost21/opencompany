@@ -407,10 +407,14 @@ function Console() {
         try {
           redemption.current ??= verifyCode(client!, magicLink.company ?? config.company, magicLink.code);
           await redemption.current;
-        } catch {
+        } catch (err) {
           // A dead link is not fatal — fall through to sign-in and let them ask
-          // for another. The reason stays vague on purpose.
-          if (!cancelled) setAuth({ ready: true, failed: true });
+          // for another. It has to *say so*, though: `failed` alone only forces
+          // the form, and the form a refused link lands on is byte-identical to
+          // the one a cold visit gets, so the click reads as having done
+          // nothing at all (issue #1305). The reason stays vague about *people*
+          // and specific about the *credential* — see `magicLinkNotice`.
+          if (!cancelled) setAuth({ ready: true, failed: true, notice: magicLinkNotice(err) });
           return;
         }
       }
@@ -652,6 +656,45 @@ function hubNotice(err: unknown): string {
       return "This host isn't connected to a TinyHumans account. Sign in with a link instead.";
     default:
       return "We couldn't complete that sign-in. Try a link below.";
+  }
+}
+
+/**
+ * What to tell someone whose magic link did not redeem.
+ *
+ * The counterpart of {@link hubNotice}, and it exists for the same reason: a
+ * refused sign-in that says nothing renders the ordinary form, which is
+ * indistinguishable from the screen a cold visit gets. A link that lapsed after
+ * fifteen minutes is the *routine* outcome of clicking one out of a mailbox the
+ * next morning — not an edge case — and the person who does it has no reason to
+ * believe pressing "Email me a link" will behave any differently (#1305).
+ *
+ * Every line is about the *credential* or the *host*: "expired", "already
+ * used", "couldn't reach". None of them names an address or admits that one has
+ * an account here, so this leaks exactly as little as the silence it replaces —
+ * which is the rule the whole sign-in surface is built around, and the reason
+ * the host answers `invalid_login` to an unknown address, a lapsed code and a
+ * spent one alike. That single answer is also why the first case below has to
+ * name both causes: the console genuinely cannot tell which one happened.
+ */
+export function magicLinkNotice(err: unknown): string {
+  const api = err instanceof ApiError ? err : null;
+  // A host that cannot be reached checked nothing, so the link may well still
+  // be good. Saying it expired would send someone off to request a second one
+  // that cannot arrive either.
+  if (api?.status === 0) {
+    return "We couldn't reach this company's host, so that sign-in link wasn't checked. Try again in a moment.";
+  }
+  switch (api?.code) {
+    case "invalid_login":
+      return "That sign-in link didn't work — links expire after 15 minutes and can only be used once. Request a new one below.";
+    case "auth_mode":
+      // The company changed how it signs people in while the link sat in a
+      // mailbox. "Request a new one" would be advice for a form that is no
+      // longer on screen, so this one points at whatever replaced it.
+      return "This company doesn't sign in with email links any more. Use the sign-in shown below.";
+    default:
+      return "That sign-in link didn't work. Request a new one below.";
   }
 }
 
