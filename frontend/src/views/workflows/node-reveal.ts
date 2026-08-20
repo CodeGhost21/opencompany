@@ -21,8 +21,9 @@
 // on top of the one it is fixing.
 //
 // **What a pan costs, and why it is still the right trade.** When the graph is
-// wider than the canvas minus the panel — `ticket_pipeline` at 1440px is 1122px
-// of graph against 1224px of canvas, and the panel wants 344 of those — no
+// wider than the canvas minus the panel — `ticket_pipeline` at 1440px measures
+// 1022px of graph against 1224px of canvas, and the panel wants 344 of those,
+// so the reveal's 244px pan runs the first node 142px past the left edge — no
 // viewport at that zoom can show every node, so revealing one on the right
 // pushes the leftmost off. The two alternatives both cost more:
 //
