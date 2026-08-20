@@ -12,6 +12,7 @@ import { useTheme } from "next-themes";
 import {
   ArrowLeft,
   Bot,
+  ChevronDown,
   FlaskConical,
   History,
   LayoutGrid,
@@ -66,6 +67,14 @@ import {
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button, buttonVariants } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { WorkflowNode } from "@/components/workflow-node";
@@ -342,8 +351,21 @@ export function WorkflowsView({
   // Issue #154: what the operator is asking this run to work on. `ranWith` is
   // pinned when the run is dispatched so the result panel echoes the request the
   // shown output came from, not whatever has been typed since.
+  //
+  // Issue #1204: `request` is the DRAFT held by the "Run with input" dialog, not
+  // an implicit argument to running. It used to be a text box wired straight
+  // into `run()`'s closure, sitting open on the toolbar; taking the box off the
+  // bar without also cutting that wire would have been worse than leaving it
+  // there, because a draft typed once and then forgotten would keep riding
+  // along on every later press of Run with nothing on screen to say so. So the
+  // payload is a PARAMETER of `run()` now (see below) and this state is only
+  // ever read at the moment a dialog button is pressed. It survives the dialog
+  // closing on purpose — reopening restores what was typed, which is what makes
+  // "run it again with a tweak" one edit rather than a retype.
   const [request, setRequest] = useState("");
   const [ranWith, setRanWith] = useState("");
+  // Issue #1204: whether that dialog is up.
+  const [runInputOpen, setRunInputOpen] = useState(false);
   // Issue #1002: the roster read behind the cards' "Asked by" line, keyed to the
   // approvals of the run on screen rather than to the whole queue — so a console
   // with a run drawer closed does not fetch the roster for cards it is not
@@ -1079,7 +1101,13 @@ export function WorkflowsView({
     return byId;
   }, [indexRuns]);
 
-  const run = useCallback(async (dryRun = false) => {
+  // `input` is the trigger payload for THIS dispatch (issue #1204), handed in by
+  // whichever control fired rather than read out of `request` state. The toolbar's
+  // Run and Test run pass nothing and therefore genuinely run with no input; only
+  // the "Run with input" dialog passes its draft. That is the whole guarantee the
+  // dialog rests on: there is no way to run with a payload the operator cannot
+  // see at the moment they press the button.
+  const run = useCallback(async (dryRun = false, input = "") => {
     if (!selectedId) return;
     setStarting(true);
     // Clear the last refusal and the own-run-start watch before this attempt, so
@@ -1111,7 +1139,7 @@ export function WorkflowsView({
     setOptimistic(dryRun ? null : graph ? initialRunState(graph) : null);
     // Trimmed once here so the echoed request and the payload the host receives
     // can never disagree.
-    const asked = request.trim();
+    const asked = input.trim();
     // Issue #1007: the browser's own clock, not the host's. It is what the
     // failure panel measures against and what the optimistic history row counts
     // from, and both are on screen before the host has said anything at all.
@@ -1238,7 +1266,10 @@ export function WorkflowsView({
     } finally {
       setStarting(false);
     }
-  }, [client, company, selectedId, request, graph]);
+    // `request` is deliberately NOT a dependency (issue #1204): the payload
+    // arrives as an argument, so this callback no longer changes identity on
+    // every keystroke in the dialog.
+  }, [client, company, selectedId, graph]);
 
   /**
    * Issue #383: stop the run this view started.
@@ -1735,6 +1766,12 @@ export function WorkflowsView({
     // the newly-selected one's.
     setRunFailure(null);
     setPendingRun(null);
+    // Issue #1204: and the run-input draft, which names work for the workflow
+    // being LEFT — "the Q3 board deck" carried onto another workflow's dialog is
+    // the same category of wrong as the drawers above, and the dialog itself
+    // must not survive a switch it was opened on the other side of.
+    setRequest("");
+    setRunInputOpen(false);
     // Issue #863: the adopted run belonged to the workflow being left. Holding
     // it across the switch would keep painting one graph's trail onto another's
     // canvas the moment the two share a node id.
@@ -1801,6 +1838,30 @@ export function WorkflowsView({
   // The Run guard, derived rather than held: the request is in flight, or a run
   // we started has not settled yet.
   const running = starting || activeRunId !== null;
+
+  /**
+   * Issue #1204: dispatch from the run-input dialog.
+   *
+   * Closes first, then runs. A synchronous run holds the request open for the
+   * whole run (#528), so a dialog left up would sit over the canvas and the
+   * history rail — the two surfaces that report what is happening — for as long
+   * as the run takes.
+   *
+   * The draft is deliberately NOT cleared: the operator who ran on "Q3 board
+   * deck" and wants to run again on "Q4 board deck" should be editing two
+   * characters, not retyping the line. It is cleared when the workflow changes,
+   * where it stops being about the work in front of them.
+   */
+  const runWithInput = useCallback(
+    (dryRun: boolean) => {
+      // The buttons are disabled in these states and Enter bypasses them, so the
+      // guard is here rather than only on the controls.
+      if (!selectedId || running || loadingGraph) return;
+      setRunInputOpen(false);
+      void run(dryRun, request);
+    },
+    [selectedId, running, loadingGraph, run, request],
+  );
 
   // What the canvas actually paints, in priority order: a past run the operator
   // explicitly asked to see, else the live fold, else the optimistic frontier.
@@ -2074,34 +2135,59 @@ export function WorkflowsView({
               data-testid="workflow-detail-actions"
             >
               {/* run intent — the point of the screen, and the only filled
-                  button on it. */}
+                  control on it.
+
+                  Issue #1204: it is ONE control in two halves now, not a text
+                  box and a button. The box — "What should this run work on?" —
+                  was the widest thing on a row of nine and empty on almost every
+                  visit, so the common case (press Run) was reached past an input
+                  that the uncommon case needed. The halves invert that: Run is a
+                  click, and the payload is a click plus a dialog.
+
+                  What the second half must NOT become is a hiding place. The
+                  capability behind it is real (issue #154 — the host seeds the
+                  payload as the trigger node's item, and a first step bound to
+                  `=items` reads it), which is exactly why the draft is passed to
+                  `run()` explicitly rather than left in a closure: pressing the
+                  left half always means "no input", visibly and always. */}
               <div className="flex min-w-0 items-center gap-2">
-                <Input
-                  value={request}
-                  onChange={(e) => setRequest(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter" && selectedId && !running && !loadingGraph) {
-                      void run();
-                    }
-                  }}
-                  disabled={!selectedId || running}
-                  placeholder="What should this run work on?"
-                  aria-label="Request for this run"
-                  className="h-8 w-64 max-w-full"
-                />
-                <Button
-                  size="sm"
-                  onClick={() => void run()}
-                  disabled={!selectedId || running || loadingGraph}
-                  data-testid="workflow-run"
-                >
-                  {running ? (
-                    <Loader2 className="mr-1.5 size-4 animate-spin" />
-                  ) : (
-                    <Play className="mr-1.5 size-4" />
-                  )}
-                  Run
-                </Button>
+                <div className="flex items-center" data-testid="workflow-run-split">
+                  <Button
+                    size="sm"
+                    onClick={() => void run()}
+                    disabled={!selectedId || running || loadingGraph}
+                    data-testid="workflow-run"
+                    className="rounded-r-none"
+                  >
+                    {running ? (
+                      <Loader2 className="mr-1.5 size-4 animate-spin" />
+                    ) : (
+                      <Play className="mr-1.5 size-4" />
+                    )}
+                    Run
+                  </Button>
+                  {/* The other half. Same fill and no gap, because a detached
+                      outline button beside Run reads as a ninth control rather
+                      than as more of this one; the hairline is what says the two
+                      belong together. Icon-only, with the name carried by
+                      `sr-only` text so it is announced and so it does not widen
+                      the row back out.
+
+                      Its `disabled` predicate is Run's, copied whole and not
+                      narrowed: opening the dialog against a graph that has not
+                      loaded would offer a run that cannot be dispatched. */}
+                  <Button
+                    size="sm"
+                    onClick={() => setRunInputOpen(true)}
+                    disabled={!selectedId || running || loadingGraph}
+                    data-testid="workflow-run-with-input"
+                    className="rounded-l-none border-l border-primary-foreground/25 px-2"
+                    title="Run this workflow on something specific — a topic, a link, a question. The first step receives it."
+                  >
+                    <ChevronDown className="size-4" />
+                    <span className="sr-only">Run with input…</span>
+                  </Button>
+                </div>
                 {/* Issue #383. Present only while a run this view started is actually
                     in flight — which is knowable at all because the host now hands
                     back the run id before the run ends. Hidden once the host has told
@@ -2682,6 +2768,69 @@ export function WorkflowsView({
           onClose={() => setRunFailure(null)}
         />
       )}
+
+      {/* Issue #1204: where the toolbar's run-input box went.
+          
+          Both dispatches live here, not just Run. The box fed the toolbar's Run
+          AND its Test run, so a dialog offering only Run would have quietly
+          taken "prove this graph against a real input, without sending
+          anything" away — the rehearsal that matters most for a workflow whose
+          first step reads `=items`. */}
+      <Dialog open={runInputOpen} onOpenChange={setRunInputOpen}>
+        <DialogContent className="sm:max-w-lg" data-testid="workflow-run-input-dialog">
+          <DialogHeader>
+            <DialogTitle>Run with input</DialogTitle>
+            {/* Says what the payload DOES, which the bare placeholder never
+                did. An operator who has to guess whether their graph reads this
+                will guess wrong in both directions. */}
+            <DialogDescription>
+              What this run should work on. It is handed to the workflow&rsquo;s first
+              step, and any step bound to <code className="font-mono">=items</code>{" "}
+              reads it. Leave it empty to run the workflow as its schedule does.
+            </DialogDescription>
+          </DialogHeader>
+          <Input
+            autoFocus
+            value={request}
+            onChange={(e) => setRequest(e.target.value)}
+            onKeyDown={(e) => {
+              // Enter runs, exactly as it did from the toolbar box (#154).
+              if (e.key === "Enter") runWithInput(false);
+            }}
+            placeholder="What should this run work on?"
+            aria-label="Request for this run"
+          />
+          <DialogFooter>
+            <Button
+              variant="ghost"
+              onClick={() => setRunInputOpen(false)}
+              data-testid="workflow-run-input-cancel"
+            >
+              Cancel
+            </Button>
+            {/* Issue #542&apos;s test run, carrying the same payload. Outline
+                beside the filled Run for the same reason it is outline on the
+                toolbar: it is the rehearsal, not the act. */}
+            <Button
+              variant="outline"
+              onClick={() => runWithInput(true)}
+              disabled={!selectedId || running || loadingGraph}
+              data-testid="workflow-run-input-test-run"
+            >
+              <FlaskConical className="mr-1.5 size-4" />
+              Test run
+            </Button>
+            <Button
+              onClick={() => runWithInput(false)}
+              disabled={!selectedId || running || loadingGraph}
+              data-testid="workflow-run-input-submit"
+            >
+              <Play className="mr-1.5 size-4" />
+              Run
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <WorkflowCreateDialog
         client={client}
