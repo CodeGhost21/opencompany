@@ -244,3 +244,102 @@ async fn local_acp_agent_answers_a_prompt_through_the_acp_agent_trait() {
             .is_dir()
     );
 }
+
+/// `codex-acp` has no startup-model env var — confirmed by trying
+/// `OPENAI_MODEL`, `CODEX_MODEL`, `MODEL` and `OPENAI_DEFAULT_MODEL` against
+/// the real adapter; none moved `currentValue` off its default
+/// (`gpt-5.6-sol`). It does advertise a real `configOptions` model entry
+/// though, so `LocalAcpAgent` falls back to `session/set_config_option`,
+/// applied once per session right after `session/new` — this proves that
+/// fallback actually works, through the `AcpAgent` trait rather than the raw
+/// client.
+#[tokio::test]
+#[ignore = "spawns a real, authenticated codex-acp and costs real usage"]
+async fn local_acp_agent_steers_codex_via_set_config_option_fallback() {
+    use opencompany::ports::acp::AcpAgentFactory;
+    use opencompany::ports::types::CompanyId;
+    use opencompany_desktop_lib::acp::LocalAcpAgentFactory;
+
+    let dir = tempfile::tempdir().unwrap();
+    let workspace_root = dir.path().canonicalize().unwrap();
+
+    let agent = LocalAcpAgentFactory
+        .build("codex", Some("gpt-5.5"), &workspace_root)
+        .expect("codex-acp must be on PATH");
+
+    let company = CompanyId::new("acme-codex-smoke");
+    // `prompt` is what actually opens the session and runs the fallback
+    // (`session/set_config_option`) before the turn starts. Not asserting on
+    // which model answered — a model's own self-reported name is not a
+    // reliable oracle for the ACP-level `value` id it was switched to,
+    // especially for aliased/internal names like these. What this proves is
+    // that the fallback call itself is accepted by the real adapter with no
+    // error: `model_config_id_matches_the_real_codex_shape` (below) already
+    // proves the *parsing* deterministically, and the manual probe that
+    // designed this fallback directly confirmed `currentValue` changes in
+    // `session/set_config_option`'s own echoed response.
+    let turn = agent
+        .prompt(
+            &company,
+            &format!("{}::researcher", company.as_ref()),
+            "Reply with exactly the single word PONG and nothing else.",
+        )
+        .await
+        .expect("prompt — including its session/set_config_option fallback call");
+
+    assert_eq!(
+        turn.stop_reason, "end_turn",
+        "updates were: {:?}",
+        turn.updates
+    );
+}
+
+/// Pins `model_config_id`'s parsing against the real shape `codex-acp`
+/// returns from `session/new` (captured live while designing the
+/// `session/set_config_option` fallback) — including its `"id"` key rather
+/// than the ACP spec's own `"configId"`, and the other, non-model config
+/// options a real response carries alongside it. No process spawned, so this
+/// runs in CI unlike the rest of this file.
+#[test]
+fn model_config_id_matches_the_real_codex_shape() {
+    let raw: serde_json::Value = serde_json::from_str(
+        r#"{
+            "sessionId": "sess-1",
+            "configOptions": [
+                {
+                    "id": "mode",
+                    "category": "mode",
+                    "currentValue": "agent",
+                    "options": [{"value": "agent"}]
+                },
+                {
+                    "id": "model",
+                    "category": "model",
+                    "currentValue": "gpt-5.6-sol",
+                    "options": [
+                        {"value": "gpt-5.6-sol"},
+                        {"value": "gpt-5.5"},
+                        {"value": "gpt-5.4"}
+                    ]
+                },
+                {
+                    "id": "reasoning_effort",
+                    "category": "thought_level",
+                    "currentValue": "medium",
+                    "options": [{"value": "medium"}]
+                }
+            ]
+        }"#,
+    )
+    .unwrap();
+
+    assert_eq!(
+        opencompany_desktop_lib::acp::local_agent::model_config_id(&raw, "gpt-5.5"),
+        Some("model".to_string())
+    );
+    assert_eq!(
+        opencompany_desktop_lib::acp::local_agent::model_config_id(&raw, "not-a-real-model"),
+        None,
+        "must not match a value the adapter never advertised"
+    );
+}

@@ -74,20 +74,27 @@ reading twice.
 
 ### Model
 
-`[harness.acp].model` is a hint forwarded to the agent's own startup lever —
+`[harness.acp].model` is a hint forwarded to the agent's own model lever —
 not a credential, so it does not join `[harness.inference]`'s prohibition on
 `acp` harnesses (see [Validation](#validation)). Optional; a harness with none
 runs whatever the agent's own config or CLI default resolves to.
 
-Whether it actually does anything depends on whether this build knows a
-startup lever for that `agent` — confirmed live against the real adapters
-(issue #1245), not guessed:
+`LocalAcpAgent` reaches that lever one of two ways, confirmed live against the
+real adapters (issue #1245), not guessed — whichever this build knows for that
+`agent`:
 
 | `agent` | lever |
 |---|---|
-| `claude` | `ANTHROPIC_MODEL` |
-| `goose` | `GOOSE_MODEL` |
-| `codex` | none known yet — `model` is accepted and validated, but not injected |
+| `claude` | startup env var `ANTHROPIC_MODEL` |
+| `goose` | startup env var `GOOSE_MODEL` |
+| `codex` | no startup env var (`OPENAI_MODEL`, `CODEX_MODEL`, `MODEL` and `OPENAI_DEFAULT_MODEL` all tried, none had any effect) — instead, `session/set_config_option` right after `session/new`, using the `configOptions` entry `codex-acp` itself advertises with `category: "model"` |
+
+The `set_config_option` fallback is not codex-specific in the code — it fires
+for any agent whose startup env var this build does not know, whenever the
+fresh `session/new` response advertises a `category: "model"` option matching
+the requested value. It is per-session state, confirmed live: a second,
+independent session on the same subprocess starts back at the adapter's
+default, not the previously-set model.
 
 `transport = "local"` only, for now: the `runner` wire protocol does not carry
 `model`, so validation rejects it there rather than accepting and silently

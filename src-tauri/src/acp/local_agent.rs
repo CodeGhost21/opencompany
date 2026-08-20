@@ -41,15 +41,14 @@ use crate::acp::discovery::HARNESSES;
 
 /// Per-CLI startup model env var, confirmed live against the real adapter
 /// (issue #1245's live smoke test) — not guessed. `None` means this build has
-/// no known lever for that CLI: `model` is still accepted on the manifest,
-/// but nothing is injected, rather than silently spawning a process that
-/// ignores the setting.
+/// no known startup env var for that CLI, and [`LocalAcpAgent::session_for`]
+/// falls back to the ACP-native `session/set_config_option` path instead —
+/// also confirmed live, for `codex-acp` specifically (its `configOptions`
+/// model entry accepts a set; no env var candidate tried had any effect).
 fn model_env_var(agent: &str) -> Option<&'static str> {
     match agent {
         "claude" => Some("ANTHROPIC_MODEL"),
         "goose" => Some("GOOSE_MODEL"),
-        // codex: no confirmed startup-model env var. Buzz (block/buzz), the
-        // one other project this design is modeled on, has none either.
         _ => None,
     }
 }
@@ -60,6 +59,12 @@ pub struct LocalAcpAgent {
     command: &'static str,
     args: Vec<String>,
     env: Vec<(String, String)>,
+    /// The desired model, kept regardless of whether an env var already
+    /// carries it — [`Self::session_for`] falls back to
+    /// `session/set_config_option` when [`model_env_var`] returned `None` at
+    /// construction, so this is the only record of what was actually asked
+    /// for in that case.
+    model: Option<String>,
     /// The company's agent-workspace root (`HarnessDeps::workspace_root`).
     /// Each session roots at `workspace_root/<company>/<agent>/workspace`,
     /// mirroring `harness::built_in::build::agent_workspace` exactly, so an
@@ -92,6 +97,7 @@ impl LocalAcpAgent {
             command: def.command,
             args: def.args.iter().map(|a| a.to_string()).collect(),
             env,
+            model: model.map(str::to_string),
             workspace_root,
             client: AsyncMutex::new(None),
             sessions: AsyncMutex::new(HashMap::new()),
@@ -174,6 +180,15 @@ impl LocalAcpAgent {
     }
 
     /// This session's cached ACP `sessionId`, opening one if none exists yet.
+    ///
+    /// A fresh session is where model steering happens when no startup env
+    /// var carries it ([`model_env_var`] returned `None` for this agent):
+    /// `session/new`'s own response is inspected for a `configOptions` entry
+    /// with `category: "model"` whose options include the desired value, and
+    /// if found, `session/set_config_option` applies it before this session
+    /// is used for anything. Confirmed live to be per-session state (not
+    /// global), which is exactly the granularity wanted — a session opened
+    /// here is one (company, agent) pair for its whole life.
     async fn session_for(
         &self,
         client: &AcpClient,
@@ -184,10 +199,52 @@ impl LocalAcpAgent {
         if let Some(id) = sessions.get(session_key) {
             return Ok(id.clone());
         }
-        let id = client
-            .new_session(root)
+
+        let raw = client
+            .call(
+                "session/new",
+                serde_json::json!({ "cwd": root.display().to_string(), "mcpServers": [] }),
+            )
             .await
             .map_err(|error| OpenCompanyError::Config(format!("acp session/new: {error}")))?;
+        let id = raw["sessionId"]
+            .as_str()
+            .ok_or_else(|| {
+                OpenCompanyError::Config("acp session/new returned no sessionId".to_string())
+            })?
+            .to_string();
+
+        // `self.env` carries the model only when `new()` found a known env
+        // var for this agent — non-empty means the spawn already handled it,
+        // so the fallback below must not also fire (redundant at best, and
+        // this session's model would otherwise be decided by whichever of
+        // the two APIs the adapter honors last). No matching `config_id`
+        // falls through the same way: either an env var already carried it
+        // at spawn, or this build has no lever for this agent at all (issue
+        // #1245's documented codex gap, before this fallback existed) —
+        // either way, silently doing nothing here is correct, not a missed
+        // error.
+        if self.env.is_empty()
+            && let Some(model) = &self.model
+            && let Some(config_id) = model_config_id(&raw, model)
+        {
+            client
+                .call(
+                    "session/set_config_option",
+                    serde_json::json!({
+                        "sessionId": id,
+                        "configId": config_id,
+                        "value": model,
+                    }),
+                )
+                .await
+                .map_err(|error| {
+                    OpenCompanyError::Config(format!(
+                        "acp session/set_config_option (model `{model}`): {error}"
+                    ))
+                })?;
+        }
+
         sessions.insert(session_key.to_string(), id.clone());
         Ok(id)
     }
@@ -202,6 +259,45 @@ impl LocalAcpAgent {
             .and_then(|rest| rest.strip_prefix("::"))
             .unwrap_or(session_key)
     }
+}
+
+/// Finds the `configId` to set to reach `desired_model`, from a fresh
+/// `session/new` response's `configOptions` — the entry whose `category` is
+/// `"model"` and whose `options` include a `value` matching `desired_model`.
+/// `None` when nothing matches: either this adapter advertises no such
+/// option, or it does but not for this exact value.
+///
+/// Accepts both `configId` (the ACP spec's own name) and `id` — confirmed
+/// live that `codex-acp` emits `id`, matching the same quirk documented for
+/// `claude-agent-acp` in `harness::acp::run_turn`.
+///
+/// `pub` (not private) so `tests/acp_live_smoke.rs` can pin this parsing
+/// against a captured real response without a live spawn — the one part of
+/// the fallback that can be tested deterministically and in CI.
+pub fn model_config_id(session_new_result: &Value, desired_model: &str) -> Option<String> {
+    session_new_result["configOptions"]
+        .as_array()?
+        .iter()
+        .find_map(|opt| {
+            if opt.get("category").and_then(|c| c.as_str()) != Some("model") {
+                return None;
+            }
+            let matches = opt
+                .get("options")
+                .and_then(|o| o.as_array())
+                .is_some_and(|options| {
+                    options
+                        .iter()
+                        .any(|o| o.get("value").and_then(|v| v.as_str()) == Some(desired_model))
+                });
+            if !matches {
+                return None;
+            }
+            opt.get("configId")
+                .or_else(|| opt.get("id"))
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+        })
 }
 
 /// Translates one raw `session/update` notification into this crate's
