@@ -392,11 +392,18 @@ export function failedNodeOf(run: WorkflowRunOutcome): string | null {
  *
  * `runStates` / `elapsed` (issue #371) tint each node with what the run on
  * screen did. Both default to empty, which is the resting canvas — identical to
- * how it rendered before #371. */
+ * how it rendered before #371.
+ *
+ * `undelivered` (issue #981) is the set of `output` nodes whose report did not
+ * go out. Deliberately a THIRD argument rather than another `NodeRunState`: it
+ * is a different subsystem's verdict, taken after the engine returned, and a
+ * node in it is normally also in `runStates` as `ok` — both are true and the
+ * card renders both. See {@link undeliveredNodes} in `run-health.ts`. */
 export function layout(
   graph: WorkflowGraph,
   runStates: Record<string, NodeRunState> = {},
   elapsed: Record<string, number> = {},
+  undelivered: Set<string> = new Set(),
 ): { nodes: Node<WorkflowNodeData>[]; edges: Edge[] } {
   const depth = new Map<string, number>(graph.nodes.map((n) => [n.id, 0]));
   for (let i = 0; i < graph.nodes.length; i++) {
@@ -430,6 +437,9 @@ export function layout(
         color: meta.color,
         runState: runStates[n.id],
         elapsedMs: elapsed[n.id],
+        // `undefined` rather than `false` when it delivered fine, so a resting
+        // node's data is byte-for-byte what it was before this existed.
+        reportUndelivered: undelivered.has(n.id) || undefined,
       },
     };
   });

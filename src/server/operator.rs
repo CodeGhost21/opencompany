@@ -8003,6 +8003,24 @@ mode = "full"
             .collect()
     }
 
+    /// The authors of every journaled `AgentReply`, in order (issue #966).
+    ///
+    /// Separate from [`agent_replies`] because that one folds the author away.
+    async fn agent_reply_authors(runtime: &Arc<CompanyRuntime>) -> Vec<String> {
+        use crate::ports::types::EventSeq;
+        runtime
+            .events()
+            .read_from(runtime.id(), EventSeq::new(0), 10_000)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter_map(|s| match s.event {
+                CompanyEvent::AgentReply { agent_id, .. } => Some(agent_id),
+                _ => None,
+            })
+            .collect()
+    }
+
     fn approve_detached(id: &ApprovalId) -> Request<Body> {
         resolve_request(id, serde_json::json!({"verdict":"approve","detach":true}))
     }
@@ -8317,6 +8335,18 @@ mode = "full"
         assert!(
             replies[0].contains("approving again is safe"),
             "the notice has to say what to do about it, got {replies:?}"
+        );
+        // Issue #966, asserted on the journaled row rather than on the
+        // constructor: this drives the real approve path, so it pins that
+        // `announce_continuation_failure` *calls* the named notice. Asserting
+        // the constructor alone leaves the call site free to go back to an
+        // inline `AgentReply` authored by the operator channel — a correct
+        // system row byte-identical to one the pre-#885 defect damaged.
+        let authors = agent_reply_authors(&c.runtime).await;
+        assert_eq!(
+            authors,
+            vec![crate::ports::SYSTEM_AUTHOR.to_string()],
+            "the runtime authored this notice, so it must not be stored under its destination"
         );
     }
 }
