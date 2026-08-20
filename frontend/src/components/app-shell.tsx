@@ -50,6 +50,7 @@ import { SetupController } from "@/setup/SetupController";
 import { TourController } from "@/tour/TourController";
 import { useCompany } from "@/hooks/use-company";
 import { type AgentReplyEvent, type CompanyStreamEvent, useEvents } from "@/hooks/use-events";
+import { useLedgerNav } from "@/hooks/use-ledger-nav";
 import type { WorkspaceEvent } from "@/views/WorkspaceView";
 import { useHashView } from "@/hooks/use-hash-view";
 import { BOARD_LEDGER } from "@/lib/board-columns";
@@ -73,6 +74,7 @@ import { fromDto, type TeamMember } from "@/lib/team";
 import { agentDmThreads, defaultThreads, threadsFromDesks } from "@/lib/threads";
 import { Overview } from "@/views/Overview";
 import { CompanyView } from "@/views/company/CompanyView";
+import { ManageListsView } from "@/views/company/ManageListsView";
 import { ChatView } from "@/views/ChatView";
 import {
   channelIdForThread,
@@ -87,7 +89,7 @@ import {
 import { Conversation } from "@/views/Conversation";
 import { TeamView } from "@/views/TeamView";
 import { ApprovalsView } from "@/views/ApprovalsView";
-import { LedgersView } from "@/views/LedgersView";
+import { LedgersView, MANAGE_SEGMENT } from "@/views/LedgersView";
 import { TaskDetailRoute } from "@/views/TaskDetailRoute";
 import { InboxView } from "@/views/InboxView";
 import { MemoryView } from "@/views/MemoryView";
@@ -138,19 +140,29 @@ interface NavItem {
 // One flat list. The nav was grouped under "Operate" and "Configure" when the
 // second group held five entries; now that configuration is a section of its
 // own, a heading over two rows labelled more than it sorted.
+//
+// "Work" (issue #1284, Rule 2 of docs/spec/runtime/ledgers-console-ia.md) is
+// one static row landing on Tasks by default; every other list the company
+// holds (Goals, Decisions, whatever it declared) is reachable from a
+// switcher on `LedgersView`'s own page title, not a second nav element.
+// Three other shapes were tried and rejected first: a row per list (unusable
+// at the 12-declared-list cap — 15 list rows plus 8 other NAV entries), a
+// collapsible sidebar section (still wrong premise: a declared list is read
+// occasionally, mostly written by agents, not a surface an operator works
+// out of the way Tasks is), and a tab strip (solved scaling but taxed the
+// most-visited screen with a permanent band for lists rarely opened) — see
+// the doc for the full reasoning on each. Do not re-add any of them without
+// reading that doc first.
 const NAV: NavItem[] = [
   { view: "overview", label: "Overview", icon: LayoutDashboard },
   // Issue #311: the company's structure, and the only way in to desk
   // creation and membership since #302 unmounted the flat Desks page.
   { view: "company", label: "Company", icon: Network },
   { view: "chat", label: "Chat", icon: MessagesSquare },
-  // Everything the company records — goals, decisions, whatever axis this
-  // workspace declared, **and the task board**, which is the `tasks` ledger and
-  // renders here as its columns. There was a Tasks entry beside this one until
-  // issue #1140, showing the same records through the same component, and an
-  // operator who met their work twice had to learn which of the two was the
-  // real one. There is one.
-  { view: "ledgers", label: "Ledgers", icon: BookText },
+  // Tasks by default; every other list the company holds is one click away
+  // through the switcher on `LedgersView`'s own title. See the comment above
+  // `NAV` for why this is one row rather than one per list or a tab strip.
+  { view: "ledgers", label: "Work", icon: BookText },
   // What the company remembers, and — now that an operator can select a
   // memory engine — WHERE it remembers: the engine panel shows which driver
   // is bound, what it negotiated, and whether the boot probe reached it.
@@ -202,6 +214,7 @@ const NAV: NavItem[] = [
  * does not reproduce any of it. Drop `tasks` from this list and `useHashView`
  * discards the head *and* its sub-page, so every one of those links quietly
  * lands on Overview instead of the card it named.
+ *
  */
 const HIDDEN_VIEWS: View[] = [
   "feedback",
@@ -398,6 +411,13 @@ export function AppShell({
     },
     [navigate],
   );
+
+  // Every list this company holds — the single read `LedgersView`'s own
+  // title switcher and Manage Lists both read (issue #1284). `refresh` is
+  // handed to Manage Lists so declaring or retiring a list is visible in the
+  // switcher's menu the same render cycle, with no reload — there is no SSE
+  // event for either (see the hook's own doc comment).
+  const ledgerNav = useLedgerNav(client, company);
   const [feedbackOpen, setFeedbackOpen] = useState(false);
   /**
    * Whether the product tour should hold — first-run setup is on screen, or the
@@ -1595,14 +1615,40 @@ export function AppShell({
               onLeave={() => navigate("ledgers", BOARD_LEDGER)}
             />
           )}
-          {view === "ledgers" && (
+          {/*
+            `MANAGE_SEGMENT` is checked *here*, before `LedgersView` ever
+            mounts — not inside it (issue #1284). `LedgersView`'s own hooks
+            read and write real list rows keyed on `sub`; running that
+            machinery against a slug that names no list (`manage`, `new`)
+            would be all cost and no ledger. Manage Lists lives in Work, not
+            Company, on purpose: it is reached almost entirely from the title
+            switcher's own menu, and a route that lived under Company while
+            being opened from Work meant every visit crossed a section
+            boundary and came back. `onBack` is `history.back()`, not a fixed
+            destination, because this screen is reached from wherever a
+            list's switcher was open, not from one canonical parent.
+          */}
+          {view === "ledgers" && sub === MANAGE_SEGMENT && (
+            <ManageListsView
+              client={client}
+              company={company}
+              ledgerNav={ledgerNav}
+              onBack={() => window.history.back()}
+            />
+          )}
+          {view === "ledgers" && sub !== MANAGE_SEGMENT && (
             <LedgersView
               client={client}
               company={company}
-              // `#/ledgers/<slug>` opens that ledger. Unvalidated here, like
-              // every other sub-page: only this view knows which slugs exist,
-              // and it resolves an unknown one against the host rather than
-              // guessing.
+              // The single read the title switcher and Manage Lists share
+              // (issue #1284) — this view no longer fetches the list itself.
+              ledgers={ledgerNav.ledgers}
+              ledgersLoading={ledgerNav.loading}
+              remaining={ledgerNav.remaining}
+              // `#/ledgers/<slug>` opens that list. Unvalidated here, like
+              // every other sub-page: only this view knows which slugs
+              // exist, and it resolves an unknown one against the host
+              // rather than guessing. A bare `#/ledgers` resolves to Tasks.
               sub={sub}
               onOpenLedger={(slug) => navigate("ledgers", slug ?? undefined)}
               // A board card leaves for its own screen. The board renders
@@ -1625,6 +1671,10 @@ export function AppShell({
               // filter lands in the hash and survives a refresh and the Back
               // button, like every other sub-page.
               onReviewApprovals={(taskId) => navigate("approvals", encodeURIComponent(taskId))}
+              // The switcher's in-place wizard declared a new list — re-read
+              // the shared list so it shows up in the menu (and Manage
+              // Lists, which reads the same instance) with no reload.
+              onListsChanged={ledgerNav.refresh}
             />
           )}
           {/*

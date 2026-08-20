@@ -5,18 +5,22 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { OpenCompanyClient } from "@/api/client";
-import type { LedgerList, LedgerRead, LedgerSummary } from "@/api/ledgers";
+import type { LedgerSummary } from "@/api/ledgers";
+import type { LedgerNav } from "@/hooks/use-ledger-nav";
 
 /**
- * Issue #1216: "Retire" on the Ledgers view used to delete the whole ledger on
- * a single unconfirmed click, 8px from "Record" — unlike row deletion on the
- * same screen, which asks first.
+ * Issue #1216: "Retire" used to delete the whole ledger on a single
+ * unconfirmed click, 8px from "Record" — unlike row deletion on the same
+ * screen, which asks first.
  *
- * The assertion the issue explicitly calls for is that the retire API is NOT
+ * Issue #1284 moved Retire off the Ledgers screen and onto Manage Lists
+ * (alongside declaring a list, both now settings-style actions rather than
+ * something offered beside a list's own rows) — this file moved with it. The
+ * assertion the original issue called for is unchanged: the retire API is NOT
  * called until the confirm button is pressed, which is a claim about what the
- * DOM does across a click sequence — not something the pure helpers in
- * `api/ledgers.ts` can pin on their own. So this file renders the view, the
- * way `workflow-run-failure.test.ts` does for the same reason.
+ * DOM does across a click sequence, not something a pure helper can pin on its
+ * own — so this still renders the view, the way `workflow-run-failure.test.ts`
+ * does for the same reason.
  */
 
 const toasts = vi.hoisted(() => ({
@@ -37,7 +41,7 @@ vi.mock("sonner", () => {
   return { toast };
 });
 
-const { LedgersView } = await import("@/views/LedgersView");
+const { ManageListsView } = await import("@/views/company/ManageListsView");
 
 const LEDGER: LedgerSummary = {
   slug: "customer-promises",
@@ -54,24 +58,11 @@ const LEDGER: LedgerSummary = {
   closed: 0,
 };
 
-const LIST: LedgerList = { ledgers: [LEDGER], remaining: 3 };
-const EMPTY_LIST: LedgerList = { ledgers: [], remaining: 4 };
-const READ: LedgerRead = { ledger: LEDGER, entries: [], matched: 0 };
-
 /** A client whose retire (`del`) call is whatever the test hands it. */
 function fakeClient(del: (path: string) => Promise<unknown>): OpenCompanyClient {
-  let retired = false;
   return {
     scopeFor: (company: string | null) => `/api/v1/${company ?? "company"}`,
-    get: async (path: string) => {
-      if (path.endsWith("/ledgers")) return retired ? EMPTY_LIST : LIST;
-      return READ;
-    },
-    del: async (path: string) => {
-      const result = await del(path);
-      retired = true;
-      return result;
-    },
+    del: async (path: string) => del(path),
   } as unknown as OpenCompanyClient;
 }
 
@@ -111,21 +102,40 @@ afterEach(async () => {
   container.remove();
 });
 
-async function mount(del: (path: string) => Promise<unknown>, onOpenLedger = vi.fn()) {
-  await act(async () => {
-    root.render(
-      createElement(LedgersView, {
-        client: fakeClient(del),
-        company: "acme",
-        sub: LEDGER.slug,
-        onOpenLedger,
-      }),
-    );
+/**
+ * Mounts `ManageListsView` with a `ledgerNav` whose `refresh()` re-renders
+ * with whatever `del` has retired so far — simulating the shared hook
+ * re-reading, without pulling the real hook (and a real fetch) into this unit
+ * test. `ManageListsView` itself calls `refresh()` once on mount (so opening
+ * it always shows the current set), so this has to answer "still there" until
+ * the confirm button actually retires it, not jump straight to empty.
+ */
+async function mount(del: (path: string) => Promise<unknown>, onBack = vi.fn()) {
+  let retired = false;
+  const client = fakeClient(async (path: string) => {
+    const result = await del(path);
+    retired = true;
+    return result;
   });
-  return onOpenLedger;
+  const render = () => {
+    const ledgerNav: LedgerNav = {
+      ledgers: retired ? [] : [LEDGER],
+      faults: [],
+      remaining: 3,
+      loading: false,
+      refresh: async () => render(),
+    };
+    root.render(
+      createElement(ManageListsView, { client, company: "acme", ledgerNav, onBack }),
+    );
+  };
+  await act(async () => {
+    render();
+  });
+  return onBack;
 }
 
-describe("Retire asks before it deletes a ledger (issue #1216)", () => {
+describe("Retire asks before it deletes a list (issue #1216)", () => {
   it("opens a confirm dialog on click and does not call the retire API", async () => {
     const del = vi.fn(async (_path: string) => undefined);
     await mount(del);
@@ -162,22 +172,21 @@ describe("Retire asks before it deletes a ledger (issue #1216)", () => {
 
   it("only calls the retire API once the confirm button is pressed", async () => {
     const del = vi.fn(async (_path: string) => undefined);
-    const onOpenLedger = await mount(del);
+    await mount(del);
 
     await act(async () => {
       button("Retire").click();
     });
     await act(async () => {
-      button("Retire ledger").click();
+      button("Retire list").click();
     });
 
     expect(del).toHaveBeenCalledTimes(1);
     expect(del.mock.calls[0][0]).toContain(`/ledgers/${LEDGER.slug}`);
     expect(toasts.success).toHaveBeenCalledWith(
-      expect.stringContaining(`Retired ${LEDGER.slug}`),
+      expect.stringContaining(`Retired ${LEDGER.title}`),
     );
-    // The address named this ledger; it must stop naming it once retired
-    // rather than keep pointing at a dead slug (issue #1216).
-    expect(onOpenLedger).toHaveBeenCalledWith(null);
+    // The list is gone from the shared read once `refresh()` lands.
+    expect(document.body.textContent).not.toContain(LEDGER.title);
   });
 });
