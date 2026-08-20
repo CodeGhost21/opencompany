@@ -55,9 +55,9 @@ A concrete before/after for the strings that do move:
 | "This company has no ledgers yet." | "This company has no lists yet." |
 | "Rows here are opened elsewhere" banner | unchanged in substance, reworded off "ledger" |
 
-## Rule 2: one nav row, a Tasks-hero page, every other list a tab
+## Rule 2: one nav row, a Tasks-hero page, a switcher on its own title
 
-This rule went through three drafts before landing; the first two are kept
+This rule went through four drafts before landing; the first three are kept
 below because the reasoning that ruled them out is the part worth not
 re-litigating.
 
@@ -100,54 +100,104 @@ cards that said nothing about what was in them — was never "not enough nav
 rows"; it was "the one existing entry point told you nothing useful before
 you clicked."
 
-### What ships: one nav row, Tasks as the hero, everything else a tab
+### Draft 3 (rejected): a tab strip
 
-`NAV` keeps exactly the one row it always had for this surface, relabeled
-**"Work"** (see the label discussion below) rather than "Ledgers". Clicking it
-opens a single screen shaped like the board always was — a tab strip across
-the top, Tasks first and selected by default, one tab per other list the
-company holds, each tab carrying its own open count so the strip is worth
-glancing at before clicking anything:
+The third cut kept one nav row, relabeled "Work", opening a single screen with
+Tasks first and selected by default and every other list as a tab beside it —
+`[ Tasks 12 ] [ Goals 3 ] [ Decisions 1 ] [More▾]` across the top, tabs that
+did not fit the measured width collapsing behind a "More" menu.
+
+This was built, tested, and verified at the 12-declared-list cap (the strip
+degraded correctly, in both themes, at both a normal and a narrow viewport) —
+and still replaced before it shipped. It solved scaling honestly, at the cost
+of a permanent new band across the top of a screen an operator opens
+constantly: every visit to Tasks now paid for the existence of eleven other
+lists it does not care about that day, in vertical space, even when nothing
+overflowed. A control that pays a fixed cost on the operator's *most-visited*
+screen so that *occasionally-visited* lists are one click away is optimizing
+for the wrong side of that trade.
+
+### What ships: the switcher lives on the page's own title
+
+Instead of adding a band above the page, the page's own `<h1>` becomes the
+control: `Tasks ▾`, with the chevron the only visual signal that it is
+interactive rather than decoration. Clicking it opens a menu listing every
+list the company holds — Tasks included, marked as the current one — each
+with its own open count:
 
 ```
-┌ Work ──────────────────────────────────────────┐
-│ [ Tasks 12 ] [ Goals 3 ] [ Decisions 1 ] [More▾]│
-├──────────────────────────────────────────────────┤
-│  the selected tab's board or list, exactly as    │
-│  LedgersView already renders it                  │
-└──────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────┐
+│  Tasks ▾                          [+ Add task]  │
+│  The company's work board…                      │
+│  [ search ]                                      │
+│  [ board ]                                       │
+└────────────────────────────────────────────────┘
+        ┌──────────────────┐
+        │ ✓ Tasks       12 │
+        │   Goals        3 │
+        │   Decisions    1 │
+        │ ─────────────────│
+        │ + New list        │
+        │   Manage lists    │
+        └──────────────────┘
 ```
 
-This keeps the one property both earlier drafts were chasing — opening any
-list is one click, direct, never through a picker of cards that says
-nothing — while paying a **fixed** nav cost (one row) regardless of whether a
-company holds 3 lists or 15. The tab strip absorbs what scaling cost there is,
-and it is built to: tabs that do not fit the available width collapse behind
-a **"More ▾"** menu computed from measured widths, not a hardcoded count, so
-the strip degrades the same way at a narrow viewport as it does at the
-12-declared-list cap. See the implementation plan for the measurement
-approach.
+This adds **no new element** to the page — the title was always going to be
+there — and it costs the operator **one click** to reach any other list
+(open the menu, pick one) against the tab strip's two-to-three (find the tab,
+possibly open "More", pick one), while scaling identically past any width a
+strip could run out of: the menu is a list, and a list scrolls. It also
+naturally answers what a tab strip and a flat "go elsewhere" button both get
+slightly wrong — a switcher's menu includes *where you already are*, marked,
+rather than only offering somewhere else to go.
 
-**Why "Work" as the label.** It cannot say "Ledgers" (Rule 1), it cannot
-imply the surface holds only Tasks (it also holds Goals, Decisions, and
-whatever the company declared), and it cannot bury the word "Tasks" so deep an
-operator hunting for the board cannot find it by scanning nav labels — Tasks
-is the first tab, on screen the instant this row is clicked, with zero further
-clicks. "Work" reads as the neutral container that is genuinely true of
-every tab under it: the board *is* "the company's work board" already, in
-its own screen's copy, and Goals/Decisions/whatever a company declares are
-just as fairly described as records of the company's work as Tasks is.
+**Open counts stay in the menu**, for the same reason they were on the tabs:
+without them, opening the switcher is a bare list of names, and a menu with
+nothing to weigh before clicking is barely better than the picker-of-cards
+Draft 1 and 2 were both trying to get away from.
 
-**Routing.** `#/ledgers/<slug>` is unchanged — it always could name any list,
-tab or not — and the tab strip is a rendering of the same address space, not
-a new one. A bare `#/ledgers` (the nav row's own address, and what a fresh
-click on it produces) resolves to the Tasks tab; `#/ledgers/<slug>` opens
-directly on that list's tab, so a deep link to Goals lands on Goals rather
-than on Tasks with an extra click to get there. `#/tasks/<id>` — the card
-detail page, the one address issue #1140 kept alive when the standalone Tasks
-page was retired — is untouched: it is a different route entirely (`view:
-"tasks"`, not `"ledgers"`), reached from chat, an approval card, or a
-workflow row exactly as before, and this redesign does not touch it.
+**`+ New list` and `Manage lists` sit at the foot of the menu**, after a
+separator — the same two actions Rule 3 already gives their own settings
+surface, reachable now from wherever the operator happens to be looking at a
+list rather than only from the Company page.
+
+**Why "Tasks" and not "Work" now.** The tab-strip draft needed a
+Ledger-free, Tasks-agnostic nav label because the nav row and the hero
+content were two different things wearing one name. A switcher removes that
+tension: the page's title is always exactly what is on screen, so it is
+allowed to say "Tasks" — the default and by far the most common state — and
+change to "Goals" the moment that is what is showing. `NAV`'s own row keeps
+whatever label gets an operator here in the first place (kept as "Work", not
+reverted, so the sidebar and the address bar do not have to agree on a
+running title); the page's `<h1>` is a different, more honest thing.
+
+**Routing is exactly what Draft 3 already established, unchanged again.**
+`#/ledgers/<slug>` names any list; a bare `#/ledgers` resolves to Tasks;
+`#/ledgers/<slug>` opens directly on that list, deep link or not; back/forward
+and reload all work because the switcher's only side effect is the same
+`navigate()` every other address in this console already uses. `#/tasks/<id>`
+— the card detail page kept alive since issue #1140 — is a different route
+entirely and this redesign has never touched it, draft after draft.
+
+**Furniture trimmed while rebuilding the header.** The pre-switcher page
+stacked title → purpose → `Renders into derived/<NAME>.md` → a lock notice
+naming the tool calls that write a native list (`spawn_task`, `assign_task`)
+→ search → the board — six bands before the thing an operator opened the
+page for. The derived-file path and the tool-name notice are accurate but
+developer/agent-facing detail, not something an operator reads on a screen
+they open constantly; both moved behind a small disclosure next to the
+title rather than being deleted, so the information is still one click away
+for whoever is debugging a derived file or wiring a manifest.
+
+**What happened to the measured-overflow work.** Draft 3's `lib/overflow-
+tabs.ts` (the pure "how many tabs fit" decision) and `hooks/use-overflow-
+tabs.ts` (its `ResizeObserver`-based measurement) existed to solve a problem
+a dropdown does not have — fitting items into a bounded strip width — and
+neither is consumed by what shipped. Removed with it, rather than kept on a
+"might be useful later" basis: unused measurement code with no caller is a
+maintenance cost with no offsetting benefit, and the reasoning for *why* it
+does not apply here is preserved in this paragraph, not in a comment on dead
+code nobody will read next to the code that replaced it.
 
 ## Rule 3: declaring a list moves out of the main nav
 

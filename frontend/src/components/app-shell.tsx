@@ -72,7 +72,7 @@ import { writeLastChannel } from "@/lib/last-channel";
 import { fromDto, type TeamMember } from "@/lib/team";
 import { agentDmThreads, defaultThreads, threadsFromDesks } from "@/lib/threads";
 import { Overview } from "@/views/Overview";
-import { CompanyView } from "@/views/company/CompanyView";
+import { CompanyView, LISTS_SEGMENT } from "@/views/company/CompanyView";
 import { ChatView } from "@/views/ChatView";
 import {
   channelIdForThread,
@@ -87,7 +87,7 @@ import {
 import { Conversation } from "@/views/Conversation";
 import { TeamView } from "@/views/TeamView";
 import { ApprovalsView } from "@/views/ApprovalsView";
-import { WorkView } from "@/views/WorkView";
+import { LedgersView } from "@/views/LedgersView";
 import { TaskDetailRoute } from "@/views/TaskDetailRoute";
 import { InboxView } from "@/views/InboxView";
 import { MemoryView } from "@/views/MemoryView";
@@ -140,23 +140,26 @@ interface NavItem {
 // own, a heading over two rows labelled more than it sorted.
 //
 // "Work" (issue #1284, Rule 2 of docs/spec/runtime/ledgers-console-ia.md) is
-// one static row for every list the company holds — Tasks (the hero tab,
-// selected by default) plus Goals, Decisions and whatever it declared, each a
-// tab inside `WorkView`. Two other shapes were tried and rejected first: a
-// row per list (unusable at the 12-declared-list cap — 15 list rows plus 8
-// other NAV entries) and a collapsible sidebar section (still wrong: a
-// declared list is read occasionally, mostly written by agents, not a
-// surface an operator works out of the way Tasks is — see the doc for the
-// full reasoning). Do not re-add either without reading that doc first.
+// one static row landing on Tasks by default; every other list the company
+// holds (Goals, Decisions, whatever it declared) is reachable from a
+// switcher on `LedgersView`'s own page title, not a second nav element.
+// Three other shapes were tried and rejected first: a row per list (unusable
+// at the 12-declared-list cap — 15 list rows plus 8 other NAV entries), a
+// collapsible sidebar section (still wrong premise: a declared list is read
+// occasionally, mostly written by agents, not a surface an operator works
+// out of the way Tasks is), and a tab strip (solved scaling but taxed the
+// most-visited screen with a permanent band for lists rarely opened) — see
+// the doc for the full reasoning on each. Do not re-add any of them without
+// reading that doc first.
 const NAV: NavItem[] = [
   { view: "overview", label: "Overview", icon: LayoutDashboard },
   // Issue #311: the company's structure, and the only way in to desk
   // creation and membership since #302 unmounted the flat Desks page.
   { view: "company", label: "Company", icon: Network },
   { view: "chat", label: "Chat", icon: MessagesSquare },
-  // Tasks (the dispatch queue) plus every other list the company holds —
-  // Goals, Decisions, whatever it declared — as tabs inside one screen. See
-  // the comment above `NAV` for why this is one row rather than one per list.
+  // Tasks by default; every other list the company holds is one click away
+  // through the switcher on `LedgersView`'s own title. See the comment above
+  // `NAV` for why this is one row rather than one per list or a tab strip.
   { view: "ledgers", label: "Work", icon: BookText },
   // What the company remembers, and — now that an operator can select a
   // memory engine — WHERE it remembers: the engine panel shows which driver
@@ -407,11 +410,11 @@ export function AppShell({
     [navigate],
   );
 
-  // Every list this company holds — the single read `WorkView`'s tab strip
-  // and Manage Lists both read (issue #1284). `refresh` is handed to Manage
-  // Lists so declaring or retiring a list is visible in the tab strip the
-  // same render cycle, with no reload — there is no SSE event for either
-  // (see the hook's own doc comment).
+  // Every list this company holds — the single read `LedgersView`'s own
+  // title switcher and Manage Lists both read (issue #1284). `refresh` is
+  // handed to Manage Lists so declaring or retiring a list is visible in the
+  // switcher's menu the same render cycle, with no reload — there is no SSE
+  // event for either (see the hook's own doc comment).
   const ledgerNav = useLedgerNav(client, company);
   const [feedbackOpen, setFeedbackOpen] = useState(false);
   /**
@@ -1583,18 +1586,17 @@ export function AppShell({
             />
           )}
           {view === "ledgers" && (
-            <WorkView
+            <LedgersView
               client={client}
               company={company}
-              // The single read the tab strip and Manage Lists share (issue
-              // #1284) — this view no longer fetches the list itself.
+              // The single read the title switcher and Manage Lists share
+              // (issue #1284) — this view no longer fetches the list itself.
               ledgers={ledgerNav.ledgers}
               ledgersLoading={ledgerNav.loading}
-              // `#/ledgers/<slug>` opens that list's tab. Unvalidated here,
-              // like every other sub-page: only this view knows which slugs
+              // `#/ledgers/<slug>` opens that list. Unvalidated here, like
+              // every other sub-page: only this view knows which slugs
               // exist, and it resolves an unknown one against the host
-              // rather than guessing. A bare `#/ledgers` resolves to Tasks —
-              // see `WorkView`.
+              // rather than guessing. A bare `#/ledgers` resolves to Tasks.
               sub={sub}
               onOpenLedger={(slug) => navigate("ledgers", slug ?? undefined)}
               // A board card leaves for its own screen. The board renders
@@ -1617,6 +1619,11 @@ export function AppShell({
               // filter lands in the hash and survives a refresh and the Back
               // button, like every other sub-page.
               onReviewApprovals={(taskId) => navigate("approvals", encodeURIComponent(taskId))}
+              // The title switcher's "New list" / "Manage lists" menu items
+              // (issue #1284) — the same settings surface Rule 3 already
+              // gives Company → Manage Lists, reached from wherever the
+              // operator happens to be looking at a list.
+              onManageLists={() => navigate("company", LISTS_SEGMENT)}
             />
           )}
           {/*

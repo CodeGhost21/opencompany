@@ -8,8 +8,8 @@ import { expect, test, type Page } from "@playwright/test";
  * drives the real replacement against a live host: Company → Manage lists →
  * New list → the four plain-language steps and a review → Create, then
  * confirms the result is a real, retireable list — reachable both from Manage
- * Lists and as its own tab on the Work screen (`work-tabs.spec.ts` covers the
- * tab strip itself) — and that retiring it asks first, the same
+ * Lists and as an entry in the title switcher's menu (`list-switcher.spec.ts`
+ * covers the switcher itself) — and that retiring it asks first, the same
  * confirm-before-destroy assertion `ledger-retire-confirm.test.ts` makes at
  * unit level.
  */
@@ -82,9 +82,9 @@ test("the wizard declares a real list, which appears in Manage Lists and the sid
   await expect(page.getByText(/open → closed/)).toBeVisible();
   await page.getByRole("button", { name: "Create list" }).click();
 
-  // Once the list exists, its title is on screen twice once the Work tab
-  // strip is visited too (the Manage Lists card and the tab's own accessible
-  // name), so `main` scopes every check here to "on this page". A plain
+  // Once the list exists, its title is on screen more than once once the
+  // switcher is visited too (the Manage Lists card and the switcher's own
+  // menu item), so `main` scopes every check here to "on this page". A plain
   // element query (`page.locator("main")`), not `getByRole("main")`: the
   // retire confirm in the next test opens an AlertDialog that inerts the
   // rest of the page for accessibility, pruning `<main>` from the
@@ -100,11 +100,13 @@ test("the wizard declares a real list, which appears in Manage Lists and the sid
     });
     await expect(main.getByText(title)).toBeVisible({ timeout: 15_000 });
 
-    // And it is a live tab on Work the moment it exists (issue #1284's core
-    // claim: no list is more than one click away, direct, no picker).
+    // And it is a live entry in the switcher's menu the moment it exists
+    // (issue #1284's core claim: no list is more than one click away,
+    // direct, no picker).
     await page.getByTestId("lists-breadcrumb-company").click();
     await page.locator('[data-tour="nav-ledgers"]').getByRole("button").click();
-    await expect(page.getByTestId(`work-tab-${slug}`)).toBeVisible({ timeout: 15_000 });
+    await page.getByTestId("list-switcher-trigger").click();
+    await expect(page.getByTestId(`list-switcher-${slug}`)).toBeVisible({ timeout: 15_000 });
   } finally {
     await request.delete(`${API}/ledgers/${slug}`);
   }
@@ -148,12 +150,14 @@ test("retiring a declared list asks before it deletes, then removes it everywher
     await openManageLists(page);
     await expect(main.getByText(title)).toBeVisible({ timeout: 15_000 });
 
-    // Confirm it is a live tab first — Manage Lists and Work read the same
-    // shared list, so declaring it (via the API seed above) already made it
-    // one before this test ever opened the retire confirm.
+    // Confirm it is a live switcher entry first — Manage Lists and the
+    // switcher read the same shared list, so declaring it (via the API seed
+    // above) already made it one before this test ever opened the retire
+    // confirm.
     await page.locator('[data-tour="nav-ledgers"]').getByRole("button").click();
-    const workTab = page.getByTestId(`work-tab-${slug}`);
-    await expect(workTab).toBeVisible({ timeout: 15_000 });
+    await page.getByTestId("list-switcher-trigger").click();
+    await expect(page.getByTestId(`list-switcher-${slug}`)).toBeVisible({ timeout: 15_000 });
+    await page.keyboard.press("Escape");
     await page.locator('[data-tour="nav-company"]').getByRole("button").click();
     await page.getByTestId("company-manage-lists").click();
 
@@ -175,9 +179,10 @@ test("retiring a declared list asks before it deletes, then removes it everywher
     await confirm.click();
     await expect(main.getByText(title)).toHaveCount(0, { timeout: 15_000 });
 
-    // And it is gone from Work's tab strip too, with no reload.
+    // And it is gone from the switcher's menu too, with no reload.
     await page.locator('[data-tour="nav-ledgers"]').getByRole("button").click();
-    await expect(page.getByTestId(`work-tab-${slug}`)).toHaveCount(0, { timeout: 15_000 });
+    await page.getByTestId("list-switcher-trigger").click();
+    await expect(page.getByTestId(`list-switcher-${slug}`)).toHaveCount(0, { timeout: 15_000 });
   } finally {
     // Idempotent: the happy path above already retired it. A failure partway
     // through must not leave this run's fixture for the next run to collide

@@ -46,7 +46,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
+  Check,
   CheckCircle2,
+  ChevronDown,
   FileText,
   Columns3,
   Loader2,
@@ -92,6 +94,13 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import {
   Dialog,
   DialogContent,
@@ -175,6 +184,13 @@ interface Props {
   now?: number;
   /** Opens the Approvals page filtered to one card (issue #883). */
   onReviewApprovals?: (taskId: string) => void;
+  /**
+   * Opens Manage Lists (`#/company/lists`) — where a list is declared and
+   * retired (Rule 3, issue #1284). Reached from the "New list" / "Manage
+   * lists" items at the foot of the title switcher's menu, so declaring one
+   * is one click from wherever an operator is already looking at a list.
+   */
+  onManageLists?: () => void;
 }
 
 /**
@@ -207,6 +223,7 @@ export function LedgersView({
   approvals = EMPTY_APPROVALS,
   now,
   onReviewApprovals,
+  onManageLists,
 }: Props) {
   const [read, setRead] = useState<LedgerRead | null>(null);
   const [reading, setReading] = useState(false);
@@ -254,12 +271,14 @@ export function LedgersView({
     [ledgers, sub],
   );
 
-  // A bare `#/ledgers` (no slug — a hand-typed or bookmarked address) lands on
-  // the first list once the read lands, since there is no in-page picker left
-  // to choose one from (issue #1284: every list is a sidebar row instead).
+  // A bare `#/ledgers` (no slug — the nav row's own address, a hand-typed
+  // one, or a bookmark) lands on Tasks, not "whichever list happened to load
+  // first" — Tasks is the hero content this screen defaults to (issue
+  // #1284), and the switcher on the title is what reaches everything else.
   useEffect(() => {
     if (!sub && !ledgersLoading && ledgers.length > 0) {
-      onOpenLedger?.(ledgers[0].slug);
+      const board = ledgers.find((held) => held.slug === BOARD_LEDGER);
+      onOpenLedger?.(board?.slug ?? ledgers[0].slug);
     }
   }, [sub, ledgersLoading, ledgers, onOpenLedger]);
 
@@ -548,14 +567,82 @@ export function LedgersView({
 
   return (
     <div className="flex h-full min-h-0 flex-col gap-4 p-6">
-      <header className="flex flex-wrap items-center gap-3">
-        <div className="flex-1 min-w-[16rem]">
-          <h1 className="text-xl font-semibold">{ledger?.title ?? "Not found"}</h1>
+      <header className="flex flex-wrap items-start gap-3">
+        <div className="min-w-[16rem] flex-1 space-y-1">
+          {/* The page's own title is the switcher (issue #1284): no new
+              element added, one click to any other list, and the menu
+              includes where you already are rather than only offering
+              somewhere else to go. Still a real `<h1>` — the interactive
+              affordance is the `<button>` inside it, not the heading itself,
+              so a screen reader still announces "heading level 1: Goals"
+              rather than losing the page's landmark structure to a button. */}
+          <h1 className="text-xl font-semibold">
+            <DropdownMenu>
+              <DropdownMenuTrigger
+                render={
+                  <button
+                    type="button"
+                    data-testid="list-switcher-trigger"
+                    className="group -ml-1 flex items-center gap-1 rounded-md px-1 py-0.5 outline-none hover:bg-accent/50 focus-visible:ring-2 focus-visible:ring-ring"
+                  >
+                    {ledger?.title ?? "Not found"}
+                    <ChevronDown className="size-4 shrink-0 text-muted-foreground transition-transform group-data-[popup-open]:rotate-180" />
+                  </button>
+                }
+              />
+              <DropdownMenuContent align="start" className="max-h-[60vh] w-56 overflow-y-auto">
+                {ledgers.map((held) => (
+                  <DropdownMenuItem
+                    key={held.slug}
+                    data-testid={`list-switcher-${held.slug}`}
+                    onClick={() => onOpenLedger?.(held.slug)}
+                  >
+                    <Check
+                      className={cn(
+                        "size-4",
+                        held.slug === ledger?.slug ? "opacity-100" : "opacity-0",
+                      )}
+                    />
+                    <span className="flex-1 truncate">{held.title}</span>
+                    {held.open > 0 && (
+                      <span className="text-xs text-muted-foreground">{held.open}</span>
+                    )}
+                  </DropdownMenuItem>
+                ))}
+                <DropdownMenuSeparator />
+                <DropdownMenuItem data-testid="list-switcher-new" onClick={() => onManageLists?.()}>
+                  <Plus className="size-4" />
+                  New list
+                </DropdownMenuItem>
+                <DropdownMenuItem data-testid="list-switcher-manage" onClick={() => onManageLists?.()}>
+                  Manage lists
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          </h1>
           <p className="text-sm text-muted-foreground">
             {ledger
               ? ledger.purpose
-              : "This list does not exist, or was retired. Pick another from the sidebar."}
+              : "This list does not exist, or was retired. Pick another from the title menu."}
           </p>
+          {ledger && (
+            <details className="text-xs text-muted-foreground">
+              <summary className="cursor-pointer select-none">Details</summary>
+              <div className="mt-1 space-y-1">
+                <p>
+                  Renders into <code>{ledger.derived}</code>
+                </p>
+                {!isWritable(ledger) && (
+                  <p className="flex items-start gap-1.5">
+                    <Lock className="mt-0.5 size-3 shrink-0" />
+                    Rows here are opened elsewhere: {ledger.writtenBy}. You can
+                    still move one between columns — that goes through the
+                    board, which is what makes it start work.
+                  </p>
+                )}
+              </div>
+            </details>
+          )}
         </div>
         <Button
           variant="outline"
@@ -583,21 +670,6 @@ export function LedgersView({
         <section className="flex min-h-0 min-w-0 flex-1 flex-col gap-3">
           {!ledger ? null : (
             <>
-              <p className="text-xs text-muted-foreground">
-                Renders into <code>{ledger.derived}</code>
-              </p>
-
-              {!isWritable(ledger) && (
-                <Alert>
-                  <Lock className="size-4" />
-                  <AlertDescription>
-                    Rows here are opened elsewhere: {ledger.writtenBy}. You can
-                    still move one between columns — that goes through the board,
-                    which is what makes it start work.
-                  </AlertDescription>
-                </Alert>
-              )}
-
               <div className="flex flex-wrap items-center gap-2">
                 <div className="relative min-w-[12rem] flex-1">
                   <Search className="pointer-events-none absolute left-2 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
