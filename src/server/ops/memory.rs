@@ -462,8 +462,19 @@ async fn delete_fact(
         // Reap the mirrored context chunk so recall stops serving a fact the
         // operator just deleted. Best-effort: the fact row is already gone,
         // and a reap failure leaves only the pre-#1290 status quo (a stale
-        // mirror), which must not turn the successful delete into an error.
-        let _ = reap_fact_mirror(company.runtime.context.as_ref(), company.id(), &fact_id).await;
+        // mirror), which must not turn the successful delete into an error —
+        // but it must be visible, because agents keep recalling the survivor
+        // while the Brain view shows the fact gone.
+        if let Err(err) =
+            reap_fact_mirror(company.runtime.context.as_ref(), company.id(), &fact_id).await
+        {
+            tracing::warn!(
+                fact_id = %fact_id,
+                error = %err,
+                "fact deleted but its context mirror could not be reaped; \
+                 recall may keep serving it until a retry or #1300's reaper"
+            );
+        }
         // Journal the operator deletion to the event log (audit trail).
         company
             .runtime
@@ -499,7 +510,7 @@ pub(crate) async fn reap_fact_mirror(
     company: &crate::ports::CompanyId,
     fact_id: &str,
 ) -> crate::Result<()> {
-    let mirror_label = format!("operator-fact/{fact_id}");
+    let mirror_label = format!("{OPERATOR_FACT_PREFIX}/{fact_id}");
     let all = context.list(company, "").await?;
     for meta in all.iter().filter(|m| m.label == mirror_label) {
         let shared = all

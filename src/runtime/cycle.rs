@@ -2273,8 +2273,9 @@ struct CycleHostImpl<'a> {
     /// exactly the pre-#435 behaviour of answering in the channel.
     thread_parent: Option<EventSeq>,
     /// Whether this cycle was triggered by content that arrived from OUTSIDE —
-    /// a `WebhookReceived` in its trigger batch (a channel message, an email,
-    /// a third-party callback). Computed once, like `task_id`. A brain-chosen
+    /// a `WebhookReceived` (a channel message, an email, a third-party
+    /// callback) or an `A2aTaskReceived` (a remote agent's payload) in its
+    /// trigger batch. Computed once, like `task_id`. A brain-chosen
     /// `ContextOp::Put` in such a cycle can be (and on the medulla path
     /// routinely is) the raw inbound payload echoed back, so the write goes
     /// through the taint-stamping inbound port instead of the internal one
@@ -5458,12 +5459,13 @@ mod test {
         assert!(recipient_is_established(&rt, "X@EXT.COM").await);
     }
 
-    /// Issue #1113: the trigger boundary, named event by event. Only a
-    /// webhook (external content) makes a cycle external; the company's own
-    /// machinery — operator speech, dispatches, schedule fires — stays
-    /// Internal, per the operator-facts authorship precedent.
+    /// Issue #1113: the trigger boundary, named event by event. Outside
+    /// content — a webhook here, an A2A task in the sibling test — makes a
+    /// cycle external; the company's own machinery — operator speech,
+    /// payments, dispatches, schedule fires — stays Internal, per the
+    /// operator-facts authorship precedent.
     #[test]
-    fn only_webhooks_make_a_cycle_external() {
+    fn outside_content_makes_a_cycle_external_and_own_machinery_does_not() {
         use crate::ports::types::Actor;
         let webhook = CompanyEvent::WebhookReceived {
             channel: "telegram".into(),
@@ -5570,6 +5572,130 @@ mod test {
                 .collect::<Vec<_>>(),
             ["probe/cyc-ext"],
             "the external cycle writes the inbound port, and only it"
+        );
+    }
+
+    /// The same routing guarantee through `with_memory_overlay`: the overlay
+    /// carries the inbound port, and dropping it in the builder was the break
+    /// that once left the whole firewall dead (issue #1113). An external
+    /// cycle on an overlay-built runtime must still write the taint-stamping
+    /// store.
+    #[tokio::test]
+    async fn overlay_built_runtimes_route_external_puts_through_the_inbound_port() {
+        use crate::ports::ContextStore;
+        use crate::store::{FsContextStore, FsMemoryStore, MemoryOverlay};
+
+        let home_dir = tmp_home();
+        let plain_dir = tempfile::tempdir().unwrap();
+        let inbound_dir = tempfile::tempdir().unwrap();
+        let plain: Arc<dyn ContextStore> =
+            Arc::new(FsContextStore::new(plain_dir.path().to_path_buf()));
+        let inbound: Arc<dyn ContextStore> =
+            Arc::new(FsContextStore::new(inbound_dir.path().to_path_buf()));
+        let memory_dir = tempfile::tempdir().unwrap();
+        let overlay = MemoryOverlay::test_with_ports(
+            Arc::new(FsMemoryStore::new(memory_dir.path().to_path_buf())),
+            plain.clone(),
+            Some(inbound.clone()),
+        );
+        let rt = RuntimeBuilder::new(home_dir.path().to_path_buf(), manifest("full"))
+            .with_memory_overlay(&overlay)
+            .build()
+            .await
+            .unwrap();
+
+        let host = CycleHostImpl::new(
+            rt.id().clone(),
+            "cyc-overlay-ext".into(),
+            &rt,
+            None,
+            true,
+            ApprovalConversation::default(),
+        );
+        host.context_op(ContextOp::Put(crate::ports::types::ContextChunk {
+            label: "probe/overlay".into(),
+            body: "external body".into(),
+        }))
+        .await
+        .unwrap();
+
+        let company = rt.id().clone();
+        assert_eq!(
+            inbound
+                .list(&company, "probe/")
+                .await
+                .unwrap()
+                .iter()
+                .map(|m| m.label.as_str())
+                .collect::<Vec<_>>(),
+            ["probe/overlay"],
+            "the overlay's inbound port receives the external cycle's put"
+        );
+        assert!(
+            plain.list(&company, "probe/").await.unwrap().is_empty(),
+            "the plain port must not see the external put"
+        );
+    }
+
+    /// And through `RuntimeHandover`: a successor runtime adopts the
+    /// predecessor's inbound port, so an external cycle after a live swap
+    /// still writes taint-stamped. A handover that dropped the port would
+    /// silently revert every post-swap external put to internal trust.
+    #[tokio::test]
+    async fn handover_preserves_the_inbound_port_for_external_puts() {
+        use crate::ports::ContextStore;
+        use crate::store::FsContextStore;
+
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
+        let plain_dir = tempfile::tempdir().unwrap();
+        let inbound_dir = tempfile::tempdir().unwrap();
+        let plain: Arc<dyn ContextStore> =
+            Arc::new(FsContextStore::new(plain_dir.path().to_path_buf()));
+        let inbound: Arc<dyn ContextStore> =
+            Arc::new(FsContextStore::new(inbound_dir.path().to_path_buf()));
+        let first = RuntimeBuilder::new(home.clone(), manifest("full"))
+            .with_context(plain.clone())
+            .with_inbound_context(inbound.clone())
+            .build()
+            .await
+            .unwrap();
+        let successor = RuntimeBuilder::new(home, manifest("full"))
+            .with_handover(first.handover())
+            .build()
+            .await
+            .unwrap();
+
+        let host = CycleHostImpl::new(
+            successor.id().clone(),
+            "cyc-swap-ext".into(),
+            &successor,
+            None,
+            true,
+            ApprovalConversation::default(),
+        );
+        host.context_op(ContextOp::Put(crate::ports::types::ContextChunk {
+            label: "probe/swap".into(),
+            body: "external body".into(),
+        }))
+        .await
+        .unwrap();
+
+        let company = successor.id().clone();
+        assert_eq!(
+            inbound
+                .list(&company, "probe/")
+                .await
+                .unwrap()
+                .iter()
+                .map(|m| m.label.as_str())
+                .collect::<Vec<_>>(),
+            ["probe/swap"],
+            "the successor's external cycle writes the inherited inbound port"
+        );
+        assert!(
+            plain.list(&company, "probe/").await.unwrap().is_empty(),
+            "the successor's plain port must not see the external put"
         );
     }
 

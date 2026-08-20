@@ -384,6 +384,17 @@ impl Tool for MemoryForgetTool {
             .filter(|m| m.addr.as_ref() == addr)
             .map(|m| m.label.as_str())
             .collect();
+        // Nothing at the address at all: the promised no-op. Either the
+        // memory was already forgotten (a retry, or a stale recall listing)
+        // or the addr never existed — in both cases there is nothing to
+        // delete and nothing to protect, so failing would only punish
+        // idempotent retries. The ownership refusal below is for addresses
+        // that DO exist and are not this agent's.
+        if at_addr.is_empty() {
+            return Ok(ToolResult::success(format!(
+                "`{addr}` was already gone; nothing to forget."
+            )));
+        }
         if !at_addr.iter().any(|label| label.starts_with(&own_prefix)) {
             return Ok(ToolResult::error(format!(
                 "`{addr}` is not one of your own stored memories, so it cannot be forgotten from \
@@ -466,11 +477,15 @@ mod test {
         assert!(!gone.is_error);
         assert!(gone.text().contains("Forgotten"));
 
-        // Idempotent: the second forget is a no-op refusal-free answer. The
-        // row is no longer under the prefix, so it now hits the scope guard —
-        // which is also correct: it is no longer "one of your own memories".
+        // Idempotent, as the tool description promises: nothing lives at the
+        // address any more, so a repeated forget (a retry, a stale recall
+        // listing) succeeds as a no-op instead of scolding the agent.
         let again = forget.execute(json!({"addr": addr})).await.unwrap();
-        assert!(again.is_error, "a vanished addr is no longer yours to see");
+        assert!(
+            !again.is_error,
+            "already-forgotten must be a no-op: {again:?}"
+        );
+        assert!(again.text().contains("already gone"));
     }
 
     #[tokio::test]
@@ -610,8 +625,27 @@ mod test {
             seen.text()
         );
         assert!(seen.text().contains("Nothing in memory matches"));
-        let refused = b_forget.execute(json!({"addr": addr})).await.unwrap();
-        assert!(refused.is_error, "beta must not delete alpha's memory");
+        // Beta's forget of alpha's addr: within beta's visibility nothing
+        // lives at that address, so the answer is the idempotent no-op — the
+        // same answer a never-existed addr gets, so the response is no
+        // cross-company existence oracle. What MUST hold is that alpha's row
+        // survives untouched.
+        let noop = b_forget
+            .execute(json!({"addr": addr.clone()}))
+            .await
+            .unwrap();
+        assert!(
+            !noop.is_error,
+            "cross-company forget answers the no-op: {noop:?}"
+        );
+        assert!(noop.text().contains("already gone"));
+        let (_, a_recall, _) = tools_for(dir.path(), "alpha", "ceo");
+        let still = a_recall.execute(json!({"query": "zig"})).await.unwrap();
+        assert!(
+            still.text().contains(&addr),
+            "alpha's memory must survive beta's forget: {}",
+            still.text()
+        );
     }
 
     #[tokio::test]

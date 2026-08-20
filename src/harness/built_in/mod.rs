@@ -3500,13 +3500,19 @@ mod tests {
     #[derive(Default)]
     struct MockContext {
         chunks: StdMutex<Vec<(ChunkAddr, ContextChunk)>>,
+        // Monotonic, NOT chunks.len(): a delete shrinks the vec, and a
+        // len-derived addr would then collide with a surviving chunk's.
+        next_addr: std::sync::atomic::AtomicUsize,
     }
 
     #[async_trait]
     impl ContextStore for MockContext {
         async fn put(&self, _id: &CompanyId, chunk: ContextChunk) -> crate::Result<ChunkAddr> {
+            let n = self
+                .next_addr
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let mut guard = self.chunks.lock().unwrap();
-            let addr = ChunkAddr::new(format!("addr-{}", guard.len()));
+            let addr = ChunkAddr::new(format!("addr-{n}"));
             guard.push((addr.clone(), chunk));
             Ok(addr)
         }
@@ -3562,6 +3568,39 @@ mod tests {
                 })
                 .collect())
         }
+    }
+
+    /// The mock's addresses are monotonic, not len-derived: a delete must not
+    /// make the next put reuse a surviving chunk's address (len-derived bug:
+    /// delete `addr-0` of `[addr-0, addr-1]`, and the next put minted
+    /// `addr-1` again — a later delete of `addr-1` then removed both rows).
+    #[tokio::test]
+    async fn mock_context_addresses_survive_deletion_without_reuse() {
+        let ctx = MockContext::default();
+        let company = CompanyId::new("acme");
+        let chunk = |label: &str| ContextChunk {
+            label: label.into(),
+            body: label.into(),
+        };
+        let first = ctx.put(&company, chunk("l/0")).await.unwrap();
+        let second = ctx.put(&company, chunk("l/1")).await.unwrap();
+        assert!(
+            ctx.delete(&company, &first).await.unwrap(),
+            "first delete removes the row"
+        );
+        assert!(
+            !ctx.delete(&company, &first).await.unwrap(),
+            "repeat delete of the same addr finds nothing"
+        );
+        let third = ctx.put(&company, chunk("l/2")).await.unwrap();
+        assert_ne!(
+            third.as_ref() as &str,
+            second.as_ref(),
+            "a post-delete put must not reuse a surviving address"
+        );
+        assert!(ctx.delete(&company, &second).await.unwrap());
+        let left = ctx.list(&company, "l/").await.unwrap();
+        assert_eq!(left.len(), 1, "only the newest row remains: {left:?}");
     }
 
     /// `CompanyStore` that records what the cost hook appends.
