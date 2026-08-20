@@ -1430,6 +1430,12 @@ fn check_expected_version(expected: Option<&str>, current_toml: &str) -> Result<
 /// cron introduced by an edit cannot fire before anyone has looked at it. See
 /// the module docs for why an edit never arms in the other direction and why a
 /// changed-but-already-present cron is left alone.
+// Eight: the four store/log handles this write needs, the draft, the
+// concurrency token, and (issue #1191) the deployment's deliverable channel set.
+// Bundling them into a context struct would only move the same list one hop and
+// break every caller for no legibility gain — `create_company_workflow` beside
+// it takes the same shape minus the revision store and the token.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn update_company_workflow(
     company: &CompanyId,
     source_dir: Option<&Path>,
