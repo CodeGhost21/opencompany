@@ -1,6 +1,7 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   // AppWindow,  // re-add with the Pages nav entry below
+  Brain,
   FolderClosed,
   LayoutDashboard,
   type LucideIcon,
@@ -149,6 +150,11 @@ const NAV: NavItem[] = [
   // operator who met their work twice had to learn which of the two was the
   // real one. There is one.
   { view: "ledgers", label: "Ledgers", icon: BookText },
+  // What the company remembers, and — now that an operator can select a
+  // memory engine — WHERE it remembers: the engine panel shows which driver
+  // is bound, what it negotiated, and whether the boot probe reached it.
+  // Re-listed (issue #302 parked it; the memory-engine work un-parks it).
+  { view: "memory", label: "Brain", icon: Brain },
   { view: "workspace", label: "Workspace", icon: FolderClosed },
   { view: "approvals", label: "Approvals", icon: ShieldCheck },
   { view: "workflows", label: "Workflows", icon: Workflow },
@@ -168,7 +174,8 @@ const NAV: NavItem[] = [
  * Routable without a nav entry — reachable by URL, absent from the sidebar.
  *
  * Feedback is linked from the sidebar footer instead. The rest are parked
- * rather than retired (issue #302 for Inbox, Brain and Finances; the chat
+ * rather than retired (issue #302 for Inbox and Finances — Brain was parked
+ * there too and is re-listed above with the memory-engine work; the chat
  * rebuild for Conversation and Team): their host routes, stores and e2e specs
  * are untouched, and re-listing one in `NAV` above is all it takes to bring it
  * back. Conversation and Team are the surfaces the Chat workspace replaces —
@@ -198,7 +205,6 @@ const NAV: NavItem[] = [
 const HIDDEN_VIEWS: View[] = [
   "feedback",
   "inbox",
-  "memory",
   "finances",
   "conversation",
   "team",

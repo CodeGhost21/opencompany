@@ -1,8 +1,7 @@
-// Issue #302: unmounted from the console — hidden, not retired. The host's
-// `/memory` routes, FactStore and tests are unchanged, and agents keep reading
-// and writing memory; only the operator-facing Brain tab is gone. Re-listing
-// "memory" in `app-shell.tsx`'s `View`/`NAV` brings it back. Do not delete it
-// as dead code.
+// Parked by issue #302, re-listed in `app-shell.tsx`'s `NAV` with the
+// memory-engine work: an operator choosing between engines needs somewhere to
+// see which one is bound, what it negotiated, and whether the boot probe
+// reached it — that is the engine panel below the header.
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Brain, Loader2, Plus, Search, Trash2 } from "lucide-react";
 import { toast } from "sonner";
@@ -27,7 +26,13 @@ import { Markdown } from "@/components/markdown";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent } from "@/components/ui/card";
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
 import {
   Dialog,
   DialogContent,
@@ -244,6 +249,8 @@ export function MemoryView({ client, company }: Props) {
             </Button>
           </div>
         </div>
+
+        <EnginePanel engine={engine} />
 
         {error && (
           <Alert variant="destructive">
@@ -496,5 +503,89 @@ function AddMemoryDialog({
         </DialogFooter>
       </DialogContent>
     </Dialog>
+  );
+}
+
+/** The three families every provider-backed engine must serve. */
+const MANDATORY_FAMILIES = ["core", "recall", "portability"];
+
+/**
+ * The read-only memory-engine panel: which engine is bound, what it
+ * negotiated, and whether the boot probe reached it.
+ *
+ * Read-only by design — engine selection is instance-wide and belongs to the
+ * infra operator (the `OPENCOMPANY_MEMORY*` variables, read once at boot), so
+ * there is deliberately no setter here: a console admin must never be able to
+ * repoint a deployment's storage. `docs/spec/runtime/memory-engine.md` carries
+ * the switch runbook this panel points at.
+ *
+ * Renders nothing for the `store` default (no separate engine to describe) and
+ * for a host predating the `/spec` memory field.
+ */
+function EnginePanel({ engine }: { engine: MemorySpec | undefined }) {
+  if (!engine || engine.backend === "store") return null;
+
+  // Exactly the mandatory three means a hosted engine serving the contract
+  // floor: worth saying out loud, because the spec's operator rights assume
+  // richer families that live only engine-side.
+  const mandatoryOnly =
+    engine.capabilities.length === MANDATORY_FAMILIES.length &&
+    MANDATORY_FAMILIES.every((f) => engine.capabilities.includes(f));
+
+  return (
+    <Card data-testid="memory-engine-panel">
+      <CardHeader className="pb-3">
+        <CardTitle className="text-base">Memory engine</CardTitle>
+        <CardDescription>
+          Selected by the infra operator (<code className="text-xs">OPENCOMPANY_MEMORY*</code>,
+          read at boot) — instance-wide, no setter here by design.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-2 text-sm">
+        <div className="flex flex-wrap items-center gap-x-6 gap-y-1">
+          <span>
+            <span className="text-muted-foreground">Engine </span>
+            <span className="font-mono text-xs">{engine.driver_id ?? engine.backend}</span>
+          </span>
+          <span>
+            <span className="text-muted-foreground">Mode </span>
+            <span className="font-mono text-xs">{engine.backend}</span>
+          </span>
+          <span className="inline-flex items-center gap-1.5" data-testid="memory-engine-health">
+            <span
+              className={cn(
+                "size-2 rounded-full",
+                engine.healthy === true && "bg-emerald-500",
+                engine.healthy === false && "bg-red-500",
+                engine.healthy === undefined && "bg-muted-foreground/40",
+              )}
+            />
+            {engine.healthy === true && "reachable at boot"}
+            {engine.healthy === false && "unreachable at boot — check the endpoint and credential"}
+            {engine.healthy === undefined && "not probed"}
+          </span>
+        </div>
+        <div className="flex flex-wrap items-center gap-1.5">
+          <span className="text-muted-foreground">Capabilities</span>
+          {engine.capabilities.length === 0 ? (
+            <span className="text-muted-foreground">
+              not negotiated — the in-pod engine is driven directly
+            </span>
+          ) : (
+            engine.capabilities.map((family) => (
+              <Badge key={family} variant="outline" className="text-xs">
+                {family}
+              </Badge>
+            ))
+          )}
+        </div>
+        {mandatoryOnly && (
+          <p className="text-xs text-muted-foreground">
+            The mandatory contract families. Richer families (trees, graph, sources) live
+            engine-side and are not served over a hosted engine.
+          </p>
+        )}
+      </CardContent>
+    </Card>
   );
 }
