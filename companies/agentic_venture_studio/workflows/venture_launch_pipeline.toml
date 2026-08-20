@@ -93,7 +93,7 @@ summary = "Report the launch and the ask."
 # The venture-launch desk coordinates the operational result behind the strategic ask.
 [node.destination]
 kind = "channel"
-target = "venture-launch"
+target = "venture_launch"
 
 [[edge]]
 from = "idea"

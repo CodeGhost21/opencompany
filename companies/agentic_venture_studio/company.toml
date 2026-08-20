@@ -9,7 +9,7 @@ human_role = "Capital allocation and major strategic decisions"
 
 # The venture-launch desk keeps the founding, product, and market owners aligned on the new company.
 [[group_chat]]
-id = "venture-launch"
+id = "venture_launch"
 name = "Venture launch desk"
 description = "Coordinate venture launch readiness and the next strategic decision."
 members = ["founder", "engineer", "marketer"]
