@@ -148,7 +148,11 @@ export function NodeDetailPanel({
           !node.retry &&
           !node.schedule &&
           !node.destination &&
-          !node.requiresApproval && (
+          !node.requiresApproval &&
+          // Issue #850: `repeatable === false` renders the "not repeated on
+          // approval" badge above, so a node whose only detail is that
+          // declaration must not also claim it has no extra details.
+          node.repeatable !== false && (
             <p className="text-xs text-muted-foreground">
               This node has no extra details beyond its kind and name.
             </p>
