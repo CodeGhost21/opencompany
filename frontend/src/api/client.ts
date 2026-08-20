@@ -7,7 +7,7 @@
 //     and calls use `/api/v1/companies/{id}/*`.
 
 import type { ConsoleConfig } from "../config";
-import type { TaskDeliverable } from "./tasks";
+import type { MessageIntent } from "./tasks";
 import { defaultTransport, needsCarriedSession } from "./transport";
 import type { StreamHandlers, Transport, TransportResponse } from "./transport";
 import {
@@ -424,13 +424,22 @@ export class OpenCompanyClient {
      */
     parent?: string | null,
     /**
-     * The once-vs-workflow choice for the card this line opens (issue #580).
-     * Only `"workflow"` reaches the wire: `"once"` (and the default) is sent as
-     * *nothing at all*, so an ordinary message keeps the exact body shape it had
-     * before #580 — the same omitted-field compatibility rule the deliverable
-     * field follows everywhere (see `CreateTask.deliverable`).
+     * What this message is for (issues #580, #845, #1152): `"once"` and
+     * `"workflow"` say what the card it opens produces, `"chat"` says it is not
+     * a request for work and no card should be opened for it.
+     *
+     * Everything except `"once"` reaches the wire; `"once"` and the default are
+     * sent as *nothing at all*. That is what keeps "Do it once" the default: an
+     * unmarked message posts the exact body shape it posted before any of these
+     * controls existed, so the host cannot tell one from a pre-#580 client —
+     * the same omitted-field compatibility rule the deliverable field follows
+     * everywhere (see `CreateTask.deliverable`).
+     *
+     * One key, not two. `"chat"` rides `deliverable` rather than arriving as a
+     * second `intent` field, so a body cannot claim "build me the workflow" and
+     * "just chatting" about the same message.
      */
-    deliverable?: TaskDeliverable,
+    intent?: MessageIntent,
     /**
      * Ask for the turn's id instead of its answer (issue #983): the host
      * journals the message, mints a durable turn row and answers `202` without
@@ -447,14 +456,14 @@ export class OpenCompanyClient {
       text: string;
       chat?: string;
       parent?: string;
-      deliverable?: TaskDeliverable;
+      deliverable?: MessageIntent;
       detach?: boolean;
     } = {
       text,
     };
     if (chat) body.chat = chat;
     if (parent) body.parent = parent;
-    if (deliverable === "workflow") body.deliverable = deliverable;
+    if (intent && intent !== "once") body.deliverable = intent;
     // Sent only when asked for, so an ordinary post keeps the exact body shape
     // it had before #983 — the same omitted-field rule `deliverable` follows.
     if (detach) body.detach = detach;

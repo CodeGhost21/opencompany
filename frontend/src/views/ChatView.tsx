@@ -13,7 +13,7 @@ import { toast } from "sonner";
 
 import { listPeople, me as fetchMe, type Person } from "@/api/auth";
 import type { OpenCompanyClient } from "@/api/client";
-import type { TaskDeliverable } from "@/api/tasks";
+import type { MessageIntent } from "@/api/tasks";
 import type { OpenTurn } from "@/lib/live-reply";
 import { setInboxEnabled } from "@/api/inbox";
 import {
@@ -661,7 +661,7 @@ export function ChatView({
    * cannot resolve — the row's own actions are disabled in that window, so this
    * is the belt to that brace.
    */
-  async function send(text: string, deliverable?: TaskDeliverable, parentId?: string) {
+  async function send(text: string, intent?: MessageIntent, parentId?: string) {
     if (sending) return;
     const target = active.id;
     const chatId = activeThreadId;
@@ -686,7 +686,7 @@ export function ChatView({
         company,
         chatId,
         toHostMessageId(parentId),
-        deliverable,
+        intent,
         // Ask for the turn's id rather than its answer. A host that predates the
         // field ignores this and answers synchronously, which is why the branch
         // below reads the response's shape and never this argument.
@@ -987,11 +987,12 @@ export function ChatView({
             <MessageComposer
               placeholder={`Message ${channelTitle(channel)}`}
               disabled={sending}
-              onSend={(text, deliverable) => void send(text, deliverable)}
-              // Channel *and* DM composers offer "do it once" vs "build me the
-              // workflow" (issues #580, #845) — see `offersDeliverableChoice`,
-              // which owns the rule. Only the thread and copilot composers below
-              // go without.
+              onSend={(text, intent) => void send(text, intent)}
+              // Channel *and* DM composers offer "just chatting" / "do it once" /
+              // "build me the workflow" (issues #580, #845, #1152) — see
+              // `offersDeliverableChoice`, which owns the rule and is unchanged:
+              // the new position inherits the same channel+DM gating. Only the
+              // thread and copilot composers below go without.
               deliverableChoice={offersDeliverableChoice(active.kind)}
             />
           </div>
