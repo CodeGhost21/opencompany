@@ -1356,6 +1356,71 @@ export function WorkflowsView({
     }
   }, [client, company, selectedId, graph]);
 
+  /**
+   * Say out loud that a write left this workflow's schedule off, and offer the
+   * one click that undoes it.
+   *
+   * Issue #1017 wrote this for the edit path; issue #1209 extracted it, because
+   * **create disarms too** and was raising a flat "Workflow created." over a
+   * workflow the host had just switched off. Two write paths that produce the
+   * same state owe the operator the same sentence, and a second copy of this
+   * closure is a second copy of the switched-company and switched-selection
+   * guards below — the two things this is careful about and the two things a
+   * copy would eventually stop being careful about.
+   *
+   * `lead` is the only part that differs ("Saved, and paused" / "Created, and
+   * paused"): what happened is not the same, what it means is.
+   */
+  const announceDisarm = useCallback(
+    (lead: string, workflow: WorkflowGraph) => {
+      toast.warning(
+        `${lead} “${workflow.name}”. Its schedule is off — it won't run on its own until you resume it.`,
+        {
+          action: {
+            label: "Resume",
+            onClick: () => {
+              void (async () => {
+                try {
+                  const resumeCompany = company;
+                  const updated = await setWorkflowEnabled(client, company, workflow.id, true);
+                  // The operator may have switched companies while this Resume
+                  // was in flight. Discard the response — the new company's list
+                  // is what matters, and mutating state keyed to the old one
+                  // would overwrite it.
+                  if (companyRef.current !== resumeCompany) return;
+                  // Newer than any list request already in flight.
+                  localWriteRef.current += 1;
+                  // The operator may have selected a different workflow while
+                  // this Resume was in flight. Only replace the displayed graph
+                  // when it still belongs to the selection — otherwise the
+                  // picker would identify the new workflow while the canvas
+                  // showed (and a later edit would mutate) the old one. The list
+                  // update below is safe unconditionally: it keys by id.
+                  if (selectedIdRef.current === updated.id) {
+                    setGraph(updated);
+                  }
+                  setWorkflows((prev) =>
+                    prev.map((w) =>
+                      w.id === updated.id ? { ...w, enabled: updated.enabled } : w,
+                    ),
+                  );
+                  toast.success(
+                    `Resumed “${updated.name}”. It will run on its schedule again.`,
+                  );
+                } catch (e) {
+                  toast.error(
+                    e instanceof Error ? e.message : "could not change the workflow",
+                  );
+                }
+              })();
+            },
+          },
+        },
+      );
+    },
+    [client, company],
+  );
+
   // Issue #259: the edit dialog saved. The host answers with the stored graph
   // AND a fresh version token, so holding onto it is what lets the operator
   // save again without a re-read — dropping it and re-fetching would be a round
@@ -1395,54 +1460,11 @@ export function WorkflowsView({
     // with a one-click Resume, instead of a "saved" that hid that its schedule
     // was switched off. Every other save keeps the plain acknowledgement.
     if (workflowSavedToast(wasEnabled, saved.enabled) === "disarmed") {
-      toast.warning(
-        `Saved, and paused “${saved.name}”. Its schedule is off — it won't run on its own until you resume it.`,
-        {
-          action: {
-            label: "Resume",
-            onClick: () => {
-              void (async () => {
-                try {
-                  const resumeCompany = company;
-                  const updated = await setWorkflowEnabled(client, company, saved.id, true);
-                  // The operator may have switched companies while this Resume
-                  // was in flight. Discard the response — the new company's list
-                  // is what matters, and mutating state keyed to the old one
-                  // would overwrite it.
-                  if (companyRef.current !== resumeCompany) return;
-                  // Newer than any list request already in flight.
-                  localWriteRef.current += 1;
-                  // The operator may have selected a different workflow while
-                  // this Resume was in flight. Only replace the displayed graph
-                  // when it still belongs to the selection — otherwise the
-                  // picker would identify the new workflow while the canvas
-                  // showed (and a later edit would mutate) the old one. The list
-                  // update below is safe unconditionally: it keys by id.
-                  if (selectedIdRef.current === updated.id) {
-                    setGraph(updated);
-                  }
-                  setWorkflows((prev) =>
-                    prev.map((w) =>
-                      w.id === updated.id ? { ...w, enabled: updated.enabled } : w,
-                    ),
-                  );
-                  toast.success(
-                    `Resumed “${updated.name}”. It will run on its schedule again.`,
-                  );
-                } catch (e) {
-                  toast.error(
-                    e instanceof Error ? e.message : "could not change the workflow",
-                  );
-                }
-              })();
-            },
-          },
-        },
-      );
+      announceDisarm("Saved, and paused", saved);
     } else {
       toast.success("Workflow saved.");
     }
-  }, [client, company, graph]);
+  }, [announceDisarm, graph]);
 
   // The creator posts the full graph back, so the new entry can be spliced
   // straight into the list and selected — no extra round trip to re-list.
@@ -1474,8 +1496,19 @@ export function WorkflowsView({
     // editing it. The hash mirror pushes that as a navigation, so Back returns
     // to the index they created it from.
     setSelectedId(created.id);
-    toast.success("Workflow created.");
-  }, []);
+    // Issue #1209: create disarms too. `#276`'s rule switches off any workflow
+    // authored WITH a schedule, and this used to acknowledge that with a flat
+    // "Workflow created." — leaving the operator to notice the paused chip on a
+    // detail screen nothing pointed them at. A create is armed-by-assumption
+    // before the host answers, so `true` is the honest "before" to classify
+    // against; the same reducer the edit path uses then names the one transition
+    // worth interrupting for.
+    if (workflowSavedToast(true, created.enabled) === "disarmed") {
+      announceDisarm("Created, and paused", created);
+    } else {
+      toast.success("Workflow created.");
+    }
+  }, [announceDisarm]);
 
   // Issue #1110: leave the workflow on screen and go back to the index.
   //
