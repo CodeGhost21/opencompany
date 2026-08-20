@@ -240,6 +240,23 @@ describe("planLabels vs node icons (issue #1258)", () => {
     expect(planLabels([named], { x: 0, y: 0, w: W * 10 }, W, [above]).size).toBe(0);
   });
 
+  it("frees the row it vacates, so a mirror can let a quieter label in", () => {
+    // Not obvious, and worth pinning rather than discovering: this pass is not
+    // monotone in the number of labels. `loud` would sit at dy 20 and take the
+    // row `quiet` wanted; blocked by an icon it mirrors instead, and `quiet`
+    // now fits the row it just left. Observed on a software company, where the
+    // icon pass cost four names and handed back "QA Engineer".
+    const loud = cand({ id: "loud", x: 0, priority: LABEL_PRIORITY.hovered });
+    const quiet = cand({ id: "quiet", x: 25, priority: LABEL_PRIORITY.worker });
+    // no icon: they contend for one row and the quieter one loses outright
+    expect(ids(planLabels([loud, quiet], { x: 0, y: 0, w: W }, W))).toEqual(["loud"]);
+    // an icon inside `loud`'s row but clear of `quiet`'s sends `loud` upstairs
+    const tool = icon({ id: "tool", x: -10, y: 17, r: 5 });
+    const plan = planLabels([loud, quiet], { x: 0, y: 0, w: W }, W, [tool]);
+    expect(plan.get("loud")).toBe(-20);
+    expect(plan.get("quiet")).toBe(20);
+  });
+
   it("stays pan-invariant, the property that lets the caller cache this", () => {
     // the module only re-runs the pass when the ZOOM changes, on the grounds
     // that a pan moves every box by one shared vector. Icons have to move with

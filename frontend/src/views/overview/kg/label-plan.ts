@@ -197,9 +197,14 @@ export type LabelPlan = Map<string, number>;
  * too blunt to ship — measured on a support company it took the company's own
  * name and its pillar's name off the canvas rather than moving them 20px. The
  * mirrored row is checked against labels and icons alike before it is taken, so
- * a moved label is one that genuinely fits, and this can only ever keep a
- * label the icon pass would otherwise have dropped — never add one the pass
- * before #1258 did not already draw.
+ * a moved label is one that genuinely fits.
+ *
+ * Note that this makes the pass **not monotone** in the number of labels: a
+ * label that moves upstairs vacates the row it wanted, and a quieter candidate
+ * that would have lost that row can now have it. So an icon can, indirectly,
+ * add a name rather than remove one. Every placement is still checked, so the
+ * extra name is a legible one — but do not read the survivor count as a
+ * ceiling.
  *
  * `icons` are the node circles actually drawn — pass every visible node, not
  * just the ones eligible for a label, since an unnamed tool hides text exactly
