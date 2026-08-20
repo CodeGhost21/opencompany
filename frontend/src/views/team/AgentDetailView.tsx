@@ -111,6 +111,8 @@ export function AgentDetailView({
    * than an invented "idle · 0 open".
    */
   const [workload, setWorkload] = useState<Workload | null>(null);
+  /** An inbox write is in flight; the switch is held until the host answers. */
+  const [inboxSaving, setInboxSaving] = useState(false);
 
   const boot = useCallback(async () => {
     setLoad("loading");
@@ -175,10 +177,17 @@ export function AgentDetailView({
    * under; nothing is persisted client-side.
    */
   async function toggleInbox(next: boolean) {
-    if (!agent) return;
+    if (!agent || inboxSaving) return;
+    // Scoped to the teammate this call is *about*. This screen does not remount
+    // when the hash names a different agent — it re-reads into the same state —
+    // so a slow write for A that fails after the operator has stepped to B would
+    // otherwise roll back B's switch, for a request B never made.
     const apply = (enabled: boolean) =>
-      setAgent((held) => (held ? { ...held, inboxEnabled: enabled } : held));
+      setAgent((held) => (held?.id === agentId ? { ...held, inboxEnabled: enabled } : held));
     apply(next);
+    // One write in flight at a time. Two quick taps otherwise race, and the
+    // host's last-writer-wins can settle on the opposite of what the switch shows.
+    setInboxSaving(true);
     try {
       await setInboxEnabled(client, company, agentId, next);
     } catch (error) {
@@ -190,6 +199,8 @@ export function AgentDetailView({
             ? error.message
             : "Couldn't change the inbox.",
       );
+    } finally {
+      setInboxSaving(false);
     }
   }
 
@@ -369,7 +380,11 @@ export function AgentDetailView({
             </Section>
 
             <Tools agent={agent} />
-            <Inbox agent={agent} onToggle={(next) => void toggleInbox(next)} />
+            <Inbox
+              agent={agent}
+              busy={inboxSaving}
+              onToggle={(next) => void toggleInbox(next)}
+            />
             <Desks agent={agent} />
           </>
         )}
@@ -552,9 +567,12 @@ function Tools({ agent }: { agent: AgentDetailDto }) {
  */
 function Inbox({
   agent,
+  busy,
   onToggle,
 }: {
   agent: AgentDetailDto;
+  /** A write is in flight — the switch is held rather than allowed to race. */
+  busy: boolean;
   onToggle: (next: boolean) => void;
 }) {
   return (
@@ -569,6 +587,7 @@ function Inbox({
         </span>
         <Switch
           checked={agent.inboxEnabled}
+          disabled={busy}
           onCheckedChange={onToggle}
           aria-label="Give this teammate an inbox"
           data-testid="agent-inbox-toggle"

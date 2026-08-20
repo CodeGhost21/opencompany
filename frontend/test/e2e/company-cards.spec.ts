@@ -211,6 +211,35 @@ test("#1193 the chart is a destination with its own address, not a mode", async 
   await expect(card(page, "Maya")).toBeVisible({ timeout: 30_000 });
 });
 
+test("#1193 the Company nav row means the roster, even after visiting Desks", async ({
+  page,
+}) => {
+  await mockApi(page);
+  await page.goto("/#/company");
+  await page.getByTestId("company-manage-desks").click();
+  await expect(page.getByRole("tree", { name: "Company org chart" })).toBeVisible({
+    timeout: 30_000,
+  });
+
+  // Step away, then come back through the sidebar. The shell remembers the last
+  // sub-segment per view so a tab switch keeps deep state — right for
+  // `#/workflows/<id>`, wrong here, because Company's segments are two different
+  // surfaces rather than two places inside one. Remembering it would open the
+  // org chart for an operator who clicked "Company" wanting their team: the
+  // remembered-mode failure #1193 removed, wearing a different mechanism.
+  await page.getByRole("link", { name: "Overview", exact: true })
+    .or(page.getByRole("button", { name: "Overview", exact: true }))
+    .first()
+    .click();
+  await page.getByRole("link", { name: "Company", exact: true })
+    .or(page.getByRole("button", { name: "Company", exact: true }))
+    .first()
+    .click();
+
+  await expect(card(page, "Maya")).toBeVisible({ timeout: 30_000 });
+  await expect.poll(() => page.url()).not.toContain("desks");
+});
+
 test("#1193 desk management survives — a desk can still be created and reached", async ({
   page,
 }) => {

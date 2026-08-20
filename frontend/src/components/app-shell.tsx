@@ -208,6 +208,28 @@ const HIDDEN_VIEWS: View[] = [
 const VIEWS: View[] = [...NAV.map((i) => i.view), ...HIDDEN_VIEWS];
 
 /**
+ * Views whose **nav row always means the parent page**, never the sub-page the
+ * operator was last on.
+ *
+ * Remembering a sub-segment per view is right for a tab whose sub-pages are
+ * places *within* it — `#/workflows/<id>` is still Workflows, and returning to
+ * the tab should not throw away which workflow was open.
+ *
+ * Company is not that (issue #1193). Its segments are two different surfaces:
+ * `#/company` is the roster and `#/company/desks` is the org chart, which is
+ * where desks are created, deleted and re-staffed. Remembering the segment
+ * would mean an operator who once opened Desks gets the org chart every time
+ * they click Company afterwards — the same "the page opens on the chart for
+ * someone who wanted their team" failure that the remembered *mode* had, wearing
+ * a different mechanism. #1193 removed the mode; this keeps the route honest.
+ *
+ * Explicit addresses are untouched: a `#/company/desks` link, a `#/company/<deskId>`
+ * deep link from chat (issue #485), and `onNavigate` all pass a segment
+ * outright, and this only governs the no-segment case.
+ */
+const NAV_ALWAYS_PARENT = new Set<View>(["company"]);
+
+/**
  * `#/tasks` with no card named the board page, which is retired (issue #1140).
  *
  * It lands where the board actually lives now, so a bookmark, a habit, or a
@@ -358,7 +380,9 @@ export function AppShell({
         navigate(next, nextSub);
         return;
       }
-      const remembered = lastSubByViewRef.current[next];
+      const remembered = NAV_ALWAYS_PARENT.has(next)
+        ? undefined
+        : lastSubByViewRef.current[next];
       if (remembered) {
         navigate(next, remembered);
         return;
