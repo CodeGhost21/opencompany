@@ -1129,7 +1129,9 @@ pub struct MemorySpec {
     /// provider. An operator reads this to see what a hosted engine does *not*
     /// support before a cycle discovers it.
     pub capabilities: Vec<String>,
-    /// Whether the boot-time reachability probe answered `Ready`.
+    /// Whether the boot-time reachability probe found the engine usable —
+    /// `Ready` or `Degraded` (reachable, possibly reduced); only `Down`
+    /// serializes as `false`.
     ///
     /// Absent means "not probed": the base backend serves memory, the in-pod
     /// engine is driven directly, or this host predates the probe — a client

@@ -320,7 +320,9 @@ pub struct MemoryDescriptor {
     /// The capability families the bound driver negotiated, so an operator can
     /// see what the engine does *not* support before a cycle finds out.
     pub capabilities: Vec<String>,
-    /// Whether the boot-time reachability probe answered `Ready`.
+    /// Whether the boot-time reachability probe found the engine usable:
+    /// `Ready`, or `Degraded` — reachable and serving, possibly reduced.
+    /// Only `Down` maps to `Some(false)`.
     ///
     /// `None` means the engine was never probed — the engine-overlay path,
     /// which has no provider seam to ask, or a boot path that skipped
