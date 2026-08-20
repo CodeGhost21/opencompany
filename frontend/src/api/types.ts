@@ -978,16 +978,44 @@ export interface RosterAgent {
 }
 
 /**
+ * How a server got into the company's effective set.
+ *
+ * - `manifest` — committed in `company.toml`'s `[[mcp_server]]`.
+ * - `runtime` — typed into the console by URL.
+ * - `default` — shipped enabled by the packaged install (issue #527). Nobody
+ *   wrote it into *this* company, so it is not "operator-added".
+ * - `registry` — installed from an upstream MCP directory through the browse
+ *   surface (issue #1270). Keyed by {@link McpServer.serverId}, not by name,
+ *   and addressed by the `…/mcp/registry/…` routes rather than List A's.
+ */
+export type McpSource = "manifest" | "runtime" | "default" | "registry";
+
+/**
  * One effective MCP tool server (issue #50), as `.../mcp/servers` returns it.
  * The credential is never present — only the non-secret `authConfigured` flag
  * and the last (scrubbed) probe `health`.
+ *
+ * Since issue #1270 this one list carries directory installs too. The four
+ * registry fields below are all optional and omitted by the host on a row with
+ * no install behind it, so a manifest / runtime / default row arrives exactly
+ * as it always did.
  */
 export interface McpServer {
   name: string;
   endpoint: string;
   description?: string;
-  /** `manifest` (committed in company.toml) or `runtime` (console-added). */
-  source: "manifest" | "runtime";
+  /**
+   * Where this row came from. **The console's single source of provenance** —
+   * it decides the badge, the delete guard, and which set of routes the row's
+   * controls may call.
+   *
+   * A row that is *both* a directory install and a List A declaration is one
+   * reconciled row carrying List A's provenance, not `registry` (issue #1270).
+   * Never re-derive provenance from {@link McpServer.serverId} being present:
+   * a manifest server that was also installed from the directory carries a
+   * `serverId` and must still badge `manifest` and still refuse a delete.
+   */
+  source: McpSource;
   enabled: boolean;
   allowedTools: string[];
   disallowedTools: string[];
@@ -1009,6 +1037,22 @@ export interface McpServer {
   reachableBy?: RosterAgent[];
   /** The last recorded (scrubbed) probe outcome, when the server has been probed. */
   health?: McpHealth;
+  /**
+   * The stable install id, present only on a row backed by a directory install
+   * (issue #1270). Every `…/mcp/registry/{serverId}/…` route keys on this;
+   * `name` is a display slug the host mints for the row and addresses nothing
+   * in the registry's own store.
+   *
+   * Present does **not** mean `source === "registry"` — a reconciled row is a
+   * List A server that also has an install. See {@link McpServer.source}.
+   */
+  serverId?: string;
+  /** The directory's qualified name (`@org/server`), when this row came from one. */
+  qualifiedName?: string;
+  /** The directory's icon, when this row came from one. */
+  iconUrl?: string;
+  /** How an install is dialled — `http_remote` or `stdio`. Absent on a List A-only row. */
+  transport?: string;
 }
 
 /**
