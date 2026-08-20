@@ -555,8 +555,8 @@ function EnginePanel({ engine }: { engine: MemorySpec | undefined }) {
             <span
               className={cn(
                 "size-2 rounded-full",
-                engine.healthy === true && "bg-emerald-500",
-                engine.healthy === false && "bg-red-500",
+                engine.healthy === true && "bg-status-done",
+                engine.healthy === false && "bg-status-failed",
                 engine.healthy === undefined && "bg-muted-foreground/40",
               )}
             />
