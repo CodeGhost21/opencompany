@@ -250,6 +250,10 @@ export function Overview({ client, company, companyName }: Props) {
       // the page now, so the graph is what gets spotlighted.
       data-tour="overview-graph"
     >
+      {/* The graph is the page and draws no visible title of its own (issue
+          #1221) — this names it for a screen reader the same way every other
+          view's title does. */}
+      <h1 className="sr-only">Company overview</h1>
       {/* The snapshot line: what the page is, when it was taken, and the way to
           take another. The graph is not live, and says so rather than leaving an
           operator to assume a stale wheel is the current company. */}

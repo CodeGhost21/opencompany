@@ -271,6 +271,10 @@ export function ApprovalsView({
   return (
     <div className="flex-1 overflow-y-auto">
       <div className="mx-auto w-full max-w-3xl px-4 py-6">
+        {/* The queue's own count heading below only renders once loaded, so
+            it can't be the page's one `h1` — this stays present through
+            loading, error and empty states alike (issue #1221). */}
+        <h1 className="sr-only">Approvals</h1>
         {/* Issue #883: the filter says so, and offers the way out of itself.
             A narrowed queue that looked identical to the whole one would make a
             decided-elsewhere approval look like it had vanished. */}

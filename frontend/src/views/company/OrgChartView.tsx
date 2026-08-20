@@ -465,7 +465,7 @@ export function OrgChartView({ client, company, focusDeskId, onBack }: Props) {
             className="flex flex-wrap items-center justify-between gap-3"
             data-testid="desks-header"
           >
-            <h2 className="text-2xl font-semibold tracking-tight">Desks</h2>
+            <h1 className="text-2xl font-semibold tracking-tight">Desks</h1>
             <div className="ml-auto flex flex-wrap items-center justify-end gap-2">
               <Button
                 size="sm"

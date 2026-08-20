@@ -1,6 +1,7 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   // AppWindow,  // re-add with the Pages nav entry below
+  Brain,
   FolderClosed,
   LayoutDashboard,
   type LucideIcon,
@@ -149,6 +150,11 @@ const NAV: NavItem[] = [
   // operator who met their work twice had to learn which of the two was the
   // real one. There is one.
   { view: "ledgers", label: "Ledgers", icon: BookText },
+  // What the company remembers, and — now that an operator can select a
+  // memory engine — WHERE it remembers: the engine panel shows which driver
+  // is bound, what it negotiated, and whether the boot probe reached it.
+  // Re-listed (issue #302 parked it; the memory-engine work un-parks it).
+  { view: "memory", label: "Brain", icon: Brain },
   { view: "workspace", label: "Workspace", icon: FolderClosed },
   { view: "approvals", label: "Approvals", icon: ShieldCheck },
   { view: "workflows", label: "Workflows", icon: Workflow },
@@ -157,8 +163,8 @@ const NAV: NavItem[] = [
   // "something an agent built" surfaces, as opposed to the fixed views above.
   // Pages is deliberately not offered in the nav. The view and its `#/pages`
   // route stay live, so an address or an existing link still resolves — this
-  // is the same treatment `feedback`, `inbox`, `memory`, `finances`,
-  // `conversation` and `team` already get. Do not "fix" the omission by
+  // is the same treatment `feedback`, `inbox`, `finances`, `conversation`
+  // and `team` already get. Do not "fix" the omission by
   // adding it back.
   // { view: "pages", label: "Pages", icon: AppWindow },
   { view: "settings", label: "Settings", icon: Settings2 },
@@ -168,7 +174,8 @@ const NAV: NavItem[] = [
  * Routable without a nav entry — reachable by URL, absent from the sidebar.
  *
  * Feedback is linked from the sidebar footer instead. The rest are parked
- * rather than retired (issue #302 for Inbox, Brain and Finances; the chat
+ * rather than retired (issue #302 for Inbox and Finances — Brain was parked
+ * there too and is re-listed above with the memory-engine work; the chat
  * rebuild for Conversation and Team): their host routes, stores and e2e specs
  * are untouched, and re-listing one in `NAV` above is all it takes to bring it
  * back. Conversation and Team are the surfaces the Chat workspace replaces —
@@ -198,7 +205,6 @@ const NAV: NavItem[] = [
 const HIDDEN_VIEWS: View[] = [
   "feedback",
   "inbox",
-  "memory",
   "finances",
   "conversation",
   "team",
@@ -1450,7 +1456,11 @@ export function AppShell({
           strip held the "Done" column, which is why a card could not be dragged
           into it (issue #334); every view was losing the same strip. */}
       <SidebarInset className="min-h-0 min-w-0">
-        <main className="flex min-h-0 flex-1 flex-col overflow-hidden">
+        {/* A `div`, not `main`: `SidebarInset` above is already the console's
+            one `<main>` landmark. This is only a flex/scroll container — a
+            second nested `<main>` here gave every page two identical
+            "skip to content" destinations (issue #1221). */}
+        <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
           {view === "overview" && (
             <Overview client={client} company={company} companyName={feed.status.name} />
           )}
@@ -1733,7 +1743,7 @@ export function AppShell({
             />
           )}
           {view === "feedback" && <FeedbackView client={client} company={company} />}
-        </main>
+        </div>
       </SidebarInset>
 
       <FeedbackDialog
