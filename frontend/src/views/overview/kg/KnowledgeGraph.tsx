@@ -1872,7 +1872,9 @@ export function KnowledgeGraph({
   // `camK` (state) rather than the live ref: reading it here is what ties the
   // declutter to the zoom, and `camK * W` is the camera width it was published
   // from. x/y come off the ref — they only move every box by a shared vector.
-  const labelSet = planLabels(labelCandidates, { x: camRectRef.current.x, y: camRectRef.current.y, w: camK * W }, W, labelIcons);
+  // a map, not a set: the plan may mirror a label above its node to get it out
+  // from under a neighbour's icon, so it hands back the `dy` to draw it at
+  const labelPlan = planLabels(labelCandidates, { x: camRectRef.current.x, y: camRectRef.current.y, w: camK * W }, W, labelIcons);
 
   // ── the graph itself (reused inline + fullscreen) ───────────────────────────
   const graphInner = (
@@ -2087,7 +2089,7 @@ export function KnowledgeGraph({
           const color = nodeColor(n);
           const { r, opacity: nodeOpacity, dim, hidden } = visuals.get(n.id)!;
           const selected = selectedAgentId === n.id || selectedToolId === n.id || selectedTaskId === n.id || selectedHumanId === n.id;
-          const showLabel = labelSet.has(n.id);
+          const labelDyPlanned = labelPlan.get(n.id);
           const Icon = cat.Icon;
 
           // the company rendered as its memory: the Notes constellation of real
@@ -2283,10 +2285,10 @@ export function KnowledgeGraph({
               <g style={{ color: n.kind === 'self' ? 'var(--bg)' : color }}>
                 <Icon x={-r * 0.62} y={-r * 0.62} width={r * 1.24} height={r * 1.24} strokeWidth={2} />
               </g>
-              {showLabel && (
+              {labelDyPlanned !== undefined && (
                 <text
                   x={0}
-                  y={r + 11 + (labelDy.get(n.id) ?? 0)}
+                  y={labelDyPlanned}
                   textAnchor="middle"
                   fontFamily="var(--font-mono)"
                   fontWeight={n.kind === 'self' || n.kind === 'team' || hoverId === n.id ? 600 : 400}

@@ -15,9 +15,10 @@
  *    hovered or selected), alongside the **icons** — every node circle actually
  *    drawn, whether or not it is ever named;
  * 2. {@link planLabels} runs a greedy declutter over them — highest priority
- *    placed first, and any later label whose box overlaps one already placed,
- *    or lands on a node's icon, is dropped. Every node keeps a `<title>`, so a
- *    dropped label still has a native tooltip underneath it.
+ *    placed first, dropping any label whose box overlaps one already placed,
+ *    and mirroring above its node (or, failing that, dropping) any label that
+ *    would land on somebody's icon. Every node keeps a `<title>`, so a dropped
+ *    label still has a native tooltip underneath it.
  *
  * ## Why icons are obstacles too (issue #1258)
  *
@@ -121,12 +122,19 @@ export type LabelBox = { x0: number; y0: number; x1: number; y1: number };
 
 /**
  * A candidate's label box in screen px, padded by {@link LABEL_GAP_X}.
- * `scale` is px per graph unit (canvas width ÷ camera width).
+ * `scale` is px per graph unit (canvas width ÷ camera width). `dy` overrides
+ * the candidate's preferred offset, which is how {@link planLabels} costs a
+ * mirrored placement without mutating the candidate.
  */
-export function labelBoxPx(c: LabelCandidate, cam: LabelCamera, scale: number): LabelBox {
+export function labelBoxPx(
+  c: LabelCandidate,
+  cam: LabelCamera,
+  scale: number,
+  dy: number = c.dy,
+): LabelBox {
   const cx = (c.x - cam.x) * scale;
   // `dy` rides the graph, so it scales with the camera; the font does not.
-  const baseline = (c.y - cam.y) * scale + c.dy * scale;
+  const baseline = (c.y - cam.y) * scale + dy * scale;
   const halfW = (c.text.length * MONO_ADVANCE * c.fontPx) / 2 + LABEL_GAP_X;
   return {
     x0: cx - halfW,
@@ -165,13 +173,33 @@ export function boxHitsCircle(
 }
 
 /**
- * The ids whose labels survive the declutter, measured in screen px.
+ * Where each surviving label is drawn: node id → the `dy` to render it at, in
+ * graph units. An id absent from the map is a label the declutter dropped.
+ */
+export type LabelPlan = Map<string, number>;
+
+/**
+ * Which labels survive the declutter and where each one sits, in screen px.
  *
  * `canvasW` is the width the camera rect maps onto — the nominal SVG width, so
  * the px here are the same px `fontPx` is quoted in. Candidates are placed
- * highest priority first; a label that collides with one already placed is
- * dropped rather than nudged, because nudging is what the old two-row stagger
- * did and it only moved the pile-up.
+ * highest priority first.
+ *
+ * **Losing to another label is still final**, exactly as it was: the two rows
+ * are the same width, so moving one of a colliding pair up would relocate the
+ * same contention rather than settle it — that was the old two-row stagger, and
+ * #1104 is the record of it not working.
+ *
+ * **Losing to an icon earns one retry**, on the mirrored row above the node. An
+ * icon is not a party to the negotiation: unlike a rival label it cannot yield,
+ * has no priority to lose on, and is drawn whatever this pass decides, so the
+ * label is the only thing that can move. Without the retry the icon pass is far
+ * too blunt to ship — measured on a support company it took the company's own
+ * name and its pillar's name off the canvas rather than moving them 20px. The
+ * mirrored row is checked against labels and icons alike before it is taken, so
+ * a moved label is one that genuinely fits, and this can only ever keep a
+ * label the icon pass would otherwise have dropped — never add one the pass
+ * before #1258 did not already draw.
  *
  * `icons` are the node circles actually drawn — pass every visible node, not
  * just the ones eligible for a label, since an unnamed tool hides text exactly
@@ -181,9 +209,9 @@ export function boxHitsCircle(
  *   node by `dy`, which rides the graph while the font does not, so zoomed far
  *   enough out every box overlaps its own circle. Blocking on that would drop
  *   every label at once rather than the one in the way.
- * - **a label with nowhere clear is dropped, not shrunk or drawn anyway.** That
- *   is already what an unwinnable label-vs-label collision does, and the node
- *   still carries a `<title>`, so the name stays one hover away instead of
+ * - **a label with no clear row is dropped, not shrunk and not drawn anyway.**
+ *   That is already what an unwinnable label-vs-label collision does, and the
+ *   node still carries a `<title>`, so the name stays one hover away instead of
  *   being rendered illegibly under an avatar.
  */
 export function planLabels(
@@ -191,7 +219,7 @@ export function planLabels(
   cam: LabelCamera,
   canvasW: number,
   icons: readonly LabelIcon[] = [],
-): Set<string> {
+): LabelPlan {
   const scale = cam.w > 0 ? canvasW / cam.w : 1;
   const order = candidates.map((c, i) => ({ c, i }));
   order.sort((a, b) => b.c.priority - a.c.priority || a.i - b.i);
@@ -203,16 +231,32 @@ export function planLabels(
     // a radius rides the graph, so unlike `fontPx` it scales with the camera
     r: n.r * scale,
   }));
+  // a label never blocks on its OWN circle — see the note above
+  const onAnIcon = (box: LabelBox, id: string): boolean =>
+    discs.some((d) => d.id !== id && boxHitsCircle(box, d.cx, d.cy, d.r));
+
   const placed: LabelBox[] = [];
-  const kept = new Set<string>();
+  const plan: LabelPlan = new Map();
   for (const { c } of order) {
-    const box = labelBoxPx(c, cam, scale);
-    if (placed.some((p) => overlaps(p, box))) continue;
-    if (discs.some((d) => d.id !== c.id && boxHitsCircle(box, d.cx, d.cy, d.r))) continue;
+    const under = labelBoxPx(c, cam, scale, c.dy);
+    if (placed.some((p) => overlaps(p, under))) continue;
+    let dy: number | null = onAnIcon(under, c.id) ? null : c.dy;
+    let box = under;
+    if (dy === null) {
+      // only an icon sends a label looking for another row, and only one:
+      // mirrored above the node, where the same name still reads as belonging
+      // to the same circle
+      const over = labelBoxPx(c, cam, scale, -c.dy);
+      if (!placed.some((p) => overlaps(p, over)) && !onAnIcon(over, c.id)) {
+        dy = -c.dy;
+        box = over;
+      }
+    }
+    if (dy === null) continue;
     placed.push(box);
-    kept.add(c.id);
+    plan.set(c.id, dy);
   }
-  return kept;
+  return plan;
 }
 
 /**
