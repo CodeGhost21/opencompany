@@ -46,7 +46,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
-  BookText,
   CheckCircle2,
   FileText,
   Columns3,
@@ -71,17 +70,14 @@ import { taskApprovalBlock } from "@/lib/task-approvals";
 import {
   byline,
   composableFields,
-  defineLedger,
   deleteEntry,
   EVERY_STATUS,
   filteredEmptyNotice,
   isClosingStatus,
   isWritable,
-  listLedgers,
   readLedger,
   recordEntry,
   renderedLedger,
-  retireLedger,
   statusField,
   statusFilterLabel,
   statusNeedsReason,
@@ -91,17 +87,6 @@ import {
 } from "@/api/ledgers";
 import { Markdown } from "@/components/markdown";
 import { Alert, AlertDescription } from "@/components/ui/alert";
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-  AlertDialogTrigger,
-} from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -129,9 +114,25 @@ import { cn } from "@/lib/utils";
 interface Props {
   client: OpenCompanyClient;
   company: string | null;
-  /** The ledger named in `#/ledgers/<slug>`, when the address carries one. */
+  /**
+   * Every list this company holds, read once by `app-shell.tsx`'s
+   * `useLedgerNav` and shared with the sidebar's own rows (issue #1284) —
+   * this screen no longer reads `listLedgers()` on its own.
+   */
+  ledgers: LedgerSummary[];
+  /** Whether `ledgers`'s first read is still in flight. */
+  ledgersLoading: boolean;
+  /** The list named in `#/ledgers/<slug>`, when the address carries one. */
   sub?: string | null;
-  /** Navigates to `#/ledgers/<slug>`, so a ledger survives a refresh. */
+  /**
+   * Navigates to `#/ledgers/<slug>`.
+   *
+   * Only used for the one case this screen still resolves on its own: a bare
+   * `#/ledgers` (a hand-typed or bookmarked address with no slug) lands on the
+   * first list rather than nothing, since there is no in-page picker left to
+   * choose one from (issue #1284 removed it — every list is a sidebar row
+   * now). Absent, this falls back to rendering nothing rather than guessing.
+   */
   onOpenLedger?: (slug: string | null) => void;
   /**
    * Opens a task card's detail screen (`#/tasks/<id>`).
@@ -195,6 +196,8 @@ interface Composing {
 export function LedgersView({
   client,
   company,
+  ledgers,
+  ledgersLoading,
   sub,
   onOpenLedger,
   onOpenCard,
@@ -203,12 +206,7 @@ export function LedgersView({
   now,
   onReviewApprovals,
 }: Props) {
-  const [ledgers, setLedgers] = useState<LedgerSummary[]>([]);
-  const [faults, setFaults] = useState<string[]>([]);
-  const [remaining, setRemaining] = useState(0);
-  const [selected, setSelected] = useState<string | null>(sub ?? null);
   const [read, setRead] = useState<LedgerRead | null>(null);
-  const [loading, setLoading] = useState(true);
   const [reading, setReading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
@@ -216,9 +214,6 @@ export function LedgersView({
   const [composing, setComposing] = useState<Composing | null>(null);
   const [saving, setSaving] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState<LedgerEntry | null>(null);
-  /** The ledger about to be retired, pending confirmation (issue #1216). */
-  const [confirmRetire, setConfirmRetire] = useState<LedgerSummary | null>(null);
-  const [declaring, setDeclaring] = useState(false);
   const [rendered, setRendered] = useState<string | null>(null);
   /**
    * Columns or rows.
@@ -253,9 +248,18 @@ export function LedgersView({
   const [tasks, setTasks] = useState<Task[]>([]);
 
   const ledger = useMemo(
-    () => ledgers.find((held) => held.slug === selected) ?? null,
-    [ledgers, selected],
+    () => (sub ? (ledgers.find((held) => held.slug === sub) ?? null) : null),
+    [ledgers, sub],
   );
+
+  // A bare `#/ledgers` (no slug — a hand-typed or bookmarked address) lands on
+  // the first list once the read lands, since there is no in-page picker left
+  // to choose one from (issue #1284: every list is a sidebar row instead).
+  useEffect(() => {
+    if (!sub && !ledgersLoading && ledgers.length > 0) {
+      onOpenLedger?.(ledgers[0].slug);
+    }
+  }, [sub, ledgersLoading, ledgers, onOpenLedger]);
 
   /** The task board, as opposed to a ledger a company declared. */
   const isBoard = ledger?.source === "native" && ledger.slug === BOARD_LEDGER;
@@ -281,36 +285,8 @@ export function LedgersView({
     setStatusFilter(EVERY_STATUS);
   }, []);
 
-  const refreshList = useCallback(async () => {
-    if (!company) return;
-    try {
-      const list = await listLedgers(client, company);
-      setLedgers(list.ledgers);
-      setFaults(list.faults ?? []);
-      setRemaining(list.remaining);
-      setError(null);
-      // Land somewhere real: an address naming a ledger that has since been
-      // retired should show the first one rather than an empty screen with no
-      // explanation.
-      setSelected((current) => {
-        if (current && list.ledgers.some((held) => held.slug === current)) {
-          return current;
-        }
-        return list.ledgers[0]?.slug ?? null;
-      });
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setLoading(false);
-    }
-  }, [client, company]);
-
-  useEffect(() => {
-    void refreshList();
-  }, [refreshList]);
-
   /**
-   * Re-reads the open ledger.
+   * Re-reads the open list.
    *
    * `quiet` suppresses the "Reading…" line, and exists for the re-reads the
    * operator did not ask for — the ones an SSE event triggers. Flashing a
@@ -319,13 +295,13 @@ export function LedgersView({
    */
   const refreshRead = useCallback(
     async (quiet = false) => {
-      if (!company || !selected) {
+      if (!company || !sub) {
         setRead(null);
         return;
       }
       if (!quiet) setReading(true);
       try {
-        const next = await readLedger(client, company, selected, {
+        const next = await readLedger(client, company, sub, {
           q: query.trim() || undefined,
           status: statusFilter === EVERY_STATUS ? undefined : statusFilter,
           limit: 100,
@@ -338,7 +314,7 @@ export function LedgersView({
         if (!quiet) setReading(false);
       }
     },
-    [client, company, selected, query, statusFilter],
+    [client, company, sub, query, statusFilter],
   );
 
   useEffect(() => {
@@ -387,35 +363,15 @@ export function LedgersView({
     void refreshTasks();
   }, [taskEventTick, refreshRead, refreshTasks]);
 
-  /**
-   * Follow the address when it names a different ledger.
-   *
-   * `selected` seeds from `sub` and used to stop there, so a `#/ledgers/<slug>`
-   * that arrived *after* mount — the Back button, a hand-edited address, a link
-   * from elsewhere in the console — changed the URL and nothing else. That was
-   * survivable while every route into this screen mounted it fresh. It stopped
-   * being survivable when `#/tasks` began rewriting to `#/ledgers/tasks` (issue
-   * #1140): an operator reading `goals` who followed an old board link would
-   * have watched the address change to the board and the screen stay on goals.
-   *
-   * A `sub` of `null` (bare `#/ledgers`) deliberately leaves the selection
-   * alone: it names no ledger, so there is nothing to follow it to.
-   */
-  useEffect(() => {
-    if (sub) setSelected(sub);
-  }, [sub]);
-
-  // The status filter is per ledger, so switching ledgers must clear it —
-  // otherwise the new ledger reads as empty under a filter it does not declare.
+  // The status filter is per list, so switching lists must clear it —
+  // otherwise the new list reads as empty under a filter it does not declare.
+  // `ledger` is derived straight from `sub` (no local "selected" state to
+  // follow it any more — issue #1284 removed the in-page picker that used to
+  // own that), so this keys on `sub` directly.
   useEffect(() => {
     setStatusFilter("all");
     setRendered(null);
-  }, [selected]);
-
-  const openLedger = (slug: string) => {
-    setSelected(slug);
-    onOpenLedger?.(slug);
-  };
+  }, [sub]);
 
   const save = async () => {
     if (!company || !ledger || !composing) return;
@@ -432,7 +388,7 @@ export function LedgersView({
         status: composing.status || undefined,
       });
       setComposing(null);
-      await Promise.all([refreshRead(), refreshList()]);
+      await refreshRead();
       toast.success(`Recorded ${id}.`);
     } catch (e) {
       // The host's refusals are written to be read — an unknown status names
@@ -521,7 +477,7 @@ export function LedgersView({
           status,
         });
       }
-      await Promise.all([refreshRead(), refreshList(), refreshTasks()]);
+      await Promise.all([refreshRead(), refreshTasks()]);
     } catch (e) {
       restage(was);
       const label = labelFor(columnsOf(ledger), status);
@@ -536,22 +492,8 @@ export function LedgersView({
     try {
       await deleteEntry(client, company, ledger.slug, confirmDelete.id);
       setConfirmDelete(null);
-      await Promise.all([refreshRead(), refreshList()]);
+      await refreshRead();
       toast.success(`Deleted ${confirmDelete.id}.`);
-    } catch (e) {
-      toast.error(e instanceof Error ? e.message : String(e));
-    }
-  };
-
-  const retire = async (target: LedgerSummary) => {
-    if (!company) return;
-    try {
-      await retireLedger(client, company, target.slug);
-      await refreshList();
-      // The address named this ledger; it no longer exists, so the hash must
-      // stop naming it rather than keep pointing at a dead slug (issue #1216).
-      onOpenLedger?.(null);
-      toast.success(`Retired ${target.slug}. Its rows were kept.`);
     } catch (e) {
       toast.error(e instanceof Error ? e.message : String(e));
     }
@@ -569,12 +511,16 @@ export function LedgersView({
   if (!company) {
     return (
       <div className="p-6 text-sm text-muted-foreground">
-        Pick a company to see its ledgers.
+        Pick a company to see its lists.
       </div>
     );
   }
 
-  if (loading) {
+  // Loading covers two different waits — this screen's own row read, and (only
+  // while no `ledger` has resolved yet) the shared list read `app-shell.tsx`
+  // owns — so a fresh `#/ledgers/<slug>` load shows the same skeleton it always
+  // did rather than a flash of "not found" before the list catches up.
+  if ((ledgersLoading && !ledger) || (reading && !read)) {
     return (
       <div className="space-y-3 p-6">
         <Skeleton className="h-8 w-48" />
@@ -587,40 +533,25 @@ export function LedgersView({
     <div className="flex h-full min-h-0 flex-col gap-4 p-6">
       <header className="flex flex-wrap items-center gap-3">
         <div className="flex-1 min-w-[16rem]">
-          <h1 className="text-xl font-semibold">Ledgers</h1>
+          <h1 className="text-xl font-semibold">{ledger?.title ?? "Not found"}</h1>
           <p className="text-sm text-muted-foreground">
-            What this company records and can look up again. Every ledger writes
-            a file into <code>derived/</code> in the workspace, which nothing
-            edits by hand — the rows here are the source.
+            {ledger
+              ? ledger.purpose
+              : "This list does not exist, or was retired. Pick another from the sidebar."}
           </p>
         </div>
         <Button
           variant="outline"
           size="sm"
-          onClick={() =>
-            void refreshList().then(() => {
-              void refreshRead();
-              // The board's cards are decorated from a second read, and this
-              // button is the whole manual fallback on a screen with no timer.
-              void refreshTasks();
-            })
-          }
+          onClick={() => {
+            void refreshRead();
+            // The board's cards are decorated from a second read, and this
+            // button is the whole manual fallback on a screen with no timer.
+            void refreshTasks();
+          }}
         >
           <RefreshCw className="mr-2 size-4" />
           Refresh
-        </Button>
-        <Button
-          size="sm"
-          onClick={() => setDeclaring(true)}
-          disabled={remaining <= 0}
-          title={
-            remaining <= 0
-              ? "This company is at the ledger cap. Retire one nothing reads first."
-              : undefined
-          }
-        >
-          <Plus className="mr-2 size-4" />
-          New ledger
         </Button>
       </header>
 
@@ -631,69 +562,13 @@ export function LedgersView({
         </Alert>
       )}
 
-      {faults.length > 0 && (
-        <Alert>
-          <AlertTriangle className="size-4" />
-          <AlertDescription>
-            <p className="font-medium">
-              Some declarations could not be loaded:
-            </p>
-            <ul className="mt-1 list-disc pl-4">
-              {faults.map((fault) => (
-                <li key={fault}>{fault}</li>
-              ))}
-            </ul>
-          </AlertDescription>
-        </Alert>
-      )}
-
       <div className="flex min-h-0 flex-1 gap-4">
-        <nav className="w-64 shrink-0 space-y-1 overflow-y-auto">
-          {ledgers.map((held) => (
-            <button
-              key={held.slug}
-              type="button"
-              onClick={() => openLedger(held.slug)}
-              className={cn(
-                "flex w-full flex-col gap-0.5 rounded-md border px-3 py-2 text-left text-sm",
-                held.slug === selected
-                  ? "border-primary bg-accent"
-                  : "border-transparent hover:bg-accent/50",
-              )}
-            >
-              <span className="flex items-center gap-2 font-medium">
-                <BookText className="size-4 shrink-0" />
-                {held.title}
-                {!isWritable(held) && (
-                  <Lock
-                    className="size-3 text-muted-foreground"
-                    aria-label="written elsewhere"
-                  />
-                )}
-              </span>
-              <span className="text-xs text-muted-foreground">
-                {held.open} open · {held.closed} closed
-              </span>
-            </button>
-          ))}
-        </nav>
-
         <section className="flex min-h-0 min-w-0 flex-1 flex-col gap-3">
-          {!ledger ? (
-            <p className="text-sm text-muted-foreground">
-              This company has no ledgers yet.
-            </p>
-          ) : (
+          {!ledger ? null : (
             <>
-              <div className="space-y-1">
-                <h2 className="text-lg font-medium">{ledger.title}</h2>
-                <p className="text-sm text-muted-foreground">
-                  {ledger.purpose}
-                </p>
-                <p className="text-xs text-muted-foreground">
-                  Renders into <code>{ledger.derived}</code>
-                </p>
-              </div>
+              <p className="text-xs text-muted-foreground">
+                Renders into <code>{ledger.derived}</code>
+              </p>
 
               {!isWritable(ledger) && (
                 <Alert>
@@ -782,59 +657,10 @@ export function LedgersView({
                     </Button>
                   )
                 )}
-                {!ledger.builtin && (
-                  <>
-                    {/* Separates the one control on this row that deletes
-                        something from the ones that don't — Retire used to sit
-                        8px from Record with nothing between them (issue #1216). */}
-                    <div className="mx-1 h-6 w-px bg-border" aria-hidden />
-                    <AlertDialog
-                      open={confirmRetire?.slug === ledger.slug}
-                      onOpenChange={(open) => setConfirmRetire(open ? ledger : null)}
-                    >
-                      <AlertDialogTrigger
-                        render={
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            className="text-destructive hover:text-destructive"
-                          >
-                            Retire
-                          </Button>
-                        }
-                      />
-                      <AlertDialogContent>
-                        <AlertDialogHeader>
-                          <AlertDialogTitle>Retire “{ledger.title}”?</AlertDialogTitle>
-                          <AlertDialogDescription>
-                            This ledger leaves this screen and its{" "}
-                            <code>{ledger.derived}</code> file stops being
-                            rewritten. Its rows are kept, but nothing in the
-                            console lists them afterward — re-declaring{" "}
-                            <code>{ledger.slug}</code> is the only way back.
-                          </AlertDialogDescription>
-                        </AlertDialogHeader>
-                        <AlertDialogFooter>
-                          <AlertDialogCancel>Keep it</AlertDialogCancel>
-                          <AlertDialogAction
-                            onClick={() => {
-                              // Close FIRST: the title above reads `ledger`,
-                              // and retiring changes which ledger is selected
-                              // out from under a dialog left mounted (same
-                              // reasoning as WorkflowsView's delete confirm).
-                              setConfirmRetire(null);
-                              void retire(ledger);
-                            }}
-                            className="bg-destructive text-white hover:bg-destructive/90"
-                            data-testid="ledger-retire-confirm"
-                          >
-                            Retire ledger
-                          </AlertDialogAction>
-                        </AlertDialogFooter>
-                      </AlertDialogContent>
-                    </AlertDialog>
-                  </>
-                )}
+                {/* Retiring a list moved to Manage Lists (issue #1284),
+                    reached from the Company page — the same place it is
+                    declared. This screen is about a list's rows now, never
+                    about whether the list itself continues to exist. */}
               </div>
 
               {reading && (
@@ -985,25 +811,6 @@ export function LedgersView({
         </Dialog>
       )}
 
-      {declaring && (
-        <DeclareDialog
-          remaining={remaining}
-          onCancel={() => setDeclaring(false)}
-          onDeclare={async (declaration) => {
-            if (!company) return;
-            try {
-              const created = await defineLedger(client, company, declaration);
-              setDeclaring(false);
-              await refreshList();
-              openLedger(created.slug);
-              toast.success(`Declared ${created.slug}.`);
-            } catch (e) {
-              toast.error(e instanceof Error ? e.message : String(e));
-            }
-          }}
-        />
-      )}
-
       {ledger && (
         <CreateTaskDialog
           open={creatingCard}
@@ -1011,7 +818,6 @@ export function LedgersView({
           onCreated={() => {
             setCreatingCard(false);
             void refreshRead();
-            void refreshList();
             // …and the `Task` behind the row that just appeared, or the new
             // card renders as a bare ledger row until something else re-reads.
             void refreshTasks();
@@ -1396,111 +1202,3 @@ function ComposeDialog({
     </Dialog>
   );
 }
-
-/**
- * Declaring a ledger by hand.
- *
- * A JSON editor rather than a wizard, deliberately: the declaration is small,
- * the field roles matter, and a wizard that produced a subset of what a
- * teammate's `define_ledger` can produce would leave the console unable to
- * express a ledger it can display. The starting document is a working example,
- * because the commonest mistake is not a syntax error — it is a ledger with no
- * closing status, which can never say why anything ended.
- */
-function DeclareDialog({
-  remaining,
-  onCancel,
-  onDeclare,
-}: {
-  remaining: number;
-  onCancel: () => void;
-  onDeclare: (declaration: unknown) => Promise<void>;
-}) {
-  const [text, setText] = useState(TEMPLATE);
-  const [invalid, setInvalid] = useState<string | null>(null);
-
-  const submit = async () => {
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(text);
-    } catch (e) {
-      setInvalid(e instanceof Error ? e.message : String(e));
-      return;
-    }
-    setInvalid(null);
-    await onDeclare(parsed);
-  };
-
-  return (
-    <Dialog open onOpenChange={onCancel}>
-      <DialogContent className="max-h-[85vh] max-w-2xl overflow-y-auto">
-        <DialogHeader>
-          <DialogTitle>Declare a ledger</DialogTitle>
-          <DialogDescription>
-            An axis this company will need to look up again. {remaining} more
-            can be declared. Mark the statuses that end a row{" "}
-            <code>closed</code>, and set <code>needs_reason</code> on those —
-            a row that closes without saying why is worth nothing later.
-          </DialogDescription>
-        </DialogHeader>
-        <Textarea
-          rows={20}
-          className="font-mono text-xs"
-          value={text}
-          onChange={(e) => setText(e.target.value)}
-        />
-        {invalid && (
-          <Alert variant="destructive">
-            <AlertTriangle className="size-4" />
-            <AlertDescription>{invalid}</AlertDescription>
-          </Alert>
-        )}
-        <DialogFooter>
-          <Button variant="ghost" onClick={onCancel}>
-            Cancel
-          </Button>
-          <Button onClick={() => void submit()}>Declare</Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-  );
-}
-
-const TEMPLATE = JSON.stringify(
-  {
-    slug: "customer-promises",
-    title: "Customer promises",
-    purpose:
-      "What we have told a customer we would do, and whether we did it. Read it before promising anything else to the same account.",
-    fields: [
-      { name: "id", role: "id" },
-      { name: "promise", role: "title", required: true },
-      { name: "status", role: "status", required: true },
-      { name: "customer", role: "owner" },
-      { name: "due", role: "date" },
-      { name: "detail", role: "prose" },
-      { name: "reason", role: "prose" },
-    ],
-    statuses: [
-      { name: "open" },
-      { name: "kept", closed: true, needs_reason: true },
-      { name: "broken", closed: true, needs_reason: true },
-    ],
-    sections: [
-      {
-        heading: "Outstanding",
-        blurb: "Promised and not yet met. Most recently updated first.",
-        statuses: ["open"],
-        order: "recent",
-      },
-      {
-        heading: "Settled",
-        blurb: "Kept or broken, each with the reason.",
-        statuses: ["kept", "broken"],
-      },
-    ],
-    checks: ["required-field", "known-status", "closed-needs-reason"],
-  },
-  null,
-  2,
-);

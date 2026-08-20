@@ -1,0 +1,211 @@
+// Manage Lists (issue #1284): where a list is created and retired, off the
+// Company page — the same shape `OrgChartView` already gave desks. Every
+// list has its own sidebar row now (`app-shell.tsx`'s `navItems`), so there
+// is no longer a single "Ledgers" screen for "New ledger" to live on; this is
+// where that control — and Retire, ported from the old per-list toolbar —
+// live instead. A list's own screen (`LedgersView`) is only ever about its
+// rows from here on.
+
+import { useState } from "react";
+import { AlertTriangle, ArrowLeft, Lock, Plus } from "lucide-react";
+import { toast } from "sonner";
+
+import type { OpenCompanyClient } from "@/api/client";
+import { retireLedger, type LedgerSummary } from "@/api/ledgers";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from "@/components/ui/alert-dialog";
+import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent } from "@/components/ui/card";
+import { Skeleton } from "@/components/ui/skeleton";
+import type { LedgerNav } from "@/hooks/use-ledger-nav";
+import { BOARD_LEDGER } from "@/lib/board-columns";
+import { DeclareListWizard } from "@/views/company/DeclareListWizard";
+
+interface Props {
+  client: OpenCompanyClient;
+  company: string | null;
+  ledgerNav: LedgerNav;
+  onBack: () => void;
+}
+
+export function ManageListsView({ client, company, ledgerNav, onBack }: Props) {
+  const [declaring, setDeclaring] = useState(false);
+  const [confirmRetire, setConfirmRetire] = useState<LedgerSummary | null>(null);
+  const [retiring, setRetiring] = useState(false);
+
+  const { ledgers, faults, remaining, loading, refresh } = ledgerNav;
+
+  if (!company) {
+    return (
+      <div className="p-6 text-sm text-muted-foreground">
+        Pick a company to manage its lists.
+      </div>
+    );
+  }
+  const board = ledgers.find((l) => l.slug === BOARD_LEDGER);
+  const rest = ledgers.filter((l) => l.slug !== BOARD_LEDGER);
+  const ordered = board ? [board, ...rest] : rest;
+
+  const retire = async (target: LedgerSummary) => {
+    setRetiring(true);
+    try {
+      await retireLedger(client, company, target.slug);
+      setConfirmRetire(null);
+      await refresh();
+      toast.success(`Retired ${target.title}. Its rows were kept.`);
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : String(e));
+    } finally {
+      setRetiring(false);
+    }
+  };
+
+  return (
+    <div className="flex h-full min-h-0 flex-col gap-4 p-6">
+      <header className="space-y-2">
+        <Button variant="ghost" size="sm" className="w-fit" onClick={onBack}>
+          <ArrowLeft className="mr-2 size-4" />
+          Company
+        </Button>
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h1 className="text-xl font-semibold">Manage lists</h1>
+            <p className="text-sm text-muted-foreground">
+              Every list this company tracks — its own board, plus whatever
+              else it records. Each one gets its own place in the sidebar the
+              moment it exists here.
+            </p>
+          </div>
+          <Button
+            size="sm"
+            onClick={() => setDeclaring(true)}
+            disabled={remaining <= 0}
+            title={
+              remaining <= 0
+                ? "This company is at the list cap. Retire one nothing reads first."
+                : undefined
+            }
+          >
+            <Plus className="mr-2 size-4" />
+            New list
+          </Button>
+        </div>
+      </header>
+
+      {faults.length > 0 && (
+        <Alert>
+          <AlertTriangle className="size-4" />
+          <AlertDescription>
+            <p className="font-medium">Some declarations could not be loaded:</p>
+            <ul className="mt-1 list-disc pl-4">
+              {faults.map((fault) => (
+                <li key={fault}>{fault}</li>
+              ))}
+            </ul>
+          </AlertDescription>
+        </Alert>
+      )}
+
+      <div className="min-h-0 flex-1 space-y-2 overflow-y-auto">
+        {loading && ledgers.length === 0 ? (
+          <div className="space-y-2">
+            <Skeleton className="h-16 w-full" />
+            <Skeleton className="h-16 w-full" />
+          </div>
+        ) : (
+          ordered.map((held) => (
+            <Card key={held.slug}>
+              <CardContent className="flex flex-wrap items-center justify-between gap-3 py-3">
+                <div className="min-w-[16rem] flex-1 space-y-0.5">
+                  <div className="flex items-center gap-2 font-medium">
+                    {held.title}
+                    {held.source === "native" && (
+                      <Lock
+                        className="size-3 text-muted-foreground"
+                        aria-label="written elsewhere"
+                      />
+                    )}
+                  </div>
+                  <p className="text-xs text-muted-foreground">{held.purpose}</p>
+                  <p className="text-xs text-muted-foreground">
+                    {held.open} open · {held.closed} closed
+                  </p>
+                </div>
+                {held.builtin ? (
+                  <span className="text-xs text-muted-foreground" title="Built into every company">
+                    Built in
+                  </span>
+                ) : (
+                  <AlertDialog
+                    open={confirmRetire?.slug === held.slug}
+                    onOpenChange={(open) => setConfirmRetire(open ? held : null)}
+                  >
+                    <AlertDialogTrigger
+                      render={
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="text-destructive hover:text-destructive"
+                        >
+                          Retire
+                        </Button>
+                      }
+                    />
+                    <AlertDialogContent>
+                      <AlertDialogHeader>
+                        <AlertDialogTitle>Retire “{held.title}”?</AlertDialogTitle>
+                        <AlertDialogDescription>
+                          This list leaves the sidebar and its{" "}
+                          <code>{held.derived}</code> file stops being
+                          rewritten. Its rows are kept, but nothing in the
+                          console lists them afterward — re-declaring{" "}
+                          <code>{held.slug}</code> is the only way back.
+                        </AlertDialogDescription>
+                      </AlertDialogHeader>
+                      <AlertDialogFooter>
+                        <AlertDialogCancel>Keep it</AlertDialogCancel>
+                        <AlertDialogAction
+                          onClick={() => void retire(held)}
+                          disabled={retiring}
+                          className="bg-destructive text-white hover:bg-destructive/90"
+                          data-testid="ledger-retire-confirm"
+                        >
+                          Retire list
+                        </AlertDialogAction>
+                      </AlertDialogFooter>
+                    </AlertDialogContent>
+                  </AlertDialog>
+                )}
+              </CardContent>
+            </Card>
+          ))
+        )}
+      </div>
+
+      {declaring && (
+        <DeclareListWizard
+          client={client}
+          company={company}
+          existingSlugs={ledgers.map((l) => l.slug)}
+          remaining={remaining}
+          onCancel={() => setDeclaring(false)}
+          onCreated={async (created) => {
+            setDeclaring(false);
+            await refresh();
+            toast.success(`Declared ${created.title}.`);
+          }}
+        />
+      )}
+    </div>
+  );
+}
