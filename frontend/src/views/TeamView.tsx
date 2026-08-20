@@ -387,24 +387,27 @@ export function TeamView({
           way. Two headings over one page's two halves is how an operator ends
           up believing they are on two different pages.
         */}
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div className="space-y-1">
+        <div className="space-y-1">
+          <div
+            className="flex flex-wrap items-center justify-between gap-3"
+            data-testid="company-header"
+          >
             <h2 className="text-2xl font-semibold tracking-tight">Company</h2>
-            <p className="text-sm text-muted-foreground">
-              The teammates that make up your company — what each does, and what
-              they're on. {fromHost ? "Defined by this company." : "Start from these and shape your own."}
-            </p>
-          </div>
-          <div className="ml-auto flex flex-wrap items-center justify-end gap-2">
-            {onManageDesks && (
-              <Button variant="outline" onClick={onManageDesks} data-testid="company-manage-desks">
-                <Network className="size-4" /> Manage desks
+            <div className="ml-auto flex flex-wrap items-center justify-end gap-2">
+              {onManageDesks && (
+                <Button variant="outline" onClick={onManageDesks} data-testid="company-manage-desks">
+                  <Network className="size-4" /> Manage desks
+                </Button>
+              )}
+              <Button onClick={() => setAddOpen(true)}>
+                <UserPlus className="size-4" /> Add teammate
               </Button>
-            )}
-            <Button onClick={() => setAddOpen(true)}>
-              <UserPlus className="size-4" /> Add teammate
-            </Button>
+            </div>
           </div>
+          <p className="text-sm text-muted-foreground">
+            The teammates that make up your company — what each does, and what
+            they're on. {fromHost ? "Defined by this company." : "Start from these and shape your own."}
+          </p>
         </div>
 
         {/*
