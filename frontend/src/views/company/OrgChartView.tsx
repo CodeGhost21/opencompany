@@ -115,11 +115,19 @@ interface Props {
    * operator just followed.
    */
   focusDeskId?: string | null;
+  /**
+   * Return to the roster at `#/company` (issue #1193).
+   *
+   * The chart is a destination under the Company page rather than a mode of it,
+   * so it owes the operator a way back — the same debt any sub-page has.
+   * Optional, so the chart still stands alone.
+   */
+  onBack?: () => void;
 }
 
 type Load = "loading" | "ready" | "error";
 
-export function OrgChartView({ client, company, focusDeskId }: Props) {
+export function OrgChartView({ client, company, focusDeskId, onBack }: Props) {
   const [load, setLoad] = useState<Load>("loading");
   const [tree, setTree] = useState<OrgTree | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
@@ -383,16 +391,43 @@ export function OrgChartView({ client, company, focusDeskId }: Props) {
   return (
     <div ref={chartRef} className="flex-1 overflow-y-auto">
       <div className="mx-auto w-full max-w-4xl space-y-6 px-4 py-6">
+        {/* A sub-page of Company, so it says where it is and offers the way
+            back (issue #1193). It used to be the other half of a toggle, which
+            said "another view of the same thing" about the one surface that can
+            create a desk. */}
+        {onBack && (
+          <nav aria-label="Breadcrumb">
+            <ol className="flex flex-wrap items-center gap-1 text-sm">
+              <li>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="-ml-2 h-7 px-2 text-muted-foreground"
+                  onClick={onBack}
+                  data-testid="desks-breadcrumb-company"
+                >
+                  Company
+                </Button>
+              </li>
+              <li aria-hidden className="text-muted-foreground">
+                <ChevronRight className="size-3.5" />
+              </li>
+              <li aria-current="page" className="min-w-0 truncate font-medium">
+                Desks
+              </li>
+            </ol>
+          </nav>
+        )}
         <div className="flex items-start justify-between gap-4">
           <div className="space-y-1">
-            <h2 className="text-2xl font-semibold tracking-tight">Company</h2>
+            <h2 className="text-2xl font-semibold tracking-tight">Desks</h2>
             <p className="text-sm text-muted-foreground">
               How your company is organised: the desks it works from and who
               staffs each one. Add a desk, move someone between desks, or change
               who leads.
             </p>
           </div>
-          <div className="flex shrink-0 flex-wrap justify-end gap-2">
+          <div className="ml-auto flex shrink-0 flex-wrap items-center justify-end gap-2">
             <Button
               size="sm"
               variant="outline"
