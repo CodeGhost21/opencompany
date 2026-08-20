@@ -148,6 +148,27 @@ test.afterAll(async ({ playwright }, testInfo) => {
   }
 });
 
+/**
+ * Wait for the toast stack to clear before clicking something under it.
+ *
+ * The notification region is `position: fixed` in the bottom-right corner, over
+ * whatever the page has scrolled under it. Playwright scrolls a click target
+ * into view *minimally*, so a control near the bottom of a scrolled pane can
+ * land right there — and then the click deadlocks rather than merely waiting:
+ * sonner PAUSES a toast's auto-dismiss timer while it is hovered (see
+ * `toast-dismissal.spec.ts`), and Playwright's retry loop hovers the point it
+ * is trying to click. The toast that would have gone in three seconds stays for
+ * the whole test timeout, and the log reads "subtree intercepts pointer
+ * events" on every attempt.
+ *
+ * Waiting first, without hovering, lets the timer run. This is about reaching
+ * the control, not about what the control does — no assertion below depends on
+ * it.
+ */
+async function toastsCleared(page: Page) {
+  await expect(page.locator("[data-sonner-toast]")).toHaveCount(0, { timeout: 30_000 });
+}
+
 test("an operator names the account, and the page says so", async ({ page }) => {
   await clearChoice(page);
   await openConnections(page);
@@ -164,6 +185,7 @@ test("an operator names the account, and the page says so", async ({ page }) => 
   // rather than pointing at a row it cannot back up (#819's argument).
   await expect(gmail).toContainText("Composio picks");
 
+  await toastsCleared(page);
   await gmail
     .getByTestId("account-ca_billing")
     .getByRole("button", { name: "Act as this" })
@@ -310,6 +332,9 @@ test.describe("the agent acts as the chosen account", () => {
 
     // Now choose, through the page, exactly as an operator would.
     await openConnections(page);
+    // The approval just decided above leaves a toast in the bottom-right
+    // corner, and this button can sit under it once the pane is scrolled.
+    await toastsCleared(page);
     await page
       .getByTestId("accounts-gmail")
       .getByTestId("account-ca_billing")
