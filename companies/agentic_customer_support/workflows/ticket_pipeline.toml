@@ -74,7 +74,7 @@ summary = "Close the ticket and report back."
 # The support-operations desk owns the resolution record and any follow-up.
 [node.destination]
 kind = "channel"
-target = "support-operations"
+target = "support_operations"
 
 [[edge]]
 from = "ticket"

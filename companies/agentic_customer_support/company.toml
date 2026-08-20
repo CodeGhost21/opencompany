@@ -9,7 +9,7 @@ human_role = "Escalation and policy"
 
 # The support-operations desk owns customer outcomes and the guidance that supports them.
 [[group_chat]]
-id = "support-operations"
+id = "support_operations"
 name = "Support operations desk"
 description = "Coordinate ticket resolution, escalations, and support documentation."
 members = ["support_agent", "escalation_manager", "docs_writer"]
