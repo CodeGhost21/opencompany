@@ -1380,15 +1380,6 @@ export function AppShell({
 
   return (
     <SidebarProvider className="h-svh overflow-hidden">
-      {/* Mobile turns the sidebar into a sheet, so its own collapse control is
-          not mounted while it is closed. Keep the way back fixed to the
-          viewport and below the page controls rather than competing with a
-          view's toolbar. Desktop keeps its own collapse button in the
-          sidebar's header. */}
-      <SidebarTrigger
-        aria-label="Toggle sidebar"
-        className="fixed bottom-4 left-4 z-50 md:hidden"
-      />
       <Sidebar collapsible="icon">
         <SidebarHeader>
           {/* The header is the column talking about itself: which host this
@@ -1793,6 +1784,18 @@ export function AppShell({
             />
           )}
           {view === "feedback" && <FeedbackView client={client} company={company} />}
+        </div>
+
+        {/* Mobile only: dedicated chrome for the way back to navigation, not an
+            overlay on top of it. A `fixed` trigger here used to float over
+            whatever content happened to scroll into the bottom-left corner and
+            win every hit-test in that region (issue #1265) — this bar reserves
+            its own row in SidebarInset's flex column instead, so the content
+            wrapper's flex-1 height (and every view's own overflow-y-auto
+            within it) already stops short of it. No view needs to know this
+            control exists. */}
+        <div className="flex shrink-0 items-center border-t bg-background p-2 md:hidden">
+          <SidebarTrigger aria-label="Toggle sidebar" />
         </div>
       </SidebarInset>
 

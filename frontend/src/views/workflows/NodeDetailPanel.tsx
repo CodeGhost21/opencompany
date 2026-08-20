@@ -65,6 +65,19 @@ export function NodeDetailPanel({
               requires approval
             </Badge>
           )}
+          {/* Issue #850. Only `false` is a statement — absent means "repeats",
+              which is the default and not worth a badge. Says what happens
+              rather than naming the field, because the operator's question is
+              what approving will do. */}
+          {node.repeatable === false && (
+            <Badge
+              variant="outline"
+              className="border-status-blocked/40 bg-status-blocked-soft font-normal"
+              data-testid="node-not-repeated"
+            >
+              not repeated on approval
+            </Badge>
+          )}
           {node.schedule && (
             <Badge variant="outline" className="border-status-running/40 bg-status-running-soft font-normal">
               scheduled
@@ -135,7 +148,11 @@ export function NodeDetailPanel({
           !node.retry &&
           !node.schedule &&
           !node.destination &&
-          !node.requiresApproval && (
+          !node.requiresApproval &&
+          // Issue #850: `repeatable === false` renders the "not repeated on
+          // approval" badge above, so a node whose only detail is that
+          // declaration must not also claim it has no extra details.
+          node.repeatable !== false && (
             <p className="text-xs text-muted-foreground">
               This node has no extra details beyond its kind and name.
             </p>
