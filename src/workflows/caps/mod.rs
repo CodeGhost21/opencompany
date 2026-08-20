@@ -849,6 +849,19 @@ impl HarnessAgentRunner {
     /// Deduped by path: a turn that called `publish_artifact` on the same file
     /// three times should name it once, for the reason
     /// [`push_tool`] gives.
+    ///
+    /// # Known limitation: the bucket is unscoped
+    ///
+    /// The queue handle is shared across every path in the company, and the
+    /// chat cycle's `clear()` at the top of each turn empties it. So a chat
+    /// cycle starting between a node's refusal and this drain can discard the
+    /// notice. That is the **safe** direction and the reason it is left as is:
+    /// the loss is a notice that does not appear, never one attributed to a run
+    /// that did not earn it — a claimed destination records no refusal at all
+    /// (pinned by `a_claimed_destination_records_no_refusal`), so nothing a chat
+    /// or task turn does can *add* to this bucket. Closing it properly means
+    /// scoping the bucket per claimant the way issue #771 scoped the delegation
+    /// queue, which is a wider change than this fix.
     fn drain_publish_refusals(&self) {
         let refusals = self.deps.pending_publishes.drain_refusals();
         let mut seen: Vec<String> = Vec::new();
