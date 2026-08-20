@@ -3406,6 +3406,65 @@ async fn mcp_servers_crud_round_trips_and_token_is_write_only() {
     assert_eq!(list.as_array().unwrap().len(), 0);
 }
 
+/// Issue #1270: a build without the `mcp` feature must serve List A exactly as
+/// before and answer the directory routes `not_wired`.
+///
+/// Gated on the absence of the feature rather than written once for both builds:
+/// with `mcp` on, these routes reach a live registry and two upstream
+/// directories over the network, which is not a thing a unit test may do. The
+/// default `cargo test --locked` lane is what runs this, and it is the lane that
+/// compiles the unwired half in the first place.
+#[cfg(not(feature = "mcp"))]
+#[tokio::test]
+async fn without_the_mcp_feature_the_directory_is_not_wired_and_list_a_is_unchanged() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+
+    let (status, _) = send(
+        &state,
+        "POST",
+        "/api/v1/company/mcp/servers",
+        Some(json!({ "name": "notion", "endpoint": "https://notion.example/mcp" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // List A is served, and carries none of the registry-only keys.
+    let (status, list) = send(&state, "GET", "/api/v1/company/mcp/servers", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(list.as_array().unwrap().len(), 1);
+    assert_eq!(list[0]["source"], "runtime");
+    for key in ["serverId", "qualifiedName", "iconUrl", "transport"] {
+        assert!(
+            list[0].get(key).is_none(),
+            "`{key}` must not appear without a registry install"
+        );
+    }
+
+    // Every directory route answers the console's degrade signal.
+    for (method, uri) in [
+        ("GET", "/api/v1/company/mcp/registry/search?q=git"),
+        (
+            "GET",
+            "/api/v1/company/mcp/registry/entry?qualifiedName=@a/b",
+        ),
+        ("POST", "/api/v1/company/mcp/registry/install"),
+        ("POST", "/api/v1/company/mcp/registry/sid/connect"),
+        ("POST", "/api/v1/company/mcp/registry/sid/disconnect"),
+        ("PUT", "/api/v1/company/mcp/registry/sid/env"),
+        ("DELETE", "/api/v1/company/mcp/registry/sid"),
+    ] {
+        let (status, body) = send(&state, method, uri, None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{method} {uri}");
+        assert_eq!(body["code"], "not_wired", "{method} {uri}");
+    }
+
+    // And the List A delete still works with no install behind the row.
+    let (status, _) = send(&state, "DELETE", "/api/v1/company/mcp/servers/notion", None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+}
+
 #[tokio::test]
 async fn mcp_manifest_server_cannot_be_deleted_but_can_be_overridden() {
     let home_dir = home();
