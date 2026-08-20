@@ -86,7 +86,7 @@ summary = "Report cohort outcomes and the ask."
 # The cohort-review desk gathers the decisions that need accelerator operator review.
 [node.destination]
 kind = "channel"
-target = "cohort-review"
+target = "cohort_review"
 
 [[edge]]
 from = "open"
