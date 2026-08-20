@@ -26,6 +26,7 @@ import {
   AgentHarnessCard, GraphHumanDetailCard, MemoryNoteCard, SopTaskDetailCard,
   type DeptLite,
 } from './KnowledgeDetail';
+import { destinationFor, MEMORY_DESTINATION } from './open-in-console';
 import { KnowledgeGraphFullscreen } from './KnowledgeGraphFullscreen';
 
 const W = 880;
@@ -1617,6 +1618,10 @@ export function KnowledgeGraph({
       onTool={selectToolSlug}
       onAgent={(id) => selectAgent(`emp:${id}`)}
       onTask={selectedAgentTaskId ? () => selectTask(selectedAgentTaskId) : undefined}
+      // The way out of the graph (issue #1308). Read off the node's own id, so
+      // the link cannot name a different teammate than the card was opened
+      // from.
+      openIn={selectedAgentId ? destinationFor(selectedAgentId) : null}
     />
   ) : null;
 
@@ -1638,6 +1643,7 @@ export function KnowledgeGraph({
       onClose={clearDetail}
       onAssignee={selectedTaskWorker ? () => selectWorker(selectedTaskWorker) : undefined}
       onTool={selectToolSlug}
+      openIn={selectedTaskId ? destinationFor(selectedTaskId) : null}
     />
   ) : null;
 
@@ -1655,6 +1661,7 @@ export function KnowledgeGraph({
       onClose={clearDetail}
       onTask={selectedHumanTaskId ? () => selectTask(selectedHumanTaskId) : undefined}
       onTool={selectToolSlug}
+      openIn={selectedHumanId ? destinationFor(selectedHumanId) : null}
     />
   ) : null;
 
@@ -1664,6 +1671,9 @@ export function KnowledgeGraph({
       note={selectedMemory}
       color={memColor(selectedMemory)}
       onClose={() => setSelectedMemoryId(null)}
+      // A note's surface is the Brain itself — `#/memory` addresses the page,
+      // not one entry — so this is the constant rather than a per-id lookup.
+      openIn={MEMORY_DESTINATION}
     />
   ) : null;
 
