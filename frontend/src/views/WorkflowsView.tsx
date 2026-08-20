@@ -2676,11 +2676,12 @@ export function WorkflowsView({
           )}
         </div>
       ) : (
-        /* Issue #1107: canvas and left rail side by side. `CanvasShell` owns
-           the detail view's column layout and documents which slot a new panel
-           belongs in — left rail, right overlay, or bottom strip. */
+        /* Issue #1107 (extended by #1205): canvas with a rail on each side.
+           `CanvasShell` owns the detail view's column layout and documents
+           which slot a new panel belongs in — left rail, right rail, or right
+           overlay. */
         <CanvasShell
-          rail={
+          leftRail={
             historyOpen && historySupported ? (
               <RunHistoryPanel
                 runs={historyRows}
@@ -2696,6 +2697,37 @@ export function WorkflowsView({
                 onFixWithCopilot={handleFixWithCopilot}
                 fixingRunSeq={fixingRunSeq}
                 fixReason={fixReason}
+              />
+            ) : null
+          }
+          // Issue #1205: `result` and `runFailure` are mutually exclusive by
+          // construction — `run()` clears both on dispatch, and only one arm
+          // of its try/catch sets one — so this is a ternary, not two
+          // independent siblings. Both are per-workflow chrome, so this is
+          // still gated by being inside the `detailOpen` branch, same as the
+          // left rail above.
+          rightRail={
+            result ? (
+              <RunResultPanel
+                result={result}
+                graph={graph}
+                request={ranWith}
+                onClose={() => setResult(null)}
+                // Issue #1002: the whole queue, narrowed by the panel to this
+                // run. Handed in unfiltered on purpose — the Approvals page
+                // reads the same array and must keep showing every row.
+                approvals={approvals}
+                now={approvalsNow}
+                askerNames={askerNames}
+                deciding={decidingApprovals}
+                decided={decidedApprovals}
+                failed={failedApprovals}
+                onDecide={onDecideApproval}
+              />
+            ) : runFailure ? (
+              <RunFailurePanel
+                failure={runFailure}
+                onClose={() => setRunFailure(null)}
               />
             ) : null
           }
@@ -2765,42 +2797,14 @@ export function WorkflowsView({
         </CanvasShell>
       )}
 
-      {/* Issue #1110: the two strips below belong to ONE workflow, so neither
-          may outlive leaving it. Their state is cleared on every selection
-          change, but a drawer is the wrong thing to be wrong about —
-          `detailOpen` makes it structural rather than a promise about ordering.
-          The third drawer this used to cover, run history, is now the detail
-          view's left rail (#1107) and is gated by the same branch structurally:
-          it renders inside `CanvasShell`, which only the detail side has. */}
-      {detailOpen && result && (
-        <RunResultPanel
-          result={result}
-          graph={graph}
-          request={ranWith}
-          onClose={() => setResult(null)}
-          // Issue #1002: the whole queue, narrowed by the panel to this run.
-          // Handed in unfiltered on purpose — the Approvals page reads the same
-          // array and must keep showing every row.
-          approvals={approvals}
-          now={approvalsNow}
-          askerNames={askerNames}
-          deciding={decidingApprovals}
-          decided={decidedApprovals}
-          failed={failedApprovals}
-          onDecide={onDecideApproval}
-        />
-      )}
-
-      {/* Issue #1007: the same slot, for the outcome that had no surface at all.
-          The two are mutually exclusive by construction — `run()` clears both on
-          dispatch and only one of its arms sets one — so they are rendered as
-          siblings rather than as a branch. */}
-      {detailOpen && runFailure && (
-        <RunFailurePanel
-          failure={runFailure}
-          onClose={() => setRunFailure(null)}
-        />
-      )}
+      {/* Issue #1110's reasoning, extended by #1205: `result` and `runFailure`
+          are per-workflow chrome that must not outlive leaving the workflow.
+          Both used to render as full-width strips here, below `CanvasShell`.
+          They are now `CanvasShell`'s `rightRail` (see the call above), gated
+          by the very same `detailOpen` branch structurally — a list of
+          workflows has no single run's outcome to show, so there is nothing
+          for a rail to be beside, the same reason run history (#1107) lives
+          inside `CanvasShell` rather than out here. */}
 
       {/* Issue #1204: where the toolbar's run-input box went.
 
