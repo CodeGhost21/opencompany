@@ -204,6 +204,77 @@ pub enum Verdict {
     Deny,
 }
 
+/// What the operator says one chat message is **for** (issue #1152).
+///
+/// # Why this is not a third `TaskDeliverable`
+///
+/// [`TaskDeliverable`](crate::ports::tasks::TaskDeliverable) answers a question
+/// about a **card**: once the work exists, does doing it produce a one-off
+/// result or a reusable workflow. This answers the question one step earlier —
+/// whether the message is a request for work at all. A card can never *be* "not
+/// work", so a third `TaskDeliverable` variant would be
+/// representable-but-invalid in every position that field is stored and read
+/// (`TaskRecord::deliverable`, the builder pass's dispatch check, the console's
+/// task edit dialog), and every one of those readers would owe a branch for a
+/// state that cannot occur.
+///
+/// [`deliverable`](Self::deliverable) returning `None` for [`Chat`](Self::Chat)
+/// is that same statement, made in the type: no card, therefore no deliverable
+/// to choose.
+///
+/// # The operator chooses; nothing guesses
+///
+/// Like `TaskDeliverable` (decision D2a of issue #580), this is only ever set
+/// from an explicit control a person pressed. Nothing reads a message and
+/// decides it "looks like chatter" — that judgement already exists one layer
+/// down, as the lexical triage (issue #267) and the model escalation (issue
+/// #984), and this is deliberately not a third one of those. It is the person's
+/// own statement about their own message, settled before any model runs.
+///
+/// Additive on the wire: the two work values are the exact `TaskDeliverable`
+/// words, so every `deliverable` value ever journaled on a
+/// [`CompanyEvent::OperatorMessage`] still deserializes, and a message that
+/// carried no choice still serializes with the field absent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MessageIntent {
+    /// Not a request for work — the composer's "Just chatting". No
+    /// deterministic path opens a card for this message.
+    Chat,
+    /// A request for work, done once. The historical default: identical in
+    /// behaviour, and on the wire, to a message that expressed no choice.
+    Once,
+    /// A request for work, built as a reusable workflow. The card it opens
+    /// routes through the builder pass.
+    Workflow,
+}
+
+impl MessageIntent {
+    /// The deliverable a card opened for this message carries, or `None` when
+    /// the operator said the message asks for no card at all.
+    pub fn deliverable(self) -> Option<crate::ports::tasks::TaskDeliverable> {
+        match self {
+            Self::Chat => None,
+            Self::Once => Some(crate::ports::tasks::TaskDeliverable::Once),
+            Self::Workflow => Some(crate::ports::tasks::TaskDeliverable::Workflow),
+        }
+    }
+
+    /// Whether the operator stated this message is not a request for work.
+    pub fn is_chat(self) -> bool {
+        matches!(self, Self::Chat)
+    }
+
+    /// The wire word, for a log line or a note a person reads.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Chat => "chat",
+            Self::Once => "once",
+            Self::Workflow => "workflow",
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Events
 // ---------------------------------------------------------------------------
@@ -255,9 +326,10 @@ pub enum CompanyEvent {
         /// terms above, so no stored record migrates.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         parent: Option<EventSeq>,
-        /// The composer's once-vs-workflow choice for this message (issue #845),
-        /// as the operator set it — [`TaskDeliverable::Workflow`] when they
-        /// picked "Build me the workflow".
+        /// What the operator's composer said this message is **for** (issues
+        /// #845, #1152), as they set it — [`MessageIntent::Workflow`] when they
+        /// picked "Build me the workflow", [`MessageIntent::Chat`] when they
+        /// picked "Just chatting".
         ///
         /// Carried on the event because the cycle is the only place that holds
         /// both this fact and the turn about to answer, and without it the turn
@@ -269,12 +341,20 @@ pub enum CompanyEvent {
         /// [`CompanyRuntime::inject_workflow_builder_awareness`](crate::company::runtime::CompanyRuntime)
         /// reads this to tell the turn who owns the authoring.
         ///
+        /// Typed [`MessageIntent`] rather than
+        /// [`TaskDeliverable`](crate::ports::tasks::TaskDeliverable) since
+        /// #1152, because the operator can now say the message is not a request
+        /// for work at all — which is a statement about the *message*, not a
+        /// choice of what a card produces. The field keeps its name and its wire
+        /// key: one operator choice, one field, so `{"deliverable":"workflow"}`
+        /// and "just chatting" cannot both be asserted about one message.
+        ///
         /// `None` means the caller expressed no choice — every message journaled
         /// before this field existed, and every non-chat producer. Additive on
-        /// exactly the `by` / `chat` / `parent` terms above, so no stored record
-        /// migrates.
+        /// exactly the `by` / `chat` / `parent` terms above, and the two work
+        /// words are unchanged, so no stored record migrates.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        deliverable: Option<crate::ports::tasks::TaskDeliverable>,
+        deliverable: Option<MessageIntent>,
     },
     /// A turn was **accepted** for an operator message (issue #983) — the
     /// transcript line that says the company took the work on.
@@ -1834,8 +1914,27 @@ impl Effect {
     /// every Composio action under one name, so the same tool is grantable when
     /// it is listing a repository's pull requests and per-call when it is
     /// sending mail.
+    ///
+    /// ## A workflow gate is asked about the call it is stopping (issue #1098)
+    ///
+    /// A gate's `kind` is the wrapper `workflow.approve`, so asking about it
+    /// classifies a name the declaration table has never heard of and returns
+    /// the undeclared fallback — the classifier never sees the `web_fetch` on
+    /// the card. That is a second, independent reason a workflow card is not
+    /// grantable today, on top of its `agent: None`, and fixing only the
+    /// principal would leave this one refusing every gate.
+    ///
+    /// [`gate_inner_call`](crate::runtime::workflow_resume::gate_inner_call)
+    /// reads the tool and arguments issue #846 already writes onto the payload,
+    /// so what is classified is what the card showed. Every other effect takes
+    /// the branch below unchanged, which is what keeps the agent path answering
+    /// exactly as it did.
     pub fn may_be_granted_standing(&self) -> bool {
-        crate::policy::consequence_of(&self.kind, &self.payload)
+        let (kind, payload) = match crate::runtime::workflow_resume::gate_inner_call(self) {
+            Some((tool, args)) => (tool, args),
+            None => (self.kind.as_str(), &self.payload),
+        };
+        crate::policy::consequence_of(kind, payload)
             .standing
             .is_grantable()
     }
@@ -1977,6 +2076,26 @@ impl TokenUsage {
 }
 
 /// Everything the brain needs to run one cycle.
+///
+/// **A cycle carries no working memory.** The struct once also carried
+/// `compressed_history` (32 recent [`CompressedTrace`]s) and `context_index`
+/// (every [`ChunkMeta`] in the company, unbounded), loaded from the
+/// [`MemoryStore`](crate::ports::MemoryStore) and
+/// [`ContextStore`](crate::ports::ContextStore) on every cycle — and read by no
+/// [`Brain`](crate::ports::Brain) implementation. Two facts made them dead
+/// rather than merely unused: no summariser exists anywhere in the crate, so a
+/// trace's `summary` is a constant string like `harness cycle handled 3
+/// event(s)`, and no brain ever consulted either field. A `roster` field was
+/// dead on the same terms; every brain re-derives the roster from the company
+/// record. Issue #1175 removed all three, so the cycle stops paying an
+/// unbounded full scan per turn for a `Vec` it drops.
+///
+/// The one live recall path is elsewhere and is untouched by this: before each
+/// turn `HarnessPool::run` retrieves the top-5 prior task outcomes from the
+/// `ContextStore` and injects them as text (`src/harness/memory_loop.rs`, under
+/// the `openhuman` feature). Traces are still *written* every cycle
+/// (they travel with the export bundle); nothing reads them back. Do not
+/// re-add a field here until something consumes it.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CycleRequest {
     /// Unique id for this cycle.
@@ -1992,12 +2111,6 @@ pub struct CycleRequest {
     /// idempotent `POST /events` on the durable log seq.
     #[serde(default)]
     pub event_seqs: Vec<EventSeq>,
-    /// Compressed traces of prior cycles.
-    pub compressed_history: Vec<CompressedTrace>,
-    /// The company roster (agent ids).
-    pub roster: Vec<String>,
-    /// The context index available to the brain.
-    pub context_index: Vec<ChunkMeta>,
 }
 
 /// The brain's output from one cycle.
@@ -2847,6 +2960,18 @@ pub struct OverlayBlob {
     /// provenance existed (the `#[serde(default)]` keeps those rows loading).
     #[serde(default)]
     pub provenance: Option<TemplateProvenance>,
+    /// The three answers first-run setup was given, when the company came from
+    /// that flow. `None` for every other company and for rows written before it
+    /// existed, which `#[serde(default)]` keeps loading.
+    ///
+    /// Carried in the blob rather than a column for the same reason
+    /// [`provenance`](Self::provenance) is: the SQLite and MongoDB backends
+    /// rebuild a record field by field, so anything not in here is silently
+    /// dropped on the way back out. That would lose the answers Phase 2 builds
+    /// workflows from — on exactly the backends a hosted tenant runs, and only
+    /// there, which is the worst shape a data-loss bug can take.
+    #[serde(default)]
+    pub setup: Option<crate::company::setup::SetupAnswers>,
 }
 
 impl OverlayBlob {
@@ -2863,6 +2988,7 @@ impl OverlayBlob {
             desk_tools: record.overlay_desk_tools.clone(),
             disabled_workflows: record.disabled_workflows.clone(),
             provenance: record.template_provenance.clone(),
+            setup: record.setup.clone(),
         }
     }
 
@@ -2889,6 +3015,9 @@ impl OverlayBlob {
                     desk_tools: Default::default(),
                     disabled_workflows: Vec::new(),
                     provenance: None,
+                    // A legacy bare-array row predates first-run setup by a long
+                    // way; it can carry no answers.
+                    setup: None,
                 })
                 .map_err(|_| original),
         }
@@ -2896,17 +3025,26 @@ impl OverlayBlob {
 }
 
 /// Ids [`CompanyRecord::mint_agent_id`] will never hand to a teammate, however
-/// free the roster leaves them: the always-present operator channel and the two
-/// workspace system roots.
+/// free the roster leaves them: the always-present operator channel, the two
+/// workspace system roots, and the author the runtime speaks under.
 ///
 /// Held as references to the real constants rather than re-typed literals, so a
-/// rename of any of the three moves this list with it instead of quietly
+/// rename of any of the four moves this list with it instead of quietly
 /// unreserving a name. Compared case-insensitively, which is why `Agents` and
 /// `Desks` cover a minted (always-lowercase) `agents` / `desks`.
-pub const RESERVED_AGENT_IDS: [&str; 3] = [
+///
+/// [`SYSTEM_AUTHOR`](crate::ports::SYSTEM_AUTHOR) earns its place for the same
+/// reason `OPERATOR_CHANNEL` does, and issue #966 is why it was noticed: it
+/// reaches the console's centred system pill **by value**, so a teammate minted
+/// onto it would render as the host. `"system"` is an ordinary legal slug —
+/// `agent_slug("System")` produces it — which is what separates it from
+/// [`CONFINED_AGENT_ID`](crate::ports::CONFINED_AGENT_ID), unmintable by
+/// construction because slugs never emit a hyphen.
+pub const RESERVED_AGENT_IDS: [&str; 4] = [
     crate::runtime::OPERATOR_CHANNEL,
     crate::company::workspace_scaffold::AGENTS_ROOT,
     crate::company::workspace_scaffold::DESKS_ROOT,
+    crate::ports::SYSTEM_AUTHOR,
 ];
 
 /// A durable company record: charter/roster (manifest) plus ledger and
@@ -3027,6 +3165,60 @@ pub struct CompanyRecord {
     /// loading without a migration.
     #[serde(default)]
     pub template_provenance: Option<TemplateProvenance>,
+    /// What the operator told first-run setup about their business, stored the
+    /// moment they answer (see `docs/spec/runtime/company-setup.md`).
+    ///
+    /// Kept because **Phase 2 must not ask again.** Phase 1 turns these answers
+    /// into a roster; the workflow phase turns the same answers into workflows,
+    /// and re-interrogating someone who already described their business would
+    /// undo the thing setup exists to buy.
+    ///
+    /// Written even when the operator abandons the flow before the roster
+    /// lands: they told us something true about their company, and it costs
+    /// nothing to remember it. It is deliberately **not** the "has setup run?"
+    /// flag — that question is answered by whether the roster is empty, so a
+    /// record stamped by an abandoned run cannot suppress the offer to try
+    /// again (decision D4).
+    ///
+    /// `None` for every company provisioned before setup existed; the
+    /// `#[serde(default)]` keeps those records loading without a migration.
+    #[serde(default)]
+    pub setup: Option<crate::company::setup::SetupAnswers>,
+}
+
+/// What a teammate key an operator or a model typed resolves to on a company's
+/// roster (issue #1162).
+///
+/// The three answers a caller has to tell apart. A key that names nothing is a
+/// different fact from a key that names two people: the first is a typo or an
+/// invention, the second is a collision the operator created and can only fix
+/// by renaming or by using an id. Collapsing them — or silently taking the
+/// first match — is the misrouting [`CompanyRecord::overlay_agent_ids_by_name`]
+/// exists to end.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TeammateResolution {
+    /// Exactly one teammate. Carries the **canonical roster id**, never the key
+    /// as typed, so every consumer downstream is working in one namespace.
+    Agent(String),
+    /// Names no teammate at all.
+    Unknown,
+    /// Names more than one operator-added teammate, because they share a
+    /// display name. Carries every colliding id so a refusal can name them.
+    Ambiguous(Vec<String>),
+}
+
+impl TeammateResolution {
+    /// The canonical id when the key named exactly one teammate.
+    ///
+    /// For the callers that have nothing useful to say about the other two
+    /// answers — a cycle guard has no target to compare, a drain has nothing to
+    /// deliver to — and where the caller ahead of them has already refused.
+    pub fn agent(self) -> Option<String> {
+        match self {
+            Self::Agent(id) => Some(id),
+            Self::Unknown | Self::Ambiguous(_) => None,
+        }
+    }
 }
 
 impl CompanyRecord {
@@ -3318,6 +3510,54 @@ impl CompanyRecord {
             .filter(|a| a.name.eq_ignore_ascii_case(name_key))
             .map(|a| a.id.clone())
             .collect()
+    }
+
+    /// Resolves a teammate key the way every surface that takes one should:
+    /// **id first, then an operator-added teammate's display name** (issue
+    /// #1162).
+    ///
+    /// The single place the two halves of the roster's namespace are joined.
+    /// [`Self::resolve_roster_agent_id`] is deliberately id-only and
+    /// [`Self::overlay_agent_ids_by_name`] deliberately name-only; every caller
+    /// that wants "who did the human mean" needs both, in this order, and
+    /// before #1162 only the board's assignee field had them. `query_company`
+    /// printed an overlay teammate under its display name while
+    /// `delegate_to_teammate` grounded ids alone, so the orchestrator read a
+    /// name off the roster it was told was authoritative and was refused.
+    ///
+    /// **Ids win.** Trying the id namespace first is what stops a display name
+    /// shadowing a real id: a teammate mischievously (or accidentally) named
+    /// `"engineer"` can never intercept work meant for the manifest agent
+    /// `engineer`. That ordering is a guarantee, not an optimisation — it is
+    /// why this is one method rather than a convention each caller re-applies.
+    ///
+    /// **Manifest agents are not matched by role**, only by id. Two teammates
+    /// may legitimately share a role, so role-matching belongs to the surfaces
+    /// that can ask a human which one they meant — the workflow authoring
+    /// resolver does it deliberately, and stays separate for that reason.
+    ///
+    /// **Desks are not in scope here.** A caller that accepts a desk *and* a
+    /// teammate — [`assignee::resolve`] is the one — must try
+    /// [`Self::resolve_desk_id`] itself, first: a desk whose id matches a
+    /// teammate id keeps routing as a desk. Folding desks in here would teach
+    /// `delegate_to_teammate` to accept them, contradicting its own "that is a
+    /// desk, not a teammate" refusal.
+    ///
+    /// [`assignee::resolve`]: crate::runtime::assignee::resolve
+    pub fn resolve_teammate_key(&self, key: &str) -> TeammateResolution {
+        let key = key.trim();
+        if key.is_empty() {
+            return TeammateResolution::Unknown;
+        }
+        if let Some(id) = self.resolve_roster_agent_id(key) {
+            return TeammateResolution::Agent(id);
+        }
+        let mut by_name = self.overlay_agent_ids_by_name(key);
+        match by_name.len() {
+            0 => TeammateResolution::Unknown,
+            1 => TeammateResolution::Agent(by_name.remove(0)),
+            _ => TeammateResolution::Ambiguous(by_name),
+        }
     }
 
     /// This teammate's operator-set budget override, if one exists.
@@ -3617,6 +3857,61 @@ pub struct PaymentReceipt {
 mod test {
     use super::*;
     use crate::ports::workflow_runner::DeliveryStatus;
+
+    /// The answers must survive the **blob**, not merely the record.
+    ///
+    /// `CompanyRecord` gained a `setup` field and the fs store round-tripped it
+    /// for free, because it serialises the whole record. SQLite and MongoDB do
+    /// not: they rebuild a record field by field from `OverlayBlob`, so anything
+    /// missing there is dropped silently on the way back out — losing exactly the
+    /// answers Phase 2 builds workflows from, on exactly the backends a hosted
+    /// tenant runs, and nowhere else. `--all-features` compilation is what
+    /// surfaced it; this is what keeps it surfaced.
+    #[test]
+    fn the_setup_answers_survive_the_overlay_blob() {
+        let answers = crate::company::setup::SetupAnswers {
+            industry: "E-commerce — homeware".into(),
+            team_hint: "someone on dispatch".into(),
+            automate: "meta ads, order dispatch".into(),
+        };
+        let mut record = CompanyRecord {
+            id: CompanyId::new("acme"),
+            manifest: toml::from_str("[company]\nname = \"Acme\"\n").expect("manifest"),
+            ledger: Vec::new(),
+            lifecycle: "running".to_string(),
+            overlay_agents: Vec::new(),
+            overlay_desk_members: Vec::new(),
+            overlay_desk_order: Vec::new(),
+            overlay_desks: Vec::new(),
+            overlay_workflows: Vec::new(),
+            overlay_budgets: Vec::new(),
+            overlay_policy: None,
+            overlay_desk_tools: Default::default(),
+            disabled_workflows: Vec::new(),
+            template_provenance: None,
+            setup: Some(answers.clone()),
+        };
+
+        let json = serde_json::to_string(&OverlayBlob::from_record(&record)).expect("serialize");
+        let parsed = OverlayBlob::parse(&json).expect("parse");
+        assert_eq!(
+            parsed.setup,
+            Some(answers),
+            "the answers were dropped by the blob the SQL backends rebuild from"
+        );
+
+        // A company that never went through setup carries nothing, and a row
+        // written before the field existed still loads.
+        record.setup = None;
+        let json = serde_json::to_string(&OverlayBlob::from_record(&record)).expect("serialize");
+        assert_eq!(OverlayBlob::parse(&json).expect("parse").setup, None);
+        assert_eq!(
+            OverlayBlob::parse("{\"agents\":[]}")
+                .expect("legacy row")
+                .setup,
+            None
+        );
+    }
 
     fn round_trip<T>(value: &T) -> T
     where
@@ -4157,6 +4452,141 @@ mod test {
         );
     }
 
+    /// The three intents are exactly the three wire words, and only those
+    /// (issue #1152).
+    ///
+    /// Pinned as literals because the console and the journal both write them:
+    /// a rename here silently stops matching every message already on disk.
+    #[test]
+    fn a_message_intent_round_trips_through_its_wire_word() {
+        for (intent, word) in [
+            (MessageIntent::Chat, "chat"),
+            (MessageIntent::Once, "once"),
+            (MessageIntent::Workflow, "workflow"),
+        ] {
+            let json = serde_json::to_string(&intent).unwrap();
+            assert_eq!(json, format!("\"{word}\""));
+            assert_eq!(
+                serde_json::from_str::<MessageIntent>(&json).unwrap(),
+                intent
+            );
+            assert_eq!(intent.as_str(), word);
+        }
+        assert!(
+            serde_json::from_str::<MessageIntent>(r#""build""#).is_err(),
+            "the set is closed: an unknown word is a 400, not a silent default"
+        );
+    }
+
+    /// "Just chatting" has no deliverable, and that is the whole point of the
+    /// type (issue #1152).
+    ///
+    /// A card can never *be* "not work", so the honest mapping from a `Chat`
+    /// message onto the card field is "there is no card" — `None` — rather than
+    /// a third `TaskDeliverable` variant every stored reader would owe a branch
+    /// for.
+    #[test]
+    fn only_a_work_intent_maps_onto_a_card_deliverable() {
+        use crate::ports::tasks::TaskDeliverable;
+
+        assert_eq!(MessageIntent::Chat.deliverable(), None);
+        assert_eq!(
+            MessageIntent::Once.deliverable(),
+            Some(TaskDeliverable::Once)
+        );
+        assert_eq!(
+            MessageIntent::Workflow.deliverable(),
+            Some(TaskDeliverable::Workflow)
+        );
+        assert!(MessageIntent::Chat.is_chat());
+        assert!(!MessageIntent::Once.is_chat());
+        assert!(!MessageIntent::Workflow.is_chat());
+    }
+
+    /// **No journaled record migrates** (issue #1152).
+    ///
+    /// Retyping `OperatorMessage::deliverable` from `TaskDeliverable` to
+    /// [`MessageIntent`] is only safe if every value already written under that
+    /// key still loads, and still writes back the same bytes. Getting this wrong
+    /// does not fail CI — it fails on somebody's event log, on whichever of the
+    /// three backends they run, the next time a company boots. So the claim is a
+    /// test rather than a sentence in a doc comment.
+    ///
+    /// The blobs are asserted verbatim in both directions: parsed to the value
+    /// the new type gives them, and re-serialized byte-for-byte back to what is
+    /// on disk.
+    #[test]
+    fn every_journaled_deliverable_value_still_loads_and_writes_back_identically() {
+        for (blob, expected) in [
+            (r#"{"kind":"OperatorMessage","text":"hi"}"#, None),
+            (
+                r#"{"kind":"OperatorMessage","text":"ship the landing page","deliverable":"once"}"#,
+                Some(MessageIntent::Once),
+            ),
+            (
+                r#"{"kind":"OperatorMessage","text":"build me a weekly report","deliverable":"workflow"}"#,
+                Some(MessageIntent::Workflow),
+            ),
+        ] {
+            let event: CompanyEvent = serde_json::from_str(blob).unwrap_or_else(|e| {
+                panic!("a stored line must still load: {blob} — {e}");
+            });
+            match &event {
+                CompanyEvent::OperatorMessage { deliverable, .. } => {
+                    assert_eq!(*deliverable, expected, "{blob}")
+                }
+                other => panic!("unexpected variant: {other:?}"),
+            }
+            assert_eq!(
+                serde_json::to_string(&event).unwrap(),
+                blob,
+                "a stored line must serialize back byte-for-byte"
+            );
+        }
+    }
+
+    /// The new word travels on the same key, and only when it was chosen
+    /// (issue #1152).
+    ///
+    /// The absent case is the compatibility half that matters most: "Do it
+    /// once" is not the default *because it is sent* — it is the default
+    /// because nothing is sent, so an unmarked message is byte-identical on the
+    /// wire to every message journaled before this control existed.
+    #[test]
+    fn a_chat_intent_journals_under_the_same_key_and_absence_stays_absent() {
+        let chatting = CompanyEvent::OperatorMessage {
+            text: "morning all".into(),
+            by: None,
+            chat: None,
+            parent: None,
+            deliverable: Some(MessageIntent::Chat),
+        };
+        assert_eq!(
+            serde_json::to_string(&chatting).unwrap(),
+            r#"{"kind":"OperatorMessage","text":"morning all","deliverable":"chat"}"#
+        );
+        assert_eq!(
+            serde_json::from_str::<CompanyEvent>(
+                r#"{"kind":"OperatorMessage","text":"morning all","deliverable":"chat"}"#
+            )
+            .unwrap(),
+            chatting
+        );
+
+        let unmarked = CompanyEvent::OperatorMessage {
+            text: "morning all".into(),
+            by: None,
+            chat: None,
+            parent: None,
+            deliverable: None,
+        };
+        assert_eq!(
+            serde_json::to_string(&unmarked).unwrap(),
+            r#"{"kind":"OperatorMessage","text":"morning all"}"#,
+            "no choice must still put nothing on the wire"
+        );
+    }
+
     #[test]
     fn an_operator_message_journaled_before_attribution_still_loads() {
         // Exactly what is already on disk in every existing company's event
@@ -4477,6 +4907,7 @@ mod test {
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
+            setup: None,
         }
     }
 
@@ -4843,7 +5274,127 @@ mod test {
         assert_eq!(record.mint_agent_id("Operator"), "operator_2");
         assert_eq!(record.mint_agent_id("Agents"), "agents_2");
         assert_eq!(record.mint_agent_id("desks"), "desks_2");
-        assert_eq!(RESERVED_AGENT_IDS, ["operator", "Agents", "Desks"]);
+        assert_eq!(record.mint_agent_id("System"), "system_2");
+        assert_eq!(
+            RESERVED_AGENT_IDS,
+            ["operator", "Agents", "Desks", "system"]
+        );
+    }
+
+    /// Issue #966: the host's own author is not a name a teammate can be given.
+    ///
+    /// `SYSTEM_AUTHOR` reaches the console's centred system pill by value —
+    /// `MessageView` projects an `AgentReply`'s `agent_id` straight into
+    /// `author`, and the console keys on the string. A teammate holding that id
+    /// would therefore render *as the host*, which is a worse confusion than the
+    /// one this issue set out to fix, and the value it replaces (`"operator"`)
+    /// was already reserved.
+    ///
+    /// Its sibling `CONFINED_AGENT_ID` needs no entry here: `agent_slug` emits
+    /// only lowercase alphanumerics and underscores, so `"workflow-copilot"` is
+    /// unmintable by construction. `"system"` is an ordinary legal slug.
+    #[test]
+    fn mint_agent_id_never_returns_the_host_author() {
+        let record = desk_record("[company]\nname = \"Acme\"\n", Vec::new());
+        assert_eq!(
+            agent_slug("System"),
+            crate::ports::SYSTEM_AUTHOR,
+            "the guard is needed precisely because this is a legal slug"
+        );
+        assert_ne!(
+            record.mint_agent_id("System"),
+            crate::ports::SYSTEM_AUTHOR,
+            "a teammate must never be minted onto the id the runtime speaks under"
+        );
+    }
+
+    /// Issue #1162: the resolve every surface that takes a teammate key runs.
+    /// An id resolves, an overlay teammate's **display name** resolves to the
+    /// id it was minted under, and a key that is nobody resolves to nothing.
+    #[test]
+    fn resolve_teammate_key_takes_an_id_or_a_display_name() {
+        let manifest = "[company]\nname = \"Acme\"\n[[agent]]\nid = \"ceo\"\nrole = \"Chief\"\n";
+        let mut record = desk_record(manifest, Vec::new());
+        record.overlay_agents.push(OverlayAgent {
+            id: "dana_designer".into(),
+            name: "Dana Designer".into(),
+            role: "Designer".into(),
+            description: None,
+            tools: Vec::new(),
+        });
+
+        assert_eq!(
+            record.resolve_teammate_key("ceo"),
+            TeammateResolution::Agent("ceo".into())
+        );
+        assert_eq!(
+            record.resolve_teammate_key("dana_designer"),
+            TeammateResolution::Agent("dana_designer".into())
+        );
+        // The case #1162 is about: the name `query_company` prints, grounding
+        // to the id the delegation tools accept.
+        assert_eq!(
+            record.resolve_teammate_key("Dana Designer"),
+            TeammateResolution::Agent("dana_designer".into())
+        );
+        assert_eq!(
+            record.resolve_teammate_key("  dana designer  "),
+            TeammateResolution::Agent("dana_designer".into())
+        );
+        assert_eq!(
+            record.resolve_teammate_key("ghost"),
+            TeammateResolution::Unknown
+        );
+        assert_eq!(
+            record.resolve_teammate_key("   "),
+            TeammateResolution::Unknown
+        );
+    }
+
+    /// Ids win. A teammate whose **display name** is another teammate's id can
+    /// never intercept work meant for that id — the ordering is the guarantee
+    /// that makes one shared resolver safe to use everywhere.
+    #[test]
+    fn resolve_teammate_key_never_lets_a_name_shadow_an_id() {
+        let manifest = "[company]\nname = \"Acme\"\n[[agent]]\nid = \"ceo\"\nrole = \"Chief\"\n";
+        let mut record = desk_record(manifest, Vec::new());
+        record.overlay_agents.push(OverlayAgent {
+            id: "impostor".into(),
+            name: "ceo".into(),
+            role: "Growth".into(),
+            description: None,
+            tools: Vec::new(),
+        });
+        assert_eq!(
+            record.resolve_teammate_key("ceo"),
+            TeammateResolution::Agent("ceo".into())
+        );
+    }
+
+    /// Two teammates answering to one display name is a collision the operator
+    /// created, and it is reported as one: every colliding id comes back, so a
+    /// caller can name them instead of silently taking the first.
+    #[test]
+    fn resolve_teammate_key_reports_a_name_two_teammates_answer_to() {
+        let mut record = desk_record("[company]\nname = \"Acme\"\n", Vec::new());
+        for id in ["dana_designer", "dana_designer_2"] {
+            record.overlay_agents.push(OverlayAgent {
+                id: id.into(),
+                name: "Dana Designer".into(),
+                role: "Designer".into(),
+                description: None,
+                tools: Vec::new(),
+            });
+        }
+        assert_eq!(
+            record.resolve_teammate_key("dana designer"),
+            TeammateResolution::Ambiguous(vec!["dana_designer".into(), "dana_designer_2".into()])
+        );
+        // Either id still resolves on its own — the collision is in the name.
+        assert_eq!(
+            record.resolve_teammate_key("dana_designer_2"),
+            TeammateResolution::Agent("dana_designer_2".into())
+        );
     }
 
     /// Whatever is minted is a legal roster id, suffix included — the same

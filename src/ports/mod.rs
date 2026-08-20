@@ -37,6 +37,7 @@ pub mod usage;
 pub mod users;
 pub mod workflow_revisions;
 pub mod workflow_runner;
+pub mod workflow_verdict;
 pub mod workspace;
 
 pub use approvals::ApprovalGate;
@@ -50,7 +51,9 @@ pub use context::ContextStore;
 pub use economy::AgentEconomy;
 pub use events::{EventLog, PruneReport, RetentionClass, RetentionPolicy, plan_prune};
 pub use facts::{FactKind, FactRecord, FactStore};
-pub use ids::{AGENT_SLUG_FALLBACK, CONFINED_AGENT_ID, agent_slug, generate_id, now_millis};
+pub use ids::{
+    AGENT_SLUG_FALLBACK, CONFINED_AGENT_ID, SYSTEM_AUTHOR, agent_slug, generate_id, now_millis,
+};
 pub use inbox::{EmailRecord, InboxMeta, InboxStore};
 pub use journal::{Durability, JournalStore};
 pub use ledgers::LedgerStore;
@@ -85,6 +88,9 @@ pub use workflow_runner::{
     DeliveryReason, DeliveryReport, DeliveryStatus, RunCancel, WorkflowApprovalOutcome,
     WorkflowBlockedNode, WorkflowBoardAction, WorkflowRun, WorkflowRunApprovalRow,
     WorkflowRunBoardRow, WorkflowRunContext, WorkflowRunNodeRow, WorkflowRunner,
+};
+pub use workflow_verdict::{
+    RunVerdictFacts, WorkflowRunVerdict, awaiting_count, is_undelivered, undelivered_count,
 };
 pub use workspace::{NodeKind, WorkspaceNode, WorkspaceOrigin, WorkspaceStore};
 

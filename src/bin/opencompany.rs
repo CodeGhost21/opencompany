@@ -70,6 +70,27 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Report companies whose durable owner row is missing, and owner rows
+    /// naming no company (issue #1077).
+    ///
+    /// Read-only. A company with no owner row is unreachable by its own tenant
+    /// — every tenant-scoped request for it answers 403 — and nothing else in
+    /// the product will tell you it exists. Repairing one is deliberately not
+    /// offered: adopting it means guessing its tenant, and a wrong guess hands
+    /// one tenant's company to another.
+    ///
+    /// Separate from `doctor` on purpose: `doctor` explains configuration and
+    /// needs no database, and making it open storage would leave it unable to
+    /// answer at all when the backend is the thing that is broken.
+    Orphans {
+        /// Data root, for backends that resolve one. Defaults the same way
+        /// `serve` does.
+        #[arg(long)]
+        home: Option<PathBuf>,
+        /// Print the report as JSON instead of aligned text.
+        #[arg(long)]
+        json: bool,
+    },
     /// Export a company's bundle: read everything through the storage ports and
     /// write the canonical filesystem layout. With `--features export` the output
     /// is a single `.tar`; otherwise an unpacked bundle directory. Secrets and
@@ -832,6 +853,92 @@ async fn run_export(
     Ok(())
 }
 
+/// `opencompany orphans` — the on-demand form of the boot check (issue #1077).
+///
+/// Opens storage, reads the two collections, and prints the set difference both
+/// ways. Nothing is written.
+///
+/// Only meaningful in tenant-namespace mode: without
+/// [`OPENCOMPANY_TENANT_ID`], no durable owner rows are ever written, so the
+/// report would show every company as orphaned on every invocation. Refuses
+/// to run when the variable is unset.
+///
+/// # Exit code
+///
+/// Zero whether or not orphans were found. This is a report, not an assertion:
+/// a non-zero exit would make the command unusable in the one place it is most
+/// wanted — a health check or a deploy script that wants the *answer* — and
+/// "the query ran and found three" is a success, not a failure. The findings
+/// are on stdout for a human and behind `--json` for anything else.
+async fn run_orphans(home: Option<PathBuf>, json: bool) -> Result<()> {
+    // Gate on OPENCOMPANY_TENANT_ID: the same condition that gates the
+    // durable owner-row write at register_company. Without a tenant
+    // namespace no owner rows are ever persisted, and reading zero owners
+    // against N companies would report every company as orphaned.
+    let tenant_id = std::env::var("OPENCOMPANY_TENANT_ID")
+        .ok()
+        .filter(|v| !v.trim().is_empty());
+    if let Some(tenant) = &tenant_id {
+        // A namespace containing the `--` id delimiter would make the
+        // `<tenant>--` prefix ambiguous between tenants (see
+        // `validate_tenant_namespace`). Reject it here, the boundary that
+        // reads the variable.
+        if let Err(reason) = opencompany::app::validate_tenant_namespace(tenant) {
+            return Err(opencompany::error::OpenCompanyError::Config(reason));
+        }
+    }
+    if tenant_id.is_none() {
+        return Err(opencompany::error::OpenCompanyError::Config(
+            "OPENCOMPANY_TENANT_ID is not set: this deployment does not persist \
+             durable owner rows, so no company can be orphaned from one. \
+             This check applies to shared-database deployments only."
+                .into(),
+        ));
+    }
+
+    let home = resolve_home_migrated(home)?;
+    let settings = opencompany::store::StorageSettings::from_env()?;
+    let Some(handles) = opencompany::store::open_storage(&settings, &home).await? else {
+        // `StorageKind::Fs` yields no handles at all, so there is no `owners`
+        // collection and this condition cannot arise. Say that plainly rather
+        // than printing an empty report, which would read as "checked, all
+        // clear" for a check that never ran.
+        return Err(opencompany::error::OpenCompanyError::Config(format!(
+            "storage backend `{:?}` keeps no ownership rows, so no company can be orphaned from \
+             one. This check applies to shared-database deployments.",
+            settings.kind
+        )));
+    };
+    let Some(ownership) = handles.ownership.as_ref() else {
+        return Err(opencompany::error::OpenCompanyError::Config(format!(
+            "storage backend `{:?}` is open but persists no company -> tenant ownership, so there \
+             is nothing to reconcile.",
+            settings.kind
+        )));
+    };
+
+    // Read list() before owners() (issue #1077): provisioning writes the
+    // owner row before the company (#1050), so a provision crossing the
+    // two reads lands as a benign dangling owner row rather than an
+    // alarming unowned company.
+    let companies = handles.company.list().await?;
+    let owners = ownership.owners().await?;
+    let report = opencompany::app::find_orphans(&companies, &owners);
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report).unwrap());
+    } else if report.is_empty() {
+        println!(
+            "No orphans: {} companies, {} owner rows, every one accounted for.",
+            companies.len(),
+            owners.len()
+        );
+    } else {
+        print!("{}", report.to_text());
+    }
+    Ok(())
+}
+
 /// Feature build: export writes a single-file `.tar`.
 #[cfg(feature = "export")]
 async fn run_export(
@@ -953,6 +1060,36 @@ const MAX_BLOCKING_THREADS: usize = openhuman_core::core::runtime::MAX_BLOCKING_
 #[cfg(not(feature = "openhuman"))]
 const MAX_BLOCKING_THREADS: usize = 512;
 
+/// The log filter used when `RUST_LOG` says nothing.
+///
+/// The bare `error` is exactly what `EnvFilter::from_default_env()` fell back to,
+/// so no target in this binary becomes chattier than it was. The one added
+/// directive is the exception the default cannot express, and it is not cosmetic.
+///
+/// `tinyagents::observability` is the target the vendored durable-append writer
+/// (`AppendWorker`, in
+/// `vendor/openhuman/vendor/tinyagents/src/harness/observability/worker.rs`)
+/// reports on — the writer behind the embedded runtime's durable agent journal.
+/// It reports only the *first* failure of a failure run at `error`; every line
+/// after that is `warn`:
+///
+/// - "still failing after N consecutive observations" — the run is ongoing,
+/// - "recovered; N observation(s) lost" — the run ended, and how much it cost,
+/// - "never recovered before shutdown, N observation(s) lost" — the run outlived
+///   the process.
+///
+/// Those `warn` lines are the only signal that the durable log is losing data and
+/// how much of it. Under a bare `error` filter an operator sees one line when a
+/// degraded run begins and then nothing — no reminder that it is still degraded,
+/// no recovery, no loss count — which is the visibility gap issue #450 is about.
+/// The writer's own subscriber-independent fallback, `AppendWorker::append_failures()`,
+/// is `pub(crate)` in tinyagents and cannot be read from here, so the subscriber
+/// is the only channel we have (see `docs/spec/runtime/workspace-layout.md`).
+///
+/// Setting `RUST_LOG` replaces this string wholesale — the operator keeps full
+/// control, and behaviour with `RUST_LOG` set is unchanged.
+const DEFAULT_LOG_FILTER: &str = "error,tinyagents::observability=warn";
+
 fn main() -> Result<()> {
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -962,9 +1099,34 @@ fn main() -> Result<()> {
         .block_on(async_main())
 }
 
+/// The filter to install, given whatever `RUST_LOG` holds.
+///
+/// Split out from [`async_main`] and taking the variable as an argument so the
+/// choice can be tested without mutating process-global environment state,
+/// which no test can do without racing every other test in the binary.
+///
+/// `Some` — the operator set the variable, so it is parsed exactly the way it
+/// was before [`DEFAULT_LOG_FILTER`] existed: **lossily**. A single malformed
+/// directive drops itself and the valid ones around it still apply. Parsing it
+/// strictly and falling back on error would silently discard an operator's
+/// entire working configuration over one typo, which is a worse failure than
+/// the one this constant was added to fix.
+///
+/// `None` — the variable is unset, so [`DEFAULT_LOG_FILTER`] applies.
+fn log_filter(rust_log: Option<&str>) -> tracing_subscriber::EnvFilter {
+    // `EnvFilter::new` is `parse_lossy` over the same `ERROR` default directive
+    // that `from_default_env` uses, so passing the variable's value through it
+    // is exactly what the old code did with it — just reachable from a test.
+    match rust_log {
+        Some(directives) => tracing_subscriber::EnvFilter::new(directives),
+        None => tracing_subscriber::EnvFilter::new(DEFAULT_LOG_FILTER),
+    }
+}
+
 async fn async_main() -> Result<()> {
+    let rust_log = std::env::var(tracing_subscriber::EnvFilter::DEFAULT_ENV).ok();
     tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_env_filter(log_filter(rust_log.as_deref()))
         .init();
 
     match Cli::parse().command {
@@ -1110,6 +1272,16 @@ async fn async_main() -> Result<()> {
             let tenant_namespace = std::env::var("OPENCOMPANY_TENANT_ID")
                 .ok()
                 .filter(|value| !value.trim().is_empty());
+            if let Some(tenant) = &tenant_namespace {
+                // A namespace containing the `--` id delimiter would make the
+                // `<tenant>--` prefix ambiguous between tenants (see
+                // `validate_tenant_namespace`), so a shared-DB workload with
+                // one would namespace ids that collide with another tenant's.
+                // Refuse to boot rather than misattribute at runtime.
+                if let Err(reason) = opencompany::app::validate_tenant_namespace(tenant) {
+                    return Err(opencompany::error::OpenCompanyError::Config(reason));
+                }
+            }
             // The address the platform records as this instance's creator. A
             // provisioned company's manifest names no admin, so without this
             // nobody is eligible to log in and there is no operator token to
@@ -1239,7 +1411,58 @@ async fn async_main() -> Result<()> {
                 // regardless, since the registry only holds locally-loaded ones).
                 if let Some(ownership) = &handles.ownership {
                     let self_tenant = state.config().tenant_namespace.clone();
-                    for (id, tenant) in ownership.owners().await? {
+                    // Issue #1077: report companies orphaned from their tenant.
+                    //
+                    // A company whose owner row is missing is unreachable by its
+                    // own tenant — `authorize_address` finds no owner and answers
+                    // 403 — and until now nothing anywhere reported it. #1050's
+                    // fix stopped provisioning creating new ones; it does nothing
+                    // for the rows the old behaviour already left behind.
+                    //
+                    // Gated on tenant_namespace: only tenant-namespace mode writes
+                    // durable owner rows at all, and without it every company
+                    // would appear orphaned on every boot. The gate also spares
+                    // non-namespaced deployments the whole-collection scan the
+                    // report needs.
+                    //
+                    // Read list() BEFORE owners() (issue #1077): provisioning
+                    // writes the owner row before the company (#1050), so a
+                    // provision crossing the two reads lands as a benign dangling
+                    // owner row rather than an alarming unowned company.
+                    let companies = if self_tenant.is_some() {
+                        match handles.company.list().await {
+                            Ok(c) => Some(c),
+                            // A failed listing must not abort a boot that would
+                            // otherwise succeed: this is a diagnostic, and the
+                            // server is perfectly able to serve every company
+                            // whose ownership *is* intact without it.
+                            Err(e) => {
+                                eprintln!("warning: could not check company ownership: {e}");
+                                None
+                            }
+                        }
+                    } else {
+                        None
+                    };
+                    let owners = ownership.owners().await?;
+                    if let (Some(me), Some(companies)) = (&self_tenant, &companies) {
+                        // Filtered to this workload's own tenant: in
+                        // shared-single-DB the `owners` collection holds every
+                        // tenant's rows, and printing them all to one tenant
+                        // pod's stderr would leak other tenants' company ids and
+                        // tenant strings. `opencompany orphans` is the
+                        // unfiltered, platform-scoped form.
+                        let report = opencompany::app::find_orphans(companies, &owners);
+                        let filtered = opencompany::app::filter_to_tenant(report, me);
+                        if !filtered.is_empty() {
+                            eprintln!(
+                                "warning: ownership rows and companies disagree \
+                                 (`opencompany orphans` for this report)\n{}",
+                                filtered.to_text()
+                            );
+                        }
+                    }
+                    for (id, tenant) in owners {
                         match &self_tenant {
                             // Compare in canonical (bare-slug) form so a row
                             // persisted as `tenant:acme` still hydrates under the
@@ -1454,6 +1677,7 @@ async fn async_main() -> Result<()> {
             }
             Ok(())
         }
+        Some(Command::Orphans { home, json }) => run_orphans(home, json).await,
         Some(Command::Export {
             company,
             out,
@@ -1738,5 +1962,179 @@ mod test {
             "path is the template basename, not the absolute host path"
         );
         std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// Records the target and level of every event a subscriber was actually
+    /// asked to record, so a filter can be tested on behaviour rather than on
+    /// the contents of its own string.
+    #[derive(Clone)]
+    struct Captured(std::sync::Arc<std::sync::Mutex<Vec<(String, tracing::Level)>>>);
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Captured {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            let meta = event.metadata();
+            self.0
+                .lock()
+                .expect("capture lock")
+                .push((meta.target().to_string(), *meta.level()));
+        }
+    }
+
+    #[test]
+    fn the_default_filter_passes_durable_append_warnings_and_still_drops_other_ones() {
+        // The point of `DEFAULT_LOG_FILTER` is the vendored append worker's
+        // warn-level reports — "still failing after N", "recovered, N lost",
+        // "never recovered before shutdown, N lost". They are the only account
+        // of how much of the durable agent journal was lost, and a bare `error`
+        // filter drops all three (issue #450).
+        //
+        // Asserted by running the filter, not by reading it: this builds the
+        // real `EnvFilter` from the real constant, installs it over a capturing
+        // layer exactly as `async_main` installs it over `fmt`, and emits the
+        // four events that matter. Revert the constant to `"error"` and the
+        // first assertion fails.
+        use tracing_subscriber::layer::SubscriberExt;
+
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry()
+            .with(Captured(std::sync::Arc::clone(&captured)))
+            .with(log_filter(None));
+
+        tracing::subscriber::with_default(subscriber, || {
+            // The worker's recovery summary — the line the operator needs.
+            tracing::warn!(
+                target: "tinyagents::observability",
+                sink = "journal",
+                lost = 3_u64,
+                "durable append recovered"
+            );
+            // An unrelated warning stays dropped: the default is still `error`
+            // for everything the exception does not name.
+            tracing::warn!(target: "opencompany::unrelated", "ordinary warning");
+            // And a real error still gets through, unchanged from before.
+            tracing::error!(target: "opencompany::unrelated", "ordinary error");
+            // The exception is scoped to `warn`, not opened wide.
+            tracing::info!(target: "tinyagents::observability", "chatter");
+        });
+
+        let events = captured.lock().expect("capture lock").clone();
+        let seen = |target: &str, level: tracing::Level| {
+            events.iter().any(|(t, l)| t == target && *l == level)
+        };
+
+        assert!(
+            seen("tinyagents::observability", tracing::Level::WARN),
+            "the durable-append recovery/reminder/shutdown reports must survive \
+             the default filter; captured {events:?}"
+        );
+        assert!(
+            !seen("opencompany::unrelated", tracing::Level::WARN),
+            "the exception is one target, not a global level bump; captured {events:?}"
+        );
+        assert!(
+            seen("opencompany::unrelated", tracing::Level::ERROR),
+            "errors kept passing exactly as they did before; captured {events:?}"
+        );
+        assert!(
+            !seen("tinyagents::observability", tracing::Level::INFO),
+            "the exception stops at `warn`; captured {events:?}"
+        );
+    }
+
+    /// A `RUST_LOG` the operator set is theirs, even when part of it is junk.
+    ///
+    /// `try_from_default_env` rejects the whole variable over one malformed
+    /// directive, so falling back to [`DEFAULT_LOG_FILTER`] on that error would
+    /// throw away every valid directive the operator wrote — turning a typo into
+    /// a silent, total loss of their logging configuration. [`log_filter`] parses
+    /// it lossily instead, which is what this binary did before the constant
+    /// existed. Flagged by review on PR #1186.
+    #[test]
+    fn a_malformed_directive_does_not_discard_the_rest_of_rust_log() {
+        use tracing_subscriber::layer::SubscriberExt;
+
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        // One good directive, one that cannot parse.
+        let subscriber = tracing_subscriber::registry()
+            .with(Captured(std::sync::Arc::clone(&captured)))
+            .with(log_filter(Some(
+                "opencompany::kept=info,@@@not a directive@@@",
+            )));
+
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::info!(target: "opencompany::kept", "the operator asked for this");
+        });
+
+        let events = captured.lock().expect("capture lock").clone();
+        assert!(
+            events
+                .iter()
+                .any(|(t, l)| t == "opencompany::kept" && *l == tracing::Level::INFO),
+            "the valid directive must survive the invalid one beside it; captured {events:?}"
+        );
+    }
+
+    /// `RUST_LOG=` — set, but empty — must not silence the binary.
+    ///
+    /// This is the sharper half of the same mistake as
+    /// `a_malformed_directive_does_not_discard_the_rest_of_rust_log`, and it is
+    /// worth its own test because it fails in the opposite direction from the
+    /// bug this file's constant exists to fix. `from_default_env` carries an
+    /// `ERROR` default directive; `try_from_default_env` carries none, so an
+    /// empty value parsed strictly yields a filter with no directives at all
+    /// and drops **everything** — errors included. That is worse than the
+    /// silence issue #450 is about, and it is reachable from an empty
+    /// environment variable in a compose file or a shell export.
+    #[test]
+    fn an_empty_rust_log_still_reports_errors() {
+        use tracing_subscriber::layer::SubscriberExt;
+
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry()
+            .with(Captured(std::sync::Arc::clone(&captured)))
+            .with(log_filter(Some("")));
+
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::error!(target: "opencompany::anything", "something broke");
+        });
+
+        let events = captured.lock().expect("capture lock").clone();
+        assert!(
+            events
+                .iter()
+                .any(|(t, l)| t == "opencompany::anything" && *l == tracing::Level::ERROR),
+            "an empty RUST_LOG must keep the ERROR default, not silence the binary; \
+             captured {events:?}"
+        );
+    }
+
+    /// Issue #1077: the `orphans` command refuses to run without a tenant
+    /// namespace.
+    ///
+    /// Without `OPENCOMPANY_TENANT_ID` no durable owner rows are ever written,
+    /// so the report would claim every company is orphaned on every run. The
+    /// gate is the same condition that guards the owner-row write at
+    /// `register_company`, and it fires before storage is even opened — the
+    /// reviewer's false-positive case, with no database needed to hit it.
+    #[tokio::test]
+    async fn orphans_refuses_to_run_without_a_tenant_namespace() {
+        // Save and restore so a box configured for shared-single-DB (or a
+        // parallel test) is unaffected.
+        let previous = std::env::var("OPENCOMPANY_TENANT_ID").ok();
+        unsafe { std::env::remove_var("OPENCOMPANY_TENANT_ID") };
+        let err = run_orphans(None, false).await.unwrap_err();
+        match previous {
+            Some(value) => unsafe { std::env::set_var("OPENCOMPANY_TENANT_ID", value) },
+            None => unsafe { std::env::remove_var("OPENCOMPANY_TENANT_ID") },
+        }
+
+        assert!(
+            matches!(&err, opencompany::error::OpenCompanyError::Config(_)),
+            "expected a Config refusal, got: {err:?}"
+        );
     }
 }

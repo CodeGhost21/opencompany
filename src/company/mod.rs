@@ -57,6 +57,12 @@ pub mod mcp_oauth;
 // testing in the default build rather than only where the agent runtime links.
 pub mod prompt;
 pub mod runtime;
+// First-run company setup (issue: docs/spec/runtime/company-setup.md): the
+// curated starting rosters and the rules a proposed roster obeys. Always
+// compiled and model-free on purpose — it is both the input to the optional
+// polish pass and the fallback when that pass cannot run, so a company with no
+// inference credential still gets a real team.
+pub mod setup;
 mod skill_file;
 // Steer (issue #111): pause / cancel / redirect an in-flight task or delegation
 // from the operator chat. Always compiled + openhuman-free so the operator
@@ -119,16 +125,18 @@ pub(crate) use manifest::is_snake_case;
 pub use manifest::{DELEGATES_TO_WILDCARD, LEGACY_MANIFEST_FILE, Located, MANIFEST_FILE, discover};
 pub use skill_file::{SkillDoc, load_dir_skills, parse_skill_md, render_skill_md};
 pub use types::{
-    Agent, BRAIN_MODES, Brain, Budget, ChannelConfig, Company, CompanyManifest, ComposioTools,
-    Connection, ContextAccess, ContextEntry, DEFAULT_ALWAYS_APPROVE, DEFAULT_MAX_DELEGATION_DEPTH,
+    ACP_AGENTS, ACP_TRANSPORTS, AcpHarness, Agent, BRAIN_MODES, Brain, Budget, ChannelConfig,
+    Company, CompanyManifest, ComposioTools, Connection, ContextAccess, ContextEntry,
+    DEFAULT_ALWAYS_APPROVE, DEFAULT_HARNESS_KIND, DEFAULT_MAX_DELEGATION_DEPTH,
     DEFAULT_MAX_IN_FLIGHT_RUNS, DEFAULT_SEARCH_DAILY_CALLS, GATEABLE_NAMESPACES, GroupChat,
-    INFERENCE_PROVIDERS, INFERENCE_TIERS, Inference, KNOWN_CHANNELS, LedgerAccess, LedgerGrant,
-    MAX_DELEGATION_DEPTH_BOUNDS, McpServer, ORCHESTRATOR_TIER, PLAN_NAMES, PLAN_PERIODS,
-    POLICY_MODES, PROMPT_CLASSES, PROMPT_FILE_BUDGET_CHARS, PROVISIONED_POLICY_MODE, Place, Plan,
-    Policy, Schedule, Skill, TIERS, TOOL_PROVIDERS, Tools, grants_chargebee_explicit,
-    grants_composio_explicit, grants_hosting_explicit, grants_media_explicit,
-    grants_paypal_explicit, grants_repo_explicit, grants_repo_write_explicit,
-    grants_search_explicit, grants_workspace_write_explicit, orchestrator_id,
+    HARNESS_KINDS, Harness, IMPLICIT_HARNESS_ID, INFERENCE_PROVIDERS, INFERENCE_TIERS, Inference,
+    KNOWN_CHANNELS, LedgerAccess, LedgerGrant, MAX_DELEGATION_DEPTH_BOUNDS, McpServer,
+    ORCHESTRATOR_TIER, PLAN_NAMES, PLAN_PERIODS, POLICY_MODES, PROMPT_CLASSES,
+    PROMPT_FILE_BUDGET_CHARS, PROVISIONED_POLICY_MODE, Place, Plan, Policy, Schedule, Skill, TIERS,
+    TOOL_PROVIDERS, Tools, grants_chargebee_explicit, grants_composio_explicit,
+    grants_hosting_explicit, grants_media_explicit, grants_paypal_explicit, grants_repo_explicit,
+    grants_repo_write_explicit, grants_search_explicit, grants_workspace_write_explicit,
+    orchestrator_id,
 };
 pub use workflow_file::{
     STAGELESS_SCHEDULE_REFUSAL, STAGELESS_WORKFLOW_NOTICE, UNDELIVERABLE_SCHEDULE_REFUSAL,

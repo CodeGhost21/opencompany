@@ -168,7 +168,30 @@ export interface TaskPlan {
    * had no assignee — a plan never reassigns work a person routed.
    */
   proposedAssignee?: string;
+  /**
+   * The teammates that plausibly fit, when more than one did (issue #1106).
+   *
+   * Non-empty means the pass **declined to choose** and the card is waiting on
+   * a person — it is never populated alongside `proposedAssignee`, which is set
+   * only when exactly one candidate resolved. Absent on every plan written
+   * before #1106, and on every unambiguous plan written since.
+   */
+  assigneeCandidates?: AssigneeCandidate[];
   plannedAtMillis: number;
+}
+
+/**
+ * One teammate the planner thinks could take a card, and why (issue #1106).
+ *
+ * `id` is canonical — the host resolves it against the roster before storing
+ * it, and drops anything the roster does not carry, so every candidate rendered
+ * is one the assignee write boundary will accept.
+ */
+export interface AssigneeCandidate {
+  /** A teammate id, or a desk id. Submitted verbatim, never resolved here. */
+  id: string;
+  /** One line on why this one fits. Model prose, shown to a person deciding. */
+  reason: string;
 }
 
 /** A board card as the host returns it. */
@@ -179,6 +202,24 @@ export interface TaskPlan {
  * treat an absent value as `"once"`.
  */
 export type TaskDeliverable = "once" | "workflow";
+
+/**
+ * What the operator says one chat **message** is for (issue #1152).
+ *
+ * The two work words mean exactly what they mean on a card. `"chat"` is the
+ * operator saying this message is not a request for work at all — the composer's
+ * "Just chatting" — so no deterministic path opens a card for it.
+ *
+ * Deliberately **not** a widening of `TaskDeliverable`. That type is the card
+ * field, shared by `CreateTask`, `TaskPatch` and `TaskDto`, and a card can never
+ * *be* "not work": widening it would make `"chat"` assignable in every one of
+ * those positions and put the compiler on the wrong side of the invariant. This
+ * is message-scoped, and the host draws the same line (`MessageIntent` beside
+ * `TaskDeliverable` in `src/ports/types.rs`).
+ *
+ * Sent only when it is not the default — see `OpenCompanyClient.chat`.
+ */
+export type MessageIntent = "chat" | TaskDeliverable;
 
 /** A positive source-currency USD amount or an explicit role-redacted state. */
 export interface TaskCost {

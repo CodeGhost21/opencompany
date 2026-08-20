@@ -69,6 +69,9 @@ layout first.
 role = "Copywriter"                     # required
 description = "Write ads and campaign copy."
 tier = "reasoning"                      # cognition hint; never selects a model
+harness = "deep"                        # which [[harness]] runs this agent's
+                                        # turns — see harnesses.md. Omitted
+                                        # means the company's default harness.
 tools = ["docs.*", "mcp:notion"]        # grant globs — see tools.md
 delegates_to = ["creative"]             # desks this agent may hand work to
 budget_usd_daily = 5.0                  # per-agent daily cap
@@ -90,6 +93,19 @@ ledgers = [                                 # per-agent ledger access (omit for 
 can_declare_ledgers = false                 # may this agent `define_ledger`? default true
 ```
 
+### `tier` versus `harness`
+
+They answer different questions and are deliberately separate fields.
+
+`tier` names a **workload** (`reasoning`, `vision`, …) and is resolved against
+whatever provider the agent's harness turns out to use. `harness` names the
+**engine and the credential**. So an agent keeps its tier when it moves between
+harnesses, and two agents sharing a tier on different harnesses run on different
+models — which is the point of naming more than one.
+
+Naming a harness the company does not declare is a validation error, reported
+against both the agent and the id. Naming none is not: every roster written
+before `[[harness]]` existed binds nobody, and all of them keep working.
 ### `context` write access
 
 A bare string in `context` is read-only — routed into the prompt, nothing
@@ -151,6 +167,16 @@ Step 5 is resolved by the async caller before the (synchronous) agent build and
 fingerprinted over document **bodies**, so editing a routed note reaches the next
 turn rather than the next restart. See
 [context-routing.md](orchestration/context-routing.md).
+
+**A named teammate is told its name.** A manifest `[[agent]]` is addressed by its
+role, and its persona reads *"You are the Content Writer at Acme."* An
+operator-added teammate also has a display name — the one the console puts on the
+DM header, the subtitle and the composer — and its persona names it too: *"You are
+Alex, the Content Writer at Acme. … Teammates and the operator address you as
+Alex; it is how you are called here, not a separate character to play."* The name
+is an addressing handle, not an identity to build a character around, and it never
+replaces the role. A name that is blank, or that only restates the role, falls
+back to the role-only wording (issue #1105).
 
 **`prompt` is appended, never substituted.** The generated line is what binds the
 agent to *this* role at *this* company; a prompt that replaced it would silently

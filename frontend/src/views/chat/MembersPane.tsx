@@ -11,7 +11,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Skeleton } from "@/components/ui/skeleton";
-import type { TeamMember } from "@/lib/team";
+import { roleSubtitle, type TeamMember } from "@/lib/team";
 import { cn } from "@/lib/utils";
 import { Avatar } from "./Avatar";
 
@@ -113,7 +113,7 @@ export function MembersPane({
   // two numbers the header's count refers to.
   const subtitle = channelMembers
     ? `${channelMembers.length} in this channel · ${total} in the company`
-    : `${total} ${total === 1 ? "agent" : "agents"} · ${
+    : `${total} ${total === 1 ? "teammate" : "teammates"} · ${
         fromHost ? "defined by this company" : "starter roster"
       }`;
 
@@ -129,8 +129,8 @@ export function MembersPane({
           size="icon"
           className="size-8"
           onClick={onAdd}
-          aria-label="Add member"
-          title="Add member"
+          aria-label="Add teammate"
+          title="Add teammate"
         >
           <UserPlus className="size-4" />
         </Button>
@@ -280,6 +280,10 @@ function MemberRow({
 }) {
   const capped = member.budgetUsdDaily !== undefined;
   const overridden = member.budgetSetBy !== undefined;
+  // Issue #1208: only when the role is not the name over again. The roster's
+  // name falls back to the role (`fromDto`), so every manifest-declared
+  // teammate said it twice here too.
+  const roleLine = roleSubtitle(member.name, member.role);
 
   return (
     <div className="group/member flex items-center gap-2.5 rounded-lg px-2 py-1.5 transition-colors hover:bg-accent/60">
@@ -302,7 +306,9 @@ function MemberRow({
               <Mail className="size-3 shrink-0 text-muted-foreground" aria-label="Has an inbox" />
             )}
           </span>
-          <span className="block truncate text-xs text-muted-foreground">{member.role}</span>
+          {roleLine && (
+            <span className="block truncate text-xs text-muted-foreground">{roleLine}</span>
+          )}
           <DailyBudgetLine member={member} setByLabel={setByLabel} />
         </span>
       </button>
@@ -325,7 +331,7 @@ function MemberRow({
             <MessageSquare className="size-4" /> Message
           </DropdownMenuItem>
           <DropdownMenuCheckboxItem checked={inboxOn} onCheckedChange={onToggleInbox}>
-            Give this agent an inbox
+            Give this teammate an inbox
           </DropdownMenuCheckboxItem>
           {canEditBudget && (
             <>

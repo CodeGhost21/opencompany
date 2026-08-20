@@ -47,6 +47,7 @@ import {
   hasConfigForm,
 } from "@/lib/workflow-node-config";
 import { draftBanners, draftLanding } from "@/lib/workflow-draft";
+import { isSafeId, slugifyWorkflowId } from "@/lib/workflow-id";
 import type { OpenCompanyClient } from "@/api/client";
 import { ApiError } from "@/api/types";
 import { CronPreviewLine } from "@/views/CronPreviewLine";
@@ -460,12 +461,6 @@ function draftEdges(graph: WorkflowGraph): DraftEdge[] {
   }));
 }
 
-/** A safe on-disk id: only letters, digits, `_`, and `-` — a subset of what the
- * host's `safe_wid` accepts (any single path component), chosen to keep ids
- * simple and unambiguous without a round-trip to the server first. */
-function isSafeId(id: string): boolean {
-  return /^[A-Za-z0-9_-]+$/.test(id);
-}
 
 export function WorkflowCreateDialog({
   client,
@@ -540,6 +535,35 @@ export function WorkflowCreateDialog({
    * and focus it rather than leave the message off-screen (#813 defect 6). */
   const errorRef = useRef<HTMLDivElement>(null);
   /**
+   * Whether the id is the operator's to own (issue #1053).
+   *
+   * `false` means the field is still derivable and the name may keep writing it;
+   * `true` means somebody decided it — the operator typed one, or a copilot
+   * draft supplied one — and the name must stop touching it. **Clobbering a
+   * deliberate id is a worse bug than the one being fixed**, so this latches on
+   * and only resets when the dialog reopens.
+   */
+  const [idTouched, setIdTouched] = useState(false);
+  /**
+   * Write an id somebody **chose** — the operator, a copilot draft, a prefilled
+   * correction — and latch it against derivation in the same step.
+   *
+   * One doorway on purpose (issue #1053 review). The latch was originally
+   * applied at each site that set a chosen id, and `runDraft`'s hydrate was
+   * missed: a create-mode draft landed its id and the next keystroke in Name
+   * slugged over it. Pairing the two writes here means a future path cannot set
+   * a chosen id *without* claiming it — the bug is removed as a class, not as an
+   * instance. Outside the reset effect, bare `setId` now means exactly one
+   * thing: a derived id. The reset effect is the one exception and has to be —
+   * it hydrates every field through `next*` locals so the pristine fingerprint
+   * is taken from the values it applies (issue #1006), so its id write cannot
+   * go through here. It sets `idTouched` itself, in the same pass.
+   */
+  function setAuthoredId(next: string) {
+    setIdTouched(true);
+    setId(next);
+  }
+  /**
    * Identity of the dialog's current contents (issue #1052).
    *
    * Bumped by the reset effect below, i.e. on every open and every re-hydrate.
@@ -558,6 +582,17 @@ export function WorkflowCreateDialog({
    * refreshed on every render, so the post-await read sees what is on screen now.
    */
   const draftDirtyRef = useRef(false);
+  /**
+   * The current node rows, readable **after** an await (issue #1016).
+   *
+   * `submit()` captures `nodes` from the render that built its closure, but the
+   * operator is invited to keep editing through the in-flight write. When the
+   * host answers with node-scoped `problems`, each one has to be matched against
+   * the rows on screen NOW — a `node_id` the operator renamed since clicking
+   * Save must fall through to the flat banner, not silently miss. Refreshed on
+   * every render below, mirroring `draftDirtyRef`.
+   */
+  const nodesRef = useRef<DraftNode[]>([]);
   /** Per-field problems raised on blur (issue #261), keyed by
    * {@link errorKey}. Separate from `error`, the submit-time banner: this one
    * is inline, scoped to the control that caused it, and never blocks Save on
@@ -615,6 +650,10 @@ export function WorkflowCreateDialog({
   // and keeping the edit would keep the stale token with it.
   useEffect(() => {
     if (!open) return;
+    // Issue #1053: a fresh open starts derivable again. Edit mode and the
+    // prefilled-draft branch below both re-latch it, because both arrive with an
+    // id somebody already chose.
+    setIdTouched(Boolean(workflow));
     // Issue #1052: a draft still in flight belongs to the contents being
     // replaced right now, not to these. Bumping first is what makes its
     // response land as `drop` instead of overwriting a freshly-reset form.
@@ -663,6 +702,12 @@ export function WorkflowCreateDialog({
     // be a latent bug if that invariant ever drifted.
     if (prefilledDraft) {
       const g = prefilledDraft.workflow;
+      // Issue #1053: chosen by the copilot, not left blank — editing the name
+      // afterwards must not slug over it. Only the latch is written here; the id
+      // itself rides `nextId` like every other hydrated field, so the pristine
+      // fingerprint below is taken from the value this open actually applies
+      // (issue #1006) rather than from state React has not committed yet.
+      setIdTouched(true);
       nextId = workflow?.id ?? g.id;
       nextName = g.name.trim();
       nextDescription = g.description ?? "";
@@ -849,13 +894,25 @@ export function WorkflowCreateDialog({
   function changeName(value: string) {
     setName(value);
     clearSubmitError();
+    // Issue #1053: the form used to reject "Weekly digest" for a missing id,
+    // then reject "weekly digest" for an unsafe one — twice, for something it
+    // could derive. Derived only while the id is nobody's yet, and never in edit
+    // mode, where the id keys the saved graph and re-slugging it is a rename.
+    if (editing || idTouched) return;
+    const derived = slugifyWorkflowId(value);
+    // An empty derivation means the name had nothing usable in it. Leave the
+    // field alone rather than writing "" — an empty id is itself invalid, and
+    // blanking a good id on a bad keystroke is the clobber this guard prevents.
+    if (derived) setId(derived);
   }
 
   /** Same for the id, which is what `validate()` complains about FIRST (missing,
    * or not a safe id) and the most common 409 from the host — so it is the
    * banner an author is most often looking at while fixing its cause. */
   function changeId(value: string) {
-    setId(value);
+    // Issue #1053: the operator has taken the field — the name stops writing it,
+    // including when they clear it back to empty, which is a decision too.
+    setAuthoredId(value);
     clearSubmitError();
   }
 
@@ -865,7 +922,34 @@ export function WorkflowCreateDialog({
   }
 
   function updateNode(key: string, fields: Partial<DraftNode>) {
+    // The row's id BEFORE this edit, read off the render snapshot the same way
+    // `removeNode` does. An edge references a node by its id, so a rename has to
+    // carry every edge that pointed at the old id over to the new one (issue
+    // #1016) — otherwise the edge dangles, `validate()` refuses the save, and
+    // the edge Select's option list (fed by the current node ids) drops the
+    // renamed node, leaving the operator nothing to re-point it at.
+    const prevId = nodes.find((n) => n.key === key)?.id;
     setNodes((rows) => rows.map((r) => (r.key === key ? { ...r, ...fields } : r)));
+    const nextId = fields.id;
+    // `""` is a real previous id (the field cleared mid-edit, see below) and
+    // must still be tracked — only a missing row (`prevId === undefined`) or
+    // an edit that didn't touch `id` (`nextId === undefined`) skips the
+    // cascade. Using `prevId &&`/`fields.id` truthiness here previously
+    // dropped the rewrite once `prevId` was `""`, so clearing an id and then
+    // typing a replacement left edges stranded pointing at `""` forever.
+    if (nextId !== undefined && prevId !== undefined && nextId !== prevId) {
+      // Continuously, on every keystroke of the id: the edges track the row's
+      // id so a rename can never orphan them. A transient empty id (the field
+      // cleared mid-edit) cascades to `""`, which is harmless — `validate()`
+      // blocks the save on it and the edges re-follow on the next keystroke.
+      setEdges((rows) =>
+        rows.map((e) => ({
+          ...e,
+          from: e.from === prevId ? nextId : e.from,
+          to: e.to === prevId ? nextId : e.to,
+        })),
+      );
+    }
     clearSubmitError();
     // Clear whatever the edit invalidated. This MUST stay in step with
     // `changeKind`: that reset exists so the draft never holds a value whose
@@ -942,7 +1026,11 @@ export function WorkflowCreateDialog({
     if (field === "schedule") {
       problem = scheduleProblem(value);
     } else if (field === "destinationTarget") {
-      problem = destinationTargetProblem(node.destinationKind, value, wiredChannels);
+      problem = destinationTargetProblem(
+        node.destinationKind,
+        value,
+        wiredChannels,
+      );
     } else if (field.startsWith("config:")) {
       const key = field.slice("config:".length);
       const spec = configFieldSpecs(node.kind).find((s) => s.key === key);
@@ -1151,6 +1239,13 @@ export function WorkflowCreateDialog({
     draftDirtyRef.current = isDraftDirty();
   });
 
+  // Issue #1016: keep the post-await view of the node rows current, so `submit`'s
+  // catch matches the host's `problems` against what is on screen when the answer
+  // lands — not the snapshot its closure captured at click time.
+  useEffect(() => {
+    nodesRef.current = nodes;
+  });
+
   /** Draft a graph from the description and hydrate the form with it (issue
    * #753). The hydrated, editable form IS the review surface — there is no
    * read-only diff — so on success the operator lands in the ordinary create
@@ -1200,7 +1295,8 @@ export function WorkflowCreateDialog({
         const graph = drafted.workflow;
         // Hydrate via the same helpers edit mode uses, so a drafted graph and a
         // saved one populate the form identically.
-        setId(graph.id);
+        // Issue #1053: the copilot chose this id, so the name stops writing it.
+        setAuthoredId(graph.id);
         setName(graph.name);
         setDescription(graph.description ?? "");
         setNodes(draftNodes(graph));
@@ -1365,6 +1461,55 @@ export function WorkflowCreateDialog({
       }
       onOpenChange(false);
     } catch (e) {
+      // Issue #1016: a `workflow_invalid` refusal carries per-node `problems`.
+      // Land each on the control that caused it so the operator sees the
+      // complaint next to the field, instead of a flat banner that names a node
+      // they then have to hunt for. Anything without an on-screen home — a
+      // graph-level field (`from`/`to`/`workflow_id`), a config key this kind
+      // has no control for, or a node that no longer exists — falls through to
+      // the banner, so nothing the host said is ever silently dropped.
+      if (e instanceof ApiError && e.problems?.length) {
+        const mapped: Record<string, string> = {};
+        const leftovers: string[] = [];
+        for (const p of e.problems) {
+          // Matched against the CURRENT rows (`nodesRef`), not the closure's
+          // snapshot: the operator may have renamed a node during the write, and
+          // a stale `node_id` must fall back to the banner rather than misfile.
+          // `.trim()` on our side because the submit path trims every id before
+          // sending it (see `outNodes.push` above) — the host's `problems`
+          // therefore carry the trimmed id, and comparing it against a raw
+          // draft id with surrounding whitespace would never match.
+          const row = nodesRef.current.find((n) => n.id.trim() === p.node_id);
+          const configKey = p.field?.startsWith("config.")
+            ? p.field.slice("config.".length)
+            : undefined;
+          const onScreen =
+            row !== undefined &&
+            configKey !== undefined &&
+            configFieldSpecs(row.kind).some((s) => s.key === configKey);
+          if (row && onScreen) {
+            mapped[errorKey(row.key, `config:${configKey}`)] = p.message;
+          } else {
+            leftovers.push(row ? `${nodeLabel(row)}: ${p.message}` : p.message);
+          }
+        }
+        // One write, merged over any blur errors (#261) already showing — a
+        // server field-error clears on the next edit of that field or the next
+        // submit, never wiping a legitimate blur error the operator has not
+        // touched.
+        if (Object.keys(mapped).length) {
+          setFieldErrors((prev) => ({ ...prev, ...mapped }));
+        }
+        // Everything that had no field home goes to the banner. If it ALL landed
+        // on a field, the banner still says something non-raw so Create never
+        // reads as a button that did nothing.
+        showError(
+          leftovers.length
+            ? leftovers.join(" ")
+            : "Some fields need attention — see the highlighted nodes below.",
+        );
+        return;
+      }
       showError(
         e instanceof Error
           ? e.message

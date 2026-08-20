@@ -209,6 +209,7 @@ pub(super) fn deps(base_url: String, dir: &std::path::Path) -> (HarnessDeps, Arc
             extra_headers: Vec::new(),
         })),
         provider_slug: "managed".to_string(),
+        serves: None,
         context: Arc::new(FsContextStore::new(dir)),
         store: Arc::new(FsCompanyStore::new(dir)),
         meter: None,
@@ -292,6 +293,7 @@ pub(super) fn record() -> CompanyRecord {
         overlay_desk_tools: Default::default(),
         disabled_workflows: Vec::new(),
         template_provenance: None,
+        setup: None,
     }
 }
 

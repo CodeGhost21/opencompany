@@ -1,4 +1,4 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type APIRequestContext, type Page } from "@playwright/test";
 
 import { LIVE_BRAIN } from "./capabilities";
 
@@ -18,6 +18,15 @@ import { LIVE_BRAIN } from "./capabilities";
  * order, and render. A column the host declares but the console never shows —
  * a broken ledger read, a dropped label — fails here and nowhere else. It is
  * also the guard on intake: one prompt box, landing in To-do.
+ *
+ * **It drives `#/ledgers/tasks`, not `#/tasks`.** The standalone Tasks page was
+ * retired in issue #1140 and the board it showed is the `tasks` ledger's
+ * columns, rendered by the same component it always was. The two claims that
+ * deletion could have taken with it — that work can still be *created*, and
+ * that a card can still be *opened* — are asserted below rather than left to
+ * the reader, because both fail silently: a console with no intake looks like a
+ * company with nothing to do, and a dead card link looks like a link that
+ * worked.
  */
 
 const API = "/api/v1/company";
@@ -42,6 +51,26 @@ test.beforeEach(async ({ page }) => {
   });
 });
 
+/**
+ * Moves every card out of one column, so a claim about that column being empty
+ * is a precondition this test set up rather than one it inherited.
+ *
+ * Needed since issue #1101: an empty column collapses to a rail, and whether a
+ * given column is empty at this point in the run depends on what earlier specs
+ * left behind — the host's data root survives between runs against a host you
+ * brought up yourself.
+ */
+async function emptyOut(request: APIRequestContext, column: string) {
+  const listed = await request.get(`${API}/tasks`);
+  expect(listed.ok()).toBeTruthy();
+  const tasks = (await listed.json()) as Array<{ id: string; column: string }>;
+  for (const task of tasks) {
+    if (task.column !== column) continue;
+    const parked = await request.patch(`${API}/tasks/${task.id}`, { data: { column: "done" } });
+    expect(parked.ok()).toBeTruthy();
+  }
+}
+
 async function dismissTour(page: Page) {
   const skip = page.getByRole("button", { name: "Skip for now" });
   for (let attempt = 0; attempt < 5; attempt += 1) {
@@ -54,11 +83,48 @@ async function dismissTour(page: Page) {
 
 /** The column headers the board actually renders, left to right. */
 function columnLabels(page: Page) {
-  return page.getByTestId("ledger-board").locator("div.w-72 > div > span.text-sm.font-medium");
+  // By testid, not by shape. An empty column collapses to a rail (issue #1101)
+  // and renders its label inside a button rather than the open column's header
+  // row, so a structural selector would silently stop counting the very columns
+  // this asserts the order of.
+  return page.getByTestId("ledger-board").getByTestId("column-label");
 }
 
-test("the board renders the six #183 columns in order, with Backlog gone", async ({ page }) => {
+/**
+ * Issue #1140 — the two things retiring the Tasks page could have taken.
+ *
+ * `#/tasks` is in every operator's history and fingers, and `#/tasks/<id>` is
+ * linked from chat, from an approval card and from a workflow run's rows. The
+ * first has to land on the board and the second has to keep opening the card,
+ * and both failures are quiet: the router drops an address it does not know and
+ * renders Overview, which looks like a link that worked.
+ */
+test("the retired #/tasks lands on the board, and #/tasks/<id> still opens the card", async ({
+  page,
+  request,
+}) => {
+  const title = `e2e retired route ${Date.now()}`;
+  const seeded = await request.post(`${API}/tasks`, { data: { title } });
+  expect(seeded.ok()).toBeTruthy();
+  const id = (await seeded.json()).id as string;
+
   await page.goto("/#/tasks");
+  await dismissTour(page);
+
+  // The board, and the address rewritten to name where it actually is. A push
+  // rather than a replace would leave `#/tasks` one Back away, bouncing the
+  // operator forward again on arrival.
+  await expect(columnLabels(page)).toHaveText(EXPECTED_COLUMNS, { timeout: 15_000 });
+  await expect.poll(() => new URL(page.url()).hash).toBe("#/ledgers/tasks");
+
+  // And the card detail, which Ledgers deliberately does not reproduce.
+  await page.goto(`/#/tasks/${id}`);
+  await expect(page.getByRole("heading", { name: title })).toBeVisible({ timeout: 15_000 });
+  expect(new URL(page.url()).hash).toBe(`#/tasks/${id}`);
+});
+
+test("the board renders the six #183 columns in order, with Backlog gone", async ({ page }) => {
+  await page.goto("/#/ledgers/tasks");
   await dismissTour(page);
 
   // The columns are a read now, not a literal, so the board is not itself
@@ -69,7 +135,7 @@ test("the board renders the six #183 columns in order, with Backlog gone", async
 });
 
 test("new work enters through one prompt box and lands in To-do", async ({ page, request }) => {
-  await page.goto("/#/tasks");
+  await page.goto("/#/ledgers/tasks");
   await dismissTour(page);
 
   // Exactly one entry point on the whole board (issue #206's rule, kept).
@@ -78,12 +144,23 @@ test("new work enters through one prompt box and lands in To-do", async ({ page,
   await addTask.click();
   await expect(page.getByRole("heading", { name: "New task" })).toBeVisible();
 
-  // One field. Title / Note / Priority / Assignee are gone from create — the
-  // host defaults the last two and the card's edit surface owns them (#278).
+  // Title / Note / Priority stay gone from create — the host defaults priority
+  // and the card's edit surface owns them (#278).
   await expect(page.locator("#new-prompt")).toBeVisible();
-  for (const gone of ["#new-title", "#new-note", "#new-assignee"]) {
+  for (const gone of ["#new-title", "#new-note", "#new-priority"]) {
     await expect(page.locator(gone)).toHaveCount(0);
   }
+
+  // Assignee came *back* in #1106, and is the one exception to "one field".
+  // #301 removed it on the reasoning that the host defaults it; what that missed
+  // is that the host's default is a planning pass which picks an owner, and picks
+  // one silently when two teammates fit. Offering it here is the pre-empt.
+  //
+  // The rule that keeps this from re-breaking what #301 fixed is the *default*,
+  // asserted below rather than the control's absence: an operator who ignores it
+  // types a prompt, hits Create, and gets exactly the unassigned card they got
+  // before — the field is omitted from the body entirely when untouched.
+  await expect(page.locator("#new-assignee")).toHaveCount(1);
 
   // A prompt longer than the title cap: the title is shortened and the full
   // text survives in the note, so nothing the operator typed is lost.
@@ -92,7 +169,7 @@ test("new work enters through one prompt box and lands in To-do", async ({ page,
   await page.locator("#new-prompt").fill(long);
   await page.getByRole("button", { name: "Create", exact: true }).click();
 
-  type Row = { title: string; note?: string; column: string };
+  type Row = { title: string; note?: string; column: string; assignee: string };
   const find = async (): Promise<Row | undefined> => {
     const rows = (await (await request.get(`${API}/tasks`)).json()) as Row[];
     return rows.find((r) => r.title.startsWith(marker));
@@ -104,6 +181,10 @@ test("new work enters through one prompt box and lands in To-do", async ({ page,
   expect(created.column).toBe("todo");
   expect(created.title.length).toBeLessThanOrEqual(81); // 80 + the ellipsis
   expect(created.note).toBe(long);
+  // The #1106 default, and the reason adding the control is a no-op for anyone
+  // who does not use it: the prompt was the only thing filled in, so the card is
+  // unassigned exactly as it was before the picker existed.
+  expect(created.assignee).toBe("");
 });
 
 /**
@@ -140,11 +221,14 @@ test("dragging into Planning moves the card without dispatching it", async ({ pa
       "contract is covered by the live-brain test below. Issue #501.",
   );
   const title = `e2e planning drag ${Date.now()}`;
+  // Planning has to be empty for the collapse assertions below to mean
+  // anything, and an earlier run of this very test may have left a card in it.
+  await emptyOut(request, "planning");
   const seeded = await request.post(`${API}/tasks`, { data: { title } });
   expect(seeded.ok()).toBeTruthy();
   const id = (await seeded.json()).id as string;
 
-  await page.goto("/#/tasks");
+  await page.goto("/#/ledgers/tasks");
   await dismissTour(page);
 
   const card = page.locator("div[draggable=true]").filter({ hasText: title }).first();
@@ -165,9 +249,18 @@ test("dragging into Planning moves the card without dispatching it", async ({ pa
   // `dragstart`, `getData` at `drop`, and nothing in between that a re-render
   // can touch.
   const dataTransfer = await page.evaluateHandle(() => new DataTransfer());
-  const planning = page.locator("div.w-72").nth(EXPECTED_COLUMNS.indexOf("Planning"));
+  const planning = page.getByTestId("board-column").nth(EXPECTED_COLUMNS.indexOf("Planning"));
+  // Issue #1101: the card just seeded makes the board non-empty, so Planning —
+  // which holds nothing — has collapsed to a rail. That is the state this drop
+  // has to survive, and it is not incidental: the columns an operator drags
+  // *into* are exactly the columns that are empty, so a rail that stopped
+  // taking a drop would break the board's main gesture on every board the
+  // collapse is for.
+  await expect(planning).toHaveAttribute("data-collapsed", "true");
   await card.dispatchEvent("dragstart", { dataTransfer });
   await planning.dispatchEvent("dragover", { dataTransfer });
+  // And it opened to receive the card rather than taking the drop blind.
+  await expect(planning).toHaveAttribute("data-collapsed", "false");
   await planning.dispatchEvent("drop", { dataTransfer });
 
   await expect
@@ -233,7 +326,7 @@ test("a card dropped into Planning is planned and settled, never left parked", a
   expect(seeded.ok()).toBeTruthy();
   const id = (await seeded.json()).id as string;
 
-  await page.goto("/#/tasks");
+  await page.goto("/#/ledgers/tasks");
   await dismissTour(page);
 
   const card = page.locator("div[draggable=true]").filter({ hasText: title }).first();
@@ -242,7 +335,7 @@ test("a card dropped into Planning is planned and settled, never left parked", a
   // The same faithful gesture as the test above: one DataTransfer across all
   // three events, so the id travels where a real drag puts it.
   const dataTransfer = await page.evaluateHandle(() => new DataTransfer());
-  const planning = page.locator("div.w-72").nth(EXPECTED_COLUMNS.indexOf("Planning"));
+  const planning = page.getByTestId("board-column").nth(EXPECTED_COLUMNS.indexOf("Planning"));
   await card.dispatchEvent("dragstart", { dataTransfer });
   await planning.dispatchEvent("dragover", { dataTransfer });
   await planning.dispatchEvent("drop", { dataTransfer });

@@ -284,6 +284,7 @@ fn record() -> CompanyRecord {
         overlay_desk_tools: Default::default(),
         disabled_workflows: Vec::new(),
         template_provenance: None,
+        setup: None,
     }
 }
 
@@ -300,6 +301,7 @@ fn deps_for(base_url: String, dir: &std::path::Path) -> (HarnessDeps, Arc<FsOps>
             extra_headers: Vec::new(),
         })),
         provider_slug: "managed".to_string(),
+        serves: None,
         context: Arc::new(FsContextStore::new(dir)),
         store: Arc::new(FsCompanyStore::new(dir)),
         meter: Some(ops.clone()),
@@ -362,9 +364,6 @@ fn chat(text: &str) -> CycleRequest {
             deliverable: None,
         }],
         event_seqs: Vec::new(),
-        compressed_history: Vec::new(),
-        roster: Vec::new(),
-        context_index: Vec::new(),
     }
 }
 

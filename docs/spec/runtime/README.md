@@ -46,7 +46,8 @@ Supporting docs:
 - [artifacts.md](artifacts.md) — what makes something a deliverable: the
   explicit-publish rule, `(task, source)` identity, body caps and reference
   bodies, and the single follow-up nudge
-- [manifest.md](manifest.md) — `company.toml` schema
+- [manifest.md](manifest.md) — `company.toml` schema,
+  with [manifest-semantics.md](manifest-semantics.md) for each key's behaviour
 - [globals.md](globals.md) — the global baseline: the agents, workflows, skills
   and starting tool belt every company gets whichever vertical it started from,
   how a company supersedes or disables one, and why provenance is persisted
@@ -123,6 +124,14 @@ Supporting docs:
   `wallet`, or `none` (no sign-in, for the desktop app), and what each changes
 - [hub-console.md](hub-console.md) — one console deployment operating many hosts
   on other origins: the carried session, CORS, and what it costs
+- [company-setup.md](company-setup.md) — first-run **company** setup: three
+  questions asked once, turned into a real roster of agents. Distinct from
+  [setup.md](setup.md), which configures the *instance*
+  - [company-setup-guarantees.md](company-setup-guarantees.md) — the four things
+    the host *enforces* rather than asks a prompt for: job coverage checked
+    against its own list, a tool belt asked for rather than inherited, a copy of
+    the reference team refused the name "designed", and a fallback that says
+    which fallback it is
 
 ## Responsibilities
 

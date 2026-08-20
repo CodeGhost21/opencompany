@@ -61,7 +61,9 @@ async function dismissOnboarding(page: Page) {
 }
 
 async function goToTeam(page: Page) {
-  await page.goto("/#/team");
+  // The Company page, whose Cards half is the roster (issue #1141). Bare
+  // `#/team` redirects here; this asks for the address that exists.
+  await page.goto("/#/company");
   await dismissOnboarding(page);
   await expect(page.getByTestId("team-card").first()).toBeVisible({ timeout: 30_000 });
 }
@@ -111,12 +113,16 @@ test("a company agent opens from its card and shows what it is", async ({ page }
   await expect(page.getByTestId("agent-desks-empty")).toBeVisible();
 
   // A blueprint teammate is read-only here, and the screen says why instead of
-  // offering an edit that would 409.
-  await expect(page.getByTestId("agent-edit")).toHaveCount(0);
+  // offering an edit that would 409. Since #1141 the affordance is *present and
+  // disabled* rather than absent: an operator hunting for the edit needs to
+  // learn why there isn't one, not to conclude the console forgot to build it.
+  await expect(page.getByTestId("agent-edit")).toBeDisabled();
   await expect(page.getByTestId("agent-readonly-note")).toContainText("company.toml");
 
-  // Back returns to the roster.
-  await page.getByRole("button", { name: "Back to team" }).click();
+  // The breadcrumb returns to the Company page (issue #1141, replacing "Back to
+  // team" — this page is linked into from the org chart and the chat pane, and
+  // Back named a page half its arrivals had never seen).
+  await page.getByTestId("agent-breadcrumb-company").click();
   await expect(page.getByTestId("team-card").first()).toBeVisible();
 });
 
@@ -141,12 +147,12 @@ test("an agent defined in the console can be read back and edited", async ({ pag
   // and leaves a second card for `card(page, role)` to match.
   try {
     // Define one through the dialog the issue calls create-only.
-    await page.getByRole("button", { name: "Add member" }).first().click();
+    await page.getByRole("button", { name: "Add teammate" }).first().click();
     const dialog = page.getByRole("dialog");
     await dialog.getByTestId("agent-field-name").fill("Detail Spec");
     await dialog.getByTestId("agent-field-role").fill(role);
     await dialog.getByTestId("agent-field-description").fill("Original instructions.");
-    await dialog.getByRole("button", { name: "Add member" }).click();
+    await dialog.getByRole("button", { name: "Add teammate" }).click();
     await expect(card(page, role)).toBeVisible({ timeout: 30_000 });
 
     // Open it. This is the half that was impossible: the roster was write-once
@@ -191,14 +197,14 @@ test("an agent defined in the console can be read back and edited", async ({ pag
 
     // …and the roster the operator came from agrees, rather than only the panel
     // they edited in.
-    await page.getByRole("button", { name: "Back to team" }).click();
+    await page.getByTestId("agent-breadcrumb-company").click();
     await expect(card(page, "Spec Runner II")).toBeVisible({ timeout: 30_000 });
   } finally {
     // Leave the company as we found it, whatever happened above.
     await goToTeam(page);
     const leftover = page.getByTestId("team-card").filter({ hasText: "Detail Spec" }).first();
     if (await leftover.count()) {
-      await leftover.getByLabel("Member actions").click();
+      await leftover.getByLabel("Teammate actions").click();
       await page.getByRole("menuitem", { name: "Remove" }).click();
       await expect(leftover).toHaveCount(0, { timeout: 30_000 });
     }

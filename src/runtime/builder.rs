@@ -9,6 +9,8 @@
 //! `build` performs boot replay: it loads the runtime journal and rehydrates
 //! any parked approvals into the gate so an approval survives a restart.
 
+#[cfg(feature = "openhuman")]
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -29,7 +31,11 @@ use crate::feedback::tinyhumans::TinyHumansClient;
 use crate::feedback::tool::BuiltinToolProvider;
 use crate::feedback::types::ConsentMode;
 #[cfg(feature = "openhuman")]
+use crate::harness::built_in::run_turn::HarnessRunTurn;
+#[cfg(feature = "openhuman")]
 use crate::harness::provider::{HostedProviderConfig, TenantProvider};
+#[cfg(feature = "openhuman")]
+use crate::harness::router::HarnessRouter;
 #[cfg(feature = "openhuman")]
 use crate::harness::{HarnessBrain, HarnessDeps};
 use crate::openhuman::rpc::OpenHumanRpc;
@@ -46,6 +52,8 @@ use crate::ports::{
     SkillStateStore, TaskStore, ToolProvider, UsageMeter, UserStore, WorkflowRevisionStore,
     WorkspaceStore,
 };
+#[cfg(feature = "openhuman")]
+use crate::runtime::delegation::RunTurn;
 // Separate line (#241) so this addition is a pure append, not a reflow of the
 // grouped import that sibling store-seam branches (#274, #596) also edit.
 use crate::ports::ScheduleFireStore;
@@ -1823,6 +1831,11 @@ impl RuntimeBuilder {
         let mut builder: Option<Arc<crate::harness::workflow_build::WorkflowBuilder>> = None;
         #[cfg(feature = "openhuman")]
         let mut workflow_harness_deps: Option<crate::harness::HarnessDeps> = None;
+        // First-run company setup's polish pass, built from the SAME deps as the
+        // planner and the workflow builder and installed the same way via
+        // `CompanyRuntime::set_roster_builder` below.
+        #[cfg(feature = "openhuman")]
+        let mut roster_builder: Option<Arc<crate::harness::roster_build::RosterBuilder>> = None;
 
         // Load the persisted record BEFORE constructing the brain so the brain's
         // in-memory record carries the operator overlays (team, desk memberships,
@@ -1880,6 +1893,7 @@ impl RuntimeBuilder {
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
+            setup: None,
         };
         let mut desk_ids = Vec::new();
         let candidates = desk_record
@@ -2008,6 +2022,10 @@ impl RuntimeBuilder {
             .as_ref()
             .and_then(|r| r.template_provenance.clone())
             .or_else(|| self.template_provenance.clone());
+        // First-run setup's answers, carried forward exactly like the provenance
+        // above: a rebuild must not lose what the operator told us about their
+        // business, or the workflow phase would have to ask again.
+        let setup = existing.as_ref().and_then(|r| r.setup.clone());
         let ledger = existing.map(|r| r.ledger).unwrap_or_default();
 
         // Issue #752: a company whose roster holds `repo` does not come up on a
@@ -2153,9 +2171,21 @@ impl RuntimeBuilder {
                         // managed env default? A corrupt runtime config degrades
                         // to "unconfigured" (managed/echo brain) rather than
                         // bricking boot.
+                        //
+                        // The manifest layer is the *default harness's* effective
+                        // inference — `default_harness_inference()` falling back
+                        // to the company-level `[inference]` — the same resolution
+                        // `TenantProvider::new` applies a few lines down. A
+                        // company whose only inference lives in
+                        // `[harness.inference]` must count as configured here,
+                        // or it would never reach the provider it just declared.
+                        let effective_manifest = self
+                            .manifest
+                            .default_harness_inference()
+                            .unwrap_or_else(|| self.manifest.inference.clone());
                         let configured = inference::resolve_effective(
                             &id,
-                            &self.manifest.inference,
+                            &effective_manifest,
                             env_default.as_ref(),
                             secrets.as_ref(),
                         )
@@ -2333,23 +2363,31 @@ impl RuntimeBuilder {
                                     Vec::new()
                                 }),
                             );
-                            let deps = HarnessDeps {
+                            let mut deps = HarnessDeps {
                                 // Carried so live re-resolution merges the same
                                 // three layers boot did (issue #527).
                                 default_mcp_servers: self.default_mcp_servers.clone(),
                                 // A per-tenant provider that re-resolves the
                                 // effective inference config on every turn, so a
                                 // console BYOK switch takes effect next turn with
-                                // no rebuild.
+                                // no rebuild. The default harness's own
+                                // `[harness.inference]` beats the company-level
+                                // `[inference]` — the same precedence a named
+                                // harness gets — while the scope stays the
+                                // default one so the flat legacy secret keys keep
+                                // working for the company's default harness.
                                 provider: Arc::new(TenantProvider::new(
                                     id.clone(),
                                     secrets.clone(),
-                                    self.manifest.inference.clone(),
-                                    env_default,
+                                    self.manifest
+                                        .default_harness_inference()
+                                        .unwrap_or_else(|| self.manifest.inference.clone()),
+                                    env_default.clone(),
                                 )),
                                 // Static fallback only; `HarnessPool::run` reads
                                 // the live slug from the provider per turn.
                                 provider_slug: "managed".to_string(),
+                                serves: None,
                                 context: context.clone(),
                                 store: store.clone(),
                                 meter: Some(fs_ops.clone()),
@@ -2600,15 +2638,74 @@ impl RuntimeBuilder {
                                 overlay_desk_tools: Default::default(),
                                 disabled_workflows: disabled_workflows.clone(),
                                 template_provenance: template_provenance.clone(),
+                                setup: setup.clone(),
                             };
-                            // Workflow agent nodes execute on the same pool as the
-                            // brain — clone before both moves into `HarnessBrain`.
-                            let runner: Arc<dyn WorkflowRunner> =
-                                Arc::new(HarnessWorkflowRunner::new(
-                                    pool.clone(),
-                                    deps.clone(),
-                                    record.clone(),
-                                ));
+                            // The company's other declared harnesses, each on
+                            // its own pool and its own provider. Empty unless
+                            // `[[harness]]` names more than one, so a company
+                            // that declares none keeps exactly the single-pool
+                            // path it always had.
+                            //
+                            // Built first so `deps.serves` is set before any
+                            // dependency clones it — otherwise the runner (which
+                            // holds `deps.clone()`) would carry `serves: None`,
+                            // and `HarnessPool::ensure` (which does not fingerprint
+                            // `serves`) could build the whole roster on the
+                            // default provider regardless of which agents it
+                            // actually serves.
+                            let lanes = crate::harness::lanes::build(
+                                &record,
+                                &deps,
+                                secrets.clone(),
+                                env_default,
+                            );
+                            if !lanes.lanes.is_empty() || !lanes.unavailable.is_empty() {
+                                tracing::info!(
+                                    company = %id,
+                                    lanes = lanes.lanes.len(),
+                                    unavailable = lanes.unavailable.len(),
+                                    "wired named harnesses"
+                                );
+                            }
+                            // Narrow the default pool to the agents it actually
+                            // serves once other lanes exist; `None` (the
+                            // single-harness case) keeps the whole roster.
+                            deps.serves = lanes.default_serves;
+
+                            // The router every dispatch goes through: the default
+                            // lane plus each named lane, indexed by agent. Shared
+                            // by the brain and the workflow runner so they cannot
+                            // disagree about which agent lands on which engine.
+                            let default_lane: Arc<dyn RunTurn> =
+                                Arc::new(HarnessRunTurn::new(pool.clone(), Arc::new(deps.clone())));
+                            let turn: Arc<dyn RunTurn> = if lanes.lanes.is_empty()
+                                && lanes.unavailable.is_empty()
+                            {
+                                default_lane
+                            } else {
+                                let default_harness = record.manifest.default_harness_id();
+                                let bindings: HashMap<String, String> = record
+                                    .manifest
+                                    .agents
+                                    .iter()
+                                    .filter_map(|a| a.harness.clone().map(|h| (a.id.clone(), h)))
+                                    .collect();
+                                Arc::new(HarnessRouter::from_lanes(
+                                    &default_harness,
+                                    default_lane,
+                                    &lanes.lanes,
+                                    &lanes.unavailable,
+                                    &bindings,
+                                ))
+                            };
+
+                            // Workflow agent nodes route through the shared
+                            // router, so a workflow node addressing a named-lane
+                            // agent lands on that lane's engine instead of the
+                            // default pool.
+                            let runner: Arc<dyn WorkflowRunner> = Arc::new(
+                                HarnessWorkflowRunner::new(turn, deps.clone(), record.clone()),
+                            );
                             // Issue #67: fill the shared handle on `deps` (a clone
                             // of which the runner holds, and which moves into the
                             // brain below) so the orchestrator's `run_workflow` tool
@@ -2631,12 +2728,21 @@ impl RuntimeBuilder {
                             builder = Some(Arc::new(
                                 crate::harness::workflow_build::WorkflowBuilder::from_deps(&deps),
                             ));
+                            // Same deps again, for the same reason: setup must
+                            // polish a roster on whichever credential the rest
+                            // of the company is thinking on.
+                            roster_builder = Some(Arc::new(
+                                crate::harness::roster_build::RosterBuilder::from_deps(&deps),
+                            ));
                             Some(Arc::new(
                                 // Issue #242: the same run store the dispatch
                                 // choke point mints into and the boot reaper
                                 // sweeps, so an attempt's trace, cost and
                                 // status all land on the row it opened.
-                                HarnessBrain::new(pool, deps, record).with_runs(ops.runs.clone()),
+                                HarnessBrain::new(pool, deps, record)
+                                    .with_lanes(lanes.lanes)
+                                    .with_unavailable_lanes(lanes.unavailable)
+                                    .with_runs(ops.runs.clone()),
                             ) as Arc<dyn Brain>)
                         } else {
                             // Do not degrade silently (issue #174): an openhuman
@@ -2733,6 +2839,7 @@ impl RuntimeBuilder {
                 overlay_desk_tools,
                 disabled_workflows,
                 template_provenance,
+                setup,
             })
             .await?;
 
@@ -2899,6 +3006,14 @@ impl RuntimeBuilder {
         #[cfg(feature = "openhuman")]
         if let Some(deps) = workflow_harness_deps {
             runtime.set_workflow_harness_deps(deps);
+        }
+        // Same rebuild treatment again. A setup pass interrupted by a rebuild
+        // needs no recovery at all: it holds no lock, mints no run and writes
+        // nothing, so the console simply re-asks and the operator loses nothing
+        // but the seconds they had waited.
+        #[cfg(feature = "openhuman")]
+        if let Some(roster_builder) = roster_builder {
+            runtime.set_roster_builder(roster_builder);
         }
 
         // Boot lifecycle step 3: going-public. Best-effort and non-blocking —
@@ -4015,6 +4130,204 @@ mod test {
                 .await
                 .unwrap()
                 .is_some()
+        );
+    }
+
+    /// **Issue #1059.** A runtime with no agent pool says so when a card is
+    /// dispatched, instead of leaving it inert in silence.
+    ///
+    /// The silence was the whole bug: `dispatch_task` returned without minting a
+    /// run, journalling anything or logging, so a card dragged into In Progress
+    /// simply sat there. Everything upstream looked healthy — the write returned
+    /// 200 and the card moved — and there was nothing to grep for.
+    ///
+    /// Asserted through a capturing subscriber rather than by reading the code,
+    /// because "it logs" is exactly the claim that rots: the warning could be
+    /// deleted, demoted to `debug!`, or moved behind a branch nothing reaches,
+    /// and every other test here would still pass.
+    ///
+    /// The second dispatch pins the latch. An inert board with fifty cards has
+    /// one problem, not fifty, and a per-card warning is the kind of noise that
+    /// gets a useful line filtered out.
+    ///
+    /// The remedy is asserted per build (issue #1059 review). "No agent pool"
+    /// has two causes with two different fixes — nobody called `with_harness`,
+    /// or the binary was built without the feature that compiles it — and a
+    /// message naming the wrong one is a dead end dressed as help. Each arm
+    /// pins the other's remedy *absent* as well as its own present, so a
+    /// message that hedged by carrying both would fail here.
+    #[tokio::test]
+    async fn an_inert_board_says_it_cannot_dispatch_once() {
+        use std::sync::{Arc as StdArc, Mutex as StdMutex};
+
+        /// A writer that keeps everything the subscriber emits.
+        #[derive(Clone, Default)]
+        struct Captured(StdArc<StdMutex<Vec<u8>>>);
+        impl std::io::Write for Captured {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        /// Keeps each event's level alongside its rendered message.
+        ///
+        /// The captured text cannot stand in for the level: `with_max_level`
+        /// names a *maximum verbosity*, so a `WARN` ceiling admits `ERROR` too,
+        /// and a promotion would slip past an assertion that only reads the
+        /// message. This reads `Metadata::level()` itself.
+        #[derive(Clone, Default)]
+        struct Levels(StdArc<StdMutex<Vec<(tracing::Level, String)>>>);
+        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Levels {
+            fn on_event(
+                &self,
+                event: &tracing::Event<'_>,
+                _ctx: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                struct Message(String);
+                impl tracing::field::Visit for Message {
+                    fn record_debug(
+                        &mut self,
+                        field: &tracing::field::Field,
+                        value: &dyn std::fmt::Debug,
+                    ) {
+                        if field.name() == "message" {
+                            self.0 = format!("{value:?}");
+                        }
+                    }
+                }
+                let mut message = Message(String::new());
+                event.record(&mut message);
+                self.0
+                    .lock()
+                    .unwrap()
+                    .push((*event.metadata().level(), message.0));
+            }
+        }
+
+        let home_dir = tmp_home("oc-inert-board-");
+        let manifest = parse("[company]\nname=\"Acme\"\n[policy]\nmode=\"full\"\n");
+        // No `with_harness`: the default shape ~200 callers use.
+        let runtime = RuntimeBuilder::new(home_dir.path().to_path_buf(), manifest)
+            .with_id(CompanyId::new("acme"))
+            .build()
+            .await
+            .expect("builds");
+        let runtime = Arc::new(runtime);
+
+        let logs = Captured::default();
+        let sink = logs.clone();
+        let levels = Levels::default();
+        let subscriber = {
+            use tracing_subscriber::layer::SubscriberExt;
+            tracing_subscriber::fmt()
+                .with_writer(move || sink.clone())
+                .with_max_level(tracing::Level::WARN)
+                .finish()
+                .with(levels.clone())
+        };
+
+        let card = |id: &str, column: &str| crate::ports::tasks::TaskRecord {
+            id: id.to_string(),
+            title: "Do the thing".to_string(),
+            note: None,
+            column: column.to_string(),
+            priority: "medium".to_string(),
+            assignee: "ceo".to_string(),
+            updated_at_millis: 1,
+            origin_chat_id: None,
+            parent_task_id: None,
+            output: None,
+            plan: None,
+            deliverable: crate::ports::tasks::TaskDeliverable::Once,
+            workflow_proposal: None,
+            origin_run_id: None,
+            origin_workflow_id: None,
+            planning_attempts: Vec::new(),
+        };
+
+        // Through `upsert_task`, the real entry point: it reads the To-do →
+        // In Progress edge and calls `dispatch_task`, so this exercises the drag
+        // an operator actually performs rather than the private hop beneath it.
+        for id in ["card-1", "card-2"] {
+            runtime
+                .upsert_task(&card(id, crate::ports::tasks::COLUMN_TODO))
+                .await
+                .expect("seed the card in To-do");
+        }
+        let guard = tracing::subscriber::set_default(subscriber);
+        for id in ["card-1", "card-2"] {
+            runtime
+                .upsert_task(&card(id, crate::ports::tasks::COLUMN_IN_PROGRESS))
+                .await
+                .expect("drag it into In Progress");
+        }
+        drop(guard);
+
+        let text = String::from_utf8(logs.0.lock().unwrap().clone()).expect("utf-8");
+        assert!(
+            text.contains("no agent pool"),
+            "an inert board must say why nothing will work the card: {text:?}"
+        );
+        // The remedy has to be the one that helps THIS build, and asserting
+        // its presence is only half of that (issue #1059 review). A message
+        // carrying both remedies would satisfy every "contains" assertion while
+        // still telling a default-build operator to call a method that is not
+        // in their binary — so each arm also pins the other's absence, which is
+        // what makes this prove the split rather than tolerate it.
+        #[cfg(feature = "openhuman")]
+        {
+            assert!(
+                text.contains("with_harness"),
+                "a build WITH the feature must name the call that wires a pool: {text:?}"
+            );
+            assert!(
+                !text.contains("--features openhuman"),
+                "the feature is already on; telling this operator to rebuild with it is \
+                 a remedy for a problem they do not have: {text:?}"
+            );
+        }
+        #[cfg(not(feature = "openhuman"))]
+        {
+            assert!(
+                text.contains("--features openhuman"),
+                "a default-feature build has no harness to wire, so rebuilding with the \
+                 feature is the only thing that helps: {text:?}"
+            );
+            assert!(
+                !text.contains("with_harness"),
+                "`RuntimeBuilder::with_harness` is itself `#[cfg(feature = \"openhuman\")]`, \
+                 so naming it here sends the operator after a method that is not compiled \
+                 into their binary: {text:?}"
+            );
+        }
+        assert_eq!(
+            text.matches("no agent pool").count(),
+            1,
+            "the warning is latched per runtime, not raised per card: {text:?}"
+        );
+
+        // The level, read from the event rather than inferred from the text.
+        // `warn!` is the whole point: demoted to `debug!` it restores the
+        // silence this fixes, and promoted to `error!` it cries failure over a
+        // documented default that ~200 callers build on purpose.
+        let seen = levels.0.lock().unwrap().clone();
+        let inert: Vec<_> = seen
+            .iter()
+            .filter(|(_, message)| message.contains("no agent pool"))
+            .collect();
+        assert_eq!(
+            inert.len(),
+            1,
+            "exactly one inert-board event should reach the subscriber: {seen:?}"
+        );
+        assert_eq!(
+            inert[0].0,
+            tracing::Level::WARN,
+            "the inert-board line must stay at WARN: {seen:?}"
         );
     }
 
@@ -5332,6 +5645,7 @@ mod test {
                 overlay_desk_tools: Default::default(),
                 disabled_workflows: Vec::new(),
                 template_provenance: None,
+                setup: None,
             })
             .await
             .unwrap();
@@ -5503,6 +5817,7 @@ mod test {
                 overlay_desk_tools: Default::default(),
                 disabled_workflows: Vec::new(),
                 template_provenance: None,
+                setup: None,
             })
             .await
             .unwrap();
@@ -5796,6 +6111,7 @@ mod test {
                 overlay_desk_tools: Default::default(),
                 disabled_workflows: Vec::new(),
                 template_provenance: None,
+                setup: None,
             })
             .await
             .unwrap();
@@ -5913,6 +6229,7 @@ mod test {
                 overlay_desk_tools: Default::default(),
                 disabled_workflows: Vec::new(),
                 template_provenance: None,
+                setup: None,
             })
             .await
             .unwrap();
@@ -6051,6 +6368,7 @@ mod test {
                 overlay_desk_tools: Default::default(),
                 disabled_workflows: Vec::new(),
                 template_provenance: None,
+                setup: None,
             })
             .await
             .unwrap();

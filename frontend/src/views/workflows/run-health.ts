@@ -7,7 +7,11 @@
 // precisely the surface where a wrong green dot is most costly — it is the one
 // an operator scans instead of opening anything.
 
-import type { DeliveryReport, WorkflowRunOutcome } from "@/api/workflows";
+import type {
+  DeliveryReport,
+  WorkflowRunOutcome,
+  WorkflowRunVerdict,
+} from "@/api/workflows";
 
 /**
  * The `pending` delivery status — a report parked for an operator's approval —
@@ -20,14 +24,72 @@ import type { DeliveryReport, WorkflowRunOutcome } from "@/api/workflows";
  */
 const PENDING_STATUS: string = "pending";
 
+/** The `skipped` delivery status, widened for the same reason as
+ * {@link PENDING_STATUS}: the host owns this union and may grow it. */
+const SKIPPED_STATUS: string = "skipped";
+
+/**
+ * The two `skipped` reasons that do NOT count as a lost report (issue #981).
+ *
+ * `already-delivered` — an earlier run in this approval lineage sent it (issue
+ * #438); approving a gate re-runs the graph from the trigger, so every upstream
+ * `output` node is reached again and the report is already at its destination.
+ * `dry-run` — a test run (issue #542) attempted nothing, on purpose.
+ *
+ * `no-destination-configured` is deliberately NOT here. That report was produced
+ * and then lost with nothing accounting for it, which is exactly what issue #925
+ * added the row to make visible; excusing it restores the silence issues #947
+ * and #963 were filed about. See docs/modules/server/run-verdict.md.
+ */
+const ACCOUNTED_FOR_REASONS: readonly string[] = [
+  "already-delivered",
+  "dry-run",
+];
+
+/**
+ * Whether THIS one report did not reach a destination and will not without a
+ * change — the host's `is_undelivered`, mirrored (issue #981).
+ *
+ * Every count and every marker below folds this, so the run's dot, the drawer's
+ * badge, the toast and the per-node marker cannot disagree about a single row.
+ *
+ * `reason` is optional on the type: a host predating issue #248 sends no reason
+ * at all. An absent one **counts**, which is the safe direction — an unreadable
+ * reason must not excuse a report from the number an operator acts on.
+ */
+export function isUndelivered(d: DeliveryReport): boolean {
+  if (d.status === "sent" || d.status === PENDING_STATUS) return false;
+  // Only a skip can be accounted for. A `failed` or `denied` row is a report
+  // that was attempted and did not work, whatever it claims about why.
+  if (d.status !== SKIPPED_STATUS) return true;
+  return !ACCOUNTED_FOR_REASONS.includes(d.reason ?? "");
+}
+
 /** Reports that did NOT reach their destination **and will not without a
- * change** — the number worth acting on. `pending` is excluded on purpose: it
- * is a report parked for an operator's approval, so counting it here would
- * badge a working approvals queue as a failure. */
+ * change** — the number worth acting on. A fold of {@link isUndelivered}. */
 export function undeliveredCount(deliveries: DeliveryReport[]): number {
-  return deliveries.filter(
-    (d) => d.status !== "sent" && d.status !== PENDING_STATUS,
-  ).length;
+  return deliveries.filter(isUndelivered).length;
+}
+
+/**
+ * The `output` nodes whose report did not go out (issue #981).
+ *
+ * The join that lets the console answer TWO questions about one node without
+ * conflating them. `nodes[].status` says whether the engine ran the step — for a
+ * dropped report the honest answer is `ok`, because delivery happens after the
+ * engine returns — and this says whether its report reached anybody. Rendering
+ * only the first is what put a green `DONE` on the output node of a run the same
+ * screen called `undelivered`.
+ *
+ * Local, off `DeliveryReport.node` (the `output` node's id, on every delivery
+ * row the host writes), so this needs **no new wire field** and adds no third
+ * notion of "this run did not fully work" beyond the verdict itself.
+ *
+ * Takes the rows rather than a run: the settled `WorkflowRunResult` and the
+ * history's `WorkflowRunOutcome` are different shapes that both carry them.
+ */
+export function undeliveredNodes(deliveries: DeliveryReport[]): Set<string> {
+  return new Set(deliveries.filter(isUndelivered).map((d) => d.node));
 }
 
 /** Reports waiting on an operator's verdict rather than on a fix. */
@@ -112,57 +174,153 @@ export function relativeTime(atMillis: number): string {
   return `${Math.round(hours / 24)}d ago`;
 }
 
-/** The status dot for a whole run.
- *
- * Every arm returns one of the console's five run states, so a dot here means
- * exactly what the same dot means on the task board and in the runs table:
- * running, blocked on a human, done, failed, or idle. See
- * docs/design-system/color.md.
- *
- * **A run still in flight is checked FIRST**, ahead of every terminal reading.
- * A running run has no `error`, no `cancelled` and no deliveries yet, so
- * without this arm it falls all the way through to the green "ok" — and every
- * caller that trusts this function (the last-run chip, the history rows, the
- * cards) paints a run that has not finished as one that succeeded. That is a
- * claim the host has not made.
+/**
+ * Two of {@link runTone}'s labels, named because {@link runSummaryLine} has to
+ * recognise them: they are the states whose *count* is a separate fact, and the
+ * only ones where repeating the words would say the same thing twice.
+ */
+const NOT_DELIVERED = "not delivered";
+const AWAITING_APPROVAL = "awaiting approval";
+
+/**
+ * The dot and the label for each verdict.
  *
  * The label is not decoration: it ships with the dot at every call site,
- * because roughly 1 in 12 men cannot separate the red/green pair and a bare
- * dot puts the whole signal on hue.
+ * because roughly 1 in 12 men cannot separate the red/green pair and a bare dot
+ * puts the whole signal on hue.
+ *
+ * Two pairs deliberately share a colour and differ only in the word.
+ * `undelivered` is red like `failed` — a report that will not go out needs the
+ * same attention as a break — but it says "not delivered", because the run
+ * itself did not fail and telling an operator it did would send them at a graph
+ * that was fine. `awaiting approval` shares amber with `blocked`: both are
+ * waiting on a person, and neither is a fault. See docs/design-system/color.md.
+ */
+const VERDICT_TONE: Record<WorkflowRunVerdict, { dot: string; label: string }> =
+  {
+    running: { dot: "animate-pulse bg-status-running", label: "running" },
+    failed: { dot: "bg-status-failed", label: "failed" },
+    // Issue #383: a stop somebody asked for is not a fault. Idle is the state
+    // for "nothing is happening and nothing went wrong".
+    stopped: { dot: "bg-status-idle", label: "stopped" },
+    // Issue #881: deliberately not red. A blocked run stopped short of its work
+    // but nothing about it failed. The label says what happened to the run, not
+    // what is owed; the count of what it parked belongs on the row beneath.
+    blocked: { dot: "bg-status-blocked", label: "blocked" },
+    undelivered: { dot: "bg-status-failed", label: NOT_DELIVERED },
+    // Amber rather than the running colour, which said "the machine is working
+    // on it" about the one state that means the opposite: it is parked until a
+    // human decides.
+    "awaiting-approval": {
+      dot: "bg-status-blocked",
+      label: AWAITING_APPROVAL,
+    },
+    ok: { dot: "bg-status-done", label: "ok" },
+  };
+
+/**
+ * A run's verdict — **the host's when it sends one** (issue #981).
+ *
+ * The seven words and their precedence order are unchanged; what changed is who
+ * owns them. They lived only here, in this console's TypeScript, so every other
+ * reader of the same run had to re-derive them — and the obvious derivation,
+ * folding `nodes[].status`, is wrong for the one case that matters: delivery
+ * runs *after* the engine returns, so a run whose report was refused reports
+ * every node `ok`. The QA harness made exactly that mistake and scored a
+ * dropped report as a pass.
+ *
+ * The fallback is not legacy tolerance for its own sake — it is the reading a
+ * host predating #981 forces, and it is the same ladder the host now runs, kept
+ * here so switching between hosts cannot change what a run means.
+ */
+export function verdictOf(run: WorkflowRunOutcome): WorkflowRunVerdict {
+  // Checked against the map rather than trusted, because `verdict` is
+  // host-controlled and a host is free to grow an eighth word this console has
+  // never heard of — the same reason `DeliveryStatus` is compared through a
+  // widened `string` further up. An unrecognised word falls through to the
+  // ladder below, which reads the rows the host also sent.
+  //
+  // It deliberately does NOT fall back to "ok". Painting a word we cannot read
+  // as a clean run is the exact failure this function exists to close, and it
+  // would be the one arm nothing on screen could contradict.
+  if (run.verdict && run.verdict in VERDICT_TONE) return run.verdict;
+  if (isRunning(run)) return "running";
+  if (run.error) return "failed";
+  if (run.cancelled) return "stopped";
+  if (isBlocked(run)) return "blocked";
+  if (undeliveredCount(run.deliveries) > 0) return "undelivered";
+  if (awaitingCount(run) > 0) return "awaiting-approval";
+  return "ok";
+}
+
+/** The status dot for a whole run.
+ *
+ * A lookup on {@link verdictOf} rather than a ladder of its own (issue #981).
+ * The ladder moved to the host; this is the last step, turning the host's word
+ * into a colour and a label. Every arm returns one of the console's five run
+ * states, so a dot here means exactly what the same dot means on the task board
+ * and in the runs table: running, blocked on a human, done, failed, or idle.
+ * See docs/design-system/color.md.
+ *
+ * **A run still in flight reads `running` FIRST**, ahead of every terminal
+ * reading, on the host and in the fallback alike. A running run has no `error`,
+ * no `cancelled` and no deliveries yet, so without that precedence it falls all
+ * the way through to the green "ok" — and every caller that trusts this
+ * function (the last-run chip, the history rows, the cards) paints a run that
+ * has not finished as one that succeeded. That is a claim the host has not
+ * made.
  */
 export function runTone(run: WorkflowRunOutcome): {
   dot: string;
   label: string;
 } {
-  if (isRunning(run))
-    return { dot: "animate-pulse bg-status-running", label: "running" };
-  if (run.error) return { dot: "bg-status-failed", label: "failed" };
-  // Issue #383: checked before the delivery reads, and deliberately NOT red. A
-  // stop somebody asked for is not a fault, and a cancelled run has no
-  // deliveries to weigh anyway — so without this arm it would fall through to
-  // the green "ok" and read as a clean success. Idle is the state for "nothing
-  // is happening and nothing went wrong".
-  if (run.cancelled) return { dot: "bg-status-idle", label: "stopped" };
-  // Issue #881: checked BEFORE the delivery reads and before `awaitingCount`,
-  // and deliberately not red. A blocked run stopped short of its work but
-  // nothing about it failed, and its own delivery rows are empty — so without
-  // this arm it fell through to the green "ok". The label says what happened to
-  // the run, not what is owed: "blocked" is the state, and the count of what it
-  // parked belongs on the row beneath.
-  if (isBlocked(run)) return { dot: "bg-status-blocked", label: "blocked" };
-  if (undeliveredCount(run.deliveries) > 0)
-    return { dot: "bg-status-failed", label: "not delivered" };
-  // Blocked, not running. This was the running colour, which said "the machine
-  // is working on it" about the one state that means the opposite: it is
-  // parked until a human decides. Amber is the colour that gets looked at.
-  //
-  // Issue #846: `awaitingCount`, not `pendingCount`. A run that paused at a gate
-  // parked no report — it never reached an output node — so the delivery-only
-  // read scored it green and the operator was told a run that did none of its
-  // work had succeeded.
-  if (awaitingCount(run) > 0)
-    return { dot: "bg-status-blocked", label: "awaiting approval" };
-  return { dot: "bg-status-done", label: "ok" };
+  return VERDICT_TONE[verdictOf(run)];
+}
+
+/**
+ * How the most recent run went, as ONE sentence: what it did, where it failed if
+ * it failed, and the counts a card carries as badges beside the words.
+ *
+ * For a fixed-width column (issue #1136: the workflow list's status column is a
+ * fixed 13rem so the dots line up down the page). A badge cannot truncate — one
+ * "2 not delivered" pill beside the label leaves the label four characters and
+ * two pills leave it none — but a sentence can, and it truncates from the right,
+ * which drops the counts before it drops the state. Callers hang the full string
+ * on a `title`, so nothing is unrecoverable.
+ *
+ * `state` is {@link runTone}'s label, passed in rather than recomputed so the
+ * words and the dot beside them can never come from two different readings.
+ *
+ * Nothing is lost against the card's badges: an undelivered report and a waiting
+ * approval are already the run's *state* by the time `runTone` has spoken, so
+ * what the badges add is the number — and that is what this appends.
+ */
+export function runSummaryLine(
+  run: WorkflowRunOutcome,
+  state: string,
+  failedNode?: string | null,
+): string {
+  const undelivered = undeliveredCount(run.deliveries);
+  const pending = pendingCount(run.deliveries);
+
+  let head = `${run.scheduled ? "Scheduled" : "Manual"} run ${state}${
+    failedNode ? ` at “${failedNode}”` : ""
+  }`;
+  // A count goes in brackets beside the words it counts when the state IS that
+  // condition, and spells itself out when the state is something else. Joining
+  // both cases the same way produces "not delivered · 2 not delivered" — the
+  // card's badge has the same redundancy and can afford it; a column that
+  // truncates cannot.
+  const also: string[] = [];
+  if (undelivered > 0) {
+    if (state === NOT_DELIVERED) head += ` (${undelivered})`;
+    else also.push(`${undelivered} ${NOT_DELIVERED}`);
+  }
+  if (pending > 0) {
+    if (state === AWAITING_APPROVAL) head += ` (${pending})`;
+    else also.push(`${pending} ${AWAITING_APPROVAL}`);
+  }
+  return [head, ...also].join(" · ");
 }
 
 /**

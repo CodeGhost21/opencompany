@@ -32,7 +32,8 @@ use crate::feedback::tool::SEND_EMAIL_TOOL;
 use crate::policy::gate::ResolveOutcome;
 use crate::ports::brain::{CycleHost, UsageMetering};
 use crate::ports::runs::{RunOutcome, RunStatus};
-use crate::ports::tasks::{COLUMN_TODO, TaskDeliverable, TaskRecord};
+use crate::ports::tasks::{COLUMN_TODO, TaskRecord};
+use crate::ports::types::MessageIntent;
 use crate::ports::types::{
     Actor, ApprovalId, CompanyEvent, CompanyId, CompanyRecord, ContextOp, ContextOpResult,
     CycleRequest, Effect, EffectDisposition, EffectGroup, EventSeq, LedgerEntry, OutboundMessage,
@@ -44,13 +45,10 @@ use crate::runtime::delegation_tools::{
     DELEGATE_TO_DESK_TOOL, DelegateArgs, SPAWN_TASK_TOOL, SpawnTaskArgs, desk_lead,
     unknown_desk_message,
 };
-use crate::runtime::grants::{GrantId, GrantScope, GrantedCall, StandingGrant};
+use crate::runtime::grants::{GrantId, GrantScope, GrantSubject, GrantedCall, StandingGrant};
 use crate::runtime::journal::{ApprovalConversation, ExecutedEffect, TaskLink};
 use crate::runtime::types::CycleReport;
 use crate::server::ops::mailer::{MailCredentials, OutboundEmail};
-
-/// How many recent traces to load into a cycle's compressed history.
-const HISTORY_LIMIT: usize = 32;
 
 /// The `Effect::kind` for an outbound email send. Shared between where the
 /// effect is built (`CycleHostImpl::send_email`, and the workflow delivery path
@@ -415,23 +413,15 @@ impl<'a> CycleRunner<'a> {
             );
         }
 
-        // 3. Load — history, context index, roster.
-        let compressed_history = self
-            .rt
-            .memory
-            .recent_traces(&company, HISTORY_LIMIT)
-            .await?;
-        let context_index = self.rt.context.list(&company, "").await?;
+        // 3. Load — the company record, and nothing else.
+        //
+        // Issue #1175: this step used to also read 32 recent traces and the
+        // *entire* context index (`list(&company, "")` — no prefix, no limit, so
+        // a full scan that grows with every turn the company has ever run) into
+        // `CycleRequest`. No brain read either one. Both loads are gone; see the
+        // note on [`CycleRequest`] for why the fields went with them. Traces are
+        // still written below — only the read was dead.
         let record = self.rt.store.load(&company).await?;
-        let roster = match &record {
-            Some(record) => record
-                .manifest
-                .agents
-                .iter()
-                .map(|agent| agent.id.clone())
-                .collect(),
-            None => Vec::new(),
-        };
 
         // Issue #176 (handed-task awareness): when an operator message is
         // addressed to a desk/agent that already has open work handed to it,
@@ -464,9 +454,6 @@ impl<'a> CycleRunner<'a> {
             company_id: company.clone(),
             events,
             event_seqs,
-            compressed_history,
-            roster,
-            context_index,
         };
 
         // 4. Think + 5. Gate — the host services callbacks and gates effects.
@@ -810,7 +797,7 @@ working on):\n{}\n]",
         for event in events.iter_mut() {
             let CompanyEvent::OperatorMessage {
                 text,
-                deliverable: Some(TaskDeliverable::Workflow),
+                deliverable: Some(MessageIntent::Workflow),
                 ..
             } = event
             else {
@@ -962,9 +949,13 @@ approval.]"
         let Some(effect) = self.rt.approval_gate.parked_effect(id) else {
             return Ok(());
         };
-        if effect.agent.is_none() {
+        // Issue #1098: a teammate, or the authored workflow a gate belongs to.
+        // Neither means the runtime itself is performing this, and there is
+        // genuinely nothing to hold a permission — the refusal below is the same
+        // one it always was, now stated about a subject rather than an agent.
+        if crate::runtime::grants::subject_of(&effect).is_none() {
             return Err(OpenCompanyError::InvalidRequest(format!(
-                "'{}' is performed by the runtime itself, so there is no teammate's tool use to \
+                "'{}' is performed by the runtime itself, so there is nobody's tool use to \
                  grant; approve it once instead",
                 effect.kind
             )));
@@ -986,6 +977,20 @@ approval.]"
         by: Actor,
         scope: GrantScope,
     ) -> Result<()> {
+        // Issue #1098: a gate carries no teammate but can still hold a standing
+        // permission for its workflow, so that case is taken before the native
+        // fall-through below. Only for `GrantScope::Tool` — a `Once` approval of
+        // a gate is still performed natively, because the single-use grant this
+        // would otherwise mint has nobody to redeem it (see `crate::workflows::gate`).
+        if effect.agent.is_none()
+            && let GrantScope::Tool { expires_at_millis } = scope
+            && let Some(subject @ GrantSubject::Workflow(_)) =
+                crate::runtime::grants::subject_of(&effect)
+        {
+            return self
+                .mint_standing_grant(id, subject, effect, by, expires_at_millis)
+                .await;
+        }
         let Some(agent) = effect.agent.clone() else {
             let key = format!("approval:{id}");
             // The card that asked for this sign-off (issue #351). It is not
@@ -1003,8 +1008,14 @@ approval.]"
         match scope {
             GrantScope::Once => self.mint_grant(id, agent, effect).await,
             GrantScope::Tool { expires_at_millis } => {
-                self.mint_standing_grant(id, agent, effect, by, expires_at_millis)
-                    .await
+                self.mint_standing_grant(
+                    id,
+                    GrantSubject::Agent(agent),
+                    effect,
+                    by,
+                    expires_at_millis,
+                )
+                .await
             }
         }
     }
@@ -1024,7 +1035,7 @@ approval.]"
     async fn mint_standing_grant(
         &self,
         id: &ApprovalId,
-        agent: String,
+        subject: GrantSubject,
         effect: Effect,
         by: Actor,
         expires_at_millis: u64,
@@ -1034,12 +1045,33 @@ approval.]"
             .journal
             .approval_conversation(id)
             .unwrap_or_default();
+        // Issue #1098: a gate's `kind` is the `workflow.approve` wrapper, so the
+        // tool and arguments the permission is *about* are the inner call issue
+        // #846 wrote onto the payload — the same call the card showed. Every
+        // other effect is its own call and answers `None` here.
+        let (tool, args) = crate::runtime::workflow_resume::gate_inner_call(&effect)
+            .map(|(tool, args)| (tool.to_string(), args.clone()))
+            .unwrap_or_else(|| (effect.kind.clone(), effect.payload.clone()));
+        // Issue #457: which slice of the tool the card was actually about, read
+        // off the **parked effect's own payload** — the arguments the operator
+        // was shown — rather than re-derived from anything live, so the grant
+        // records the sentence they consented to. `None` for every tool whose
+        // name is the whole of what it can do.
+        //
+        // Computed here rather than inline in the literal below, which would
+        // borrow `tool` after the field above has moved it.
+        let scope = crate::policy::consequence::standing_scope_of(&tool, &args);
+        let (agent, workflow) = match subject {
+            GrantSubject::Agent(agent) => (agent, None),
+            GrantSubject::Workflow(workflow) => (String::new(), Some(workflow)),
+        };
         let grant = StandingGrant {
             id: GrantId::generate(),
             agent,
+            workflow,
             // The tool, and nothing about the arguments. A standing grant has no
             // `args` field to copy them into — that is the type's whole point.
-            tool: effect.kind.clone(),
+            tool,
             granted_by: by,
             approval_id: id.clone(),
             at_millis: now_millis(),
@@ -1053,19 +1085,19 @@ approval.]"
             // Issue #796: the task this call was parked from, carried so a
             // standing grant can reclaim the task's checkout across parks.
             origin_task: self.approval_work_key(id),
-            // Issue #457: which slice of the tool the card was actually about.
-            // Read off the **parked effect's own payload** — the arguments the
-            // operator was shown — rather than re-derived from anything live, so
-            // the grant records the sentence they consented to. `None` for every
-            // tool whose name is the whole of what it can do.
-            scope: crate::policy::consequence::standing_scope_of(&effect.kind, &effect.payload),
+            // Derived from the same `(tool, args)` the grant records, which for
+            // a gate is the inner call rather than the wrapper — read with the
+            // same function the live side uses, so the two cannot drift into a
+            // permission that never matches its own call.
+            scope,
         };
         self.rt.journal.record_standing_granted(&grant).await?;
         tracing::debug!(
             approval_id = %id,
             grant_id = %grant.id,
-            tool = %effect.kind,
+            tool = %grant.tool,
             agent = %grant.agent,
+            workflow = ?grant.workflow,
             expires_at_millis,
             "[approval] minted a standing grant; this tool will not ask again until it expires"
         );
@@ -2681,6 +2713,12 @@ mod test {
     /// desk agent answering the same message was telling the operator that it
     /// "cannot make it exist". The turn was right about its own toolset and
     /// wrong about the company, because nothing told it.
+    ///
+    /// The `chat` case is issue #1152's, and "nothing else does" is why it is
+    /// pinned here rather than assumed: a "Just chatting" message opens no card,
+    /// so there is no builder pass owning anything, so briefing the turn that a
+    /// build is under way would be telling it something untrue. The injection
+    /// matches `Workflow` exactly and this is what keeps it exact.
     #[test]
     fn only_a_workflow_message_gets_the_builder_briefing() {
         let msg = |deliverable| CompanyEvent::OperatorMessage {
@@ -2696,9 +2734,10 @@ mod test {
         };
 
         let mut events = vec![
-            msg(Some(TaskDeliverable::Workflow)),
-            msg(Some(TaskDeliverable::Once)),
+            msg(Some(MessageIntent::Workflow)),
+            msg(Some(MessageIntent::Once)),
             msg(None),
+            msg(Some(MessageIntent::Chat)),
             // A non-operator event must be left entirely alone.
             CompanyEvent::ScheduleFired {
                 cron: "0 6 * * 5".to_string(),
@@ -2719,14 +2758,18 @@ mod test {
             "{briefed}"
         );
 
-        for (i, label) in [(1, "once"), (2, "no choice")] {
+        for (i, label) in [(1, "once"), (2, "no choice"), (3, "chat")] {
             let text = text_of(&events[i]);
             assert_eq!(
                 text, "set up a weekly AEO audit",
                 "a `{label}` message must reach the brain exactly as typed"
             );
+            assert!(
+                !text.contains(BUILDER_ANNOTATION),
+                "a `{label}` message must carry no builder briefing: {text}"
+            );
         }
-        assert!(matches!(events[3], CompanyEvent::ScheduleFired { .. }));
+        assert!(matches!(events[4], CompanyEvent::ScheduleFired { .. }));
     }
 
     /// Issue #845, the wiring: the briefing actually reaches the brain.
@@ -2770,7 +2813,7 @@ mod test {
         };
 
         let workflow = rt
-            .run_cycle(vec![ask(Some(TaskDeliverable::Workflow))])
+            .run_cycle(vec![ask(Some(MessageIntent::Workflow))])
             .await
             .unwrap();
         let seen = workflow
@@ -2786,7 +2829,7 @@ mod test {
         // …and a one-off is handed through byte-for-byte, so the annotation is
         // not simply always on.
         let once = rt
-            .run_cycle(vec![ask(Some(TaskDeliverable::Once))])
+            .run_cycle(vec![ask(Some(MessageIntent::Once))])
             .await
             .unwrap();
         let seen_once = once
@@ -2875,7 +2918,7 @@ mod test {
         assert!(!task_names_a_card(&[], "019ff728-abcd"));
     }
     use std::sync::Arc;
-    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use crate::company::CompanyManifest;
     use crate::company::runtime::CompanyMail;
@@ -2883,13 +2926,16 @@ mod test {
     use crate::ports::ChannelAdapter;
     use crate::ports::brain::Brain;
     use crate::ports::types::{
-        ActorKind, CompressedTrace, CycleResult, EffectGroup, EventSeq, ReplyTo, TokenUsage,
+        ActorKind, ChunkAddr, ChunkHit, ChunkMeta, CompressedTrace, ContextChunk, CycleResult,
+        EffectGroup, EventSeq, EvictionPolicy, ReplyTo, TaskResult, TokenUsage,
     };
+    use crate::ports::{ContextStore, MemoryStore};
     use crate::runtime::RuntimeBuilder;
     use crate::runtime::channel::OperatorChannel;
     use crate::server::ops::mailer::RecordingMailSender;
     use crate::server::ops::smtp::{SmtpCredentials, SmtpSecurity};
     use crate::store::paths::Bundle;
+    use crate::store::{FsContextStore, FsMemoryStore};
 
     fn tmp_home() -> tempfile::TempDir {
         tempfile::Builder::new()
@@ -3459,6 +3505,142 @@ mod test {
         }])
         .await
         .expect("an unknown run id is a bookkeeping miss, not a cycle failure");
+    }
+
+    /// A [`MemoryStore`] that counts the calls a cycle makes, delegating the
+    /// work to a real fs store so the runtime behaves normally around it.
+    struct CountingMemory {
+        inner: FsMemoryStore,
+        reads: AtomicUsize,
+        writes: AtomicUsize,
+    }
+
+    impl CountingMemory {
+        fn new(inner: FsMemoryStore) -> Self {
+            Self {
+                inner,
+                reads: AtomicUsize::new(0),
+                writes: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl MemoryStore for CountingMemory {
+        async fn save_trace(&self, id: &CompanyId, trace: CompressedTrace) -> Result<()> {
+            self.writes.fetch_add(1, Ordering::SeqCst);
+            self.inner.save_trace(id, trace).await
+        }
+
+        async fn recent_traces(
+            &self,
+            id: &CompanyId,
+            limit: usize,
+        ) -> Result<Vec<CompressedTrace>> {
+            self.reads.fetch_add(1, Ordering::SeqCst);
+            self.inner.recent_traces(id, limit).await
+        }
+
+        async fn save_task_result(&self, id: &CompanyId, result: TaskResult) -> Result<()> {
+            self.inner.save_task_result(id, result).await
+        }
+
+        async fn evict(&self, id: &CompanyId, policy: EvictionPolicy) -> Result<u64> {
+            self.inner.evict(id, policy).await
+        }
+    }
+
+    /// The [`ContextStore`] half of the same instrument.
+    struct CountingContext {
+        inner: FsContextStore,
+        lists: AtomicUsize,
+    }
+
+    impl CountingContext {
+        fn new(inner: FsContextStore) -> Self {
+            Self {
+                inner,
+                lists: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl ContextStore for CountingContext {
+        async fn put(&self, id: &CompanyId, chunk: ContextChunk) -> Result<ChunkAddr> {
+            self.inner.put(id, chunk).await
+        }
+
+        async fn list(&self, id: &CompanyId, prefix: &str) -> Result<Vec<ChunkMeta>> {
+            self.lists.fetch_add(1, Ordering::SeqCst);
+            self.inner.list(id, prefix).await
+        }
+
+        async fn peek(
+            &self,
+            id: &CompanyId,
+            addr: &ChunkAddr,
+            range: Option<std::ops::Range<usize>>,
+        ) -> Result<String> {
+            self.inner.peek(id, addr, range).await
+        }
+
+        async fn search(&self, id: &CompanyId, query: &str, limit: usize) -> Result<Vec<ChunkHit>> {
+            self.inner.search(id, query, limit).await
+        }
+    }
+
+    /// Issue #1175: a cycle used to load 32 recent traces *and the whole context
+    /// index* (`list(company, "")` — no prefix, no limit) into `CycleRequest`,
+    /// where no brain read either. Both reads are gone, and the context one was
+    /// the expensive half: it grew with every turn the company had ever run.
+    ///
+    /// The trace *write* deliberately stayed — traces travel with the export
+    /// bundle — so this asserts the save as well. Without that half, a later
+    /// "nothing reads traces, delete the write" would pass silently.
+    #[tokio::test]
+    async fn a_cycle_reads_neither_recent_traces_nor_the_context_index() {
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
+        let memory = Arc::new(CountingMemory::new(FsMemoryStore::new(home.clone())));
+        let context = Arc::new(CountingContext::new(FsContextStore::new(home.clone())));
+        let rt = RuntimeBuilder::new(home, manifest("full"))
+            .with_memory(memory.clone())
+            .with_context(context.clone())
+            .build()
+            .await
+            .unwrap();
+
+        // Boot is not what this test is about; only what one cycle costs.
+        memory.reads.store(0, Ordering::SeqCst);
+        memory.writes.store(0, Ordering::SeqCst);
+        context.lists.store(0, Ordering::SeqCst);
+
+        rt.run_cycle(vec![CompanyEvent::OperatorMessage {
+            parent: None,
+            text: "hi".into(),
+            by: None,
+            chat: None,
+            deliverable: None,
+        }])
+        .await
+        .unwrap();
+
+        assert_eq!(
+            memory.reads.load(Ordering::SeqCst),
+            0,
+            "a cycle must not read traces back: no brain consumes them"
+        );
+        assert_eq!(
+            context.lists.load(Ordering::SeqCst),
+            0,
+            "a cycle must not scan the context index: no brain consumes it"
+        );
+        assert_eq!(
+            memory.writes.load(Ordering::SeqCst),
+            1,
+            "the trace write is not dead code — it feeds the export bundle"
+        );
     }
 
     #[tokio::test]

@@ -27,7 +27,11 @@ import { fileURLToPath } from "node:url";
 import { createContext, runInNewContext } from "node:vm";
 import { describe, expect, it } from "vitest";
 
-import { runTone } from "@/views/workflows/run-health";
+import {
+  isUndelivered as consoleIsUndelivered,
+  runTone,
+  verdictOf,
+} from "@/views/workflows/run-health";
 import type {
   DeliveryReport,
   WorkflowBlockedNode,
@@ -83,6 +87,11 @@ function loadHarness(fetchImpl?: (path: string, init?: { method?: string }) => P
     _internals: {
       runVerdict: (run: unknown) => string;
       undeliveredCount: (d: DeliveryReport[]) => number;
+      isUndelivered: (d: DeliveryReport) => boolean;
+      checkDeliveries: (
+        rows: { check: string; verdict: string; value: string }[],
+        runs: unknown[],
+      ) => void;
       pendingCount: (d: DeliveryReport[]) => number;
       awaitingCount: (run: unknown) => number;
       isBlocked: (run: unknown) => boolean;
@@ -108,9 +117,23 @@ function run(overrides: Partial<WorkflowRunOutcome>): WorkflowRunOutcome {
   } as WorkflowRunOutcome;
 }
 
-function delivery(status: DeliveryReport["status"]): DeliveryReport {
-  return { node: "report", kind: "channel", target: "operator", status, detail: "" };
+function delivery(
+  status: DeliveryReport["status"],
+  reason?: string,
+): DeliveryReport {
+  return { node: "report", kind: "channel", target: "operator", status, detail: "", reason };
 }
+
+/** The console's label for a run, mapped to the harness's verdict word. */
+const TONE_TO_VERDICT: Record<string, string> = {
+  running: "running",
+  failed: "failed",
+  stopped: "stopped",
+  blocked: "blocked",
+  "not delivered": "undelivered",
+  "awaiting approval": "awaiting-approval",
+  ok: "ok",
+};
 
 /** A node the run stopped short at, waiting on a person (issue #881). */
 function blocked(nodeId: string): WorkflowBlockedNode {
@@ -349,17 +372,6 @@ describe("runVerdict agrees with the console's runTone", () => {
     { name: "nothing to deliver", run: run({}), label: "ok" },
   ];
 
-  /** The console's label for a run, mapped to the harness's verdict word. */
-  const TONE_TO_VERDICT: Record<string, string> = {
-    running: "running",
-    failed: "failed",
-    stopped: "stopped",
-    blocked: "blocked",
-    "not delivered": "undelivered",
-    "awaiting approval": "awaiting-approval",
-    ok: "ok",
-  };
-
   for (const c of cases) {
     it(c.name, () => {
       const { runVerdict } = loadHarness()._internals;
@@ -394,9 +406,158 @@ describe("runVerdict agrees with the console's runTone", () => {
     expect(pendingCount(deliveries)).toBe(1);
   });
 
+  /**
+   * Issue #981's second half. The harness is pasted against whatever host is in
+   * front of the operator, so its fallback has to move rung-for-rung with the
+   * host's `is_undelivered` and the console's `isUndelivered` — otherwise the
+   * three readings of the same rows diverge exactly where nobody is checking.
+   */
+  it("excuses the same two skipped reasons the console and the host excuse", () => {
+    const { isUndelivered, undeliveredCount } = loadHarness()._internals;
+    expect(isUndelivered(delivery("skipped", "dry-run"))).toBe(false);
+    expect(isUndelivered(delivery("skipped", "already-delivered"))).toBe(false);
+    // The deliberate non-move: this report was produced and then lost.
+    expect(isUndelivered(delivery("skipped", "no-destination-configured"))).toBe(
+      true,
+    );
+    // A host predating issue #248 records no reason; an unreadable one counts.
+    expect(isUndelivered(delivery("skipped"))).toBe(true);
+    // The exemptions are scoped to a skip.
+    expect(isUndelivered(delivery("failed", "dry-run"))).toBe(true);
+    expect(
+      undeliveredCount([
+        delivery("skipped", "dry-run"),
+        delivery("skipped", "already-delivered"),
+        delivery("skipped", "no-destination-configured"),
+      ]),
+    ).toBe(1);
+  });
+
+  it("agrees with the console's isUndelivered on every reason", () => {
+    const { isUndelivered } = loadHarness()._internals;
+    for (const row of [
+      delivery("sent", "channel-posted"),
+      delivery("pending", "parked-for-approval"),
+      delivery("skipped", "dry-run"),
+      delivery("skipped", "already-delivered"),
+      delivery("skipped", "no-destination-configured"),
+      delivery("skipped", "recipient-not-established"),
+      delivery("denied", "email-not-granted"),
+      delivery("failed", "channel-not-wired"),
+    ]) {
+      expect(isUndelivered(row), `${row.status}/${row.reason}`).toBe(
+        consoleIsUndelivered(row),
+      );
+    }
+  });
+
+  /**
+   * The `workflow-deliveries` row is what an operator running the harness
+   * actually reads, and it owned a NINTH copy of the filter. A company whose
+   * most recent runs were **test** runs — the safest thing an operator can do —
+   * scored a red FAIL for a delivery path that is working perfectly.
+   */
+  it("does not fail the delivery check on accounted-for skips", () => {
+    const { checkDeliveries } = loadHarness()._internals;
+    const rows: { check: string; verdict: string; value: string }[] = [];
+    checkDeliveries(rows, [
+      {
+        workflowId: "digest",
+        deliveries: [
+          delivery("skipped", "dry-run"),
+          delivery("skipped", "already-delivered"),
+          delivery("sent", "channel-posted"),
+        ],
+      },
+    ]);
+    const r = rows.find((x) => x.check === "workflow-deliveries");
+    expect(r?.verdict).toBe("PASS");
+    expect(r?.value).toContain("0/3 reports dropped");
+  });
+
+  it("still fails it for a report that was produced and lost", () => {
+    const { checkDeliveries } = loadHarness()._internals;
+    const rows: { check: string; verdict: string; value: string }[] = [];
+    checkDeliveries(rows, [
+      {
+        workflowId: "digest",
+        deliveries: [
+          delivery("failed", "channel-not-wired"),
+          // The deliberate non-move (issue #925).
+          delivery("skipped", "no-destination-configured"),
+        ],
+      },
+    ]);
+    const r = rows.find((x) => x.check === "workflow-deliveries");
+    expect(r?.verdict).toBe("FAIL");
+    expect(r?.value).toContain("2/2 reports dropped");
+  });
+
   it("reports an unknown run as unknown rather than ok", () => {
     const { runVerdict } = loadHarness()._internals;
     expect(runVerdict(null)).toBe("unknown");
+  });
+});
+
+/**
+ * The host owns the verdict now (issue #981, part 2).
+ *
+ * The table above still exercises the ladder, because none of its runs carries
+ * a `verdict` — that is the fallback path, kept for a host predating this. What
+ * the cases here pin is that the fallback stays a fallback: when the host does
+ * answer, both readers take its word and neither re-derives one of its own.
+ */
+describe("the host's verdict is what both readers use", () => {
+  it("is taken verbatim by the console and by the harness", () => {
+    const { runVerdict } = loadHarness()._internals;
+    const delivered = run({
+      deliveries: [delivery("sent")],
+      verdict: "undelivered",
+    });
+    // Deliberately contradictory: every local fact says `ok`. If either reader
+    // still owns a definition, it answers `ok` here.
+    expect(runVerdict(delivered)).toBe("undelivered");
+    expect(runTone(delivered).label).toBe("not delivered");
+    expect(runTone(delivered).dot).toContain("status-failed");
+  });
+
+  it("falls back to the ladder when the host sends none", () => {
+    const { runVerdict } = loadHarness()._internals;
+    const dropped = run({ deliveries: [delivery("failed")] });
+    expect(dropped.verdict).toBeUndefined();
+    expect(runVerdict(dropped)).toBe("undelivered");
+    expect(runTone(dropped).label).toBe("not delivered");
+  });
+
+  it("ignores a word it cannot read rather than painting it green", () => {
+    // `verdict` is host-controlled and a host may grow an eighth word. Falling
+    // back to "ok" for one we cannot read would be the single arm nothing on
+    // screen could contradict — so an unknown word drops to the ladder, which
+    // reads the rows the host also sent.
+    const dropped = run({
+      deliveries: [delivery("failed")],
+      verdict: "quantum-superposition" as never,
+    });
+    expect(runTone(dropped).label).toBe("not delivered");
+    expect(runTone(dropped).dot).toContain("status-failed");
+    expect(verdictOf(dropped)).toBe("undelivered");
+  });
+
+  it("agrees with the ladder on every word, so the two are interchangeable", () => {
+    const { runVerdict } = loadHarness()._internals;
+    for (const verdict of [
+      "running",
+      "failed",
+      "stopped",
+      "blocked",
+      "undelivered",
+      "awaiting-approval",
+      "ok",
+    ] as const) {
+      const settled = run({ verdict });
+      expect(runVerdict(settled)).toBe(verdict);
+      expect(TONE_TO_VERDICT[runTone(settled).label]).toBe(verdict);
+    }
   });
 });
 

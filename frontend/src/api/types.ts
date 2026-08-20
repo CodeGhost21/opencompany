@@ -583,6 +583,16 @@ export interface FeedbackSummary {
  * `GET /spec` — the host's runtime specification. Unauthenticated, so the
  * console can read it before (and regardless of) a session.
  */
+/** The bound memory engine, as `/spec` reports it. No endpoint, no credential. */
+export interface MemorySpec {
+  /** `store` | `embedded` | `remote` | `null`. */
+  backend: string;
+  /** The bound engine's own name, absent when the base store serves memory. */
+  driver_id?: string;
+  /** Capability families negotiated at bind time; empty = not negotiated. */
+  capabilities: string[];
+}
+
 export interface AppSpec {
   name: string;
   version: string;
@@ -593,6 +603,13 @@ export interface AppSpec {
    * "is this instance provisioned" signal. No secret bytes are surfaced.
    */
   cycles_available: boolean;
+  /**
+   * The bound memory engine: mode, driver id, and the capability families it
+   * negotiated at bind time. Optional — a host predating the field omits it.
+   * The console shows this so an operator can see what a hosted engine does
+   * NOT support before a cycle discovers it.
+   */
+  memory?: MemorySpec;
   /**
    * Whether the first-run setup flow has been completed on this instance.
    *
@@ -1241,10 +1258,64 @@ export interface FinancesDto {
   transactions: TransactionDto[];
 }
 
-/** Error envelope shape: `{ error, code }`. */
+/**
+ * One structured problem with a workflow graph the host refused (issue #1016).
+ *
+ * Field names are the **wire** names, not the console's usual camelCase. The
+ * host serialises `WorkflowProblem` with serde's defaults (`src/error.rs`), so
+ * the key really is `node_id`; renaming it here to match house style would
+ * compile, type-check, and silently read `undefined` at runtime for every
+ * problem — the failure this shape exists to prevent.
+ *
+ * Both locators are optional because a problem need not have one: a graph-level
+ * refusal (an inescapable cycle) names several nodes at once and owns neither.
+ * `message` is the only field always present, and it is prosumer language ready
+ * to render.
+ */
+export interface WorkflowProblem {
+  /** The node at fault, or the dangling endpoint for an edge problem. */
+  node_id?: string;
+  /** The config path at fault (`config.url`, `workflow_id`, `from`). */
+  field?: string;
+  /** The human-readable problem. */
+  message: string;
+}
+
+/**
+ * Error envelope shape: `{ error, code }`, plus `problems` on a refusal that
+ * has them.
+ *
+ * `problems` is additive and scoped to `workflow_invalid` on the host side, so
+ * it is absent from every other error and must stay optional here.
+ */
 export interface ApiErrorBody {
   error: string;
   code: string;
+  problems?: WorkflowProblem[];
+}
+
+/**
+ * The "where" of a {@link WorkflowProblem}, or `undefined` when it names no
+ * location at all.
+ *
+ * A function rather than a conditional inside the card's JSX, because the three
+ * shapes are the whole of this feature's correctness and the console has no
+ * component-test harness to catch a mistake in markup. Extracted after review
+ * caught the field-only case being dropped: the first version keyed the whole
+ * locator on `node_id`, so a problem carrying `field` and no node rendered its
+ * message with no indication of where it came from — and nothing could have
+ * failed, because there was nothing to call.
+ *
+ * All three shapes are real. The host builds a node+field problem through
+ * `WorkflowProblem::node_field`, which stores `node_id` only when it is
+ * non-blank — so a blank node id with a real field emits exactly the field-only
+ * shape — and a graph-level refusal (an inescapable cycle) carries neither.
+ */
+export function workflowProblemLocator(problem: WorkflowProblem): string | undefined {
+  const parts = [problem.node_id, problem.field].filter(
+    (part): part is string => typeof part === "string" && part.trim() !== "",
+  );
+  return parts.length ? parts.join(" · ") : undefined;
 }
 
 export class ApiError extends Error {
@@ -1261,6 +1332,23 @@ export class ApiError extends Error {
    * that may sit in state for the life of the view.
    */
   detail?: string;
+
+  /**
+   * The per-node, per-field breakdown behind `message`, when the host sent one
+   * (issues #1016, #836).
+   *
+   * The host already computes this and puts it on the wire; before this field
+   * existed the console parsed the envelope's `error` and `code` and dropped
+   * `problems` on the floor, so an operator was told *that* a graph was refused
+   * and never *which node*. `message` remains the flattened sentence and stays
+   * the fallback — a renderer may show this list instead, never in addition to
+   * nothing.
+   *
+   * Absent for every error that is not a workflow refusal, and absent (rather
+   * than empty) when the host sent no array, so `problems?.length` distinguishes
+   * "no breakdown offered" from "a breakdown with nothing in it".
+   */
+  problems?: WorkflowProblem[];
 
   constructor(
     public status: number,

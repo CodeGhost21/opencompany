@@ -30,6 +30,7 @@ import {
   runDuration,
   runTone,
   undeliveredCount,
+  undeliveredNodes,
 } from "./run-health";
 
 /** Badge styling per delivery outcome. A report that did NOT go out must not
@@ -52,9 +53,11 @@ export function DeliveryRows({ deliveries }: { deliveries: DeliveryReport[] }) {
   // broken — badging it red alongside a transport failure would send them
   // hunting for a bug when the fix is a click in Approvals.
   const pending = deliveries.filter((d) => d.status === "pending").length;
-  const undelivered = deliveries.filter(
-    (d) => d.status !== "sent" && d.status !== "pending",
-  ).length;
+  // Issue #981: the shared rung, not a fourth transcription of it. The filter
+  // this replaces badged every test run "1 not delivered" — a `dry-run` row is
+  // a report nothing attempted, on purpose — and said the same of a gate
+  // continuation whose report an earlier run had already sent.
+  const undelivered = undeliveredCount(deliveries);
   return (
     <div className="mb-3 space-y-1.5 rounded-lg border bg-background/40 p-2">
       <div className="flex items-center gap-2">
@@ -203,22 +206,45 @@ export function RunHistoryPanel({
   // click did something, and it is only true if it moves.
   const now = useRunningClock(runs.some(isRunning));
   return (
-    <div className="border-t bg-card/60" data-testid="workflow-run-history">
-      <div className="flex items-center justify-between px-4 py-2">
-        <div className="flex items-center gap-2">
+    // Issue #1107: a left rail at `xl`, the bottom strip it has always been
+    // below that. `CanvasShell` owns the placement and the width; this owns
+    // the chrome, and the two readings differ only in which edge carries the
+    // border and whether the list is capped or grows.
+    //
+    // `aside` + `aria-label`: at `xl` the rail is painted left of a canvas it
+    // follows in the DOM, so it is reachable as a named complementary landmark
+    // rather than only by tabbing past the graph.
+    <aside
+      aria-label="Run history"
+      className="flex h-full flex-col border-t bg-card/60 xl:border-t-0 xl:border-r"
+      data-testid="workflow-run-history"
+    >
+      {/* `flex-wrap` rather than a breakpoint: at 320px the workflow name drops
+          to its own line on its own, and at full width it stays inline where
+          there is room for it. */}
+      <div className="flex items-start justify-between gap-2 border-b px-4 py-2">
+        <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5">
           <span className="text-sm font-medium">Run history</span>
+          <Badge variant="secondary">{runs.length}</Badge>
           {workflowName && (
-            <span className="truncate text-xs text-muted-foreground">
+            <span className="max-w-full truncate text-xs text-muted-foreground">
               {workflowName}
             </span>
           )}
-          <Badge variant="secondary">{runs.length}</Badge>
         </div>
-        <Button variant="ghost" size="sm" onClick={onClose}>
+        <Button
+          variant="ghost"
+          size="sm"
+          className="-mr-2 shrink-0"
+          onClick={onClose}
+        >
           Dismiss
         </Button>
       </div>
-      <div className="max-h-72 overflow-auto px-4 pb-3">
+      {/* Capped as a strip, growing as a rail. `min-h-0` is what actually lets
+          it scroll inside the column — without it the flex item floors at its
+          content height and the rail overflows the view instead. */}
+      <div className="max-h-72 overflow-auto px-4 py-3 xl:min-h-0 xl:max-h-none xl:flex-1">
         {runs.length === 0 ? (
           <p className="text-xs text-muted-foreground">
             This workflow hasn't finished a run yet. Runs appear here once they
@@ -243,7 +269,7 @@ export function RunHistoryPanel({
           </div>
         )}
       </div>
-    </div>
+    </aside>
   );
 }
 
@@ -281,6 +307,12 @@ function RunHistoryRow({
 }) {
   const tone = runTone(run);
   const nodes = run.nodes ?? [];
+  // Issue #981: which of those nodes produced a report that never went out.
+  // Joined off `DeliveryReport.node` — the same rows the delivery block below
+  // renders — so the chip and the block cannot disagree, and so the node the
+  // operator clicks into stops claiming a clean run this row calls
+  // `not delivered`.
+  const droppedNodes = undeliveredNodes(run.deliveries);
   // Issue #881 / #880: read once, so the chip, the badge and the terminal line
   // below cannot disagree about whether this run stopped for a person.
   const blocked = run.blockedNodes ?? [];
@@ -379,7 +411,11 @@ function RunHistoryRow({
           data-testid="workflow-run-nodes"
         >
           {nodes.map((node) => (
-            <RunNodeChip key={`${node.nodeId}-${node.elapsedMs}`} node={node} />
+            <RunNodeChip
+              key={`${node.nodeId}-${node.elapsedMs}`}
+              node={node}
+              undelivered={droppedNodes.has(node.nodeId)}
+            />
           ))}
         </div>
       )}
@@ -586,8 +622,23 @@ function RunHistoryRow({
   );
 }
 
-/** One node's outcome in a history row: its id, how it went, how long it took. */
-function RunNodeChip({ node }: { node: WorkflowRunNode }) {
+/** One node's outcome in a history row: its id, how it went, how long it took —
+ * and, since issue #981, whether the report it produced actually went out.
+ *
+ * The two are separate facts and the chip states them separately. `node.status`
+ * answers "did the engine run this step?", and for a dropped report the honest
+ * answer is `ok`: delivery happens after the engine returns, so the node really
+ * did run and its work stands. What was wrong was that the chip said only that,
+ * beside a run the same panel scored `undelivered`. So the green dot stays and a
+ * second, labelled segment carries the delivery — nothing here is re-tinted to
+ * mean something it does not. */
+function RunNodeChip({
+  node,
+  undelivered,
+}: {
+  node: WorkflowRunNode;
+  undelivered: boolean;
+}) {
   // Issue #881: three tones, not two. A blocked step is neither green nor red —
   // painting it red sends an operator hunting for a bug when the fix is a click
   // in Approvals, and painting it green is the lie the issue was filed about.
@@ -620,6 +671,16 @@ function RunNodeChip({ node }: { node: WorkflowRunNode }) {
           ? `${node.elapsedMs}ms`
           : `${(node.elapsedMs / 1000).toFixed(1)}s`}
       </span>
+      {undelivered && (
+        <span
+          className="flex items-center gap-1 border-l border-status-failed/40 pl-1.5 text-[var(--status-failed-text)]"
+          data-testid="workflow-run-node-undelivered"
+          title="This step ran. Its report did not go out — see Report delivery below."
+        >
+          <span className="size-1.5 rounded-full bg-status-failed" />
+          not delivered
+        </span>
+      )}
     </span>
   );
 }
@@ -628,9 +689,9 @@ function RunNodeChip({ node }: { node: WorkflowRunNode }) {
  * A once-a-second clock, live only while something on screen is counting
  * against it (issue #1007).
  *
- * Gated rather than always-on: the history drawer sits under the canvas for as
- * long as the operator leaves it open, and a settled row's duration is a fixed
- * number that re-rendering every second cannot change.
+ * Gated rather than always-on: the history rail stays up for as long as the
+ * operator leaves it open, and a settled row's duration is a fixed number that
+ * re-rendering every second cannot change.
  */
 function useRunningClock(active: boolean): number {
   const [now, setNow] = useState(() => Date.now());

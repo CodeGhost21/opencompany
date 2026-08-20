@@ -81,6 +81,11 @@ struct AgentFile {
     description: Option<String>,
     #[serde(default)]
     tier: Option<String>,
+    /// Which `[[harness]]` this agent runs on. Cross-checked against the
+    /// company's declared harnesses in `CompanyManifest::validate`, not here —
+    /// this file cannot see them.
+    #[serde(default)]
+    harness: Option<String>,
     #[serde(default)]
     tools: Vec<String>,
     #[serde(default)]
@@ -251,6 +256,7 @@ fn parse_agent_file(
         role,
         description: file.description,
         tier: file.tier,
+        harness: file.harness,
         tools: file.tools,
         delegates_to: file.delegates_to,
         context: file.context,
@@ -260,6 +266,7 @@ fn parse_agent_file(
         prompt_files_resolved,
         classes: file.classes,
         ledgers: file.ledgers,
+        name: None,
         can_declare_ledgers: file.can_declare_ledgers.unwrap_or(true),
         // Provenance is set by whoever merges the baseline in, never by a file:
         // this same parser reads both a company's `agents/` and `globals/`.

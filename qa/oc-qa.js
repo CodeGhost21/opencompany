@@ -155,14 +155,22 @@
    * ------------------------------------------------------------------ */
 
   /**
-   * A run's verdict, in the console's own precedence order.
+   * A run's verdict — **the host's when it sends one** (issue #981).
    *
-   * **This is a transcription of `frontend/src/views/workflows/run-health.ts`,
-   * and it must stay one.** Two independent definitions of "did this run
-   * succeed" is precisely the defect issue #981 filed, and the harness owned
-   * the second copy. `frontend/test/unit/qa-harness.test.ts` pins the two
-   * together so a change to the console's reading breaks this file loudly
-   * rather than silently re-greening a bad run.
+   * `run.verdict` is now derived server-side and serialized on both run DTOs,
+   * so the first line below is the whole of this function against any current
+   * host. Everything after it is the fallback for a host predating #981, and
+   * that fallback is a transcription of
+   * `frontend/src/views/workflows/run-health.ts` **which must stay one**: two
+   * independent definitions of "did this run succeed" is precisely the defect
+   * issue #981 filed, and the harness owned the second copy — it scored a
+   * delivery-failure run as PASS. `frontend/test/unit/qa-harness.test.ts` pins
+   * the two together so a change to the console's reading breaks this file
+   * loudly rather than silently re-greening a bad run.
+   *
+   * The fallback cannot simply be deleted now the host answers: this script is
+   * pasted into a browser against whatever host is in front of the operator,
+   * including one rolled back or older than this file.
    *
    * The order IS the check, and every arm below exists because the state it
    * names had been scoring green:
@@ -182,11 +190,13 @@
    *   reached an `output` node, so its `deliveries` are empty and a
    *   delivery-only read scored the gated case — the common one — as clean.
    *
-   * These are exactly the seven words issue #981 proposes for a server-side
-   * `WorkflowRunVerdict`. When that lands, delete this and read the host's.
+   * These are exactly the seven words the host's `WorkflowRunVerdict` uses, in
+   * the same order — which is what makes the fallback and the answer
+   * interchangeable rather than merely similar.
    */
   function runVerdict(run) {
     if (!run) return "unknown";
+    if (run.verdict) return run.verdict;
     if (run.running === true) return "running";
     if (run.error) return "failed";
     if (run.cancelled) return "stopped";
@@ -219,9 +229,30 @@
    * Reports that did not land **and will not without a change**. `pending` is
    * excluded on purpose: it is a report parked for an operator's approval, so
    * counting it here would score a working approvals queue as a failure.
+   *
+   * Two `skipped` reasons are excluded too (issue #981), matching the host's
+   * `is_undelivered` and the console's `isUndelivered`: `already-delivered` (an
+   * earlier run in this approval lineage sent it, issue #438) and `dry-run` (a
+   * test run attempted nothing, on purpose, issue #542). Both describe a report
+   * whose fate is accounted for.
+   *
+   * `no-destination-configured` is deliberately NOT excluded: that report was
+   * produced and then lost, with nothing accounting for it, which is exactly
+   * what issue #925 added the row to make visible.
+   *
+   * An absent `reason` — a host predating issue #248 — counts, which is the
+   * safe direction for a harness that is pasted against whatever host is in
+   * front of the operator.
    */
   function undeliveredCount(deliveries) {
-    return (deliveries || []).filter((d) => d.status !== "sent" && d.status !== "pending").length;
+    return (deliveries || []).filter(isUndelivered).length;
+  }
+
+  /** Whether one delivery row is a report that did not go out. */
+  function isUndelivered(d) {
+    if (d.status === "sent" || d.status === "pending") return false;
+    if (d.status !== "skipped") return true;
+    return d.reason !== "already-delivered" && d.reason !== "dry-run";
   }
 
   /** Reports waiting on an operator's verdict rather than on a fix. */
@@ -799,7 +830,13 @@
     }
     const all = runs.flatMap((r) => (r.deliveries || []).map((d) => ({ run: r, d })));
     const attempted = runs.filter((r) => (r.deliveries || []).length > 0);
-    const dropped = all.filter(({ d }) => d.status !== "sent" && d.status !== "pending");
+    // Issue #981: the shared predicate, not a fourth transcription of it inside
+    // this file. The status-only filter this replaces FAILED the whole check on
+    // a `skipped`/`dry-run` row (a test run attempted nothing, on purpose) and
+    // on a `skipped`/`already-delivered` one (an earlier run in the approval
+    // lineage sent it) — so a company whose most recent runs were tests scored
+    // a red row for a delivery path that is working.
+    const dropped = all.filter(({ d }) => isUndelivered(d));
     const reasons = [...new Set(dropped.map(({ d }) => d.reason || d.status))];
     rows.push(
       row(
@@ -1295,6 +1332,8 @@
     _internals: {
       runVerdict,
       undeliveredCount,
+      isUndelivered,
+      checkDeliveries,
       pendingCount,
       awaitingCount,
       isBlocked,

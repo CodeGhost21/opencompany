@@ -13,7 +13,7 @@ import { toast } from "sonner";
 
 import { listPeople, me as fetchMe, type Person } from "@/api/auth";
 import type { OpenCompanyClient } from "@/api/client";
-import type { TaskDeliverable } from "@/api/tasks";
+import type { MessageIntent } from "@/api/tasks";
 import { setInboxEnabled } from "@/api/inbox";
 import {
   ApiError,
@@ -38,7 +38,7 @@ import {
   reportAddMember,
   type AddMemberOutcome,
 } from "@/lib/member-feedback";
-import { fromDto, newMember, starterTeam, type TeamMember } from "@/lib/team";
+import { fromDto, newMember, type TeamMember } from "@/lib/team";
 import { cn } from "@/lib/utils";
 import { useAskerNames } from "@/components/approval-card";
 import { AddMemberDialog, type NewMemberFields } from "./chat/AddMemberDialog";
@@ -225,12 +225,17 @@ export function ChatView({
         setMembers(roster.map(fromDto));
         setFromHost(true);
       } else {
-        setMembers(starterTeam());
+        // Nobody, rather than a fabricated roster. A DM list of twelve invented
+        // teammates offers conversations with agents the host has never heard
+        // of, and the first message to one goes nowhere
+        // (`docs/spec/runtime/company-setup.md`).
+        setMembers([]);
         setFromHost(false);
       }
     } catch {
-      // No roster surface on this host yet — start from an editable team.
-      setMembers(starterTeam());
+      // The roster read failed, so we do not know who works here. Still nobody:
+      // guessing a team is what this change exists to stop.
+      setMembers([]);
       setFromHost(false);
     } finally {
       setLoadingTeam(false);
@@ -619,7 +624,7 @@ export function ChatView({
    * cannot resolve — the row's own actions are disabled in that window, so this
    * is the belt to that brace.
    */
-  async function send(text: string, deliverable?: TaskDeliverable, parentId?: string) {
+  async function send(text: string, intent?: MessageIntent, parentId?: string) {
     if (sending) return;
     const target = active.id;
     const chatId = activeThreadId;
@@ -637,7 +642,7 @@ export function ChatView({
         company,
         chatId,
         toHostMessageId(parentId),
-        deliverable,
+        intent,
       );
       const replies = reply.responses.length
         ? reply.responses.map((r) =>
@@ -781,7 +786,7 @@ export function ChatView({
             kind: "partial",
             name: fields.name,
             missed: "their inbox couldn't be switched on.",
-            fix: "Add it from the member's actions menu.",
+            fix: "Add it from the teammate's actions menu.",
           };
         }
       }
@@ -900,11 +905,12 @@ export function ChatView({
             <MessageComposer
               placeholder={`Message ${channelTitle(channel)}`}
               disabled={sending}
-              onSend={(text, deliverable) => void send(text, deliverable)}
-              // Channel *and* DM composers offer "do it once" vs "build me the
-              // workflow" (issues #580, #845) — see `offersDeliverableChoice`,
-              // which owns the rule. Only the thread and copilot composers below
-              // go without.
+              onSend={(text, intent) => void send(text, intent)}
+              // Channel *and* DM composers offer "just chatting" / "do it once" /
+              // "build me the workflow" (issues #580, #845, #1152) — see
+              // `offersDeliverableChoice`, which owns the rule and is unchanged:
+              // the new position inherits the same channel+DM gating. Only the
+              // thread and copilot composers below go without.
               deliverableChoice={offersDeliverableChoice(active.kind)}
             />
           </div>
