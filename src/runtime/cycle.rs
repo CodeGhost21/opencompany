@@ -3588,6 +3588,10 @@ mod test {
         async fn search(&self, id: &CompanyId, query: &str, limit: usize) -> Result<Vec<ChunkHit>> {
             self.inner.search(id, query, limit).await
         }
+
+        async fn delete(&self, id: &CompanyId, addr: &ChunkAddr) -> Result<bool> {
+            self.inner.delete(id, addr).await
+        }
     }
 
     /// Issue #1175: a cycle used to load 32 recent traces *and the whole context

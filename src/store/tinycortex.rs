@@ -478,6 +478,12 @@ impl ContextStore for CortexContextStore {
     async fn search(&self, id: &CompanyId, query: &str, limit: usize) -> Result<Vec<ChunkHit>> {
         self.client.search_chunks(id.as_ref(), query, limit).await
     }
+
+    async fn delete(&self, id: &CompanyId, addr: &ChunkAddr) -> Result<bool> {
+        // The operator hard-delete the client already serves; agent-forget and
+        // operator-delete are the same act at this layer.
+        self.client.hard_delete_chunk(id.as_ref(), addr.as_ref()).await
+    }
 }
 
 /// Builds a [`MemoryStore`] + [`ContextStore`] pair over one shared

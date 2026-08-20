@@ -1353,6 +1353,9 @@ mod tests {
             ) -> crate::Result<Vec<ChunkHit>> {
                 Ok(Vec::new())
             }
+            async fn delete(&self, _: &CompanyId, _: &ChunkAddr) -> crate::Result<bool> {
+                Ok(false)
+            }
         }
 
         let memory: Arc<dyn Memory> = Arc::new(OcMemory::new(

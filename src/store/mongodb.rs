@@ -949,6 +949,15 @@ impl ContextStore for MongoStore {
         Ok(out)
     }
 
+    async fn delete(&self, id: &CompanyId, addr: &ChunkAddr) -> Result<bool> {
+        let result = self
+            .collection::<mongodb::bson::Document>("context_chunks")
+            .delete_one(doc! {"company_id": id.as_ref(), "addr": addr.as_ref()})
+            .await
+            .map_err(mongo_err)?;
+        Ok(result.deleted_count > 0)
+    }
+
     async fn peek(
         &self,
         id: &CompanyId,

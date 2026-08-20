@@ -1336,6 +1336,37 @@ impl ContextStore for FsContextStore {
         }
     }
 
+    async fn delete(&self, id: &CompanyId, addr: &ChunkAddr) -> Result<bool> {
+        let bundle = self.bundle(id);
+        let index_path = bundle.context_index_jsonl();
+        let lock = path_lock(&index_path);
+        let _guard = lock.lock().await;
+        // Strict read on purpose: this is a read-modify-write, and
+        // `read_jsonl_lenient` is forbidden to rewriters — a damaged line must
+        // abort the rewrite, not be laundered out of the file for good.
+        let index = read_jsonl::<IndexEntry>(&index_path).await?;
+        let before = index.len();
+        let kept: Vec<IndexEntry> = index
+            .into_iter()
+            .filter(|e| e.addr != addr.as_ref())
+            .collect();
+        if kept.len() == before {
+            return Ok(false);
+        }
+        crate::store::fs_ops::rewrite_jsonl(&index_path, &kept).await?;
+        // The blob is shared by every index entry bearing this address (put
+        // appends an entry per write, all pointing at one content-addressed
+        // file). The filter above removed all of them, so the blob is
+        // unreferenced and goes too.
+        let blob_path = bundle.context_blob(addr.as_ref());
+        match tokio::fs::remove_file(&blob_path).await {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(io_err(&blob_path, e)),
+        }
+        Ok(true)
+    }
+
     async fn search(&self, id: &CompanyId, query: &str, limit: usize) -> Result<Vec<ChunkHit>> {
         let bundle = self.bundle(id);
         let index = read_jsonl::<IndexEntry>(&bundle.context_index_jsonl()).await?;
