@@ -2059,8 +2059,16 @@ export function WorkflowsView({
   // Issue #1231: the reveal pan below has to know when the operator takes the
   // canvas over, so it can stop having an opinion about where the canvas
   // belongs. `onMove` forwards d3-zoom's `sourceEvent`, which React Flow leaves
-  // null for a programmatic transition — the reveal's own — and sets to the
-  // real pointer or wheel event for the operator's. Truthy means theirs.
+  // null for a programmatic transition and sets to the real pointer or wheel
+  // event for a gesture on the canvas. Truthy means theirs.
+  //
+  // "Programmatic" covers the reveal's own pan and `WorkflowMiniMap`'s
+  // `setCenter`, so a minimap drag would not register here. That is not a hole
+  // today only because the minimap sits at the canvas's bottom-right, which is
+  // exactly where the inspector overlay is: the panel covers it whenever there
+  // is a reveal to take over from. Anything that gives the operator a
+  // programmatic way to move the canvas WHILE the inspector is open has to call
+  // `operatorTookOver` itself.
   const revealRef = useRef<RevealSelectedNodeHandle | null>(null);
   const onMove = useCallback((event: MouseEvent | TouchEvent | null) => {
     if (event) revealRef.current?.operatorTookOver();
