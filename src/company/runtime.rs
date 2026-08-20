@@ -194,6 +194,10 @@ pub struct CompanyRuntime {
     pub(crate) events: Arc<dyn EventLog>,
     pub(crate) memory: Arc<dyn MemoryStore>,
     pub(crate) context: Arc<dyn ContextStore>,
+    /// The taint-stamping context port for external content (issue #1113);
+    /// resolved at build time — same store as `context` when the engine
+    /// cannot represent taint.
+    pub(crate) inbound_context: Arc<dyn ContextStore>,
     pub(crate) tools: Arc<dyn ToolProvider>,
     pub(crate) channels: Vec<Arc<dyn ChannelAdapter>>,
     pub(crate) economy: Option<Arc<dyn AgentEconomy>>,
@@ -417,6 +421,7 @@ impl CompanyRuntime {
         events: Arc<dyn EventLog>,
         memory: Arc<dyn MemoryStore>,
         context: Arc<dyn ContextStore>,
+        inbound_context: Arc<dyn ContextStore>,
         tools: Arc<dyn ToolProvider>,
         channels: Vec<Arc<dyn ChannelAdapter>>,
         economy: Option<Arc<dyn AgentEconomy>>,
@@ -443,6 +448,7 @@ impl CompanyRuntime {
             events,
             memory,
             context,
+            inbound_context,
             tools,
             channels,
             economy,
@@ -2413,6 +2419,41 @@ impl CompanyRuntime {
     /// says so, rather than showing an all-clear it cannot stand behind.
     pub fn has_undescribed_history(&self) -> bool {
         self.journal.has_undescribed_history()
+    }
+
+    /// The approvals queue as it is right now, in the two shapes a workflow run
+    /// is joined against it by (issue #1189).
+    ///
+    /// One pass over the same parked effects [`pending_approvals`](Self::pending_approvals)
+    /// projects, collecting both keys at once: every live approval id, and every
+    /// live `(run, gate node)` pair. See
+    /// [`LiveApprovals`](crate::ports::workflow_verdict::LiveApprovals) for why
+    /// one key cannot answer for both shapes.
+    ///
+    /// It reads the **raw** effects rather than the projected summaries on
+    /// purpose. `ApprovalSummary::payload` is `display_payload` — redacted and
+    /// node-budget-bounded — so recovering a gate's node id from it would be
+    /// reading a rendering of the fact instead of the fact, and would break
+    /// silently the day the redaction rules change. Building the answer here
+    /// also keeps raw parked effects out of the HTTP layer, which is the whole
+    /// reason the projection exists.
+    ///
+    /// No task-link discrimination is needed for the gate half, unlike
+    /// [`workflow_run_of`]: `gate_node_id` kind-checks `workflow.approve`, a
+    /// kind only `park_pending_gates` ever mints, and on that effect `run_id` is
+    /// always the workflow run that paused.
+    pub fn live_approvals(&self) -> crate::ports::workflow_verdict::LiveApprovals {
+        let mut live = crate::ports::workflow_verdict::LiveApprovals::default();
+        for parked in self.journal.pending() {
+            live.insert_id(parked.id.as_ref());
+            if let (Some(run_id), Some(node_id)) = (
+                parked.effect.run_id.as_deref(),
+                crate::runtime::workflow_resume::gate_node_id(&parked.effect),
+            ) {
+                live.insert_gate(run_id, node_id);
+            }
+        }
+        live
     }
 
     /// The approvals currently awaiting the operator.

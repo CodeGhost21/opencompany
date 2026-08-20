@@ -54,3 +54,44 @@ export function approvedByRuntimeLine(stillAwaiting: StillAwaiting, detail?: str
     stillAwaiting === 1 ? "" : "s"
   } before it runs${suffix}`;
 }
+
+/** This card's place in its turn's batch: 1-based `index` of `total` (#1289). */
+export interface BatchPosition {
+  index: number;
+  total: number;
+}
+
+/**
+ * Each batched approval's position within its own turn's batch (#1289).
+ *
+ * The "N of M from the same turn" line on the Approvals page needs both halves,
+ * and they must come from one walk of one list: computing the numerator over a
+ * focus-narrowed view and the denominator over the whole queue would print a
+ * card as "1 of 5" when it is the third. So `index` and `total` are derived
+ * here together, in `approvals` order, and every sibling of a batch gets a
+ * distinct `index` — which is what the old hardcoded `1` never did, leaving a
+ * two-card turn with two "1 of 2"s and no "2 of 2".
+ *
+ * `total` is counted over the approvals passed in — the caller passes the still
+ * pending set (#842), so the count shrinks as rows are decided rather than
+ * promising a sibling that has already been signed off. Approvals with no
+ * `batch` are absent from the map; their line is not shown.
+ */
+export function batchPositions(
+  approvals: readonly { id: string; batch?: string | null }[],
+): Map<string, BatchPosition> {
+  const total = new Map<string, number>();
+  for (const a of approvals) {
+    if (!a.batch) continue;
+    total.set(a.batch, (total.get(a.batch) ?? 0) + 1);
+  }
+  const seen = new Map<string, number>();
+  const positions = new Map<string, BatchPosition>();
+  for (const a of approvals) {
+    if (!a.batch) continue;
+    const index = (seen.get(a.batch) ?? 0) + 1;
+    seen.set(a.batch, index);
+    positions.set(a.id, { index, total: total.get(a.batch) ?? index });
+  }
+  return positions;
+}

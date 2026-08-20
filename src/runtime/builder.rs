@@ -31,8 +31,6 @@ use crate::feedback::tinyhumans::TinyHumansClient;
 use crate::feedback::tool::BuiltinToolProvider;
 use crate::feedback::types::ConsentMode;
 #[cfg(feature = "openhuman")]
-use crate::harness::built_in::run_turn::HarnessRunTurn;
-#[cfg(feature = "openhuman")]
 use crate::harness::provider::{HostedProviderConfig, TenantProvider};
 #[cfg(feature = "openhuman")]
 use crate::harness::router::HarnessRouter;
@@ -375,6 +373,15 @@ pub struct RuntimeBuilder {
     events: Option<Arc<dyn EventLog>>,
     memory: Option<Arc<dyn MemoryStore>>,
     context: Option<Arc<dyn ContextStore>>,
+    /// The context port for writes whose content arrived from OUTSIDE — a
+    /// channel message, a webhook body, fetched web text. Same store and
+    /// namespace as `context`, but the engine facade behind it stamps
+    /// `MemoryTaint::ExternalSync` instead of `Internal`, so an engine that
+    /// enforces taint policy can tell the company's own conclusions from what
+    /// the outside world said (issue #1113). `None` — the base backends and
+    /// the legacy engine overlay, which cannot represent taint — falls back
+    /// to `context` at build time: today's exact behavior, no regression.
+    inbound_context: Option<Arc<dyn ContextStore>>,
     tools: Option<Arc<dyn ToolProvider>>,
     channels: Option<Vec<Arc<dyn ChannelAdapter>>>,
     economy: Option<Arc<dyn AgentEconomy>>,
@@ -474,6 +481,16 @@ pub struct RuntimeBuilder {
     /// consumed when a company **explicitly** grants the `search` namespace.
     #[cfg(feature = "openhuman")]
     search_backend: Option<crate::harness::search::SearchBackend>,
+    /// Issue #1245: builds the engine for a `transport = "local"` `acp`
+    /// harness. `None` — the default — leaves every such harness
+    /// `unavailable`, exactly as before this existed; only the desktop shell
+    /// (the only implementation this crate does not itself provide) sets it.
+    ///
+    /// Gated on `acp` specifically, not `openhuman` — `AcpAgentFactory` lives
+    /// behind the narrower feature (`acp = ["openhuman"]`), so an
+    /// `openhuman`-only build (no `acp`) does not have the type to name here.
+    #[cfg(feature = "acp")]
+    acp_agents: Option<Arc<dyn crate::harness::acp::run_turn::AcpAgentFactory>>,
     /// Issue #290: the live state of the runtime this build is *replacing*.
     ///
     /// Present only on a rebuild. It supplies the per-instance pieces a second
@@ -505,6 +522,7 @@ impl RuntimeBuilder {
             events: None,
             memory: None,
             context: None,
+            inbound_context: None,
             tools: None,
             channels: None,
             economy: None,
@@ -553,6 +571,8 @@ impl RuntimeBuilder {
             media_backend: None,
             #[cfg(feature = "openhuman")]
             search_backend: None,
+            #[cfg(feature = "acp")]
+            acp_agents: None,
             handover: None,
         }
     }
@@ -641,6 +661,12 @@ impl RuntimeBuilder {
         self
     }
 
+    /// Swaps the inbound (external-content) context store. See the field doc.
+    pub fn with_inbound_context(mut self, inbound: Arc<dyn ContextStore>) -> Self {
+        self.inbound_context = Some(inbound);
+        self
+    }
+
     /// Swaps every durable port at once from one opened storage backend
     /// (see [`crate::store::select`]).
     pub fn with_stores(mut self, handles: &crate::store::StorageHandles) -> Self {
@@ -683,9 +709,15 @@ impl RuntimeBuilder {
     /// three ports. Taking whichever the overlay offers is what keeps one
     /// company's memory on one engine instead of split across two (issue #914).
     pub fn with_memory_overlay(self, overlay: &crate::store::MemoryOverlay) -> Self {
-        let builder = self
+        let mut builder = self
             .with_memory(overlay.memory.clone())
             .with_context(overlay.context.clone());
+        // The taint-stamping write path. Dropping it here was the break that
+        // left the whole firewall dead — the overlay carried the port and
+        // nothing downstream ever saw it (issue #1113).
+        if let Some(inbound) = &overlay.inbound_context {
+            builder = builder.with_inbound_context(inbound.clone());
+        }
         match &overlay.facts {
             Some(facts) => builder.with_facts(facts.clone()),
             None => builder,
@@ -969,6 +1001,21 @@ impl RuntimeBuilder {
         self
     }
 
+    /// Issue #1245: sets the factory that builds the engine for a
+    /// `transport = "local"` `acp` harness. Only the desktop shell has an
+    /// implementation to give this — a server build leaves it unset, so
+    /// `lanes::build` records every such harness `unavailable` instead of
+    /// having anything to spawn a subprocess with. Feature-gated on `acp`
+    /// specifically; see the field's own doc for why.
+    #[cfg(feature = "acp")]
+    pub fn with_acp_agents(
+        mut self,
+        factory: Arc<dyn crate::harness::acp::run_turn::AcpAgentFactory>,
+    ) -> Self {
+        self.acp_agents = Some(factory);
+        self
+    }
+
     /// Issue #109: sets the MANAGED media-generation backend (platform
     /// credential + URL, resolved from the environment via
     /// [`media_backend_from_env`](crate::harness::provider::media_backend_from_env)).
@@ -1131,6 +1178,15 @@ impl RuntimeBuilder {
             .map(|h| h.context.clone())
             .or(self.context)
             .unwrap_or_else(|| Arc::new(FsContextStore::new(home.clone())));
+        // Resolved to a real port here so nothing downstream carries the
+        // Option: absent (base backends, legacy engine overlay) means the
+        // plain context store — the write still lands, it is merely stamped
+        // Internal, which is today's exact behavior on those backends.
+        let inbound_context: Arc<dyn ContextStore> = handover
+            .as_ref()
+            .map(|h| h.inbound_context.clone())
+            .or(self.inbound_context)
+            .unwrap_or_else(|| context.clone());
         // Effective grants narrow the company allow-list by per-agent tools.
         let grants = effective_grants(&self.manifest);
         let openhuman = self.openhuman;
@@ -2653,11 +2709,23 @@ impl RuntimeBuilder {
                             // `serves`) could build the whole roster on the
                             // default provider regardless of which agents it
                             // actually serves.
+                            //
+                            // `self.acp_agents` only exists under `acp`
+                            // (narrower than this whole block's `openhuman`
+                            // gate) — an `openhuman`-only build has nothing to
+                            // pass, so every `local` acp harness resolves to
+                            // `unavailable` there, same as before issue #1245.
+                            #[cfg(feature = "acp")]
+                            let acp_agents = self.acp_agents.as_deref();
+                            #[cfg(not(feature = "acp"))]
+                            let acp_agents = None;
                             let lanes = crate::harness::lanes::build(
                                 &record,
+                                pool.clone(),
                                 &deps,
                                 secrets.clone(),
                                 env_default,
+                                acp_agents,
                             );
                             if !lanes.lanes.is_empty() || !lanes.unavailable.is_empty() {
                                 tracing::info!(
@@ -2676,27 +2744,40 @@ impl RuntimeBuilder {
                             // lane plus each named lane, indexed by agent. Shared
                             // by the brain and the workflow runner so they cannot
                             // disagree about which agent lands on which engine.
-                            let default_lane: Arc<dyn RunTurn> =
-                                Arc::new(HarnessRunTurn::new(pool.clone(), Arc::new(deps.clone())));
-                            let turn: Arc<dyn RunTurn> = if lanes.lanes.is_empty()
-                                && lanes.unavailable.is_empty()
-                            {
-                                default_lane
-                            } else {
-                                let default_harness = record.manifest.default_harness_id();
-                                let bindings: HashMap<String, String> = record
-                                    .manifest
-                                    .agents
-                                    .iter()
-                                    .filter_map(|a| a.harness.clone().map(|h| (a.id.clone(), h)))
-                                    .collect();
-                                Arc::new(HarnessRouter::from_lanes(
-                                    &default_harness,
-                                    default_lane,
-                                    &lanes.lanes,
-                                    &lanes.unavailable,
-                                    &bindings,
-                                ))
+                            //
+                            // `default_engine` is `lanes::build`'s call, not ours
+                            // (issue #1244): a non-`built_in` default harness
+                            // resolves to `None` there, with its own reason
+                            // already folded into `lanes.unavailable` — this must
+                            // not paper over that with a `HarnessRunTurn` built
+                            // straight from `pool`/`deps` the way it used to.
+                            let default_engine = lanes.default_engine.clone();
+                            let turn: Arc<dyn RunTurn> = match (
+                                &default_engine,
+                                lanes.lanes.is_empty(),
+                                lanes.unavailable.is_empty(),
+                            ) {
+                                // The byte-identical single-pool path: a lone
+                                // `built_in` default, nothing else declared.
+                                (Some(engine), true, true) => engine.clone(),
+                                _ => {
+                                    let default_harness = record.manifest.default_harness_id();
+                                    let bindings: HashMap<String, String> = record
+                                        .manifest
+                                        .agents
+                                        .iter()
+                                        .filter_map(|a| {
+                                            a.harness.clone().map(|h| (a.id.clone(), h))
+                                        })
+                                        .collect();
+                                    Arc::new(HarnessRouter::from_lanes(
+                                        &default_harness,
+                                        default_engine.clone(),
+                                        &lanes.lanes,
+                                        &lanes.unavailable,
+                                        &bindings,
+                                    ))
+                                }
                             };
 
                             // Workflow agent nodes route through the shared
@@ -2742,6 +2823,7 @@ impl RuntimeBuilder {
                                 HarnessBrain::new(pool, deps, record)
                                     .with_lanes(lanes.lanes)
                                     .with_unavailable_lanes(lanes.unavailable)
+                                    .with_default_engine(default_engine)
                                     .with_runs(ops.runs.clone()),
                             ) as Arc<dyn Brain>)
                         } else {
@@ -2871,6 +2953,7 @@ impl RuntimeBuilder {
             events,
             memory,
             context,
+            inbound_context,
             tools,
             channels,
             economy.clone(),
@@ -5247,6 +5330,7 @@ mod test {
             on_error: None,
             retry: None,
             requires_approval: None,
+            repeatable: None,
             destination: None,
         };
         RawWorkflow {

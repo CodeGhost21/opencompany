@@ -2,10 +2,10 @@ import { useCallback, useEffect, useLayoutEffect, useRef } from "react";
 import { Bot, UserPlus } from "lucide-react";
 
 import type { ApprovalSummary, GrantScope, TurnStep, Verdict } from "@/api/types";
+import { TeammateAvatar } from "@/components/teammate-avatar";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
 import { ApprovalRow } from "./ApprovalRow";
-import { Avatar } from "./Avatar";
 import { MessageRow } from "./MessageRow";
 import { StepTimeline } from "./StepTimeline";
 import { WorkingIndicator } from "./WorkingIndicator";
@@ -28,6 +28,12 @@ interface Props {
   openThreadId: string | null;
   /** Someone on the company side is composing a reply. */
   typing: boolean;
+  /**
+   * The turn is accepted but has not started — queued on the per-company serial
+   * lock rather than working (issue #983). Words the row honestly instead of
+   * showing a spinner that implies progress.
+   */
+  queued?: boolean;
   /**
    * The tool rows of a turn running *right now* on this channel's thread, off
    * the transient `tool_call` / `tool_result` / `thinking` frames. Present
@@ -91,6 +97,7 @@ export function MessageTimeline({
   historyPending = false,
   openThreadId,
   typing,
+  queued,
   liveSteps,
   onOpenThread,
   onReact,
@@ -223,10 +230,10 @@ export function MessageTimeline({
             />
           ),
         )}
-        {liveStepCount > 0 ? (
+        {liveStepCount > 0 && !queued ? (
           <LiveTurnRow channel={channel} steps={liveSteps ?? []} />
         ) : (
-          typing && <TypingRow channel={channel} />
+          typing && <TypingRow channel={channel} queued={queued} />
         )}
       </div>
     </div>
@@ -297,9 +304,10 @@ function ChannelIntro({
 }) {
   return (
     <div className={cn("px-4 pb-3", empty ? "pt-16" : "pt-6")}>
-      <Avatar
+      <TeammateAvatar
         name={channel.voice ?? channel.name}
         tone={channel.tone}
+        avatar={channel.member?.avatar}
         company={channel.kind === "channel" && channel.id === "main"}
         className="mb-3 size-12 rounded-lg text-base"
       />
@@ -430,9 +438,10 @@ function HistorySkeleton() {
 function LiveTurnRow({ channel, steps }: { channel: Channel; steps: TurnStep[] }) {
   return (
     <div className="flex items-start gap-2.5 px-4 py-1">
-      <Avatar
+      <TeammateAvatar
         name={channel.voice ?? channel.name}
         tone={channel.tone}
+        avatar={channel.member?.avatar}
         company={channel.kind === "channel" && channel.id === "main"}
         className="size-9 shrink-0"
       />
@@ -446,16 +455,17 @@ function LiveTurnRow({ channel, steps }: { channel: Channel; steps: TurnStep[] }
   );
 }
 
-function TypingRow({ channel }: { channel: Channel }) {
+function TypingRow({ channel, queued }: { channel: Channel; queued?: boolean }) {
   return (
     <div className="flex items-center gap-2.5 px-4 py-1">
-      <Avatar
+      <TeammateAvatar
         name={channel.voice ?? channel.name}
         tone={channel.tone}
+        avatar={channel.member?.avatar}
         company={channel.kind === "channel" && channel.id === "main"}
         className="size-9"
       />
-      <WorkingIndicator srLabel="Replying…" />
+      <WorkingIndicator srLabel="Replying…" queued={queued} />
     </div>
   );
 }

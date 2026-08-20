@@ -90,7 +90,7 @@ use crate::company::{
 };
 use crate::error::OpenCompanyError;
 use crate::ports::types::{
-    CompanyEvent, CompanyRecord, EventSeq, OverlayWorkflow, WorkflowNodeStatus,
+    CompanyEvent, CompanyRecord, EventSeq, OverlayWorkflow, StoredEvent, WorkflowNodeStatus,
 };
 use crate::ports::workflow_verdict::{RunVerdictFacts, WorkflowRunVerdict};
 use crate::runtime::cron::{CivilTime, CronExpr};
@@ -321,6 +321,14 @@ struct WorkflowNode {
     retry: Option<WorkflowRetryOut>,
     #[serde(skip_serializing_if = "Option::is_none")]
     requires_approval: Option<bool>,
+    /// When `false`, a continuation must not repeat this node's call — see
+    /// [`WorkflowNodeDef::repeatable`] (issue #850). Round-tripped verbatim so
+    /// the console's edit form does not lose the declaration on an unrelated
+    /// save: the create/update body reads this same field back, so omitting it
+    /// here would have `repeatable: false` silently disappear on the first
+    /// re-submit.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    repeatable: Option<bool>,
     /// Where an `output` node's report is routed once the run finishes (issue
     /// #170). The model shape is reused verbatim in both directions: its two
     /// fields (`kind` / `target`) are single words, so there is no snake_case →
@@ -366,6 +374,7 @@ impl From<WorkflowNodeDef> for WorkflowNode {
             on_error: n.on_error,
             retry: n.retry.map(WorkflowRetryOut::from),
             requires_approval: n.requires_approval,
+            repeatable: n.repeatable,
             destination: n.destination,
         }
     }
@@ -593,6 +602,11 @@ struct CreateNode {
     /// When `true`, the node pauses awaiting operator approval before it runs.
     #[serde(default)]
     requires_approval: Option<bool>,
+    /// When `false`, a continuation must not repeat this node's call — it
+    /// replays the result the earlier run recorded (issue #850). Only valid on
+    /// `tool_call` and `http_request`, the two kinds that make a call.
+    #[serde(default)]
+    repeatable: Option<bool>,
     /// Where an `output` node's report goes once the run finishes:
     /// `{"kind": "owner"|"email"|"channel", "target"?: "…"}`. Rejected on any
     /// other node kind, and each kind's target contract is enforced by
@@ -662,6 +676,7 @@ impl TryFrom<CreateWorkflowBody> for RawWorkflow {
                 on_error: n.on_error,
                 retry: n.retry.map(WorkflowRetryDef::from),
                 requires_approval: n.requires_approval,
+                repeatable: n.repeatable,
                 destination: n.destination,
             });
         }
@@ -1475,6 +1490,13 @@ async fn run_workflow(
                 blocked_nodes: run.blocked_nodes.len(),
                 deliveries: &run.deliveries,
                 pending_approvals: run.pending_approvals.len(),
+                // Issue #1189: deliberately not reconciled here, and a literal
+                // rather than a lookup. This body is written microseconds after
+                // `park_pending_gates` minted the cards, so joining against the
+                // queue would be a guaranteed-zero query on the hot path — the
+                // reconciliation is a fact about a run somebody comes back to,
+                // which is what the history route is for.
+                stranded_approvals: 0,
             });
             Ok(RunWorkflowOk::Settled(Box::new(RunWorkflowResponse {
                 output: run.output,
@@ -2047,17 +2069,20 @@ async fn fix_from_run(
     .ok_or_else(|| {
         ApiError(OpenCompanyError::CompanyNotFound(format!("workflow {wid}"))).into_response()
     })?;
-    // `workflow_spec_from_graph` below has no `on_error`/`retry` field on
-    // `WorkflowNodeSpec` (the builder never authors them — see its own doc
-    // comment), so a node that had either set loses it silently once the
-    // operator saves the correction. Correlating retry/error policy across a
-    // copilot rewrite that may rename or drop nodes is the harder problem this
-    // PR does not take on; naming it in a note at least makes the loss visible
-    // instead of silent.
-    let dropped_error_policy_nodes: Vec<String> = file
+    // `workflow_spec_from_graph` below has no `on_error`/`retry`/`repeatable`
+    // field on `WorkflowNodeSpec` (the builder never authors them — see its
+    // own doc comment), so a node that had any of the three set loses it
+    // silently once the operator saves the correction. `repeatable` is the
+    // safety declaration issue #850 exists to protect — a correction that
+    // drops it with no warning can leave a continuation free to replay a call
+    // its author explicitly marked non-repeatable. Correlating this policy
+    // across a copilot rewrite that may rename or drop nodes is the harder
+    // problem this PR does not take on; naming it in a note at least makes the
+    // loss visible instead of silent.
+    let dropped_policy_nodes: Vec<String> = file
         .nodes
         .iter()
-        .filter(|n| n.on_error.is_some() || n.retry.is_some())
+        .filter(|n| n.on_error.is_some() || n.retry.is_some() || n.repeatable.is_some())
         .map(|n| n.name.clone())
         .collect();
     let spec = crate::company::workflow_spec_from_graph(file);
@@ -2103,11 +2128,12 @@ async fn fix_from_run(
             mut notes,
         }) => {
             let (ok, advisories) = workflow_readiness(&spec);
-            if !dropped_error_policy_nodes.is_empty() {
+            if !dropped_policy_nodes.is_empty() {
                 notes.push(format!(
-                    "on_error/retry on {} — this correction does not carry per-node error \
-                     policy through; reapply it after reviewing if the node is still there.",
-                    dropped_error_policy_nodes.join(", ")
+                    "on_error/retry/repeatable on {} — this correction does not carry these \
+                     per-node policies through; reapply them after reviewing if the node is \
+                     still there.",
+                    dropped_policy_nodes.join(", ")
                 ));
             }
             Ok(Json(FixFromRunResponse::Fixed {
@@ -2321,7 +2347,15 @@ async fn workflow_wired_channels(company: ScopedCompany) -> Json<WiredChannelsRe
 const DEFAULT_RUN_LIMIT: usize = 20;
 const MAX_RUN_LIMIT: usize = 200;
 
-/// The `?workflow=` / `?limit=` selectors on the run-history read.
+/// The journal page size [`list_runs`] walks backward in (issue #1012). Same
+/// magnitude and rationale as `EVENT_PAGE` in
+/// [`history_for_desk`](crate::server::chat_history::history_for_desk):
+/// walking backward in fixed-size pages keeps the newest `limit` runs without
+/// ever materialising the unrelated journal beyond them.
+const RUN_EVENT_PAGE: usize = 512;
+
+/// The `?workflow=` / `?limit=` / `?before_seq=` selectors on the run-history
+/// read.
 #[derive(Debug, Deserialize)]
 struct RunsQuery {
     /// Return only runs of this workflow id. Absent = every workflow.
@@ -2330,6 +2364,22 @@ struct RunsQuery {
     /// default rather than returning an empty page, which is never what a
     /// caller means.
     limit: Option<usize>,
+    /// Opaque pagination cursor (issue #1012): only runs whose displayed
+    /// `seq` is strictly less than this are considered. Absent reads the
+    /// newest page. The console walks backward through history by passing the
+    /// `seq` of the oldest run it already holds — the same `before_seq` shape
+    /// [`chat_history`](crate::server::chat_history)'s `?before=` and
+    /// `TaskDetailQuery`'s `?discussionBefore=` already use for the same
+    /// problem.
+    before_seq: Option<u64>,
+}
+
+/// `skip_serializing_if` predicate for a count that is almost always zero —
+/// the same one `crate::ports::workflow_runner` uses for the per-node
+/// `unparkable` / `stranded` pair, so the two counts are omitted on identical
+/// terms.
+fn is_zero(n: &usize) -> bool {
+    *n == 0
 }
 
 /// One finished run as the console's history panel renders it (camelCase).
@@ -2445,6 +2495,24 @@ struct WorkflowRunOutcome {
     /// count becomes a fresh lie the moment somebody approves one.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     approvals: Vec<crate::ports::WorkflowRunApprovalRow>,
+    /// How many of [`pending_approvals`](Self::pending_approvals) have **no
+    /// live card left in the queue** (issue #1189).
+    ///
+    /// The gate-shaped sibling of `blockedNodes[].stranded`, and the number the
+    /// console needs to stop telling an operator to go and decide something
+    /// that is not there. #1143's per-node count is keyed on approval ids, and
+    /// a gate parked by `park_pending_gates` records none — no approval-row
+    /// receipt and no blocked-node row, only its node id here — so that count
+    /// structurally cannot describe this shape. On the marketing tenant it is
+    /// the shape of 34 of 60 runs.
+    ///
+    /// **Computed on the read, never journaled**, on exactly the terms
+    /// `WorkflowBlockedNode::stranded` is: the journal records what happened and
+    /// is not edited to reflect what is true now, and a stored "still waiting"
+    /// count is a fresh lie the moment the queue moves. Skipped when zero, which
+    /// is every healthy run, so an unaffected row's wire shape is unchanged.
+    #[serde(skip_serializing_if = "is_zero")]
+    stranded_approvals: usize,
     /// What this run adds up to, in one word (issue #981).
     ///
     /// **Always serialized**, and **derived in a single pass** once the fold
@@ -2475,6 +2543,9 @@ impl WorkflowRunOutcome {
             blocked_nodes: self.blocked_nodes.len(),
             deliveries: &self.deliveries,
             pending_approvals: self.pending_approvals.len(),
+            // Issue #1189: filled in by the join below, which is why the verdict
+            // pass now runs AFTER it. See `list_runs`.
+            stranded_approvals: self.stranded_approvals,
         })
     }
 }
@@ -2519,64 +2590,50 @@ impl From<crate::ports::WorkflowRunNodeRow> for WorkflowRunNode {
     }
 }
 
-/// `GET …/workflows/runs?workflow=&limit=` — the company's finished workflow
-/// runs, **newest first** (issue #228).
+/// Folds a chronologically-ordered slice of journal rows into per-run outcomes
+/// (issue #371's group-by-run fold). Extracted out of [`list_runs`] by issue
+/// #1012 so the caller can run it repeatedly over a growing, backward-paged
+/// buffer instead of once over an unbounded forward read — see the read loop
+/// there.
 ///
-/// This is the durable half of the issue: a manual run's delivery rows used to
-/// live only in the console drawer until it was dismissed, and a scheduled run's
-/// only on host stdout. Folding
-/// [`CompanyEvent::WorkflowRunFinished`](crate::ports::types::CompanyEvent) out
-/// of the journal makes both survive a console reload, which is the whole point.
+/// Issue #371 turned this from a filter into a **group-by-run fold**: a run
+/// now contributes up to N+2 rows (a start, one per node, a finish) instead of
+/// one, and they have to come back as a single history entry.
 ///
-/// The fold reads the company's whole event log
-/// (`read_from(0, MAX)`) — the same thing
-/// [`chat_history`](crate::server::chat_history) already does on every history
-/// GET. Following that precedent keeps this route from inventing an index the
-/// rest of the read plane doesn't have; if the journal scan ever becomes the
-/// bottleneck it should be fixed for both surfaces at once, not just here.
-async fn list_runs(
-    company: ScopedCompany,
-    Query(query): Query<RunsQuery>,
-) -> Result<Json<Vec<WorkflowRunOutcome>>, ApiError> {
-    let limit = match query.limit {
-        Some(0) | None => DEFAULT_RUN_LIMIT,
-        Some(n) => n.min(MAX_RUN_LIMIT),
-    };
-
-    let stored = company
-        .runtime
-        .events()
-        .read_from(company.id(), EventSeq::new(0), usize::MAX)
-        .await
-        .map_err(ApiError)?;
-
-    // Issue #371 turned this from a filter into a **group-by-run fold**: a run
-    // now contributes up to N+2 rows (a start, one per node, a finish) instead
-    // of one, and they have to come back as a single history entry.
-    //
-    // The invariant that keeps it simple: the journal is append-only and
-    // single-writer, so a run's rows are ordered `Started < Node… < Finished` —
-    // the runner drains and joins its progress collector before returning, which
-    // is what makes the last part true rather than a race. Rows of *different*
-    // runs may interleave (two workflows can run at once), so the grouping is
-    // keyed on run id rather than on adjacency.
-    //
-    // A pre-#371 finished row has no run id and no start, so it simply folds to
-    // itself — one row in, one entry out, exactly as before.
+/// The invariant that keeps it simple: the journal is append-only and
+/// single-writer, so a run's rows are ordered `Started < Node… < Finished` —
+/// the runner drains and joins its progress collector before returning, which
+/// is what makes the last part true rather than a race. Rows of *different*
+/// runs may interleave (two workflows can run at once), so the grouping is
+/// keyed on run id rather than on adjacency. **`rows` must be chronologically
+/// ordered (ascending `seq`)** for this invariant to hold — a caller reading
+/// backward via [`EventLog::read_before`](crate::ports::EventLog::read_before)
+/// (which comes back newest-first) must reverse each page before it is folded
+/// in.
+///
+/// A pre-#371 finished row has no run id and no start, so it simply folds to
+/// itself — one row in, one entry out, exactly as before. The same shape
+/// results for a post-#371 row whose start fell outside `rows` — whether
+/// because the caller's window does not reach that far back yet, or because a
+/// retention pass pruned the `WorkflowRunStarted` row while keeping its
+/// `WorkflowRunFinished` (the two are independently prunable; see
+/// `CompanyEvent::retention_class`). Both are "legitimate" in the sense the
+/// original comment on this fold already drew: nothing here tells them apart,
+/// and nothing needs to — a caller paging backward for more history is exactly
+/// how the first case resolves itself into the second, or into a real match.
+///
+/// Returns the folded runs, in fold/push order (not sorted or truncated — the
+/// caller does that), and the highest `seq` seen among EVERY row, matched or
+/// not — the `read_through` high-water mark [`list_runs`]'s #1009 cross-check
+/// resumes reading from.
+fn fold_run_events(rows: Vec<StoredEvent>, wanted: Option<&str>) -> (Vec<WorkflowRunOutcome>, u64) {
     let mut runs: Vec<WorkflowRunOutcome> = Vec::new();
     let mut index: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-    // The `?workflow=` filter is applied per event rather than after the `limit`
-    // cut, so asking for one workflow returns that workflow's most recent N —
-    // not "whichever of the last N happen to match".
-    let wanted = query.workflow.as_deref();
     let matches = |workflow_id: &str| wanted.is_none_or(|w| w == workflow_id);
-    // The high-water mark of the snapshot above, kept over EVERY row rather than
-    // only the matched ones. It is where the settle below resumes reading, which
-    // is what tells a run that died apart from one that merely finished while
-    // this request was folding.
+    // The high-water mark over EVERY row rather than only the matched ones.
     let mut read_through = 0u64;
 
-    for stored in stored {
+    for stored in rows {
         let seq = stored.seq.value();
         let at_millis = stored.at_millis;
         read_through = read_through.max(seq);
@@ -2629,6 +2686,10 @@ async fn list_runs(
                     // True of a row that has only a start — and re-derived
                     // anyway by the single pass below, which is what makes it
                     // right for a row the finish or the settle changes.
+                    // Issue #1189: filled by the join in the tail, on the rows
+                    // actually being returned. Zero here is the honest default —
+                    // this row has not been reconciled against the queue yet.
+                    stranded_approvals: 0,
                     verdict: WorkflowRunVerdict::Running,
                 });
             }
@@ -2760,6 +2821,10 @@ async fn list_runs(
                     blocked_nodes,
                     approvals,
                     // Re-derived by the single pass below, like the start arm's.
+                    // Issue #1189: filled by the join in the tail, on the rows
+                    // actually being returned. Zero here is the honest default —
+                    // this row has not been reconciled against the queue yet.
+                    stranded_approvals: 0,
                     verdict: WorkflowRunVerdict::Running,
                 });
             }
@@ -2767,279 +2832,456 @@ async fn list_runs(
         }
     }
 
-    // Issue #1009: cross-check the still-`running` rows against the live run set
-    // and settle the ones nobody is running.
-    //
-    // The fold above marks a start with no finish `running: true`, which is only
-    // ever settled by the boot sweep ([`sweep_interrupted_runs`]). Three ways a
-    // finish never lands — a task that panicked, an append that failed, a host
-    // that died — therefore all read as an eternal spinner *until the next host
-    // restart*, with a Stop button that cannot help and a 2s console poll that
-    // never stops. This closes the gap between restarts: any run the fold thinks
-    // is in flight whose id is **absent** from the supervisor's live set has no
-    // task behind it here and now, so it is journaled a synthetic finish (the
-    // same `INTERRUPTED_BY_RESTART` the boot sweep uses) and flipped in the
-    // in-memory row, so this very response is already self-consistent.
-    //
-    // Keyed strictly on `live()` membership. A run the current process is
-    // genuinely running is registered there and is left untouched — the watchdog
-    // (issue #1009, path A) is what guarantees a *panicking* run never reaches
-    // this predicate, because it journals its own finish before its guard drops.
-    //
-    // The one accepted false positive: a run that survived a live
-    // `rebuild_company` swap is registered on the *old* supervisor and so is
-    // absent from the successor's `live()`, so this could settle a run that is
-    // still walking its graph. Accepted because (i) the watchdog keeps panics out
-    // of this path entirely, (ii) that run's real finish lands later in journal
-    // order and wins the read's last-writer-wins display, and (iii) it is the
-    // same class the boot sweep already accepts — which is why that sweep gates
-    // on the handover being absent (see the runtime builder call site). It never
-    // corrupts the journal: that run's second, truthful finish lands *after* the
-    // synthetic one and so supersedes it.
-    //
-    // That last argument turns on ORDER, and it does not carry to a run which
-    // settles inside this request — there the truthful finish lands first and
-    // loses. See the window handled below; it is closed rather than accepted.
-    let live_ids: HashSet<String> = company
-        .runtime
-        .run_supervisor()
-        .live()
-        .into_iter()
-        .map(|(run_id, _workflow_id)| run_id)
-        .collect();
-    let mut dead: Vec<usize> = Vec::new();
-    for (index, entry) in runs.iter().enumerate() {
-        if !entry.running {
-            continue;
-        }
-        let Some(run_id) = entry.run_id.as_ref() else {
-            continue;
-        };
-        if live_ids.contains(run_id) {
-            continue;
-        }
-        dead.push(index);
-    }
+    (runs, read_through)
+}
 
-    // ── The window between the snapshot and `live()` ────────────────────────
-    //
-    // `live()` is consulted AFTER the journal snapshot was taken, and a run can
-    // settle in between: it appends its finish (too late for the snapshot) and
-    // then drops its guard (in time to be missing from `live()`). Such a run is
-    // indistinguishable, on the two facts above, from one that died — but it is
-    // the opposite, and settling it is worse than the hang this repairs.
-    //
-    // The ordering is what makes it worse rather than merely wrong. The rebuild
-    // false positive this block already accepts is self-correcting because the
-    // run's real finish lands *after* the synthetic one, and the fold settles an
-    // entry from the last finish it sees. Here the real finish lands *first*, so
-    // the synthetic one wins for good: a successful run reads
-    // `INTERRUPTED_BY_RESTART` permanently, and because the fold overwrites
-    // `deliveries` from whichever finish settles last, the record of what it
-    // sent is replaced by an empty list.
-    //
-    // So before writing anything, read the journal on from where the snapshot
-    // stopped and drop any candidate whose finish turns up there. That is
-    // exact rather than a heuristic: a run whose start was in the snapshot was
-    // registered before it (`begin` precedes both the spawn and the runner's
-    // `WorkflowRunStarted`), so a candidate missing from `live()` has already
-    // been deregistered — and a deregistered run journaled its finish first, if
-    // it was ever going to. Anything appended before that point is at a higher
-    // sequence than the whole snapshot, so this second read cannot miss it.
-    //
-    // Cheap where it matters: it runs only when there are candidates at all,
-    // which after the first settle is nothing, and it reads only the tail.
-    if !dead.is_empty() {
-        match company
+/// `GET …/workflows/runs?workflow=&limit=&before_seq=` — the company's
+/// finished workflow runs, **newest first** (issue #228), a page at a time
+/// (issue #1012).
+///
+/// This is the durable half of the issue: a manual run's delivery rows used to
+/// live only in the console drawer until it was dismissed, and a scheduled run's
+/// only on host stdout. Folding
+/// [`CompanyEvent::WorkflowRunFinished`](crate::ports::types::CompanyEvent) out
+/// of the journal makes both survive a console reload, which is the whole point.
+///
+/// The fold walks the journal **backward**, in bounded
+/// [`RUN_EVENT_PAGE`]-sized pages via
+/// [`EventLog::read_before`](crate::ports::EventLog::read_before) — the same
+/// pattern [`history_for_desk`](crate::server::chat_history::history_for_desk)
+/// already uses for a desk transcript, which has the same
+/// unbounded-forever-growing-journal problem and answers it the same way.
+/// Before #1012 this read all of `read_from(0, MAX)` on every call (a company's
+/// *entire* event history, not just its workflow runs — the same call
+/// `chat_history` used to make too), which got slower as the journal grew and
+/// never stopped growing; the backward-paged walk instead reads only as much
+/// of the journal as it takes to answer this page's `limit`, plus one extra run
+/// to know whether there is more (`hasMore`).
+///
+/// A run is a *group* of events (`Started`, N × node events, `Finished`), not
+/// one — so a page of raw events is not a page of runs. See the loop below and
+/// [`fold_run_events`]'s doc for how a bracket split across a page boundary is
+/// handled.
+async fn list_runs(
+    company: ScopedCompany,
+    Query(query): Query<RunsQuery>,
+) -> Result<Json<WorkflowRunsResponse>, ApiError> {
+    let limit = match query.limit {
+        Some(0) | None => DEFAULT_RUN_LIMIT,
+        Some(n) => n.min(MAX_RUN_LIMIT),
+    };
+    // The `?workflow=` filter is applied per event rather than after the `limit`
+    // cut, so asking for one workflow returns that workflow's most recent N —
+    // not "whichever of the last N happen to match".
+    let wanted = query.workflow.as_deref();
+
+    // A run counts as ready to answer with once its `Started` row has been
+    // found (full data — `startedNodes`, `nodes`, `startedAtMillis` — is then
+    // known), or it has no run id at all (a pre-#371/gapped orphan finish,
+    // complete by definition — nothing more to wait for). A run whose
+    // `Finished`/node row has been seen but whose `Started` has not (yet) is
+    // still open: walking backward means its `Started` row, if it exists, is
+    // further back than what has been read so far.
+    let is_settled =
+        |run: &WorkflowRunOutcome| run.run_id.is_none() || run.started_at_millis.is_some();
+
+    let mut cursor = query.before_seq.map(EventSeq::new);
+    let mut buffer: Vec<StoredEvent> = Vec::new();
+    let mut runs: Vec<WorkflowRunOutcome> = Vec::new();
+    let mut read_through = 0u64;
+    // Whether the walk reached the true beginning of the journal — the only
+    // condition under which an open (not-yet-settled) run can be trusted as
+    // permanently orphaned rather than merely not-yet-resolved. See the
+    // `retain` below. No placeholder initial value: every path out of the loop
+    // assigns it before breaking, so the compiler can already prove it is set
+    // by the time it is read after the loop. `mut` because the loop can
+    // reassign it once per page before the page that finally breaks out.
+    let mut exhausted;
+    loop {
+        let page = company
             .runtime
             .events()
-            .read_from(
-                company.id(),
-                EventSeq::new(read_through.saturating_add(1)),
-                usize::MAX,
-            )
+            .read_before(company.id(), cursor, RUN_EVENT_PAGE)
             .await
-        {
-            Ok(tail) => {
-                let settled_since: HashSet<String> = tail
-                    .into_iter()
-                    .filter_map(|stored| match stored.event {
-                        CompanyEvent::WorkflowRunFinished {
-                            run_id: Some(run_id),
-                            ..
-                        } => Some(run_id),
-                        _ => None,
-                    })
-                    .collect();
-                dead.retain(|index| {
-                    runs[*index]
-                        .run_id
-                        .as_ref()
-                        .is_none_or(|run_id| !settled_since.contains(run_id))
-                });
-            }
-            Err(err) => {
-                // Unprovable, so nothing is settled. The row keeps reporting
-                // `running` and a later poll retries — strictly better than
-                // stamping "interrupted" on a run that may well be finishing.
-                tracing::warn!(
-                    company = %company.id(),
-                    %err,
-                    "could not re-read the journal to confirm a workflow run is dead; \
-                     leaving it as running"
-                );
-                dead.clear();
-            }
+            .map_err(ApiError)?;
+        if page.is_empty() {
+            exhausted = true;
+            break;
+        }
+        // A page shorter than asked-for proves there is nothing older left to
+        // read, without waiting for one more round trip that would only
+        // confirm it empty.
+        exhausted = page.len() < RUN_EVENT_PAGE;
+        // `read_before` returns newest-first; its own last element is this
+        // page's oldest row, and the correct cursor to resume strictly before.
+        cursor = page.last().map(|event| event.seq);
+        let mut chrono_page = page;
+        chrono_page.reverse();
+        buffer.splice(0..0, chrono_page);
+
+        let (folded, through) = fold_run_events(buffer.clone(), wanted);
+        // `read_through`'s meaning — the high-water mark of a "now" snapshot,
+        // which the #1009 cross-check below resumes reading from — is fixed
+        // by the FIRST page: `fold_run_events` computes it as the buffer's max
+        // `seq`, and the buffer only grows *older* on every later page, so
+        // this value cannot change after the first assignment. Reassigning it
+        // unconditionally is simplest and gives the identical answer.
+        read_through = through;
+        let settled = folded.iter().filter(|run| is_settled(run)).count();
+        runs = folded;
+        if exhausted || settled > limit {
+            break;
         }
     }
-
-    for index in &dead {
-        let entry = &mut runs[*index];
-        let Some(run_id) = entry.run_id.clone() else {
-            continue;
-        };
-        // Durable half: append the finish so it survives this response, folds
-        // settled on the next `GET …/workflows/runs`, and stops the boot sweep
-        // from having to. Best-effort by construction — a failed append leaves
-        // the row as the in-memory flip below still makes it, and the next read
-        // simply retries.
-        crate::runtime::record_run_finished(
-            company.runtime.events(),
-            company.id(),
-            &entry.workflow_id,
-            entry.scheduled,
-            &run_id,
-            Err(crate::runtime::workflow_outcome::INTERRUPTED_BY_RESTART.into()),
-        )
-        .await;
-        // In-memory half: flip the row this response returns, so the console does
-        // not have to wait for the next poll to stop the spinner.
-        entry.running = false;
-        entry.error = Some(crate::runtime::workflow_outcome::INTERRUPTED_BY_RESTART.to_string());
+    if !exhausted {
+        // Drop any run still open: walking further back might yet resolve it
+        // (find its `Started` row) or might not, and returning it now, in the
+        // fold's orphan placeholder shape, would risk showing a real run's
+        // history as gapped when the only reason it looks that way is that
+        // this page chose not to read far enough. Once the journal actually IS
+        // exhausted, every remaining open row is a genuine orphan — see
+        // `fold_run_events`'s doc — and is kept exactly as the fold shaped it.
+        runs.retain(is_settled);
     }
 
-    // ── Serve the row the NEXT read will fold, identically ──────────────────
-    //
-    // The fold keys a settled entry on its **finish**, taking `seq` and
-    // `at_millis` from that row. So flipping `running` while leaving the
-    // start's values in place means this response and the one 2s later carry
-    // *different* `seq` for the same run — and the console keys its history
-    // rows on exactly that field (`RunHistoryPanel`: `key={run.seq}`, with
-    // `selectedRunSeq` / `fixingRunSeq` / `fixReason.seq` compared against it).
-    // The row remounts and any selection on it is dropped, in the one window
-    // where an operator is most likely to be looking: the 2s recovery poll runs
-    // precisely because someone is watching this run.
-    //
-    // So the appended rows are read back and their real `seq` / `at_millis`
-    // stamped on. Read back rather than returned from `record_run_finished`,
-    // which reports only whether the append happened — the values served are
-    // then the durable ones rather than a second construction of them.
-    if !dead.is_empty() {
-        match company
+    // Issue #1012: this cross-check only makes sense against "now" — an
+    // older page (a `before_seq` cursor was given) is not the newest state,
+    // so a `running: true` row on it is out of scope here: either it was
+    // already resolved by an earlier newest-page read (whose synthetic
+    // finish will surface naturally once an older page's window reaches
+    // that seq), or it is a genuinely long-lived run outside what
+    // pagination is meant to answer.
+    if query.before_seq.is_none() {
+        // Issue #1009: cross-check the still-`running` rows against the live run set
+        // and settle the ones nobody is running.
+        //
+        // The fold above marks a start with no finish `running: true`, which is only
+        // ever settled by the boot sweep ([`sweep_interrupted_runs`]). Three ways a
+        // finish never lands — a task that panicked, an append that failed, a host
+        // that died — therefore all read as an eternal spinner *until the next host
+        // restart*, with a Stop button that cannot help and a 2s console poll that
+        // never stops. This closes the gap between restarts: any run the fold thinks
+        // is in flight whose id is **absent** from the supervisor's live set has no
+        // task behind it here and now, so it is journaled a synthetic finish (the
+        // same `INTERRUPTED_BY_RESTART` the boot sweep uses) and flipped in the
+        // in-memory row, so this very response is already self-consistent.
+        //
+        // Keyed strictly on `live()` membership. A run the current process is
+        // genuinely running is registered there and is left untouched — the watchdog
+        // (issue #1009, path A) is what guarantees a *panicking* run never reaches
+        // this predicate, because it journals its own finish before its guard drops.
+        //
+        // The one accepted false positive: a run that survived a live
+        // `rebuild_company` swap is registered on the *old* supervisor and so is
+        // absent from the successor's `live()`, so this could settle a run that is
+        // still walking its graph. Accepted because (i) the watchdog keeps panics out
+        // of this path entirely, (ii) that run's real finish lands later in journal
+        // order and wins the read's last-writer-wins display, and (iii) it is the
+        // same class the boot sweep already accepts — which is why that sweep gates
+        // on the handover being absent (see the runtime builder call site). It never
+        // corrupts the journal: that run's second, truthful finish lands *after* the
+        // synthetic one and so supersedes it.
+        //
+        // That last argument turns on ORDER, and it does not carry to a run which
+        // settles inside this request — there the truthful finish lands first and
+        // loses. See the window handled below; it is closed rather than accepted.
+        let live_ids: HashSet<String> = company
             .runtime
-            .events()
-            .read_from(
-                company.id(),
-                EventSeq::new(read_through.saturating_add(1)),
-                usize::MAX,
-            )
-            .await
-        {
-            Ok(appended) => {
-                let stamped: std::collections::HashMap<String, (u64, u64)> = appended
-                    .into_iter()
-                    .filter_map(|stored| match stored.event {
-                        CompanyEvent::WorkflowRunFinished {
-                            run_id: Some(run_id),
-                            ..
-                        } => Some((run_id, (stored.seq.value(), stored.at_millis))),
-                        _ => None,
-                    })
-                    .collect();
-                for index in &dead {
-                    let entry = &mut runs[*index];
-                    let Some((seq, at_millis)) =
-                        entry.run_id.as_ref().and_then(|id| stamped.get(id))
-                    else {
-                        continue;
-                    };
-                    entry.seq = *seq;
-                    entry.at_millis = *at_millis;
+            .run_supervisor()
+            .live()
+            .into_iter()
+            .map(|(run_id, _workflow_id)| run_id)
+            .collect();
+        let mut dead: Vec<usize> = Vec::new();
+        for (index, entry) in runs.iter().enumerate() {
+            if !entry.running {
+                continue;
+            }
+            let Some(run_id) = entry.run_id.as_ref() else {
+                continue;
+            };
+            if live_ids.contains(run_id) {
+                continue;
+            }
+            dead.push(index);
+        }
+
+        // ── The window between the snapshot and `live()` ────────────────────────
+        //
+        // `live()` is consulted AFTER the journal snapshot was taken, and a run can
+        // settle in between: it appends its finish (too late for the snapshot) and
+        // then drops its guard (in time to be missing from `live()`). Such a run is
+        // indistinguishable, on the two facts above, from one that died — but it is
+        // the opposite, and settling it is worse than the hang this repairs.
+        //
+        // The ordering is what makes it worse rather than merely wrong. The rebuild
+        // false positive this block already accepts is self-correcting because the
+        // run's real finish lands *after* the synthetic one, and the fold settles an
+        // entry from the last finish it sees. Here the real finish lands *first*, so
+        // the synthetic one wins for good: a successful run reads
+        // `INTERRUPTED_BY_RESTART` permanently, and because the fold overwrites
+        // `deliveries` from whichever finish settles last, the record of what it
+        // sent is replaced by an empty list.
+        //
+        // So before writing anything, read the journal on from where the snapshot
+        // stopped and drop any candidate whose finish turns up there. That is
+        // exact rather than a heuristic: a run whose start was in the snapshot was
+        // registered before it (`begin` precedes both the spawn and the runner's
+        // `WorkflowRunStarted`), so a candidate missing from `live()` has already
+        // been deregistered — and a deregistered run journaled its finish first, if
+        // it was ever going to. Anything appended before that point is at a higher
+        // sequence than the whole snapshot, so this second read cannot miss it.
+        //
+        // Cheap where it matters: it runs only when there are candidates at all,
+        // which after the first settle is nothing, and it reads only the tail.
+        if !dead.is_empty() {
+            match company
+                .runtime
+                .events()
+                .read_from(
+                    company.id(),
+                    EventSeq::new(read_through.saturating_add(1)),
+                    usize::MAX,
+                )
+                .await
+            {
+                Ok(tail) => {
+                    let settled_since: HashSet<String> = tail
+                        .into_iter()
+                        .filter_map(|stored| match stored.event {
+                            CompanyEvent::WorkflowRunFinished {
+                                run_id: Some(run_id),
+                                ..
+                            } => Some(run_id),
+                            _ => None,
+                        })
+                        .collect();
+                    dead.retain(|index| {
+                        runs[*index]
+                            .run_id
+                            .as_ref()
+                            .is_none_or(|run_id| !settled_since.contains(run_id))
+                    });
+                }
+                Err(err) => {
+                    // Unprovable, so nothing is settled. The row keeps reporting
+                    // `running` and a later poll retries — strictly better than
+                    // stamping "interrupted" on a run that may well be finishing.
+                    tracing::warn!(
+                        company = %company.id(),
+                        %err,
+                        "could not re-read the journal to confirm a workflow run is dead; \
+                         leaving it as running"
+                    );
+                    dead.clear();
                 }
             }
-            Err(err) => {
-                // The settle itself stands — it is already durable. Only the
-                // row's identity is left at the start's, which the next read
-                // corrects.
-                tracing::warn!(
-                    company = %company.id(),
-                    %err,
-                    "settled a dead workflow run but could not read back its finish row; \
-                     this response carries the start's seq and time"
-                );
+        }
+
+        for index in &dead {
+            let entry = &mut runs[*index];
+            let Some(run_id) = entry.run_id.clone() else {
+                continue;
+            };
+            // Durable half: append the finish so it survives this response, folds
+            // settled on the next `GET …/workflows/runs`, and stops the boot sweep
+            // from having to. Best-effort by construction — a failed append leaves
+            // the row as the in-memory flip below still makes it, and the next read
+            // simply retries.
+            crate::runtime::record_run_finished(
+                company.runtime.events(),
+                company.id(),
+                &entry.workflow_id,
+                entry.scheduled,
+                &run_id,
+                Err(crate::runtime::workflow_outcome::INTERRUPTED_BY_RESTART.into()),
+            )
+            .await;
+            // In-memory half: flip the row this response returns, so the console does
+            // not have to wait for the next poll to stop the spinner.
+            entry.running = false;
+            entry.error =
+                Some(crate::runtime::workflow_outcome::INTERRUPTED_BY_RESTART.to_string());
+        }
+
+        // ── Serve the row the NEXT read will fold, identically ──────────────────
+        //
+        // The fold keys a settled entry on its **finish**, taking `seq` and
+        // `at_millis` from that row. So flipping `running` while leaving the
+        // start's values in place means this response and the one 2s later carry
+        // *different* `seq` for the same run — and the console keys its history
+        // rows on exactly that field (`RunHistoryPanel`: `key={run.seq}`, with
+        // `selectedRunSeq` / `fixingRunSeq` / `fixReason.seq` compared against it).
+        // The row remounts and any selection on it is dropped, in the one window
+        // where an operator is most likely to be looking: the 2s recovery poll runs
+        // precisely because someone is watching this run.
+        //
+        // So the appended rows are read back and their real `seq` / `at_millis`
+        // stamped on. Read back rather than returned from `record_run_finished`,
+        // which reports only whether the append happened — the values served are
+        // then the durable ones rather than a second construction of them.
+        if !dead.is_empty() {
+            match company
+                .runtime
+                .events()
+                .read_from(
+                    company.id(),
+                    EventSeq::new(read_through.saturating_add(1)),
+                    usize::MAX,
+                )
+                .await
+            {
+                Ok(appended) => {
+                    let stamped: std::collections::HashMap<String, (u64, u64)> = appended
+                        .into_iter()
+                        .filter_map(|stored| match stored.event {
+                            CompanyEvent::WorkflowRunFinished {
+                                run_id: Some(run_id),
+                                ..
+                            } => Some((run_id, (stored.seq.value(), stored.at_millis))),
+                            _ => None,
+                        })
+                        .collect();
+                    for index in &dead {
+                        let entry = &mut runs[*index];
+                        let Some((seq, at_millis)) =
+                            entry.run_id.as_ref().and_then(|id| stamped.get(id))
+                        else {
+                            continue;
+                        };
+                        entry.seq = *seq;
+                        entry.at_millis = *at_millis;
+                    }
+                }
+                Err(err) => {
+                    // The settle itself stands — it is already durable. Only the
+                    // row's identity is left at the start's, which the next read
+                    // corrects.
+                    tracing::warn!(
+                        company = %company.id(),
+                        %err,
+                        "settled a dead workflow run but could not read back its finish row; \
+                         this response carries the start's seq and time"
+                    );
+                }
             }
         }
     }
 
-    // Issue #981: the run verdicts, read in ONE pass, here — after the fold has
-    // settled every open row and after the #1009 cross-check has flipped the
-    // dead ones to `error: INTERRUPTED_BY_RESTART`.
+    // Newest first: a history panel leads with the run that just happened.
     //
-    // Position is the correctness argument. Every input the verdict reads is
-    // written by the settle arm *after* its row was pushed (`running`, `error`,
-    // `cancelled`, `deliveries`, `pendingApprovals`, `blockedNodes`), and two of
-    // them are written again by the cross-check above. Deriving at construction
-    // would score the row the fold had at the time and never revisit it — the
-    // exact staleness a *stored* verdict would have, reintroduced by placement.
-    for run in &mut runs {
-        run.verdict = run.derive_verdict();
-    }
-
-    // Newest first: a history panel leads with the run that just happened. The
-    // `limit` now cuts *runs* rather than journal rows, which is the number the
-    // caller was asking about all along.
-    runs.reverse();
+    // Issue #1012: sorted explicitly by `(at_millis, seq)` descending — the
+    // very pair every row *displays* — rather than `reverse()`d. `reverse()`
+    // only flips the fold's push order, which is the order runs *started* (an
+    // entry is pushed once, at its `WorkflowRunStarted` row, and only mutated
+    // in place — never re-pushed — when its `WorkflowRunFinished` row later
+    // overwrites `seq`/`at_millis` to the finish's own). Two runs that
+    // interleave (B starts after A, but finishes first) therefore used to come
+    // back in *start* order while every row read as if it were ordered by
+    // *finish* — the row for A would lead even though B's `seq`/`atMillis` say
+    // B is newer. Sorting on the same field the row displays makes the two
+    // agree by construction, for a run still in flight (which sorts on its own
+    // start) exactly as for one already settled.
+    //
+    // The `limit` now cuts *runs* rather than journal rows, which is the
+    // number the caller was asking about all along.
+    //
+    // Issue #1189: this stays ABOVE the verdict pass (moved to the very end,
+    // below the reconciliation join). Neither the sort nor `truncate` touches
+    // a single field of a row — they reorder and drop whole rows — so the
+    // invariant the verdict pass is placed on ("derive after everything that
+    // can still change its inputs") is not weakened by running them first.
+    runs.sort_by_key(|r| std::cmp::Reverse((r.at_millis, r.seq)));
+    // Issue #1012: the backward-paged read above stopped once it had settled
+    // at least `limit + 1` runs (or ran out of journal), precisely so this
+    // count is known here — one more than fit on the page means there is a
+    // page after this one.
+    let has_more = runs.len() > limit;
     runs.truncate(limit);
 
-    // Issue #1143. A blocked node's `approval_ids` is a receipt of what the run
-    // parked, and a receipt cannot go stale — but the *question* it points at
-    // can. `ApprovalParked` is journaled at `Durability::Process` on the stated
-    // reasoning that losing it is harmless because "the agent parks it again on
-    // its next attempt". That holds for a chat turn, which retries; it is false
-    // for a workflow run, which halted at the blocked node and never re-enters
-    // the gate. So a run that outlived its own approvals goes on reporting that
-    // it waits on cards the queue does not have, and the drawer's "decide in
-    // Approvals" links land on an empty page. #1145 carries the durability
-    // decision; this reconciliation deliberately does not pre-empt it.
+    // Issues #1143 + #1189. A run's record of what it stopped for is a receipt
+    // and cannot go stale — but the *question* it points at can. `ApprovalParked`
+    // is journaled at `Durability::Process` on the stated reasoning that losing
+    // it is harmless because "the agent parks it again on its next attempt".
+    // That holds for a chat turn, which retries; it is false for a workflow run,
+    // which halted at the gate and never re-enters it. So a run that outlived
+    // its own approvals goes on reporting that it waits on cards the queue does
+    // not have. #1145 carries the durability decision; this reconciliation
+    // deliberately does not pre-empt it.
+    //
+    // TWO joins, because a run has two ways to stop for a person and they leave
+    // different traces:
+    //
+    // * `blockedNodes[].approvalIds` — the ids an agent node's gated calls
+    //   parked. Those cards are tool-call effects and carry no node id, so the
+    //   only key is the id (issue #1143).
+    // * `pendingApprovals` — the gate nodes the engine paused at. Their cards
+    //   are `workflow.approve` effects that record no receipt and no
+    //   blocked-node row at all, so #1143's id-keyed join structurally could not
+    //   reach them; they are joined on `(run_id, node_id)` instead (issue
+    //   #1189). This is the bigger half: 34 of the marketing tenant's 60 runs.
     //
     // Done HERE, on the read, for the same reason `relabel_blocked` above
     // relabels rather than rewriting the durable node rows: the journal records
     // what happened and is not edited to reflect what is true now. After the
     // truncate, so the join costs one journal snapshot and covers only the rows
     // actually being returned — and skipped entirely when no returned run
-    // parked anything, which is nearly every read.
-    if runs
-        .iter()
-        .any(|r| r.blocked_nodes.iter().any(|b| !b.approval_ids.is_empty()))
-    {
-        let live: std::collections::HashSet<String> = company
-            .runtime
-            .pending_approvals()
-            .into_iter()
-            .map(|a| a.id.as_ref().to_string())
-            .collect();
+    // stopped for anybody, which is nearly every read.
+    if runs.iter().any(|r| {
+        !r.pending_approvals.is_empty()
+            || r.blocked_nodes.iter().any(|b| !b.approval_ids.is_empty())
+    }) {
+        let live = company.runtime.live_approvals();
         for run in &mut runs {
             for blocked in &mut run.blocked_nodes {
                 blocked.stranded = blocked
                     .approval_ids
                     .iter()
-                    .filter(|id| !live.contains(id.as_str()))
+                    .filter(|id| !live.holds_id(id))
                     .count();
             }
+            run.stranded_approvals = crate::ports::workflow_verdict::stranded_approvals(
+                run.run_id.as_deref(),
+                &run.pending_approvals,
+                &run.blocked_nodes,
+                &live,
+            );
         }
     }
 
-    Ok(Json(runs))
+    // Issue #981: the run verdicts, read in ONE pass, here — after the fold has
+    // settled every open row, after the #1009 cross-check has flipped the dead
+    // ones to `error: INTERRUPTED_BY_RESTART`, and (issue #1189) after the
+    // reconciliation above.
+    //
+    // Position is the correctness argument. Every input the verdict reads is
+    // written by the settle arm *after* its row was pushed (`running`, `error`,
+    // `cancelled`, `deliveries`, `pendingApprovals`, `blockedNodes`), two of
+    // them are written again by the cross-check, and `strandedApprovals` is
+    // written by the join. Deriving at construction — or, as it was until
+    // #1189, before the join — scores the row against inputs that have since
+    // moved underneath it: the exact staleness a *stored* verdict would have,
+    // reintroduced by placement.
+    for run in &mut runs {
+        run.verdict = run.derive_verdict();
+    }
+
+    Ok(Json(WorkflowRunsResponse { runs, has_more }))
+}
+
+/// The `GET …/workflows/runs` response body (issue #1012).
+///
+/// Wrapped rather than a bare array — as this route answered before — because
+/// `hasMore` has nowhere else to ride: the console's history drawer cannot
+/// otherwise tell "this is the whole history" from "this page was truncated at
+/// `limit`", which is exactly the silent-truncation half of the issue.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkflowRunsResponse {
+    runs: Vec<WorkflowRunOutcome>,
+    /// Whether a further, older page exists behind `?before_seq=<oldest
+    /// returned run's seq>`.
+    has_more: bool,
 }
 
 /// Relabels a run's node rows for the nodes it blocked on a human (issue #881).
@@ -3279,6 +3521,7 @@ mod tests {
                     backoff: Some("exponential".into()),
                 }),
                 requires_approval: Some(true),
+                repeatable: None,
                 destination: None,
             }],
             edges: Vec::new(),
@@ -3291,6 +3534,67 @@ mod tests {
         assert_eq!(node["retry"]["backoffMs"], 250);
         assert_eq!(node["retry"]["backoff"], "exponential");
         assert_eq!(node["requiresApproval"], true);
+    }
+
+    /// `repeatable: false` round-trips through the read model (issue #850).
+    ///
+    /// `WorkflowNode` previously omitted the field entirely, so a console edit
+    /// that read a node back from `GET`/create/update and resubmitted it would
+    /// silently drop the author's `repeatable = false` declaration on the next
+    /// save — the exact safety declaration issue #850 exists to protect.
+    #[test]
+    fn json_serializes_repeatable_field() {
+        use crate::company::{WorkflowNodeDef, WorkflowNodeKind};
+
+        let file = WorkflowFile {
+            global: false,
+            id: "wf".into(),
+            name: "WF".into(),
+            description: None,
+            nodes: vec![
+                WorkflowNodeDef {
+                    id: "publish".into(),
+                    kind: WorkflowNodeKind::ToolCall,
+                    name: "Publish".into(),
+                    summary: None,
+                    agent: None,
+                    schedule: None,
+                    config: Some(serde_json::json!({ "slug": "shell" })),
+                    on_error: None,
+                    retry: None,
+                    requires_approval: None,
+                    repeatable: Some(false),
+                    destination: None,
+                },
+                WorkflowNodeDef {
+                    id: "read".into(),
+                    kind: WorkflowNodeKind::ToolCall,
+                    name: "Read".into(),
+                    summary: None,
+                    agent: None,
+                    schedule: None,
+                    config: Some(serde_json::json!({ "slug": "web_fetch" })),
+                    on_error: None,
+                    retry: None,
+                    requires_approval: None,
+                    repeatable: None,
+                    destination: None,
+                },
+            ],
+            edges: Vec::new(),
+        };
+        let json = serde_json::to_value(WorkflowGraph::new(file, false, None, true)).unwrap();
+        let nodes = json["nodes"].as_array().unwrap();
+        let publish = nodes.iter().find(|n| n["id"] == "publish").unwrap();
+        assert_eq!(
+            publish["repeatable"], false,
+            "declared repeatable:false must survive the read model: {publish}"
+        );
+        let read = nodes.iter().find(|n| n["id"] == "read").unwrap();
+        assert!(
+            read.get("repeatable").is_none(),
+            "an undeclared node omits the key rather than serializing null: {read}"
+        );
     }
 
     // --- P2: create body maps the new node fields (config/error/retry/approval)
@@ -3467,6 +3771,7 @@ mod tests {
                     on_error: None,
                     retry: None,
                     requires_approval: None,
+                    repeatable: None,
                     destination: None,
                 },
                 WorkflowNodeDef {
@@ -3480,6 +3785,7 @@ mod tests {
                     on_error: None,
                     retry: None,
                     requires_approval: None,
+                    repeatable: None,
                     destination: None,
                 },
             ],
@@ -4822,6 +5128,109 @@ mod tests {
             assert!(body["readiness"]["ok"].is_boolean(), "body: {body}");
         }
 
+        /// A node declared `repeatable = false` is named in the correction's
+        /// notes, alongside `on_error`/`retry` (issue #850).
+        ///
+        /// `WorkflowNodeSpec` — what the copilot's builder actually authors —
+        /// has no `repeatable` field, so a corrected graph silently drops the
+        /// declaration unless `fix_from_run` names it in `notes`. Without this,
+        /// an operator who saves a copilot correction over a workflow with a
+        /// `repeatable: false` node loses that guard with no warning at all.
+        #[cfg(feature = "openhuman")]
+        #[tokio::test]
+        async fn fix_from_run_notes_a_dropped_repeatable_declaration() {
+            use crate::harness::provider::HarnessModel;
+            use crate::harness::workflow_build::WorkflowBuilder;
+            use crate::harness::workflow_build::test::{
+                NativeCopilotModel, NativeStep, agent_deps, propose_step,
+            };
+
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let (state, _store, id) = hosted_state(&home).await;
+
+            let model = NativeCopilotModel::scripting(vec![
+                propose_step(
+                    "dropped the unwired step",
+                    serde_json::json!({
+                        "name": "Greeter",
+                        "nodes": [
+                            { "id": "start", "kind": "trigger", "name": "Start" },
+                            { "id": "done", "kind": "output", "name": "Report" }
+                        ],
+                        "edges": [ { "from": "start", "to": "done" } ]
+                    }),
+                ),
+                NativeStep::done("Corrected the workflow."),
+            ]);
+            {
+                let mut runtime =
+                    std::sync::Arc::into_inner(state.registry().remove(&id).expect("registered"))
+                        .expect("uniquely held in this test");
+                let deps = agent_deps(&runtime, model.clone() as std::sync::Arc<dyn HarnessModel>);
+                runtime.set_builder(std::sync::Arc::new(WorkflowBuilder::new(
+                    model as std::sync::Arc<dyn HarnessModel>,
+                    "test-model",
+                )));
+                runtime.set_workflow_harness_deps(deps);
+                state
+                    .registry()
+                    .insert(id.clone(), std::sync::Arc::new(runtime));
+            }
+
+            // Seed a workflow whose middle node declares `repeatable: false` —
+            // the exact declaration `fix_from_run`'s correction cannot carry
+            // through the builder's `WorkflowNodeSpec`.
+            let mut body = create_body();
+            body["nodes"].as_array_mut().unwrap().insert(
+                1,
+                serde_json::json!({
+                    "id": "publish",
+                    "kind": "tool_call",
+                    "name": "Publish",
+                    "config": { "slug": "shell", "args": { "command": "./bin/announce" } },
+                    "repeatable": false
+                }),
+            );
+            body["edges"] = serde_json::json!([
+                { "from": "start", "to": "publish" },
+                { "from": "publish", "to": "done" }
+            ]);
+            let created = router(state.clone())
+                .oneshot(request("POST", "/api/v1/company/workflows", Some(body)))
+                .await
+                .unwrap();
+            assert_eq!(created.status(), StatusCode::OK);
+
+            journal_run_with_id(
+                &state,
+                &id,
+                "greeter",
+                "run-1",
+                "the tool `web_search` is not wired on this deployment",
+            )
+            .await;
+
+            let response = router(state)
+                .oneshot(request(
+                    "POST",
+                    "/api/v1/company/workflows/greeter/fix-from-run",
+                    Some(serde_json::json!({ "runId": "run-1" })),
+                ))
+                .await
+                .unwrap();
+            let status = response.status();
+            let body = json_body(response).await;
+            assert_eq!(status, StatusCode::OK, "body: {body}");
+            let notes = body["notes"].as_array().cloned().unwrap_or_default();
+            assert!(
+                notes.iter().any(|n| n
+                    .as_str()
+                    .is_some_and(|s| s.contains("repeatable") && s.contains("Publish"))),
+                "notes must name the dropped repeatable declaration on `Publish`: {body}"
+            );
+        }
+
         /// Issue #783: the per-workflow copilot's tool-grounding read answers
         /// `200 {"slugs":[…],"unwired":[…]}` on **both** scope forms — which also
         /// proves the static prefix is wired ahead of the dynamic
@@ -5332,7 +5741,7 @@ mod tests {
                 .unwrap();
             assert_eq!(response.status(), StatusCode::OK);
             let body = json_body(response).await;
-            let rows = body.as_array().expect("array");
+            let rows = body["runs"].as_array().expect("array");
             assert_eq!(rows.len(), 2, "body: {body}");
 
             // Newest first: the history panel leads with the run that just ran.
@@ -5400,7 +5809,7 @@ mod tests {
                 .unwrap();
             assert_eq!(response.status(), StatusCode::OK);
             let body = json_body(response).await;
-            let rows = body.as_array().expect("array");
+            let rows = body["runs"].as_array().expect("array");
             assert_eq!(rows.len(), 3, "body: {body}");
 
             // The more serious fact first: a run that broke mid-graph AND did
@@ -5459,7 +5868,7 @@ mod tests {
                 .unwrap();
             assert_eq!(response.status(), StatusCode::OK);
             let body = json_body(response).await;
-            let rows = body.as_array().expect("array");
+            let rows = body["runs"].as_array().expect("array");
             assert_eq!(rows.len(), 1, "body: {body}");
             assert_eq!(rows[0]["running"], true, "{body}");
             assert_eq!(rows[0]["verdict"], "running", "{body}");
@@ -5548,10 +5957,10 @@ mod tests {
                 .unwrap();
             let body = json_body(response).await;
             assert_eq!(
-                body[0]["error"],
+                body["runs"][0]["error"],
                 "no inference source for agent node `worker`"
             );
-            assert_eq!(body[0]["deliveries"].as_array().unwrap().len(), 0);
+            assert_eq!(body["runs"][0]["deliveries"].as_array().unwrap().len(), 0);
         }
 
         // ── Issue #371: the per-node progress fold ─────────────────────────
@@ -5700,7 +6109,7 @@ mod tests {
                 .await
                 .unwrap();
             let body = json_body(response).await;
-            let rows = body.as_array().expect("array");
+            let rows = body["runs"].as_array().expect("array");
             assert_eq!(rows.len(), 1, "four journal rows fold to one run: {body}");
 
             assert_eq!(rows[0]["runId"], "run-1");
@@ -5756,7 +6165,7 @@ mod tests {
                 .await
                 .unwrap();
             let body = json_body(response).await;
-            let rows = body.as_array().expect("array");
+            let rows = body["runs"].as_array().expect("array");
             assert_eq!(rows.len(), 1, "one run: {body}");
             assert_eq!(rows[0]["running"], true, "still in flight: {body}");
             assert_eq!(rows[0]["runId"], run, "{body}");
@@ -5804,7 +6213,7 @@ mod tests {
                 .await
                 .unwrap();
             let body = json_body(response).await;
-            let rows = body.as_array().expect("array");
+            let rows = body["runs"].as_array().expect("array");
             assert_eq!(rows.len(), 1, "only the asked-for workflow: {body}");
             assert_eq!(rows[0]["runId"], "run-mine");
             let started = rows[0]["startedNodes"].as_array().expect("startedNodes");
@@ -5838,7 +6247,7 @@ mod tests {
                 .unwrap();
             let body = json_body(response).await;
             assert!(
-                body[0].get("startedNodes").is_none(),
+                body["runs"][0].get("startedNodes").is_none(),
                 "an empty trail is absent, not `[]`: {body}"
             );
         }
@@ -5878,11 +6287,13 @@ mod tests {
                 .await
                 .unwrap();
             let body = json_body(response).await;
-            assert!(body[0].get("running").is_none(), "settled: {body}");
-            let started = body[0]["startedNodes"].as_array().expect("startedNodes");
+            assert!(body["runs"][0].get("running").is_none(), "settled: {body}");
+            let started = body["runs"][0]["startedNodes"]
+                .as_array()
+                .expect("startedNodes");
             assert_eq!(started.len(), 2, "{body}");
             assert_eq!(started[1], "draft");
-            let nodes = body[0]["nodes"].as_array().expect("nodes");
+            let nodes = body["runs"][0]["nodes"].as_array().expect("nodes");
             assert_eq!(nodes.len(), 1, "`draft` never finished: {body}");
         }
 
@@ -5953,7 +6364,7 @@ mod tests {
                 .await
                 .unwrap();
             let body = json_body(response).await;
-            let rows = body.as_array().expect("array");
+            let rows = body["runs"].as_array().expect("array");
             assert_eq!(rows.len(), 1, "{body}");
             assert!(
                 rows[0].get("error").is_none(),
@@ -6017,9 +6428,18 @@ mod tests {
                 .unwrap();
             let body = json_body(response).await;
             assert_eq!(
-                body[0]["blockedNodes"][0]["stranded"], 1,
+                body["runs"][0]["blockedNodes"][0]["stranded"], 1,
                 "an approval id the journal no longer holds must read as stranded, \
                  or the drawer goes on linking to an empty queue: {body}"
+            );
+            // Issue #1189, and the assertion that pins the reordering: the
+            // verdict pass now runs AFTER this join, so it can see what the join
+            // wrote. With the old ordering the row read `blocked` here — the
+            // blocked-node list said "cannot be continued" and the run's own
+            // one-word reading said "go and decide it", on the same row.
+            assert_eq!(
+                body["runs"][0]["verdict"], "stranded",
+                "the verdict must be derived after the reconciliation, not before it: {body}"
             );
         }
 
@@ -6102,9 +6522,203 @@ mod tests {
                 .unwrap();
             let body = json_body(response).await;
             assert!(
-                body[0]["blockedNodes"][0].get("stranded").is_none(),
+                body["runs"][0]["blockedNodes"][0].get("stranded").is_none(),
                 "a parked approval is still decidable, so nothing may be marked \
                  stranded: {body}"
+            );
+            assert_eq!(
+                body["runs"][0]["verdict"], "blocked",
+                "a run with a live card is still blocked, not stranded: {body}"
+            );
+        }
+
+        /// Issue #1189, THE regression test for the bigger half of the defect.
+        ///
+        /// The marketing tenant's shape, verbatim: gate nodes on
+        /// `pendingApprovals`, `blockedNodes` empty, `approvals` empty, and an
+        /// empty queue. #1143's join is keyed on approval ids this shape never
+        /// records, so it could not touch these rows — 34 of the tenant's 60
+        /// runs went on scoring `awaiting-approval` about a person with nothing
+        /// to answer.
+        #[tokio::test]
+        async fn run_history_scores_a_gate_run_with_no_live_card_as_stranded() {
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let (state, _store, id) = hosted_state(&home).await;
+
+            journal_start(&state, &id, "sports_blog", "run-g", true).await;
+            let runtime = state.registry().get(&id).expect("registered");
+            runtime
+                .events()
+                .append(
+                    &id,
+                    CompanyEvent::WorkflowRunFinished {
+                        workflow_id: "sports_blog".to_string(),
+                        scheduled: true,
+                        run_id: Some("run-g".to_string()),
+                        deliveries: Vec::new(),
+                        pending_approvals: vec!["fetch_bbc".to_string(), "fetch_espn".to_string()],
+                        error: None,
+                        cancelled: false,
+                        notices: Vec::new(),
+                        board: Vec::new(),
+                        // The whole point of this shape: a paused gate writes
+                        // NEITHER of the two things #1143 reads.
+                        blocked_nodes: Vec::new(),
+                        approvals: Vec::new(),
+                    },
+                )
+                .await
+                .expect("append");
+
+            let response = router(state)
+                .oneshot(request("GET", "/api/v1/company/workflows/runs", None))
+                .await
+                .unwrap();
+            let body = json_body(response).await;
+            assert_eq!(
+                body["runs"][0]["strandedApprovals"], 2,
+                "both gates lost their card, and nothing else on this row says so: {body}"
+            );
+            assert_eq!(
+                body["runs"][0]["verdict"], "stranded",
+                "nothing in the queue is waiting on this run: {body}"
+            );
+        }
+
+        /// The negative twin, and the reason the test above proves anything.
+        ///
+        /// A join that marked every gate run stranded would satisfy it and be
+        /// far worse than no join: it would retire runs an operator can still
+        /// act on. Here the gate's card is genuinely parked — a real
+        /// `workflow.approve` effect carrying this run's id and this node's id,
+        /// which is the pair the join keys on — so the run stays awaiting and
+        /// `strandedApprovals` is skipped off the wire entirely.
+        #[tokio::test]
+        async fn run_history_leaves_a_gate_run_with_a_live_card_awaiting() {
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let (state, _store, id) = hosted_state(&home).await;
+            let runtime = state.registry().get(&id).expect("registered");
+
+            // Built by the same `gate_effect` the runner parks with, so the
+            // shape the join reads is the shape the park writes.
+            let effect = crate::runtime::workflow_resume::gate_effect(
+                "sports_blog",
+                "fetch_bbc",
+                &serde_json::json!({}),
+                "run-live-gate",
+                &[],
+                &[],
+                None,
+            );
+            let approval_id = runtime
+                .approvals
+                .park(runtime.id(), effect.clone())
+                .await
+                .expect("park");
+            runtime
+                .journal()
+                .record_parked(
+                    &approval_id,
+                    &effect,
+                    crate::ports::now_millis(),
+                    crate::runtime::journal::TaskLink::Unlinked,
+                    crate::runtime::journal::ApprovalConversation {
+                        thread: None,
+                        parent: None,
+                    },
+                    None,
+                )
+                .await
+                .expect("record");
+
+            journal_start(&state, &id, "sports_blog", "run-live-gate", true).await;
+            runtime
+                .events()
+                .append(
+                    &id,
+                    CompanyEvent::WorkflowRunFinished {
+                        workflow_id: "sports_blog".to_string(),
+                        scheduled: true,
+                        run_id: Some("run-live-gate".to_string()),
+                        deliveries: Vec::new(),
+                        pending_approvals: vec!["fetch_bbc".to_string()],
+                        error: None,
+                        cancelled: false,
+                        notices: Vec::new(),
+                        board: Vec::new(),
+                        blocked_nodes: Vec::new(),
+                        approvals: Vec::new(),
+                    },
+                )
+                .await
+                .expect("append");
+
+            let response = router(state)
+                .oneshot(request("GET", "/api/v1/company/workflows/runs", None))
+                .await
+                .unwrap();
+            let body = json_body(response).await;
+            assert!(
+                body["runs"][0].get("strandedApprovals").is_none(),
+                "the gate's card is on the queue, so nothing may be marked stranded: {body}"
+            );
+            assert_eq!(
+                body["runs"][0]["verdict"], "awaiting-approval",
+                "a decidable gate is still awaiting a person: {body}"
+            );
+        }
+
+        /// A row journaled before issue #371 carries no `run_id`, so the
+        /// `(run, node)` join has no key at all.
+        ///
+        /// It must therefore be left exactly as it read before #1189. Calling
+        /// its gates stranded on the strength of a *missing field* would retire
+        /// live work — the failure mode that is strictly worse than the one this
+        /// issue closes, because an operator cannot argue with a run the console
+        /// says is over.
+        #[tokio::test]
+        async fn run_history_leaves_a_pre_371_row_unreconciled() {
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let (state, _store, id) = hosted_state(&home).await;
+            let runtime = state.registry().get(&id).expect("registered");
+            runtime
+                .events()
+                .append(
+                    &id,
+                    CompanyEvent::WorkflowRunFinished {
+                        workflow_id: "sports_blog".to_string(),
+                        scheduled: true,
+                        // The pre-#371 shape: no correlation id, and so no start
+                        // row to pair with either.
+                        run_id: None,
+                        deliveries: Vec::new(),
+                        pending_approvals: vec!["fetch_bbc".to_string()],
+                        error: None,
+                        cancelled: false,
+                        notices: Vec::new(),
+                        board: Vec::new(),
+                        blocked_nodes: Vec::new(),
+                        approvals: Vec::new(),
+                    },
+                )
+                .await
+                .expect("append");
+
+            let response = router(state)
+                .oneshot(request("GET", "/api/v1/company/workflows/runs", None))
+                .await
+                .unwrap();
+            let body = json_body(response).await;
+            assert!(
+                body["runs"][0].get("strandedApprovals").is_none(),
+                "a row with no run id cannot be joined, so it must report nothing: {body}"
+            );
+            assert_eq!(
+                body["runs"][0]["verdict"], "awaiting-approval",
+                "an unjoinable row keeps the reading it had before #1189: {body}"
             );
         }
 
@@ -6141,9 +6755,9 @@ mod tests {
                 .await
                 .unwrap();
             let body = json_body(response).await;
-            assert_eq!(body[0]["running"], true, "{body}");
-            assert_eq!(body[0]["nodes"].as_array().unwrap().len(), 1);
-            assert!(body[0].get("error").is_none(), "{body}");
+            assert_eq!(body["runs"][0]["running"], true, "{body}");
+            assert_eq!(body["runs"][0]["nodes"].as_array().unwrap().len(), 1);
+            assert!(body["runs"][0].get("error").is_none(), "{body}");
         }
 
         /// An event log that lets exactly one run settle **inside** `list_runs`'
@@ -6328,7 +6942,7 @@ mod tests {
             // still the snapshot's, `running: true`. That is honest: the run WAS
             // in flight when the journal was sampled. What matters is that it is
             // not stamped dead.
-            let rows = body.as_array().expect("array");
+            let rows = body["runs"].as_array().expect("array");
             assert_eq!(rows.len(), 1, "{body}");
             assert!(
                 rows[0].get("error").is_none(),
@@ -6345,9 +6959,12 @@ mod tests {
                     .unwrap(),
             )
             .await;
-            assert!(next[0].get("running").is_none(), "settled: {next}");
-            assert!(next[0].get("error").is_none(), "a successful run: {next}");
-            assert_eq!(next[0]["deliveries"][0]["status"], "sent", "{next}");
+            assert!(next["runs"][0].get("running").is_none(), "settled: {next}");
+            assert!(
+                next["runs"][0].get("error").is_none(),
+                "a successful run: {next}"
+            );
+            assert_eq!(next["runs"][0]["deliveries"][0]["status"], "sent", "{next}");
         }
 
         /// **A settled row keeps one identity across reads.** The response that
@@ -6384,21 +7001,24 @@ mod tests {
             )
             .await;
 
-            assert!(first[0].get("running").is_none(), "settled: {first}");
+            assert!(
+                first["runs"][0].get("running").is_none(),
+                "settled: {first}"
+            );
             assert_eq!(
-                first[0]["seq"], second[0]["seq"],
+                first["runs"][0]["seq"], second["runs"][0]["seq"],
                 "the settling read and the one after it must agree on the row's \
                  identity: {first} then {second}"
             );
             assert_eq!(
-                first[0]["atMillis"], second[0]["atMillis"],
+                first["runs"][0]["atMillis"], second["runs"][0]["atMillis"],
                 "…and on when it settled: {first} then {second}"
             );
             // Specifically the FINISH's row, which is what the next fold uses —
             // not the start's, which is the only other candidate.
             assert!(
-                first[0]["atMillis"].as_u64().unwrap()
-                    >= first[0]["startedAtMillis"].as_u64().unwrap(),
+                first["runs"][0]["atMillis"].as_u64().unwrap()
+                    >= first["runs"][0]["startedAtMillis"].as_u64().unwrap(),
                 "the settle cannot predate the start: {first}"
             );
         }
@@ -6420,7 +7040,7 @@ mod tests {
                 .await
                 .unwrap();
             let body = json_body(response).await;
-            let rows = body.as_array().expect("array");
+            let rows = body["runs"].as_array().expect("array");
             assert_eq!(rows.len(), 1);
             assert_eq!(rows[0]["workflowId"], "digest");
             assert!(rows[0].get("nodes").is_none(), "{body}");
@@ -6450,7 +7070,7 @@ mod tests {
                 .await
                 .unwrap();
             let body = json_body(response).await;
-            let rows = body.as_array().expect("array");
+            let rows = body["runs"].as_array().expect("array");
             assert_eq!(rows.len(), 2, "{body}");
             let by_id = |run: &str| {
                 rows.iter()
@@ -6462,6 +7082,44 @@ mod tests {
             assert_eq!(by_id("run-a")["nodes"].as_array().unwrap().len(), 1);
             assert_eq!(by_id("run-b")["nodes"][0]["nodeId"], "b1");
             assert_eq!(by_id("run-b")["nodes"].as_array().unwrap().len(), 1);
+        }
+
+        /// Issue #1012. Two interleaved runs — `run-a` starts first but
+        /// `run-b` finishes last — must come back ordered by **finish**, the
+        /// field every row displays, not by the order they started. The old
+        /// `runs.reverse()` only flipped the fold's push order (start order),
+        /// so this exact fixture used to list `run-a` first despite `run-b`
+        /// carrying the newer `seq`/`atMillis`.
+        #[tokio::test]
+        async fn run_history_orders_by_finish_not_start() {
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let (state, _store, id) = hosted_state(&home).await;
+
+            // Start order: a, then b. Finish order: a, then b — so b is both
+            // the last to start AND the last to finish, which alone would not
+            // distinguish "ordered by start" from "ordered by finish". Insert
+            // a THIRD run, `c`, that starts before `b` but finishes before `a`
+            // too, so the two orderings genuinely disagree on where it lands.
+            journal_start(&state, &id, "wf", "run-a", false).await;
+            journal_start(&state, &id, "wf", "run-c", false).await;
+            journal_finish(&state, &id, "wf", "run-c", false, None).await;
+            journal_start(&state, &id, "wf", "run-b", false).await;
+            journal_finish(&state, &id, "wf", "run-a", false, None).await;
+            journal_finish(&state, &id, "wf", "run-b", false, None).await;
+
+            // Start order: a, c, b. Finish order: c, a, b.
+            // By-start reversal would read: b, c, a (wrong).
+            // By-finish descending must read: b, a, c.
+            let response = router(state)
+                .oneshot(request("GET", "/api/v1/company/workflows/runs", None))
+                .await
+                .unwrap();
+            let body = json_body(response).await;
+            let rows = body["runs"].as_array().expect("array");
+            assert_eq!(rows.len(), 3, "{body}");
+            let ids: Vec<&str> = rows.iter().map(|r| r["runId"].as_str().unwrap()).collect();
+            assert_eq!(ids, vec!["run-b", "run-a", "run-c"], "{body}");
         }
 
         /// `?limit=` now cuts **runs**, not journal rows — the number the caller
@@ -6490,7 +7148,7 @@ mod tests {
                 .await
                 .unwrap();
             let body = json_body(response).await;
-            let rows = body.as_array().expect("array");
+            let rows = body["runs"].as_array().expect("array");
             assert_eq!(rows.len(), 2, "{body}");
             // Newest first, and each one whole.
             assert_eq!(rows[0]["runId"], "run-2");
@@ -6523,7 +7181,7 @@ mod tests {
                 .await
                 .unwrap();
             let body = json_body(response).await;
-            let rows = body.as_array().expect("array");
+            let rows = body["runs"].as_array().expect("array");
             assert_eq!(rows.len(), 1, "body: {body}");
             assert_eq!(rows[0]["workflowId"], "digest");
         }
@@ -6555,14 +7213,14 @@ mod tests {
 
             // Explicit cap, taken from the newest end.
             let capped = page("/api/v1/company/workflows/runs?limit=3").await;
-            let rows = capped.as_array().expect("array");
+            let rows = capped["runs"].as_array().expect("array");
             assert_eq!(rows.len(), 3);
             assert_eq!(rows[0]["workflowId"], "wf-24", "newest first: {capped}");
 
             // No `limit` → the default page, not the whole 25.
             let defaulted = page("/api/v1/company/workflows/runs").await;
             assert_eq!(
-                defaulted.as_array().unwrap().len(),
+                defaulted["runs"].as_array().unwrap().len(),
                 DEFAULT_RUN_LIMIT,
                 "{defaulted}"
             );
@@ -6570,11 +7228,15 @@ mod tests {
             // `limit=0` means "I didn't really mean zero" — an empty page is
             // never what a caller wants, so it falls back to the default.
             let zero = page("/api/v1/company/workflows/runs?limit=0").await;
-            assert_eq!(zero.as_array().unwrap().len(), DEFAULT_RUN_LIMIT, "{zero}");
+            assert_eq!(
+                zero["runs"].as_array().unwrap().len(),
+                DEFAULT_RUN_LIMIT,
+                "{zero}"
+            );
 
             // Above the ceiling clamps; with only 25 rows that is all of them.
             let huge = page("/api/v1/company/workflows/runs?limit=100000").await;
-            assert_eq!(huge.as_array().unwrap().len(), 25, "{huge}");
+            assert_eq!(huge["runs"].as_array().unwrap().len(), 25, "{huge}");
         }
 
         /// A company that has never run a workflow gets an empty list, not a
@@ -6590,7 +7252,10 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(response.status(), StatusCode::OK);
-            assert_eq!(json_body(response).await.as_array().unwrap().len(), 0);
+            assert_eq!(
+                json_body(response).await["runs"].as_array().unwrap().len(),
+                0
+            );
         }
 
         /// **Route-ordering pin.** `runs` is a syntactically valid `wid`, so
@@ -6614,9 +7279,12 @@ mod tests {
                 StatusCode::OK,
                 "the static /workflows/runs must win over /workflows/{{wid}}"
             );
-            // An array of outcomes, not a single graph object.
+            // A runs page — `{ runs: [...], hasMore }` — not a single graph object.
             let body = json_body(response).await;
-            assert!(body.is_array(), "graph read shadowed the history: {body}");
+            assert!(
+                body["runs"].is_array(),
+                "graph read shadowed the history: {body}"
+            );
         }
 
         // -------------------------------------------------------------------
@@ -6747,7 +7415,7 @@ mod tests {
                 .unwrap();
             assert_eq!(response.status(), StatusCode::OK);
             let body = json_body(response).await;
-            assert_eq!(body[0]["workflowId"], "digest");
+            assert_eq!(body["runs"][0]["workflowId"], "digest");
         }
 
         // ── Issue #259: edit + delete at the HTTP boundary ──────────────────
@@ -7308,12 +7976,9 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(response.status(), StatusCode::OK);
-            let rows = json_body(response).await;
-            assert_eq!(
-                rows.as_array().unwrap().len(),
-                1,
-                "past runs must outlive the workflow: {rows}"
-            );
+            let body = json_body(response).await;
+            let rows = body["runs"].as_array().unwrap();
+            assert_eq!(rows.len(), 1, "past runs must outlive the workflow: {body}");
             assert_eq!(rows[0]["workflowId"], "greeter");
         }
 
@@ -7562,15 +8227,15 @@ mod tests {
                 .await
                 .unwrap();
             let body = json_body(response).await;
-            assert_eq!(body.as_array().unwrap().len(), 1);
+            assert_eq!(body["runs"].as_array().unwrap().len(), 1);
             // `running` is skip-serialized when false, so a settled row simply
             // omits it — assert it is not `true` rather than equal to `false`.
             assert_ne!(
-                body[0]["running"], true,
+                body["runs"][0]["running"], true,
                 "an absent run is settled on the read, not left spinning: {body}"
             );
             assert_eq!(
-                body[0]["error"],
+                body["runs"][0]["error"],
                 crate::runtime::workflow_outcome::INTERRUPTED_BY_RESTART
             );
 
@@ -7612,9 +8277,9 @@ mod tests {
                 .await
                 .unwrap();
             let body = json_body(response).await;
-            assert_eq!(body.as_array().unwrap().len(), 1);
+            assert_eq!(body["runs"].as_array().unwrap().len(), 1);
             assert_eq!(
-                body[0]["running"], true,
+                body["runs"][0]["running"], true,
                 "a run the process is running must not be settled from under it"
             );
 
@@ -8192,7 +8857,7 @@ label = "ok"
                 .await
                 .unwrap();
             let rows = json_body(response).await;
-            let row = &rows.as_array().expect("array")[0];
+            let row = &rows["runs"].as_array().expect("array")[0];
             assert_eq!(row["runId"], run_id.as_str(), "{rows}");
             assert_eq!(row["cancelled"], true, "{rows}");
             assert!(

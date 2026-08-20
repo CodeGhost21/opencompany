@@ -140,7 +140,15 @@ function SidebarProvider({
           } as React.CSSProperties
         }
         className={cn(
-          "group/sidebar-wrapper flex h-svh min-h-svh w-full has-data-[variant=inset]:bg-sidebar",
+          // `bg-chrome` (issue #1178): this element is the chrome layer, and
+          // the ONE place it is painted. Both the sidebar column
+          // (`sidebar-inner`) and the content column (`SidebarInset`) are
+          // transparent, so they are this fill showing through — which is what
+          // makes them read as one continuous surface rather than two tinted
+          // panes meeting at a seam. It lives here rather than on the caller so
+          // the primitive is self-sufficient: a second provider anywhere would
+          // otherwise render an unpainted shell with no error.
+          "group/sidebar-wrapper flex h-svh min-h-svh w-full bg-chrome has-data-[variant=inset]:bg-sidebar",
           className
         )}
         {...props}
@@ -245,7 +253,10 @@ function Sidebar({
           // Adjust the padding for floating and inset variants.
           variant === "floating" || variant === "inset"
             ? "p-2 group-data-[collapsible=icon]:w-[calc(var(--sidebar-width-icon)+(--spacing(4))+2px)]"
-            : "group-data-[collapsible=icon]:w-(--sidebar-width-icon) group-data-[side=left]:border-r group-data-[side=right]:border-l",
+            // No `border-r` (issue #1178): the column and the content card
+            // separate by fill contrast now, and a filled seam would draw a
+            // line straight across the chrome that separation replaces.
+            : "group-data-[collapsible=icon]:w-(--sidebar-width-icon)",
           className
         )}
         {...props}
@@ -253,7 +264,15 @@ function Sidebar({
         <div
           data-sidebar="sidebar"
           data-slot="sidebar-inner"
-          className="flex size-full flex-col bg-sidebar group-data-[variant=floating]:rounded-lg group-data-[variant=floating]:shadow-sm group-data-[variant=floating]:ring-1 group-data-[variant=floating]:ring-sidebar-border"
+          // No fill (issue #1178). The column sits directly on the window
+          // chrome the shell root paints, and so does the margin around the
+          // content card — one continuous surface, which is the whole point of
+          // the two-layer shell. Painting `bg-sidebar` here would tint this
+          // column separately from the frame beside it and re-draw the seam.
+          //
+          // The mobile sheet above keeps its fill: it is an overlay dragged
+          // over the page, not a pane of the shell.
+          className="flex size-full flex-col bg-transparent group-data-[variant=floating]:rounded-lg group-data-[variant=floating]:shadow-sm group-data-[variant=floating]:ring-1 group-data-[variant=floating]:ring-sidebar-border"
         >
           {children}
         </div>
@@ -322,7 +341,11 @@ function SidebarInset({ className, ...props }: React.ComponentProps<"main">) {
         // sidebar, a 100% basis makes this box overflow the row by exactly the
         // sidebar's width. Nothing showed it while every view centred its own
         // max-width container, but a full-bleed view runs off the right edge.
-        "relative flex min-w-0 flex-1 flex-col bg-background md:peer-data-[variant=inset]:m-2 md:peer-data-[variant=inset]:ml-0 md:peer-data-[variant=inset]:rounded-xl md:peer-data-[variant=inset]:shadow-sm md:peer-data-[variant=inset]:peer-data-[state=collapsed]:ml-2",
+        // `bg-transparent`, not `bg-background` (issue #1178). This is the
+        // chrome-side column: the opaque sheet is the `ContentSurface` card
+        // inside it, which carries `--background` and the inset margin. A fill
+        // here would paint over the frame the card is supposed to float in.
+        "relative flex min-w-0 flex-1 flex-col bg-transparent md:peer-data-[variant=inset]:m-2 md:peer-data-[variant=inset]:ml-0 md:peer-data-[variant=inset]:rounded-xl md:peer-data-[variant=inset]:shadow-sm md:peer-data-[variant=inset]:peer-data-[state=collapsed]:ml-2",
         className
       )}
       {...props}
@@ -657,7 +680,12 @@ function SidebarMenuDot({
       aria-label={label}
       title={label}
       className={cn(
-        "pointer-events-none absolute top-1.5 right-1.5 hidden size-2 rounded-full bg-[var(--status-blocked)] ring-2 ring-sidebar select-none group-data-[collapsible=icon]:block",
+        // `ring-chrome`, not `ring-sidebar` (issue #1178). The ring is a
+        // CUT-OUT: 2px of the ground punched around the dot so it reads off
+        // whatever is behind it. The collapsed rail — the only state this dot
+        // renders in — sits on the window chrome now, so a ring painted
+        // `--sidebar` draws a mismatched halo instead of a cut-out.
+        "pointer-events-none absolute top-1.5 right-1.5 hidden size-2 rounded-full bg-[var(--status-blocked)] ring-2 ring-chrome select-none group-data-[collapsible=icon]:block",
         className
       )}
       {...props}

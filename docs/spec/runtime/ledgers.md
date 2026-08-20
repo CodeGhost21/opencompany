@@ -275,9 +275,15 @@ the loss the append-only shape exists to prevent. Deleting the rows too is
 
 ## The console
 
-The Ledgers section renders from the ledger's own `fields`, `statuses` and
-`sections`, never from anything hard-coded. A ledger a teammate declared this
-morning renders correctly this afternoon with no console release; a screen that
+The console-facing IA — naming ("ledger" stays an internal word only), how a
+company's lists reach the sidebar, where declaring and retiring one lives, and
+the plain-language wizard that replaced the JSON declare dialog — is
+`docs/spec/runtime/ledgers-console-ia.md` (issue #1284). What follows here is
+how a list's own screen renders, which that redesign left unchanged.
+
+Each list's screen renders from its own `fields`, `statuses` and `sections`,
+never from anything hard-coded. A list a teammate declared this morning
+renders correctly this afternoon with no console release; a screen that
 hard-coded the goals columns would have made "declare your own axis" a promise
 the UI quietly broke.
 
