@@ -38,6 +38,7 @@ import {
   SidebarRail,
   SidebarTrigger,
 } from "@/components/ui/sidebar";
+import { ContentSurface } from "@/components/content-surface";
 import { FeedbackDialog } from "@/components/feedback-dialog";
 import { HostSwitcher } from "@/components/host-switcher";
 import {
@@ -169,6 +170,25 @@ const NAV: NavItem[] = [
   // { view: "pages", label: "Pages", icon: AppWindow },
   { view: "settings", label: "Settings", icon: Settings2 },
 ];
+
+/**
+ * The views that render edge-to-edge instead of on the inset card (issue
+ * #1178).
+ *
+ * Both are canvases sized against the box they are given rather than pages laid
+ * out inside it, so a 12px frame is not a margin to them — it is a crop.
+ *
+ *   - `overview` is the force-directed knowledge graph, laid out against
+ *     `h-svh` and clipped by its own `overflow-hidden`. Framed, it would
+ *     measure the window and be drawn into a box 24px smaller in both axes.
+ *   - `workflows` is the React Flow canvas, whose viewport transform and
+ *     minimap viewbox are both computed from the container's measured rect.
+ *     That is precisely the surface #1259 and #1261 just finished un-cropping.
+ *
+ * Everything else is a document — headers, cards, tables, prose — and reads
+ * better on a sheet with an edge. See `ContentSurface`.
+ */
+const FULL_BLEED_VIEWS: ReadonlySet<View> = new Set<View>(["overview", "workflows"]);
 
 /**
  * Routable without a nav entry — reachable by URL, absent from the sidebar.
@@ -1359,7 +1379,14 @@ export function AppShell({
   });
 
   return (
-    <SidebarProvider className="h-svh overflow-hidden">
+    <SidebarProvider
+      // The chrome layer, and the ONE place it is painted (issue #1178). The
+      // sidebar column and the frame around the content card are both this
+      // surface showing through, which is what makes them read as continuous;
+      // tinting each pane on its own lands them on different values and
+      // reintroduces the seam the two-layer shell exists to remove.
+      className="h-svh overflow-hidden bg-chrome"
+    >
       <Sidebar collapsible="icon">
         <SidebarHeader>
           {/* The header is the column talking about itself: which host this
@@ -1447,11 +1474,12 @@ export function AppShell({
           strip held the "Done" column, which is why a card could not be dragged
           into it (issue #334); every view was losing the same strip. */}
       <SidebarInset className="min-h-0 min-w-0">
-        {/* A `div`, not `main`: `SidebarInset` above is already the console's
-            one `<main>` landmark. This is only a flex/scroll container — a
-            second nested `<main>` here gave every page two identical
-            "skip to content" destinations (issue #1221). */}
-        <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+        {/* The card half of the two-layer shell: the one opaque sheet in the
+            console, floating on the chrome the shell root paints (issue
+            #1178). A `div`, not `main` — `SidebarInset` above is already the
+            console's one `<main>` landmark, and a second nested one gave every
+            page two identical "skip to content" destinations (issue #1221). */}
+        <ContentSurface unframed={FULL_BLEED_VIEWS.has(view)}>
           {view === "overview" && (
             <Overview client={client} company={company} companyName={feed.status.name} />
           )}
@@ -1734,7 +1762,7 @@ export function AppShell({
             />
           )}
           {view === "feedback" && <FeedbackView client={client} company={company} />}
-        </div>
+        </ContentSurface>
 
         {/* Mobile only: dedicated chrome for the way back to navigation, not an
             overlay on top of it. A `fixed` trigger here used to float over
@@ -1744,7 +1772,7 @@ export function AppShell({
             wrapper's flex-1 height (and every view's own overflow-y-auto
             within it) already stops short of it. No view needs to know this
             control exists. */}
-        <div className="flex shrink-0 items-center border-t bg-background p-2 md:hidden">
+        <div className="flex shrink-0 items-center bg-transparent px-3 pb-3 md:hidden">
           <SidebarTrigger aria-label="Toggle sidebar" />
         </div>
       </SidebarInset>
