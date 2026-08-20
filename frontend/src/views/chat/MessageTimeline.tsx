@@ -9,7 +9,7 @@ import { Avatar } from "./Avatar";
 import { MessageRow } from "./MessageRow";
 import { StepTimeline } from "./StepTimeline";
 import { WorkingIndicator } from "./WorkingIndicator";
-import { channelTitle, type Channel, type TimelineItem } from "./model";
+import { channelIntroSentence, channelTitle, type Channel, type TimelineItem } from "./model";
 
 interface Props {
   channel: Channel;
@@ -283,11 +283,7 @@ function ChannelIntro({
           conversation (issue #934). The identity block above is not a claim
           and stays either way, so the pane still says where you are. */}
       <p className="mt-1 max-w-prose text-sm text-muted-foreground">
-        {loading
-          ? sentence(channel.purpose)
-          : channel.kind === "dm"
-            ? `This is the start of your direct message with ${channel.name} — ${lower(channel.purpose)}.`
-            : `This is the very beginning of ${channelTitle(channel)}. ${sentence(channel.purpose)}`}
+        {channelIntroSentence(channel, loading)}
       </p>
       {/* The two openings a new channel actually has. Held back until the
           history has answered, for the same reason the sentence above is:
@@ -435,13 +431,4 @@ function TypingRow({ channel }: { channel: Channel }) {
       <WorkingIndicator srLabel="Replying…" />
     </div>
   );
-}
-
-function lower(s: string): string {
-  return s.charAt(0).toLowerCase() + s.slice(1);
-}
-
-function sentence(s: string): string {
-  const t = s.trim();
-  return /[.!?]$/.test(t) ? t : `${t}.`;
 }

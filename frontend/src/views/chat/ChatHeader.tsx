@@ -4,7 +4,7 @@ import { Check, CircleDot, Copy, Hash, Lock, PanelLeft, Users } from "lucide-rea
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { Avatar } from "./Avatar";
-import { channelTitle, dmFace, type Channel } from "./model";
+import { channelSubtitle, channelTitle, dmFace, type Channel } from "./model";
 
 interface Props {
   channel: Channel;
@@ -20,9 +20,14 @@ interface Props {
  * The bar above a channel's timeline.
  *
  * It is deliberately thin — a kind mark (the teammate's avatar on a DM), the
- * name, and the purpose in the tooltip — with the two things you actually
- * reach for on the right: the member pane and a copy of the channel name. The
- * copy button only appears on hover so the title reads clean at rest.
+ * name, and a muted second line past the divider — with the two things you
+ * actually reach for on the right: the member pane and a copy of the channel
+ * name. The copy button only appears on hover so the title reads clean at rest.
+ *
+ * That second line is [`channelSubtitle`], which answers `null` when the only
+ * thing it could say is what the title already says. The whole `<span>` goes
+ * with it: it carries the `border-l` that draws the divider, so rendering it
+ * empty would leave a rule hanging beside the name with nothing after it.
  */
 export function ChatHeader({
   channel,
@@ -33,6 +38,7 @@ export function ChatHeader({
 }: Props) {
   const [copied, setCopied] = useState(false);
   const title = channelTitle(channel);
+  const subtitle = channelSubtitle(channel);
 
   async function copyName() {
     try {
@@ -62,7 +68,7 @@ export function ChatHeader({
         <KindIcon channel={channel} />
         <h1
           className="min-w-0 truncate text-base font-semibold tracking-tight"
-          title={channel.purpose}
+          title={subtitle ?? undefined}
         >
           {channel.name}
         </h1>
@@ -76,9 +82,11 @@ export function ChatHeader({
         >
           {copied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
         </Button>
-        <span className="hidden min-w-0 truncate border-l pl-2 text-xs text-muted-foreground sm:block">
-          {channel.purpose}
-        </span>
+        {subtitle && (
+          <span className="hidden min-w-0 truncate border-l pl-2 text-xs text-muted-foreground sm:block">
+            {subtitle}
+          </span>
+        )}
       </div>
 
       <Button

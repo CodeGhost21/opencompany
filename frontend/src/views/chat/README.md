@@ -174,3 +174,23 @@ the header drew before issue #1170. Both go through `dmFace(channel)` in
 glyph (`#`, `Lock`, `CircleDot`) instead, because neither has one person behind
 it. The header draws its tile at 24px, the floor below which `Avatar`'s
 `markOnly` says a mascot is a smudge and the bare tone tile is the honest mark.
+
+## One name per teammate
+
+The header's title is `channel.name`; the muted slot past the divider is
+`channelSubtitle(channel)`. A DM's `purpose` is the teammate's **description**,
+falling back to their role — the field parallel to a desk's blurb, since both
+answer "what is this line for". It used to be the role alone, which is an
+identity field in a description slot, and `fromDto` resolves a teammate's name
+as `dto.name?.trim() || dto.role`: a company that declares roles and names
+nobody made the two slots one string, and every DM header in it read
+`Backend Engineer │ Backend Engineer` (issue #1180).
+
+So `channelSubtitle` returns `null` — not `""` — for a purpose that is empty or
+that only repeats the title, compared case- and whitespace-insensitively. The
+header drops the entire `<span>` when it does, divider included: the `border-l`
+lives on that element, so keeping it empty would leave a rule hanging beside the
+name. `ChannelRail`'s row tooltip and `MessageTimeline`'s conversation-intro
+clause read the same helper, for the same reason. The rule is kind-agnostic: a
+desk whose blurb just restates its slug is the identical non-fact under `#`, and
+a blurb that says something the slug does not is untouched.
