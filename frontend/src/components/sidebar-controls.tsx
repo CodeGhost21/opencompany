@@ -277,6 +277,12 @@ export function SidebarCollapseButton() {
             data-testid="sidebar-collapse"
             onClick={toggleSidebar}
             className={cn(
+              // The same resting dim as the rows below, reached through the
+              // ink's alpha rather than `RESTING_ROW`'s `opacity-60`: opacity
+              // dims the whole box, focus ring included, and the ring on an
+              // unlabelled button is the only thing saying where the keyboard
+              // is. (`RESTING_ROW` also carries `data-active:opacity-100`,
+              // which is a nav row's business and never this one's.)
               "shrink-0 text-sidebar-foreground/60",
               // Three classes replacing exactly one of `ghost`'s each, so
               // tailwind-merge drops the original rather than leaving the two
