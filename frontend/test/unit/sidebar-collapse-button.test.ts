@@ -13,10 +13,13 @@ import { SidebarProvider } from "@/components/ui/sidebar";
  * This suite is normally for pure functions (see `vitest.config.ts`), and it
  * earns the exception the same way `board-collapsed-columns.test.ts` does: the
  * claims here only exist at the rendered element. The one thing that has to
- * hold is that an ICON-ONLY button still says what it is and what it did —
- * there is no label to fall back on, so the accessible name and `aria-expanded`
- * are the whole contract, and both are exactly the kind of attribute a styling
- * pass drops without breaking a single render.
+ * hold is that an ICON-ONLY button still says what it is and what it did.
+ * There is no visible label to fall back on and no `aria-expanded` (see the
+ * component for why), so the accessible NAME is the entire state channel: it
+ * reads "Collapse sidebar" while the column is showing and "Expand sidebar"
+ * once it is a rail. An `aria-label` is exactly the kind of attribute a
+ * styling pass drops without breaking a single render, and a name that stops
+ * tracking the provider's state is a control that lies about what it does.
  *
  * The other half of the fix — that the button sits in the sidebar's header and
  * not among the nav rows, and that it stays inside the 3rem rail it produces —
@@ -93,7 +96,7 @@ function control(): HTMLButtonElement {
 }
 
 describe("the sidebar collapse button", () => {
-  it("names itself and reports the state it toggles", () => {
+  it("names itself, on a real button", () => {
     mount(true);
 
     const button = control();
@@ -101,22 +104,21 @@ describe("the sidebar collapse button", () => {
     // tab-reachable and Enter/Space-operable without any help from us.
     expect(button.tagName).toBe("BUTTON");
     expect(button.getAttribute("aria-label")).toBe("Collapse sidebar");
-    expect(button.getAttribute("aria-expanded")).toBe("true");
   });
 
-  it("flips its name and its state when pressed", () => {
+  it("flips its name from the provider's state when pressed", () => {
     mount(true);
 
     act(() => control().click());
 
+    // The name follows `useSidebar().state`, not a local flag: the click went
+    // through the provider and came back out as a different label.
     const button = control();
     expect(button.getAttribute("aria-label")).toBe("Expand sidebar");
-    expect(button.getAttribute("aria-expanded")).toBe("false");
 
     // …and back, so the control is a toggle rather than a one-way trip.
     act(() => control().click());
     expect(control().getAttribute("aria-label")).toBe("Collapse sidebar");
-    expect(control().getAttribute("aria-expanded")).toBe("true");
   });
 
   it("is never nameless, in either state it can be mounted in", () => {

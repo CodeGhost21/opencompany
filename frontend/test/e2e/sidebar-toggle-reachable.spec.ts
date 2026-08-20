@@ -58,7 +58,6 @@ test.describe("sidebar toggle reachability", () => {
     // is: this control is icon-only, so an `aria-label` lost in a refactor
     // leaves a button a screen reader announces as "button".
     await expect(toggle).toBeInViewport();
-    await expect(toggle).toHaveAttribute("aria-expanded", "true");
 
     // Chrome, not a destination. It lives in the header with the host switcher
     // and is nowhere in the nav list.
@@ -95,7 +94,6 @@ test.describe("sidebar toggle reachability", () => {
     const expand = page.getByRole("button", { name: "Expand sidebar", exact: true });
     await expect(expand).toBeVisible();
     await expect(expand).toBeInViewport();
-    await expect(expand).toHaveAttribute("aria-expanded", "false");
 
     const railBox = await expand.boundingBox();
     expect(railBox, "the collapsed control should have a box").not.toBeNull();

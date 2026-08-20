@@ -261,20 +261,31 @@ export function SidebarCollapseButton() {
             // "button". The tooltip says the same words, but a tooltip is a
             // visual affordance and cannot be relied on for the name.
             aria-label={label}
-            // …and it reports the state it toggles, so the control is not
-            // write-only to a screen reader. No `aria-controls`: the sidebar
-            // has no stable id to point at, and a dangling one is worse than
-            // none.
-            aria-expanded={!collapsed}
+            // Deliberately NO `aria-expanded`, and not an oversight.
+            //
+            // The name already carries the state: it says "Collapse sidebar"
+            // while the column is showing and "Expand sidebar" once it is a
+            // rail, so a reader is told what pressing does and, by the change,
+            // what happened. `aria-expanded` on top of that announces the
+            // state twice ("Expand sidebar, collapsed") — and `ghost` styles
+            // the attribute as "the popup under me is open", which is what it
+            // means on the dropdown triggers that variant was written for. On
+            // this button it painted a pressed chip for as long as the sidebar
+            // was open, and Tailwind sorts `aria-expanded:` after `hover:`, so
+            // overriding the chip also swallowed the hover feedback. A second
+            // channel saying the same thing is not worth either.
             data-testid="sidebar-collapse"
             onClick={toggleSidebar}
             className={cn(
               "shrink-0 text-sidebar-foreground/60",
-              // `sidebar-accent`, NOT `Button`'s stock `hover:bg-muted`. The
-              // muted tint is tuned against the canvas, and this button is on
-              // the sidebar's surface — which is a different rung, and about
-              // to move again (issue #1178).
-              "hover:bg-sidebar-accent hover:text-sidebar-accent-foreground",
+              // Three classes replacing exactly one of `ghost`'s each, so
+              // tailwind-merge drops the original rather than leaving the two
+              // to race: `hover:bg-muted`, `hover:text-foreground` and
+              // `dark:hover:bg-muted/50`. The muted tint is tuned against the
+              // canvas; this button is on the sidebar's surface, which is a
+              // different rung and moving again in issue #1178. The accent is
+              // also what every row in this column already hovers to.
+              "hover:bg-sidebar-accent hover:text-sidebar-accent-foreground dark:hover:bg-sidebar-accent",
               "focus-visible:ring-sidebar-ring/50",
               // 28px beside a 48px nameplate, 32px on the rail. See the note
               // on the collapsed rail above.
