@@ -4,6 +4,7 @@ import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
+import type { DeptLite } from "@/views/overview/kg/KnowledgeDetail";
 import { KnowledgeGraphFullscreen } from "@/views/overview/kg/KnowledgeGraphFullscreen";
 
 /**
@@ -31,27 +32,28 @@ let root: Root;
 
 const RAIL_CLEARANCE = "right-[316px]";
 
+const DESKS: DeptLite[] = [
+  { deptId: "desk:eng", teamId: "team:desk:eng", name: "Engineering", tagline: "", color: "var(--accent)" },
+  { deptId: "desk:gtm", teamId: "team:desk:gtm", name: "Go-to-Market", tagline: "", color: "var(--ok)" },
+];
+
 /** The shell, with or without a detail card in the rail. */
 function render(detail: boolean) {
   act(() => {
     root.render(
-      createElement(
-        KnowledgeGraphFullscreen,
-        {
-          deptList: [
-            { teamId: "eng", name: "Engineering", color: "var(--accent)" },
-            { teamId: "gtm", name: "Go-to-Market", color: "var(--ok)" },
-          ],
-          currentTeamId: "eng",
-          currentDept: { teamId: "eng", name: "Engineering", color: "var(--accent)" },
-          toolWiki: null,
-          extraDetail: detail ? createElement("div", { "data-testid": "card" }, "a card") : undefined,
-          statusSlot: createElement("div", { "data-testid": "snapshot" }, "Snapshot 09:41"),
-          onNavDept: () => {},
-          onBack: () => {},
-        },
-        createElement("svg"),
-      ),
+      createElement(KnowledgeGraphFullscreen, {
+        deptList: DESKS,
+        currentTeamId: DESKS[0].teamId,
+        currentDept: DESKS[0],
+        toolWiki: null,
+        extraDetail: detail ? createElement("div", { "data-testid": "card" }, "a card") : undefined,
+        statusSlot: createElement("div", { "data-testid": "snapshot" }, "Snapshot 09:41"),
+        onNavDept: () => {},
+        onBack: () => {},
+        // `children` is a required prop here, not a JSX convenience — passing
+        // it positionally to `createElement` satisfies React and not the type.
+        children: createElement("svg"),
+      }),
     );
   });
 }
