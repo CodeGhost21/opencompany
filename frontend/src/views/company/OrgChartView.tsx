@@ -46,6 +46,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Skeleton } from "@/components/ui/skeleton";
+import { roleSubtitle } from "@/lib/team";
 import {
   addMemberFailure,
   addOutcome,
@@ -835,6 +836,11 @@ function Seat({
   // state, so offering the link would send the operator to a dead end to
   // discover what the badge beside the name already says.
   const href = seat.known ? teamHref(seat.id) : null;
+  // Issue #1208: only when the role is not the name over again. A seat's two
+  // strings come from one roster row, and the console's own name fallback
+  // (`fromDto`) makes them identical for every agent a manifest declares
+  // without a display name — which was every seat on this chart.
+  const subtitle = roleSubtitle(seat.name, seat.role);
 
   const label = (
     <>
@@ -848,9 +854,9 @@ function Seat({
       <span className={cn("truncate", !seat.known && "text-muted-foreground")}>
         {seat.name}
       </span>
-      {seat.role && (
+      {subtitle && (
         <span className="truncate text-xs text-muted-foreground">
-          {seat.role}
+          {subtitle}
         </span>
       )}
       {/* A seat naming somebody the roster no longer has. Shown, not hidden:
