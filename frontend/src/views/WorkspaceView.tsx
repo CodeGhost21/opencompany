@@ -224,7 +224,36 @@ export function migrationBannerText(files: number, folders: number): string {
 }
 
 /** What the editor's status line is currently reporting. */
-type SaveState = "idle" | "saving" | "saved" | "error";
+export type SaveState = "idle" | "dirty" | "saving" | "saved" | "error";
+
+/**
+ * What the status line says for a state, or `null` for the states with nothing
+ * to report (issue #1372).
+ *
+ * `dirty` exists because the line used to be **silent for the only window in
+ * which the operator's words are at risk**. Typing set `idle`, `idle` rendered
+ * nothing, and the first thing the header ever said was "Saved" — after the
+ * risk had passed. An operator who typed a sentence and reloaded inside the
+ * autosave debounce lost it, having been told nothing.
+ *
+ * So the two silent states are now the two honest silences: `idle` is an
+ * untouched note, and everything the operator has typed is announced until the
+ * host has acknowledged it.
+ */
+export function saveStatusLabel(state: SaveState): string | null {
+  switch (state) {
+    case "dirty":
+      return "Unsaved";
+    case "saving":
+      return "Saving…";
+    case "saved":
+      return "Saved";
+    case "error":
+      return "Not saved — retrying on edit";
+    default:
+      return null;
+  }
+}
 
 /**
  * Text the operator wrote into a note that no longer exists, held out of the
@@ -670,9 +699,28 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
     };
   }, []);
 
+  // …and neither must unloading the page (issue #1372). The unmount cleanup
+  // above covers every navigation React knows about, which is why switching
+  // notes was already safe. A reload, a tab close or a link out of the console
+  // is not one of those: the debounce timer dies with the document and the
+  // typing goes with it, silently. `preventDefault` is the whole modern API —
+  // the browser writes its own wording — and it fires only while there is
+  // genuinely something buffered, so an operator who is merely reading is
+  // never asked.
+  useEffect(() => {
+    const guard = (event: BeforeUnloadEvent) => {
+      if (!pending.current) return;
+      event.preventDefault();
+    };
+    window.addEventListener("beforeunload", guard);
+    return () => window.removeEventListener("beforeunload", guard);
+  }, []);
+
   function onEdit(id: string, content: string) {
     setDraft(content);
-    setSaveState("idle");
+    // `dirty`, not `idle`: from this keystroke until the host acknowledges the
+    // write, the only copy of these words is in this tab (issue #1372).
+    setSaveState("dirty");
     pending.current = { id, content };
     if (timer.current) clearTimeout(timer.current);
     timer.current = setTimeout(() => void flushRef.current(), AUTOSAVE_DELAY_MS);
@@ -1580,20 +1628,30 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
   );
 }
 
-/** The editor's save indicator: quiet when idle, explicit when it matters. */
+/**
+ * The editor's save indicator: quiet only on a note nobody has touched.
+ *
+ * `dirty` carries a filled dot as well as the word, because "Unsaved" and
+ * "Saved" are one letter apart in a 12px muted line and the operator is meant
+ * to be able to read this at a glance, mid-sentence, without stopping to parse
+ * it (issue #1372).
+ */
 function SaveStatus({ state }: { state: SaveState }) {
-  if (state === "idle") return null;
-  const label =
-    state === "saving" ? "Saving…" : state === "saved" ? "Saved" : "Not saved — retrying on edit";
+  const label = saveStatusLabel(state);
+  if (!label) return null;
   return (
     <span
       data-testid="workspace-save-state"
       data-state={state}
       className={cn(
-        "shrink-0 text-xs",
+        "flex shrink-0 items-center gap-1.5 text-xs",
         state === "error" ? "text-destructive" : "text-muted-foreground",
+        state === "dirty" && "text-foreground",
       )}
     >
+      {state === "dirty" && (
+        <span aria-hidden="true" className="size-1.5 rounded-full bg-tone-2" />
+      )}
       {label}
     </span>
   );
