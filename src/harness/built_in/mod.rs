@@ -2543,7 +2543,7 @@ impl HarnessPool {
         // re-injected into a later turn.
         //
         // TAINT (issue #1113): deliberately `deps.context` (Internal), not
-        // `deps.inbound()`. Harness turns are operator-triggered —
+        // the runtime's inbound port. Harness turns are operator-triggered —
         // `OperatorMessage` is operator speech, the same authorship precedent
         // that stamps operator facts Internal — while channel/webhook content
         // enters through the cycle path, which routes its puts through the

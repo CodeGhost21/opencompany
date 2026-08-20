@@ -5476,8 +5476,16 @@ mod test {
             parent: None,
             deliverable: None,
         };
+        // The company's own machinery stays Internal, event by event: a
+        // payment landing is the company's ledger speaking, not third-party
+        // prose riding an open boundary.
+        let payment = CompanyEvent::PaymentReceived {
+            amount_usd: 10.0,
+            memo: "invoice".into(),
+        };
         assert!(cycle_is_external(&[webhook]));
         assert!(!cycle_is_external(&[operator]));
+        assert!(!cycle_is_external(&[payment]));
         assert!(!cycle_is_external(&[]));
     }
 
