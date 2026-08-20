@@ -859,9 +859,23 @@ impl HarnessAgentRunner {
     /// the loss is a notice that does not appear, never one attributed to a run
     /// that did not earn it — a claimed destination records no refusal at all
     /// (pinned by `a_claimed_destination_records_no_refusal`), so nothing a chat
-    /// or task turn does can *add* to this bucket. Closing it properly means
-    /// scoping the bucket per claimant the way issue #771 scoped the delegation
-    /// queue, which is a wider change than this fix.
+    /// or task turn does can *add* to this bucket.
+    ///
+    /// A *different* workflow run can add to it, though: two overlapping runs
+    /// of the same company share this same bucket, and whichever run's
+    /// `drain_publish_refusals` executes first takes every refusal queued so
+    /// far, including one a sibling run just raised — a misattribution, not a
+    /// loss (tracked as issue #1243). Closing it properly is **not** as simple
+    /// as handing each run a private queue at `build_capabilities` time: the
+    /// `agent` node type dispatches through `HarnessPool::run_background` to a
+    /// roster agent built **once** by `HarnessPool::ensure` and cached behind
+    /// fingerprints, so the `PublishArtifactTool` a model's turn actually calls
+    /// captures its `pending_publishes` handle at that cache-build time, not at
+    /// per-run dispatch time — a fork made here never reaches it. The fix needs
+    /// the same *task-local* run scope issue #771 gave the delegation queue
+    /// (`ApprovalScope` / `DelegationScope` / `board_claim.scoped(..)` above),
+    /// read by `push_refusal` at call time rather than baked in at tool
+    /// construction, which is a wider change than this fix.
     fn drain_publish_refusals(&self) {
         let refusals = self.deps.pending_publishes.drain_refusals();
         let mut seen: Vec<String> = Vec::new();
