@@ -127,6 +127,7 @@ pub fn run() {
             commands::oc_stop_local_instance,
             commands::oc_rename_local_instance,
             commands::oc_forget_local_instance,
+            commands::oc_acp_harnesses,
         ])
         .run(tauri::generate_context!())
         .expect("run the desktop shell");

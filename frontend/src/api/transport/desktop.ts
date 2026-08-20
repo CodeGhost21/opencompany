@@ -314,6 +314,48 @@ export async function forgetDevice(id: string): Promise<void> {
   await tauriCore()?.invoke("oc_forget_device", { connectionId: id });
 }
 
+/**
+ * Whether a coding harness can be used right now, and if not, what to do
+ * about it. Mirrors `Readiness` in Rust (`acp::discovery`) — a tagged union
+ * over `state`, exactly as `serde`'s `tag = "state"` emits it.
+ */
+export type AcpReadiness =
+  | { state: "notInstalled" }
+  | { state: "notSignedIn" }
+  | { state: "ready" }
+  | { state: "spawnFailed"; reason: string };
+
+/** One coding harness this shell can drive over ACP. Mirrors `HarnessStatus`. */
+export interface AcpHarnessStatus {
+  id: string;
+  label: string;
+  readiness: AcpReadiness;
+  /** Where the binary was found, when it was. */
+  path?: string;
+}
+
+/**
+ * Every coding harness this shell knows how to drive over ACP, and whether
+ * each is ready.
+ *
+ * `[]` in a browser, which has no local harnesses to speak of. `null` on a
+ * shell built before this command existed — same distinction
+ * {@link localInstances} draws, and for the same reason: "no command" and "no
+ * harnesses installed" are different answers, and only the settings panel
+ * that reads this needs to tell them apart.
+ */
+export async function acpHarnesses(): Promise<AcpHarnessStatus[] | null> {
+  const desktop = tauriCore();
+  if (!desktop) return [];
+  try {
+    const answer = await desktop.invoke<AcpHarnessStatus[]>("oc_acp_harnesses");
+    return Array.isArray(answer) ? answer : null;
+  } catch (error) {
+    console.warn("[desktop] this shell has no ACP harness catalogue", error);
+    return null;
+  }
+}
+
 /** Test seam: forget every registration. */
 export function resetDesktopRegistrations(): void {
   registrations.clear();

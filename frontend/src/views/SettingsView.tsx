@@ -26,6 +26,7 @@ import {
 } from "@/components/ui/card";
 import { DevicePairing } from "@/components/device-pairing";
 import { DomainSettings } from "@/components/domain-settings";
+import { HarnessSettings } from "@/components/harness-settings";
 import { PolicySettings } from "@/components/policy-settings";
 import { StatusPill } from "@/components/status-pill";
 import { ThemeToggle } from "@/components/theme-toggle";
@@ -54,6 +55,10 @@ export function SettingsView({ client, company, feed, onFlag }: Props) {
         {/* Pairing this machine. Renders nothing in a browser, where the
             session cookie already works. */}
         <DevicePairing />
+
+        {/* Coding harnesses this machine can run a teammate through (issue
+            #1245). Renders nothing in a browser, for the same reason. */}
+        <HarnessSettings />
 
         {/* Approvals: the autonomy tier and the always-ask list (issue #562).
             High in the page on purpose — an operator who comes to settings
