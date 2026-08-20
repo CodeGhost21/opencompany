@@ -3186,6 +3186,7 @@ dependencies = [
  "tinyflows",
  "tinymemory",
  "tinymemory-api",
+ "tinymemory-conformance",
  "tinymemory-core",
  "tinymemory-remote",
  "tinymemory-tinycortex",
@@ -5316,6 +5317,16 @@ dependencies = [
  "sha2 0.11.0",
  "thiserror 2.0.20",
  "uuid",
+]
+
+[[package]]
+name = "tinymemory-conformance"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "serde_json",
+ "tinymemory-api",
 ]
 
 [[package]]
