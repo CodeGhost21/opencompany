@@ -87,7 +87,7 @@ import {
 import { Conversation } from "@/views/Conversation";
 import { TeamView } from "@/views/TeamView";
 import { ApprovalsView } from "@/views/ApprovalsView";
-import { LedgersView } from "@/views/LedgersView";
+import { WorkView } from "@/views/WorkView";
 import { TaskDetailRoute } from "@/views/TaskDetailRoute";
 import { InboxView } from "@/views/InboxView";
 import { MemoryView } from "@/views/MemoryView";
@@ -133,35 +133,31 @@ interface NavItem {
   view: View;
   label: string;
   icon: LucideIcon;
-  /**
-   * The hash's second segment this row always opens, when the row names one
-   * specific list rather than a whole view.
-   *
-   * Only set on the rows built from {@link useLedgerNav} below (issue #1284):
-   * every list a company holds — `tasks`, `goals`, `decisions`, and whatever it
-   * declared — gets its own row at this same tier, each always opening
-   * `#/ledgers/<sub>` rather than whatever sub-page `ledgers` was last on. A
-   * static `NAV` row never sets this; its click restores the remembered
-   * sub-page the ordinary way (see `setView`).
-   */
-  sub?: string;
 }
 
 // One flat list. The nav was grouped under "Operate" and "Configure" when the
 // second group held five entries; now that configuration is a section of its
 // own, a heading over two rows labelled more than it sorted.
 //
-// There is deliberately no static "Ledgers" entry (issue #1284). Every list —
-// `tasks`, `goals`, `decisions`, and whatever a company declared — gets its
-// own row at this same tier instead, built from `useLedgerNav` and spliced in
-// where the single "Ledgers" row used to sit (see `navItems` below). A row
-// naming a picker of lists is exactly the surface #1284 asked to remove.
+// "Work" (issue #1284, Rule 2 of docs/spec/runtime/ledgers-console-ia.md) is
+// one static row for every list the company holds — Tasks (the hero tab,
+// selected by default) plus Goals, Decisions and whatever it declared, each a
+// tab inside `WorkView`. Two other shapes were tried and rejected first: a
+// row per list (unusable at the 12-declared-list cap — 15 list rows plus 8
+// other NAV entries) and a collapsible sidebar section (still wrong: a
+// declared list is read occasionally, mostly written by agents, not a
+// surface an operator works out of the way Tasks is — see the doc for the
+// full reasoning). Do not re-add either without reading that doc first.
 const NAV: NavItem[] = [
   { view: "overview", label: "Overview", icon: LayoutDashboard },
   // Issue #311: the company's structure, and the only way in to desk
   // creation and membership since #302 unmounted the flat Desks page.
   { view: "company", label: "Company", icon: Network },
   { view: "chat", label: "Chat", icon: MessagesSquare },
+  // Tasks (the dispatch queue) plus every other list the company holds —
+  // Goals, Decisions, whatever it declared — as tabs inside one screen. See
+  // the comment above `NAV` for why this is one row rather than one per list.
+  { view: "ledgers", label: "Work", icon: BookText },
   // What the company remembers, and — now that an operator can select a
   // memory engine — WHERE it remembers: the engine panel shows which driver
   // is bound, what it negotiated, and whether the boot probe reached it.
@@ -214,13 +210,6 @@ const NAV: NavItem[] = [
  * discards the head *and* its sub-page, so every one of those links quietly
  * lands on Overview instead of the card it named.
  *
- * `ledgers` is here for a reason of its own, and it is new (issue #1284).
- * There is no longer a static `NAV` row named `ledgers` — every list gets its
- * own row instead, built from `useLedgerNav` and spliced into `navItems` at
- * render time — but `#/ledgers/<slug>` still has to resolve. Drop `ledgers`
- * from this list and `useHashView` would call every one of those addresses
- * unknown the instant the company's list read has not landed yet, which is
- * every first paint.
  */
 const HIDDEN_VIEWS: View[] = [
   "feedback",
@@ -229,7 +218,6 @@ const HIDDEN_VIEWS: View[] = [
   "conversation",
   "team",
   "tasks",
-  "ledgers",
 ];
 
 const VIEWS: View[] = [...NAV.map((i) => i.view), ...HIDDEN_VIEWS];
@@ -419,41 +407,12 @@ export function AppShell({
     [navigate],
   );
 
-  // Every list this company holds — the single read the sidebar's ledgers
-  // rows and `LedgersView`'s own screen both read (issue #1284). `refresh` is
-  // handed to Manage Lists so declaring or retiring a list is visible in the
-  // sidebar the same render cycle, with no reload — there is no SSE event for
-  // either (see the hook's own doc comment).
+  // Every list this company holds — the single read `WorkView`'s tab strip
+  // and Manage Lists both read (issue #1284). `refresh` is handed to Manage
+  // Lists so declaring or retiring a list is visible in the tab strip the
+  // same render cycle, with no reload — there is no SSE event for either
+  // (see the hook's own doc comment).
   const ledgerNav = useLedgerNav(client, company);
-
-  /**
-   * `NAV`, with one row per list spliced in where the single "Ledgers" row
-   * used to sit (issue #1284) — immediately before Workspace, same as before.
-   *
-   * `tasks` sorts first: it is the board, and deserves the billing the old
-   * static row gave "Ledgers" itself. Everything else keeps the order the host
-   * returns, which is declaration order.
-   */
-  const navItems = useMemo(() => {
-    const items: NavItem[] = [];
-    const rest = ledgerNav.ledgers.filter((held) => held.slug !== BOARD_LEDGER);
-    const board = ledgerNav.ledgers.find((held) => held.slug === BOARD_LEDGER);
-    const ordered = board ? [board, ...rest] : rest;
-    for (const item of NAV) {
-      if (item.view === "workspace") {
-        for (const held of ordered) {
-          items.push({
-            view: "ledgers",
-            sub: held.slug,
-            label: held.title,
-            icon: BookText,
-          });
-        }
-      }
-      items.push(item);
-    }
-    return items;
-  }, [ledgerNav.ledgers]);
   const [feedbackOpen, setFeedbackOpen] = useState(false);
   /**
    * Whether the product tour should hold — first-run setup is on screen, or the
@@ -1457,24 +1416,12 @@ export function AppShell({
         <SidebarContent data-tour="sidebar">
           <SidebarGroup>
             <SidebarMenu>
-              {navItems.map((item) => (
-                <SidebarMenuItem
-                  key={item.sub ? `ledgers:${item.sub}` : item.view}
-                  data-tour={item.sub ? `nav-ledgers-${item.sub}` : `nav-${item.view}`}
-                >
+              {NAV.map((item) => (
+                <SidebarMenuItem key={item.view} data-tour={`nav-${item.view}`}>
                   <SidebarMenuButton
-                    // A list row is active only when `sub` names *that* list —
-                    // several rows share `view === "ledgers"` now, and
-                    // `view === item.view` alone would light every one of
-                    // them at once (issue #1284).
-                    isActive={item.sub ? view === item.view && sub === item.sub : view === item.view}
+                    isActive={view === item.view}
                     tooltip={item.label}
-                    // A list row always opens exactly that list — the explicit
-                    // `nextSub` form `setView` already supports, which
-                    // deliberately bypasses "restore the remembered sub-page"
-                    // (see `setView` above): clicking Goals must open Goals,
-                    // never wherever `ledgers` was last left.
-                    onClick={() => (item.sub ? setView(item.view, item.sub) : setView(item.view))}
+                    onClick={() => setView(item.view)}
                     className={RESTING_ROW}
                   >
                     <item.icon />
@@ -1636,17 +1583,18 @@ export function AppShell({
             />
           )}
           {view === "ledgers" && (
-            <LedgersView
+            <WorkView
               client={client}
               company={company}
-              // The single read the sidebar's own ledgers rows share (issue
+              // The single read the tab strip and Manage Lists share (issue
               // #1284) — this view no longer fetches the list itself.
               ledgers={ledgerNav.ledgers}
               ledgersLoading={ledgerNav.loading}
-              // `#/ledgers/<slug>` opens that ledger. Unvalidated here, like
-              // every other sub-page: only this view knows which slugs exist,
-              // and it resolves an unknown one against the host rather than
-              // guessing.
+              // `#/ledgers/<slug>` opens that list's tab. Unvalidated here,
+              // like every other sub-page: only this view knows which slugs
+              // exist, and it resolves an unknown one against the host
+              // rather than guessing. A bare `#/ledgers` resolves to Tasks —
+              // see `WorkView`.
               sub={sub}
               onOpenLedger={(slug) => navigate("ledgers", slug ?? undefined)}
               // A board card leaves for its own screen. The board renders

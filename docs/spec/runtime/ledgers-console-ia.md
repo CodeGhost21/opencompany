@@ -48,58 +48,117 @@ A concrete before/after for the strings that do move:
 
 | today | becomes |
 | --- | --- |
-| nav item "Ledgers" | one nav row per list, titled by the list (Tasks, Goals, Decisions, …) |
+| nav item "Ledgers" | nav item **"Work"** — the hero surface below, see Rule 2 |
 | "New ledger" button | "New list" (moved — see Rule 3) |
 | "Declare a ledger" dialog title | wizard, titled by its first step (see Rule 4) |
 | "This ledger leaves this screen…" (retire confirm) | "This list leaves the sidebar…" |
 | "This company has no ledgers yet." | "This company has no lists yet." |
 | "Rows here are opened elsewhere" banner | unchanged in substance, reworded off "ledger" |
 
-## Rule 2: every list is a sidebar row, same tier as Tasks
+## Rule 2: one nav row, a Tasks-hero page, every other list a tab
 
-Today `NAV` (`frontend/src/components/app-shell.tsx`) is a fixed,
-module-scope array; clicking its `ledgers` row opens `LedgersView`, which
-draws its own secondary nav — a column of buttons, one per list, with open/
-closed counts — inside the page body. That inner column **is** the "picker of
-cards" issue #1284 objects to; it just isn't drawn as cards today, it's drawn
-as a list. Either way, a list one level below the sidebar is a list the
-sidebar's own affordance (open the tier-one row, land on the content) does not
-reach.
+This rule went through three drafts before landing; the first two are kept
+below because the reasoning that ruled them out is the part worth not
+re-litigating.
 
-After this change, the sidebar itself carries one row per list the company
-actually has — the built-ins (`tasks`, plus `goals`/`decisions` where
-present) and every company-declared list — each opening straight to that
-list's board/list view, no intermediate picker. `LedgersView`'s inner nav
-column goes away; what it drew is now the sidebar.
+### Draft 1 (rejected): every list its own sidebar row
 
-This makes the nav **dynamic per company** rather than a fixed constant,
-which is the one piece of this redesign that is a genuine architecture change
-and not just a rename. `View` and `NAV` are read in several places
-(`useHashView<View>`, `HIDDEN_VIEWS`, `NAV_ALWAYS_PARENT`, the sidebar
-`NAV.map`) that currently assume a closed, static set. The concrete mechanics
-of making that set computed from `listLedgers()` — the `View` typing, where
-the fetch lives, how a list's row and its `#/ledgers/<slug>` address
-correspond, ordering (`tasks` first, then the rest in declaration order),
-and what a loading/error state looks like before the first list — are left to
-the implementation plan (`local/tasks.json` T-80) rather than pinned here,
-because they depend on details (exact hook signatures, render timing) that
-are implementation, not IA. What this doc pins is the outcome: **no list is
-ever one click further from the sidebar than any other**, and the URL scheme
-(`#/ledgers/<slug>`, `#/tasks/<id>` for the task detail page) is unchanged —
-only how the sidebar offers those addresses changes.
+The first cut took "no list should be a click further from the sidebar than
+any other" literally: `NAV` stopped being a fixed array and grew one row per
+list the company held, spliced in where the single "Ledgers" row used to sit.
 
-The task detail route (`#/tasks/<id>`) is untouched: it remains the one
-address that outlived the pre-#1140 Tasks page, reached from chat, approval
-cards, and workflow rows, same as today.
+It did not survive contact with the cap. A company may declare up to
+`MAX_DECLARED` = 12 lists (`src/ledger/spec.rs`) on top of the 3 built-ins
+(`tasks`, `goals`, `decisions`) — 15 list rows, sharing the sidebar with the 8
+other fixed `NAV` entries (Overview, Company, Chat, Brain, Workspace,
+Approvals, Workflows, Settings). Twenty-three rows in one sidebar is not a
+list of destinations an operator scans, it is a wall. The draft read fine
+during review only because it was checked against a demo company holding
+exactly three lists — the cap itself was never rendered and never looked at.
+
+### Draft 2 (rejected): a collapsible "Lists" section
+
+The second cut tried to keep flat, always-visible rows while bounding their
+count: a collapsible sidebar section, one header row, with every list but
+Tasks as an indented, persistently-collapsible child. Tasks stayed a
+top-level row outside it.
+
+This was abandoned before it shipped, for a reason upstream of scaling: a
+sidebar section — collapsible or not — is still built on the premise that an
+operator's daily relationship to a declared list is *finding it in the nav*.
+That premise does not hold. `goals`, `decisions`, and anything a company
+declares are `LedgerSource::Events`, written almost entirely by **agents**
+through `record_entry`/`close_entry` (`docs/spec/runtime/ledgers.md`); a
+person's own relationship to them is closer to "check what we decided" than
+"work out of this every day." `tasks` is the one genuine exception —
+`LedgerSource::Native`, its rows live in the task store, its columns fire
+dispatch, and an operator works out of it constantly. Reserving permanent nav
+real estate for surfaces that are consulted rather than worked was solving
+the wrong half of the original complaint. The actual defect Draft 1 correctly
+identified — that reaching Goals or Decisions meant an in-page picker of bare
+cards that said nothing about what was in them — was never "not enough nav
+rows"; it was "the one existing entry point told you nothing useful before
+you clicked."
+
+### What ships: one nav row, Tasks as the hero, everything else a tab
+
+`NAV` keeps exactly the one row it always had for this surface, relabeled
+**"Work"** (see the label discussion below) rather than "Ledgers". Clicking it
+opens a single screen shaped like the board always was — a tab strip across
+the top, Tasks first and selected by default, one tab per other list the
+company holds, each tab carrying its own open count so the strip is worth
+glancing at before clicking anything:
+
+```
+┌ Work ──────────────────────────────────────────┐
+│ [ Tasks 12 ] [ Goals 3 ] [ Decisions 1 ] [More▾]│
+├──────────────────────────────────────────────────┤
+│  the selected tab's board or list, exactly as    │
+│  LedgersView already renders it                  │
+└──────────────────────────────────────────────────┘
+```
+
+This keeps the one property both earlier drafts were chasing — opening any
+list is one click, direct, never through a picker of cards that says
+nothing — while paying a **fixed** nav cost (one row) regardless of whether a
+company holds 3 lists or 15. The tab strip absorbs what scaling cost there is,
+and it is built to: tabs that do not fit the available width collapse behind
+a **"More ▾"** menu computed from measured widths, not a hardcoded count, so
+the strip degrades the same way at a narrow viewport as it does at the
+12-declared-list cap. See the implementation plan for the measurement
+approach.
+
+**Why "Work" as the label.** It cannot say "Ledgers" (Rule 1), it cannot
+imply the surface holds only Tasks (it also holds Goals, Decisions, and
+whatever the company declared), and it cannot bury the word "Tasks" so deep an
+operator hunting for the board cannot find it by scanning nav labels — Tasks
+is the first tab, on screen the instant this row is clicked, with zero further
+clicks. "Work" reads as the neutral container that is genuinely true of
+every tab under it: the board *is* "the company's work board" already, in
+its own screen's copy, and Goals/Decisions/whatever a company declares are
+just as fairly described as records of the company's work as Tasks is.
+
+**Routing.** `#/ledgers/<slug>` is unchanged — it always could name any list,
+tab or not — and the tab strip is a rendering of the same address space, not
+a new one. A bare `#/ledgers` (the nav row's own address, and what a fresh
+click on it produces) resolves to the Tasks tab; `#/ledgers/<slug>` opens
+directly on that list's tab, so a deep link to Goals lands on Goals rather
+than on Tasks with an extra click to get there. `#/tasks/<id>` — the card
+detail page, the one address issue #1140 kept alive when the standalone Tasks
+page was retired — is untouched: it is a different route entirely (`view:
+"tasks"`, not `"ledgers"`), reached from chat, an approval card, or a
+workflow row exactly as before, and this redesign does not touch it.
 
 ## Rule 3: declaring a list moves out of the main nav
 
 Today "New ledger" is a button in `LedgersView`'s own toolbar, reachable
-the moment an operator opens what used to be the single Ledgers page. Once
-every list has its own sidebar row (Rule 2), there is no single "Ledgers
-home" screen left for that button to live on — and putting it on every list's
-toolbar would mean an operator managing Goals sees a control for creating an
-unrelated new list, which is a settings action wearing a data-page's chrome.
+the moment an operator opens what used to be the single Ledgers page. The
+tab strip Rule 2 lands on is a screen for *working a list's rows*, tab by
+tab — putting a "New list" control there would mean an operator sitting on
+the Goals tab sees a button for creating an unrelated new list, which is a
+settings action wearing a data-page's chrome, and it would have to be
+findable from whichever tab happens to be open rather than from one obvious
+place.
 
 This follows the precedent `CompanyView` already set for desks
 (`frontend/src/views/company/CompanyView.tsx`): the Company page

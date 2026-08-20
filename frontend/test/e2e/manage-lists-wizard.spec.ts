@@ -8,7 +8,8 @@ import { expect, test, type Page } from "@playwright/test";
  * drives the real replacement against a live host: Company → Manage lists →
  * New list → the four plain-language steps and a review → Create, then
  * confirms the result is a real, retireable list — reachable both from Manage
- * Lists and as its own sidebar row — and that retiring it asks first, the same
+ * Lists and as its own tab on the Work screen (`work-tabs.spec.ts` covers the
+ * tab strip itself) — and that retiring it asks first, the same
  * confirm-before-destroy assertion `ledger-retire-confirm.test.ts` makes at
  * unit level.
  */
@@ -81,15 +82,15 @@ test("the wizard declares a real list, which appears in Manage Lists and the sid
   await expect(page.getByText(/open → closed/)).toBeVisible();
   await page.getByRole("button", { name: "Create list" }).click();
 
-  // Once the list exists, its title is on screen twice — the Manage Lists
-  // card and the sidebar's own row (shell chrome, present on every route) —
-  // so `main` scopes every check below to "on this page", leaving the
-  // sidebar to `navRow`-style locators instead. `page.locator("main")`
-  // (a plain element query), not `getByRole("main")`: the retire confirm
-  // below opens an AlertDialog that inerts the rest of the page for
-  // accessibility, which prunes `<main>` from the accessibility tree — a
-  // role-based query would then find nothing while a role-agnostic one still
-  // sees the (occluded but present) DOM.
+  // Once the list exists, its title is on screen twice once the Work tab
+  // strip is visited too (the Manage Lists card and the tab's own accessible
+  // name), so `main` scopes every check here to "on this page". A plain
+  // element query (`page.locator("main")`), not `getByRole("main")`: the
+  // retire confirm in the next test opens an AlertDialog that inerts the
+  // rest of the page for accessibility, pruning `<main>` from the
+  // accessibility tree — a role-based query would find nothing there while a
+  // role-agnostic one still sees the (occluded but present) DOM. Used here
+  // too, for consistency with that test.
   const main = page.locator("main");
 
   try {
@@ -99,12 +100,11 @@ test("the wizard declares a real list, which appears in Manage Lists and the sid
     });
     await expect(main.getByText(title)).toBeVisible({ timeout: 15_000 });
 
-    // And it is a live sidebar row the moment it exists (issue #1284's core
-    // claim: no list is one click further from the sidebar than any other).
+    // And it is a live tab on Work the moment it exists (issue #1284's core
+    // claim: no list is more than one click away, direct, no picker).
     await page.getByTestId("lists-breadcrumb-company").click();
-    await expect(
-      page.locator(`[data-tour="nav-ledgers-${slug}"]`).getByRole("button"),
-    ).toBeVisible({ timeout: 15_000 });
+    await page.locator('[data-tour="nav-ledgers"]').getByRole("button").click();
+    await expect(page.getByTestId(`work-tab-${slug}`)).toBeVisible({ timeout: 15_000 });
   } finally {
     await request.delete(`${API}/ledgers/${slug}`);
   }
@@ -147,13 +147,15 @@ test("retiring a declared list asks before it deletes, then removes it everywher
     const main = page.locator("main");
     await openManageLists(page);
     await expect(main.getByText(title)).toBeVisible({ timeout: 15_000 });
-    // The sidebar is shell chrome, present on every route — it already
-    // picked this list up from the seed above, before the confirm below
-    // removes it. A plain CSS descendant (`button`), not `.getByRole`: the
-    // same aria-hidden pruning `main` needs a role-agnostic locator for
-    // below applies here too once the confirm dialog inerts the sidebar.
-    const sidebarRow = page.locator(`[data-tour="nav-ledgers-${slug}"] button`);
-    await expect(sidebarRow).toBeVisible({ timeout: 15_000 });
+
+    // Confirm it is a live tab first — Manage Lists and Work read the same
+    // shared list, so declaring it (via the API seed above) already made it
+    // one before this test ever opened the retire confirm.
+    await page.locator('[data-tour="nav-ledgers"]').getByRole("button").click();
+    const workTab = page.getByTestId(`work-tab-${slug}`);
+    await expect(workTab).toBeVisible({ timeout: 15_000 });
+    await page.locator('[data-tour="nav-company"]').getByRole("button").click();
+    await page.getByTestId("company-manage-lists").click();
 
     // Scoped to the one Card carrying this list's title, not any `div` that
     // happens to contain the text — several ancestor divs do, and only the
@@ -165,15 +167,17 @@ test("retiring a declared list asks before it deletes, then removes it everywher
     await expect(confirm).toBeVisible();
     // Not gone yet — the confirm has not been pressed. `toBeAttached`, not
     // `toBeVisible`: the open AlertDialog dims and inerts the rest of the
-    // page (confirmed live — the row and the sidebar are still in the DOM,
-    // just occluded), so a visibility check here would be asserting the
-    // modal's own backdrop rather than whether the retire actually happened.
+    // page (confirmed live), so a visibility check here would be asserting
+    // the modal's own backdrop rather than whether the retire actually
+    // happened.
     await expect(main.getByText(title)).toBeAttached();
-    await expect(sidebarRow).toBeAttached();
 
     await confirm.click();
     await expect(main.getByText(title)).toHaveCount(0, { timeout: 15_000 });
-    await expect(sidebarRow).toHaveCount(0);
+
+    // And it is gone from Work's tab strip too, with no reload.
+    await page.locator('[data-tour="nav-ledgers"]').getByRole("button").click();
+    await expect(page.getByTestId(`work-tab-${slug}`)).toHaveCount(0, { timeout: 15_000 });
   } finally {
     // Idempotent: the happy path above already retired it. A failure partway
     // through must not leave this run's fixture for the next run to collide
