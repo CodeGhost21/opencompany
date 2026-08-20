@@ -66,7 +66,16 @@ env:
   # medulla (hosted brain transport), tinycortex (local memory backend), and
   # sidecar. `sqlite` is intentionally omitted — its bundled rusqlite needs a C
   # compiler the slim build image lacks, and it is redundant on a mongodb tenant.
-  TENANT_FEATURES: mongodb,openhuman,openhuman-rpc,tinyplace,github,smtp,dns,tinyhumans,webhooks,platform-jwt,export,mcp,media,composio,imap,telegram,medulla,tinycortex,sidecar,chargebee,paypal
+  #
+  # `tinymemory` is the hosted-memory contract: `OPENCOMPANY_MEMORY=remote` +
+  # `OPENCOMPANY_MEMORY_DRIVER=supermemory|mem0|cognee` (plus `null`), inert
+  # until an operator sets those. `tinymemory-embedded` is deliberately NOT
+  # here for the same two reasons `sqlite` isn't: tinymemory-core links a
+  # bundled rusqlite (the C compiler the slim image lacks), and its `namespace`
+  # store on a mongodb tenant is refused by the ephemeral-/data guard anyway.
+  # Self-hosters wanting the embedded contract driver compile it via
+  # OPENCOMPANY_FEATURES (deploy/README.md).
+  TENANT_FEATURES: mongodb,openhuman,openhuman-rpc,tinyplace,github,smtp,dns,tinyhumans,webhooks,platform-jwt,export,mcp,media,composio,imap,telegram,medulla,tinycortex,sidecar,chargebee,paypal,tinymemory
 
 jobs:
   deploy:
