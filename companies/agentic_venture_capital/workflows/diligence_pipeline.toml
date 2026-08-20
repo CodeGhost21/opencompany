@@ -72,7 +72,7 @@ summary = "Deliver the memo and recommendation."
 # The investment committee turns the diligence evidence into the investment decision.
 [node.destination]
 kind = "channel"
-target = "investment-committee"
+target = "investment_committee"
 
 [[edge]]
 from = "inbound"
