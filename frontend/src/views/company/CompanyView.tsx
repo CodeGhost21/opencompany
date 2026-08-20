@@ -1,5 +1,5 @@
-// The Company page (issue #1141): the teammates first, the structure behind a
-// toggle.
+// The Company page (issue #1141): the teammates, with the desk hierarchy one
+// click away at its own address.
 //
 // # Why this exists
 //
@@ -10,76 +10,56 @@
 // opened the org chart: a tree of desks, which is the company's filing system
 // rather than the company's people.
 //
-// So this page leads with the people and keeps the desks one click away. It is
-// the same shape Workflows uses for its Cards/List index (issue #1110) — one
-// question with two answers, rendered as a switch — and it is deliberately not
-// two nav entries: a roster and an org chart are two views of one company, and
-// listing both would make an operator choose between them before they know
-// which one answers their question.
+// # Cards is the page; the chart is a destination (issue #1193)
 //
-// # Why the chart is not simply deleted
+// This shipped as a Cards ⇄ Org chart toggle, matching the Workflows index.
+// That was wrong, and wrong in a way worth recording: a toggle says *two
+// renderings of one thing*, and these are not that. The cards are the roster;
+// the chart is the only surface in the console that can create a desk, delete
+// one, move somebody between desks, reorder seats or change a lead — the way in
+// that issue #302 closed and #311 deliberately reopened.
 //
-// The chart is the only way in to desk creation, desk membership and the lead
-// (issue #311, which restored exactly that after #302 closed it). Cards lead;
-// the hierarchy stays reachable.
-
-import { useEffect, useState } from "react";
-import { LayoutGrid, Network } from "lucide-react";
+// Presenting it as the other half of a switch made desk management look like a
+// view preference, and — because the preference was remembered — could open
+// Company on the org chart for an operator who just wanted to see their team.
+//
+// So there is no mode and nothing is remembered. The **route** decides:
+//
+//   `#/company`            the teammates
+//   `#/company/desks`      the org chart
+//   `#/company/<deskId>`   the org chart, arriving at that desk (issue #485)
+//
+// which means the chart survives a reload, can be linked, and is reached by
+// asking for it rather than by flipping a switch and hoping.
 
 import type { OpenCompanyClient } from "@/api/client";
-import { Button } from "@/components/ui/button";
 import { OrgChartView } from "@/views/company/OrgChartView";
 import { TeamView } from "@/views/TeamView";
 
-/** Which half of the company this page is showing. */
-export type CompanyMode = "cards" | "chart";
-
-/** Where the cards-or-chart preference is remembered. */
-const MODE_KEY = "oc.company.mode";
-
 /**
- * The remembered mode, defaulting to cards — the teammates are the lead.
+ * The sub-page segment that names the chart itself rather than a desk on it.
  *
- * Every access is guarded: `localStorage` throws outright in a browser with
- * site data blocked, and a preference is never worth failing a render over.
- * Same contract as the Workflows index's own remembered mode.
+ * Reserved, and cheaply so: `OrgChartView` mints desk ids by slugifying a name
+ * to `[a-z0-9_]`, so a *created* desk can only collide by being named literally
+ * "Desks". A company whose manifest declares that id reaches its chart with no
+ * desk brought into view — the same silent no-op an unknown id already gets
+ * (see `focusDeskId`), never an error or a missing page.
  */
-function readMode(): CompanyMode {
-  try {
-    return window.localStorage.getItem(MODE_KEY) === "chart" ? "chart" : "cards";
-  } catch {
-    return "cards";
-  }
-}
-
-/** Remembers the mode. Best-effort, for the same reason. */
-function writeMode(mode: CompanyMode): void {
-  try {
-    window.localStorage.setItem(MODE_KEY, mode);
-  } catch {
-    // A preference that cannot be saved is not an error worth surfacing.
-  }
-}
+export const DESKS_SEGMENT = "desks";
 
 interface Props {
   client: OpenCompanyClient;
   company: string | null;
   /**
-   * A desk to bring into view — the second segment of `#/company/<deskId>`,
-   * which chat's member pane links to (issue #485).
+   * The hash's second segment: nothing, {@link DESKS_SEGMENT}, or a desk id.
    *
-   * **Its presence forces the chart**, whatever the remembered preference says.
-   * A desk address is an org-chart address: honouring it in cards mode would
-   * land the operator on a page that cannot show the desk they just named, and
-   * silently at that.
-   *
-   * It also *sticks* for the rest of the visit — see the effect below — so
-   * stepping from `#/company/<deskId>` to bare `#/company` stays on the chart
-   * rather than swapping the page out from under the operator mid-task. What it
-   * never does is rewrite the stored preference: a link followed once out of
-   * chat should not decide what Company opens as tomorrow.
+   * Handed back unvalidated, as `useHashView` documents — only the chart knows
+   * which desks exist, so an id naming none is its own silent no-op rather than
+   * something this component guesses at.
    */
-  focusDeskId?: string | null;
+  sub: string | null;
+  /** Go to the chart, a desk, or back to the roster. */
+  onNavigate: (sub: string | null) => void;
   /**
    * Open a teammate, or return to this page with `null`.
    *
@@ -92,60 +72,30 @@ interface Props {
   refreshKey?: number;
   /** Reopen first-run setup, so skipping it is not a dead end. */
   onRunSetup?: () => void;
-  /**
-   * Drop the desk from the hash, landing on bare `#/company`.
-   *
-   * Wired to the toggle for the one case it cannot otherwise answer: asking for
-   * Cards while `#/company/<deskId>` is forcing the chart. Without this the
-   * control is *visible and inert* — the operator presses Cards, the chart stays
-   * put because the route outranks the preference, and the only thing that
-   * changed is the stored preference they could not see. Leaving the desk is
-   * what "show me the cards" means from there.
-   */
-  onLeaveDesk?: () => void;
 }
 
 export function CompanyView({
   client,
   company,
-  focusDeskId,
+  sub,
+  onNavigate,
   onOpenAgent,
   refreshKey,
   onRunSetup,
-  onLeaveDesk,
 }: Props) {
-  const [chosen, setChosen] = useState<CompanyMode>(readMode);
-  const mode: CompanyMode = focusDeskId ? "chart" : chosen;
+  if (sub) {
+    return (
+      <OrgChartView
+        client={client}
+        company={company}
+        // The reserved segment names the chart, not a desk on it.
+        focusDeskId={sub === DESKS_SEGMENT ? null : sub}
+        onBack={() => onNavigate(null)}
+      />
+    );
+  }
 
-  // Arriving at a desk makes the chart this visit's mode, in memory only. The
-  // render above already forces it for the frame the link lands on; this is
-  // what keeps it once the desk leaves the hash — and keeps the chart *mounted*
-  // across that step, which is what the arrival ring's own state depends on.
-  useEffect(() => {
-    if (focusDeskId) setChosen("chart");
-  }, [focusDeskId]);
-
-  const toolbar = (
-    <ModeToggle
-      mode={mode}
-      onMode={(next) => {
-        setChosen(next);
-        writeMode(next);
-        // The route outranks the preference, so asking for Cards from a desk
-        // address has to clear the desk or nothing visible happens.
-        if (focusDeskId && next === "cards") onLeaveDesk?.();
-      }}
-    />
-  );
-
-  return mode === "chart" ? (
-    <OrgChartView
-      client={client}
-      company={company}
-      focusDeskId={focusDeskId}
-      toolbar={toolbar}
-    />
-  ) : (
+  return (
     <TeamView
       client={client}
       company={company}
@@ -153,46 +103,7 @@ export function CompanyView({
       onOpenAgent={onOpenAgent}
       refreshKey={refreshKey}
       onRunSetup={onRunSetup}
-      toolbar={toolbar}
+      onManageDesks={() => onNavigate(DESKS_SEGMENT)}
     />
-  );
-}
-
-/**
- * Cards ⇄ Org chart.
- *
- * Segmented rather than two loose buttons, and the same segmented control the
- * Workflows index uses, because the pair is one question with two answers and
- * reads as a switch.
- */
-function ModeToggle({
-  mode,
-  onMode,
-}: {
-  mode: CompanyMode;
-  onMode: (mode: CompanyMode) => void;
-}) {
-  return (
-    <div className="flex items-center gap-1 rounded-lg border p-0.5">
-      {(
-        [
-          { value: "cards", label: "Cards", Icon: LayoutGrid },
-          { value: "chart", label: "Org chart", Icon: Network },
-        ] as const
-      ).map(({ value, label, Icon }) => (
-        <Button
-          key={value}
-          size="sm"
-          variant={mode === value ? "secondary" : "ghost"}
-          className="h-7 px-2"
-          onClick={() => onMode(value)}
-          aria-pressed={mode === value}
-          data-testid={`company-mode-${value}`}
-        >
-          <Icon className="mr-1.5 size-3.5" />
-          {label}
-        </Button>
-      ))}
-    </div>
   );
 }

@@ -185,42 +185,58 @@ test("#1141 a card carries the description, the status and the open count", asyn
   await expect(priya.getByTestId("team-card-tasks")).toHaveText("0 open tasks");
 });
 
-test("#1141 the org chart is one toggle away, and the choice is remembered", async ({ page }) => {
+test("#1193 the chart is a destination with its own address, not a mode", async ({ page }) => {
   await mockApi(page);
   await page.goto("/#/company");
   await expect(card(page, "Maya")).toBeVisible({ timeout: 30_000 });
 
-  await page.getByTestId("company-mode-chart").click();
+  // There is no toggle. Cards is the Company page.
+  await expect(page.getByTestId("company-mode-cards")).toHaveCount(0);
+  await expect(page.getByTestId("company-mode-chart")).toHaveCount(0);
+
+  // One named way in, and it lands on an address of its own.
+  await page.getByTestId("company-manage-desks").click();
   const chart = page.getByRole("tree", { name: "Company org chart" });
   await expect(chart).toBeVisible({ timeout: 30_000 });
-  await expect(page.getByTestId("company-mode-chart")).toHaveAttribute("aria-pressed", "true");
+  await expect.poll(() => page.url()).toContain("#/company/desks");
 
-  // The chart is where desk creation and membership live (issue #311), so it
-  // has to survive a reload rather than being a mode the page forgets.
+  // Which means it survives a reload. The remembered *mode* it replaced could
+  // not be linked, and could open Company on the chart for an operator who
+  // only wanted to see their team.
   await page.reload();
   await expect(chart).toBeVisible({ timeout: 30_000 });
 
-  // And back, which is the half this page leads with.
-  await page.getByTestId("company-mode-cards").click();
-  await expect(card(page, "Maya")).toBeVisible();
+  // And it owes a way back, like any sub-page.
+  await page.getByTestId("desks-breadcrumb-company").click();
+  await expect(card(page, "Maya")).toBeVisible({ timeout: 30_000 });
 });
 
-test("#1141 asking for Cards from a desk address leaves the desk", async ({ page }) => {
+test("#1193 desk management survives — a desk can still be created and reached", async ({
+  page,
+}) => {
   await mockApi(page);
+  await page.goto("/#/company");
 
-  // `#/company/<deskId>` forces the chart — a desk address is an org-chart
-  // address (issue #485).
+  // The failure mode this guards: a Company page with no way to create a desk.
+  // The chart is the only surface that can (issues #302, #311), so the route to
+  // it has to work from the roster with no desk already in hand.
+  await page.getByTestId("company-manage-desks").click();
+  await expect(page.getByRole("tree", { name: "Company org chart" })).toBeVisible({
+    timeout: 30_000,
+  });
+  await expect(page.getByRole("button", { name: "New desk" })).toBeEnabled({ timeout: 30_000 });
+  await expect(page.getByRole("button", { name: "New teammate" })).toBeEnabled();
+});
+
+test("#485 a desk address still opens the chart at that desk", async ({ page }) => {
+  await mockApi(page);
+  // The deep link chat's member pane relies on. It predates the toggle and
+  // outlives it.
   await page.goto("/#/company/research");
   await expect(page.getByRole("tree", { name: "Company org chart" })).toBeVisible({
     timeout: 30_000,
   });
-
-  // So Cards has to clear the desk. Otherwise it is a control an operator can
-  // see and press while the route silently outranks it, and the only thing that
-  // changes is a preference they cannot observe.
-  await page.getByTestId("company-mode-cards").click();
-  await expect(card(page, "Maya")).toBeVisible({ timeout: 30_000 });
-  await expect.poll(() => page.url()).not.toContain("research");
+  await expect.poll(() => page.url()).toContain("#/company/research");
 });
 
 test("#1141 a host with no board says nothing, rather than idle", async ({ page }) => {
@@ -266,6 +282,22 @@ test("#1181 the card and the detail header wear the same mascot", async ({ page 
   // `test/unit/teammate-avatar-seed.test.ts` for the two seeds in play.
   const onDetail = page.getByTestId("agent-avatar").locator("img");
   await expect(onDetail).toHaveAttribute("src", cardSrc ?? "");
+});
+
+test("#1190 the card carries no switch; the inbox lives on the teammate", async ({ page }) => {
+  await mockApi(page);
+  await page.goto("/#/company");
+  await expect(card(page, "Maya")).toBeVisible({ timeout: 30_000 });
+
+  // Nothing on the grid writes to the host. The card is for recognising a
+  // teammate, and the switch was one mis-click from a silent config change
+  // while scanning thirteen of them.
+  await expect(page.getByTestId("team-inbox-toggle")).toHaveCount(0);
+  await expect(page.getByRole("switch")).toHaveCount(0);
+
+  // The capability is not gone — it moved to the page that already reported it.
+  await card(page, "Maya").getByTestId("team-card-open").click();
+  await expect(page.getByTestId("agent-inbox-toggle")).toBeVisible({ timeout: 30_000 });
 });
 
 test("#1141 bare #/team is the Company page now", async ({ page }) => {

@@ -1400,10 +1400,12 @@ export function AppShell({
               // segment back unvalidated, so the chart resolves an unknown id
               // itself rather than this shell guessing which desks exist.
               //
-              // Issue #1141: it also decides the mode. A desk address is an org
-              // chart address, so naming one puts the chart on screen whatever
-              // the operator's remembered preference is.
-              focusDeskId={sub}
+              // Issue #1193: and the segment decides the surface outright.
+              // Nothing (`#/company`) is the roster; `desks` is the org chart;
+              // anything else is a desk on it. There is no remembered mode to
+              // disagree with the address.
+              sub={sub}
+              onNavigate={(next) => navigate("company", next ?? undefined)}
               // The roster half's own sub-page is `#/team/<agentId>`, not a
               // second segment of this view — the teammate detail page is a
               // linkable address of its own (issue #264) and stays one.
@@ -1415,10 +1417,6 @@ export function AppShell({
               // Skipping setup must not be a dead end: an unstaffed company keeps
               // a visible way back in.
               onRunSetup={() => setSetupForced(true)}
-              // Asking for Cards from `#/company/<deskId>` means leaving the
-              // desk: the route forces the chart, so the toggle would otherwise
-              // be a control that visibly does nothing.
-              onLeaveDesk={() => navigate("company")}
             />
           )}
           {view === "chat" && (

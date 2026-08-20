@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
-import { Mail, MoreHorizontal, Plus, Sparkles, UserPlus, Wallet } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { Mail, MoreHorizontal, Network, Plus, Sparkles, UserPlus, Wallet } from "lucide-react";
 import { toast } from "sonner";
 
 import { listPeople, me as fetchMe, type Person } from "@/api/auth";
@@ -61,11 +61,14 @@ interface Props {
    */
   onRunSetup?: () => void;
   /**
-   * The Company page's Cards ⇄ Org chart switch (issue #1141), rendered in this
-   * view's header beside "Add teammate". See `CompanyView` for why it is a slot
-   * rather than a bar drawn above both halves.
+   * Go to the org chart — desks, seats, leads (issue #1193).
+   *
+   * The one way there from here, and a named destination rather than half of a
+   * toggle: the chart is not another rendering of this roster, it is the only
+   * surface that can create a desk or move somebody between two. Optional, so
+   * this view still stands alone.
    */
-  toolbar?: ReactNode;
+  onManageDesks?: () => void;
 }
 
 type Load = "loading" | "ready";
@@ -78,7 +81,7 @@ export function TeamView({
   onOpenAgent,
   refreshKey,
   onRunSetup,
-  toolbar,
+  onManageDesks,
 }: Props) {
   const [load, setLoad] = useState<Load>("loading");
   const [fromHost, setFromHost] = useState(false);
@@ -134,39 +137,6 @@ export function TeamView({
       setPeople([]);
     }
   }, [client, company]);
-
-  /**
-   * Give a teammate an inbox, or take it away, on the host — keyed by the
-   * roster **agent id**, which is the `InboxStore` key the Inbox page reads and
-   * the ingest webhook files mail under. Nothing is persisted client-side: if
-   * the write fails the switch goes back, so the console never claims an inbox
-   * the host doesn't have.
-   *
-   * Starter-team cards are locally-invented placeholders, not host records, so
-   * their ids are not real inbox keys — refuse rather than file mail under one.
-   */
-  async function toggleMemberInbox(member: TeamMember) {
-    if (!fromHost) {
-      toast.error("Add this teammate to your company first — an inbox needs a saved teammate.");
-      return;
-    }
-    const next = !member.inboxEnabled;
-    const apply = (enabled: boolean) =>
-      setMembers((ms) => ms.map((m) => (m.id === member.id ? { ...m, inboxEnabled: enabled } : m)));
-    apply(next);
-    try {
-      await setInboxEnabled(client, company, member.id, next);
-    } catch (error) {
-      apply(!next);
-      toast.error(
-        error instanceof ApiError && error.status === 404
-          ? "This host doesn't offer teammate inboxes yet."
-          : error instanceof Error
-            ? error.message
-            : "Couldn't change the inbox.",
-      );
-    }
-  }
 
   const boot = useCallback(async () => {
     try {
@@ -411,7 +381,11 @@ export function TeamView({
             </p>
           </div>
           <div className="ml-auto flex flex-wrap items-center justify-end gap-2">
-            {toolbar}
+            {onManageDesks && (
+              <Button variant="outline" onClick={onManageDesks} data-testid="company-manage-desks">
+                <Network className="size-4" /> Manage desks
+              </Button>
+            )}
             <Button onClick={() => setAddOpen(true)}>
               <UserPlus className="size-4" /> Add teammate
             </Button>
@@ -454,8 +428,6 @@ export function TeamView({
               <MemberCard
                 key={m.id}
                 member={m}
-                inboxOn={m.inboxEnabled}
-                onToggleInbox={() => void toggleMemberInbox(m)}
                 onRemove={() => void removeMember(m)}
                 // Only a host-backed teammate can be opened: a starter-team
                 // card is a local placeholder with no record behind it, so its
@@ -546,8 +518,6 @@ function budgetError(error: unknown, fallback: string): string {
 
 function MemberCard({
   member,
-  inboxOn,
-  onToggleInbox,
   onRemove,
   onOpen,
   canEditBudget,
@@ -558,8 +528,6 @@ function MemberCard({
   workload,
 }: {
   member: TeamMember;
-  inboxOn: boolean;
-  onToggleInbox: () => void;
   onRemove: () => void;
   /** Open this agent's detail page. Undefined when the card has no host record. */
   onOpen?: () => void;
@@ -660,20 +628,20 @@ function MemberCard({
         )}
         {workload && <WorkloadLine workload={workload} />}
         <DailyBudgetLine member={member} setByLabel={setByLabel} />
-        <div className="mt-auto flex items-center justify-between gap-2 border-t pt-3">
+        {/*
+          The Inbox switch used to sit here (issue #1190). It was the only
+          control on the card that *wrote* to the host, at the same weight as
+          the name, on a grid of thirteen — a card is for recognising a
+          teammate, and a mis-click while scanning silently changed a per-
+          teammate setting with no confirmation.
+
+          It moved to the teammate's own page, which already reported inbox
+          state as a badge and offered no way to change it. See `AgentDetailView`.
+        */}
+        <div className="mt-auto flex items-center gap-2 border-t pt-3">
           <Badge variant="secondary" className="gap-1">
             <Sparkles className="size-3" /> Teammate
           </Badge>
-          <label className="flex cursor-pointer items-center gap-2 text-xs text-muted-foreground">
-            <Mail className="size-3.5" />
-            Inbox
-            <Switch
-              checked={inboxOn}
-              onCheckedChange={onToggleInbox}
-              aria-label="Give this teammate an inbox"
-              data-testid="team-inbox-toggle"
-            />
-          </label>
         </div>
       </CardContent>
     </Card>

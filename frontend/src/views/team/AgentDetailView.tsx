@@ -3,12 +3,14 @@ import { ChevronRight, Mail, Pencil, Sparkles, Users, Wrench } from "lucide-reac
 import { toast } from "sonner";
 
 import type { OpenCompanyClient } from "@/api/client";
+import { setInboxEnabled } from "@/api/inbox";
 import { listTasks } from "@/api/tasks";
 import { ApiError, type AgentDetailDto } from "@/api/types";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Switch } from "@/components/ui/switch";
 import {
   agentEdits,
   draftFrom,
@@ -158,6 +160,38 @@ export function AgentDetailView({
       live = false;
     };
   }, [client, company, agentId]);
+
+  /**
+   * Give this teammate an inbox, or take it away (issue #1190).
+   *
+   * Moved here from the roster card, where it was the only control that wrote
+   * to the host and sat one mis-click away while scanning thirteen cards. This
+   * page already *reported* inbox state as a badge and offered no way to change
+   * it; the read and the write live together now.
+   *
+   * Optimistic, then reverted on failure — the switch must never be left
+   * claiming a state the host refused. Keyed on the roster agent id, which is
+   * the `InboxStore` key the Inbox page reads and the ingest webhook files mail
+   * under; nothing is persisted client-side.
+   */
+  async function toggleInbox(next: boolean) {
+    if (!agent) return;
+    const apply = (enabled: boolean) =>
+      setAgent((held) => (held ? { ...held, inboxEnabled: enabled } : held));
+    apply(next);
+    try {
+      await setInboxEnabled(client, company, agentId, next);
+    } catch (error) {
+      apply(!next);
+      toast.error(
+        error instanceof ApiError && error.status === 404
+          ? "This host doesn't offer teammate inboxes yet."
+          : error instanceof Error
+            ? error.message
+            : "Couldn't change the inbox.",
+      );
+    }
+  }
 
   async function save() {
     if (!agent) return;
@@ -335,6 +369,7 @@ export function AgentDetailView({
             </Section>
 
             <Tools agent={agent} />
+            <Inbox agent={agent} onToggle={(next) => void toggleInbox(next)} />
             <Desks agent={agent} />
           </>
         )}
@@ -502,6 +537,43 @@ function Tools({ agent }: { agent: AgentDetailDto }) {
       <p className="text-xs text-muted-foreground">
         Company tool list: {agent.tools.companyAllow.join(", ") || "nothing allowed"}
       </p>
+    </Section>
+  );
+}
+
+/**
+ * Whether mail addressed to this teammate lands anywhere (issue #1190).
+ *
+ * A per-teammate setting, on the teammate's own page — not a switch in a grid
+ * of cards, which is what it was. The subtitle says what turning it on actually
+ * does, because "Inbox" alone does not: an inbox is an address the outside
+ * world can reach, which is a different kind of decision from the rest of this
+ * screen and worth one sentence.
+ */
+function Inbox({
+  agent,
+  onToggle,
+}: {
+  agent: AgentDetailDto;
+  onToggle: (next: boolean) => void;
+}) {
+  return (
+    <Section
+      title="Inbox"
+      subtitle="Give this teammate an address of its own, so mail routed to it arrives here rather than nowhere."
+    >
+      <label className="flex cursor-pointer items-center justify-between gap-3">
+        <span className="flex items-center gap-2 text-sm">
+          <Mail className="size-4 text-muted-foreground" />
+          {agent.inboxEnabled ? "This teammate has an inbox." : "This teammate has no inbox."}
+        </span>
+        <Switch
+          checked={agent.inboxEnabled}
+          onCheckedChange={onToggle}
+          aria-label="Give this teammate an inbox"
+          data-testid="agent-inbox-toggle"
+        />
+      </label>
     </Section>
   );
 }
