@@ -1,29 +1,45 @@
 import { describe, expect, it } from "vitest";
 
 import type { WorkflowGraph } from "@/api/workflows";
-import { layout, minimapDimensions } from "@/views/workflows/graph";
+import {
+  layout,
+  minimapDimensions,
+  minimapViewBox,
+} from "@/views/workflows/graph";
 
 /**
  * Issue #1259: the minimap's own container shrinks to match a linear graph's
- * aspect ratio, instead of always requesting React Flow's 200x150 default.
+ * aspect ratio, instead of always requesting React Flow's 200x150 default —
+ * and, unlike React Flow's built-in `<MiniMap>`, the SCALE used to draw node
+ * rects is computed from node positions alone, never the live pan/zoom
+ * viewport.
  *
  * #1230 made the minimap draw real node `<rect>`s by giving every laid-out
  * node an `initialWidth`/`initialHeight` hint. But `layout()` places every
  * node's depth on the x-axis and sibling index on the y-axis, and every
  * shipped company workflow template is one node per depth layer — so the real
  * content bounding box for an 8-10 node pipeline is thousands of pixels wide
- * and one node (64px) tall. React Flow's `<MiniMap>` "contain"-fits that box
- * into whatever container it's given (`viewScale = Math.max(scaledWidth,
- * scaledHeight)`, not configurable via any prop), so fit into the 200x150
- * default, the viewBox's height gets padded ~30-40x past the real content —
- * each node rect renders as an imperceptible sliver. The rects existed
- * (#1230), but were still invisible in practice.
+ * and one node (64px) tall. React Flow's built-in `<MiniMap>` "contain"-fits a
+ * bounding box into whatever container it's given (`viewScale =
+ * Math.max(scaledWidth, scaledHeight)`, not configurable via any prop), so fit
+ * into the 200x150 default, the viewBox's height gets padded ~30-40x past the
+ * real content — each node rect renders as an imperceptible sliver. The rects
+ * existed (#1230), but were still invisible in practice.
  *
  * `minimapDimensions` shrinks the requested container height instead of
- * fighting React Flow's fit algorithm, so a node's real height keeps a
- * healthy fraction of the minimap's own height. A graph with real vertical
- * spread (true siblings sharing a layer) needs no such shrink and keeps the
- * previous 200x150 default untouched.
+ * fighting React Flow's fit algorithm. That alone measured as NO improvement
+ * in a real browser, though: the built-in `<MiniMap>`'s bounding box is the
+ * union of node bounds and the CURRENT VIEWPORT, and for a wide graph
+ * clamped at React Flow's default `minZoom`, the on-screen viewport is itself
+ * far taller than any node — dominating the bounding box regardless of
+ * container size. `minimapViewBox` (what `WorkflowMiniMap.tsx` actually
+ * draws with) computes the same "contain" fit off `contentBounds` alone, so
+ * it isn't subject to that coupling — these tests assert the property that
+ * matters: a node's real height ends up a healthy fraction of the drawn
+ * viewBox's height, not ~3% of one inflated by an unrelated viewport rect.
+ *
+ * A graph with real vertical spread (true siblings sharing a layer) needs no
+ * shrink and keeps the previous 200x150 default untouched.
  */
 
 function graph(nodes: { id: string; kind: string; name: string }[], edges: { from: string; to: string }[] = []): WorkflowGraph {
@@ -133,5 +149,53 @@ describe("minimapDimensions", () => {
     expect(height).toBe(150);
     expect(Number.isFinite(width)).toBe(true);
     expect(Number.isFinite(height)).toBe(true);
+  });
+});
+
+describe("minimapViewBox", () => {
+  it("keeps a linear chain's node height a healthy fraction of the drawn box — not ~3%", () => {
+    const { nodes } = layout(LINEAR_CHAIN);
+    const { height: containerHeight } = minimapDimensions(nodes);
+    const box = minimapViewBox(nodes);
+
+    // Same content bounds as the minimapDimensions test above.
+    const contentHeight = 64;
+
+    // This is the actual number `WorkflowMiniMap.tsx` draws with — unlike
+    // React Flow's built-in `<MiniMap>`, nothing about the current pan/zoom
+    // viewport feeds into it, so this fraction is deterministic from the
+    // graph alone and doesn't depend on window size, zoom level, or whether
+    // the canvas has even mounted yet.
+    const fraction = contentHeight / box.height;
+    expect(fraction).toBeGreaterThan(0.1);
+
+    // The box's own height should be a small multiple of the container it's
+    // fit into (React Flow's default offsetScale padding aside) — not the
+    // 30-40x inflation the issue reported against the built-in component's
+    // viewport-unioned bounding box.
+    expect(box.height).toBeLessThan(containerHeight * 20);
+  });
+
+  it("returns a finite box for an empty graph, never NaN", () => {
+    const { nodes } = layout(EMPTY);
+    const box = minimapViewBox(nodes);
+    expect(Number.isFinite(box.x)).toBe(true);
+    expect(Number.isFinite(box.y)).toBe(true);
+    expect(Number.isFinite(box.width)).toBe(true);
+    expect(Number.isFinite(box.height)).toBe(true);
+    expect(box.width).toBeGreaterThan(0);
+    expect(box.height).toBeGreaterThan(0);
+  });
+
+  it("scales a single node's own bounds (190x64) into the default 200x150 container", () => {
+    const { nodes } = layout(SINGLE);
+    const box = minimapViewBox(nodes);
+    // Width is the tighter axis (190/200 = 0.95 > 64/150 = 0.4267), so it
+    // determines viewScale; the box is padded by 2x the default offsetScale
+    // (5 * viewScale) on each axis, same as React Flow's built-in component.
+    const viewScale = 190 / 200;
+    const offset = 5 * viewScale;
+    expect(box.width).toBeCloseTo(viewScale * 200 + offset * 2, 6);
+    expect(box.height).toBeCloseTo(viewScale * 150 + offset * 2, 6);
   });
 });
