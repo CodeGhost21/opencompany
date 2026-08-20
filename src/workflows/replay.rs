@@ -766,6 +766,48 @@ mod tests {
         );
     }
 
+    /// The same recovery, for an `http_request` node (issue #850 + #846
+    /// interaction).
+    ///
+    /// `declared_call_names` has a separate branch for `HttpRequest` that
+    /// builds the name from the authored method rather than a `slug` — this
+    /// pins that it is actually reached through the sentinel-recovery path,
+    /// not just present in the source. `replay_performed` converts a replayed
+    /// `HttpRequest` node into `NodeKind::ToolCall` with `REPLAY_SLUG` — the
+    /// same shape a replayed `ToolCall` node ends up in — so this is the
+    /// fixture that exercises the `HttpRequest` arm of `declared_call_names`
+    /// rather than its `ToolCall` arm.
+    #[test]
+    fn a_replayed_declared_http_node_keeps_its_own_name() {
+        let authored = {
+            let mut file = authored(&[("notify", WorkflowNodeKind::HttpRequest, Some(false))]);
+            file.nodes[0].config = Some(json!({
+                "method": "POST",
+                "url": "https://api.test/hooks"
+            }));
+            file
+        };
+        // What `replay_performed` leaves behind on the second hop: kind
+        // rewritten to `ToolCall`, config replaced by the sentinel — an
+        // `HttpRequest` node is indistinguishable in shape from a replayed
+        // `ToolCall` node by the time this function sees it.
+        let g = graph(vec![node(
+            "notify",
+            NodeKind::ToolCall,
+            json!({ "slug": REPLAY_SLUG, "args": { "__replayed_result": "{\"status\":201}" } }),
+        )]);
+        let (performed, unreplayable) =
+            outward_calls_performed(&g, &settled("notify", json!({ "status": 201 })), &authored);
+        assert!(unreplayable.is_empty(), "{unreplayable:?}");
+        assert_eq!(performed.len(), 1, "{performed:?}");
+        assert_eq!(performed[0].node, "notify");
+        assert_eq!(
+            performed[0].tool, "http_request POST",
+            "must recover the authored method-based name through the HttpRequest arm of \
+             declared_call_names, not the replay sentinel"
+        );
+    }
+
     /// A declaration only ever ADDS a guard.
     ///
     /// `repeatable = true` on a node the host already classifies as outward is
