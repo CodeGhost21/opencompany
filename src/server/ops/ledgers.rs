@@ -47,6 +47,35 @@ pub fn router() -> Router<AppState> {
         ))
 }
 
+/// One status, wire-shaped for the console (issue #1266).
+///
+/// `crate::ledger::StatusSpec` stays plain snake_case in both directions,
+/// because it is also what a declared ledger round-trips through in every
+/// store backend — a rename there would make a save write one key and a
+/// reload expect another, silently dropping `needs_reason` back to `false`.
+/// This DTO exists so the API-output shape can be camelCase (matching every
+/// other field `LedgerSummary` sends) without that type doing double duty.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LedgerStatusDto {
+    name: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    label: String,
+    closed: bool,
+    needs_reason: bool,
+}
+
+impl From<&crate::ledger::StatusSpec> for LedgerStatusDto {
+    fn from(status: &crate::ledger::StatusSpec) -> Self {
+        Self {
+            name: status.name.clone(),
+            label: status.label.clone(),
+            closed: status.closed,
+            needs_reason: status.needs_reason,
+        }
+    }
+}
+
 /// One ledger as the console lists it.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -65,7 +94,7 @@ struct LedgerSummary {
     /// Whether the runtime ships it. A built-in cannot be retired.
     builtin: bool,
     fields: Vec<crate::ledger::Field>,
-    statuses: Vec<crate::ledger::StatusSpec>,
+    statuses: Vec<LedgerStatusDto>,
     sections: Vec<crate::ledger::Section>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     writers: Vec<String>,
@@ -211,7 +240,7 @@ async fn summary(ctx: &ledgers::Ledgers, spec: &LedgerSpec) -> Result<LedgerSumm
         written_by: spec.written_by.clone(),
         builtin: spec.builtin,
         fields: spec.fields.clone(),
-        statuses: spec.statuses.clone(),
+        statuses: spec.statuses.iter().map(LedgerStatusDto::from).collect(),
         sections: spec.sections.clone(),
         writers: spec.writers.clone(),
         open: entries.open_count(spec),
