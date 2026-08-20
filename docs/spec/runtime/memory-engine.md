@@ -325,3 +325,38 @@ OPENCOMPANY_MEMORY_ALLOW_EPHEMERAL=1  # operator asserts /data is durable
 OPENCOMPANY_MONGODB_URI=mongodb://…
 # → boots; engine memory persists under /data/memory/<workspace>/ as usual.
 ```
+
+## Switching engines — the operator runbook
+
+Engine selection is **infra-operator only**: instance-wide, env-driven, read
+once at boot. There is no per-company choice, no API setter, and no Console
+setter — a Console admin must never be able to repoint a deployment's storage.
+Switching is therefore an env flip plus a restart, and because **nothing
+migrates between engines** (a switched engine starts empty by design), the
+data step comes first.
+
+1. **Export what the live engine holds** (until `export` reads the live
+   overlay, capture what matters by hand — the gap is tracked in the P1
+   follow-ups). A future `opencompany memory migrate --from --to` built on the
+   contract's Portability family is the intended tool here.
+2. **Set the variables** for the target engine (the `.env.example` block names
+   all five). A hosted engine needs the build to carry the `tinymemory`
+   feature; `namespace` needs `tinymemory-embedded`. A feature-less build
+   refuses at boot naming the missing feature.
+3. **Restart.** Selection is read once at boot; a running process never
+   re-reads it.
+4. **Verify on `GET /spec`**: `memory.backend` and `memory.driver_id` name
+   what you selected, `memory.capabilities` lists what it negotiated, and
+   `memory.healthy` reports the boot-time reachability probe — `false` means
+   bound-but-unreachable (bad endpoint or credential); absent means "not
+   probed" (the `store` default or the direct engine overlay).
+
+Misconfiguration never falls back: an unknown mode, a missing driver, URL or
+key, or a missing cargo feature is a boot refusal naming the knob to change.
+
+> **`namespace` caveat (2026-08-20):** the embedded contract driver has two
+> open correctness defects — #1201 (writes corrupted by the PII scrubber's
+> digit redaction inside the stored envelope) and #1238 (a dropped context
+> chunk and reordered traces under the port conformance suite). Fixes are in
+> flight; until both land and the union CI lane is green over them, prefer the
+> incumbent `embedded` engine overlay or a hosted engine for anything real.
