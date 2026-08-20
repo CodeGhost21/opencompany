@@ -189,6 +189,49 @@ Never nest a modal inside a modal.
 
 ---
 
+## Shell: chrome and the content card
+
+The console's window is two layers, not two panes (issue #1178).
+
+| Layer | What paints it | Fill |
+| --- | --- | --- |
+| Chrome | the shell root (`SidebarProvider`) | `bg-chrome` |
+| Card | `ContentSurface` | `bg-background`, `m-3`, `rounded-2xl`, `border-chrome-border`, `shadow-sm` |
+
+The chrome is painted **once**. The sidebar column and the frame around the card
+are the same surface showing through: `Sidebar`'s inner container and
+`SidebarInset` are both `bg-transparent`, and the sidebar draws no border. Give
+either one a fill of its own and the two regions land on different values, which
+is the seam this layout exists to remove — the reason the rule is "painted
+once" and not "painted the same".
+
+The card is the only opaque sheet in the shell. Everything a page draws — its
+own `bg-card` panels, its dialogs — stacks on top of it, which is why it keeps
+`--background` rather than a colour of its own: page contrast is exactly what it
+was before the shell was rebuilt.
+
+### `unframed`
+
+`ContentSurface` takes an `unframed` prop that renders the page edge to edge:
+no margin, no radius, no edge. It is for surfaces that are **drawings**, not
+documents — a canvas sized against the box it is handed, for which a 12px frame
+is not a margin but a crop.
+
+`src/lib/shell-frame.ts` decides it, and it asks the whole address rather than
+the view, because Workflows is both:
+
+| Address | Mode | Why |
+| --- | --- | --- |
+| `#/overview` | unframed | the force-directed knowledge graph, laid out against `h-svh` |
+| `#/workflows` | framed | the browse list — cards, a count, a toolbar |
+| `#/workflows/<id>` | unframed | React Flow, whose viewport and minimap are computed from the container's rect (#1259, #1261) |
+| everything else | framed | documents |
+
+Adding a view? It is framed unless it draws its own full-window canvas. If you
+reach for `unframed`, say which measurement breaks without it.
+
+---
+
 ## Scrollbars
 
 Native scrollbars are themed once, globally, in `index.css` — nothing opts in
