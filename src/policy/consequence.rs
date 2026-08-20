@@ -438,6 +438,9 @@ const DECLARED: &[Declared] = &[
     d_grantable("apply_patch", EffectGroup::Other, Reach::Consequence),
     d_grantable("csv_export", EffectGroup::Other, Reach::Consequence),
     d_grantable("memory_store", EffectGroup::Other, Reach::Consequence),
+    // Forgetting is a write with the same blast radius as storing: durable
+    // company state changes. Same group, same reach, same grantability.
+    d_grantable("memory_forget", EffectGroup::Other, Reach::Consequence),
     // `git_operations` is deliberately NOT grantable alongside its filesystem
     // siblings: it can push to a configured remote, so it reaches an address
     // this layer does not get to see.

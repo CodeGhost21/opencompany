@@ -2693,18 +2693,16 @@ impl CycleHost for CycleHostImpl<'_> {
 
     async fn context_op(&self, op: ContextOp) -> Result<ContextOpResult> {
         match op {
-            ContextOp::Put(chunk) => Ok(ContextOpResult::Addr(
-                {
-                    // External-triggered cycles write through the taint-stamping
-                    // port; see `external_trigger` on this struct.
-                    let port = if self.external_trigger {
-                        &self.rt.inbound_context
-                    } else {
-                        &self.rt.context
-                    };
-                    port.put(&self.company, chunk).await?
-                },
-            )),
+            ContextOp::Put(chunk) => Ok(ContextOpResult::Addr({
+                // External-triggered cycles write through the taint-stamping
+                // port; see `external_trigger` on this struct.
+                let port = if self.external_trigger {
+                    &self.rt.inbound_context
+                } else {
+                    &self.rt.context
+                };
+                port.put(&self.company, chunk).await?
+            })),
             ContextOp::List { prefix } => Ok(ContextOpResult::Metas(
                 self.rt.context.list(&self.company, &prefix).await?,
             )),

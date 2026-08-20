@@ -90,6 +90,7 @@ pub mod mcp;
 pub mod mcp_probe;
 pub mod memory;
 pub mod memory_loop;
+pub mod memory_tools;
 pub mod orchestrator;
 /// Chargebee billing tools (issue #788), wired per company from its own
 /// SecretStore. Always compiled so the credential resolution and the fail-closed

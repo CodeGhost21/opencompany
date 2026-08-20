@@ -482,7 +482,9 @@ impl ContextStore for CortexContextStore {
     async fn delete(&self, id: &CompanyId, addr: &ChunkAddr) -> Result<bool> {
         // The operator hard-delete the client already serves; agent-forget and
         // operator-delete are the same act at this layer.
-        self.client.hard_delete_chunk(id.as_ref(), addr.as_ref()).await
+        self.client
+            .hard_delete_chunk(id.as_ref(), addr.as_ref())
+            .await
     }
 }
 

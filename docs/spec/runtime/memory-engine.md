@@ -340,6 +340,39 @@ repoint it. A deployment with mixed needs runs the engine that fits its
 dominant workload; splitting workloads across engines (traces local, facts
 hosted) is a possible future refinement of *routing*, not of selection.
 
+## Depth: taint, deliberate memory, and what is deliberately not wired
+
+Three determinations from the depth pass (issue #1113), recorded so nobody
+re-derives them:
+
+- **Taint routing is by trigger, at the cycle.** A cycle triggered by
+  `WebhookReceived` writes its brain-chosen context puts through the
+  overlay's inbound port, which stamps `ExternalSync`; everything else stamps
+  `Internal`. Coarse by design — the host cannot see which put quoted the
+  payload, and over-tainting is safe where under-tainting is the leak.
+  `OperatorMessage` turns are deliberately `Internal`: operator speech is the
+  company writing about itself, the same authorship precedent that stamps
+  operator facts `Internal`. Read-side taint *filtering* is a separate,
+  larger change (a `taint` field on `ChunkMeta`/`ChunkHit` and every
+  backend); until it lands, the stamp is honest at the engine and invisible
+  to readers.
+- **Deliberate agent memory is three oc-authored tools** — `memory_store`,
+  `memory_recall`, `memory_forget` — over the company's own `ContextStore`,
+  company and agent captured at build time, never a model-supplied
+  namespace. Forget reaches only the agent's own `agent-memory/<id>/` rows;
+  task outcomes and operator facts are not an agent's to delete. The
+  vendored upstream memory tools stay unwired: they resolve their store
+  ambiently, which under multi-tenant-in-one-process is a cross-company
+  leak (`src/harness/built_in/build.rs`, `memory_tools`).
+- **Scratch stays on the overlay, unwired, until its first consumer.**
+  Carrying it into the harness with zero consumers would recreate the dead
+  seam this pass existed to remove.
+- **Hybrid routing (traces local, facts hosted) is deferred, not rejected** —
+  it would sidestep the hosted enumeration-cost cliff without waiting on
+  upstream keyed CRUD, but it is a refinement of *routing* under the P3
+  selection decision, and it waits for real usage data to say which
+  workloads actually hurt.
+
 ## Switching engines — the operator runbook
 
 Selection is infra-operator only (previous section), so switching is an env

@@ -352,6 +352,7 @@ mod tests {
             "query_company",
             "spawn_task",
             "delegate_to_desk",
+            "memory_forget",
             "memory_recall",
             "memory_store",
             "workspace_read",
