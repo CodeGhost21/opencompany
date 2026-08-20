@@ -58,7 +58,7 @@ summary = "Send the close package to the operator."
 # The close-review desk owns the package that needs filing approval.
 [node.destination]
 kind = "channel"
-target = "close-review"
+target = "close_review"
 
 [[edge]]
 from = "close"

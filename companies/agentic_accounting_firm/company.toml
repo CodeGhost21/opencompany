@@ -9,7 +9,7 @@ human_role = "Sign-off on filings"
 
 # The close-review desk keeps the people who reconcile, file, and substantiate the books together.
 [[group_chat]]
-id = "close-review"
+id = "close_review"
 name = "Close review desk"
 description = "Coordinate the month-end close package before operator sign-off."
 members = ["bookkeeper", "tax_preparer", "audit_prep"]
