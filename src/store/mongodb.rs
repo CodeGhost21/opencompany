@@ -951,7 +951,7 @@ impl ContextStore for MongoStore {
 
     async fn delete(&self, id: &CompanyId, addr: &ChunkAddr) -> Result<bool> {
         let result = self
-            .collection::<mongodb::bson::Document>("context_chunks")
+            .collection("context_chunks")
             .delete_one(doc! {"company_id": id.as_ref(), "addr": addr.as_ref()})
             .await
             .map_err(mongo_err)?;
