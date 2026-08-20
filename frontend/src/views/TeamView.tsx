@@ -389,7 +389,7 @@ export function TeamView({
         */}
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="space-y-1">
-            <h2 className="text-2xl font-semibold tracking-tight">Company</h2>
+            <h1 className="text-2xl font-semibold tracking-tight">Company</h1>
             <p className="text-sm text-muted-foreground">
               The teammates that make up your company — what each does, and what
               they're on. {fromHost ? "Defined by this company." : "Start from these and shape your own."}

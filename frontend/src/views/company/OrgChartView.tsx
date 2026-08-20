@@ -421,7 +421,7 @@ export function OrgChartView({ client, company, focusDeskId, onBack }: Props) {
         )}
         <div className="flex items-start justify-between gap-4">
           <div className="space-y-1">
-            <h2 className="text-2xl font-semibold tracking-tight">Desks</h2>
+            <h1 className="text-2xl font-semibold tracking-tight">Desks</h1>
             <p className="text-sm text-muted-foreground">
               How your company is organised: the desks it works from and who
               staffs each one. Add a desk, move someone between desks, or change
