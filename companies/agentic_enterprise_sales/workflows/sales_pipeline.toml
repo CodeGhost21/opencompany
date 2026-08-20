@@ -72,7 +72,7 @@ summary = "Report pipeline state and the ask."
 # The deal desk coordinates the account materials behind the closing decision.
 [node.destination]
 kind = "channel"
-target = "deal-desk"
+target = "deal_desk"
 
 [[edge]]
 from = "lead"

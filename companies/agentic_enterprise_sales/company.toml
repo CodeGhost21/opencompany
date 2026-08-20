@@ -9,7 +9,7 @@ human_role = "Closing strategic accounts"
 
 # The deal desk brings the proposal, contract, and follow-up owners together for account decisions.
 [[group_chat]]
-id = "deal-desk"
+id = "deal_desk"
 name = "Deal desk"
 description = "Coordinate strategic account proposals, contracts, and next steps."
 members = ["proposal_writer", "contract_generator", "follow_up_agent"]
