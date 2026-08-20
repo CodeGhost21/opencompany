@@ -12,16 +12,16 @@
 //! arrives, and a `prompt` call drains only its own session's buffer after
 //! `session/prompt` returns rather than reading whatever the sink last saw.
 //!
-//! ## Permission requests: fails closed (deliberate, and a known gap)
+//! ## Permission requests: copied from `buzz-agent`, not bridged to the queue
 //!
-//! `docs/spec/runtime/harnesses.md` says an ACP agent "is still subject to
-//! the company's approval policy" — this does not yet route ACP permission
-//! requests through that policy gate; it refuses every one it did not
-//! explicitly configure to allow, via the same [`ConfinedFiles`] the fixture
-//! tests already use. That is the safe direction to be wrong in: a refused
-//! edit is a visible failure the operator can act on, where a silently
-//! auto-approved one would not be. Wiring ACP's `session/request_permission`
-//! into `ApprovalRequestQueue` is real follow-up work, not done here.
+//! An earlier draft routed ACP `session/request_permission` calls through
+//! `ApprovalRequestQueue` and, until that landed, refused every request by
+//! default. `buzz-agent` (`crates/buzz-acp`) answers a much simpler question
+//! instead — trust the CLI's own permission mode, and auto-approve whatever
+//! it still asks about — and that is what this does too, via
+//! [`AutoApprovingFiles`]. There is no human-approval queue in the loop here;
+//! an ACP-run teammate's own CLI is the trust boundary, the same as it is for
+//! a developer running that CLI interactively themselves.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -35,7 +35,7 @@ use opencompany::ports::types::CompanyId;
 use serde_json::Value;
 use tokio::sync::Mutex as AsyncMutex;
 
-use crate::acp::client::{AcpClient, ClientHandler, ConfinedFiles};
+use crate::acp::client::{AcpClient, AutoApprovingFiles, ClientHandler, ConfinedFiles};
 use crate::acp::confine::Confinement;
 use crate::acp::discovery::HARNESSES;
 
@@ -120,8 +120,10 @@ impl LocalAcpAgent {
         })?;
         let confinement = Confinement::new(&self.workspace_root)
             .map_err(|error| OpenCompanyError::Config(format!("acp workspace: {error}")))?;
-        // V1 fails closed — see the module docs.
-        let handler: Arc<dyn ClientHandler> = Arc::new(ConfinedFiles::new(confinement, None));
+        // Auto-approves permission requests by kind — see the module docs.
+        let handler: Arc<dyn ClientHandler> = Arc::new(AutoApprovingFiles::new(
+            ConfinedFiles::new(confinement, None),
+        ));
 
         let pending = Arc::clone(&self.pending_updates);
         let sink: crate::acp::client::UpdateSink = Arc::new(move |update: Value| {

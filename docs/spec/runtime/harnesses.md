@@ -250,13 +250,16 @@ silent fallback either.
 - **`[brain].mode`** (`hosted` | `sidecar`) is a separate axis. It selects the
   cognition seam *within* the built-in harness.
 - **Tools, policy, budgets, desks.** All company- or agent-scoped, and unchanged
-  by which engine runs the turn. An ACP agent is still subject to the company's
-  approval policy — **not yet true for `local`'s own permission prompts**
-  (`session/request_permission`): `LocalAcpAgent` fails closed on every one it
-  was not explicitly configured to allow, rather than routing it through
-  `ApprovalRequestQueue`. Safe (a refusal is a visible, actionable failure; a
-  silent auto-approval would not be), but a known gap, not the intended
-  end state.
+  by which engine runs the turn — **except `local`'s own permission prompts**
+  (`session/request_permission`), which are not routed through
+  `ApprovalRequestQueue` at all. `LocalAcpAgent` auto-approves whatever its CLI
+  still asks about, by option `kind` rather than a configured id, mirroring
+  `buzz-agent`'s own answer to the same protocol gap
+  (`crates/buzz-acp/src/acp.rs::handle_permission_request`): the CLI's own
+  permission mode is the trust boundary, the same as it is for a developer
+  running that CLI interactively themselves. This is a deliberate choice, not
+  a placeholder — an ACP-run teammate is not gated by the company's approval
+  policy the way a `built_in`-run one is.
 - **Which model an agent's `tier` means.** A tier names a workload and is
   resolved against whatever provider its harness turns out to use, so an agent
   keeps its tier when it moves between harnesses. See
