@@ -242,6 +242,30 @@ pub struct HarnessBrain {
     runs: Option<Arc<dyn crate::ports::RunStore>>,
 }
 
+/// A bubble the **runtime** wrote, not an agent (issue #966).
+///
+/// Two sites emit these on the operator channel: the approval-overflow notice
+/// and the cycle's `"Acknowledged."` fallback. Both used to leave the author
+/// unset, so the journal writer's `channel` fallback stamped `"operator"` — and
+/// that made a *correct* system row byte-identical on disk to a reply whose
+/// author the pre-#885 defect had overwritten. No reader could tell them apart,
+/// which is the finding recorded on #966.
+///
+/// Named rather than inlined for the same reason [`confined_bubble`] is: the
+/// author is the load-bearing field, and a free function is what lets it be
+/// asserted without standing up a cycle.
+fn system_notice(text: String) -> OutboundMessage {
+    OutboundMessage {
+        message_id: None,
+        task_id: None,
+        channel: "operator".to_string(),
+        agent: Some(crate::ports::SYSTEM_AUTHOR.to_string()),
+        text,
+        steps: Vec::new(),
+        reply_to: None,
+    }
+}
+
 /// The single bubble a workflow-copilot turn returns (issues #416, #966).
 ///
 /// Named rather than inlined because its **author** is the load-bearing field
@@ -2873,11 +2897,13 @@ impl HarnessBrain {
                     let record = self.record();
                     let turn = self
                         .delegation_runner(run_turn.as_ref(), &record)
-                        // Issue #1035: the operator's own statement of what this
-                        // message is for. The REST handler already acts on it;
-                        // until now the runtime never saw it, so it could not
-                        // tell a message the handler had carded from one it had
-                        // not.
+                        // Issues #1035 / #1152: the operator's own statement of
+                        // what this message is for. The REST handler already
+                        // acts on it; until #1035 the runtime never saw it, so
+                        // it could not tell a message the handler had carded
+                        // from one it had not — and since #1152 it also carries
+                        // "this is not work", which the runtime has to honour or
+                        // the console's promise holds on one surface only.
                         .requested(*deliverable)
                         .handle_operator_message(&responder, text, chat_id)
                         .await?;
@@ -3129,28 +3155,12 @@ impl HarnessBrain {
         // the agent was cut off — and because a turn whose only outcome was
         // overflow has no reply to append to.
         if let Some(notice) = self.park_approval_requests(host).await? {
-            channel_responses.push(OutboundMessage {
-                message_id: None,
-                task_id: None,
-                channel: "operator".to_string(),
-                agent: None,
-                text: notice,
-                steps: Vec::new(),
-                reply_to: None,
-            });
+            channel_responses.push(system_notice(notice));
         }
 
         // The runtime requires at least one channel response per cycle.
         if channel_responses.is_empty() {
-            channel_responses.push(OutboundMessage {
-                message_id: None,
-                task_id: None,
-                channel: "operator".to_string(),
-                agent: None,
-                text: "Acknowledged.".to_string(),
-                steps: Vec::new(),
-                reply_to: None,
-            });
+            channel_responses.push(system_notice("Acknowledged.".to_string()));
         }
 
         let trace = CompressedTrace::now(
@@ -3408,6 +3418,16 @@ description = "Runs Acme."
             .expect("cycle runs");
         assert_eq!(result.channel_responses.len(), 1);
         assert_eq!(result.channel_responses[0].text, "Acknowledged.");
+        // Issue #966, asserted here rather than only on `system_notice`: this
+        // drives the real cycle, so it pins that the fallback *calls* the
+        // constructor. Asserting the constructor alone leaves the call site free
+        // to go back to an inline bubble with no author, which is the shape that
+        // caused the defect.
+        assert_eq!(
+            result.channel_responses[0].agent.as_deref(),
+            Some(crate::ports::SYSTEM_AUTHOR),
+            "the runtime's own fallback is authored by the runtime, not by its destination"
+        );
     }
 
     #[test]
@@ -9148,6 +9168,25 @@ kind = "built_in"
             bubble.agent.as_deref(),
             Some(bubble.channel.as_str()),
             "author and destination must not be the same value — that conflation is issue #885"
+        );
+    }
+
+    /// Issue #966: a bubble the runtime wrote names a non-agent author.
+    ///
+    /// Asserts it is not `"operator"` specifically, rather than only that it
+    /// equals the constant. The whole defect is that a host-authored notice and
+    /// a reply whose author was overwritten stored the *same* value, so a test
+    /// that checked equality alone would still pass if `SYSTEM_AUTHOR` were ever
+    /// redefined to the channel name.
+    #[test]
+    fn a_host_authored_notice_is_not_authored_by_the_operator_channel() {
+        let bubble = system_notice("Acknowledged.".to_string());
+        assert_eq!(bubble.channel, "operator", "the destination is unchanged");
+        assert_eq!(bubble.agent.as_deref(), Some(crate::ports::SYSTEM_AUTHOR));
+        assert_ne!(
+            bubble.agent.as_deref(),
+            Some("operator"),
+            "a notice must not store the author a destination-overwrite produces"
         );
     }
 }

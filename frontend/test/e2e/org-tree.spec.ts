@@ -313,7 +313,10 @@ const deskNode = (page: Page, name: string) =>
  * which needs a second navigation and therefore clicks instead.
  */
 async function openChart(page: Page) {
-  await page.goto("/#/company");
+  // The chart has an address of its own since #1193 — it is a destination under
+  // the Company page, not a mode of it, so it survives a reload and can be
+  // linked. `#/company` is the roster.
+  await page.goto("/#/company/desks");
   await expect(chart(page)).toBeVisible({ timeout: 30_000 });
 }
 
@@ -366,11 +369,16 @@ test("#311 the org chart is reachable, which it was not before", async ({
   // also the stronger claim: it proves the nav entry *routes*, which typing a
   // URL does not.
   await nav.click();
+  // Cards first (issue #1141): the nav entry lands on the teammates. The chart
+  // is one named action away rather than gone — "Manage desks", because desk
+  // management is what it is for (issue #1193).
+  await expect(page.getByTestId("team-card").first()).toBeVisible({ timeout: 30_000 });
+  await page.getByTestId("company-manage-desks").click();
   await expect(chart(page)).toBeVisible({ timeout: 30_000 });
 
-  // And the hash survives rather than being rewritten to the fallback view,
-  // which is exactly what `#/desks` does — it names no view.
-  await expect.poll(() => page.url()).toContain("#/company");
+  // And the hash names where we are rather than being rewritten to the
+  // fallback view, which is exactly what `#/desks` does — it names no view.
+  await expect.poll(() => page.url()).toContain("#/company/desks");
 });
 
 test("#311 the chart is three levels and never a fourth", async ({ page }) => {
@@ -836,10 +844,12 @@ test("#485 following the same desk link twice still lands on it", async ({
     "true",
   );
 
-  // Off to the bare chart. The view stays mounted, so whatever it remembers
-  // about the last honoured id survives.
+  // Off to the bare chart — `#/company/desks` since #1193, because plain
+  // `#/company` is the roster now and would unmount this view rather than leave
+  // it holding what it remembers. The view stays mounted, so whatever it
+  // remembers about the last honoured id survives.
   await page.evaluate(() => {
-    window.location.hash = "#/company";
+    window.location.hash = "#/company/desks";
   });
   await expect(chart(page)).toBeVisible();
   // The previous desk must not keep wearing the ring once it is no longer the
@@ -958,9 +968,9 @@ test("#1102 a teammate on the chart opens their detail page", async ({
   await expect(grace).toHaveAttribute("href", "#/team/grace");
   await grace.click();
   await expect.poll(() => page.url()).toContain("#/team/grace");
-  await expect(
-    page.getByRole("button", { name: "Back to team" }),
-  ).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByTestId("agent-breadcrumb-company")).toBeVisible({
+    timeout: 30_000,
+  });
 
   // The chips under "Not on a desk" name the same teammates and were the worse
   // half of #1102 — bordered pills that read as controls and did nothing.
