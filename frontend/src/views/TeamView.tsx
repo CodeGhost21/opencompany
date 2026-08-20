@@ -36,7 +36,7 @@ import {
   reportAddMember,
   type MissedStep,
 } from "@/lib/member-feedback";
-import { fromDto, newMember, type TeamMember } from "@/lib/team";
+import { fromDto, newMember, roleSubtitle, type TeamMember } from "@/lib/team";
 import { workloadByAssignee, type Workload } from "@/lib/team-workload";
 import { cn } from "@/lib/utils";
 import { Avatar } from "@/views/chat/Avatar";
@@ -563,6 +563,11 @@ function MemberCard({
   // An override exists (someone set this deliberately), as opposed to the cap
   // simply coming from the company's own definition.
   const overridden = member.budgetSetBy !== undefined;
+  // Issue #1208: the role only earns its line when it is not the name again.
+  // Every manifest-declared agent in the shipped companies resolves both to one
+  // string, so this slot was the same words twice on every card — directly
+  // above the description that actually says what the teammate does.
+  const subtitle = roleSubtitle(member.name, member.role);
   return (
     <Card data-testid="team-card">
       <CardContent className="flex h-full flex-col gap-3 py-4">
@@ -588,12 +593,16 @@ function MemberCard({
               data-testid="team-card-open"
             >
               <p className="truncate font-medium">{member.name}</p>
-              <p className="truncate text-xs text-muted-foreground">{member.role}</p>
+              {subtitle && (
+                <p className="truncate text-xs text-muted-foreground">{subtitle}</p>
+              )}
             </button>
           ) : (
             <div className="min-w-0 flex-1">
               <p className="truncate font-medium">{member.name}</p>
-              <p className="truncate text-xs text-muted-foreground">{member.role}</p>
+              {subtitle && (
+                <p className="truncate text-xs text-muted-foreground">{subtitle}</p>
+              )}
             </div>
           )}
           <DropdownMenu>
