@@ -127,7 +127,7 @@ async function mount(del: (path: string) => Promise<unknown>, onOpenLedger = vi.
 
 describe("Retire asks before it deletes a ledger (issue #1216)", () => {
   it("opens a confirm dialog on click and does not call the retire API", async () => {
-    const del = vi.fn(async () => undefined);
+    const del = vi.fn(async (_path: string) => undefined);
     await mount(del);
 
     await act(async () => {
@@ -142,7 +142,7 @@ describe("Retire asks before it deletes a ledger (issue #1216)", () => {
   });
 
   it("Keep it dismisses the dialog without ever calling the retire API", async () => {
-    const del = vi.fn(async () => undefined);
+    const del = vi.fn(async (_path: string) => undefined);
     await mount(del);
 
     await act(async () => {
@@ -161,7 +161,7 @@ describe("Retire asks before it deletes a ledger (issue #1216)", () => {
   });
 
   it("only calls the retire API once the confirm button is pressed", async () => {
-    const del = vi.fn(async () => undefined);
+    const del = vi.fn(async (_path: string) => undefined);
     const onOpenLedger = await mount(del);
 
     await act(async () => {
