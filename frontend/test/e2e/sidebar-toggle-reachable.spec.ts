@@ -4,9 +4,10 @@ import { expect, test } from "@playwright/test";
  * However the sidebar is hidden, there is always a way back to it.
  *
  * Two shapes, because the sidebar has two. On mobile it is a sheet that closes
- * entirely, taking its own controls with it, so the way back is a button fixed
- * to the viewport. On desktop it collapses to a 3rem icon rail that keeps its
- * header, so the way back is the same control that put it there.
+ * entirely, taking its own controls with it, so the way back is a button
+ * docked in its own chrome bar below the page. On desktop it collapses to a
+ * 3rem icon rail that keeps its header, so the way back is the same control
+ * that put it there.
  *
  * The desktop half also pins WHERE that control lives (issue #1177). It used to
  * be a full-width row directly above Overview — the nav row shape exactly, for
@@ -16,6 +17,12 @@ import { expect, test } from "@playwright/test";
  * with the reachability claims rather than filed on its own: a control that is
  * in the right place but unreachable, or reachable but nameless, is the same
  * bug in a different coat.
+ *
+ * The mobile half used to be `position: fixed`, floating over whatever content
+ * happened to scroll into the same bottom-left corner and winning every
+ * hit-test there (issue #1265). It is now a normal-flow bar that reserves its
+ * own row instead of overlaying one, which is what the overlap test below
+ * pins down.
  */
 
 /** The tour can cover the fixed trigger while it is showing. */
@@ -40,6 +47,56 @@ test.describe("sidebar toggle reachability", () => {
 
     const trigger = page.getByRole("button", { name: "Toggle sidebar" });
     await expect(trigger).toBeInViewport();
+    await trigger.click();
+    await expect(page.getByText("Workflows", { exact: true })).toBeVisible();
+  });
+
+  test("the mobile trigger does not overlap scrollable page content", async ({ page }) => {
+    // The issue's own repro viewport (iPhone 12-class).
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.goto("/#/settings/general");
+    await dismissTour(page);
+
+    // Settings' General page is a single `flex-1 overflow-y-auto` column
+    // (`SettingsView.tsx`) ending in a "Something off?" card — scrolling it to
+    // the bottom is what used to land that card's button under the fixed
+    // corner.
+    const flagButton = page.getByRole("button", { name: "Flag something" });
+    await flagButton.scrollIntoViewIfNeeded();
+
+    const trigger = page.getByRole("button", { name: "Toggle sidebar" });
+    await expect(trigger).toBeInViewport();
+
+    const triggerBox = await trigger.boundingBox();
+    const flagBox = await flagButton.boundingBox();
+    expect(triggerBox, "the trigger should have a box").not.toBeNull();
+    expect(flagBox, "the flag button should have a box").not.toBeNull();
+
+    // No shared pixels in either axis: the trigger's row is reserved chrome,
+    // not an overlay, so scrolled-to-the-end content and the trigger cannot
+    // occupy the same screen space.
+    const overlapsX = triggerBox!.x < flagBox!.x + flagBox!.width && flagBox!.x < triggerBox!.x + triggerBox!.width;
+    const overlapsY = triggerBox!.y < flagBox!.y + flagBox!.height && flagBox!.y < triggerBox!.y + triggerBox!.height;
+    expect(overlapsX && overlapsY, "the trigger and the scrolled-to content must not overlap").toBe(
+      false,
+    );
+
+    // And the corner it used to cover hit-tests as the content now, not the
+    // trigger — the concrete symptom from the issue's repro.
+    const flagCenterX = flagBox!.x + flagBox!.width / 2;
+    const flagCenterY = flagBox!.y + flagBox!.height / 2;
+    const hit = await page.evaluate(
+      ([x, y]) => {
+        const el = document.elementFromPoint(x, y);
+        return el?.getAttribute("aria-label") ?? el?.textContent ?? el?.tagName ?? null;
+      },
+      [flagCenterX, flagCenterY],
+    );
+    expect(hit, "the flag button's own point hits the flag button, not the trigger").not.toBe(
+      "Toggle sidebar",
+    );
+
+    // Still reachable and still functional in its own right.
     await trigger.click();
     await expect(page.getByText("Workflows", { exact: true })).toBeVisible();
   });
