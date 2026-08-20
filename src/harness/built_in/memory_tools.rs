@@ -367,6 +367,10 @@ impl Tool for MemoryForgetTool {
         // call time — not against anything the model asserted — so a copied or
         // hallucinated address outside the prefix is refused, never deleted.
         //
+        // KNOWN RACE (#1300): this check is a snapshot — see
+        // reap_fact_mirror's twin note; the label-scoped delete tracked
+        // there closes it by construction.
+        //
         // And checked against the WHOLE index, not just the agent's slice:
         // chunks are content-addressed, so `ContextStore::delete` removes the
         // address — every label pointing at that body goes with it. If any

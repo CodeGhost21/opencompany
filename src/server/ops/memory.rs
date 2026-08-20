@@ -487,6 +487,13 @@ async fn delete_fact(
 /// aware: an address also carrying any label OUTSIDE this mirror's own is
 /// skipped — deleting it would delete that other row too (content
 /// addressing; the same rule `memory_forget` enforces).
+///
+/// KNOWN RACE (#1300): the shared-label check is a snapshot; a write of
+/// byte-identical content landing between the check and the delete loses its
+/// row. The port has no conditional delete to close this — that is exactly
+/// the label-scoped-delete work item in #1300, which fixes it by
+/// construction. Until then the window is one operator HTTP call wide and
+/// requires an adversarially-timed identical-content write.
 pub(crate) async fn reap_fact_mirror(
     context: &dyn crate::ports::ContextStore,
     company: &crate::ports::CompanyId,
