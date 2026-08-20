@@ -117,9 +117,14 @@ alias `…/company/…`). See [`server::ops::mcp`](../../src/server/ops/mcp.rs).
 | `POST` | `…/mcp/registry/{serverId}/disconnect` | Drop the live session, keeping the install. |
 | `PUT` | `…/mcp/registry/{serverId}/env` | Rotate an install's credentials (write-only). |
 | `DELETE` | `…/mcp/registry/{serverId}` | Uninstall. |
+| `GET` | `…/mcp/registry/credential` | The company's Smithery key status (never the key). |
+| `PUT` | `…/mcp/registry/credential` | Set / rotate / clear it (write-only, admin-only). |
 
 The `…/mcp/registry/…` routes are gated on the `mcp` feature and report
-`not_wired` without it, matching `…/oauth/start`. Every registry **mutation**
+`not_wired` without it, matching `…/oauth/start`. The two `…/credential` rows are
+the exception: the key is a secret slot and a console field, so they are always
+compiled — an unwired build still has to let an admin set the key a wired one
+will spend. Every registry **mutation**
 takes the admin guard: an install hands *every* teammate a new set of callable
 tools, so it settles what the company can reach. Browsing decides nothing and
 takes the ordinary company scope.
@@ -169,6 +174,56 @@ was none, and a `health` where the server has never been probed (a real probe
 wins, since it dials the way the agents' bridge tools do). `authConfigured` is
 the union. All four registry fields are omitted when absent, so a declared row's
 JSON is byte-identical to what it was before this existed.
+
+### The directory needs a credential to be worth browsing
+
+Issue #1287. Two upstream directories back the browse surface and only one is
+always on.
+
+* The **official registry** is always queried. Most of its entries declare no
+  remote endpoint, so the hosted-transport filter discards them — correctly:
+  this deployment cannot launch a local subprocess. The survival rate is very
+  low: one live `slack` search fetched 17 entries and kept none; a second, paged
+  differently, kept one across three pages. Not literally empty, but far too
+  thin to look like a working directory.
+* **Smithery** carries the hosted servers (all 20 of its `slack` results report
+  `isDeployed: true`) and upstream's `enabled_registries` adds it **only when a
+  key resolves**.
+
+So with no key the surface works perfectly and has almost nothing to show, which
+reads on screen as a broken search.
+
+The key is **per company**, in that tenant's secret store under
+`smithery/api-key`, write-only, admin-set — [`company::smithery`](../../src/company/smithery.rs).
+Not a shared platform key: Smithery servers *connect* through the account, with
+per-server credentials configured on smithery.ai, so one platform-wide key would
+make one tenant's GitHub configuration every other tenant's, and pool usage onto
+one bill.
+
+**Two working tiers, reported apart.** The company's own key wins; failing that
+the host's `SMITHERY_API_KEY` (upstream's own fallback, and the self-hosting
+hatch). The second is one Smithery account shared by every company on the
+instance, so it is its own `source` value rather than folded into a boolean —
+`configured: true` would be true of both while hiding the sharing, and a
+`configured` meaning "its own" would read `false` for a company whose directory
+works. Those are the two halves of the issue #886 lie at once.
+
+**Discovery, not connection.** The key authenticates search, entry lookup and the
+fetch an install performs. It is *not* what an installed server connects with:
+`registry::connections::connect` dials the stored `deployment_url` and builds its
+auth from that server's own stored env row. Clearing the key stops new browsing
+and leaves running servers alone — worth stating, because the opposite is the
+intuitive guess and would leave an operator afraid to rotate.
+
+Resolved per call rather than held on `McpRuntime`, so an admin's rotation lands
+on the next search with no restart.
+
+**A bad key degrades, it does not break.** Upstream's `registry_search_with`
+treats a single registry's failure as a partial outage (`!any_ok` → empty
+catalogue, never `Err`), so a wrong or expired Smithery key still returns the
+official registry's rows rather than failing the search. Verified live against a
+local host with a deliberately invalid key: `200`, official rows still present,
+Smithery contributing nothing.
 
 ### Delete dispatches
 

@@ -75,16 +75,25 @@ describe("registryOutage", () => {
  */
 describe("expectCatalogue", () => {
   it("passes a page through", () => {
-    const body = { servers: [{ qualifiedName: "@org/git" }], page: 2, totalPages: 7 };
+    const body = {
+      servers: [{ qualifiedName: "@org/git" }],
+      page: 2,
+      totalPages: 7,
+      directoryCredential: "company",
+    };
 
     expect(expectCatalogue(body)).toEqual(body);
   });
 
+  // A page from a host that predates issue #1287 carries no tier. It reads as
+  // `none`, which only ever offers the operator more explanation than the
+  // truth — never a claim that a key is working.
   it("accepts an empty page — a directory with no matches is not a failure", () => {
     expect(expectCatalogue({ servers: [], page: 1, totalPages: 0 })).toEqual({
       servers: [],
       page: 1,
       totalPages: 0,
+      directoryCredential: "none",
     });
   });
 

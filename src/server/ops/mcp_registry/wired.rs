@@ -29,6 +29,7 @@ use openhuman_core::openhuman as oh;
 
 use crate::company::mcp::{McpHealth, stdio_install_refusal};
 use crate::company::runtime::CompanyRuntime;
+use crate::company::smithery::{self, DirectoryKey};
 use crate::error::OpenCompanyError;
 use crate::ports::now_millis;
 use crate::server::error::ApiError;
@@ -170,13 +171,45 @@ fn project(server: InstalledServer, state: Option<&ConnStatus>, now: u64) -> Reg
     }
 }
 
+/// The Smithery credential this company's directory calls present (issue #1287).
+///
+/// Resolved per request rather than held on the runtime, so an admin's rotation
+/// reaches the very next search. The environment is read straight from the
+/// process here, as the sibling credential routes already do.
+async fn directory_key(runtime: &CompanyRuntime) -> Result<DirectoryKey, ApiError> {
+    smithery::resolve(
+        runtime.id(),
+        runtime.secrets().as_ref(),
+        &crate::app::config::ProcessEnv,
+    )
+    .await
+    .map_err(ApiError)
+}
+
 /// `GET …/mcp/registry/search` — browse the two upstream directories.
+///
+/// The response reports which Smithery tier the search presented, because
+/// "no rows" has two completely different causes and only one of them is the
+/// operator's to fix: a real miss, or a directory that was never queried
+/// because no key resolved (issue #1287).
 pub(super) async fn search(company: ScopedCompany, Query(query): Query<SearchQuery>) -> Response {
     let Some(mcp) = company.runtime.mcp() else {
         return not_wired("mcp registry");
     };
-    match mcp.search(query.q, query.page, query.page_size).await {
-        Ok(raw) => Json(catalogue_search(&raw)).into_response(),
+    let key = match directory_key(company.runtime.as_ref()).await {
+        Ok(key) => key,
+        Err(error) => return error.into_response(),
+    };
+    let source = key.source();
+    match mcp
+        .search(key.into_value(), query.q, query.page, query.page_size)
+        .await
+    {
+        Ok(raw) => {
+            let mut dto = catalogue_search(&raw);
+            dto.directory_credential = source;
+            Json(dto).into_response()
+        }
         Err(error) => ApiError(error).into_response(),
     }
 }
@@ -195,7 +228,14 @@ pub(super) async fn entry(company: ScopedCompany, Query(query): Query<EntryQuery
         ))
         .into_response();
     }
-    let raw = match mcp.registry_get(qualified_name.clone()).await {
+    let key = match directory_key(company.runtime.as_ref()).await {
+        Ok(key) => key,
+        Err(error) => return error.into_response(),
+    };
+    let raw = match mcp
+        .registry_get(key.into_value(), qualified_name.clone())
+        .await
+    {
         Ok(raw) => raw,
         Err(error) => return ApiError(error).into_response(),
     };
@@ -232,7 +272,14 @@ pub(super) async fn install(
         .into_response();
     }
 
-    let raw = match mcp.registry_get(qualified_name.clone()).await {
+    let key = match directory_key(runtime).await {
+        Ok(key) => key,
+        Err(error) => return error.into_response(),
+    };
+    let raw = match mcp
+        .registry_get(key.value().map(str::to_string), qualified_name.clone())
+        .await
+    {
         Ok(raw) => raw,
         Err(error) => return ApiError(error).into_response(),
     };
@@ -246,7 +293,10 @@ pub(super) async fn install(
         return ApiError(OpenCompanyError::InvalidRequest(refusal)).into_response();
     }
 
-    let server = match mcp.install_from_directory(qualified_name, body.env).await {
+    let server = match mcp
+        .install_from_directory(key.into_value(), qualified_name, body.env)
+        .await
+    {
         Ok(server) => server,
         Err(error) => return ApiError(error).into_response(),
     };
