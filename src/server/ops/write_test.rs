@@ -9265,7 +9265,7 @@ async fn the_run_history_carries_a_runs_board_rows() {
 
     let (status, runs) = send(&state, "GET", "/api/v1/company/workflows/runs", None).await;
     assert_eq!(status, StatusCode::OK);
-    let runs = runs.as_array().expect("an array of runs");
+    let runs = runs["runs"].as_array().expect("an array of runs");
 
     let settled = runs
         .iter()

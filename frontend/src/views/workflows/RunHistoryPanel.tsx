@@ -169,6 +169,9 @@ export function RunHistoryPanel({
   onFixWithCopilot,
   fixingRunSeq,
   fixReason,
+  hasMore,
+  onLoadOlder,
+  loadingOlder,
 }: {
   runs: WorkflowRunOutcome[];
   /**
@@ -193,6 +196,19 @@ export function RunHistoryPanel({
   fixingRunSeq?: number | null;
   /** A run the copilot judged un-fixable, shown inline under that run's row. */
   fixReason?: { seq: number; reason: string } | null;
+  /**
+   * Whether an older page of `runs` exists behind the oldest `seq` currently
+   * held (issue #1012) — the silent-truncation half of that issue. Omitted
+   * (or `false`) hides "Load older" entirely, which is also how a host
+   * predating the pagination fields degrades: no crash, just no affordance.
+   */
+  hasMore?: boolean;
+  /** Fetch and append the next-older page. Absent hides "Load older" even if
+   * `hasMore` is true — a caller with nowhere to route the click should not
+   * offer it. */
+  onLoadOlder?: () => void;
+  /** An older-page fetch is in flight, so "Load older" shows as busy. */
+  loadingOlder?: boolean;
 }) {
   // Only one fix may be in flight at a time: `handleFixWithCopilot` sets a
   // single `prefilledDraft`/`editOpen` slot, so a second Fix started on a
@@ -267,6 +283,20 @@ export function RunHistoryPanel({
                 fixReason={fixReason?.seq === run.seq ? fixReason.reason : null}
               />
             ))}
+            {/* Issue #1012: the honest half of the page cap — a truncated
+                history says so, with a way to see more, rather than silently
+                ending at `limit` and reading as the whole story. */}
+            {hasMore && onLoadOlder && (
+              <Button
+                variant="ghost"
+                size="sm"
+                className="w-full"
+                disabled={loadingOlder}
+                onClick={onLoadOlder}
+              >
+                {loadingOlder ? "Loading…" : "Load older"}
+              </Button>
+            )}
           </div>
         )}
       </div>
