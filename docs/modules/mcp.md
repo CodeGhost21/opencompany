@@ -244,8 +244,9 @@ builds with `mcp` (`TENANT_FEATURES` in `deploy-staging.yml`); the default
 
 One component reads these routes —
 [`McpServersSection`](../../frontend/src/views/connections/McpServersSection.tsx),
-over the standalone functions in `frontend/src/api/mcp.ts` — rendered from two
-places: inline on Connections, and as the whole of Settings, MCP Servers.
+over the standalone functions in `frontend/src/api/mcp.ts` (List A) and
+`frontend/src/api/mcp-registry.ts` (the directory) — rendered from two places:
+inline on Connections, and as the whole of Settings, MCP Servers.
 
 There is deliberately no MCP method on `OpenCompanyClient`. A second set used to
 sit there, declaring a `{ servers }` wrapper around this table's bare array,
@@ -253,6 +254,48 @@ sit there, declaring a `{ servers }` wrapper around this table's bare array,
 Settings page built on it crashed on open (issue #414). The client casts an
 unparsed body to the declared type, so a second surface is never caught by the
 compiler — only by whoever opens the page.
+
+### Browsing the directory
+
+[`McpRegistryBrowser`](../../frontend/src/views/connections/McpRegistryBrowser.tsx)
+sits inside the same card as the add-a-URL form, under the same manage gate
+(issue #403 — an install hands every teammate a new set of tools). What it
+installs lands in the list above it with a `registry` badge; there is no second
+section, for the reason the whole merge exists.
+
+An entry's install form is exactly the `requiredEnvKeys` the host derived from
+the connection the install will use, as password fields. Those values are
+write-only in both directions: nothing sends one back, and the merged row
+reports only `authConfigured`.
+
+Its failures are its own. Both upstream directories are network hops and either
+can be down, and on a build without the `mcp` feature every `…/mcp/registry/…`
+route answers `404 not_wired` — so `registryOutage` in
+`frontend/src/lib/mcp-registry.ts` turns *every* rejection into one of two
+notices rendered inside the panel, and never rethrows. A dead directory is an
+empty result with a reason; a missing feature is a sentence about the build. The
+company's installed servers keep rendering through both.
+
+### Provenance picks the routes, not just the badge
+
+A row's `source` decides which half of the API it may call. List A's Switch,
+`Test` and `Tools` resolve the row's `name` against the declared list; a
+directory install has no declaration and its `name` is a slug the merge minted,
+so all three answer `no MCP server named …` on it. The registry's
+connect / disconnect stand in their place, its delete is
+`DELETE …/mcp/registry/{serverId}`, and its credentials rotate through
+`PUT …/mcp/registry/{serverId}/env` rather than List A's single token field.
+
+`mcpRowControls` in `frontend/src/lib/mcp-registry.ts` is the one place that
+decides all four, and it reads `source` — never the presence of `serverId`. A
+reconciled row carries a `serverId` and is still a manifest server: it keeps
+List A's controls, keeps its badge, and keeps its refusal to be deleted.
+
+One wire gap worth knowing: `GET …/mcp/servers` reports *that* a credential is
+stored, never which keys hold it, so the rotation form re-reads the field names
+from the catalogue entry. A directory outage therefore costs the rotation form
+its fields even though `PUT …/env` is healthy — the form says so rather than
+guessing.
 
 ### Opening one server
 
@@ -264,7 +307,11 @@ the paragraph above one level up: two surfaces describing the same idea acquire
 two vocabularies and then drift.
 
 The panel is read-only. Enable, `Test`, `Tools` and `Remove` stay on the row;
-what it adds is what the row cannot say —
+what it adds is what the row cannot say. Its provenance and removal prose are
+`mcpProvenanceNote` / `mcpRemovalNote` — one sentence per source, because the
+panel used to read `manifest` against everything-else and told a directory
+install it "was added from the console and lives in this company's runtime
+store", true of neither half of it.
 
 - **Connected, and as what.** MCP has no connection object, so this is assembled
   from two facts a single badge would collapse: `enabled` (whether any agent
