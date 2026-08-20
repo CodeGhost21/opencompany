@@ -364,7 +364,7 @@ export function TeamView({
             className="flex flex-wrap items-center justify-between gap-3"
             data-testid="company-header"
           >
-            <h2 className="text-2xl font-semibold tracking-tight">Company</h2>
+            <h1 className="text-2xl font-semibold tracking-tight">Company</h1>
             <div className="ml-auto flex flex-wrap items-center justify-end gap-2">
               {onManageDesks && (
                 <Button variant="outline" onClick={onManageDesks} data-testid="company-manage-desks">

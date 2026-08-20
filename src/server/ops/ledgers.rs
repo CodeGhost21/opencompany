@@ -219,13 +219,40 @@ fn ctx(scope: &ScopedCompany) -> ledgers::Ledgers {
 /// becomes a system author, which the service refuses every deletion from. That
 /// is deliberate and not an oversight: the platform credential is a tenant, not
 /// a person, and *only a person deletes* has to mean a person.
-fn author(scope: &ScopedCompany) -> LedgerAuthor {
+async fn author(scope: &ScopedCompany) -> LedgerAuthor {
     match &scope.actor {
         Some(actor) if matches!(actor.kind, ActorKind::Operator | ActorKind::User) => {
-            LedgerAuthor::human(actor.id.clone(), actor.id.clone())
+            LedgerAuthor::human(actor.id.clone(), human_label(scope, &actor.id).await)
         }
         Some(actor) => LedgerAuthor::agent(actor.id.clone()),
         None => LedgerAuthor::system("platform"),
+    }
+}
+
+/// A person's byline, resolved through the same user store the admin-only
+/// `GET …/users` route reads (`src/server/users/admin.rs::list_users`) — but
+/// called directly here, with no `require_admin` gate, so every signed-in
+/// member sees a real name rather than only admins.
+///
+/// Falls back to the raw id on any lookup failure — a deleted user, a store
+/// error — because a display-name lookup must never fail the write it is
+/// merely decorating.
+async fn human_label(scope: &ScopedCompany, actor_id: &str) -> String {
+    match scope
+        .runtime
+        .users()
+        .get_user(scope.runtime.id(), actor_id)
+        .await
+    {
+        Ok(Some(user)) => {
+            let display_name = user.display_name.as_deref().unwrap_or("").trim();
+            if display_name.is_empty() {
+                user.email
+            } else {
+                display_name.to_string()
+            }
+        }
+        Ok(None) | Err(_) => actor_id.to_string(),
     }
 }
 
@@ -321,7 +348,8 @@ async fn record_entry(
     if let Some(reason) = body.reason {
         fields.insert(crate::ledger::REASON_FIELD.to_string(), Some(reason));
     }
-    let entry = ledgers::record(&ctx(&scope), spec, &author(&scope), &body.id, fields).await?;
+    let entry =
+        ledgers::record(&ctx(&scope), spec, &author(&scope).await, &body.id, fields).await?;
     Ok(Json(EntryRow::of(&entry, spec)))
 }
 
@@ -332,7 +360,7 @@ async fn delete_entry(
     let registry = ledgers::registry(&ctx(&scope)).await?;
     let spec = registry.require(&path.slug)?;
     let removed =
-        ledgers::delete_entry(&ctx(&scope), spec, &author(&scope), &path.entry_id).await?;
+        ledgers::delete_entry(&ctx(&scope), spec, &author(&scope).await, &path.entry_id).await?;
     Ok(if removed {
         StatusCode::NO_CONTENT
     } else {
@@ -345,7 +373,7 @@ async fn retire_ledger(
     Path(path): Path<LedgerPath>,
     Query(query): Query<RetireQuery>,
 ) -> Result<StatusCode, ApiError> {
-    ledgers::retire(&ctx(&scope), &author(&scope), &path.slug, query.purge).await?;
+    ledgers::retire(&ctx(&scope), &author(&scope).await, &path.slug, query.purge).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 

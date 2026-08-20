@@ -551,9 +551,9 @@ function Identity({ agent }: { agent: AgentDetailDto }) {
       />
       <div className="min-w-0 flex-1 space-y-2">
         <div>
-          <h2 className="truncate text-2xl font-semibold tracking-tight" data-testid="agent-name">
+          <h1 className="truncate text-2xl font-semibold tracking-tight" data-testid="agent-name">
             {display}
-          </h2>
+          </h1>
           {subtitle && (
             <p className="truncate text-sm text-muted-foreground" data-testid="agent-role">
               {subtitle}
