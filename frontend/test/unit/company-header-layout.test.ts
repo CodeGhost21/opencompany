@@ -110,10 +110,6 @@ describe("Company header (#1207)", () => {
 });
 
 describe("Desks header (#1207)", () => {
-  function desk(over: Partial<DeskDto> & Pick<DeskDto, "id" | "name">): DeskDto {
-    return { members: [], ...over } as DeskDto;
-  }
-
   function client(over: { desks?: DeskDto[]; team?: TeamMemberDto[] } = {}): OpenCompanyClient {
     return {
       scopeFor: () => "/api/v1/company/acme",
