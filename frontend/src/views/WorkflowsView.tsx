@@ -3,7 +3,6 @@ import {
   Background,
   BackgroundVariant,
   Controls,
-  MiniMap,
   type Node,
   ReactFlow,
 } from "@xyflow/react";
@@ -99,6 +98,7 @@ import {
   statesFromRun,
   windowHasRunStart,
 } from "@/views/workflows/graph";
+import { WorkflowMiniMap } from "@/views/workflows/WorkflowMiniMap";
 import { LastRunChip, RunHistoryPanel } from "@/views/workflows/RunHistoryPanel";
 import { WorkflowIndex, type IndexMode } from "@/views/workflows/WorkflowIndex";
 import { CopilotPanel } from "@/views/workflows/CopilotPanel";
@@ -408,6 +408,15 @@ export function WorkflowsView({
   // vanished when the drawer was dismissed and a scheduled run's never reached
   // the operator at all.
   const [runs, setRuns] = useState<WorkflowRunOutcome[]>([]);
+  // Issue #1012: whether an older page of `runs` exists behind the oldest
+  // `seq` currently held — gates the drawer's "Load older" affordance. Reset
+  // to `false` whenever the effect below replaces `runs` wholesale (a fresh
+  // newest-page fetch has not yet learned this), and updated by both that
+  // effect and `loadOlderRuns` from each fetch's own `hasMore`.
+  const [runsHasMore, setRunsHasMore] = useState(false);
+  // A "Load older" fetch in flight, so the drawer can disable the control and
+  // avoid a second click racing the first for the same older page.
+  const [loadingOlderRuns, setLoadingOlderRuns] = useState(false);
   // Which workflow the rows in `runs` were fetched for.
   //
   // `graph` and `runs` are two independent requests off the same selection, so
@@ -988,18 +997,25 @@ export function WorkflowsView({
     // whether the host serves this route.
     if (!selectedId) {
       setRuns([]);
+      setRunsHasMore(false);
       setRunsFor(null);
       return;
     }
     let live = true;
     (async () => {
       try {
-        const rows = await listWorkflowRuns(client, company, {
+        const { runs: rows, hasMore } = await listWorkflowRuns(client, company, {
           workflow: selectedId,
           limit: 50,
         });
         if (!live) return;
         setRuns(rows);
+        // Issue #1012: this effect always replaces the page wholesale (a
+        // company switch, a run event, an explicit refresh) — any older runs
+        // a "Load older" click had appended are gone with it, so `hasMore`
+        // starts back over from this fresh newest page's own answer rather
+        // than carrying forward whatever the appended state last said.
+        setRunsHasMore(hasMore);
         setRunsFor(selectedId);
         setHistorySupported(true);
         // Issue #371, the no-live-stream fallback. If the run we just POSTed is
@@ -1022,6 +1038,7 @@ export function WorkflowsView({
         // Degrade quietly: an older host simply has no history to show.
         console.debug("[WorkflowsView] run history unavailable", e);
         setRuns([]);
+        setRunsHasMore(false);
         // Still THIS workflow's answer — "the host has no history for it" — so
         // the pair agrees and the copilot may proceed, told via `runsKnown`
         // that nothing is known about runs rather than that there were none.
@@ -1038,6 +1055,36 @@ export function WorkflowsView({
     // inside, and listing it would re-run this fetch on that clear.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [client, company, selectedId, runsTick, runEventTick]);
+
+  // Issue #1012: "Load older", the run-history drawer's pagination affordance.
+  // APPENDS to `runs` rather than replacing it — unlike the effect above,
+  // which always starts over from the newest page. Paged off the `seq` of the
+  // oldest run currently held, matching the host's `?before_seq=` cursor
+  // semantics (issue #1012's ordering fix made `seq` the field every row's
+  // own display agrees with, which is what makes it a stable paging key).
+  const loadOlderRuns = useCallback(() => {
+    if (!selectedId || loadingOlderRuns) return;
+    const oldest = runs.at(-1)?.seq;
+    if (oldest === undefined) return;
+    setLoadingOlderRuns(true);
+    (async () => {
+      try {
+        const { runs: older, hasMore } = await listWorkflowRuns(client, company, {
+          workflow: selectedId,
+          limit: 50,
+          beforeSeq: oldest,
+        });
+        setRuns((prev) => [...prev, ...older]);
+        setRunsHasMore(hasMore);
+      } catch (e) {
+        // Same quiet degradation as the newest-page fetch — leave what is
+        // already shown in place rather than losing it to a failed page.
+        console.debug("[WorkflowsView] loading older run history failed", e);
+      } finally {
+        setLoadingOlderRuns(false);
+      }
+    })();
+  }, [client, company, selectedId, runs, loadingOlderRuns]);
 
   // Issue #303: the run page the index's health readings are folded from.
   //
@@ -1060,7 +1107,9 @@ export function WorkflowsView({
     let live = true;
     (async () => {
       try {
-        const rows = await listWorkflowRuns(client, company, { limit: 200 });
+        // `hasMore` is ignored here: the index only needs enough of the
+        // company-wide page to fold per-card health, not a pagination UI.
+        const { runs: rows } = await listWorkflowRuns(client, company, { limit: 200 });
         if (!live) return;
         setIndexRuns(rows);
         setIndexRunsLoaded(true);
@@ -2126,9 +2175,9 @@ export function WorkflowsView({
                 {/* Navigation is not identity. The hairline says so, so the
                     name reads as a heading rather than as the next link. */}
                 <span aria-hidden className="h-4 w-px shrink-0 bg-border" />
-                <h2 className="min-w-0 truncate text-sm font-semibold" data-testid="workflow-detail-name">
+                <h1 className="min-w-0 truncate text-sm font-semibold" data-testid="workflow-detail-name">
                   {selected?.name ?? graph?.name ?? selectedId}
-                </h2>
+                </h1>
                 {/* Issue #228: the last run's outcome at a glance — including for
                     a scheduled run nobody watched, which is the case the issue is
                     about. Absent until this workflow has run at least once. */}
@@ -2427,7 +2476,7 @@ export function WorkflowsView({
              act on the list rather than on any workflow in it. */
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div className="flex min-w-0 items-center gap-2">
-              <h2 className="text-sm font-semibold">Workflows</h2>
+              <h1 className="text-sm font-semibold">Workflows</h1>
               <Badge variant="secondary">{workflows.length}</Badge>
             </div>
             <div className="flex min-w-0 flex-wrap items-center justify-end gap-2">
@@ -2697,6 +2746,9 @@ export function WorkflowsView({
                 onFixWithCopilot={handleFixWithCopilot}
                 fixingRunSeq={fixingRunSeq}
                 fixReason={fixReason}
+                hasMore={runsHasMore}
+                onLoadOlder={loadOlderRuns}
+                loadingOlder={loadingOlderRuns}
               />
             ) : null
           }
@@ -2745,6 +2797,13 @@ export function WorkflowsView({
                 colorMode={resolvedTheme === "dark" ? "dark" : "light"}
                 fitView
                 fitViewOptions={{ padding: 0.2 }}
+                // Issue #1261: the library default (0.5) is above the scale
+                // most shipped templates need to fit — an 8-10 node single-row
+                // pipeline needs roughly 0.3. Left at the default, `fitView`
+                // clamps to 0.5 and permanently crops the first/last node,
+                // and the canvas's own Zoom Out control is disabled from
+                // load because the viewport is already pinned at the floor.
+                minZoom={0.1}
                 nodesDraggable={false}
                 nodesConnectable={false}
                 elementsSelectable
@@ -2754,7 +2813,9 @@ export function WorkflowsView({
               >
                 <Background variant={BackgroundVariant.Dots} gap={20} size={1} />
                 <Controls showInteractive={false} />
-                <MiniMap pannable zoomable className="!hidden sm:!block" />
+                {/* Issue #1259: a custom minimap, not React Flow's built-in
+                    `<MiniMap>` — see WorkflowMiniMap.tsx for why. */}
+                <WorkflowMiniMap nodes={nodes} className="!hidden sm:!block" />
               </ReactFlow>
               {/* Issue #303: the copilot and the node inspector share the canvas's
                   right edge, and the copilot wins while it is open — it was

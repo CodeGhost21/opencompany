@@ -53,6 +53,7 @@
 
 pub mod driver;
 pub mod facades;
+pub mod migrate;
 mod namespace;
 
 use std::sync::Arc;
@@ -246,3 +247,5 @@ impl BoundMemory {
 
 #[cfg(test)]
 mod test;
+#[cfg(test)]
+mod upstream_conformance_test;

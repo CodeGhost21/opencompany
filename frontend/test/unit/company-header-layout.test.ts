@@ -55,9 +55,9 @@ function assertHeadingActionsShareRowDescriptionBeneath(headerTestId: string, he
   const row = testId(headerTestId);
   expect(row).not.toBeNull();
 
-  const h2 = [...(row?.querySelectorAll("h2") ?? [])].find((el) => el.textContent === heading);
-  expect(h2).toBeTruthy();
-  expect(h2?.parentElement).toBe(row);
+  const h1 = [...(row?.querySelectorAll("h1") ?? [])].find((el) => el.textContent === heading);
+  expect(h1).toBeTruthy();
+  expect(h1?.parentElement).toBe(row);
 
   // The actions live in the same row as the heading, as its sibling.
   const buttons = row?.querySelectorAll("button") ?? [];

@@ -7,6 +7,7 @@ import type { OpenCompanyClient } from "@/api/client";
 import { setInboxEnabled } from "@/api/inbox";
 import { listTasks } from "@/api/tasks";
 import { ApiError, type AgentDetailDto } from "@/api/types";
+import { TeammateAvatar } from "@/components/teammate-avatar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -33,10 +34,9 @@ import {
   type AgentFieldKey,
 } from "@/lib/agent";
 import { fetchBoardColumns } from "@/lib/board-columns";
-import { roleSubtitle, toneFor } from "@/lib/team";
+import { avatarFor, roleSubtitle, toneFor } from "@/lib/team";
 import { workloadByAssignee, type Workload } from "@/lib/team-workload";
 import { cn } from "@/lib/utils";
-import { Avatar } from "@/views/chat/Avatar";
 import { AgentFields } from "@/views/team/AgentFields";
 
 type Load = "loading" | "ready" | "missing" | "unsupported" | "error";
@@ -528,26 +528,32 @@ export function AgentDetailView({
 /** Name, role, id, and the two facts that classify an agent. */
 function Identity({ agent }: { agent: AgentDetailDto }) {
   const display = agent.name?.trim() || agent.role;
+  const seed = agent.id || display;
+  const tone = toneFor(seed);
+  // Same seed as `tone` — the id where there is one — so a rename doesn't
+  // change this teammate's face on the one screen that should never be
+  // showing letters (issue #1181, and issue #1185 for the seed itself).
+  const avatar = avatarFor(seed);
   // #1208, on the page a teammate *is*. `display` already falls back to the
   // role, and a manifest-declared agent has no `name` at all, so the line under
   // the title was the title again on every teammate in every shipped company.
   const subtitle = roleSubtitle(display, agent.role);
-  const tone = toneFor(agent.id || display);
   return (
     <div className="flex items-start gap-4">
       {/* The header of the page a teammate *is* — the one screen that should
           never be the one showing letters (issue #1181). 56px. */}
-      <Avatar
+      <TeammateAvatar
         name={display}
         tone={tone}
+        avatar={avatar}
         className="size-14 rounded-xl text-base"
         data-testid="agent-avatar"
       />
       <div className="min-w-0 flex-1 space-y-2">
         <div>
-          <h2 className="truncate text-2xl font-semibold tracking-tight" data-testid="agent-name">
+          <h1 className="truncate text-2xl font-semibold tracking-tight" data-testid="agent-name">
             {display}
-          </h2>
+          </h1>
           {subtitle && (
             <p className="truncate text-sm text-muted-foreground" data-testid="agent-role">
               {subtitle}

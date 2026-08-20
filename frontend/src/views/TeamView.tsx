@@ -7,6 +7,7 @@ import type { OpenCompanyClient } from "@/api/client";
 import { setInboxEnabled } from "@/api/inbox";
 import { listTasks } from "@/api/tasks";
 import { ApiError, type TeamMemberDto } from "@/api/types";
+import { TeammateAvatar } from "@/components/teammate-avatar";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import {
@@ -38,7 +39,6 @@ import {
 import { fromDto, newMember, roleSubtitle, type TeamMember } from "@/lib/team";
 import { workloadByAssignee, type Workload } from "@/lib/team-workload";
 import { cn } from "@/lib/utils";
-import { Avatar } from "@/views/chat/Avatar";
 import { AgentDetailView } from "@/views/team/AgentDetailView";
 import { AgentFields } from "@/views/team/AgentFields";
 
@@ -364,7 +364,7 @@ export function TeamView({
             className="flex flex-wrap items-center justify-between gap-3"
             data-testid="company-header"
           >
-            <h2 className="text-2xl font-semibold tracking-tight">Company</h2>
+            <h1 className="text-2xl font-semibold tracking-tight">Company</h1>
             <div className="ml-auto flex flex-wrap items-center justify-end gap-2">
               {onManageDesks && (
                 <Button variant="outline" onClick={onManageDesks} data-testid="company-manage-desks">
@@ -539,7 +539,7 @@ function MemberCard({
             44px, comfortably above the ~24px floor under which a mascot is a
             smudge and the bare tone tile is the honest fallback.
           */}
-          <Avatar name={member.name} tone={member.tone} className="size-11 rounded-xl text-sm" />
+          <TeammateAvatar name={member.name} tone={member.tone} avatar={member.avatar} className="size-11 rounded-xl text-sm" />
           {/*
             Plain text, not its own button (issue #1206): the whole card above
             is now the single click/keyboard target, so a second nested
