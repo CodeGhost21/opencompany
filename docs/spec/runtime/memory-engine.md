@@ -343,13 +343,41 @@ hosted) is a possible future refinement of *routing*, not of selection.
 ## Switching engines — the operator runbook
 
 Selection is infra-operator only (previous section), so switching is an env
-flip plus a restart — and because **nothing migrates between engines** (a
-switched engine starts empty by design), the data step comes first.
+flip plus a restart — and because **the flip alone moves no data** (a
+switched engine starts empty until something puts records in it), the
+migration below is the step that moves it, and it comes first.
 
-1. **Export what the live engine holds** (until `export` reads the live
-   overlay, capture what matters by hand — the gap is tracked in the P1
-   follow-ups). A future `opencompany memory migrate --from --to` built on the
-   contract's Portability family is the intended tool here.
+0. **Stop the writes.** Pause the workload (or scale the tenant to zero)
+   before migrating: the copy is page-by-page with no dual-write, so anything
+   a live cycle writes to the source *after* its page was exported is lost to
+   the target. The export cursor is also the source driver's own — against a
+   store that keeps changing underneath it, a hosted cursor can skip or repeat
+   rows. A paused company loses nothing: chat still parks, and the whole
+   procedure is one restart long anyway.
+1. **Move the data.** `opencompany memory migrate --to <driver>` copies every
+   record from the env-selected engine (the source — you have not flipped the
+   environment yet, so it still names the old engine) into the target, over
+   the contract's Portability family: namespaces, record kinds and provenance
+   taint round-trip untouched. `--dry-run` counts first; a stopped run prints
+   the `--resume-cursor` to re-enter at (import is idempotent by
+   `(namespace, key)`, so re-running a failed page cannot duplicate — drivers
+   that detect presence report `skipped`, the rest overwrite in place). Hosted targets warn about
+   their enumeration-based write cost. The `store` default and the
+   EngineCortex overlay have no provider seam and are refused by name — for
+   those, `opencompany export` now reads the live engine (base backend plus
+   memory overlay, operator facts included) and is the capture tool.
+
+   Two hosted-deployment cautions. The copy is **engine-level**: every
+   namespace the source credential can see crosses, which is exactly right
+   when each tenant has its own hosted account and credential — and exactly
+   wrong if two tenants ever shared one, so keep hosted memory credentials
+   per-tenant. And pass the target credential through
+   `OPENCOMPANY_MEMORY_TARGET_API_KEY`, not `--to-api-key`: a flag sits in
+   `/proc/<pid>/cmdline`, world-readable for the whole (possibly long) run,
+   which no shell-history hygiene fixes. The flag remains only for
+   compatibility. On completion the command re-counts the **target's own**
+   export as a receipt, so the evidence is the target's answer rather than
+   the migration's own counters.
 2. **Set the variables** for the target engine (the `.env.example` block names
    all five). A hosted engine needs the build to carry the `tinymemory`
    feature; `namespace` needs `tinymemory-embedded`. A feature-less build

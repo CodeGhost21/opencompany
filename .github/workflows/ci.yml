@@ -1135,6 +1135,13 @@ jobs:
 
       - name: Test the memory engine selection surface
         run: scripts/ci/run-scoped-suite.sh "tinymemory selection" acp,runner,tinymemory store::select
+      # The `memory migrate` / bundle-command guards live in the lib
+      # (store::memory::migrate, store::select) and run above; this executes
+      # the bin target's own tests under the same features so nothing
+      # bin-resident is ever compile-only again (#1279 review: no lane ran
+      # `cargo test --bin` at any feature set).
+      - name: Bin tests (tinymemory)
+        run: cargo test --locked --features acp,runner,tinymemory --bin opencompany
 
       # Issue #1113 gave `tinymemory-embedded` its own lane; these two steps are
       # that lane moved onto the union of the openhuman+tinycortex core and the

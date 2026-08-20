@@ -22,7 +22,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import type { CompanyFeed } from "@/hooks/use-company";
-import { approvedByRuntimeLine, approvedLine } from "@/lib/approval-wording";
+import { approvedByRuntimeLine, approvedLine, batchPositions } from "@/lib/approval-wording";
 import { approvalSummary, grantHeadline, timeAgo, toolAction, untilLabel } from "@/lib/language";
 import { approvalsForTask } from "@/lib/task-approvals";
 import { startVisiblePolling } from "@/lib/visible-poll";
@@ -165,15 +165,14 @@ export function ApprovalsView({
    * Counted over what is still pending rather than over the whole batch, so the
    * number shrinks as rows are decided instead of promising a fourth row that
    * has already been signed off.
+   *
+   * Both halves of "N of M" come from one walk of that pending list (#1289): a
+   * per-card `index` as well as the batch `total`, so a two-card turn reads
+   * "1 of 2" then "2 of 2" rather than the hardcoded "1 of 2" twice, and a
+   * focus-narrowed view cannot count the position over a subset and the total
+   * over the whole.
    */
-  const batchTotals = useMemo(() => {
-    const counts = new Map<string, number>();
-    for (const a of approvals) {
-      if (!a.batch) continue;
-      counts.set(a.batch, (counts.get(a.batch) ?? 0) + 1);
-    }
-    return counts;
-  }, [approvals]);
+  const batchPos = useMemo(() => batchPositions(approvals), [approvals]);
 
   const markInFlight = (id: string, verdict: Verdict | null) =>
     setInFlight((prev) => {
@@ -335,7 +334,8 @@ export function ApprovalsView({
                   now={now}
                   askerNames={askerNames}
                   deciding={inFlight.get(a.id) ?? null}
-                  batchTotal={batchTotals.get(a.batch ?? "") ?? 1}
+                  batchIndex={batchPos.get(a.id)?.index ?? 1}
+                  batchTotal={batchPos.get(a.id)?.total ?? 1}
                   onDecide={(verdict, scope) => void decide(a, verdict, scope)}
                 />
               ))}
@@ -562,6 +562,7 @@ function ApprovalCard({
   now,
   askerNames,
   deciding,
+  batchIndex,
   batchTotal,
   onDecide,
 }: {
@@ -570,6 +571,12 @@ function ApprovalCard({
   askerNames: Map<string, string>;
   /** The verdict this card is waiting on, or `null` when it is idle (#373). */
   deciding: Verdict | null;
+  /**
+   * This card's 1-based position within its turn's batch — the numerator of
+   * "N of M from the same turn" (#1289). `1` is the default for an approval
+   * with no batch, where the line is not shown at all.
+   */
+  batchIndex: number;
   /**
    * How many rows this turn's batch still has waiting, including this one
    * (#842). `1` — the default for an approval with no batch — says nothing.
@@ -659,7 +666,7 @@ function ApprovalCard({
                   // here, on its own, and pointing at the others would imply a
                   // batch decision this page does not offer. The conversation's
                   // card is where one Approve covers all of them (#842).
-                  `1 of ${batchTotal} from the same turn`
+                  `${batchIndex} of ${batchTotal} from the same turn`
                 : undefined
           }
         />

@@ -548,6 +548,52 @@ pub async fn open_storage(
     }
 }
 
+/// The bundle-command environment refusals (`export` / `import`), extracted
+/// from the bin's `live_ports` so they execute under this module's tests —
+/// the first cut left them in the binary, where no CI lane runs tests and a
+/// mutation (`if false &&`) went green (the #1279 review's finding).
+///
+/// One deployment per bundle: with a non-default environment an explicit
+/// `--home` is refused rather than mixed in; `null` is refused in both
+/// directions; shared-single-DB tenant mode is refused (bundle ops write no
+/// owner rows). Under the fs+store default every check passes and `--home`
+/// means exactly what it always has.
+pub fn refuse_bundle_env(settings: &StorageSettings, home_was_flagged: bool) -> crate::Result<()> {
+    let live = settings.kind != StorageKind::Fs || settings.memory_backend != MemoryBackend::Store;
+    if settings.memory_backend == MemoryBackend::Null {
+        return Err(crate::error::OpenCompanyError::Config(
+            "OPENCOMPANY_MEMORY=null retains nothing: an export would capture no memory and an \
+             import would discard every record while reporting success. Unset OPENCOMPANY_MEMORY \
+             for bundle operations."
+                .into(),
+        ));
+    }
+    if live && home_was_flagged {
+        return Err(crate::error::OpenCompanyError::Config(format!(
+            "--home names an fs data set, but this environment selects storage `{}` and memory \
+             `{}` — the bundle would mix two deployments. Unset OPENCOMPANY_STORAGE and \
+             OPENCOMPANY_MEMORY* to operate on the fs home, or drop --home to operate on the \
+             live deployment.",
+            settings.kind.as_str(),
+            settings.memory_backend.as_str()
+        )));
+    }
+    if live
+        && settings
+            .tenant_id
+            .as_deref()
+            .is_some_and(|t| !t.trim().is_empty())
+    {
+        return Err(crate::error::OpenCompanyError::Config(
+            "shared-single-DB tenant mode (OPENCOMPANY_TENANT_ID) namespaces company ids and \
+             owner rows at the app layer; bundle operations write neither. Run them without \
+             tenant mode, from the manager path."
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Opens the memory + context overlay selected by `OPENCOMPANY_MEMORY`.
 ///
 /// `Ok(None)` means [`MemoryBackend::Store`] — the base backend keeps its own
@@ -1644,5 +1690,56 @@ mod test {
             ..Default::default()
         };
         assert!(open_storage(&settings, Path::new("/tmp")).await.is_err());
+    }
+    /// The bundle-command refusals, executed — the #1279 review neutralised
+    /// the bin-resident versions with `if false &&` and nothing went red;
+    /// these are the tests that make that mutation fail.
+    #[test]
+    fn bundle_env_refusals_fire_and_the_fs_default_passes() {
+        // fs+store default: both flag spellings pass — no regression.
+        let default = StorageSettings::default();
+        refuse_bundle_env(&default, false).expect("default env, no flag");
+        refuse_bundle_env(&default, true).expect("default env, explicit --home");
+
+        // null refuses in both directions regardless of the flag.
+        let null = StorageSettings {
+            memory_backend: MemoryBackend::Null,
+            ..StorageSettings::default()
+        };
+        for flagged in [false, true] {
+            let err = refuse_bundle_env(&null, flagged)
+                .expect_err("null must refuse")
+                .to_string();
+            assert!(err.contains("OPENCOMPANY_MEMORY=null"), "{err}");
+        }
+
+        // A live environment refuses an explicit --home (two deployments in
+        // one bundle) but proceeds without the flag.
+        let live = StorageSettings {
+            kind: StorageKind::Mongodb,
+            ..StorageSettings::default()
+        };
+        let err = refuse_bundle_env(&live, true)
+            .expect_err("live env + --home must refuse")
+            .to_string();
+        assert!(err.contains("--home"), "{err}");
+        refuse_bundle_env(&live, false).expect("live env without the flag proceeds");
+
+        // Tenant mode refuses on a live env; whitespace does not count as set.
+        let tenant = StorageSettings {
+            kind: StorageKind::Mongodb,
+            tenant_id: Some("acme".into()),
+            ..StorageSettings::default()
+        };
+        let err = refuse_bundle_env(&tenant, false)
+            .expect_err("tenant mode must refuse")
+            .to_string();
+        assert!(err.contains("OPENCOMPANY_TENANT_ID"), "{err}");
+        let blank_tenant = StorageSettings {
+            kind: StorageKind::Mongodb,
+            tenant_id: Some("  ".into()),
+            ..StorageSettings::default()
+        };
+        refuse_bundle_env(&blank_tenant, false).expect("blank tenant id is unset");
     }
 }

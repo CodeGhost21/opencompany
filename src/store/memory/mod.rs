@@ -53,6 +53,7 @@
 
 pub mod driver;
 pub mod facades;
+pub mod migrate;
 mod namespace;
 
 use std::sync::Arc;
