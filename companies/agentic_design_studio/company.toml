@@ -26,7 +26,7 @@ allow = ["*", "media", "composio", "search"]
 
 # The creative-direction desk brings research, brand, and product-design decisions to one review.
 [[group_chat]]
-id = "creative-direction"
+id = "creative_direction"
 name = "Creative direction desk"
 description = "Coordinate the design system before creative sign-off."
 members = ["user_researcher", "brand_designer", "ui_designer"]

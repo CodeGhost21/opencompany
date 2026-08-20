@@ -65,7 +65,7 @@ summary = "Hand the system to the operator for sign-off."
 # The creative-direction desk gathers the system for the operator's design review.
 [node.destination]
 kind = "channel"
-target = "creative-direction"
+target = "creative_direction"
 
 [[edge]]
 from = "brief"
