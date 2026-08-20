@@ -326,14 +326,25 @@ OPENCOMPANY_MONGODB_URI=mongodb://…
 # → boots; engine memory persists under /data/memory/<workspace>/ as usual.
 ```
 
+## Selection scope — a decision, not a gap (2026-08-20)
+
+Engine selection is **infra-operator only**: instance-wide, expressed through
+the `OPENCOMPANY_MEMORY*` environment, read once at boot. There is no
+per-company selection, no per-agent selection, no API setter, and no Console
+setter — the Console's Brain and Settings panels are read-only views of
+`/spec` by design, so a console admin can see the engine but never repoint a
+deployment's storage. This deliberately does **not** follow the per-company
+`[inference]` model, for the reason recorded at the selection site in
+`src/store/select.rs`: memory is storage, and nothing model-shaped may ever
+repoint it. A deployment with mixed needs runs the engine that fits its
+dominant workload; splitting workloads across engines (traces local, facts
+hosted) is a possible future refinement of *routing*, not of selection.
+
 ## Switching engines — the operator runbook
 
-Engine selection is **infra-operator only**: instance-wide, env-driven, read
-once at boot. There is no per-company choice, no API setter, and no Console
-setter — a Console admin must never be able to repoint a deployment's storage.
-Switching is therefore an env flip plus a restart, and because **nothing
-migrates between engines** (a switched engine starts empty by design), the
-data step comes first.
+Selection is infra-operator only (previous section), so switching is an env
+flip plus a restart — and because **nothing migrates between engines** (a
+switched engine starts empty by design), the data step comes first.
 
 1. **Export what the live engine holds** (until `export` reads the live
    overlay, capture what matters by hand — the gap is tracked in the P1
