@@ -1,8 +1,7 @@
 import { Building2 } from "lucide-react";
 
-import { TEAM_TONES, avatarFor, avatarSrc } from "@/lib/team";
+import { TEAM_TONES, avatarFor, avatarSrc, initials } from "@/lib/team";
 import { cn } from "@/lib/utils";
-import { initials } from "@/views/chat/model";
 
 interface Props {
   name: string;

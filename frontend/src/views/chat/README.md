@@ -176,8 +176,8 @@ couldn't match against the roster).
 
 A DM is where seeding it wrong bites hardest: the rail row and `ChatHeader`
 sit on screen together, and seeding them differently would put two faces on
-one teammate — worse than the generic glyph the header drew before issue
-#1170. Both go through `dmFace(channel)` in `model.ts`, which reads
+one teammate — worse than the generic glyph the header drew before issue #1170.
+Both go through `dmFace(channel)` in `model.ts`, which reads
 `channel.member.avatar`; a channel and a DM with no roster entry get `null`
 there and wear a glyph (`#`, `Lock`, `CircleDot`) instead, because neither has
 one person behind it. The header draws its tile at 24px, the floor below
