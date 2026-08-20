@@ -114,9 +114,16 @@ test("the sidebar picks up a newly declared list without a reload", async ({
     // Reached through Manage Lists' own refresh path (Company → Manage lists),
     // which is the one place a declare actually happens from in the console —
     // this only proves the sidebar's *read* keeps up once it does.
+    //
+    // Both Manage Lists' own row and the sidebar's row (shell chrome, present
+    // on every route) carry this exact title once the shared read lands, so
+    // an unscoped text lookup would match two elements — scoped to `main`
+    // here to mean "on the page itself", separate from `navRow` below.
     await page.locator('[data-tour="nav-company"]').getByRole("button").click();
     await page.getByTestId("company-manage-lists").click();
-    await expect(page.getByText("E2E sidebar list")).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByRole("main").getByText("E2E sidebar list")).toBeVisible({
+      timeout: 15_000,
+    });
 
     await page.getByTestId("lists-breadcrumb-company").click();
 

@@ -72,9 +72,14 @@ test("the wizard declares a real list, which appears in Manage Lists and the sid
   await page.locator("label", { hasText: "Owner" }).getByRole("switch").click();
   await page.getByRole("button", { name: "Next" }).click();
 
-  // Step 5 — review, then submit.
-  await expect(page.getByText(title)).toBeVisible();
-  await expect(page.getByText(/open → closed/)).toBeVisible();
+  // Step 5 — review, then submit. Scoped to `main`: the review text and the
+  // eventual Manage Lists row both carry the title, and once this list also
+  // has a sidebar row (checked below) the title exists on screen twice —
+  // `getByText` unscoped would then match both and fail Playwright's
+  // single-match requirement.
+  const main = page.getByRole("main");
+  await expect(main.getByText(title)).toBeVisible();
+  await expect(main.getByText(/open → closed/)).toBeVisible();
   await page.getByRole("button", { name: "Create list" }).click();
 
   try {
@@ -82,7 +87,7 @@ test("the wizard declares a real list, which appears in Manage Lists and the sid
     await expect(page.getByRole("heading", { name: "Manage lists" })).toBeVisible({
       timeout: 15_000,
     });
-    await expect(page.getByText(title)).toBeVisible({ timeout: 15_000 });
+    await expect(main.getByText(title)).toBeVisible({ timeout: 15_000 });
 
     // And it is a live sidebar row the moment it exists (issue #1284's core
     // claim: no list is one click further from the sidebar than any other).
@@ -116,23 +121,31 @@ test("retiring a declared list asks before it deletes, then removes it everywher
   });
   expect(declared.ok()).toBeTruthy();
 
+  const main = page.getByRole("main");
   await openManageLists(page);
-  await expect(page.getByText("E2E retire target")).toBeVisible({ timeout: 15_000 });
+  await expect(main.getByText("E2E retire target")).toBeVisible({ timeout: 15_000 });
   // The sidebar is shell chrome, present on every route — it already picked
   // this list up from the seed above, before the confirm below removes it.
   const sidebarRow = page.locator(`[data-tour="nav-ledgers-${slug}"]`).getByRole("button");
   await expect(sidebarRow).toBeVisible({ timeout: 15_000 });
 
-  const row = page.locator("div", { hasText: "E2E retire target" }).last();
+  // Scoped to the one Card carrying this list's title, not any `div` that
+  // happens to contain the text — several ancestor divs do, and only the
+  // card itself has the Retire button as a sibling rather than a stranger.
+  const row = page.locator('[data-slot="card"]', { hasText: "E2E retire target" });
   await row.getByRole("button", { name: "Retire" }).click();
 
   const confirm = page.getByTestId("ledger-retire-confirm");
   await expect(confirm).toBeVisible();
-  // Not gone yet — the confirm has not been pressed.
-  await expect(page.getByText("E2E retire target")).toBeVisible();
-  await expect(sidebarRow).toBeVisible();
+  // Not gone yet — the confirm has not been pressed. `toBeAttached`, not
+  // `toBeVisible`: the open AlertDialog dims and inerts the rest of the page
+  // (confirmed live — the row and the sidebar are still in the DOM, just
+  // occluded), so a visibility check here would be asserting the modal's own
+  // backdrop rather than whether the retire actually happened.
+  await expect(main.getByText("E2E retire target")).toBeAttached();
+  await expect(sidebarRow).toBeAttached();
 
   await confirm.click();
-  await expect(page.getByText("E2E retire target")).toHaveCount(0, { timeout: 15_000 });
+  await expect(main.getByText("E2E retire target")).toHaveCount(0, { timeout: 15_000 });
   await expect(sidebarRow).toHaveCount(0);
 });
