@@ -2553,6 +2553,15 @@ impl HarnessPool {
         // SECURITY: the reply **text only** — the scrubbed `outcome.steps` never
         // enter the memory store, so a step detail can never be retrieved and
         // re-injected into a later turn.
+        //
+        // TAINT (issue #1113): deliberately `deps.context` (Internal), not
+        // `deps.inbound()`. Harness turns are operator-triggered —
+        // `OperatorMessage` is operator speech, the same authorship precedent
+        // that stamps operator facts Internal — while channel/webhook content
+        // enters through the cycle path, which routes its puts through the
+        // inbound port (`CycleHostImpl::external_trigger`). If a harness turn
+        // ever takes a webhook trigger, that turn must switch to
+        // `deps.inbound()` — the accessor exists for exactly that day.
         if !matches!(
             steer.and_then(SteerControl::pending),
             Some(SteerAction::Cancel)

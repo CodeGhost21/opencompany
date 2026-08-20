@@ -469,6 +469,10 @@ impl<'a> CycleRunner<'a> {
             // never pruned, and a cycle needs the link for at most the couple of
             // `ApprovalResolved` ids in its own batch.
             cycle_task_id(&request.events, |id| self.rt.journal.approval_task(id)),
+            request
+                .events
+                .iter()
+                .any(|e| matches!(e, CompanyEvent::WebhookReceived { .. })),
             // Issue #379: and which conversation, on the same terms — read off
             // the same trigger events, from the same retained origins. Issue
             // #435 widened this to the channel *and* the thread within it, in
@@ -2249,6 +2253,16 @@ struct CycleHostImpl<'a> {
     /// agrees on a channel but not on a thread within it — which degrades to
     /// exactly the pre-#435 behaviour of answering in the channel.
     thread_parent: Option<EventSeq>,
+    /// Whether this cycle was triggered by content that arrived from OUTSIDE —
+    /// a `WebhookReceived` in its trigger batch (a channel message, an email,
+    /// a third-party callback). Computed once, like `task_id`. A brain-chosen
+    /// `ContextOp::Put` in such a cycle can be (and on the medulla path
+    /// routinely is) the raw inbound payload echoed back, so the write goes
+    /// through the taint-stamping inbound port instead of the internal one
+    /// (issue #1113). Coarse by design: the host cannot see which put quoted
+    /// the payload, so every put of an externally-triggered cycle carries the
+    /// external stamp — over-tainting is safe, under-tainting is the leak.
+    external_trigger: bool,
 }
 
 impl<'a> CycleHostImpl<'a> {
@@ -2257,6 +2271,7 @@ impl<'a> CycleHostImpl<'a> {
         cycle_id: String,
         rt: &'a CompanyRuntime,
         task_id: Option<String>,
+        external_trigger: bool,
         conversation: ApprovalConversation,
     ) -> Self {
         Self {
@@ -2267,6 +2282,7 @@ impl<'a> CycleHostImpl<'a> {
             executed: StdMutex::new(Vec::new()),
             parked: StdMutex::new(Vec::new()),
             task_id,
+            external_trigger,
             thread_id: conversation.thread,
             thread_parent: conversation.parent,
         }
@@ -2678,7 +2694,16 @@ impl CycleHost for CycleHostImpl<'_> {
     async fn context_op(&self, op: ContextOp) -> Result<ContextOpResult> {
         match op {
             ContextOp::Put(chunk) => Ok(ContextOpResult::Addr(
-                self.rt.context.put(&self.company, chunk).await?,
+                {
+                    // External-triggered cycles write through the taint-stamping
+                    // port; see `external_trigger` on this struct.
+                    let port = if self.external_trigger {
+                        &self.rt.inbound_context
+                    } else {
+                        &self.rt.context
+                    };
+                    port.put(&self.company, chunk).await?
+                },
             )),
             ContextOp::List { prefix } => Ok(ContextOpResult::Metas(
                 self.rt.context.list(&self.company, &prefix).await?,
@@ -5430,6 +5455,7 @@ mod test {
             "cyc-nomail".into(),
             &rt,
             None,
+            false,
             ApprovalConversation::default(),
         );
 
@@ -5459,6 +5485,7 @@ mod test {
             "cyc-bad".into(),
             &rt,
             None,
+            false,
             ApprovalConversation::default(),
         );
 
@@ -5488,6 +5515,7 @@ mod test {
             "cyc-park".into(),
             &rt,
             None,
+            false,
             ApprovalConversation::default(),
         );
 
@@ -5519,6 +5547,7 @@ mod test {
             "cyc-task".into(),
             &rt,
             Some("t-42".to_string()),
+            false,
             ApprovalConversation::default(),
         );
 
@@ -5572,6 +5601,7 @@ mod test {
             "cyc-chat".into(),
             &rt,
             None,
+            false,
             ApprovalConversation::default(),
         );
 
@@ -5609,6 +5639,7 @@ mod test {
             "cyc-thread".into(),
             &rt,
             None,
+            false,
             ApprovalConversation {
                 thread: Some("desk-finance".to_string()),
                 parent: None,
@@ -5670,6 +5701,7 @@ mod test {
             "cyc-none".into(),
             &rt,
             None,
+            false,
             ApprovalConversation::default(),
         );
 
@@ -5742,6 +5774,7 @@ mod test {
             "cyc-research".into(),
             &rt,
             None,
+            false,
             ApprovalConversation {
                 thread: Some("desk-marketing".to_string()),
                 parent: None,
@@ -5768,6 +5801,7 @@ mod test {
             "cyc-later".into(),
             &rt,
             None,
+            false,
             ApprovalConversation {
                 thread: Some("desk-marketing".to_string()),
                 parent: None,
@@ -6424,6 +6458,7 @@ mod test {
             "cyc-send".into(),
             &rt,
             None,
+            false,
             ApprovalConversation::default(),
         );
 
@@ -6494,6 +6529,7 @@ mod test {
             "cyc-deep".into(),
             &rt,
             None,
+            false,
             ApprovalConversation::default(),
         );
         let res = host
@@ -6586,6 +6622,7 @@ mod test {
             "cyc".into(),
             &rt,
             None,
+            false,
             ApprovalConversation::default(),
         );
 
@@ -6626,6 +6663,7 @@ mod test {
             "cyc".into(),
             &rt,
             None,
+            false,
             ApprovalConversation::default(),
         );
 
@@ -6668,6 +6706,7 @@ mod test {
             "cyc".into(),
             &rt,
             None,
+            false,
             ApprovalConversation::default(),
         );
 
