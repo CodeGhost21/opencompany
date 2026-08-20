@@ -19,6 +19,17 @@
 //             pan on open would otherwise quietly break. Unless the operator
 //             has panned or zoomed since, in which case their view is theirs.
 //
+// **Never read the live viewport while our own animation is running.** React
+// Flow animates a viewport change through d3-zoom's smooth interpolation, which
+// arcs through a LOWER ZOOM even when the start and the end zoom are identical
+// — a 264px pan at scale 1.291 was measured passing through 1.271. Two things
+// break if that arc is mistaken for the operator's view: closing the panel
+// mid-animation reads a zoom that matches neither end and abandons the restore,
+// and selecting a second node mid-animation computes its pan against the arc's
+// zoom and then LANDS there, silently rescaling the canvas. So while a reveal
+// is in flight this reasons about the viewport it asked for, not the one on
+// screen. `settledAtRef` is when that stops being true.
+//
 // See `node-reveal.ts` for the arithmetic and for why this pans rather than
 // zooms or reflows.
 
@@ -26,16 +37,16 @@ import { useEffect, useRef } from "react";
 import { useReactFlow, useStore } from "@xyflow/react";
 
 import { NODE_H, NODE_W } from "./graph";
-import {
-  revealViewport,
-  shouldRestore,
-  type Viewport,
-} from "./node-reveal";
+import { revealViewport, shouldRestore, type Viewport } from "./node-reveal";
 
 /** How long the reveal and its undo take. Long enough to read as the canvas
  * moving rather than cutting, short enough not to be in the way of the panel
  * that is opening over it. */
 const REVEAL_MS = 200;
+
+/** Slack on top of the animation before the viewport counts as the operator's
+ * again — one or two frames of transition teardown. */
+const SETTLE_SLACK_MS = 80;
 
 export function RevealSelectedNode({
   nodeId,
@@ -52,58 +63,76 @@ export function RevealSelectedNode({
   /** Overridable so a test can take the animation out of the way. */
   duration?: number;
 }) {
-  const { getNode, getViewport, setViewport } = useReactFlow();
+  const { getInternalNode, getViewport, setViewport } = useReactFlow();
   const paneWidth = useStore((s) => s.width);
 
   /** The viewport to go back to — captured before the FIRST reveal of a run of
    * selections, so walking node to node with the panel open and then closing it
    * returns to where the walk started, not to the last node's stop. */
   const restoreRef = useRef<Viewport | null>(null);
-  /** The viewport the last reveal asked for. */
+  /** The viewport the canvas was last asked for — the destination of whatever
+   * animation is running, and the truth about where it is heading. */
   const appliedRef = useRef<Viewport | null>(null);
+  /** When that animation stops being ours. See the note at the top. */
+  const settledAtRef = useRef(0);
 
   useEffect(() => {
+    const applied = appliedRef.current;
+    const inFlight = applied !== null && Date.now() < settledAtRef.current;
+    /** What the canvas is showing, or heading to — see the note at the top. */
+    const current = inFlight && applied ? applied : getViewport();
+
     if (!nodeId) {
       const from = restoreRef.current;
-      const to = appliedRef.current;
       restoreRef.current = null;
       appliedRef.current = null;
+      settledAtRef.current = 0;
       // Nothing was moved, so there is nothing to put back — the overwhelmingly
       // common case, since most nodes are nowhere near the overlay.
-      if (!from || !to) return;
-      if (!shouldRestore(getViewport(), from, to)) return;
+      if (!from || !applied) return;
+      // Their pan, their zoom, their view: leave it.
+      if (!shouldRestore(current, from, applied)) return;
+      // The restore is itself an animation, so the canvas is heading somewhere
+      // again and the next reveal has to reason about `from`, not the arc.
+      appliedRef.current = from;
+      settledAtRef.current = Date.now() + duration + SETTLE_SLACK_MS;
       void setViewport(from, { duration });
       return;
     }
 
-    const node = getNode(nodeId);
+    // `getInternalNode`, not `getNode` — the internal node is where React Flow
+    // keeps what it MEASURED, and `fitView` reads the same thing. `getNode`
+    // hands back the object `layout` built, which carries only the nominal
+    // `initialWidth`/`initialHeight` hints: a real node runs 180-204px wide
+    // against that hint's 190 (issue #1230), so clearing the panel by the
+    // nominal width left a real node up to ~14px * zoom still under it.
+    const node = getInternalNode(nodeId);
     if (!node) return;
-    const viewport = getViewport();
     const next = revealViewport({
       node: {
-        x: node.position.x,
-        y: node.position.y,
-        // `measured` is React Flow's own measurement and wins when it has one;
-        // `initialWidth`/`initialHeight` are the hints `layout` puts on every
-        // node (issue #1230) and cover the frame before the first measure.
-        width: node.measured?.width ?? node.initialWidth ?? NODE_W,
-        height: node.measured?.height ?? node.initialHeight ?? NODE_H,
+        x: node.internals.positionAbsolute.x,
+        y: node.internals.positionAbsolute.y,
+        // The hints are still the fallback: they cover the frame between a node
+        // entering the graph and React Flow measuring it.
+        width: node.measured.width ?? node.initialWidth ?? NODE_W,
+        height: node.measured.height ?? node.initialHeight ?? NODE_H,
       },
-      viewport,
+      viewport: current,
       paneWidth,
     });
     if (!next) return;
+
     // Re-anchor if the operator has panned or zoomed since the last reveal:
     // "where they were before the inspector started moving things" is now their
-    // view, not the one we captured two nodes ago.
+    // view, not the one captured two nodes ago.
     const anchor = restoreRef.current;
-    const applied = appliedRef.current;
-    if (!anchor || !applied || !shouldRestore(viewport, anchor, applied)) {
-      restoreRef.current = viewport;
+    if (!anchor || !applied || !shouldRestore(current, anchor, applied)) {
+      restoreRef.current = current;
     }
     appliedRef.current = next;
+    settledAtRef.current = Date.now() + duration + SETTLE_SLACK_MS;
     void setViewport(next, { duration });
-  }, [nodeId, paneWidth, duration, getNode, getViewport, setViewport]);
+  }, [nodeId, paneWidth, duration, getInternalNode, getViewport, setViewport]);
 
   return null;
 }

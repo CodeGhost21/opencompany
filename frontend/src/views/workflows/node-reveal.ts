@@ -20,6 +20,28 @@
 // floor), and a fix that silently rescales the graph would be a second surprise
 // on top of the one it is fixing.
 //
+// **What a pan costs, and why it is still the right trade.** When the graph is
+// wider than the canvas minus the panel — `ticket_pipeline` at 1440px is 1122px
+// of graph against 1224px of canvas, and the panel wants 344 of those — no
+// viewport at that zoom can show every node, so revealing one on the right
+// pushes the leftmost off. The two alternatives both cost more:
+//
+//   re-fit with asymmetric padding — `fitView({ padding: { right: 344 } })`
+//     keeps every node on screen, but rescales the WHOLE graph on every
+//     selection and again on every close. A lot of motion for a click, and on a
+//     long pipeline it shrinks the node labels toward illegibility, bounded
+//     only by #1261's 0.1 floor.
+//
+//   shrink the canvas — make the slot in-flow, as the rails are at `xl`. That
+//     is a reflow of everything rather than an animation of one thing, and
+//     `CanvasShell`'s arithmetic already rules it out below `xl`: two rails
+//     plus the app's 216px nav is most of a laptop window before the canvas
+//     enters into it.
+//
+// A pan moves the least, keeps the operator's zoom, and what it pushes off the
+// left is still reachable — it is a pan away, and the panel is transient. What
+// the overlay covered was reachable only by closing the panel.
+//
 // The math is pure and lives here so it can be asserted directly. What broke is
 // arithmetic about two rectangles, not a React tree.
 

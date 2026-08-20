@@ -143,6 +143,13 @@ test("closing the inspector puts the canvas back where it was", async ({ page })
   // `CanvasShell`'s convention for this slot promises the canvas is restored
   // instantly on close. Panning on open would quietly break that promise, so
   // the undo is part of the fix rather than a nicety.
+  //
+  // Note that this closes the panel as soon as the canvas has visibly started
+  // moving, which lands MID-ANIMATION — and that is the case worth having.
+  // React Flow animates a viewport change through d3-zoom's smooth
+  // interpolation, which arcs through a lower zoom than either end, so a
+  // restore that decided from the live viewport read a zoom matching neither
+  // and gave up. See `RevealSelectedNode`.
   const { node, before } = await setup(page, 1440);
 
   await node.click();
