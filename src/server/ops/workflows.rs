@@ -321,6 +321,14 @@ struct WorkflowNode {
     retry: Option<WorkflowRetryOut>,
     #[serde(skip_serializing_if = "Option::is_none")]
     requires_approval: Option<bool>,
+    /// When `false`, a continuation must not repeat this node's call — see
+    /// [`WorkflowNodeDef::repeatable`] (issue #850). Round-tripped verbatim so
+    /// the console's edit form does not lose the declaration on an unrelated
+    /// save: the create/update body reads this same field back, so omitting it
+    /// here would have `repeatable: false` silently disappear on the first
+    /// re-submit.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    repeatable: Option<bool>,
     /// Where an `output` node's report is routed once the run finishes (issue
     /// #170). The model shape is reused verbatim in both directions: its two
     /// fields (`kind` / `target`) are single words, so there is no snake_case →
@@ -366,6 +374,7 @@ impl From<WorkflowNodeDef> for WorkflowNode {
             on_error: n.on_error,
             retry: n.retry.map(WorkflowRetryOut::from),
             requires_approval: n.requires_approval,
+            repeatable: n.repeatable,
             destination: n.destination,
         }
     }
@@ -3364,6 +3373,67 @@ mod tests {
         assert_eq!(node["retry"]["backoffMs"], 250);
         assert_eq!(node["retry"]["backoff"], "exponential");
         assert_eq!(node["requiresApproval"], true);
+    }
+
+    /// `repeatable: false` round-trips through the read model (issue #850).
+    ///
+    /// `WorkflowNode` previously omitted the field entirely, so a console edit
+    /// that read a node back from `GET`/create/update and resubmitted it would
+    /// silently drop the author's `repeatable = false` declaration on the next
+    /// save — the exact safety declaration issue #850 exists to protect.
+    #[test]
+    fn json_serializes_repeatable_field() {
+        use crate::company::{WorkflowNodeDef, WorkflowNodeKind};
+
+        let file = WorkflowFile {
+            global: false,
+            id: "wf".into(),
+            name: "WF".into(),
+            description: None,
+            nodes: vec![
+                WorkflowNodeDef {
+                    id: "publish".into(),
+                    kind: WorkflowNodeKind::ToolCall,
+                    name: "Publish".into(),
+                    summary: None,
+                    agent: None,
+                    schedule: None,
+                    config: Some(serde_json::json!({ "slug": "shell" })),
+                    on_error: None,
+                    retry: None,
+                    requires_approval: None,
+                    repeatable: Some(false),
+                    destination: None,
+                },
+                WorkflowNodeDef {
+                    id: "read".into(),
+                    kind: WorkflowNodeKind::ToolCall,
+                    name: "Read".into(),
+                    summary: None,
+                    agent: None,
+                    schedule: None,
+                    config: Some(serde_json::json!({ "slug": "web_fetch" })),
+                    on_error: None,
+                    retry: None,
+                    requires_approval: None,
+                    repeatable: None,
+                    destination: None,
+                },
+            ],
+            edges: Vec::new(),
+        };
+        let json = serde_json::to_value(WorkflowGraph::new(file, false, None, true)).unwrap();
+        let nodes = json["nodes"].as_array().unwrap();
+        let publish = nodes.iter().find(|n| n["id"] == "publish").unwrap();
+        assert_eq!(
+            publish["repeatable"], false,
+            "declared repeatable:false must survive the read model: {publish}"
+        );
+        let read = nodes.iter().find(|n| n["id"] == "read").unwrap();
+        assert!(
+            read.get("repeatable").is_none(),
+            "an undeclared node omits the key rather than serializing null: {read}"
+        );
     }
 
     // --- P2: create body maps the new node fields (config/error/retry/approval)
