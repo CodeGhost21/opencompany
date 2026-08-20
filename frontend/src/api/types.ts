@@ -592,9 +592,10 @@ export interface MemorySpec {
   /** Capability families negotiated at bind time; empty = not negotiated. */
   capabilities: string[];
   /**
-   * Whether the boot-time reachability probe answered ready. Absent = not
-   * probed (base store, direct engine, or an older host) — treat as unknown,
-   * not unhealthy.
+   * Whether the boot-time reachability probe found the engine usable — ready
+   * or degraded (reachable, possibly reduced); only a down engine is `false`.
+   * Absent = not probed (base store, direct engine, or an older host) — treat
+   * as unknown, not unhealthy.
    */
   healthy?: boolean;
 }
