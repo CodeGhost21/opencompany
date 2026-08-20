@@ -33,7 +33,7 @@ import {
   type AgentFieldKey,
 } from "@/lib/agent";
 import { fetchBoardColumns } from "@/lib/board-columns";
-import { toneFor } from "@/lib/team";
+import { roleSubtitle, toneFor } from "@/lib/team";
 import { workloadByAssignee, type Workload } from "@/lib/team-workload";
 import { cn } from "@/lib/utils";
 import { Avatar } from "@/views/chat/Avatar";
@@ -528,6 +528,10 @@ export function AgentDetailView({
 /** Name, role, id, and the two facts that classify an agent. */
 function Identity({ agent }: { agent: AgentDetailDto }) {
   const display = agent.name?.trim() || agent.role;
+  // #1208, on the page a teammate *is*. `display` already falls back to the
+  // role, and a manifest-declared agent has no `name` at all, so the line under
+  // the title was the title again on every teammate in every shipped company.
+  const subtitle = roleSubtitle(display, agent.role);
   const tone = toneFor(agent.id || display);
   return (
     <div className="flex items-start gap-4">
@@ -544,9 +548,11 @@ function Identity({ agent }: { agent: AgentDetailDto }) {
           <h2 className="truncate text-2xl font-semibold tracking-tight" data-testid="agent-name">
             {display}
           </h2>
-          <p className="truncate text-sm text-muted-foreground" data-testid="agent-role">
-            {agent.role}
-          </p>
+          {subtitle && (
+            <p className="truncate text-sm text-muted-foreground" data-testid="agent-role">
+              {subtitle}
+            </p>
+          )}
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <Badge variant="secondary" className="gap-1" data-testid="agent-tier">
