@@ -424,18 +424,46 @@ impl MongoStore {
         // since `map` would then be ambiguous with `Iterator::map`.
         use futures::StreamExt as _;
 
-        futures::stream::iter(plans.into_iter().chain(extra))
+        // Every operation is allowed to finish before any error is reported.
+        //
+        // `try_collect` would short-circuit, which matches what the old
+        // sequential loop did — but only in appearance. Sequentially there was
+        // never an operation in flight to abandon; here a short-circuit drops up
+        // to `INDEX_CONCURRENCY - 1` futures mid-await, and a driver operation
+        // cancelled after its request is sent but before its reply is read
+        // leaves a connection the pool cannot safely reuse. That hazard is new,
+        // introduced by the concurrency, so it is handled here rather than
+        // inherited.
+        //
+        // Letting them all land is also simply better: a transient failure on
+        // one index no longer decides whether the other forty-three exist.
+        let results: Vec<Result<()>> = futures::stream::iter(plans.into_iter().chain(extra))
             .map(|(name, index)| async move {
                 self.collection(name)
                     .create_index(index)
                     .await
                     .map(|_| ())
-                    .map_err(mongo_err)
+                    .map_err(|err| mongo_err(format!("index on `{name}`: {err}")))
             })
             .buffer_unordered(INDEX_CONCURRENCY)
-            .try_collect::<()>()
-            .await?;
-        Ok(())
+            .collect()
+            .await;
+
+        let failures: Vec<_> = results
+            .into_iter()
+            .filter_map(std::result::Result::err)
+            .collect();
+        let failed = failures.len();
+        match failures.into_iter().next() {
+            // The count matters: one failing index is a different problem from
+            // every index failing, and the first error alone cannot tell them
+            // apart.
+            Some(first) if failed > 1 => Err(mongo_err(format!(
+                "{failed} indexes failed; first: {first}"
+            ))),
+            Some(first) => Err(first),
+            None => Ok(()),
+        }
     }
 
     fn collection(&self, name: &str) -> Collection<Document> {
@@ -4071,6 +4099,75 @@ mod test {
             )
         });
         Some(Arc::new(store))
+    }
+
+    /// One failing index must not stop the other forty-three from being created.
+    ///
+    /// `ensure_indexes` runs concurrently, so a short-circuit would drop
+    /// in-flight driver operations mid-await — and an operation cancelled after
+    /// its request is sent but before its reply is read leaves a connection the
+    /// pool cannot safely reuse. That hazard does not exist in a sequential
+    /// loop; it arrived with the concurrency, so it is pinned here.
+    #[tokio::test]
+    async fn every_index_is_attempted_even_when_one_fails() {
+        let Some(store) = store().await else { return };
+
+        // `store()` has already run `ensure_indexes` once, so the assertion has
+        // to be about something this run RE-creates. Drop a known index first;
+        // if the pipeline short-circuits before reaching it, it stays missing.
+        store
+            .collection("notifications")
+            .drop_index("company_id_1_id_1")
+            .await
+            .expect("drop the index whose return proves the run continued");
+
+        // Induce the failure the way MongoDB actually produces one: an existing
+        // index on the same keys with conflicting options. Replacing the unique
+        // `owners` index with a non-unique one makes `ensure_indexes` collide.
+        store
+            .collection("owners")
+            .drop_index("company_id_1")
+            .await
+            .expect("drop owners index");
+        store
+            .collection("owners")
+            .create_index(IndexModel::builder().keys(doc! {"company_id": 1}).build())
+            .await
+            .expect("seed the conflicting index");
+
+        let err = store
+            .ensure_indexes()
+            .await
+            .expect_err("the conflicting index should make this fail");
+        assert!(
+            format!("{err}").contains("owners"),
+            "the error should name the collection that failed: {err}"
+        );
+
+        // The point: the run continued past the failure and recreated the index
+        // dropped above. A short-circuit would leave it absent.
+        let mut names = Vec::new();
+        let mut cursor = store
+            .collection("notifications")
+            .list_indexes()
+            .await
+            .expect("list notifications indexes");
+        while cursor.advance().await.expect("advance") {
+            if let Some(name) = cursor
+                .deserialize_current()
+                .expect("model")
+                .options
+                .and_then(|o| o.name)
+            {
+                names.push(name);
+            }
+        }
+        assert!(
+            names.iter().any(|n| n == "company_id_1_id_1"),
+            "a failure on `owners` must not stop other indexes being created; got {names:?}"
+        );
+
+        drop_db(&store).await;
     }
 
     async fn drop_db(store: &MongoStore) {
