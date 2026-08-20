@@ -154,8 +154,8 @@ use sha2::{Digest, Sha256};
 
 use crate::company::{
     RawEdge, RawNode, RawWorkflow, WorkflowDestinationDef, WorkflowFile, WorkflowNodeKind,
-    list_workflows_union, parse_workflow, raw_workflow_from_toml, render_workflow,
-    required_config_problems,
+    channel_destination_missing_target_message, list_workflows_union, parse_workflow,
+    raw_workflow_from_toml, render_workflow, required_config_problems,
 };
 use crate::error::{OpenCompanyError, Result, WorkflowProblem};
 use crate::ports::events::EventLog;
@@ -772,6 +772,7 @@ fn validate_draft_against_record(
             "output" => {
                 #[cfg(feature = "openhuman")]
                 validate_output_destination(node, record)?;
+                problems.extend(output_destination_problems(node));
             }
             // Per-kind required config (issue #661, extended #1016): reject a
             // `condition` with no `field`, an `http_request` missing `method` or a
@@ -1054,6 +1055,39 @@ fn validate_tool_call_node(node: &RawNode, record: &CompanyRecord) -> Result<()>
     Ok(())
 }
 
+/// The author-time destination problems for an `output` node, each carrying the
+/// node id and the config field at fault so the console can anchor it on the
+/// node the author actually wrote (issue #1191).
+///
+/// [`parse_workflow`] states the same rules and keeps them — it is the load
+/// path, and a seed or legacy graph never passes through here. What it cannot
+/// do is locate them: it builds flat `String`s, which
+/// [`From<String>`](WorkflowProblem) turns into problems with no `node_id` and
+/// no `field`, so the console rendered the sentence with no indication of where
+/// it came from. Reported here first, with the locator; the flat pass never runs
+/// because this returns before the render → parse round trip.
+///
+/// Ungated on purpose: it reads nothing but the node, so the default-lane HTTP
+/// routes are held to it exactly as the harness lanes are.
+fn output_destination_problems(node: &RawNode) -> Vec<WorkflowProblem> {
+    let mut problems = Vec::new();
+    let Some(destination) = node.destination.as_ref() else {
+        return problems;
+    };
+    if destination.kind.trim() != "channel" {
+        return problems;
+    }
+    let target = destination.target.as_deref().map(str::trim).unwrap_or("");
+    if target.is_empty() {
+        problems.push(WorkflowProblem::node_field(
+            &node.id,
+            "destination.target",
+            channel_destination_missing_target_message(&format!("node `{}`", node.id)),
+        ));
+    }
+    problems
+}
+
 /// Author-time `output` destination check: an `email` destination needs the
 /// company to grant the `email` namespace in `[tools].allow` (issue #981).
 ///
@@ -1091,9 +1125,10 @@ fn validate_output_destination(node: &RawNode, record: &CompanyRecord) -> Result
     let Some(destination) = node.destination.as_ref() else {
         return Ok(());
     };
-    // Only `email`. A missing/unknown `kind`, and a `channel` with no target,
-    // are `parse_workflow`'s to report — it says something more specific about
-    // each, and reporting the wrong problem first is worse than second.
+    // Only `email`. A missing/unknown `kind` is `parse_workflow`'s to report —
+    // it says something more specific, and reporting the wrong problem first is
+    // worse than second. The `channel` arms are
+    // `output_destination_problems`' (issue #1191).
     if destination.kind.trim() != "email" {
         return Ok(());
     }
@@ -4418,6 +4453,42 @@ to = "done"
             target: target.map(str::to_string),
         });
         draft
+    }
+
+    /// Issue #1191: a `channel` destination with no `target` is refused with a
+    /// LOCATED problem — the node id and the config field — not a bare sentence.
+    ///
+    /// The rule itself is old and lived only on the load path, where it is built
+    /// as a flat `String` and converted with `node_id: None, field: None`. The
+    /// console reads `problems` to highlight the offending node, so the one class
+    /// of error #836 was filed about rendered as prose it could not anchor.
+    #[tokio::test]
+    async fn a_channel_destination_with_no_target_names_the_node_and_the_field() {
+        let company = CompanyId::new("acme");
+        let store = store_of(MemStore::seeded(record(
+            &company,
+            manifest_with_assistant(),
+        )));
+
+        let err = create_company_workflow(
+            &company,
+            None,
+            &store,
+            None,
+            draft_with_destination("wf", "WF", "channel", None),
+        )
+        .await
+        .expect_err("a channel destination with no target must not persist");
+
+        let OpenCompanyError::WorkflowInvalid { problems } = &err else {
+            panic!("expected a located `WorkflowInvalid`, got: {err}");
+        };
+        let problem = problems
+            .iter()
+            .find(|p| p.message.contains("name the channel to post the report to"))
+            .unwrap_or_else(|| panic!("no channel-target problem in {problems:?}"));
+        assert_eq!(problem.node_id.as_deref(), Some("done"));
+        assert_eq!(problem.field.as_deref(), Some("destination.target"));
     }
 
     /// Issue #981: an `email` destination on a company whose `[tools].allow`
