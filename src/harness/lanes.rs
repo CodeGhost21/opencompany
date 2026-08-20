@@ -25,6 +25,16 @@
 //! unavailable with the reason, and a turn bound to it fails saying so. Falling
 //! back would be the worst outcome available — the turn would succeed, on a
 //! model and a credential nobody chose.
+//!
+//! This applies to the **default** harness exactly as much as a named one
+//! (issue #1244). It used to not: every caller built the default lane straight
+//! from `HarnessDeps`/`HarnessPool` on its own, without ever asking what kind
+//! the default harness actually was, so a company whose *only* declared
+//! harness was `kind = "acp"` still ran on the embedded engine — a silent
+//! fallback of exactly the kind this module's own doctrine forbids. Resolving
+//! the default the same way as every other harness, in this one place, is what
+//! closes that gap for good instead of leaving a second opinion for a future
+//! caller to reintroduce.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -38,14 +48,33 @@ use crate::ports::SecretStore;
 use crate::ports::types::{CompanyId, CompanyRecord};
 use crate::runtime::delegation::RunTurn;
 
+/// Why a declared harness of `kind` has no engine on this host — the one
+/// message both the default-harness path and the named-harness loop use, so
+/// they cannot drift into saying different things about the same gap.
+fn unavailable_reason(kind: &str) -> String {
+    match kind {
+        "acp" => "it is an ACP harness and this build has no ACP transport wired — \
+                  run it from the desktop app, or bind these agents to a `built_in` harness"
+            .to_string(),
+        other => format!("`{other}` is not a harness kind this build knows how to run"),
+    }
+}
+
 /// The engines a company's declared harnesses resolve to on this host.
 pub struct Lanes {
     /// Agents the **default** harness serves, when the company declares more
     /// than one. `None` means the whole roster — the single-harness case.
     pub default_serves: Option<HashSet<String>>,
+    /// The engine for the default harness itself, when this host can run it.
+    ///
+    /// `None` if and only if the default harness's id has a matching entry in
+    /// `unavailable` — callers must not substitute another engine in that
+    /// case; see the module docs.
+    pub default_engine: Option<Arc<dyn RunTurn>>,
     /// Every lane beyond the default: its harness id and the engine serving it.
     pub lanes: Vec<(String, Arc<dyn RunTurn>)>,
-    /// Declared harnesses this host cannot run, and why.
+    /// Declared harnesses this host cannot run, and why. Includes the default
+    /// harness's own id when `default_engine` is `None`.
     pub unavailable: Vec<(String, String)>,
 }
 
@@ -71,33 +100,44 @@ fn agents_on(record: &CompanyRecord, harness_id: &str, default_harness: &str) ->
     ids
 }
 
-/// Builds the lanes for `record`, given the deps the **default** harness runs
-/// on.
+/// Builds the lanes for `record`, given the shared pool and deps the
+/// **default** harness runs on when it is runnable at all.
 ///
-/// Returns no lanes at all for a company that declares no `[[harness]]` (or
-/// declares exactly one): there is nothing to route, and the caller keeps its
-/// single pool untouched. That is the path every existing company takes.
+/// `default_serves` is `None` — "the whole roster, no narrowing" — for a
+/// company that declares no `[[harness]]` (or declares exactly one): the
+/// byte-identical single-pool path every existing company takes. That stays
+/// true regardless of whether the default harness turns out to be runnable;
+/// what changed (issue #1244) is that `default_engine`/`unavailable` are now
+/// always resolved too, instead of every caller resolving the default
+/// separately (and inconsistently) on its own.
 pub fn build(
     record: &CompanyRecord,
+    pool: Arc<HarnessPool>,
     base: &HarnessDeps,
     secrets: Arc<dyn SecretStore>,
     env_default: Option<EnvDefault>,
 ) -> Lanes {
     let declared = record.manifest.effective_harnesses();
-    let default_harness = record.manifest.default_harness_id();
-
-    if declared.len() <= 1 {
-        return Lanes {
-            default_serves: None,
-            lanes: Vec::new(),
-            unavailable: Vec::new(),
-        };
-    }
+    let default_harness = record.manifest.default_harness();
+    let default_harness_id = default_harness.id.clone();
 
     let mut lanes = Vec::new();
     let mut unavailable = Vec::new();
 
-    for harness in declared.iter().filter(|h| h.id != default_harness) {
+    let default_engine = match default_harness.kind.as_str() {
+        // The base deps already resolved the default's own `[harness.inference]`
+        // precedence (`default_harness_inference`) before this was called —
+        // wrap them in the caller's shared pool exactly as it always did.
+        "built_in" => {
+            Some(Arc::new(HarnessRunTurn::new(pool, Arc::new(base.clone()))) as Arc<dyn RunTurn>)
+        }
+        kind => {
+            unavailable.push((default_harness_id.clone(), unavailable_reason(kind)));
+            None
+        }
+    };
+
+    for harness in declared.iter().filter(|h| h.id != default_harness_id) {
         match harness.kind.as_str() {
             "built_in" => lanes.push((
                 harness.id.clone(),
@@ -107,27 +147,22 @@ pub fn build(
                     &secrets,
                     env_default.clone(),
                     harness,
-                    &default_harness,
+                    &default_harness_id,
                 ),
             )),
-            // The ACP transports are supplied by the desktop shell (a stdio
-            // subprocess) and the runner lane (a socket); a server build has
-            // neither, so there is nothing to hand a turn to.
-            "acp" => unavailable.push((
-                harness.id.clone(),
-                "it is an ACP harness and this build has no ACP transport wired — \
-                 run it from the desktop app, or bind these agents to a `built_in` harness"
-                    .to_string(),
-            )),
-            other => unavailable.push((
-                harness.id.clone(),
-                format!("`{other}` is not a harness kind this build knows how to run"),
-            )),
+            kind => unavailable.push((harness.id.clone(), unavailable_reason(kind))),
         }
     }
 
+    let default_serves = if declared.len() <= 1 {
+        None
+    } else {
+        Some(agents_on(record, &default_harness_id, &default_harness_id))
+    };
+
     Lanes {
-        default_serves: Some(agents_on(record, &default_harness, &default_harness)),
+        default_serves,
+        default_engine,
         lanes,
         unavailable,
     }

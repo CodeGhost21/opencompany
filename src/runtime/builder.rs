@@ -31,8 +31,6 @@ use crate::feedback::tinyhumans::TinyHumansClient;
 use crate::feedback::tool::BuiltinToolProvider;
 use crate::feedback::types::ConsentMode;
 #[cfg(feature = "openhuman")]
-use crate::harness::built_in::run_turn::HarnessRunTurn;
-#[cfg(feature = "openhuman")]
 use crate::harness::provider::{HostedProviderConfig, TenantProvider};
 #[cfg(feature = "openhuman")]
 use crate::harness::router::HarnessRouter;
@@ -2655,6 +2653,7 @@ impl RuntimeBuilder {
                             // actually serves.
                             let lanes = crate::harness::lanes::build(
                                 &record,
+                                pool.clone(),
                                 &deps,
                                 secrets.clone(),
                                 env_default,
@@ -2676,27 +2675,40 @@ impl RuntimeBuilder {
                             // lane plus each named lane, indexed by agent. Shared
                             // by the brain and the workflow runner so they cannot
                             // disagree about which agent lands on which engine.
-                            let default_lane: Arc<dyn RunTurn> =
-                                Arc::new(HarnessRunTurn::new(pool.clone(), Arc::new(deps.clone())));
-                            let turn: Arc<dyn RunTurn> = if lanes.lanes.is_empty()
-                                && lanes.unavailable.is_empty()
-                            {
-                                default_lane
-                            } else {
-                                let default_harness = record.manifest.default_harness_id();
-                                let bindings: HashMap<String, String> = record
-                                    .manifest
-                                    .agents
-                                    .iter()
-                                    .filter_map(|a| a.harness.clone().map(|h| (a.id.clone(), h)))
-                                    .collect();
-                                Arc::new(HarnessRouter::from_lanes(
-                                    &default_harness,
-                                    default_lane,
-                                    &lanes.lanes,
-                                    &lanes.unavailable,
-                                    &bindings,
-                                ))
+                            //
+                            // `default_engine` is `lanes::build`'s call, not ours
+                            // (issue #1244): a non-`built_in` default harness
+                            // resolves to `None` there, with its own reason
+                            // already folded into `lanes.unavailable` — this must
+                            // not paper over that with a `HarnessRunTurn` built
+                            // straight from `pool`/`deps` the way it used to.
+                            let default_engine = lanes.default_engine.clone();
+                            let turn: Arc<dyn RunTurn> = match (
+                                &default_engine,
+                                lanes.lanes.is_empty(),
+                                lanes.unavailable.is_empty(),
+                            ) {
+                                // The byte-identical single-pool path: a lone
+                                // `built_in` default, nothing else declared.
+                                (Some(engine), true, true) => engine.clone(),
+                                _ => {
+                                    let default_harness = record.manifest.default_harness_id();
+                                    let bindings: HashMap<String, String> = record
+                                        .manifest
+                                        .agents
+                                        .iter()
+                                        .filter_map(|a| {
+                                            a.harness.clone().map(|h| (a.id.clone(), h))
+                                        })
+                                        .collect();
+                                    Arc::new(HarnessRouter::from_lanes(
+                                        &default_harness,
+                                        default_engine.clone(),
+                                        &lanes.lanes,
+                                        &lanes.unavailable,
+                                        &bindings,
+                                    ))
+                                }
                             };
 
                             // Workflow agent nodes route through the shared
@@ -2742,6 +2754,7 @@ impl RuntimeBuilder {
                                 HarnessBrain::new(pool, deps, record)
                                     .with_lanes(lanes.lanes)
                                     .with_unavailable_lanes(lanes.unavailable)
+                                    .with_default_engine(default_engine)
                                     .with_runs(ops.runs.clone()),
                             ) as Arc<dyn Brain>)
                         } else {
