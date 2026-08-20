@@ -92,7 +92,7 @@ function fakeClient(post: () => Promise<unknown>): OpenCompanyClient {
     scopeFor: (company: string | null) => `/api/v1/${company ?? "company"}`,
     get: async (path: string) => {
       if (path.endsWith("/workflows")) return [{ id: GRAPH.id, name: GRAPH.name }];
-      if (path.includes("/workflows/runs")) return [];
+      if (path.includes("/workflows/runs")) return { runs: [], hasMore: false };
       return GRAPH;
     },
     post,

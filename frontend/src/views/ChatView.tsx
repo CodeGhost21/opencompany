@@ -474,8 +474,8 @@ export function ChatView({
     ? loadingTeam || !historyReady(hydration, channel.id)
     : false;
   const entries = useMemo(
-    () => (channel ? buildTimeline(messages, channel) : []),
-    [messages, channel],
+    () => (channel ? buildTimeline(messages, channel, members) : []),
+    [messages, channel, members],
   );
 
   /**
@@ -975,6 +975,7 @@ export function ChatView({
           {parent && (
             <ThreadPanel
               channel={channel}
+              members={members}
               parent={parent}
               replies={threadReplies}
               sending={sending}
