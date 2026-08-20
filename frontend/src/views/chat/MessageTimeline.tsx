@@ -179,6 +179,38 @@ export function MessageTimeline({
     el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
   }, [channel.id, historyPending, items.length, typing, liveStepCount]);
 
+  // Rule 3 — the *viewport* shrinking underneath (issue #1325).
+  //
+  // Rules 1 and 2 both watch the content. Neither watches the box, and the box
+  // moves: the composer below this pane grows with the draft (`field-sizing-
+  // content`, up to `max-h-48`), which takes its height out of this scroller's
+  // `clientHeight`. `scrollTop` is untouched by that, so the transcript slides
+  // up behind the composer — measured at 96px on a two-line draft and up to
+  // ~150px at the cap, which is often the very message being replied to,
+  // hidden for exactly as long as the draft is long.
+  //
+  // It could not be fixed by adding a dependency to rule 2: the composer is a
+  // sibling component and its height is not a value this one is given. The
+  // element's own size is, through `ResizeObserver` — and observing the box
+  // covers the window resizing and the thread panel opening as well, which want
+  // the same answer.
+  //
+  // `following.current` is the same gate rule 2 uses, so a reader who has
+  // deliberately scrolled up is left alone. Instant rather than smooth,
+  // unlike rule 2: this fires as the composer grows a line at a time, and an
+  // animation per keystroke would be a permanent wobble rather than a glide.
+  // Setting `scrollTop` does not resize anything, so there is no feedback loop.
+  useEffect(() => {
+    const el = scroller.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(() => {
+      if (!following.current) return;
+      el.scrollTop = el.scrollHeight;
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
+
   return (
     <div ref={scroller} onScroll={trackFollowing} className="flex-1 overflow-y-auto">
       <div className="flex min-h-full flex-col justify-end pb-4">
