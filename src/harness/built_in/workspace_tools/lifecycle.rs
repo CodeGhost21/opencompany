@@ -457,7 +457,7 @@ impl Tool for WorkspaceRenameTool {
     }
 
     fn description(&self) -> &str {
-        "Rename and/or move ONE folder or note INSIDE your own workspace folder `Agents/<your \
+        "Rename and/or move ONE folder or note INSIDE your own workspace folder `agents/<your \
          agent id>/`. USE FOR tidying your own folder — giving a draft the title it earned, or \
          filing notes under a subfolder you made with `workspace_create`. Pass `new_name`, \
          `new_parent`, or both. The node AND the destination folder must both be inside your own \
@@ -480,7 +480,7 @@ impl Tool for WorkspaceRenameTool {
                 },
                 "new_name": {
                     "type": "string",
-                    "description": "The node's new name, one path segment only — no `/`. Include the file extension on a note. Omit to keep the current name."
+                    "description": "The node's new name, one path segment only — no `/`. Include the file extension on a note. Normalized to the workspace convention (lowercase, dashed), so `Q3 Report.md` lands as `q3-report.md`. Omit to keep the current name."
                 },
                 "new_parent": {
                     "type": "string",

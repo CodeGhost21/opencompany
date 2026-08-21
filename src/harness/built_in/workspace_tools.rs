@@ -925,7 +925,11 @@ pub fn workspace_brief(can_write: bool) -> String {
              `{AGENTS_ROOT}/<your agent id>/`. Deleting is permanent for anything you simply \
              created — only a note you published keeps a history anywhere else — so remove what is \
              genuinely superseded rather than what is merely untidy. Renaming or deleting anything \
-             OUTSIDE your own folder stays the operator's job, not yours."
+             OUTSIDE your own folder stays the operator's job, not yours. Every name in this \
+             tree is lowercase and dashed — `playbooks/close-checklist.md`, never \
+             `Playbooks/Close checklist.md`. You do not have to get that right: whatever you \
+             pass is normalized for you, and the reply tells you the path it actually landed at. \
+             Use that path afterwards rather than the one you asked for."
         ));
     }
     brief
@@ -1657,7 +1661,7 @@ impl Tool for WorkspaceWriteTool {
             return Ok(ToolResult::error(format!(
                 "Refused: `{}` is outside your declared write scope. Your manifest confines \
                  `workspace_write` to specific paths — ask the operator to add this one, or work \
-                 in `Agents/<your agent id>/`, which is always writable.",
+                 in `agents/<your agent id>/`, which is always writable.",
                 entry.path
             )));
         }
@@ -1852,8 +1856,10 @@ impl Tool for WorkspaceCreateTool {
     fn description(&self) -> &str {
         "Create ONE new folder or note in the company's shared workspace at `path`. USE FOR \
          putting work you have produced somewhere the operator and your teammates can find it — \
-         your own folder `Agents/<your agent id>/` is the default home for it, and is made for \
-         you the first time you put something directly in it. Everywhere else the parent folder \
+         your own folder `agents/<your agent id>/` is the default home for it, and is made for \
+         you the first time you put something directly in it. The name you pass is normalized to \
+         the workspace convention — lowercase and dashed — and the reply names the path it landed \
+         at. Everywhere else the parent folder \
          must already exist (create it first, one level at a time). The path must be free — this \
          never overwrites. To change a note that already exists use `workspace_write`. NOT for \
          your own scratch files (use the `file_*` tools)."
@@ -1865,7 +1871,7 @@ impl Tool for WorkspaceCreateTool {
             "properties": {
                 "path": {
                     "type": "string",
-                    "description": "Where to create it, e.g. \"Agents/ceo/Q3 launch brief.md\". Every segment but the last must already be an existing folder, except your own `Agents/<your agent id>/`, which is made on demand. Include the file extension on a note."
+                    "description": "Where to create it, e.g. \"agents/ceo/q3-launch-brief.md\". Every segment but the last must already be an existing folder, except your own `agents/<your agent id>/`, which is made on demand. Include the file extension on a note; the final segment is normalized to lowercase and dashes."
                 },
                 "kind": {
                     "type": "string",
@@ -1898,7 +1904,7 @@ impl Tool for WorkspaceCreateTool {
             .filter(|p| !p.is_empty())
         else {
             return Ok(ToolResult::error(
-                "Invalid arguments: `path` is required, e.g. \"Agents/ceo/Launch brief.md\"."
+                "Invalid arguments: `path` is required, e.g. \"agents/ceo/launch-brief.md\"."
                     .to_string(),
             ));
         };
@@ -1961,7 +1967,7 @@ impl Tool for WorkspaceCreateTool {
             return Ok(ToolResult::error(format!(
                 "Refused: `{normalized}` is outside your declared write scope. Your manifest \
                  confines `workspace_create` to specific paths — ask the operator to add this \
-                 one, or work in `Agents/<your agent id>/`, which is always writable."
+                 one, or work in `agents/<your agent id>/`, which is always writable."
             )));
         }
 
