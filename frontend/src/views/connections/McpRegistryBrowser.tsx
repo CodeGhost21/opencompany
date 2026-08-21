@@ -310,12 +310,22 @@ export function McpRegistryBrowser({ client, company, onInstalled }: Props) {
           notice points down here in as many words when it is the thing standing
           in their way. A save re-runs the current search, so setting the key
           fills the list they are already looking at instead of leaving them to
-          guess it worked. */}
-      <McpDirectoryCredentialCard
-        client={client}
-        company={company}
-        onChanged={() => void runSearch(1)}
-      />
+          guess it worked.
+
+          Withheld while the directory is known-unwired (issue #1467): on a build
+          without the `mcp` feature the search returns the `unwired` outage and
+          the notice above says the directory isn't enabled in this build.
+          Rendering a green "Set for this company" credential card with working
+          Rotate/Clear controls under that notice asserts a feature it just
+          denied. Any other state — idle, a transient directory error, or a live
+          catalogue — still shows the card. */}
+      {!(results.kind === "outage" && results.outage.kind === "unwired") && (
+        <McpDirectoryCredentialCard
+          client={client}
+          company={company}
+          onChanged={() => void runSearch(1)}
+        />
+      )}
     </div>
   );
 }
