@@ -240,6 +240,59 @@ export function Overview({ client, company, companyName }: Props) {
 
   const memoryGraph = useMemo(() => buildMemoryGraph(sources.memories), [sources.memories]);
 
+  /**
+   * The snapshot line: what the page is, when it was taken, and the way to
+   * take another. The graph is not live, and says so rather than leaving an
+   * operator to assume a stale wheel is the current company.
+   *
+   * Handed to the graph as a slot rather than positioned here (issue #1307).
+   * This used to be an `absolute right-3 top-3 z-10` corner of its own, which
+   * put it squarely underneath the graph's `z-30` detail rail: opening any
+   * node's card hid the staleness signal, the Refresh control *and* the
+   * outage alert, and left them unclickable behind an opaque panel. Only the
+   * graph's shell knows how much of the right edge the rail is using, so the
+   * shell is what places this.
+   */
+  const statusSlot = (
+    <>
+      {/* Every source failed at once (issue #1219): a host that could not be
+          reached, said out loud, in the same corner that already owns the
+          staleness signal — rather than a graph redrawn empty with no
+          explanation. */}
+      {loadError && (
+        <div
+          role="alert"
+          className="max-w-64 rounded-md border border-destructive/40 bg-destructive/10 px-2 py-1 text-2xs text-destructive shadow-sm backdrop-blur"
+        >
+          {loadError}
+        </div>
+      )}
+      <div className="flex items-center gap-1.5 rounded-md border bg-background/90 px-2 py-1 text-2xs text-muted-foreground shadow-sm backdrop-blur">
+        <span className="truncate">
+          {sources.fetchedAt === null
+            ? loading
+              ? "Loading…"
+              : "No snapshot yet"
+            : `Snapshot ${new Date(sources.fetchedAt).toLocaleTimeString([], {
+                hour: "2-digit",
+                minute: "2-digit",
+              })}`}
+        </span>
+        <button
+          type="button"
+          onClick={refresh}
+          disabled={loading}
+          title="This page is a snapshot, not a live view. Re-read the company."
+          aria-label="Refresh the graph"
+          className="inline-flex items-center gap-1 rounded px-1 py-0.5 hover:bg-muted disabled:opacity-50"
+        >
+          <RefreshCw className={`size-3 ${loading ? "animate-spin" : ""}`} aria-hidden />
+          Refresh
+        </button>
+      </div>
+    </>
+  );
+
   return (
     // Fills whatever the shell gives it. It used to claim `h-svh` — the whole
     // viewport — which was true while the page ran edge to edge. It sits on the
@@ -258,49 +311,17 @@ export function Overview({ client, company, companyName }: Props) {
           #1221) — this names it for a screen reader the same way every other
           view's title does. */}
       <h1 className="sr-only">Company overview</h1>
-      {/* The snapshot line: what the page is, when it was taken, and the way to
-          take another. The graph is not live, and says so rather than leaving an
-          operator to assume a stale wheel is the current company. */}
-      <div className="absolute right-3 top-3 z-10 flex flex-col items-end gap-1.5">
-        {/* Every source failed at once (issue #1219): a host that could not be
-            reached, said out loud, in the same corner that already owns the
-            staleness signal — rather than a graph redrawn empty with no
-            explanation. */}
-        {loadError && (
-          <div
-            role="alert"
-            className="max-w-64 rounded-md border border-destructive/40 bg-destructive/10 px-2 py-1 text-2xs text-destructive shadow-sm backdrop-blur"
-          >
-            {loadError}
-          </div>
-        )}
-        <div className="flex items-center gap-1.5 rounded-md border bg-background/90 px-2 py-1 text-2xs text-muted-foreground shadow-sm backdrop-blur">
-          <span className="truncate">
-            {sources.fetchedAt === null
-              ? loading
-                ? "Loading…"
-                : "No snapshot yet"
-              : `Snapshot ${new Date(sources.fetchedAt).toLocaleTimeString([], {
-                  hour: "2-digit",
-                  minute: "2-digit",
-                })}`}
-          </span>
-          <button
-            type="button"
-            onClick={refresh}
-            disabled={loading}
-            title="This page is a snapshot, not a live view. Re-read the company."
-            aria-label="Refresh the graph"
-            className="inline-flex items-center gap-1 rounded px-1 py-0.5 hover:bg-muted disabled:opacity-50"
-          >
-            <RefreshCw className={`size-3 ${loading ? "animate-spin" : ""}`} aria-hidden />
-            Refresh
-          </button>
-        </div>
-      </div>
       <Suspense
         fallback={
+          // The graph's chunk is still in flight, so there is no shell to slot
+          // the snapshot line into yet — and no detail rail for it to dodge
+          // either. It is drawn here at the same inset the shell will use, so
+          // a cold load still says "Loading…" and the line does not appear to
+          // pop into existence once the physics arrives.
           <div className="grid h-full place-items-center text-sm text-muted-foreground">
+            <div className="absolute right-5 top-5 z-40 flex flex-col items-end gap-1.5">
+              {statusSlot}
+            </div>
             Drawing the graph…
           </div>
         }
@@ -313,6 +334,7 @@ export function Overview({ client, company, companyName }: Props) {
           tasks={adapted.tasks}
           memory={memoryGraph}
           toolLabels={adapted.toolLabels}
+          statusSlot={statusSlot}
         />
       </Suspense>
     </div>
