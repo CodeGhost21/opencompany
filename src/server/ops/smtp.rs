@@ -20,7 +20,7 @@ use std::sync::Arc;
 
 use axum::extract::State;
 use axum::response::Response;
-use axum::routing::{post, put};
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
@@ -32,7 +32,7 @@ use crate::ports::types::SecretValue;
 use crate::ports::{generate_id, now_millis};
 use crate::server::error::ApiError;
 use crate::server::ops::mailer::{MailCredentials, OutboundEmail};
-use crate::server::ops::{AdminScopedCompany, SMTP_KEY, scoped};
+use crate::server::ops::{AdminScopedCompany, SMTP_KEY, ScopedCompany, scoped};
 
 /// The SMTP security mode. Mirrors the console's `SmtpSecurity`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -126,7 +126,33 @@ impl SmtpStatus {
 
 /// Builds the SMTP route fragment.
 pub fn router() -> Router<AppState> {
-    scoped("/smtp", put(put_smtp)).merge(scoped("/smtp/test", post(test_smtp)))
+    scoped("/smtp", get(get_smtp).put(put_smtp)).merge(scoped("/smtp/test", post(test_smtp)))
+}
+
+// -- GET smtp ---------------------------------------------------------------
+
+/// `GET …/smtp` (both scope forms) — the non-secret status of what is stored.
+///
+/// `ScopedCompany`, and the asymmetry with its neighbours is deliberate. The
+/// admin line on this plane guards the company's outward identity: `PUT …/smtp`
+/// sets the credentials its mail goes out under, and `POST …/smtp/test` sends
+/// real mail to a recipient the caller names in the body. This read does
+/// neither — [`SmtpStatus`] is host, port, username and from-address, with the
+/// password absent by construction — so it stays open to any member, the same
+/// rule `docs/modules/server/authority.md` already states for reads on these
+/// surfaces. Admin-only, it would `403` a member on the Settings screen while
+/// the identical projection stayed readable to them over GraphQL as
+/// `Company.smtp`.
+///
+/// [`SmtpStatus::unconfigured`] rather than `null` when nothing is stored: the
+/// type already carries a `configured` flag to say so, and the GraphQL field is
+/// the non-null `SmtpStatus!`.
+async fn get_smtp(company: ScopedCompany) -> Result<Json<SmtpStatus>, ApiError> {
+    let stored = load_credentials(&company.runtime).await?;
+    Ok(Json(stored.as_ref().map_or_else(
+        SmtpStatus::unconfigured,
+        SmtpStatus::from_credentials,
+    )))
 }
 
 // -- PUT smtp ---------------------------------------------------------------
@@ -144,14 +170,80 @@ async fn store_credentials(
     Ok(Json(SmtpStatus::from_credentials(&creds)))
 }
 
+/// The save-credentials body: [`SmtpCredentials`], except that the password is
+/// a **patch**.
+///
+/// Same shape and same field names on the wire — a body carrying a password
+/// behaves exactly as it always did. What is new is that a body *without* one
+/// keeps the stored password, mirroring the patch semantics
+/// [`hosting`](super::hosting) already uses for its API key. The reason is the
+/// same: the password is write-only, so a form can never render it back, and
+/// without this every correction to a from-name would cost the operator a
+/// credential they would have to go and look up again.
+///
+/// Field names stay `snake_case` (`from_name`, `from_email`) because
+/// [`SmtpCredentials`] has no `rename_all` and the console mirrors it as-is.
+#[derive(Debug, Deserialize)]
+struct SmtpConfigBody {
+    /// SMTP server host.
+    host: String,
+    /// SMTP server port.
+    port: u16,
+    /// Transport security mode.
+    #[serde(default)]
+    security: SmtpSecurity,
+    /// Login username.
+    username: String,
+    /// Login password. Omit (or send empty) to keep the stored one.
+    #[serde(default)]
+    password: Option<String>,
+    /// Display name on the `From` header.
+    #[serde(default)]
+    from_name: String,
+    /// Envelope/from address.
+    from_email: String,
+}
+
 /// `PUT …/smtp` (both scope forms).
 ///
 /// Requires authority over the company (issue #403): these credentials are the
 /// address the company's mail goes out as.
+///
+/// Every field but the password replaces what is stored. The password is kept
+/// when the body omits it, so "stored — leave blank to keep" is a save the
+/// console can actually offer; with nothing supplied and nothing stored, the
+/// request is refused rather than persisting credentials that could never
+/// authenticate.
 async fn put_smtp(
     company: AdminScopedCompany,
-    Json(creds): Json<SmtpCredentials>,
+    Json(body): Json<SmtpConfigBody>,
 ) -> Result<Json<SmtpStatus>, ApiError> {
+    let supplied = body
+        .password
+        .as_deref()
+        .map(str::trim)
+        .filter(|password| !password.is_empty())
+        .map(str::to_string);
+    let password = match supplied {
+        Some(password) => password,
+        None => load_credentials(&company.runtime)
+            .await?
+            .map(|stored| stored.password)
+            .ok_or_else(|| {
+                ApiError(OpenCompanyError::InvalidRequest(
+                    "an SMTP password is required".to_string(),
+                ))
+            })?,
+    };
+    let creds = SmtpCredentials {
+        host: body.host,
+        port: body.port,
+        security: body.security,
+        username: body.username,
+        password,
+        from_name: body.from_name,
+        from_email: body.from_email,
+    };
     store_credentials(company.runtime, creds).await
 }
 
