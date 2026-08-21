@@ -2269,17 +2269,17 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let ops: Arc<dyn WorkspaceStore> = Arc::new(FsOps::new(dir.path()));
         let id = CompanyId::new(company);
-        ops.create(&id, &folder("f-standards", "Standards", None), None)
+        ops.create(&id, &folder("f-standards", "standards", None), None)
             .await
             .expect("folder");
         ops.create(
             &id,
-            &file("n-eng", "Engineering standards.md", Some("f-standards")),
+            &file("n-eng", "engineering-standards.md", Some("f-standards")),
             Some("# Engineering\nReview every PR."),
         )
         .await
         .expect("note");
-        ops.create(&id, &file("n-readme", "README.md", None), Some("# Root"))
+        ops.create(&id, &file("n-readme", "readme.md", None), Some("# Root"))
             .await
             .expect("readme");
         (dir, ops)
