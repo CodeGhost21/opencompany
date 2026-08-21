@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import type { ApprovalSummary } from "@/api/types";
 import { ApprovalMeta } from "@/components/approval-card";
-import { approvalStatusLabel, untilLabel } from "@/lib/language";
+import { approvalDeadline, approvalStatusLabel, untilLabel } from "@/lib/language";
 
 /**
  * Issue #971: nothing may vanish unannounced.
@@ -66,7 +66,44 @@ describe("the deadline on an approval card", () => {
     const text = container.textContent ?? "";
     // Both halves of "is this still worth deciding?".
     expect(text).toContain("2h ago");
-    expect(text).toContain("declined in 22h");
+    expect(text).toContain("Declines itself in 22h");
+  });
+
+  /**
+   * Issue #1403. The old line read "declined in 22h" — a past participle two
+   * words after a genuinely past-tense age, in identical muted grey. The whole
+   * point of the new wording is that it cannot be scanned as "this was
+   * declined", so the absence of the bare participle is the assertion.
+   */
+  it("never says a pending request was declined", async () => {
+    await render(approval({ expires_at_millis: T0 + 24 * HOUR }), T0 + 2 * HOUR);
+    expect(container.textContent ?? "").not.toContain("declined in");
+  });
+
+  /**
+   * The tone is load-bearing rather than decorative: this is the only line on
+   * the card saying the decision gets taken FOR the operator if they scroll
+   * past. A card with a day left must stay quiet, or the emphasis on the one
+   * with four minutes left buys nothing.
+   */
+  it("says a deadline inside the hour loudly, and a distant one quietly", async () => {
+    await render(approval({ expires_at_millis: T0 + 24 * HOUR }), T0 + 23.5 * HOUR);
+    expect(container.querySelector(".text-status-blocked-text")).not.toBeNull();
+
+    await render(approval({ expires_at_millis: T0 + 24 * HOUR }), T0 + 2 * HOUR);
+    expect(container.querySelector(".text-status-blocked-text")).toBeNull();
+    expect(container.querySelector(".text-status-failed-text")).toBeNull();
+  });
+
+  it("explains a card whose deadline has already passed", async () => {
+    // The host sweeps expired approvals once a minute, so a card can sit in the
+    // queue briefly after its deadline. It used to render "declined in 0m" with
+    // live Approve and Decline buttons beside it.
+    await render(approval({ expires_at_millis: T0 + HOUR }), T0 + 2 * HOUR);
+    const text = container.textContent ?? "";
+    expect(text).toContain("Past its deadline");
+    expect(text).not.toContain("0m");
+    expect(container.querySelector(".text-status-failed-text")).not.toBeNull();
   });
 
   it("says nothing when the host reports no deadline", async () => {
@@ -77,7 +114,8 @@ describe("the deadline on an approval card", () => {
     await render(approval(), T0 + 2 * HOUR);
     const text = container.textContent ?? "";
     expect(text).toContain("2h ago");
-    expect(text).not.toContain("declined");
+    expect(text).not.toContain("eclines itself");
+    expect(text).not.toContain("deadline");
     expect(text).not.toContain("in ");
   });
 
@@ -87,9 +125,11 @@ describe("the deadline on an approval card", () => {
     await render(approval(), T0 + 2 * HOUR);
     const without = container.textContent ?? "";
     // The deadline is additive: strip it and the two lines agree.
-    expect(withDeadline.replace("·declined in 22h", "").replace("declined in 22h", "")).toBe(
-      without,
-    );
+    expect(
+      withDeadline
+        .replace("·Declines itself in 22h", "")
+        .replace("Declines itself in 22h", ""),
+    ).toBe(without);
     expect(without).toContain("SEO Specialist");
   });
 });
@@ -111,6 +151,68 @@ describe("untilLabel, after the move into the language layer", () => {
 
   it("clamps a passed deadline at zero rather than counting backwards", () => {
     expect(untilLabel(T0 - HOUR, T0)).toBe("in 0m");
+  });
+});
+
+/**
+ * The deadline's own wording and tone (#1403), as strings.
+ *
+ * Pinned here rather than only through the DOM because these six buckets are
+ * the whole fix: three of them did not exist before, and one of them —
+ * "under a minute" — replaces a string ("in 0m") that an operator could read as
+ * "already declined".
+ */
+describe("approvalDeadline", () => {
+  it("counts a distant deadline down quietly", () => {
+    expect(approvalDeadline(T0 + 22 * HOUR, T0)).toEqual({
+      text: "Declines itself in 22h",
+      tone: "normal",
+    });
+    expect(approvalDeadline(T0 + 3 * 24 * HOUR, T0)).toEqual({
+      text: "Declines itself in 3d",
+      tone: "normal",
+    });
+  });
+
+  it("turns loud inside the last hour", () => {
+    expect(approvalDeadline(T0 + 59 * 60_000, T0)).toEqual({
+      text: "Declines itself in 59m",
+      tone: "soon",
+    });
+    expect(approvalDeadline(T0 + 4 * 60_000, T0)).toEqual({
+      text: "Declines itself in 4m",
+      tone: "soon",
+    });
+    // The boundary belongs to the quiet arm: an hour is an hour, not "soon".
+    expect(approvalDeadline(T0 + 60 * 60_000, T0).tone).toBe("normal");
+  });
+
+  it("spells out the last minute rather than rounding it to zero", () => {
+    // The bug this replaces: `untilLabel` rounds, so twenty-five seconds left
+    // printed the same "in 0m" as a deadline that had already gone.
+    expect(approvalDeadline(T0 + 25_000, T0)).toEqual({
+      text: "Declines itself in under a minute",
+      tone: "soon",
+    });
+    expect(approvalDeadline(T0 + 59_000, T0).text).toBe("Declines itself in under a minute");
+  });
+
+  it("floors rather than rounding, so the time left is never overstated", () => {
+    // 90 seconds is one minute of usable time, not two. `untilLabel` would
+    // round this up; on a deadline the operator is racing, the only safe
+    // rounding error is the one that makes them act sooner.
+    expect(approvalDeadline(T0 + 90_000, T0).text).toBe("Declines itself in 1m");
+    expect(approvalDeadline(T0 + 90 * 60_000, T0).text).toBe("Declines itself in 1h");
+  });
+
+  it("says a passed deadline is passed, and never counts backwards", () => {
+    expect(approvalDeadline(T0 - HOUR, T0)).toEqual({
+      text: "Past its deadline — declining itself",
+      tone: "passed",
+    });
+    // Exactly on the deadline is past it: there is no time left to offer.
+    expect(approvalDeadline(T0, T0).tone).toBe("passed");
+    expect(approvalDeadline(T0 - 1, T0).text).not.toContain("0m");
   });
 });
 

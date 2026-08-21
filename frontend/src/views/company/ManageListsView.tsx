@@ -22,6 +22,7 @@ import { useEffect, useState } from "react";
 import { AlertTriangle, ArrowLeft, Lock, Plus } from "lucide-react";
 import { toast } from "sonner";
 
+import { inlineCode } from "@/lib/inline-code";
 import type { OpenCompanyClient } from "@/api/client";
 import { retireLedger, type LedgerSummary } from "@/api/ledgers";
 import {
@@ -53,7 +54,9 @@ interface Props {
 
 export function ManageListsView({ client, company, ledgerNav, onBack }: Props) {
   const [declaring, setDeclaring] = useState(false);
-  const [confirmRetire, setConfirmRetire] = useState<LedgerSummary | null>(null);
+  const [confirmRetire, setConfirmRetire] = useState<LedgerSummary | null>(
+    null,
+  );
   const [retiring, setRetiring] = useState(false);
 
   const { ledgers, faults, remaining, loading, refresh } = ledgerNav;
@@ -115,9 +118,9 @@ export function ManageListsView({ client, company, ledgerNav, onBack }: Props) {
           <div>
             <h1 className="text-xl font-semibold">Manage lists</h1>
             <p className="text-sm text-muted-foreground">
-              Every list this company tracks — its own board, plus whatever
-              else it records. Reach any of them from the switcher on its own
-              title; retire one here.
+              Every list this company tracks — its own board, plus whatever else
+              it records. Reach any of them from the switcher on its own title;
+              retire one here.
             </p>
           </div>
           <Button
@@ -140,7 +143,9 @@ export function ManageListsView({ client, company, ledgerNav, onBack }: Props) {
         <Alert>
           <AlertTriangle className="size-4" />
           <AlertDescription>
-            <p className="font-medium">Some declarations could not be loaded:</p>
+            <p className="font-medium">
+              Some declarations could not be loaded:
+            </p>
             <ul className="mt-1 list-disc pl-4">
               {faults.map((fault) => (
                 <li key={fault}>{fault}</li>
@@ -170,19 +175,26 @@ export function ManageListsView({ client, company, ledgerNav, onBack }: Props) {
                       />
                     )}
                   </div>
-                  <p className="text-xs text-muted-foreground">{held.purpose}</p>
+                  <p className="max-w-prose text-xs text-muted-foreground">
+                    {inlineCode(held.purpose)}
+                  </p>
                   <p className="text-xs text-muted-foreground">
                     {held.open} open · {held.closed} closed
                   </p>
                 </div>
                 {held.builtin ? (
-                  <span className="text-xs text-muted-foreground" title="Built into every company">
+                  <span
+                    className="text-xs text-muted-foreground"
+                    title="Built into every company"
+                  >
                     Built in
                   </span>
                 ) : (
                   <AlertDialog
                     open={confirmRetire?.slug === held.slug}
-                    onOpenChange={(open) => setConfirmRetire(open ? held : null)}
+                    onOpenChange={(open) =>
+                      setConfirmRetire(open ? held : null)
+                    }
                   >
                     <AlertDialogTrigger
                       render={
@@ -197,7 +209,9 @@ export function ManageListsView({ client, company, ledgerNav, onBack }: Props) {
                     />
                     <AlertDialogContent>
                       <AlertDialogHeader>
-                        <AlertDialogTitle>Retire “{held.title}”?</AlertDialogTitle>
+                        <AlertDialogTitle>
+                          Retire “{held.title}”?
+                        </AlertDialogTitle>
                         <AlertDialogDescription>
                           This list leaves the switcher's menu and its{" "}
                           <code>{held.derived}</code> file stops being

@@ -26,6 +26,7 @@ import {
   AgentHarnessCard, GraphHumanDetailCard, MemoryNoteCard, SopTaskDetailCard,
   type DeptLite,
 } from './KnowledgeDetail';
+import { destinationFor, MEMORY_DESTINATION } from './open-in-console';
 import { KnowledgeGraphFullscreen } from './KnowledgeGraphFullscreen';
 
 const W = 880;
@@ -214,11 +215,24 @@ type SimLink = { source: SimNode | string; target: SimNode | string; kind: strin
  */
 export function KnowledgeGraph({
   graph, agents = [], departments = [], people = [], tasks = [], memory, runsByAgent = {}, toolLabels = {},
+  statusSlot,
   repelDefault = 150, linkDistDefault = 60, centerDefault = 0.32,
 }: {
   graph: KGData; agents?: Agent[]; departments?: Department[]; people?: Person[]; tasks?: SopTask[];
   /** the distilled memory constellation drawn at the core */
   memory?: MemoryGraph;
+  /**
+   * The snapshot line — when this picture was read, and the control that reads
+   * it again — owned by `Overview` and positioned by the shell (issue #1307).
+   *
+   * It is a slot rather than something `Overview` positions itself because the
+   * detail rail is the only thing that knows how much of the right edge is
+   * still visible, and `Overview` cannot see it. Positioned separately, the
+   * chip sat at `right-3` under a `z-30` rail: the staleness signal, the
+   * Refresh control and the outage alert all vanished behind the first card an
+   * operator opened.
+   */
+  statusSlot?: React.ReactNode;
   /** latest run per agent id, for the harness card */
   runsByAgent?: Record<string, AgentRun>;
   /** Tool slug → display name, so a card can name a tool as its source does. */
@@ -1617,6 +1631,10 @@ export function KnowledgeGraph({
       onTool={selectToolSlug}
       onAgent={(id) => selectAgent(`emp:${id}`)}
       onTask={selectedAgentTaskId ? () => selectTask(selectedAgentTaskId) : undefined}
+      // The way out of the graph (issue #1308). Read off the node's own id, so
+      // the link cannot name a different teammate than the card was opened
+      // from.
+      openIn={selectedAgentId ? destinationFor(selectedAgentId) : null}
     />
   ) : null;
 
@@ -1638,6 +1656,7 @@ export function KnowledgeGraph({
       onClose={clearDetail}
       onAssignee={selectedTaskWorker ? () => selectWorker(selectedTaskWorker) : undefined}
       onTool={selectToolSlug}
+      openIn={selectedTaskId ? destinationFor(selectedTaskId) : null}
     />
   ) : null;
 
@@ -1655,6 +1674,7 @@ export function KnowledgeGraph({
       onClose={clearDetail}
       onTask={selectedHumanTaskId ? () => selectTask(selectedHumanTaskId) : undefined}
       onTool={selectToolSlug}
+      openIn={selectedHumanId ? destinationFor(selectedHumanId) : null}
     />
   ) : null;
 
@@ -1664,6 +1684,9 @@ export function KnowledgeGraph({
       note={selectedMemory}
       color={memColor(selectedMemory)}
       onClose={() => setSelectedMemoryId(null)}
+      // A note's surface is the Brain itself — `#/memory` addresses the page,
+      // not one entry — so this is the constant rather than a per-id lookup.
+      openIn={MEMORY_DESTINATION}
     />
   ) : null;
 
@@ -2396,6 +2419,7 @@ export function KnowledgeGraph({
         onCollapseCore={clearAll}
         searchSlot={vaultSearchInput}
         legendSlot={compactLegend}
+        statusSlot={statusSlot}
         onNavDept={navDept}
         onBack={clearDetail}
       >

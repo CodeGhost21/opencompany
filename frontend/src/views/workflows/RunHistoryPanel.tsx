@@ -291,6 +291,7 @@ export function RunHistoryPanel({
                 variant="ghost"
                 size="sm"
                 className="w-full"
+                data-testid="workflow-run-load-older"
                 disabled={loadingOlder}
                 onClick={onLoadOlder}
               >

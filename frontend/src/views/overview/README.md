@@ -89,6 +89,32 @@ The console deliberately does **not** intersect a grant against the tool names
 discovered from MCP servers. Deciding what a glob covers is the host's
 `grant_matches`, and a second copy here is exactly the drift issue #264 forbids.
 
+## The way out
+
+Every card ends with one link to the page that names the same record
+(`kg/open-in-console.ts`, issue #1308):
+
+| card | goes to |
+|---|---|
+| AI teammate | `#/team/<agentId>` |
+| SOP task | `#/tasks/<taskId>` |
+| human | `#/settings/people` — there is no per-person address |
+| note | `#/memory` |
+
+A **tool** and a **stage** deliberately get none. A grant is a string in
+`company.toml`, not a record with a page, and pointing at the MCP tab would
+name a server the grant may have nothing to do with — the `grant_matches`
+guesswork this file forbids two sections down. A stage is a node inside a saved
+graph: the flow has an address, the node within it does not.
+
+The destination is read off the **node's own id**, which already carries the
+host's id for the thing it draws (`emp:<agentId>`, `team:desk:<deskId>`), so a
+card cannot link to a different record than the node it was opened from.
+
+It is a real `<a href="#/…">` rather than a click handler, so cmd-click,
+middle-click and copy-link work and the hash router picks it up from
+`hashchange` like every other link in the console.
+
 ## Freshness
 
 The page is a **snapshot**, not a live view, and says so: a "Snapshot HH:MM" chip
@@ -141,6 +167,11 @@ the two board predicates the adapter needs. Theme tokens live under `.oc-kg`
 in `src/index.css`.
 
 The graph is the whole page, so its chrome stays minimal: a pillar selector, a
-kind legend, the side paddles, and the detail card. The docked directory index
+kind legend, the side paddles, and the detail card. The selector names every
+desk rather than numbering them (issue #1309) — it used to draw one anonymous
+dot per desk under the words "Pick a pillar", so the control that exists to
+choose a desk said which was which only on hover, and said nothing at all to a
+touch device. The chips wrap rather than scroll or clip; each carries the
+colour its pillar's node and label already carry. The docked directory index
 and the entity/function/action lenses were removed — with nothing else on the
 page competing for attention, they covered more of the graph than they earned.
