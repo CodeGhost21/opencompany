@@ -1,5 +1,5 @@
-//! Char-boundary-safe slicing shared by every [`ContextStore`]
-//! (crate::ports::ContextStore) backend.
+//! Char-boundary-safe slicing shared by every
+//! [`ContextStore`](crate::ports::ContextStore) backend.
 //!
 //! The ranged `peek` and the search-snippet window both compute **byte**
 //! offsets — a caller-supplied range, or ±24 bytes around a match — and a byte
