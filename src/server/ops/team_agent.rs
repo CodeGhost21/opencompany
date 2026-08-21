@@ -71,7 +71,7 @@ use serde::{Deserialize, Serialize};
 use crate::AppState;
 use crate::error::OpenCompanyError;
 use crate::ports::store::company_write_lock;
-use crate::ports::types::CompanyRecord;
+use crate::ports::types::{AgentOverride, CompanyRecord};
 use crate::runtime::builder::agent_scoped_grants;
 use crate::server::error::ApiError;
 use crate::server::ops::ScopedCompany;
@@ -102,7 +102,7 @@ pub(super) enum AgentSource {
 
 /// The fields a `PATCH` accepts for an overlay teammate. Sent to the console so
 /// it renders the same rule the host enforces.
-const OVERLAY_EDITABLE: [&str; 4] = ["name", "role", "description", "tools"];
+const OVERLAY_EDITABLE: [&str; 5] = ["name", "role", "description", "tools", "instructions"];
 
 /// The subset a **non-admin** member may `PATCH` (issue #619).
 ///
@@ -112,7 +112,16 @@ const OVERLAY_EDITABLE: [&str; 4] = ["name", "role", "description", "tools"];
 /// gives: a console renders a field read-only exactly when the host says it is,
 /// so offering `tools` to a member who would meet a `403` on save is precisely
 /// the drift `editable` exists to remove.
-const OVERLAY_EDITABLE_MEMBER: [&str; 3] = ["name", "role", "description"];
+const OVERLAY_EDITABLE_MEMBER: [&str; 4] = ["name", "role", "description", "instructions"];
+
+/// The only field a **manifest** teammate accepts (issue #1530): its persona
+/// instructions, which write to the per-agent override record rather than the
+/// version-controlled `company.toml`, so editing them never makes the deployed
+/// company diverge from the file in git. Every other manifest field stays
+/// read-only, which is why this is a one-element list rather than
+/// [`OVERLAY_EDITABLE`]. A non-empty `editable` is also what makes the console
+/// show the persona editor + Save for a blueprint agent.
+const MANIFEST_EDITABLE: [&str; 1] = ["instructions"];
 
 /// One agent, in full — everything #264 lists as unreachable.
 #[derive(Debug, Serialize)]
@@ -131,9 +140,26 @@ pub(super) struct AgentDetailDto {
     #[serde(skip_serializing_if = "Option::is_none")]
     description: Option<String>,
     source: AgentSource,
-    /// The field names a `PATCH` will accept for this teammate. Empty for a
-    /// manifest teammate.
+    /// The field names a `PATCH` will accept for this teammate. Since #1530 a
+    /// manifest teammate is no longer empty — it accepts `instructions`, which
+    /// write to the override record rather than `company.toml`.
     editable: Vec<&'static str>,
+    /// The persona instructions **in force** for this teammate (issue #1530):
+    /// an operator override when one is set, else the manifest `prompt`, else
+    /// absent. This is what actually frames the agent's turns — the value the
+    /// console shows in the editor.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    instructions: Option<String>,
+    /// The manifest `prompt` seed, when this teammate has one — what
+    /// "Reset to blueprint" restores. Absent for an overlay teammate (no
+    /// manifest row) and for a manifest agent that declares no `prompt`. The
+    /// console previews/labels the reset target from this.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    blueprint_instructions: Option<String>,
+    /// Whether an operator override is currently masking the blueprint — the
+    /// signal the console gates "Reset to blueprint" on, so it offers the reset
+    /// only when there is something to reset to.
+    instructions_overridden: bool,
     /// The declared cognition-tier hint, when the manifest sets one. An overlay
     /// teammate has none by construction.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -369,6 +395,21 @@ pub(super) struct EditAgent {
     /// its workspace folder, budget row, desk memberships and inbox.
     #[serde(default)]
     tools: Option<Vec<String>>,
+    /// The teammate's persona instructions (issue #1530). A **double option**,
+    /// the same three-state contract as `description`:
+    ///
+    /// | body | parses as | means |
+    /// |---|---|---|
+    /// | `{}` | `None` | leave the instructions alone |
+    /// | `{"instructions": null}` | `Some(None)` | clear the override → reset to blueprint |
+    /// | `{"instructions": "…"}` | `Some(Some(…))` | set the override |
+    ///
+    /// Unlike every other field here, this is accepted for a **manifest**
+    /// teammate too: it writes to the per-agent override record, not to
+    /// `company.toml`, so it is legal for both kinds. A blank/whitespace string
+    /// is normalized to a reset, so an override can never blank a persona.
+    #[serde(default, deserialize_with = "double_option")]
+    instructions: Option<Option<String>>,
 }
 
 /// `GET {scope}/team/{agent_id}` — one agent, read.
@@ -393,11 +434,15 @@ async fn agent_detail(
     detail(&company, &record, &agent_id, is_admin).await
 }
 
-/// `PATCH {scope}/team/{agent_id}` — edit an overlay teammate.
+/// `PATCH {scope}/team/{agent_id}` — edit a teammate.
 ///
-/// Refuses a manifest teammate with a `409` naming where the edit belongs, and
-/// an unknown id with a `404`. `name`, `role` and `description` are open to any
-/// signed-in member, matching `POST …/team`: defining a teammate was never
+/// Refuses an unknown id with a `404`. A manifest teammate's version-controlled
+/// fields (`name`/`role`/`description`/`tools`) still refuse with a `409` naming
+/// where the edit belongs — but since #1530 the refusal is **conditional**: an
+/// `instructions`-only body is accepted for a manifest teammate too, because it
+/// writes to the per-agent override record rather than `company.toml` (see the
+/// check inside). `name`, `role`, `description` and `instructions` are open to
+/// any signed-in member, matching `POST …/team`: defining a teammate was never
 /// admin-only, so correcting one it defined is not either.
 ///
 /// # Why `tools` is the exception (issue #619)
@@ -456,16 +501,30 @@ async fn edit_agent(
 
     // Identity before validation, so an unknown id is a 404 rather than a
     // complaint about the shape of a body nobody could have applied anyway.
-    if record.manifest.agents.iter().any(|a| a.id == agent_id) {
-        return Err(ApiError(OpenCompanyError::Conflict(
-            language::MANIFEST_TEAMMATE_EDIT.to_string(),
-        ))
-        .into_response());
-    }
-    if !record.overlay_agents.iter().any(|a| a.id == agent_id) {
+    let is_manifest = record.manifest.agents.iter().any(|a| a.id == agent_id);
+    let is_overlay = record.overlay_agents.iter().any(|a| a.id == agent_id);
+    if !is_manifest && !is_overlay {
         return Err(ApiError(OpenCompanyError::CompanyNotFound(format!(
             "teammate {agent_id}"
         )))
+        .into_response());
+    }
+
+    // Issue #1530: the manifest 409 is now **conditional**. A manifest
+    // teammate's version-controlled fields (`name`/`role`/`description`/`tools`)
+    // are still read-only from a browser — editing them would make the deployed
+    // company diverge from `company.toml`. But `instructions` write to the
+    // per-agent OVERRIDE record, not the manifest, so an instructions-only edit
+    // is legal for a manifest teammate exactly as it is for an overlay one. Only
+    // refuse when the body actually touches a manifest-native field.
+    let touches_native_field = body.name.is_some()
+        || body.role.is_some()
+        || body.description.is_some()
+        || body.tools.is_some();
+    if is_manifest && touches_native_field {
+        return Err(ApiError(OpenCompanyError::Conflict(
+            language::MANIFEST_TEAMMATE_EDIT.to_string(),
+        ))
         .into_response());
     }
 
@@ -501,7 +560,9 @@ async fn edit_agent(
         .transpose()
         .map_err(|e| e.into_response())?;
 
-    {
+    // Native fields live on the overlay agent, and a manifest-native edit was
+    // refused above — so this mutation only ever runs for an overlay teammate.
+    if is_overlay {
         let agent = record
             .overlay_agents
             .iter_mut()
@@ -529,6 +590,25 @@ async fn edit_agent(
         // the company already made.
         if let Some(tools) = tools {
             agent.tools = tools;
+        }
+    }
+
+    // Issue #1530: the persona override, written to the record for **either**
+    // kind. A `null` or blank/whitespace body normalizes to a reset — drop the
+    // override so the blueprint `prompt` applies again — which is what keeps an
+    // emptied edit from silently blanking a persona. A non-empty string upserts,
+    // replacing any prior override so `agent_override`'s first-match read can
+    // never see a stale row.
+    if let Some(instructions) = body.instructions {
+        match instructions
+            .map(|text| text.trim().to_string())
+            .filter(|text| !text.is_empty())
+        {
+            Some(text) => record.upsert_agent_override(AgentOverride {
+                agent_id: agent_id.clone(),
+                instructions: Some(text),
+            }),
+            None => record.clear_agent_override(&agent_id),
         }
     }
 
@@ -672,6 +752,23 @@ async fn detail(
         .into_iter()
         .any(|meta| meta.key == agent_id && meta.enabled);
 
+    // Issue #1530: the persona in force, the blueprint it would reset to, and
+    // whether an override is currently masking that blueprint. `blueprint` is
+    // the manifest `prompt` seed — absent for an overlay teammate, which has no
+    // manifest row — so the console can preview what "Reset to blueprint"
+    // restores. `overridden` is gated on an override that actually carries
+    // instructions, so an empty record never reads as "overridden".
+    let effective_instructions = record.effective_instructions(agent_id);
+    let blueprint_instructions = record
+        .manifest
+        .agents
+        .iter()
+        .find(|a| a.id == agent_id)
+        .and_then(|a| a.prompt.clone());
+    let instructions_overridden = record
+        .agent_override(agent_id)
+        .is_some_and(|entry| entry.instructions.is_some());
+
     Ok(Json(AgentDetailDto {
         id: agent_id.to_string(),
         name,
@@ -681,8 +778,14 @@ async fn detail(
         editable: match (source, is_admin) {
             (AgentSource::Overlay, true) => OVERLAY_EDITABLE.to_vec(),
             (AgentSource::Overlay, false) => OVERLAY_EDITABLE_MEMBER.to_vec(),
-            (AgentSource::Manifest, _) => Vec::new(),
+            // Issue #1530: no longer empty — a manifest teammate accepts
+            // `instructions`, which is what makes the console show the persona
+            // editor + Save for a blueprint agent.
+            (AgentSource::Manifest, _) => MANIFEST_EDITABLE.to_vec(),
         },
+        instructions: effective_instructions,
+        blueprint_instructions,
+        instructions_overridden,
         tier: declared_tier(record, agent_id),
         is_orchestrator: is_orchestrator(record, agent_id),
         tools: agent_tools(record, agent_id),
@@ -1440,11 +1543,127 @@ members = ["writer", "ceo"]
 
         let (_, ceo) = get_agent(&state, "ceo").await;
         assert_eq!(ceo["role"], "Chief Executive", "{ceo}");
-        assert!(
-            ceo["editable"].as_array().unwrap().is_empty(),
-            "and the host says so up front, so the console never offers the \
-             field: {ceo}"
+        // Issue #1530: a manifest teammate is no longer wholly read-only — its
+        // persona `instructions` are editable (they write to the override, not
+        // `company.toml`) — but nothing else is, so a `role` edit still 409s.
+        assert_eq!(
+            strings(&ceo["editable"]),
+            vec!["instructions"],
+            "the host offers only the override-backed field on a manifest \
+             teammate: {ceo}"
         );
+    }
+
+    /// A manifest with a blueprint `prompt`, so the persona-override tests have a
+    /// seed for "Reset to blueprint" to restore.
+    const PERSONA_MANIFEST: &str = r#"
+[company]
+name = "Acme"
+[policy]
+mode = "full"
+[tools]
+allow = ["workspace", "workspace.*"]
+
+[[agent]]
+id = "ceo"
+role = "Chief Executive"
+prompt = "Lead decisively."
+"#;
+
+    /// Issue #1530: a manifest teammate's persona `instructions` ARE editable —
+    /// they write to the override record, not `company.toml`, so no `409` — while
+    /// every other manifest field stays read-only. The response exposes the
+    /// effective text, the blueprint it would reset to, and that it is overridden.
+    #[tokio::test]
+    async fn instructions_are_editable_on_a_manifest_teammate_without_a_409() {
+        let home_dir = home();
+        let state = state_with_manifest(home_dir.path(), PERSONA_MANIFEST).await;
+
+        let (status, edited) =
+            patch_agent(&state, "ceo", json!({"instructions": "Answer only in haiku."})).await;
+        assert_eq!(status, StatusCode::OK, "an instructions-only edit is legal: {edited}");
+        assert_eq!(edited["instructions"], "Answer only in haiku.", "{edited}");
+        assert_eq!(edited["instructionsOverridden"], true, "{edited}");
+        assert_eq!(
+            edited["blueprintInstructions"], "Lead decisively.",
+            "the blueprint seed is surfaced for Reset: {edited}"
+        );
+
+        // Persisted, not just echoed by the handler.
+        let (_, reread) = get_agent(&state, "ceo").await;
+        assert_eq!(reread["instructions"], "Answer only in haiku.", "{reread}");
+        assert_eq!(reread["instructionsOverridden"], true, "{reread}");
+
+        // The conditional 409 did NOT open the gate for a native field: a role
+        // edit on the same manifest teammate is still refused.
+        let (status, refusal) = patch_agent(&state, "ceo", json!({"role": "Chief Vibes"})).await;
+        assert_eq!(
+            status,
+            StatusCode::CONFLICT,
+            "a manifest-native field stays read-only: {refusal}"
+        );
+    }
+
+    /// Issue #1530: `instructions: null` on a manifest teammate clears the
+    /// override and resets to the blueprint `prompt` — the escape hatch that
+    /// keeps the override from masking version control forever.
+    #[tokio::test]
+    async fn null_instructions_resets_a_manifest_teammate_to_blueprint() {
+        let home_dir = home();
+        let state = state_with_manifest(home_dir.path(), PERSONA_MANIFEST).await;
+
+        // Override, then reset.
+        let (status, _) =
+            patch_agent(&state, "ceo", json!({"instructions": "Custom voice."})).await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, reset) = patch_agent(&state, "ceo", json!({"instructions": null})).await;
+        assert_eq!(status, StatusCode::OK, "{reset}");
+        assert_eq!(
+            reset["instructions"], "Lead decisively.",
+            "reset falls back to the blueprint: {reset}"
+        );
+        assert_eq!(
+            reset["instructionsOverridden"], false,
+            "no override masks the blueprint after a reset: {reset}"
+        );
+
+        // A blank string is a reset too, so an emptied editor never blanks the
+        // persona.
+        let (status, _) =
+            patch_agent(&state, "ceo", json!({"instructions": "Custom voice."})).await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, blanked) = patch_agent(&state, "ceo", json!({"instructions": "   "})).await;
+        assert_eq!(status, StatusCode::OK, "{blanked}");
+        assert_eq!(blanked["instructions"], "Lead decisively.", "{blanked}");
+        assert_eq!(blanked["instructionsOverridden"], false, "{blanked}");
+    }
+
+    /// Issue #1530: an overlay teammate's persona is editable the same way. It
+    /// has no manifest `prompt`, so `blueprintInstructions` is absent and a reset
+    /// falls all the way to nothing.
+    #[tokio::test]
+    async fn instructions_are_editable_on_an_overlay_teammate() {
+        let home_dir = home();
+        let state = state_with_manifest(home_dir.path(), ROSTER).await;
+        let jamie = add_overlay(&state, "Jamie", "Growth").await;
+
+        let (status, edited) =
+            patch_agent(&state, &jamie, json!({"instructions": "Be terse and data-first."})).await;
+        assert_eq!(status, StatusCode::OK, "{edited}");
+        assert_eq!(edited["instructions"], "Be terse and data-first.", "{edited}");
+        assert_eq!(edited["instructionsOverridden"], true, "{edited}");
+        assert!(
+            edited["blueprintInstructions"].is_null(),
+            "an overlay teammate has no manifest seed to reset to: {edited}"
+        );
+
+        let (status, reset) = patch_agent(&state, &jamie, json!({"instructions": null})).await;
+        assert_eq!(status, StatusCode::OK, "{reset}");
+        assert!(
+            reset["instructions"].is_null(),
+            "clearing an overlay override leaves no persona text: {reset}"
+        );
+        assert_eq!(reset["instructionsOverridden"], false, "{reset}");
     }
 
     /// The console renders read-only from the host's answer, not from a rule of
@@ -1458,7 +1677,7 @@ members = ["writer", "ceo"]
         let (_, agent) = get_agent(&state, &jamie).await;
         assert_eq!(
             strings(&agent["editable"]),
-            vec!["name", "role", "description", "tools"],
+            vec!["name", "role", "description", "tools", "instructions"],
             "{agent}"
         );
     }
@@ -1679,7 +1898,7 @@ members = ["writer", "ceo"]
         let (_, as_admin) = get_agent(&state, &jamie).await;
         assert_eq!(
             strings(&as_admin["editable"]),
-            vec!["name", "role", "description", "tools"],
+            vec!["name", "role", "description", "tools", "instructions"],
             "{as_admin}"
         );
 
@@ -1693,7 +1912,7 @@ members = ["writer", "ceo"]
         .await;
         assert_eq!(
             strings(&as_member["editable"]),
-            vec!["name", "role", "description"],
+            vec!["name", "role", "description", "instructions"],
             "a member is not offered a field they cannot save: {as_member}"
         );
     }
