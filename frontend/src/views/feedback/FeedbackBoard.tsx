@@ -27,6 +27,21 @@ import { cn } from "@/lib/utils";
 /** One page. Matches the host's own default, so page 1 costs no query string. */
 const PAGE_SIZE = 20;
 
+/**
+ * Value→label maps for the two filters.
+ *
+ * The `Select` trigger renders its *value* unless it is handed the labels, so
+ * without these the closed control would read "feature" where the open menu
+ * reads "Ideas" — the same mismatch the feedback form's `items` prop exists to
+ * avoid.
+ */
+const KIND_LABELS = Object.fromEntries(
+  BOARD_KIND_FILTERS.map((option) => [option.value, option.label]),
+);
+const STATUS_LABELS = Object.fromEntries(
+  BOARD_STATUS_FILTERS.map((option) => [option.value, option.label]),
+);
+
 interface Props {
   client: OpenCompanyClient;
   company: string | null;
@@ -184,7 +199,11 @@ export function FeedbackBoard({ client, company, refreshKey, onAvailability }: P
       </div>
 
       <div className="flex flex-wrap items-center gap-2">
-        <Select value={kind} onValueChange={(v) => setKind(v as BoardKind | "all")}>
+        <Select
+          value={kind}
+          onValueChange={(v) => setKind(v as BoardKind | "all")}
+          items={KIND_LABELS}
+        >
           <SelectTrigger size="sm" className="w-36" aria-label="Filter by type">
             <SelectValue />
           </SelectTrigger>
@@ -197,7 +216,11 @@ export function FeedbackBoard({ client, company, refreshKey, onAvailability }: P
           </SelectContent>
         </Select>
 
-        <Select value={status} onValueChange={(v) => setStatus(v as BoardStatus | "all")}>
+        <Select
+          value={status}
+          onValueChange={(v) => setStatus(v as BoardStatus | "all")}
+          items={STATUS_LABELS}
+        >
           <SelectTrigger size="sm" className="w-36" aria-label="Filter by status">
             <SelectValue />
           </SelectTrigger>
