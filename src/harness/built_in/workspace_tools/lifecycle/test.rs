@@ -41,7 +41,7 @@ async fn own_home(company: &str) -> Home {
     let id = CompanyId::new(company);
 
     store
-        .create(&id, &folder("f-standards", "Standards", None), None)
+        .create(&id, &folder("f-standards", "standards", None), None)
         .await
         .expect("folder");
     store
@@ -53,7 +53,7 @@ async fn own_home(company: &str) -> Home {
         .await
         .expect("note");
     store
-        .create(&id, &file("n-readme", "README.md", None), Some("# Root"))
+        .create(&id, &file("n-readme", "readme.md", None), Some("# Root"))
         .await
         .expect("readme");
     ensure_workspace_scaffold(store.as_ref(), &id)
@@ -545,7 +545,7 @@ async fn renaming_your_own_note_keeps_its_body_id_and_authorship() {
     assert!(!out.is_error, "{}", text(&out));
     let message = text(&out);
     assert!(
-        message.contains("agents/ceo/Q3 launch brief.md"),
+        message.contains("agents/ceo/q3-launch-brief.md"),
         "{message}"
     );
     assert!(
@@ -697,7 +697,7 @@ async fn renaming_anything_outside_your_own_folder_is_refused() {
         json!({ "id": "n-eng", "new_name": "mine.md" }),
         json!({ "path": "agents/cmo/Plan.md", "new_name": "mine.md" }),
         json!({ "id": "n-mate", "new_parent": "agents/ceo" }),
-        json!({ "path": "README.md", "new_name": "mine.md" }),
+        json!({ "path": "readme.md", "new_name": "mine.md" }),
     ] {
         let out = tool.execute(args.clone()).await.unwrap();
         assert!(out.is_error, "{args} was allowed: {}", text(&out));
@@ -766,7 +766,7 @@ async fn moving_your_own_note_out_of_your_folder_is_refused() {
     let home = own_home("acme").await;
     let tool = home.renamer();
 
-    for parent in ["Standards", "Agents", "agents/cmo"] {
+    for parent in ["standards", "agents", "agents/cmo"] {
         let out = tool
             .execute(json!({ "path": "agents/ceo/Draft.md", "new_parent": parent }))
             .await
