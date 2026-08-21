@@ -68,7 +68,7 @@ label = "Hypothesis"
 
 [[status]]
 name = "discovery"
-label = "Hit finding"
+label = "Discovery"
 aliases = ["hit_finding", "lead_optimization"]
 
 [[status]]

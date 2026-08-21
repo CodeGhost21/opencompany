@@ -114,8 +114,8 @@ order = "recent"
 [[section]]
 heading = "Settled"
 blurb = """
-Filed, extended, or found not to be required — each with the reason and who \
-signed. This is the firm's own audit trail, and it is read far more often than \
+Filed, or not — each with the reason (extended, or found not to be required) and \
+who signed. This is the firm's own audit trail, and it is read far more often than \
 it is written.\
 """
 statuses = ["filed", "not_filed"]

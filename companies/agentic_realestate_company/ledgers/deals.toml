@@ -104,9 +104,10 @@ order = "recent"
 [[section]]
 heading = "Closed"
 blurb = """
-Bought, passed, or lost — each with the reason. The passed rows are the buy box \
-made concrete, and the lost ones say what this company is actually willing to \
-pay versus what it says it is.\
+Bought, or not — each with the reason, which is where passed-on and lost-to-a-\
+higher-bidder are told apart. The passed rows are the buy box made concrete and \
+the lost ones say what this company will actually pay versus what it says it \
+will, so the reason has to carry which of the two it was.\
 """
 statuses = ["closed_won", "not_bought"]
 cap = 20
