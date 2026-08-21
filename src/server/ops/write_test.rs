@@ -1622,7 +1622,7 @@ async fn workspace_search_returns_hits_with_paths_and_excerpts() {
     let hits = results["hits"].as_array().unwrap();
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0]["id"], json!(note_id));
-    assert_eq!(hits[0]["path"], "standards/Support.md");
+    assert_eq!(hits[0]["path"], "standards/support.md");
     assert_eq!(hits[0]["matched"], "content");
     assert_eq!(hits[0]["kind"], "file");
     assert_eq!(hits[0]["updatedBy"], json!({"kind": "operator"}));
