@@ -5090,6 +5090,62 @@ needs_reason = true
         );
     }
 
+    /// A **shipped** bundle seeds its own ledgers, and their derived files
+    /// appear in the workspace.
+    ///
+    /// The other seeding tests build their bundle in a tempdir, so they prove
+    /// the mechanism and not the content. This one boots
+    /// `companies/agentic_law_firm` exactly as an operator would and asserts
+    /// that the axes that vertical is *about* — its matter list, its deadlines —
+    /// are actually there, which is the whole point of the feature and the one
+    /// thing a tempdir fixture cannot check.
+    #[tokio::test]
+    async fn a_shipped_bundle_seeds_its_own_ledgers_and_renders_them() {
+        let home_dir = tmp_home("oc-ledger-shipped-");
+        let bundle = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("companies")
+            .join("agentic_law_firm");
+        let manifest = CompanyManifest::from_path(&bundle).expect("the shipped bundle parses");
+        let id = CompanyId::new("firm");
+        let runtime = RuntimeBuilder::new(home_dir.path().to_path_buf(), manifest)
+            .with_id(id.clone())
+            .with_seed_dir(bundle)
+            .build()
+            .await
+            .unwrap();
+
+        let slugs: Vec<String> = runtime
+            .ledgers()
+            .list_specs(&id)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|spec| spec.slug)
+            .collect();
+        for expected in ["matters", "deadlines", "positions"] {
+            assert!(
+                slugs.contains(&expected.to_string()),
+                "`{expected}` was not seeded from the bundle: {slugs:?}"
+            );
+        }
+
+        // And the derived files are published, so the axes are legible to
+        // everything that already reads the workspace rather than only through
+        // the ledger tools.
+        let ctx = crate::company::ledgers::Ledgers::new(id.clone(), runtime.ledgers().clone())
+            .with_workspace_opt(Some(runtime.workspace().clone()));
+        crate::company::ledgers::republish_all(&ctx)
+            .await
+            .expect("republished");
+        let tree = runtime.workspace().tree(&id).await.unwrap();
+        for name in ["MATTERS.md", "DEADLINES.md", "POSITIONS.md"] {
+            assert!(
+                tree.iter().any(|node| node.name == name),
+                "`{name}` was not rendered"
+            );
+        }
+    }
+
     /// Boot lays down `Agents/` and operator-only `secrets/README.md`. `Desks/`
     /// has no producer, so it is minted on first use instead of standing empty.
     ///
