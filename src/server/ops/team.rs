@@ -1396,7 +1396,7 @@ mod tests {
         let (status, _) = send(
             &state,
             "PATCH",
-            "/api/v1/company/team/ceo",
+            "/api/v1/company/team/analyst",
             Some(json!({"role": "Managing Director", "description": "Runs the place."})),
             Some(&admin_cookie()),
         )
@@ -1417,7 +1417,7 @@ mod tests {
         let (status, cleared) = send(
             &state,
             "DELETE",
-            "/api/v1/company/team/ceo/budget",
+            "/api/v1/company/team/analyst/budget",
             None,
             Some(&admin_cookie()),
         )
