@@ -23,14 +23,14 @@ ledgers = [
 ]
 
 # Write scope (docs/spec/runtime/agents.md): confined to this company's
-# shared active-work document, plus the always-writable Agents/<id> home.
+# shared active-work document, plus the always-writable agents/<id> home.
 # The bare entries below preserve this agent's existing (reasoning-tier)
 # routed context — only the last entry changes behavior, by adding a write
-# grant. Standards/ and Playbooks/ stay out: governance documents, left to
+# grant. standards/ and playbooks/ stay out: governance documents, left to
 # the operator and the unconfined orchestrator.
 context = [
-    "BRIEF.md", "CLAIMS.md",
-    { path = "Tickets/Login outage.md", access = "write" },
+    "brief.md", "claims.md",
+    { path = "tickets/login-outage.md", access = "write" },
 ]
 
 # The role's working rules, checked in beside this file and read at manifest

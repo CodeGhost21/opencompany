@@ -35,7 +35,7 @@ fn manifest() -> CompanyManifest {
 /// The sorted node names in a workspace tree body.
 ///
 /// A freshly-built company is no longer an empty tree: boot scaffolds the
-/// reserved `Agents/` and `Desks/` roots (issue #551), so the tests below name
+/// reserved `agents/` and `desks/` roots (issue #551), so the tests below name
 /// what they expect rather than counting to zero. Nothing is provisioned
 /// *inside* them — a member folder is minted when that agent or desk first
 /// produces something.
@@ -1335,15 +1335,15 @@ async fn workspace_tree_and_file_reads_reflect_writes() {
 
     // A workspace with nothing seeded into it reads as a real tree, not a 404
     // and not a fixture. It is not *empty*, though: boot scaffolds the reserved
-    // `Agents/` root and operator-only `secrets/README.md`. The manifest here has an agent and it gets
+    // `agents/` root and operator-only `secrets/README.md`. The manifest here has an agent and it gets
     // no folder — a member folder is minted on first use, not on joining the
-    // roster. `Desks/` is absent for the same reason since issue #645: nothing
+    // roster. `desks/` is absent for the same reason since issue #645: nothing
     // writes into it, so it is minted on first use rather than scaffolded.
     let (status, tree) = send(&state, "GET", "/api/v1/company/workspace", None).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
         provisioned_names(&tree),
-        vec!["Agents", "Artifacts", "README.md", "README.md", "secrets"],
+        vec!["agents", "artifacts", "readme.md", "readme.md", "secrets"],
         "a fresh company starts with its system scaffold and nothing else"
     );
     let provisioned = tree.as_array().unwrap().len();
@@ -1352,7 +1352,7 @@ async fn workspace_tree_and_file_reads_reflect_writes() {
         &state,
         "POST",
         "/api/v1/company/workspace",
-        Some(json!({"name": "Standards", "kind": "folder"})),
+        Some(json!({"name": "standards", "kind": "folder"})),
     )
     .await;
     let folder_id = folder["id"].as_str().unwrap().to_string();
@@ -1413,7 +1413,7 @@ async fn workspace_tree_and_file_reads_reflect_writes() {
     // "the runtime laid this down" from "somebody wrote this".
     let root = tree
         .iter()
-        .find(|node| node["name"] == json!("Agents"))
+        .find(|node| node["name"] == json!("agents"))
         .expect("the Agents root is in the tree");
     assert_eq!(root["createdBy"], json!({"kind": "seed"}));
     assert_eq!(root["kind"], json!("folder"));
@@ -1552,7 +1552,7 @@ async fn workspace_reads_are_isolated_between_companies() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
         provisioned_names(&tree_b),
-        vec!["Agents", "Artifacts", "README.md", "README.md", "secrets"]
+        vec!["agents", "artifacts", "readme.md", "readme.md", "secrets"]
     );
 
     // Even naming A's node id explicitly, B's scope does not resolve it.
@@ -1590,7 +1590,7 @@ async fn workspace_search_returns_hits_with_paths_and_excerpts() {
         &state,
         "POST",
         "/api/v1/company/workspace",
-        Some(json!({"name": "Standards", "kind": "folder"})),
+        Some(json!({"name": "standards", "kind": "folder"})),
     )
     .await;
     let folder_id = folder["id"].as_str().unwrap().to_string();
@@ -1622,7 +1622,7 @@ async fn workspace_search_returns_hits_with_paths_and_excerpts() {
     let hits = results["hits"].as_array().unwrap();
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0]["id"], json!(note_id));
-    assert_eq!(hits[0]["path"], "Standards/Support.md");
+    assert_eq!(hits[0]["path"], "standards/support.md");
     assert_eq!(hits[0]["matched"], "content");
     assert_eq!(hits[0]["kind"], "file");
     assert_eq!(hits[0]["updatedBy"], json!({"kind": "operator"}));
@@ -1653,7 +1653,7 @@ async fn workspace_search_returns_hits_with_paths_and_excerpts() {
     let (status, scoped) = send(
         &state,
         "GET",
-        "/api/v1/company/workspace/search?q=support&prefix=Standards",
+        "/api/v1/company/workspace/search?q=support&prefix=standards",
         None,
     )
     .await;
@@ -1695,7 +1695,7 @@ async fn workspace_search_returns_hits_with_paths_and_excerpts() {
 }
 
 /// `POST …/workspace/sweep-empty-agent-folders` (issue #700): the operator's
-/// one-time tidy of the empty `Agents/<id>/` folders a pre-#570 company still
+/// one-time tidy of the empty `agents/<id>/` folders a pre-#570 company still
 /// carries.
 ///
 /// The whole route in one test, because the halves only mean something together:
@@ -1713,13 +1713,13 @@ async fn workspace_sweep_previews_then_removes_only_the_empty_agent_folders() {
     let state = state_with_company(&home).await;
     let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
 
-    // Boot already scaffolded `Agents/`; find it rather than making a rival.
+    // Boot already scaffolded `agents/`; find it rather than making a rival.
     let (_, tree) = send(&state, "GET", "/api/v1/company/workspace", None).await;
     let agents_id = tree
         .as_array()
         .unwrap()
         .iter()
-        .find(|node| node["name"] == "Agents")
+        .find(|node| node["name"] == "agents")
         .expect("boot scaffolds the Agents root")["id"]
         .as_str()
         .unwrap()
@@ -1829,13 +1829,13 @@ async fn workspace_sweep_previews_then_removes_only_the_empty_agent_folders() {
     assert_eq!(
         provisioned_names(&tree),
         vec![
-            "Agents".to_string(),
-            "Artifacts".to_string(),
-            "README.md".to_string(),
-            "README.md".to_string(),
-            "README.md".to_string(),
+            "agents".to_string(),
+            "artifacts".to_string(),
             "cmo".to_string(),
             "launch-brief.md".to_string(),
+            "readme.md".to_string(),
+            "readme.md".to_string(),
+            "readme.md".to_string(),
             "secrets".to_string(),
         ],
         "the folder holding a deliverable, the operator's note and the root all stay"

@@ -10,7 +10,7 @@
 //!
 //! # Why this is coherence, not containment
 //!
-//! The confinement to `Agents/<self>/` here is **not** a security boundary, and
+//! The confinement to `agents/<self>/` here is **not** a security boundary, and
 //! must not be described as one. The same explicit `workspace` grant already
 //! confers [`WORKSPACE_WRITE_TOOL`](super::WORKSPACE_WRITE_TOOL), which can
 //! overwrite any note in the tree with an empty body — strictly broader
@@ -69,6 +69,7 @@ use serde_json::{Value, json};
 use openhuman_core::openhuman::tools::traits::{PermissionLevel, Tool, ToolResult};
 
 use crate::company::artifact_mirror::published_record_for_node;
+use crate::company::workspace_names::kebab_name;
 use crate::company::workspace_paths::{is_legal_segment, split_logical_path};
 use crate::company::workspace_scaffold::AGENTS_ROOT;
 use crate::ports::workspace::NodeKind;
@@ -275,7 +276,7 @@ impl Tool for WorkspaceDeleteTool {
     }
 
     fn description(&self) -> &str {
-        "Delete ONE folder or note from your own workspace folder `Agents/<your agent id>/`. USE \
+        "Delete ONE folder or note from your own workspace folder `agents/<your agent id>/`. USE \
          FOR tidying up after yourself — removing a draft you have replaced, or a working note \
          that is no longer worth a teammate's time to find. You must pass `expected_updated_at` — \
          the `rev` from a `workspace_read` of the note, or the `rev=` on its `workspace_list` line \
@@ -291,7 +292,7 @@ impl Tool for WorkspaceDeleteTool {
             "properties": {
                 "path": {
                     "type": "string",
-                    "description": "The node's path as shown by workspace_list, e.g. \"Agents/ceo/Old draft.md\". Must be inside your own folder."
+                    "description": "The node's path as shown by workspace_list, e.g. \"agents/ceo/Old draft.md\". Must be inside your own folder."
                 },
                 "id": {
                     "type": "string",
@@ -456,7 +457,7 @@ impl Tool for WorkspaceRenameTool {
     }
 
     fn description(&self) -> &str {
-        "Rename and/or move ONE folder or note INSIDE your own workspace folder `Agents/<your \
+        "Rename and/or move ONE folder or note INSIDE your own workspace folder `agents/<your \
          agent id>/`. USE FOR tidying your own folder — giving a draft the title it earned, or \
          filing notes under a subfolder you made with `workspace_create`. Pass `new_name`, \
          `new_parent`, or both. The node AND the destination folder must both be inside your own \
@@ -471,7 +472,7 @@ impl Tool for WorkspaceRenameTool {
             "properties": {
                 "path": {
                     "type": "string",
-                    "description": "The node's path as shown by workspace_list, e.g. \"Agents/ceo/Draft.md\". Must be inside your own folder."
+                    "description": "The node's path as shown by workspace_list, e.g. \"agents/ceo/Draft.md\". Must be inside your own folder."
                 },
                 "id": {
                     "type": "string",
@@ -479,11 +480,11 @@ impl Tool for WorkspaceRenameTool {
                 },
                 "new_name": {
                     "type": "string",
-                    "description": "The node's new name, one path segment only — no `/`. Include the file extension on a note. Omit to keep the current name."
+                    "description": "The node's new name, one path segment only — no `/`. Include the file extension on a note. Normalized to the workspace convention (lowercase, dashed), so `Q3 Report.md` lands as `q3-report.md`. Omit to keep the current name."
                 },
                 "new_parent": {
                     "type": "string",
-                    "description": "The path of an EXISTING folder to move the node into, e.g. \"Agents/ceo/archive\". Must be your own folder or a folder inside it. Omit to leave the node where it is."
+                    "description": "The path of an EXISTING folder to move the node into, e.g. \"agents/ceo/archive\". Must be your own folder or a folder inside it. Omit to leave the node where it is."
                 }
             },
             "additionalProperties": false
@@ -527,6 +528,13 @@ impl Tool for WorkspaceRenameTool {
                 shown = echo_path(name),
             )));
         }
+
+        // The host owns the name (the same rule `workspace_create` applies to
+        // the name it mints): a rename lands lowercase and dashed, so renaming
+        // cannot walk a node back out of the convention the tree is kept in.
+        // The reply below echoes the path it actually landed at.
+        let new_name = new_name.map(kebab_name);
+        let new_name = new_name.as_deref();
 
         let (index, entry) = match resolve_in_index(&self.workspace, path, id).await {
             Ok(pair) => pair,
@@ -657,7 +665,7 @@ impl Tool for WorkspaceRenameTool {
         let final_name = new_name.unwrap_or(entry.node.name.as_str());
         let target_path = format!("{parent_path}/{final_name}");
 
-        if let Some(occupants) = index.by_path.get(&target_path) {
+        if let Some(occupants) = index.lookup(&target_path) {
             if occupants.len() == 1 && occupants[0].node.id == entry.node.id {
                 return Ok(ToolResult::error(format!(
                     "Refused: `{shown}` is already exactly where you asked to put it, so nothing \

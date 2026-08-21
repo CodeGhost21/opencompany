@@ -496,8 +496,8 @@ fn manifest(policy_mode: &str) -> CompanyManifest {
 ///
 /// Boot lays down the reserved workspace roots, and since #327 the workspace
 /// store announces its own writes — one `WorkspaceChanged` per root, plus one
-/// per explanatory README the scaffold provisions (`secrets/README.md` and
-/// `Artifacts/README.md`), is journalled before any operator message.
+/// per explanatory note the scaffold provisions (`secrets/readme.md` and
+/// `artifacts/readme.md`), is journalled before any operator message.
 const BOOT_JOURNAL_EVENTS: u64 = crate::company::workspace_scaffold::SYSTEM_ROOTS.len() as u64 + 2;
 
 /// The deterministic first-cycle id a real runtime for `Acme` produces: the

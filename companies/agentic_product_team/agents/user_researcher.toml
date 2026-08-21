@@ -8,9 +8,9 @@ ledgers = [
 ]
 
 context = [
-    "BRIEF.md",
-    "CLAIMS.md",
-    { path = "Market/User signals.md", access = "write" },
+    "brief.md",
+    "claims.md",
+    { path = "market/user-signals.md", access = "write" },
 ]
 
 prompt_files = ["prompts/user_researcher.md"]

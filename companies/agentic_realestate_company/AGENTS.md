@@ -2,7 +2,7 @@
 
 > A property company of agents that sources deals, analyses neighbourhoods, underwrites, coordinates rehab and manages tenants — with a human approving purchases.
 
-This file is routed into every teammate's system prompt alongside `METHOD.md`
+This file is routed into every teammate's system prompt alongside `method.md`
 (`context_routing::UNIVERSAL_DOCUMENTS`), so it is the one place a convention
 reaches the whole roster without being repeated in every agent's `context`.
 
@@ -24,7 +24,7 @@ ledgers below exist for exactly those two.
 | `tenant_manager` | Tenant Manager | — | Manage tenants and tenancies. |
 
 `property_scout` is the orchestrator: it holds the routing picture
-(`BRIEF.md`, `CLAIMS.md`, `THREADS.md`) and unrestricted ledger access.
+(`brief.md`, `claims.md`, `threads.md`) and unrestricted ledger access.
 
 Humans keep **purchase approvals**; everything up to the offer is the roster's
 to run.
@@ -90,16 +90,16 @@ Plus the baseline's `web-research`, `weekly-report` and `meeting-brief`.
 
 ## Workspace layout
 
-- `Standards/`, `Playbooks/`, `Deals/` — shared, operator-seeded notes.
-- `Agents/<your agent id>/` — your own folder, the default home for anything you
+- `standards/`, `playbooks/`, `deals/` — shared, operator-seeded notes.
+- `agents/<your agent id>/` — your own folder, the default home for anything you
   produce.
 - `derived/` — rendered ledger views. Never hand-write anything here.
 
 ## Write scope
 
 Every specialist but `property_scout` declares an explicit `context` confining
-`workspace_write`/`workspace_create` to `Deals/Maple St duplex.md` — this
-company's shared active-work document — plus its own `Agents/<id>/` home.
+`workspace_write`/`workspace_create` to `deals/maple-st-duplex.md` — this
+company's shared active-work document — plus its own `agents/<id>/` home.
 
 ## The bar
 

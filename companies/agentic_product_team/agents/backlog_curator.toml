@@ -9,10 +9,10 @@ ledgers = [
 ]
 
 context = [
-    "BRIEF.md",
-    "CLAIMS.md",
-    "Standards/Definition of ready.md",
-    { path = "Product/Backlog.md", access = "write" },
+    "brief.md",
+    "claims.md",
+    "standards/definition-of-ready.md",
+    { path = "product/backlog.md", access = "write" },
 ]
 
 prompt_files = ["prompts/backlog_curator.md"]

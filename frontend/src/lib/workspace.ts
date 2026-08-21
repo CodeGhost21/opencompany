@@ -56,10 +56,38 @@ export function titleOf(node: FsNode): string {
   return node.name.replace(/\.(md|markdown|txt)$/i, "");
 }
 
-/** Resolve an Obsidian-style `[[wiki link]]` target to a file, by title. */
+/**
+ * A title reduced to the workspace naming rule — lowercase, dashed.
+ *
+ * Kept in step with `kebab_name` in `src/company/workspace_names.rs`, which is
+ * what every name the runtime mints now goes through. Only used for *matching*:
+ * nothing is displayed through this.
+ */
+function linkKey(title: string): string {
+  return title
+    .toLowerCase()
+    .replace(/[^a-z0-9.]+/g, "-")
+    .replace(/-*\.-*/g, ".")
+    .replace(/^[-.]+|[-.]+$/g, "");
+}
+
+/**
+ * Resolve an Obsidian-style `[[wiki link]]` target to a file, by title.
+ *
+ * Matched on the normalized title rather than the literal one, so a link
+ * written the way a person says it — `[[Close checklist]]` — still resolves to
+ * the note the runtime stored it as, `close-checklist.md`. Without this the
+ * lowercase-dashed rule would have silently unresolved every existing wiki link
+ * in every seeded company. The exact-title match is tried first so a tree that
+ * has both spellings resolves each to itself.
+ */
 export function fileByTitle(nodes: FsNode[], target: string): FsNode | undefined {
   const want = target.trim().toLowerCase();
-  return nodes.find((x) => x.kind === "file" && titleOf(x).toLowerCase() === want);
+  const exact = nodes.find((x) => x.kind === "file" && titleOf(x).toLowerCase() === want);
+  if (exact) return exact;
+  const key = linkKey(target);
+  if (!key) return undefined;
+  return nodes.find((x) => x.kind === "file" && linkKey(titleOf(x)) === key);
 }
 
 /**
@@ -372,10 +400,10 @@ export function pathOf(nodes: FsNode[], id: string | null): FsNode[] {
  * than what is shown instead of reading a shortened path as the whole truth.
  */
 /**
- * Whether `folder` is the workspace's `Agents/` root — the one folder whose
+ * Whether `folder` is the workspace's `agents/` root (case-insensitive) — the one folder whose
  * direct children are named by roster id rather than anything an operator
  * chose (issue #973). Root-scoped (`parentId === null`) so a note or folder an
- * operator names "Agents" somewhere else in the tree is never mistaken for it.
+ * operator names "agents" somewhere else in the tree is never mistaken for it.
  *
  * Lives here rather than in the view because the tree is no longer the only
  * surface that has to resolve those ids: the Move dialog lists the same folders
@@ -384,37 +412,43 @@ export function pathOf(nodes: FsNode[], id: string | null): FsNode[] {
 export function isAgentsFolder(folder: FsNode | undefined): boolean {
   return (
     folder?.kind === "folder" &&
-    folder.name === "Agents" &&
+    folder.name.toLowerCase() === "agents" &&
     folder.parentId === null
   );
 }
 
 /**
  * The roots whose direct child folders are named by roster id, not by anything
- * a person chose. Mirrors the host: `ensure_agent_folder` mints
- * `Agents/<agent-id>/` and `Artifacts/<agent-id>/` from the same id.
+ * a person chose. Mirrors the host: `ensure_agent_folder` and
+ * `ensure_artifact_folder` mint `agents/<agent-id>/` and
+ * `artifacts/<agent-id>/` from the same id.
+ *
+ * Lowercase, and compared lowercased below, because a company that booted
+ * before the lowercase-dashed rule still carries `Agents/` and `Artifacts/` —
+ * the host adopts those spellings rather than renaming them, so the console has
+ * to read both.
  */
-const ROSTER_ROOTS = ["Agents", "Artifacts"] as const;
+const ROSTER_ROOTS = ["agents", "artifacts"] as const;
 
 /**
  * Whether `folder` is a root whose children carry roster ids for names.
  *
- * {@link isAgentsFolder} named only `Agents/`, which was the whole story until
- * `Artifacts/` shipped: it files every published deliverable under
- * `Artifacts/<agent-id>/<task-id>/`, so its direct children are roster ids
- * exactly as `Agents/`'s are. A resolver scoped to one root printed raw ULIDs
+ * {@link isAgentsFolder} named only `agents/`, which was the whole story until
+ * `artifacts/` shipped: it files every published deliverable under
+ * `artifacts/<agent-id>/<task-id>/`, so its direct children are roster ids
+ * exactly as `agents/`'s are. A resolver scoped to one root printed raw ULIDs
  * on the surface an operator opens to see what the company produced — issue
  * #973's bug again, one root over.
  *
  * Root-scoped (`parentId === null`) for the same reason `isAgentsFolder` is: a
- * folder somebody named "Artifacts" inside their own subtree is theirs, and its
+ * folder somebody named "artifacts" inside their own subtree is theirs, and its
  * children must keep the names they were given.
  */
 export function isRosterRoot(folder: FsNode | undefined): boolean {
   return (
     folder?.kind === "folder" &&
     folder.parentId === null &&
-    (ROSTER_ROOTS as readonly string[]).includes(folder.name)
+    (ROSTER_ROOTS as readonly string[]).includes(folder.name.toLowerCase())
   );
 }
 
@@ -482,7 +516,7 @@ export const SYSTEM_ROOTS = ["agents", "artifacts", "secrets"] as const;
 /** The note the host provisions inside `secrets/` on first boot. */
 const SECRETS_README = "readme.md";
 
-/** The note the host provisions inside Artifacts/ on first boot. */
+/** The note the host provisions inside `artifacts/` on first boot. */
 const ARTIFACTS_README = "readme.md";
 
 /**
@@ -545,7 +579,7 @@ export type Crumb = FsNode | null;
  * the middle collapses. That split is the useful one: the root says which part
  * of the company this belongs to, and the last two say what it sits next to.
  * Truncating the string instead — which is what `truncate` on a single span did
- * — ellipsises the *tail*, so every note under `Standards/Engineering/…` renders
+ * — ellipsises the *tail*, so every note under `standards/Engineering/…` renders
  * the identical prefix and the discriminating end is exactly what is thrown away.
  */
 export function breadcrumbOf(nodes: FsNode[], id: string | null, max = 3): Crumb[] {

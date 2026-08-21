@@ -2,7 +2,7 @@ role = "Research Lead"
 description = "Break a question into lines of inquiry, delegate them, and combine the results."
 tier = "orchestrator"
 # Sees everything that decides what to do next, including the assertion board.
-context = ["GOAL.md", "BRIEF.md", "CLAIMS.md", "THREADS.md", "DEMANDS.md", "BOARD.md", "INDEX.md"]
+context = ["GOAL.md", "brief.md", "claims.md", "threads.md", "DEMANDS.md", "board.md", "INDEX.md"]
 
 # The role's working rules, checked in beside this file and read at manifest
 # load. The `.toml` carries the wiring; `prompts/` carries how the role works.

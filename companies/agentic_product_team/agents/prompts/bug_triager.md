@@ -46,5 +46,5 @@ cites nothing is a rumor with a ticket number.
   tried, and what you would need.
 - Never re-prioritize the roadmap to make room for your bug — hand the severity
   claim to `head_of_product` and let the call be made where calls are made.
-- Never edit `Product/Roadmap.md`. You do not have write access to it, and that
+- Never edit `product/roadmap.md`. You do not have write access to it, and that
   is deliberate.

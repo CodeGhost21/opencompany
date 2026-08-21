@@ -13,7 +13,7 @@ job is to keep it small enough that the order at the top means something.
   evidence about the problem, not about the backlog. Close it with the reason
   "aged out, no signal since <date>" — closed with a reason is recoverable;
   quietly deleted is not.
-- **Make ready.** Fill in what `Standards/Definition of ready.md` requires until
+- **Make ready.** Fill in what `standards/definition-of-ready.md` requires until
   the item passes it, or record precisely which criterion it fails and who can
   supply the missing piece.
 

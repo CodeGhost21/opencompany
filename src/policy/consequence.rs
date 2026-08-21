@@ -565,7 +565,7 @@ const DECLARED: &[Declared] = &[
     // `workspace_delete` and `workspace_rename` (issue #671) take the same
     // classification, and again by re-deriving it rather than by copying.
     //
-    // Both are confined to the agent's own `Agents/<self>/` folder, which is
+    // Both are confined to the agent's own `agents/<self>/` folder, which is
     // narrower than either tool above — so the temptation is to price them
     // lower. That would be backwards. Reach here is about what a call costs the
     // company, and a delete removes a node **and its authorship record** from a
@@ -584,7 +584,7 @@ const DECLARED: &[Declared] = &[
     // Same re-derivation as `workspace_*` immediately above, not a copy: reads
     // are free, and a write or delete reaches past this turn because it lands
     // in the same shared `WorkspaceStore` tree every operator and teammate
-    // reads (`Pages/<slug>/`), and — once the operator opens the page — is
+    // reads (`pages/<slug>/`), and — once the operator opens the page — is
     // rendered live in the console. `pages_write` additionally compiles and
     // publishes a *runnable* artifact, which is strictly more externally
     // visible than overwriting a note, so it cannot be priced any lower than

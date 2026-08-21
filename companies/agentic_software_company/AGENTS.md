@@ -2,7 +2,7 @@
 
 > A software company of agents that designs, builds, ships, and supports an entire SaaS product — with a human owning product direction.
 
-This file is routed into every teammate's system prompt alongside `METHOD.md`
+This file is routed into every teammate's system prompt alongside `method.md`
 (`context_routing::UNIVERSAL_DOCUMENTS`), so it is the one place a convention
 reaches the whole roster without being repeated in every agent's `context`.
 
@@ -30,7 +30,7 @@ this company can use it.
 | `customer_support` | Customer Support | Go-to-Market | Resolve customer issues and feed insight back. |
 
 `product_manager` is the orchestrator: it holds the routing picture
-(`BRIEF.md`, `CLAIMS.md`, `THREADS.md`) and unrestricted ledger access, so it
+(`brief.md`, `claims.md`, `threads.md`) and unrestricted ledger access, so it
 is the one that sets and revises goals and decisions rather than a specialist
 re-deciding them mid-task.
 
@@ -121,10 +121,10 @@ Plus the baseline's `web-research`, `weekly-report` and `meeting-brief`.
 
 ## Workspace layout
 
-- `Standards/`, `Product/`, `Playbooks/` — shared, operator-seeded notes. Read
+- `standards/`, `product/`, `playbooks/` — shared, operator-seeded notes. Read
   them before proposing work that touches an area they cover; edit them on
   purpose, not as a side effect of an unrelated task.
-- `Agents/<your agent id>/` — your own folder, the default home for anything you
+- `agents/<your agent id>/` — your own folder, the default home for anything you
   produce. Always writable, whatever your `context` write scope says.
 - `derived/` — rendered ledger views. Never hand-write anything here; it is
   regenerated on every ledger write, so an edit that lands is an edit that is
@@ -133,9 +133,9 @@ Plus the baseline's `web-research`, `weekly-report` and `meeting-brief`.
 ## Write scope
 
 Every specialist but `product_manager` declares an explicit `context` confining
-`workspace_write`/`workspace_create` to `Product/Billing v2.md` — the shared
-active-work document — plus its own `Agents/<id>/` home, which stays writable
-regardless. `Standards/` and `Playbooks/` are left out of that grant:
+`workspace_write`/`workspace_create` to `product/billing-v2.md` — the shared
+active-work document — plus its own `agents/<id>/` home, which stays writable
+regardless. `standards/` and `playbooks/` are left out of that grant:
 governance documents, read by everyone and changed by the operator or the
 unconfined orchestrator.
 

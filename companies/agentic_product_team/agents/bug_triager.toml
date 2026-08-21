@@ -15,14 +15,14 @@ ledgers = [
 ]
 
 # Write scope (docs/spec/runtime/agents.md): the triage policy and the bug log,
-# plus the always-writable `Agents/<id>/` home. `Product/Roadmap.md` is readable
+# plus the always-writable `agents/<id>/` home. `product/roadmap.md` is readable
 # and not writable — a triager arguing severity must not be able to re-sequence
 # the roadmap to win the argument.
 context = [
-    "BRIEF.md",
-    "CLAIMS.md",
-    "Standards/Bug triage policy.md",
-    { path = "Product/Bug log.md", access = "write" },
+    "brief.md",
+    "claims.md",
+    "standards/bug-triage-policy.md",
+    { path = "product/bug-log.md", access = "write" },
 ]
 
 prompt_files = ["prompts/bug_triager.md"]

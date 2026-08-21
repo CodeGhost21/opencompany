@@ -8,10 +8,10 @@ ledgers = [
 ]
 
 context = [
-    "BRIEF.md",
-    "CLAIMS.md",
-    "Standards/Definition of ready.md",
-    { path = "Product/Roadmap.md", access = "write" },
+    "brief.md",
+    "claims.md",
+    "standards/definition-of-ready.md",
+    { path = "product/roadmap.md", access = "write" },
 ]
 
 prompt_files = ["prompts/roadmap_planner.md"]

@@ -2,7 +2,7 @@
 
 > A research lab of agents that investigates a question with primary sources, computes what it can, argues with its own conclusions, and reports only what it can defend — with a human setting the question and accepting the findings.
 
-This file is routed into every teammate's system prompt alongside `METHOD.md`
+This file is routed into every teammate's system prompt alongside `method.md`
 (`context_routing::UNIVERSAL_DOCUMENTS`), so it is the one place a convention
 reaches the whole roster without being repeated in every agent's `context`.
 
@@ -28,8 +28,8 @@ or reject them on something other than tone.
 | `inventor` | Inventor | Propose a different angle when the current line stalls. |
 | `curator` | Curator | Owns the brief: one current statement of what the lab knows. |
 
-`orchestrator` (Research Lead) holds the routing picture (`BRIEF.md`,
-`CLAIMS.md`, `THREADS.md`) and unrestricted ledger access, so it sets and
+`orchestrator` (Research Lead) holds the routing picture (`brief.md`,
+`claims.md`, `threads.md`) and unrestricted ledger access, so it sets and
 revises goals and decisions rather than a specialist re-deciding them mid-task.
 
 ## Where the role rules live
@@ -110,7 +110,7 @@ different shape.
 ## Workspace layout
 
 - `Standards/`, `Playbooks/`, `Findings/` — shared, operator-seeded notes.
-- `Agents/<your agent id>/` — your own folder, the default home for anything you
+- `agents/<your agent id>/` — your own folder, the default home for anything you
   produce.
 - `derived/` — rendered ledger views. Never hand-write anything here.
 

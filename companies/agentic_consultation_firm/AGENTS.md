@@ -2,7 +2,7 @@
 
 > A consulting firm of agents that researches, interviews, models, and turns findings into strategy and an implementation plan — with a human running the executive workshops.
 
-This file is routed into every teammate's system prompt alongside `METHOD.md`
+This file is routed into every teammate's system prompt alongside `method.md`
 (`context_routing::UNIVERSAL_DOCUMENTS`), so it is the one place a convention
 reaches the whole roster without being repeated in every agent's `context`.
 
@@ -25,8 +25,8 @@ be true for it to be right.
 | `implementation_planner` | Implementation Planner | Turn strategy into an execution roadmap. |
 | `deck_builder` | Deck Builder | Produce client-ready presentations. |
 
-`researcher` is the orchestrator: it holds the routing picture (`BRIEF.md`,
-`CLAIMS.md`, `THREADS.md`) and unrestricted ledger access, so it sets and
+`researcher` is the orchestrator: it holds the routing picture (`brief.md`,
+`claims.md`, `threads.md`) and unrestricted ledger access, so it sets and
 revises goals and decisions rather than a specialist re-deciding them mid-task.
 
 Humans keep **executive workshops** — the room where the advice is argued and
@@ -97,16 +97,16 @@ Plus the baseline's `web-research`, `weekly-report` and `meeting-brief`.
 
 ## Workspace layout
 
-- `Standards/`, `Playbooks/`, `Engagements/` — shared, operator-seeded notes.
-- `Agents/<your agent id>/` — your own folder, the default home for anything you
+- `standards/`, `playbooks/`, `engagements/` — shared, operator-seeded notes.
+- `agents/<your agent id>/` — your own folder, the default home for anything you
   produce.
 - `derived/` — rendered ledger views. Never hand-write anything here.
 
 ## Write scope
 
 Every specialist but `researcher` declares an explicit `context` confining
-`workspace_write`/`workspace_create` to `Engagements/Retail growth strategy.md`
-— this firm's shared active-work document — plus its own `Agents/<id>/` home.
+`workspace_write`/`workspace_create` to `engagements/retail-growth-strategy.md`
+— this firm's shared active-work document — plus its own `agents/<id>/` home.
 
 ## The bar
 

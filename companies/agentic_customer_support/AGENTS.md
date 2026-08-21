@@ -2,7 +2,7 @@
 
 > A support organization of agents that answers tickets, files bugs, handles refunds, keeps the docs current, and escalates what it cannot fix — with a human owning escalation and policy.
 
-This file is routed into every teammate's system prompt alongside `METHOD.md`
+This file is routed into every teammate's system prompt alongside `method.md`
 (`context_routing::UNIVERSAL_DOCUMENTS`), so it is the one place a convention
 reaches the whole roster without being repeated in every agent's `context`.
 
@@ -23,8 +23,8 @@ broken as it found it, and every agent re-derives the same answer.
 | `bug_reporter` | Bug Reporter | File actionable bug reports. |
 | `docs_writer` | Docs Writer | Write and maintain help docs. |
 
-`support_agent` is the orchestrator: it holds the routing picture (`BRIEF.md`,
-`CLAIMS.md`, `THREADS.md`) and unrestricted ledger access.
+`support_agent` is the orchestrator: it holds the routing picture (`brief.md`,
+`claims.md`, `threads.md`) and unrestricted ledger access.
 
 Humans keep **escalation and policy**; everything else here is the roster's to
 run.
@@ -91,16 +91,16 @@ Plus the baseline's `web-research`, `weekly-report` and `meeting-brief`.
 
 ## Workspace layout
 
-- `Standards/`, `Playbooks/`, `Tickets/` — shared, operator-seeded notes.
-- `Agents/<your agent id>/` — your own folder, the default home for anything you
+- `standards/`, `playbooks/`, `tickets/` — shared, operator-seeded notes.
+- `agents/<your agent id>/` — your own folder, the default home for anything you
   produce.
 - `derived/` — rendered ledger views. Never hand-write anything here.
 
 ## Write scope
 
 Every specialist but `support_agent` declares an explicit `context` confining
-`workspace_write`/`workspace_create` to `Tickets/Login outage.md` — this
-company's shared active-work document — plus its own `Agents/<id>/` home.
+`workspace_write`/`workspace_create` to `tickets/login-outage.md` — this
+company's shared active-work document — plus its own `agents/<id>/` home.
 
 ## The bar
 

@@ -2,7 +2,7 @@
 
 > An accelerator of agents that scouts and screens startups, matches mentors, designs curriculum, coaches progress, supports the portfolio, works investors and produces demo day — with a human making the investment and demo-day decisions.
 
-This file is routed into every teammate's system prompt alongside `METHOD.md`
+This file is routed into every teammate's system prompt alongside `method.md`
 (`context_routing::UNIVERSAL_DOCUMENTS`), so it is the one place a convention
 reaches the whole roster without being repeated in every agent's `context`.
 
@@ -27,8 +27,8 @@ below exist to make the difference visible while the cycle is running.
 | `portfolio_support` | Portfolio Support | — | Support companies after the programme. |
 | `demo_day_producer` | Demo Day Producer | — | Produce demo day. |
 
-`startup_scout` is the orchestrator: it holds the routing picture (`BRIEF.md`,
-`CLAIMS.md`, `THREADS.md`) and unrestricted ledger access.
+`startup_scout` is the orchestrator: it holds the routing picture (`brief.md`,
+`claims.md`, `threads.md`) and unrestricted ledger access.
 
 Humans keep **investment and demo-day decisions**; everything else here is the
 programme's to run.
@@ -97,16 +97,16 @@ Plus the baseline's `web-research`, `weekly-report` and `meeting-brief`.
 
 ## Workspace layout
 
-- `Standards/`, `Playbooks/`, `Cohorts/` — shared, operator-seeded notes.
-- `Agents/<your agent id>/` — your own folder, the default home for anything you
+- `standards/`, `playbooks/`, `cohorts/` — shared, operator-seeded notes.
+- `agents/<your agent id>/` — your own folder, the default home for anything you
   produce.
 - `derived/` — rendered ledger views. Never hand-write anything here.
 
 ## Write scope
 
 Every specialist but `startup_scout` declares an explicit `context` confining
-`workspace_write`/`workspace_create` to `Cohorts/Spring cohort.md` — this
-programme's shared active-work document — plus its own `Agents/<id>/` home.
+`workspace_write`/`workspace_create` to `cohorts/spring-cohort.md` — this
+programme's shared active-work document — plus its own `agents/<id>/` home.
 
 ## The bar
 

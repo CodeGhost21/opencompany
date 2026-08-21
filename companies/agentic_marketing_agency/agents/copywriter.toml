@@ -25,7 +25,7 @@ prompt_files = ["prompts/house-style.md", "prompts/copywriter.md"]
 # because they are the most volatile thing in it. Unlike `prompt_files` these are
 # operator-owned and may not exist yet, so a missing one is skipped rather than
 # refused. Editing either note reaches the next turn without a restart.
-context = ["Brand/Brand voice.md", "Playbooks/Campaign checklist.md"]
+context = ["brand/brand-voice.md", "playbooks/campaign-checklist.md"]
 
 # Visibility/read-record scope (docs/spec/runtime/ledgers.md): this specialist
 # manages its own work on the board and sees, but does not redefine, company

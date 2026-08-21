@@ -18,7 +18,7 @@ reaches the whole roster without being repeated in every agent's `context`.
 | `user_researcher` | User Researcher | Turn support threads and usage into evidence. |
 
 `head_of_product` is this company's orchestrator: it holds the routing picture
-(`BRIEF.md`, `CLAIMS.md`, `THREADS.md`) and unrestricted ledger access, so it
+(`brief.md`, `claims.md`, `threads.md`) and unrestricted ledger access, so it
 sets and revises direction rather than a specialist re-deciding it mid-task. It
 is also the only teammate with `can_declare_ledgers`.
 
@@ -35,14 +35,14 @@ edit the `.toml` to change what it may touch.
 
 ## Workspace layout
 
-- `Standards/` — the bar the team holds itself to. Read before proposing work
+- `standards/` — the bar the team holds itself to. Read before proposing work
   that touches an area they cover; the operator and `head_of_product` change
   them, nobody else.
-- `Product/`, `Market/` — the active documents. Each has exactly one owner with
+- `product/`, `market/` — the active documents. Each has exactly one owner with
   a `write` grant on it; everyone else reads.
-- `Agents/<your agent id>/` — your own folder, the default home for anything you
+- `agents/<your agent id>/` — your own folder, the default home for anything you
   produce. Always writable, whatever your `context` write scope says.
-- `Artifacts/` — deliverables that were explicitly published, filed by the agent
+- `artifacts/` — deliverables that were explicitly published, filed by the agent
   that published them. A projection of the artifact chain, not a scratch folder:
   publish with `publish_artifact` rather than writing here by hand.
 - `derived/` — rendered ledger views. Never hand-write anything here; it is
@@ -72,12 +72,12 @@ Ownership is expressed as write scope, one document each:
 
 | Document | Writer |
 | --- | --- |
-| `Product/Bug log.md` | `bug_triager` |
-| `Product/Backlog.md` | `backlog_curator` |
-| `Product/Roadmap.md` | `roadmap_planner` |
-| `Market/Competitive landscape.md` | `competitor_analyst` |
-| `Market/User signals.md` | `user_researcher` |
+| `product/bug-log.md` | `bug_triager` |
+| `product/backlog.md` | `backlog_curator` |
+| `product/roadmap.md` | `roadmap_planner` |
+| `market/competitive-landscape.md` | `competitor_analyst` |
+| `market/user-signals.md` | `user_researcher` |
 
-`Standards/` is left out of every grant on purpose: a triager arguing severity
+`standards/` is left out of every grant on purpose: a triager arguing severity
 must not be able to edit the policy that decides the argument. `head_of_product`
 is unconfined.
