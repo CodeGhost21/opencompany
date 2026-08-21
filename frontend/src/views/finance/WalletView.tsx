@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Loader2, RefreshCw } from "lucide-react";
 
 import { getPaypal, type PaypalStatus } from "@/api/billing";
@@ -64,7 +64,12 @@ export function WalletView({ client, company }: Props) {
   const [status, setStatus] = useState<PaypalStatus | null>(null);
   const [statusError, setStatusError] = useState<string | null>(null);
   const [expanded, setExpanded] = useState(false);
-  const [expandedSeeded, setExpandedSeeded] = useState(false);
+  // A latch, not render state: set once from the first status that arrives.
+  // Re-deriving the panel's openness on every status would slam it shut the
+  // moment a credential was saved, which is exactly when the operator is still
+  // working in it — and a `useState` here would re-render for a value nothing
+  // renders.
+  const expandedSeeded = useRef(false);
 
   const [balances, setBalances] = useState<Balance[] | null>(null);
   const [transactions, setTransactions] = useState<Transaction[] | null>(null);
@@ -86,10 +91,10 @@ export function WalletView({ client, company }: Props) {
       const next = await getPaypal(client, company);
       setStatus(next);
       setStatusError(null);
-      setExpandedSeeded((seeded) => {
-        if (!seeded) setExpanded(startsExpanded(paypalHealth(next)));
-        return true;
-      });
+      if (!expandedSeeded.current) {
+        expandedSeeded.current = true;
+        setExpanded(startsExpanded(paypalHealth(next)));
+      }
     } catch (err) {
       setStatusError(err instanceof Error ? err.message : String(err));
     }

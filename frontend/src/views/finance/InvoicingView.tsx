@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { ExternalLink, Loader2, RefreshCw } from "lucide-react";
 
 import { getBilling, type BillingStatus } from "@/api/billing";
@@ -47,10 +47,12 @@ export function InvoicingView({ client, company }: Props) {
   const [status, setStatus] = useState<BillingStatus | null>(null);
   const [statusError, setStatusError] = useState<string | null>(null);
   const [expanded, setExpanded] = useState(false);
-  // Set once, from the first status that arrives. Re-deriving it on every
-  // status would slam the panel shut the moment a credential was saved, which
-  // is exactly when the operator is still working in it.
-  const [expandedSeeded, setExpandedSeeded] = useState(false);
+  // A latch, not render state: set once from the first status that arrives.
+  // Re-deriving the panel's openness on every status would slam it shut the
+  // moment a credential was saved, which is exactly when the operator is still
+  // working in it — and a `useState` here would re-render for a value nothing
+  // renders.
+  const expandedSeeded = useRef(false);
 
   const [invoices, setInvoices] = useState<Invoice[] | null>(null);
   const [listError, setListError] = useState<{ code: string; message: string } | null>(null);
@@ -64,10 +66,10 @@ export function InvoicingView({ client, company }: Props) {
       const next = await getBilling(client, company);
       setStatus(next);
       setStatusError(null);
-      setExpandedSeeded((seeded) => {
-        if (!seeded) setExpanded(startsExpanded(chargebeeHealth(next)));
-        return true;
-      });
+      if (!expandedSeeded.current) {
+        expandedSeeded.current = true;
+        setExpanded(startsExpanded(chargebeeHealth(next)));
+      }
     } catch (err) {
       setStatusError(err instanceof Error ? err.message : String(err));
     }
