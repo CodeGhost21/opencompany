@@ -112,11 +112,14 @@ test("a company agent opens from its card and shows what it is", async ({ page }
   // This agent sits on no desk, and says so rather than rendering nothing.
   await expect(page.getByTestId("agent-desks-empty")).toBeVisible();
 
-  // A blueprint teammate is read-only here, and the screen says why instead of
-  // offering an edit that would 409. Since #1141 the affordance is *present and
-  // disabled* rather than absent: an operator hunting for the edit needs to
-  // learn why there isn't one, not to conclude the console forgot to build it.
-  await expect(page.getByTestId("agent-edit")).toBeDisabled();
+  // A blueprint teammate's instructions are editable here since #1530 — the
+  // host accepts an `instructions` override for a manifest agent and still
+  // refuses name/role/tools with a 409, so the affordance is enabled and the
+  // note below says which parts remain fixed in company.toml. Before #1530 the
+  // whole teammate was read-only and this button was present-but-disabled
+  // (#1141), so that an operator hunting for the edit learned why there wasn't
+  // one rather than concluding the console forgot to build it.
+  await expect(page.getByTestId("agent-edit")).toBeEnabled();
   await expect(page.getByTestId("agent-readonly-note")).toContainText("company.toml");
 
   // The breadcrumb returns to the Company page (issue #1141, replacing "Back to
