@@ -27,6 +27,15 @@ pub(crate) fn link_target(name: &str) -> &str {
     name.strip_suffix(".md").unwrap_or(name)
 }
 
+/// The form two link targets are compared in: the workspace naming rule,
+/// applied to both sides.
+///
+/// One function so a link and the note it points at are always reduced the same
+/// way — the failure this replaces was exactly two sides reducing differently.
+fn link_key(target: &str) -> String {
+    crate::company::workspace_names::kebab_name(target)
+}
+
 /// Reads one workspace node with its content and inbound `[[wikilink]]`
 /// backlinks, or `None` when the id names nothing in this company's tree.
 ///
@@ -42,12 +51,19 @@ pub(crate) async fn file_with_backlinks(
     let Some((node, content)) = store.read(company, id).await? else {
         return Ok(None);
     };
-    // Lowercased to match the console, which resolves a wiki link through
-    // `fileByTitle` with both sides lowercased (`frontend/src/lib/workspace.ts`).
-    // Comparing case-sensitively here would let `[[Voice]]` render as a resolved
-    // link to `voice.md` while `voice.md` reported no backlink — the two halves
-    // of one feature disagreeing about the same link.
-    let target = link_target(&node.name).to_ascii_lowercase();
+    // Normalized to match the console, which resolves a wiki link through
+    // `fileByTitle` against the same rule (`frontend/src/lib/workspace.ts`).
+    // Comparing literally here would let `[[Voice]]` render as a resolved link
+    // to `voice.md` while `voice.md` reported no backlink — the two halves of
+    // one feature disagreeing about the same link.
+    //
+    // The rule is the workspace naming rule itself
+    // ([`crate::company::workspace_names`]), not merely a lowercasing: a note is
+    // stored as `close-checklist.md` while people, and the seeded prose,
+    // reasonably write `[[Close checklist]]`. Link text is how a document reads;
+    // the file name is what the tree is kept in, and those two need not be the
+    // same string for the link to resolve.
+    let target = link_key(link_target(&node.name));
 
     // Backlinks: scan every other file node's content for a `[[target]]` link.
     let mut backlinks = Vec::new();
@@ -58,7 +74,7 @@ pub(crate) async fn file_with_backlinks(
         if let Some((other_node, other_content)) = store.read(company, &other.id).await?
             && extract_wikilinks(&other_content)
                 .iter()
-                .any(|link| link.to_ascii_lowercase() == target)
+                .any(|link| link_key(link) == target)
         {
             backlinks.push(other_node);
         }

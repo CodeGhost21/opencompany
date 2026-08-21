@@ -45,10 +45,38 @@ export function titleOf(node: FsNode): string {
   return node.name.replace(/\.(md|markdown|txt)$/i, "");
 }
 
-/** Resolve an Obsidian-style `[[wiki link]]` target to a file, by title. */
+/**
+ * A title reduced to the workspace naming rule — lowercase, dashed.
+ *
+ * Kept in step with `kebab_name` in `src/company/workspace_names.rs`, which is
+ * what every name the runtime mints now goes through. Only used for *matching*:
+ * nothing is displayed through this.
+ */
+function linkKey(title: string): string {
+  return title
+    .toLowerCase()
+    .replace(/[^a-z0-9.]+/g, "-")
+    .replace(/-*\.-*/g, ".")
+    .replace(/^[-.]+|[-.]+$/g, "");
+}
+
+/**
+ * Resolve an Obsidian-style `[[wiki link]]` target to a file, by title.
+ *
+ * Matched on the normalized title rather than the literal one, so a link
+ * written the way a person says it — `[[Close checklist]]` — still resolves to
+ * the note the runtime stored it as, `close-checklist.md`. Without this the
+ * lowercase-dashed rule would have silently unresolved every existing wiki link
+ * in every seeded company. The exact-title match is tried first so a tree that
+ * has both spellings resolves each to itself.
+ */
 export function fileByTitle(nodes: FsNode[], target: string): FsNode | undefined {
   const want = target.trim().toLowerCase();
-  return nodes.find((x) => x.kind === "file" && titleOf(x).toLowerCase() === want);
+  const exact = nodes.find((x) => x.kind === "file" && titleOf(x).toLowerCase() === want);
+  if (exact) return exact;
+  const key = linkKey(target);
+  if (!key) return undefined;
+  return nodes.find((x) => x.kind === "file" && linkKey(titleOf(x)) === key);
 }
 
 /**
