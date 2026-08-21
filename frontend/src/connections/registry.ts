@@ -133,6 +133,21 @@ function patch(id: ConnectionId, change: Partial<Connection>): void {
   if (touched) emit();
 }
 
+/**
+ * True when a probe working against `address` is describing a connection that
+ * has since moved on.
+ *
+ * `reseat` swaps in a new `OpenCompanyClient` (built from a new address) for
+ * the same id, so a probe that captured the previous one would otherwise patch
+ * identity, companies, and status fetched from the *old* address over the new
+ * connection's row. Discarding by address rather than by client identity lets
+ * a label-only `reseat` keep its in-flight probe's writes, which are still
+ * describing the same host.
+ */
+function stale(id: ConnectionId, address: string | undefined): boolean {
+  return clientFor(id)?.baseUrl !== address;
+}
+
 /** Every connection, for rendering. */
 export function useConnections(): Connection[] {
   return useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
@@ -794,6 +809,9 @@ export async function probe(id: ConnectionId): Promise<void> {
   if (!clientFor(id) || probing.has(id)) return;
   probing.add(id);
   patch(id, { status: "connecting", error: undefined, waking: false });
+  // The address this probe is working against, so the finalizer below can tell
+  // whether the connection moved under it.
+  let address: string | undefined = clientFor(id)?.baseUrl;
   try {
     if (!(await ensureTunnel(id))) return;
     const insecure = insecurelyCredentialed(getConnection(id));
@@ -807,12 +825,20 @@ export async function probe(id: ConnectionId): Promise<void> {
       return;
     }
     // Re-read: `ensureTunnel` may have moved this connection to a new address,
-    // which replaces its client.
+    // which replaces its client. The probe works against the client it finds
+    // here; a `reseat` after this point makes its writes stale.
     const client = clientFor(id);
     if (!client) return;
-    await probeUntilAwake(id, client);
+    address = client.baseUrl;
+    await probeUntilAwake(id, client, address);
   } finally {
     probing.delete(id);
+    // The connection moved while this probe was in flight, so its own
+    // `void probe(id)` was suppressed by the in-flight guard and the
+    // replacement client never got a probe. Pick it up now that the stale
+    // work has cleared.
+    const current = clientFor(id);
+    if (current && current.baseUrl !== address) void probe(id);
   }
 }
 
@@ -867,15 +893,20 @@ async function ensureTunnel(id: ConnectionId): Promise<boolean> {
 async function probeUntilAwake(
   id: ConnectionId,
   client: OpenCompanyClient,
+  address: string | undefined,
 ): Promise<void> {
   const startedAt = Date.now();
   for (let attempt = 0; ; attempt += 1) {
-    const failure = await runProbe(id, client);
+    const failure = await runProbe(id, client, address);
     if (!failure) return;
     // Removed or retired while the request was in flight — including by
     // `resetConnections`, which is how a test escapes this loop.
     const connection = getConnection(id);
     if (!connection) return;
+    // Moved to a new address while this probe was in flight: its writes would
+    // describe a different host, so stop here — the `probe` finalizer starts
+    // the replacement client's probe.
+    if (stale(id, address)) return;
     const status = failure.status ?? "down";
     if (!keepWaking(connection.connector, status, Date.now() - startedAt)) {
       patch(id, { ...failure, waking: false });
@@ -884,6 +915,7 @@ async function probeUntilAwake(
     patch(id, { status: "connecting", error: undefined, waking: true });
     await sleep(wakeRetryDelay(attempt));
     if (!getConnection(id)) return;
+    if (stale(id, address)) return;
   }
 }
 
@@ -902,12 +934,21 @@ function sleep(ms: number): Promise<void> {
 async function runProbe(
   id: ConnectionId,
   client: OpenCompanyClient,
+  address: string | undefined,
 ): Promise<Partial<Connection> | null> {
+  // The connection moved while this attempt was in flight: everything below
+  // would describe the old address. Answer `null` (the stop signal) so the
+  // caller ends without writing; the `probe` finalizer starts the replacement
+  // client's probe.
+  if (stale(id, address)) return null;
   const identity = await readIdentity(client);
-  if (identity) patch(id, { identity, label: identity.displayName ?? labelOf(id) });
+  if (identity && !stale(id, address)) {
+    patch(id, { identity, label: identity.displayName ?? labelOf(id) });
+  }
 
   try {
     const companies = await client.listCompanies();
+    if (stale(id, address)) return null;
     patch(id, { status: "live", companies: companies.map((c) => c.id), waking: false });
     return null;
   } catch (listErr) {
@@ -916,6 +957,7 @@ async function runProbe(
     // what lets one client hold a platform host and a prosumer host at once.
     try {
       await client.status(null);
+      if (stale(id, address)) return null;
       patch(id, { status: "live", companies: [], waking: false });
       return null;
     } catch (statusErr) {
