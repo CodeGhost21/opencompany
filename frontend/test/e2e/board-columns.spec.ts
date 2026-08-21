@@ -1,4 +1,4 @@
-import { expect, test, type APIRequestContext, type Page } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 
 import { LIVE_BRAIN } from "./capabilities";
 
@@ -43,26 +43,6 @@ test.beforeEach(async ({ page }) => {
     }
   });
 });
-
-/**
- * Moves every card out of one column, so a claim about that column being empty
- * is a precondition this test set up rather than one it inherited.
- *
- * Needed since issue #1101: an empty column collapses to a rail, and whether a
- * given column is empty at this point in the run depends on what earlier specs
- * left behind — the host's data root survives between runs against a host you
- * brought up yourself.
- */
-async function emptyOut(request: APIRequestContext, column: string) {
-  const listed = await request.get(`${API}/tasks`);
-  expect(listed.ok()).toBeTruthy();
-  const tasks = (await listed.json()) as Array<{ id: string; column: string }>;
-  for (const task of tasks) {
-    if (task.column !== column) continue;
-    const parked = await request.patch(`${API}/tasks/${task.id}`, { data: { column: "done" } });
-    expect(parked.ok()).toBeTruthy();
-  }
-}
 
 async function dismissTour(page: Page) {
   const skip = page.getByRole("button", { name: "Skip for now" });
