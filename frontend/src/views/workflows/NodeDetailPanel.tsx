@@ -2,7 +2,8 @@
 //
 // Extracted verbatim from `WorkflowsView.tsx` (issue #303).
 
-import type { ReactNode } from "react";
+import { useEffect, type ReactNode } from "react";
+import { X } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
@@ -38,6 +39,14 @@ export function NodeDetailPanel({
     node.config !== undefined && node.config !== null &&
     !(typeof node.config === "object" && Object.keys(node.config as object).length === 0);
 
+  useEffect(() => {
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [onClose]);
+
   return (
     <div
       // Issue #1231: the overlay's geometry is asserted, not assumed —
@@ -56,8 +65,14 @@ export function NodeDetailPanel({
             <div className="truncate text-2xs text-muted-foreground">{node.id}</div>
           </div>
         </div>
-        <Button variant="ghost" size="sm" className="-mr-1 h-7 px-2" onClick={onClose}>
-          Close
+        <Button
+          variant="ghost"
+          size="icon"
+          className="-mr-1 size-7"
+          onClick={onClose}
+          aria-label="Close"
+        >
+          <X className="size-4" />
         </Button>
       </div>
 

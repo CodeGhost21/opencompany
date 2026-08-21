@@ -100,6 +100,7 @@ import {
   windowHasRunStart,
 } from "@/views/workflows/graph";
 import { WorkflowMiniMap } from "@/views/workflows/WorkflowMiniMap";
+import { WorkflowZoomReadout } from "@/views/workflows/WorkflowZoomReadout";
 // Issue #1361: opens a long pipeline at a zoom its node titles survive.
 import { FitGraphToPane } from "@/views/workflows/FitGraphToPane";
 // Issue #1231: keeps the inspector from opening on top of the node it describes.
@@ -2916,7 +2917,9 @@ export function WorkflowsView({
                 proOptions={{ hideAttribution: true }}
               >
                 <Background variant={BackgroundVariant.Dots} gap={20} size={1} />
-                <Controls showInteractive={false} />
+                <Controls showInteractive={false}>
+                  <WorkflowZoomReadout />
+                </Controls>
                 {/* Issue #1259: a custom minimap, not React Flow's built-in
                     `<MiniMap>` — see WorkflowMiniMap.tsx for why. */}
                 <WorkflowMiniMap nodes={nodes} className="!hidden sm:!block" />
@@ -3005,8 +3008,7 @@ export function WorkflowsView({
                 will guess wrong in both directions. */}
             <DialogDescription>
               What this run should work on. It is handed to the workflow&rsquo;s first
-              step, and any step bound to <code className="font-mono">=items</code>{" "}
-              reads it. Leave it empty to run the workflow as its schedule does.
+              step. Leave it empty to run the workflow as its schedule does.
             </DialogDescription>
           </DialogHeader>
           <Input
