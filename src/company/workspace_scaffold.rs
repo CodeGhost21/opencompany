@@ -94,16 +94,22 @@ use crate::ports::{generate_id, now_millis};
 /// A literal, because identity here is by path: this is the name the persona
 /// brief tells agents to look for and the name issue #552's published
 /// deliverables land under.
-pub const AGENTS_ROOT: &str = "Agents";
+///
+/// Lowercase, like every other name the runtime mints — see
+/// [`workspace_names`](super::workspace_names). It was `Agents`, and a company
+/// that ran an older build still has that folder: [`find`] matches a root name
+/// case-insensitively so the legacy spelling is *adopted* rather than joined by
+/// a lowercase twin, which would split one agent's home in two.
+pub const AGENTS_ROOT: &str = "agents";
 
 /// The reserved root folder holding one subfolder per desk that has produced
 /// something.
 ///
 /// Not scaffolded at boot — see [`SYSTEM_ROOTS`] and [`ensure_desk_folder`].
-pub const DESKS_ROOT: &str = "Desks";
+pub const DESKS_ROOT: &str = "desks";
 
 /// The reserved root folder holding one subfolder per agent-authored
-/// dashboard page: `Pages/<slug>/`.
+/// dashboard page: `pages/<slug>/`.
 ///
 /// Not scaffolded at boot, for the same reason [`DESKS_ROOT`] is not: nothing
 /// writes here until an agent creates its first page. Named here — rather
@@ -111,14 +117,14 @@ pub const DESKS_ROOT: &str = "Desks";
 /// `openhuman` feature — because [`crate::server::ops::pages`] (always
 /// compiled) needs the identical root name to serve what
 /// `harness::pages_tools::pages_tools` wrote. One literal, two callers.
-pub const PAGES_ROOT: &str = "Pages";
+pub const PAGES_ROOT: &str = "pages";
 
-/// The page manifest node's name inside `Pages/<slug>/`.
+/// The page manifest node's name inside `pages/<slug>/`.
 pub const PAGE_MANIFEST_NAME: &str = "page.toml";
-/// The page source node's name inside `Pages/<slug>/`.
-pub const PAGE_SOURCE_NAME: &str = "Page.tsx";
-/// The compiled page node's name inside `Pages/<slug>/`.
-pub const PAGE_COMPILED_NAME: &str = "Page.compiled.mjs";
+/// The page source node's name inside `pages/<slug>/`.
+pub const PAGE_SOURCE_NAME: &str = "page.tsx";
+/// The compiled page node's name inside `pages/<slug>/`.
+pub const PAGE_COMPILED_NAME: &str = "page.compiled.mjs";
 /// The mime [`crate::server::ops::pages`] serves [`PAGE_COMPILED_NAME`] as.
 pub const PAGE_COMPILED_MIME: &str = "application/javascript";
 
