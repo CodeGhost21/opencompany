@@ -119,6 +119,7 @@ fn router_with_console(state: AppState, console_dir: Option<PathBuf>) -> Router 
         .merge(crate::server::provision::router())
         .merge(crate::server::setup::router())
         .merge(crate::server::feedback::router())
+        .merge(crate::server::feedback_board::router())
         .merge(crate::server::users::router())
         .merge(crate::server::users::admin::router())
         .merge(crate::server::users::devices::router())
