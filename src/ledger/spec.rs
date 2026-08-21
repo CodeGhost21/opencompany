@@ -383,6 +383,21 @@ impl LedgerSpec {
         self.status(status).is_some()
     }
 
+    /// Whether `status` is a status this ledger declares **by name** — not by
+    /// one of the aliases a narrowed vocabulary left behind.
+    ///
+    /// The write side's question. Reads heal (a stored `at_risk` renders as
+    /// `active`); writes do not, so a client still sending a retired word is
+    /// told once, with the surviving set named, rather than being quietly kept
+    /// on a vocabulary that no longer exists. The same asymmetry
+    /// [`LEGACY_COLUMN_BACKLOG`](crate::ports::tasks::LEGACY_COLUMN_BACKLOG)
+    /// already makes for a stored card.
+    pub fn declares_status(&self, status: &str) -> bool {
+        self.statuses
+            .iter()
+            .any(|declared| declared.name.eq_ignore_ascii_case(status.trim()))
+    }
+
     /// The declaration for `status`, if there is one — by name, or by one of
     /// the [`aliases`](StatusSpec::aliases) a narrowed vocabulary left behind.
     pub fn status(&self, status: &str) -> Option<&StatusSpec> {
