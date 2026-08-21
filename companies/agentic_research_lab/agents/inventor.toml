@@ -2,7 +2,7 @@ role = "Inventor"
 description = "Propose a different line of attack when the current one stalls."
 # Must see what has already been tried and closed, or it re-proposes it — the
 # one thing this role exists not to do.
-context = ["GOAL.md", "BRIEF.md", "THREADS.md", "CLAIMS.md", "BOARD.md"]
+context = ["GOAL.md", "brief.md", "threads.md", "claims.md", "board.md"]
 
 # Visibility/read-record scope (docs/spec/runtime/ledgers.md): this specialist
 # manages its own work on the board and sees, but does not redefine, company
@@ -24,3 +24,9 @@ ledgers = [
     { name = "findings", access = "read" },
     { name = "sources", access = "read" },
 ]
+
+# The role's working rules, checked in beside this file and read at manifest
+# load. The `.toml` carries the wiring; `prompts/` carries how the role works.
+# A missing path here is a manifest error rather than a skipped entry — a role
+# whose prompt was written around a briefing it never received fails silently.
+prompt_files = ["prompts/inventor.md"]

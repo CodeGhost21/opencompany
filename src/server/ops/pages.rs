@@ -1,4 +1,4 @@
-//! Serves agent-authored internal dashboard pages (`Pages/<slug>/` in the
+//! Serves agent-authored internal dashboard pages (`pages/<slug>/` in the
 //! company workspace) to the operator console.
 //!
 //! ```text
@@ -25,7 +25,7 @@
 //! of `src/harness/` is); this module is always compiled, because the routes
 //! it serves must 404 rather than fall through to the console SPA shell even
 //! in a build without the harness. So it does not import from
-//! `harness::pages_tools` — it re-derives the same `Pages/<slug>/` layout from
+//! `harness::pages_tools` — it re-derives the same `pages/<slug>/` layout from
 //! the always-compiled constants in
 //! [`crate::company::workspace_scaffold`], the same way `harness::pages_tools`
 //! does.
@@ -131,16 +131,21 @@ fn valid_slug(slug: &str) -> bool {
     chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
 }
 
-/// Resolves every `Pages/<slug>/` bundle from one company-scoped tree read.
+/// Resolves every `pages/<slug>/` bundle from one company-scoped tree read.
 async fn all_pages(
     store: &dyn WorkspaceStore,
     company: &CompanyId,
 ) -> crate::Result<Vec<(String, PageBundle)>> {
     let nodes = store.tree(company).await?;
-    let Some(pages_root) = nodes
-        .iter()
-        .find(|n| n.parent_id.is_none() && n.kind == NodeKind::Folder && n.name == PAGES_ROOT)
-    else {
+    // Case-insensitive, matching `harness::pages_tools`: the root and the
+    // compiled node were `Pages/` and `Page.compiled.mjs` before the workspace's
+    // lowercase-dashed rule, and this route serves exactly what those tools
+    // wrote — including in a company created under the old spelling.
+    let Some(pages_root) = nodes.iter().find(|n| {
+        n.parent_id.is_none()
+            && n.kind == NodeKind::Folder
+            && n.name.eq_ignore_ascii_case(PAGES_ROOT)
+    }) else {
         return Ok(Vec::new());
     };
     let mut out = Vec::new();
@@ -155,9 +160,9 @@ async fn all_pages(
             .iter()
             .filter(|n| n.parent_id.as_deref() == Some(folder.id.as_str()))
         {
-            if child.name == PAGE_MANIFEST_NAME {
+            if child.name.eq_ignore_ascii_case(PAGE_MANIFEST_NAME) {
                 bundle.manifest = Some(child.clone());
-            } else if child.name == PAGE_COMPILED_NAME {
+            } else if child.name.eq_ignore_ascii_case(PAGE_COMPILED_NAME) {
                 bundle.compiled = Some(child.clone());
             }
         }

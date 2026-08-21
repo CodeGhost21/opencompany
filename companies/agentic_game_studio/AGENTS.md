@@ -2,7 +2,7 @@
 
 > A studio of agents that designs worlds and systems, writes the story, builds the assets, implements the gameplay, tests it and markets the launch — with a human owning creative and design direction.
 
-This file is routed into every teammate's system prompt alongside `METHOD.md`
+This file is routed into every teammate's system prompt alongside `method.md`
 (`context_routing::UNIVERSAL_DOCUMENTS`), so it is the one place a convention
 reaches the whole roster without being repeated in every agent's `context`.
 
@@ -25,11 +25,22 @@ are technically present and not yet fun, and a schedule built on that list.
 | `qa_tester` | QA Tester | Release | Find and report bugs. |
 | `marketer` | Marketer | Release | Market and promote the launch. |
 
-`world_builder` is the orchestrator: it holds the routing picture (`BRIEF.md`,
-`CLAIMS.md`, `THREADS.md`) and unrestricted ledger access.
+`world_builder` is the orchestrator: it holds the routing picture (`brief.md`,
+`claims.md`, `threads.md`) and unrestricted ledger access.
 
 Humans keep **creative and design direction**; everything else here is the
 studio's to run.
+
+## Where the role rules live
+
+Each teammate's `.toml` carries wiring only — tier, ledger grants, routed
+context, delegation. The working rules live in `agents/prompts/<id>.md`, named by
+that file's `prompt_files` entry and loaded into the prompt as **Your brief**
+(see `docs/spec/runtime/agents.md`). Edit the brief to change how a role works;
+edit the `.toml` to change what it may touch.
+
+Print what any teammate's prompt assembles into with
+`./scripts/dump-prompt.sh --company companies/<name> --agent <id>`.
 
 ## The desk
 
@@ -85,16 +96,16 @@ Plus the baseline's `web-research`, `weekly-report` and `meeting-brief`.
 
 ## Workspace layout
 
-- `Standards/`, `Playbooks/`, `Games/` — shared, operator-seeded notes.
-- `Agents/<your agent id>/` — your own folder, the default home for anything you
+- `standards/`, `playbooks/`, `games/` — shared, operator-seeded notes.
+- `agents/<your agent id>/` — your own folder, the default home for anything you
   produce.
 - `derived/` — rendered ledger views. Never hand-write anything here.
 
 ## Write scope
 
 Every specialist but `world_builder` declares an explicit `context` confining
-`workspace_write`/`workspace_create` to `Games/Skyward.md` — this studio's
-shared active-work document — plus its own `Agents/<id>/` home.
+`workspace_write`/`workspace_create` to `games/skyward.md` — this studio's
+shared active-work document — plus its own `agents/<id>/` home.
 
 ## The bar
 

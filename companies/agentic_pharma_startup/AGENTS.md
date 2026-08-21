@@ -2,7 +2,7 @@
 
 > A discovery organization of agents that reviews the literature, proposes and screens molecules, simulates, and plans trials — with humans doing the laboratory work.
 
-This file is routed into every teammate's system prompt alongside `METHOD.md`
+This file is routed into every teammate's system prompt alongside `method.md`
 (`context_routing::UNIVERSAL_DOCUMENTS`), so it is the one place a convention
 reaches the whole roster without being repeated in every agent's `context`.
 
@@ -23,10 +23,21 @@ humans who do.
 | `trial_planner` | Trial Planner | Design trial protocols and endpoints. |
 
 `literature_reviewer` is the orchestrator: it holds the routing picture
-(`BRIEF.md`, `CLAIMS.md`, `THREADS.md`) and unrestricted ledger access.
+(`brief.md`, `claims.md`, `threads.md`) and unrestricted ledger access.
 
 Humans keep **laboratory work** — and with it every claim that requires a wet
 result, every dosing decision, and everything a regulator would read.
+
+## Where the role rules live
+
+Each teammate's `.toml` carries wiring only — tier, ledger grants, routed
+context, delegation. The working rules live in `agents/prompts/<id>.md`, named by
+that file's `prompt_files` entry and loaded into the prompt as **Your brief**
+(see `docs/spec/runtime/agents.md`). Edit the brief to change how a role works;
+edit the `.toml` to change what it may touch.
+
+Print what any teammate's prompt assembles into with
+`./scripts/dump-prompt.sh --company companies/<name> --agent <id>`.
 
 ## The desk
 
@@ -83,8 +94,8 @@ with different labels.
 
 ## Workspace layout
 
-- `Standards/`, `Playbooks/`, `Programs/` — shared, operator-seeded notes.
-- `Agents/<your agent id>/` — your own folder, the default home for anything you
+- `standards/`, `playbooks/`, `programs/` — shared, operator-seeded notes.
+- `agents/<your agent id>/` — your own folder, the default home for anything you
   produce.
 - `derived/` — rendered ledger views. Never hand-write anything here.
 
@@ -92,8 +103,8 @@ with different labels.
 
 Every specialist but `literature_reviewer` declares an explicit `context`
 confining `workspace_write`/`workspace_create` to
-`Programs/Kinase inhibitor program.md` — this organization's shared active-work
-document — plus its own `Agents/<id>/` home.
+`programs/kinase-inhibitor-program.md` — this organization's shared active-work
+document — plus its own `agents/<id>/` home.
 
 ## The bar
 
