@@ -30,17 +30,20 @@ import type { FocusEvent } from "react";
  * operator is about to press does not move, yet still shows its spinner.
  *
  * Spread {@link StableList.containerProps} onto the element wrapping the rows —
- * the region whose bounds define "over the queue".
+ * the region whose bounds define "over the queue". It also carries a `ref`:
+ * see the note on `focusInsideNow` below for why the thaw check needs the
+ * actual container node rather than trusting the focus flag alone.
  */
 export interface StableList<T> {
   /** The rows to render, in a pointer-stable order. */
   items: T[];
-  /** Handlers for the queue container that detect operator interaction. */
+  /** Handlers (and a `ref`) for the queue container that detect operator interaction. */
   containerProps: {
     onPointerEnter: () => void;
     onPointerLeave: () => void;
     onFocusCapture: () => void;
     onBlurCapture: (event: FocusEvent) => void;
+    ref: (node: HTMLElement | null) => void;
   };
 }
 
@@ -61,6 +64,13 @@ export function useStableList<T>(live: T[]): StableList<T> {
   const pointerInside = useRef(false);
   const focusInside = useRef(false);
 
+  // The container node, so the thaw check can ask the DOM directly rather
+  // than trust `focusInside` alone — see `focusInsideNow`.
+  const containerRef = useRef<HTMLElement | null>(null);
+  const setContainerRef = useCallback((node: HTMLElement | null) => {
+    containerRef.current = node;
+  }, []);
+
   const freeze = useCallback(() => {
     // Capture the list as it is *now* — which equals live, because a frozen
     // list never reaches here twice (the guard `?? liveRef.current` keeps the
@@ -68,9 +78,33 @@ export function useStableList<T>(live: T[]): StableList<T> {
     setFrozen((prev) => prev ?? liveRef.current);
   }, []);
 
-  const thawIfIdle = useCallback(() => {
-    if (!pointerInside.current && !focusInside.current) setFrozen(null);
+  /**
+   * Whether focus is *actually* still inside the container right now.
+   *
+   * `focusInside` is set from `onFocusCapture`/`onBlurCapture`, but disabling
+   * a focused element clears `document.activeElement` — to `<body>` — without
+   * firing `blur`/`focusout` at all (verified against Chromium; the browser
+   * drops focus as a side effect of the `disabled` attribute, not as a focus
+   * transition). This queue is the textbook trigger: every decide button sets
+   * its own `disabled` the instant it is clicked (the caller's in-flight
+   * `deciding` state), and clicking focuses the button first. So the row the
+   * operator just decided freezes on click, `onBlurCapture` never runs to
+   * clear `focusInside`, and — because nothing else ever calls it again —
+   * the queue stayed frozen permanently, surviving even the pointer leaving.
+   * Re-deriving from the live DOM here, at every thaw check, closes that gap
+   * without depending on an event that this specific case never sends.
+   */
+  const focusInsideNow = useCallback(() => {
+    const active = document.activeElement;
+    return active !== null && containerRef.current !== null && containerRef.current.contains(active);
   }, []);
+
+  const thawIfIdle = useCallback(() => {
+    if (pointerInside.current) return;
+    if (focusInsideNow()) return;
+    focusInside.current = false;
+    setFrozen(null);
+  }, [focusInsideNow]);
 
   const onPointerEnter = useCallback(() => {
     pointerInside.current = true;
@@ -100,6 +134,12 @@ export function useStableList<T>(live: T[]): StableList<T> {
 
   return {
     items: frozen ?? live,
-    containerProps: { onPointerEnter, onPointerLeave, onFocusCapture, onBlurCapture },
+    containerProps: {
+      onPointerEnter,
+      onPointerLeave,
+      onFocusCapture,
+      onBlurCapture,
+      ref: setContainerRef,
+    },
   };
 }
