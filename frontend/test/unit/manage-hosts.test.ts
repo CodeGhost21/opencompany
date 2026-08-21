@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   addConnection,
@@ -8,8 +8,10 @@ import {
   editConnection,
   getConnection,
   hostAddressEditable,
+  probe,
   resetConnections,
 } from "@/connections/registry";
+import type { Transport, TransportRequest, TransportResponse } from "@/api/transport";
 import { findProfile, readProfiles } from "@/connections/profileStore";
 import {
   addressLabel,
@@ -106,6 +108,91 @@ describe("editConnection", () => {
 
   it("does nothing for a host that is already gone", () => {
     expect(() => editConnection("no-such-host", { label: "x" })).not.toThrow();
+  });
+});
+
+const OLD = "https://old.acme.test";
+const NEW = "https://new.acme.test";
+
+/**
+ * A transport that can hold the old address's `/spec` open indefinitely.
+ *
+ * The bug this fixture exists for needs the two probes to *overlap*, which no
+ * amount of awaiting produces on its own: the old probe has to still be in
+ * flight at the moment the connection is re-addressed. Only `/spec` is gated,
+ * not every request — the old probe has to be able to run to completion once
+ * released, since what is under test is that its **writes** are discarded
+ * rather than that it is somehow prevented from finishing.
+ */
+class GatedTransport implements Transport {
+  readonly urls: string[] = [];
+  private waiting: (() => void)[] = [];
+
+  async request(req: TransportRequest): Promise<TransportResponse> {
+    this.urls.push(req.url);
+    if (req.url.startsWith(OLD) && req.url.endsWith("/spec")) {
+      await new Promise<void>((resolve) => this.waiting.push(resolve));
+    }
+    const old = req.url.startsWith(OLD);
+    const body = req.url.endsWith("/spec")
+      ? JSON.stringify({ display_name: old ? "Old host" : "New host" })
+      : JSON.stringify([{ id: old ? "old-co" : "new-co" }]);
+    return {
+      status: 200,
+      statusText: "OK",
+      url: req.url,
+      text: body,
+      header: () => null,
+    };
+  }
+
+  /** Lets every held request answer, as a slow host eventually does. */
+  release(): void {
+    for (const resume of this.waiting.splice(0)) resume();
+  }
+
+  subscribe(): () => void {
+    throw new Error("no streaming");
+  }
+}
+
+/**
+ * A probe that was already running when its host moved.
+ *
+ * Two failures in one, and both are silent. The registry suppresses a second
+ * probe for an id while one is in flight — without which a re-render storm
+ * probes forever — so `editConnection`'s own `void probe(id)` did nothing, and
+ * the new address was never contacted at all. Meanwhile the old probe still
+ * held the *old* client, so when it finally answered it patched that host's
+ * identity, company list and status onto the row now pointing somewhere else:
+ * a console naming one host while addressing another.
+ */
+describe("a host that moves while a probe is in flight", () => {
+  it("ignores the old probe's answers and probes the address it moved to", async () => {
+    const transport = new GatedTransport();
+    const id = addConnection({ baseUrl: OLD, transport });
+
+    const inFlight = probe(id);
+    // Not `await Promise.resolve()`: the probe reaches the transport several
+    // microtasks in, and the move has to land while it is genuinely held.
+    await vi.waitFor(() => expect(transport.urls.length).toBeGreaterThan(0));
+
+    editConnection(id, { baseUrl: NEW });
+    transport.release();
+    await inFlight;
+
+    // The replacement probe is started by the old one's finalizer, so it is
+    // running unawaited by the time `inFlight` settles.
+    await vi.waitFor(() => expect(getConnection(id)?.status).toBe("live"));
+
+    const moved = getConnection(id);
+    // The new address was contacted at all, which is the half that used to be
+    // skipped outright.
+    expect(transport.urls.some((url) => url.startsWith(NEW))).toBe(true);
+    // And nothing the old address said survived onto the row.
+    expect(moved?.identity?.displayName).toBe("New host");
+    expect(moved?.label).toBe("New host");
+    expect(moved?.companies).toEqual(["new-co"]);
   });
 });
 
