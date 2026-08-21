@@ -244,7 +244,7 @@ test("a condition's branches are picked, not typed, and the host checks the grap
   const stamp = Date.now();
   const dialog = await openCreateDialog(page);
 
-  await dialog.getByLabel("Id", { exact: true }).fill(`e2e_branch_${stamp}`);
+  await dialog.getByLabel("Workflow ID", { exact: true }).fill(`e2e_branch_${stamp}`);
   await dialog.getByLabel("Name", { exact: true }).fill(`Branch probe ${stamp}`);
 
   // Trigger → condition → output, the smallest graph with a branch in it.
@@ -324,7 +324,7 @@ test("the host's refusal of an unreachable node arrives before Create (#1074)", 
   const stamp = Date.now();
   const dialog = await openCreateDialog(page);
 
-  await dialog.getByLabel("Id", { exact: true }).fill(`e2e_unreach_${stamp}`);
+  await dialog.getByLabel("Workflow ID", { exact: true }).fill(`e2e_unreach_${stamp}`);
   await dialog.getByLabel("Name", { exact: true }).fill(`Unreachable probe ${stamp}`);
 
   await dialog.getByLabel("Node id").first().fill("start");
