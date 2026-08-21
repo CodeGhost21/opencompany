@@ -133,6 +133,12 @@ pub struct MockTinyHumansClient {
     forwarded: StdMutex<Vec<IngestRequest>>,
     outcome: IngestOutcome,
     failure: Option<String>,
+    /// The seeded board. Empty unless a test calls [`with_board`](Self::with_board),
+    /// so a test that only cares about ingestion sees an empty board rather than
+    /// invented rows.
+    board: StdMutex<Vec<BoardItem>>,
+    /// Comments per board-item id.
+    comments: StdMutex<std::collections::HashMap<String, Vec<BoardComment>>>,
 }
 
 impl Default for MockTinyHumansClient {
@@ -150,7 +156,24 @@ impl MockTinyHumansClient {
                 remote_id: Some("hub-1".to_string()),
             },
             failure: None,
+            board: StdMutex::new(Vec::new()),
+            comments: StdMutex::new(std::collections::HashMap::new()),
         }
+    }
+
+    /// Seeds the board this mock serves.
+    pub fn with_board(self, items: Vec<BoardItem>) -> Self {
+        *self.board.lock().expect("mock poisoned") = items;
+        self
+    }
+
+    /// Seeds the comments on one board item.
+    pub fn with_comments(self, id: &str, comments: Vec<BoardComment>) -> Self {
+        self.comments
+            .lock()
+            .expect("mock poisoned")
+            .insert(id.to_string(), comments);
+        self
     }
 
     /// Returns `outcome` instead of accepting.
@@ -169,6 +192,30 @@ impl MockTinyHumansClient {
     pub fn forwarded(&self) -> Vec<IngestRequest> {
         self.forwarded.lock().expect("mock poisoned").clone()
     }
+
+    /// The configured failure as an error, if any.
+    fn failure_error(&self) -> Option<crate::error::OpenCompanyError> {
+        self.failure
+            .as_ref()
+            .map(|message| crate::error::OpenCompanyError::TinyHumans {
+                code: "unreachable".to_string(),
+                message: message.clone(),
+            })
+    }
+
+    /// The stored item with `id`, or a hub-shaped 404.
+    fn find(&self, id: &str) -> Result<BoardItem> {
+        self.board
+            .lock()
+            .expect("mock poisoned")
+            .iter()
+            .find(|item| item.id == id)
+            .cloned()
+            .ok_or_else(|| crate::error::OpenCompanyError::TinyHumans {
+                code: "http_404".to_string(),
+                message: format!("no board item {id}"),
+            })
+    }
 }
 
 #[async_trait]
@@ -180,13 +227,115 @@ impl TinyHumansClient for MockTinyHumansClient {
             .lock()
             .expect("mock poisoned")
             .push(request.clone());
-        if let Some(message) = &self.failure {
-            return Err(crate::error::OpenCompanyError::TinyHumans {
-                code: "unreachable".to_string(),
-                message: message.clone(),
-            });
+        if let Some(error) = self.failure_error() {
+            return Err(error);
         }
         Ok(self.outcome.clone())
+    }
+
+    async fn list_board(&self, query: BoardQuery) -> Result<BoardPage> {
+        if let Some(error) = self.failure_error() {
+            return Err(error);
+        }
+        let query = query.clamped();
+        let mut items: Vec<BoardItem> = self
+            .board
+            .lock()
+            .expect("mock poisoned")
+            .iter()
+            .filter(|item| query.kind.is_none_or(|kind| item.kind == kind))
+            .filter(|item| query.status.is_none_or(|status| item.status == status))
+            .cloned()
+            .collect();
+        match query.sort {
+            // The mock has no time decay to model, so `hot` and `top` agree
+            // here. What a route test asserts is that the ordering *travelled*,
+            // not that this crate reimplements the hub's ranking.
+            BoardSort::Hot | BoardSort::Top => items.sort_by_key(|item| std::cmp::Reverse(item.score)),
+            BoardSort::New => items.sort_by(|a, b| b.created_at.cmp(&a.created_at)),
+        }
+        let total = items.len() as u32;
+        let skip = ((query.page - 1) * query.limit) as usize;
+        let page: Vec<BoardItem> = items
+            .into_iter()
+            .skip(skip)
+            .take(query.limit as usize)
+            .collect();
+        Ok(BoardPage {
+            items: page,
+            total,
+            page: query.page,
+            limit: query.limit,
+        })
+    }
+
+    async fn board_item(&self, id: &str) -> Result<BoardDetail> {
+        if let Some(error) = self.failure_error() {
+            return Err(error);
+        }
+        Ok(BoardDetail {
+            item: self.find(id)?,
+            comments: self
+                .comments
+                .lock()
+                .expect("mock poisoned")
+                .get(id)
+                .cloned()
+                .unwrap_or_default(),
+        })
+    }
+
+    async fn vote_board_item(&self, id: &str, value: VoteValue) -> Result<BoardItem> {
+        if let Some(error) = self.failure_error() {
+            return Err(error);
+        }
+        // Confirm it exists before mutating, so a 404 reads the same as the hub's.
+        self.find(id)?;
+        let mut board = self.board.lock().expect("mock poisoned");
+        let item = board
+            .iter_mut()
+            .find(|item| item.id == id)
+            .expect("checked above");
+        // Retract the previous vote, then apply the new one — the same
+        // arithmetic the hub does, so a console asserting "my second upvote did
+        // not double-count" sees the real behaviour offline.
+        match item.my_vote {
+            VoteValue::Up => item.upvotes = item.upvotes.saturating_sub(1),
+            VoteValue::Down => item.downvotes = item.downvotes.saturating_sub(1),
+            VoteValue::None => {}
+        }
+        match value {
+            VoteValue::Up => item.upvotes += 1,
+            VoteValue::Down => item.downvotes += 1,
+            VoteValue::None => {}
+        }
+        item.my_vote = value;
+        item.score = i64::from(item.upvotes) - i64::from(item.downvotes);
+        Ok(item.clone())
+    }
+
+    async fn comment_board_item(&self, id: &str, body: &str) -> Result<BoardComment> {
+        if let Some(error) = self.failure_error() {
+            return Err(error);
+        }
+        self.find(id)?;
+        let stored = {
+            let mut comments = self.comments.lock().expect("mock poisoned");
+            let thread = comments.entry(id.to_string()).or_default();
+            let comment = BoardComment {
+                id: format!("comment-{}", thread.len() + 1),
+                author: Some("you".to_string()),
+                body: body.to_string(),
+                created_at: "1970-01-01T00:00:00.000Z".to_string(),
+            };
+            thread.push(comment.clone());
+            comment
+        };
+        let mut board = self.board.lock().expect("mock poisoned");
+        if let Some(item) = board.iter_mut().find(|item| item.id == id) {
+            item.comment_count += 1;
+        }
+        Ok(stored)
     }
 }
 
