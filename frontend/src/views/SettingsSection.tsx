@@ -3,7 +3,6 @@ import { lazy, Suspense } from "react";
 import type { OpenCompanyClient } from "@/api/client";
 import type { CompanyFeed } from "@/hooks/use-company";
 import { cn } from "@/lib/utils";
-import { BillingView } from "@/views/BillingView";
 import { ConnectionsView } from "@/views/ConnectionsView";
 import { DevicesView } from "@/views/DevicesView";
 import { HostingView } from "@/views/HostingView";
@@ -104,15 +103,12 @@ export function SettingsSection({ client, company, feed, sub, onNavigate, onFlag
         {page === "devices" && <DevicesView client={client} company={company} />}
         {page === "connections" && <ConnectionsView client={client} company={company} />}
         {page === "mcp" && <McpServersView client={client} company={company} />}
-        {/* `key` remounts on a company switch, which is what keeps one
-            company's typed-but-unsaved credentials out of another's Save. See
-            the note above `load` in BillingView. */}
-        {page === "billing" && (
-          <BillingView key={company ?? "self"} client={client} company={company} />
-        )}
-        {/* Same `key` remount as Billing, and for the same reason: a hosting
-            token typed for one company must not survive a company switch into
-            another company's Save. */}
+        {/* Billing was here. It moved to Finance → Invoicing and Finance → Wallet
+            (docs/spec/runtime/finance-console.md): a credential form belongs
+            beside the data it unlocks, and "Billing" read as *what OpenCompany
+            charges me* — which is Usage, two rows down.
+            Same `key` remount as the providers in FinanceSection: it keeps one
+            company's typed-but-unsaved token out of another's Save. */}
         {page === "hosting" && (
           <HostingView key={company ?? "self"} client={client} company={company} />
         )}
