@@ -216,14 +216,17 @@ test("names the host it was told nothing about by the address it answers on", as
   // are not: the menu's trailing actions ("Add a host", "Manage hosts") carry
   // their own testids, and filtering those out by their *text* would drop a
   // real host somebody named "Add a host" — labels here are typed by an
-  // operator. `role=menuitem` as well as the prefix, because a row that is not
-  // `live` also renders a `host-row-state-…` span inside itself, and the
+  // operator. The menu-item role as well as the prefix, because a row that is
+  // not `live` also renders a `host-row-state-…` span *inside* itself, and the
   // prefix alone counts that span as a third host.
   //
   // Down to each row's first line: a row carries its state and its shortcut
   // too, and a shortcut differs on every row, so comparing whole rows would
   // call two identical names distinct.
-  const rows = await page.locator('[role="menuitem"][data-testid^="host-row-"]').allInnerTexts();
+  const rows = await page
+    .getByRole("menuitem")
+    .and(page.locator('[data-testid^="host-row-"]'))
+    .allInnerTexts();
   const names = rows.map((text) => text.split("\n")[0].trim());
   expect(names.length).toBe(2);
   expect(new Set(names).size, `two hosts must not read alike: ${JSON.stringify(names)}`).toBe(2);
