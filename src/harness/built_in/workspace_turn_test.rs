@@ -252,7 +252,7 @@ async fn harness(
     let store: Arc<dyn WorkspaceStore> = Arc::new(FsOps::new(dir));
     let id = CompanyId::new("acme");
     store
-        .create(&id, &folder("f-std", "Standards"), None)
+        .create(&id, &folder("f-std", "standards"), None)
         .await
         .unwrap();
     store

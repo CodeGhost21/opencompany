@@ -1213,10 +1213,10 @@ async fn empty_surfaces_resolve_to_empty_lists() {
         .map(|node| node["name"].as_str().unwrap())
         .collect();
     names.sort_unstable();
-    assert_eq!(names, vec!["Agents", "README.md", "maya", "secrets"]);
+    assert_eq!(names, vec!["agents", "maya", "readme.md", "secrets"]);
     let root = tree
         .iter()
-        .find(|node| node["name"] == serde_json::json!("Agents"))
+        .find(|node| node["name"] == serde_json::json!("agents"))
         .unwrap();
     assert_eq!(root["createdBy"]["kind"], "seed");
     assert!(root["createdBy"]["agentId"].is_null());
@@ -1935,7 +1935,7 @@ async fn workspace_search_resolves_hits_with_paths_and_totals() {
     let workspace = state.registry().get(&id).unwrap().workspace().clone();
     let folder = crate::ports::workspace::WorkspaceNode {
         id: "f-std".to_string(),
-        name: "Standards".to_string(),
+        name: "standards".to_string(),
         kind: crate::ports::workspace::NodeKind::Folder,
         parent_id: None,
         updated_at_millis: 1_000,
