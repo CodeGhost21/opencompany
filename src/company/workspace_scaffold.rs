@@ -88,6 +88,8 @@ use crate::ports::types::CompanyId;
 use crate::ports::workspace::{NodeKind, WorkspaceNode, WorkspaceOrigin, WorkspaceStore};
 use crate::ports::{generate_id, now_millis};
 
+use super::workspace_names::kebab_name_or;
+
 /// The reserved root folder holding one subfolder per agent that has produced
 /// something.
 ///
@@ -386,15 +388,47 @@ async fn ensure_member_folder(
         Found::Collision(why) => return Err(OpenCompanyError::Conflict(why)),
     };
 
-    match find(&nodes, Some(&root_id), id) {
+    // The folder is named by the lowercase-dashed rule, not by the id verbatim:
+    // a roster id is snake_case (`page_builder`), and every other name in the
+    // tree is dashed. Falls back to the id when the id normalizes to nothing,
+    // which `is_legal_segment` above has already proved is a usable segment.
+    let name = kebab_name_or(id, id);
+
+    match find(&nodes, Some(&root_id), &name) {
         Found::Folder(existing) => Ok(existing),
-        Found::Free => Ok(store
-            .adopt_or_create_folder(company, Some(&root_id), id, origin)
-            .await?
-            .into_node()
-            .id),
         Found::Collision(why) => Err(OpenCompanyError::Conflict(why)),
+        // Nothing carries the canonical name. Before minting it, look for the
+        // folder an older build made under the id verbatim — `page_builder`
+        // rather than `page-builder`, which `find` does not match because the
+        // difference is a character, not a case. Adopting it keeps one member's
+        // work in one folder across the upgrade; creating beside it would split
+        // the member's history in two and report neither half as incomplete.
+        Found::Free => match legacy_alias(&nodes, &root_id, id, &name) {
+            Some(Found::Folder(existing)) => Ok(existing),
+            Some(Found::Collision(why)) => Err(OpenCompanyError::Conflict(why)),
+            _ => Ok(store
+                .adopt_or_create_folder(company, Some(&root_id), &name, origin)
+                .await?
+                .into_node()
+                .id),
+        },
     }
+}
+
+/// The pre-lowercase-dashed spelling of a member folder, when there is one to
+/// look for.
+///
+/// `None` when the id already *is* its canonical name, so the caller mints the
+/// canonical folder without a second lookup. Separated out because "adopt what
+/// the last build wrote" is a distinct decision from "create what this build
+/// writes", and folding it into the match arm above hid that.
+fn legacy_alias(
+    nodes: &[WorkspaceNode],
+    root_id: &str,
+    id: &str,
+    canonical: &str,
+) -> Option<Found> {
+    (id != canonical).then(|| find(nodes, Some(root_id), id))
 }
 
 /// What a lookup for one named node under one parent found.
