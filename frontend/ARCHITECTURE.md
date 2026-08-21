@@ -254,6 +254,21 @@ it. Responses mirror the TypeScript models in `src/lib/*` and `src/api/types.ts`
   the three into the rows `ProvidersSection` renders. `ComposioSection` keeps
   only the credential layer.
 
+### Devices (Settings) — `src/views/DevicesView.tsx`, `src/api/devices.ts`
+- The machines paired to the signed-in user: mint a pairing code, list paired
+  devices, revoke one.
+- **Source:** ✅ real — `GET/POST …/devices` and `DELETE …/devices/{id}`. The
+  routes shipped with device pairing and had no caller in the console for a
+  release, while the desktop's prompt pointed people here (issue #1476).
+- **Never `…/devices/claim`.** Redemption happens on the machine being enrolled,
+  through the Tauri bridge, so the session token goes host → OS keychain without
+  passing through a webview. A console that called it would hold the credential
+  the design says it cannot.
+- The sub-page table lives in `src/views/settings-pages.ts` rather than in
+  `SettingsSection.tsx`, so prose that sends someone to a sub-page (the desktop
+  pairing prompt) can name one without importing the section back through
+  itself — and cannot name one that does not exist.
+
 ### Domain & Email (Settings) — `src/components/domain-settings.tsx`, `src/lib/domain.ts`
 - Custom domain with generated DNS records (verification TXT, CNAME, DKIM, SPF)
   + verification status; SMTP credentials + test.
