@@ -296,7 +296,6 @@ about whether it does.
 | --- | --- |
 | `src/server/ops/finance.rs` | new — the read plane above |
 | `src/server/ops/mod.rs` | merge `finance::router()` |
-| `docs/spec/runtime/api.md` | document the new routes |
 | `frontend/src/api/finance.ts` | new — typed client for the routes |
 | `frontend/src/views/finance/FinanceSection.tsx` | new — sub-router |
 | `frontend/src/views/finance/InvoicingView.tsx` | new |
@@ -313,6 +312,10 @@ about whether it does.
 
 `frontend/src/api/billing.ts` is unchanged — the credential calls are the same
 calls, made from a different page.
+
+`docs/spec/runtime/api.md` gains nothing: it does not document the
+`…/billing/…` routes either, and this file is the reference for both halves of
+the surface.
 
 ## Testing
 
