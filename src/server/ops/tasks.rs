@@ -775,7 +775,7 @@ async fn reject_workflow_proposal(
     record.note = Some(crate::runtime::advance::append_result(
         record.note.as_deref(),
         crate::runtime::advance::SYSTEM_ATTRIBUTION,
-        "the proposed workflow was rejected — the card is back in To-do",
+        "the proposed workflow was rejected — the card is back in Pending",
     ));
     record.column = COLUMN_TODO.to_string();
     record.updated_at_millis = now_millis();
