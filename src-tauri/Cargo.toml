@@ -37,7 +37,30 @@ path = "src/main.rs"
 [dependencies]
 # The host, linked rather than spawned. `sqlite` is the desktop's backend;
 # `mongodb` is deliberately absent — a per-tenant cluster is a hosting concern.
-opencompany = { path = "..", default-features = false, features = ["sqlite", "platform-jwt", "oauth"] }
+#
+# `mcp` is what puts an agent harness in the app at all. Without it this build
+# has no `openhuman` feature, so `src/harness/` is not compiled, no company can
+# reach a model, and the console's inference test answers "This build cannot
+# reach a model — the agent harness is not compiled in." `mcp` implies
+# `openhuman`, and the host's `openhuman_core` dependency is declared
+# `default-features = false, features = ["skills", "mcp", "hosting"]` — so what
+# a desktop agent gets is exactly the minimal belt: built-in tools, MCP servers
+# and skills.
+#
+# Deliberately NOT here, and each for a reason rather than an oversight:
+#
+# * `tinycortex` / `tinymemory*` — the in-pod memory engines. They carry
+#   tinycortex, `tinyagents/sqlite` and a second bundled SQLite build into the
+#   bundle for a surface the desktop does not offer; the runtime keeps its
+#   fs-backed memory stores.
+# * `media`, `composio`, `search` and the rest of the managed backends — they
+#   need a platform credential the desktop has no way to hold, and each fails
+#   closed anyway.
+# * `acp` — the local coding-harness lane. `src/acp/` here is an ACP *client*
+#   and compiles without it; turning it on would additionally wire
+#   `RuntimeBuilder::with_acp_agents`, which is a separate decision from having
+#   a harness at all.
+opencompany = { path = "..", default-features = false, features = ["sqlite", "platform-jwt", "oauth", "mcp"] }
 
 tauri = { version = "2", features = [] }
 # The OS credential store, so a device session token never has to live in the
