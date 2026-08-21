@@ -20,8 +20,12 @@ use tokio::task::JoinHandle;
 use crate::Result;
 use crate::app::config::AuthMode;
 use crate::error::OpenCompanyError;
+use crate::feedback::board::{
+    BoardComment, BoardDetail, BoardItem, BoardPage, BoardQuery, VoteValue,
+};
 use crate::feedback::service::{FeedbackFiler, FeedbackResponse};
 use crate::feedback::store::FeedbackStore;
+use crate::feedback::tinyhumans::TinyHumansClient;
 use crate::feedback::types::{FeedbackInput, FeedbackItem, FeedbackSummary};
 use crate::policy::ManifestApprovalGate;
 use crate::ports::now_millis;
@@ -2616,6 +2620,44 @@ impl CompanyRuntime {
         let mut items = self.feedback.list().await?;
         items.sort_by_key(|item| std::cmp::Reverse(item.at_millis));
         Ok(items.iter().map(FeedbackSummary::from_item).collect())
+    }
+
+    /// The shared feedback board, one page at a time.
+    ///
+    /// The board is the hub's, not this runtime's: these four methods are a
+    /// proxy that lends the console the instance credential without ever
+    /// putting it in a browser. An instance provisioned with no credential has
+    /// no board — that is a `no_board` refusal, not an empty page, so the
+    /// console can hide the surface instead of rendering "nobody has asked for
+    /// anything yet" to every unprovisioned operator.
+    pub async fn feedback_board(&self, query: BoardQuery) -> Result<BoardPage> {
+        self.hub()?.list_board(query).await
+    }
+
+    /// One board item with its comments.
+    pub async fn feedback_board_item(&self, id: &str) -> Result<BoardDetail> {
+        self.hub()?.board_item(id).await
+    }
+
+    /// Casts (or retracts) this instance's vote on a board item.
+    pub async fn vote_feedback_board(&self, id: &str, value: VoteValue) -> Result<BoardItem> {
+        self.hub()?.vote_board_item(id, value).await
+    }
+
+    /// Comments on a board item as this instance's hub account.
+    pub async fn comment_feedback_board(&self, id: &str, body: &str) -> Result<BoardComment> {
+        self.hub()?.comment_board_item(id, body).await
+    }
+
+    /// The hub client, or the refusal an unprovisioned instance owes the caller.
+    fn hub(&self) -> Result<&dyn TinyHumansClient> {
+        self.filer
+            .tinyhumans
+            .as_deref()
+            .ok_or_else(|| crate::error::OpenCompanyError::TinyHumans {
+                code: "no_board".to_string(),
+                message: "this instance is not connected to a TinyHumans account".to_string(),
+            })
     }
 
     /// The company's display name — what the manifest calls it, falling back to

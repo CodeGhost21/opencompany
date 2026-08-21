@@ -100,7 +100,7 @@ tempfile = "3"
 # Keep this byte-identical to the host's table modulo the `../` prefix. The
 # comments explaining each entry live there; this is the replica.
 [patch."https://github.com/tinyhumansai/tinymemory"]
-tinymemory-api = { path = "../vendor/openhuman/vendor/tinymemory/api" }
+tinymemory-api = { path = "../vendor/openhuman/vendor/tinymemory/crates/tinymemory-api" }
 
 [patch.crates-io]
 tinyagents = { path = "../vendor/openhuman/vendor/tinyagents" }

@@ -227,6 +227,53 @@ export function accountSummary(accounts: ComposioConnectedAccount[] | undefined)
   return null;
 }
 
+/**
+ * Whether the company grants the `composio` tool namespace, as a genuine
+ * tri-state (issue #1478).
+ *
+ * `granted` arrives from an unvalidated `client.get` cast, so `undefined` is
+ * reachable — an older host, or any response-shape drift. The bug this closes:
+ * one surface defaulted `undefined` to "not granted" (a warning badge + banner)
+ * while another defaulted it to "granted", so a single render showed both. Every
+ * surface routes the field through here instead, so `undefined` reads as
+ * `"unknown"` on all of them — never a definite answer.
+ */
+export type GrantStanding = "granted" | "not-granted" | "unknown";
+
+export function grantStanding(granted: boolean | undefined): GrantStanding {
+  if (granted === true) return "granted";
+  if (granted === false) return "not-granted";
+  return "unknown";
+}
+
+/**
+ * The one count of connected providers (issue #1407).
+ *
+ * The header badge and the section heading each computed this independently from
+ * the same array; deriving both from one function keeps them in step by
+ * construction.
+ */
+export function connectedProviderCount(providers: GridProvider[]): number {
+  return providers.filter((p) => p.connected).length;
+}
+
+/**
+ * Whether a connected tile's tools actually reach teammates (issue #1407).
+ *
+ * A connection is real whether or not the `composio` namespace is granted — the
+ * grant governs the tool belt, not the handshake — but a green "connected" tile
+ * under a banner saying the tools reach nobody is the contradiction #1262/#1407
+ * are about. A Composio-route tile whose grant is explicitly `false` is
+ * connected-but-not-delivering, so it must not wear the success colour. An
+ * `unknown` grant is NOT demoted: that would render an unchecked field as a
+ * definite negative.
+ */
+export function tileDelivers(row: GridProvider, granted: boolean | undefined): boolean {
+  if (!row.connected) return false;
+  if (row.route.kind === "composio" && grantStanding(granted) === "not-granted") return false;
+  return true;
+}
+
 /** The local tile for a Composio slug, when the console has metadata for one. */
 function nativeTileFor(slug: string): ConnectionProvider | undefined {
   return CONNECTION_PROVIDERS.find((p) => toolkitSlug(p.toolkit) === slug);
