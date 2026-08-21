@@ -395,11 +395,14 @@ export function AgentDetailView({
               variant="outline"
               size="sm"
               onClick={() => setEditing(true)}
-              // Disabled with the reason, never absent. A manifest teammate is
-              // declared in version control and the host says so through its
-              // own `editable` list — an operator looking for the edit needs to
-              // find out *why* there isn't one, not to conclude the console
-              // forgot to build it.
+              // Disabled with the reason, never absent — an operator looking
+              // for the edit needs to find out *why* there isn't one, not to
+              // conclude the console forgot to build it. What makes a teammate
+              // uneditable is the host's own `editable` list and nothing this
+              // file decides: a current host offers at least name, role and
+              // instructions on every teammate, manifest ones included, so an
+              // empty list now means a host that does not support the edit
+              // rather than a blueprint row this console must refuse.
               disabled={agent.editable.length === 0}
               title={
                 agent.editable.length === 0
