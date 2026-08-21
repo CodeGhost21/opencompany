@@ -33,7 +33,7 @@ plan and proposes a graph for review. This document is only the planning half.
 
 | | |
 |---|---|
-| **Trigger** | the transition *into* `planning`, edge-fired in `CompanyRuntime::upsert_task` |
+| **Trigger** | the transition *into* the `planning` stage, edge-fired in `CompanyRuntime::upsert_task` |
 | **Work done** | exactly one model call, no tools, no retry |
 | **Deadline** | 120s, hard |
 | **Cost** | one `SampleKind::PlanningCall` sample, charged to the company |
@@ -67,17 +67,26 @@ exists to remove, and would leave every planned card waiting on a person who
 has already said what they want. The operator's levers are all still there:
 
 - entry into Planning is **per card**, and only ever from a person — either the
-  drag, or an actionable message they typed into the prompt box (issue #576);
-- `todo → in_progress` still dispatches unplanned, so planning is never
+  card's *Plan first* control, or an actionable message they typed into the
+  prompt box (issue #576);
+- a drop into Working still dispatches unplanned, so planning is never
   compulsory;
 - a missing prerequisite stops the walk **before** any dispatch spend;
 - the run still stops in In Review, so nothing reaches Done without a person.
 
 The cost this accepts: entering Planning can spend the assignee's budget
-without a second confirmation. Entry is informed consent — the drag is a
+without a second confirmation. Entry is informed consent — *Plan first* is a
 deliberate act and the console says what it costs, and the prompt box is a
 person asking the company to do the thing — the per-agent cap from #304 still
 gates the dispatch turn, and the run still stops for review.
+
+**Planning stopped being a column in issue #1512.** The board now renders three
+phases — `pending`, `working`, `done` — and `planning` is one of the four stages
+that read as Working, so there is no column to drag into. Nothing about the pass
+changed: the same transition into the same stage fires the same single call, and
+the gesture that causes it is the card's *Plan first* button. What moved is only
+where a person expresses the intent, and a control expresses an *act* better
+than a column expressed a *state* somebody had to drag through.
 
 **A card opened by anything other than a person still lands in To-do**
 (issue #576). The prompt box is a human surface, but it is not only a human
