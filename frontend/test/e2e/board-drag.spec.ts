@@ -1,7 +1,7 @@
 import { expect, test, type APIRequestContext, type Locator, type Page } from "@playwright/test";
 
 /**
- * Issue #334 — moving a card out of In review by dragging it onto Done.
+ * Issue #334 — moving a card out of Working by dragging it onto Done.
  *
  * QA reported this as "a card cannot be moved out of In review": the drop
  * appeared to work, the counts did not change, and nothing said why. Two
@@ -67,8 +67,8 @@ const BOARD = "/#/ledgers/tasks";
  * These are the host's labels — see the note above on why they are written out
  * here rather than read back from the ledger.
  */
-const COLUMNS = ["To-do", "Planning", "In progress", "Paused", "In review", "Done"];
-const IN_REVIEW = COLUMNS.indexOf("In review");
+const COLUMNS = ["Pending", "Working", "Done"];
+const WORKING = COLUMNS.indexOf("Working");
 const DONE = COLUMNS.indexOf("Done");
 
 test.beforeEach(async ({ page }) => {
@@ -128,7 +128,14 @@ async function openBoard(page: Page) {
   await expandAll(page);
 }
 
-/** Seeds a card straight into In review and opens the board on it. */
+/**
+ * Seeds a card straight into the `in_review` stage and opens the board on it.
+ *
+ * The stage still exists and is still what a finished run lands in; since issue
+ * #1512 it is not a *column*, so the card renders under Working. The seed
+ * writes the stage word directly because that is the state this spec is about —
+ * a card one drop away from Done, which is where #334's report came from.
+ */
 async function seedInReview(page: Page, request: APIRequestContext, title: string) {
   const created = await request.post(`${API}/tasks`, { data: { title } });
   expect(created.ok()).toBeTruthy();
@@ -192,14 +199,14 @@ test("the whole board fits the window, so the last column is a full drop target"
   expect(Math.min(done!.x + done!.width, width) - done!.x).toBeGreaterThan(200);
 });
 
-test("a card drags from In review to Done, and the board scrolls to get there", async ({
+test("a card drags from Working to Done, and the board scrolls to get there", async ({
   page,
   request,
 }) => {
   const title = `e2e in-review to done ${Date.now()}`;
   const { id, card } = await seedInReview(page, request, title);
 
-  // Park the board so In review is on screen and Done is not. This is the
+  // Park the board so Working is on screen and Done is not. This is the
   // operator's actual starting position, and the case the gesture could not
   // finish before: nothing scrolls a nested container during an HTML5 drag.
   const scrolled = await board(page).evaluate((el) => {
@@ -254,7 +261,7 @@ test("a card drags from In review to Done, and the board scrolls to get there", 
 
   // And the counts the operator was watching.
   await expect(column(page, DONE)).toContainText(title);
-  await expect(column(page, IN_REVIEW)).not.toContainText(title);
+  await expect(column(page, WORKING)).not.toContainText(title);
 });
 
 test("a drop that misses every column says so instead of doing nothing", async ({
@@ -284,8 +291,11 @@ test("a drop that misses every column says so instead of doing nothing", async (
     timeout: 5_000,
   });
   // Saying so is not the same as moving it: the card must stay where it was.
-  expect((await (await request.get(`${API}/tasks/${id}`)).json()).task.column).toBe("in_review");
-  await expect(column(page, IN_REVIEW)).toContainText(title);
+  // Unmoved: still the `in_review` stage, which reads as the Working column.
+  const unmoved = (await (await request.get(`${API}/tasks/${id}`)).json()).task;
+  expect(unmoved.stage).toBe("in_review");
+  expect(unmoved.column).toBe("working");
+  await expect(column(page, WORKING)).toContainText(title);
 });
 
 test("a move the host refuses names the card, the column, and the reason", async ({
@@ -295,7 +305,7 @@ test("a move the host refuses names the card, the column, and the reason", async
   const title = `e2e refused move ${Date.now()}`;
   const { card } = await seedInReview(page, request, title);
 
-  // The host accepts in_review → done, so the refusal has to be induced. This
+  // The host accepts working → done, so the refusal has to be induced. This
   // asserts the console's half of the contract: whatever the host says, the
   // operator reads it rather than watching the card snap back in silence.
   await page.route("**/tasks/*", async (route) => {
@@ -322,5 +332,5 @@ test("a move the host refuses names the card, the column, and the reason", async
   });
   await expect(page.getByText("the board is read-only right now")).toBeVisible();
   // Refused means refused: the optimistic move is rolled back.
-  await expect(column(page, IN_REVIEW)).toContainText(title);
+  await expect(column(page, WORKING)).toContainText(title);
 });
