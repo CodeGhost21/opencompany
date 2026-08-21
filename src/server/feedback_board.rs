@@ -36,7 +36,7 @@ use crate::feedback::board::{
 use crate::ports::types::CompanyId;
 use crate::server::error::ApiError;
 use crate::server::feedback::{lookup, sole};
-use crate::server::platform_auth::{CompanyAuth, authorize_address};
+use crate::server::platform_auth::{CompanyAuth, GqlAuth, authorize_address};
 
 /// Builds the board route fragment, merged into the main router.
 pub fn router() -> Router<AppState> {
@@ -122,7 +122,7 @@ struct CommentRequest {
 /// it is no more anonymous than filing is.
 fn addressed(
     state: &AppState,
-    auth: &crate::server::platform_auth::Principal,
+    auth: &GqlAuth,
     id: &str,
 ) -> Result<Arc<CompanyRuntime>, Response> {
     let company = CompanyId::new(id);
@@ -135,7 +135,7 @@ fn addressed(
 /// The sole company, authorized the same way.
 fn addressed_sole(
     state: &AppState,
-    auth: &crate::server::platform_auth::Principal,
+    auth: &GqlAuth,
 ) -> Result<Arc<CompanyRuntime>, Response> {
     let runtime = sole(state).map_err(IntoResponse::into_response)?;
     if let Some(resp) = authorize_address(state, auth, runtime.id()) {
