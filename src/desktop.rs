@@ -671,6 +671,37 @@ mod tests {
         assert_eq!(runtime.config().operator_email, DESKTOP_OPERATOR_EMAIL);
     }
 
+    /// A desktop company must come up with an agent harness attached.
+    ///
+    /// The gap this pins was two-part and each half was silent on its own. The
+    /// desktop shell shipped without the `openhuman` feature, so `src/harness/`
+    /// was not compiled at all and the console's inference test answered "This
+    /// build cannot reach a model — the agent harness is not compiled in"; and
+    /// `register` — the only path a desktop company is built through — never
+    /// called `with_harness`, so even a build that *did* compile one in would
+    /// have handed every company the echo brain instead.
+    ///
+    /// Gated on the feature because there is nothing to attach without it, and
+    /// asserted here rather than on `attach` itself because the seam that broke
+    /// is this registration path, not the helper.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn a_seeded_company_can_reach_a_model() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = state_over(directory.path());
+
+        bootstrap_companies(&state, DEFAULT_PRESET_ID)
+            .await
+            .expect("a fresh root bootstraps");
+
+        let runtime = state.registry().sole().expect("the company is registered");
+        assert!(
+            runtime.harness().is_some(),
+            "a desktop company was built without a harness pool, so every turn \
+             falls back to the echo brain",
+        );
+    }
+
     /// A state over `home`, as an embedded host builds one.
     fn state_over(home: &std::path::Path) -> AppState {
         AppState::new(AppConfig::default()).with_home(home.to_path_buf())
