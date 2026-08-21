@@ -2,7 +2,7 @@
 
 A **connector** is the answer to one question an operator has to answer before
 anything else works: *where does my company actually run?* Today the console
-answers it twice, in two unrelated places — the desktop's "Add a host" dialog
+answers it twice, in two unrelated places — the desktop's "Add a host" screen
 offers a local instance or a typed URL, and the hosted platform is reached by
 being handed a link. Neither is a choice presented as a choice.
 
@@ -51,7 +51,7 @@ four connectors must be holdable simultaneously, each with its own status row,
 each failing on its own.
 
 So the connector is a field on `Connection`, chosen once when the host is added,
-and the chooser is the "Add a host" dialog growing from two tabs to four.
+and the chooser is the "Add a host" screen growing from two tabs to four.
 
 ### It extends `ConnectionOrigin`, and turns it into a tagged union
 
@@ -188,7 +188,7 @@ their company is gone.
 **What has not landed** is the front door. The tab asks for the address the
 platform gave you, because an account-scoped tenant listing is the manager's
 surface to expose and it does not exist yet. Control-plane sign-in, the tenant
-list, and provisioning from the dialog all wait on it — the connector, and the
+list, and provisioning from the chooser all wait on it — the connector, and the
 patience it carries, do not.
 
 ## `remote` — a gateway you run
@@ -201,7 +201,7 @@ What it needs beyond the field:
 
 - **A probe before commit.** `/spec` answers with the host's identity and
   capabilities and is unauthenticated; asking it before the row is written turns
-  a typo into an error message in the dialog rather than a permanently red row
+  a typo into an error message on the chooser rather than a permanently red row
   in the switcher. Note that `capabilities` being absent means *assume REST
   only* — an older host omits the field — so `undefined` and `[]` must not be
   conflated.
@@ -217,12 +217,12 @@ What it needs beyond the field:
   and the console reports a failure about a host it never addressed
   ([#613](https://github.com/tinyhumansai/opencompany/issues/613)).
 
-The honest limitation to print in the dialog: **from a browser, a remote gateway
+The honest limitation to print on the chooser: **from a browser, a remote gateway
 must allow-list this console's origin.** There is no wildcard, because the
 session is a credential and `Access-Control-Allow-Origin: *` is forbidden with
 credentials. An operator adding a host from the web build and getting nothing
 but CORS failures is the most likely support question this connector generates,
-and the dialog is where it is cheapest to answer.
+and the chooser is where it is cheapest to answer.
 
 ## `ssh` — over SSH
 
@@ -310,7 +310,7 @@ does on every launch. That is what makes the ephemeral port harmless, and it
 needs no separate idea of which tunnels are up, because opening is idempotent
 on the core's side.
 
-The dialog is the exception, and deliberately: adding a host opens the tunnel
+The chooser is the exception, and deliberately: adding a host opens the tunnel
 there so that a destination `ssh` refuses is reported in the form the operator
 is standing in front of, rather than becoming a red row they have to go and
 read.
@@ -352,11 +352,22 @@ not a trade to make for a Windows dependency that ships in the OS today.
 
 ## Where the choice is offered
 
-Two places, and only one of them is a dialog.
+Two places, and neither of them is a dialog.
 
 **"Add a host"** is the ordinary one: four tabs, `local` and `ssh` present only
 where a process can be started. It is reached from the switcher, which means it
 is reached by someone who already has a console on screen.
+
+It is a **screen**, not a popup
+([#1531](https://github.com/tinyhumansai/opencompany/issues/1531)). It was a
+`Dialog` while it was an afterthought on the switcher's last menu item, and that
+dialog is 24rem wide: four tabs clipped their own labels in it, and the card
+scrolled its own title away to make room for the form. The deeper reason is that
+adding a host is the *first* step of onboarding rather than a confirmation —
+nothing else on the host is reachable until it is done — so it is drawn in the
+same `OnboardingShell` card as the setup wizard, and reads as one flow with it.
+`App` renders it beside the console and hides the console behind it rather than
+unmounting it, so cancelling out does not tear down a live connection's streams.
 
 **The first-host screen** is the one that matters more, and it used to be a
 dead end. A console holding no connection at all rendered "the host on this
@@ -452,7 +463,7 @@ one, and the UI must not imply it does. The data root is on the machine the
 runtime runs on; moving a company between connectors is the tar export/import of
 the company bundle, and it belongs to the company, not to the connection.
 
-Stating this in the dialog is worth a sentence, because "choose where to run"
+Stating this on the chooser is worth a sentence, because "choose where to run"
 reads to a new operator as a switch that moves their work.
 
 ## What has landed, and what has not
@@ -466,7 +477,7 @@ Landed:
 - `cloud`'s waking behaviour — the retry loop, the window, and the row that
   says so;
 - `ssh` end to end: the supervised tunnel roster in `src-tauri/src/ssh.rs` over
-  the system `ssh`, opened from the dialog and re-opened by every probe;
+  the system `ssh`, opened from the chooser and re-opened by every probe;
 - the first-host screen offering the choice rather than describing it;
 - "Manage hosts": renaming, re-addressing and forgetting a connection without
   minting a new id.
@@ -474,12 +485,12 @@ Landed:
 Not yet:
 
 - **the cloud front door.** Control-plane sign-in, the tenant list, and
-  provisioning from the dialog, all gated on the manager exposing an
+  provisioning from the chooser, all gated on the manager exposing an
   account-scoped tenant listing. Until then the tab takes the address the
   platform gave you.
 - **`remote`'s probe-before-commit and sign-in step.** Adding a gateway still
   writes the row first and discovers the typo as a red row rather than as an
-  error in the dialog.
+  error on the chooser.
 - **a tunnel roster in the UI.** `oc_ssh_tunnels` reports a tunnel that
   dropped; nothing renders it yet, so a dropped tunnel currently reads as an
   unreachable host until the next probe re-opens it.

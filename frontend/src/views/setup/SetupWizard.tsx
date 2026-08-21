@@ -42,6 +42,7 @@ import {
   type SetupStatus,
 } from "@/api/setup";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import { OnboardingShell } from "@/components/onboarding-shell";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -474,28 +475,28 @@ export function SetupWizard({ client, onDone, onCancel }: Props) {
 
   if (loadError) {
     return (
-      <Shell>
+      <OnboardingShell>
         <Alert variant="destructive">
           <AlertTitle>Can&apos;t read this instance&apos;s setup</AlertTitle>
           <AlertDescription>{loadError}</AlertDescription>
         </Alert>
-      </Shell>
+      </OnboardingShell>
     );
   }
 
   if (!status) {
     return (
-      <Shell>
+      <OnboardingShell>
         <div className="flex items-center gap-2 text-sm text-muted-foreground">
           <Loader2 className="size-4 animate-spin" /> Reading this instance…
         </div>
-      </Shell>
+      </OnboardingShell>
     );
   }
 
   if (applied) {
     return (
-      <Shell>
+      <OnboardingShell>
         <div className="space-y-4" data-testid="setup-done">
           <h1 className="text-xl font-semibold">You&apos;re set up</h1>
           <p className="text-sm text-muted-foreground">
@@ -604,7 +605,7 @@ export function SetupWizard({ client, onDone, onCancel }: Props) {
             </Button>
           )}
         </div>
-      </Shell>
+      </OnboardingShell>
     );
   }
 
@@ -653,7 +654,7 @@ export function SetupWizard({ client, onDone, onCancel }: Props) {
   };
 
   return (
-    <Shell
+    <OnboardingShell
       header={
         <div className="space-y-4">
           <div className="space-y-1">
@@ -815,7 +816,7 @@ export function SetupWizard({ client, onDone, onCancel }: Props) {
           </Alert>
         )}
       </div>
-    </Shell>
+    </OnboardingShell>
   );
 }
 
@@ -979,41 +980,6 @@ function LayerLock() {
         <code className="font-mono">config.toml</code>. Change it where the host is deployed.
       </span>
     </p>
-  );
-}
-
-/**
- * A card, centred — not an application shell.
- *
- * The previous version put edge-to-edge header and footer rules across the
- * viewport, which is the chrome of an app you live in. This is a task you pass
- * through once, and dressing it as an admin panel made a five-field flow look
- * like a broken settings page: rules running off both edges, a narrow column
- * marooned in the middle of them, and — because the content band was `flex-1` —
- * most of a thousand pixels of nothing between the last field and the buttons.
- *
- * One bounded card instead, centred on both axes, with its own header and its
- * own actions. It grows with its content and stops at 88vh, after which the
- * middle scrolls and the header and actions stay put. Nothing floats, nothing
- * stretches, and the eye has one object to land on.
- */
-function Shell({
-  header,
-  footer,
-  children,
-}: {
-  header?: React.ReactNode;
-  footer?: React.ReactNode;
-  children: React.ReactNode;
-}) {
-  return (
-    <div className="flex min-h-screen items-center justify-center bg-background p-4 sm:p-6">
-      <div className="flex max-h-[88vh] w-full max-w-[34rem] flex-col overflow-hidden rounded-2xl border bg-card shadow-xl">
-        {header && <div className="shrink-0 border-b px-6 py-5">{header}</div>}
-        <div className="min-h-0 flex-1 overflow-y-auto px-6 py-6">{children}</div>
-        {footer && <div className="shrink-0 border-t px-6 py-4">{footer}</div>}
-      </div>
-    </div>
   );
 }
 

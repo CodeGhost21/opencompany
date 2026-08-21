@@ -21,7 +21,7 @@ import {
   type LocalInstance,
 } from "@/api/transport/desktop";
 import { ApiError } from "@/api/types";
-import { AddHostDialog, ConsoleChrome } from "@/components/host-switcher";
+import { ConsoleChrome } from "@/components/host-switcher";
 import { ManageHostsPage } from "@/components/manage-hosts";
 import { Button } from "@/components/ui/button";
 import { resolveConfig } from "@/config";
@@ -40,6 +40,8 @@ import { HostsProvider, useHosts, type HostsValue } from "@/connections/HostsCon
 import { firstHostCopy } from "@/connections/first-host";
 import type { ConnectionId } from "@/connections/types";
 import { ConnectionConsole } from "@/views/ConnectionConsole";
+import { AddHostPage } from "@/views/setup/AddHostPage";
+import { cn } from "@/lib/utils";
 
 /**
  * Reads `?company=&code=` off a magic-link landing.
@@ -554,7 +556,7 @@ function Console() {
 
   return (
     <HostsProvider value={hosts}>
-      <div className="min-h-svh">
+      <ConsoleOrAddHost>
         {active && client ? (
           // Keyed by connection: switching hosts remounts rather than
           // reconciling, so no view can carry one host's in-flight state into
@@ -575,16 +577,39 @@ function Console() {
             <NoConnection starting={!embedded.resolved} desktop={isDesktopRuntime()} />
           </ConsoleChrome>
         )}
-      </div>
-      {/* Beside the console rather than inside it: creating a host on this
-          computer selects it, and that remounts the console. A dialog mounted
-          within would take itself off screen at the moment it succeeded. */}
-      <AddHostDialog />
+      </ConsoleOrAddHost>
       {/* Beside the console for the same reason, and more so: forgetting the
           host on screen selects another one, which remounts the console. A page
           mounted within would unmount itself mid-edit. */}
       <ManageHostsPage />
     </HostsProvider>
+  );
+}
+
+/**
+ * The console, and the add-host screen that stands in front of it.
+ *
+ * Adding a host is a screen of the onboarding flow rather than a dialog over
+ * the console (`views/setup/AddHostPage.tsx`), so it needs somewhere to be
+ * drawn that is *outside* the console: creating a host on this computer selects
+ * it, and that remounts the console. Drawn within, the screen would take itself
+ * off screen at the moment it succeeded.
+ *
+ * The console is **hidden, not unmounted**, while it is up. The console owns
+ * this host's streams and its boot, and someone who opens the chooser and
+ * changes their mind should come back to the page they left rather than to
+ * "Connecting…".
+ *
+ * A component of its own only because the flag lives in `HostsContext`, which
+ * `App` provides and therefore cannot read.
+ */
+function ConsoleOrAddHost({ children }: { children: React.ReactNode }) {
+  const { addingHost } = useHosts();
+  return (
+    <>
+      <div className={cn("min-h-svh", addingHost && "hidden")}>{children}</div>
+      {addingHost ? <AddHostPage /> : null}
+    </>
   );
 }
 
@@ -601,7 +626,7 @@ interface EmbeddedState {
    * Every local instance the core knows about, running or not.
    *
    * The stopped ones are here and nowhere else: they have no address, so they
-   * cannot be connections. The switcher's "Add a host" dialog is where they
+   * cannot be connections. The switcher's "Add a host" screen is where they
    * are startable.
    */
   instances: LocalInstance[];

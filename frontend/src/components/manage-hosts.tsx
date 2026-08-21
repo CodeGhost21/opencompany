@@ -94,7 +94,7 @@ export function validAddress(value: string): boolean {
  * keeps whatever is underneath alive rather than tearing it down and rebuilding
  * it when the page closes.
  *
- * Mounted by `App` beside `AddHostDialog`, for the reason given there.
+ * Mounted by `App` beside `ConsoleOrAddHost`, for the reason given there.
  */
 export function ManageHostsPage() {
   const hosts = useHosts();

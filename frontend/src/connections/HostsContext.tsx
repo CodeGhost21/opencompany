@@ -59,7 +59,7 @@ export interface HostsValue {
    * built before tunnels existed, so the tab is offered only where the button
    * behind it can be honoured.
    *
-   * Rejects with what `ssh` said, which the dialog shows: a refused key names
+   * Rejects with what `ssh` said, which the form shows: a refused key names
    * a specific thing to go and fix.
    */
   onAddSsh?: (target: SshTarget) => Promise<void>;
@@ -86,15 +86,16 @@ export interface HostsValue {
 /**
  * The roster plus the one piece of UI state that must not live in the switcher.
  *
- * "Add a host" opens a dialog, and creating a host on this computer *selects*
- * it — which remounts the console the switcher is drawn inside, taking the
- * dialog with it and closing the roster mid-flow. The rail did not have this
- * problem because it stood outside the console; keeping the open flag here, and
- * the dialog mounted beside the console rather than within it, is how the
- * switcher keeps that property from its new home.
+ * "Add a host" opens a screen (`views/setup/AddHostPage.tsx`), and creating a
+ * host on this computer *selects* it — which remounts the console the switcher
+ * is drawn inside, taking that screen with it and closing the flow halfway
+ * through. The rail did not have this problem because it stood outside the
+ * console; keeping the open flag here, and the screen mounted beside the
+ * console rather than within it, is how the switcher keeps that property from
+ * its new home.
  */
 export interface HostsContextValue extends HostsValue {
-  /** Whether the "Add a host" dialog is open. */
+  /** Whether the "Add a host" screen is up. */
   addingHost: boolean;
   setAddingHost: (open: boolean) => void;
   /**
