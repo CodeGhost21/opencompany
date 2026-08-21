@@ -111,6 +111,7 @@ import {
   hasLegacyLocal,
   hasOperatorContent,
   isAgentsFolder,
+  isRosterRoot,
   isDerivedNode,
   isSecretNode,
   legacyImportDeclined,
@@ -2099,7 +2100,7 @@ function sortRosterFolders(items: FsNode[], names: RosterNames): FsNode[] {
 
 function Tree(props: TreeProps) {
   const items = childrenOf(props.nodes, props.parentId);
-  const ordered = isAgentsFolder(nodeById(props.nodes, props.parentId))
+  const ordered = isRosterRoot(nodeById(props.nodes, props.parentId))
     ? sortRosterFolders(items, props.rosterNames)
     : items;
   return (
@@ -2180,7 +2181,7 @@ function TreeRow({ node, ...props }: TreeProps & { node: FsNode }) {
   // recognizes the teammate by name, not by that id (issue #973). The id stays
   // the label everywhere else in the tree: it is only ever a roster id one
   // level below `Agents/`.
-  const isRosterFolder = isFolder && isAgentsFolder(nodeById(nodes, node.parentId));
+  const isRosterFolder = isFolder && isRosterRoot(nodeById(nodes, node.parentId));
   const displayName = isRosterFolder ? rosterDisplayName(node.name, rosterNames) : node.name;
   /** What this row is actually called on screen. */
   const label = isFolder ? displayName : titleOf(node);
