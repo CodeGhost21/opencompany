@@ -1404,7 +1404,7 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
 
         // Then set a cap on the same teammate. The response is a roster row.
-        let (status, row) = put_budget(&state, "ceo", json!({"budgetUsdDaily": 4.0})).await;
+        let (status, row) = put_budget(&state, "analyst", json!({"budgetUsdDaily": 4.0})).await;
         assert_eq!(status, StatusCode::OK, "{row}");
         assert_eq!(
             row["role"], "Managing Director",
