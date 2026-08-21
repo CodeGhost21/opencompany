@@ -64,11 +64,10 @@ description = "Why it closed — bought, passed and on what, or lost to another 
 name = "refs"
 role = "refs"
 
-[[status]]
-name = "sourced"
 
 [[status]]
 name = "underwriting"
+aliases = ["sourced"]
 
 [[status]]
 name = "offer_out"
@@ -84,15 +83,12 @@ label = "Closed"
 closed = true
 needs_reason = true
 
-[[status]]
-name = "passed"
-closed = true
-needs_reason = true
 
 [[status]]
 name = "lost"
 closed = true
 needs_reason = true
+aliases = ["passed"]
 
 [[section]]
 heading = "Under contract"
@@ -103,7 +99,7 @@ order = "recent"
 [[section]]
 heading = "In the funnel"
 blurb = "Sourced or being underwritten."
-statuses = ["sourced", "underwriting"]
+statuses = ["underwriting"]
 order = "recent"
 
 [[section]]
@@ -113,5 +109,5 @@ Bought, passed, or lost — each with the reason. The passed rows are the buy bo
 made concrete, and the lost ones say what this company is actually willing to \
 pay versus what it says it is.\
 """
-statuses = ["closed_won", "passed", "lost"]
+statuses = ["closed_won", "lost"]
 cap = 20

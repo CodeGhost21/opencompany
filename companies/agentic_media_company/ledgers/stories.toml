@@ -72,9 +72,8 @@ name = "pitched"
 
 [[status]]
 name = "reporting"
+aliases = ["verifying"]
 
-[[status]]
-name = "verifying"
 
 [[status]]
 name = "ready"
@@ -92,7 +91,7 @@ needs_reason = true
 [[section]]
 heading = "In the pipeline"
 blurb = "Being reported or verified. `verifying` is a real stage and nothing skips it."
-statuses = ["reporting", "verifying", "ready"]
+statuses = ["reporting", "ready"]
 order = "recent"
 
 [[section]]

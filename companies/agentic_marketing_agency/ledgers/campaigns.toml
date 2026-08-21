@@ -82,9 +82,8 @@ name = "approved"
 
 [[status]]
 name = "live"
+aliases = ["paused"]
 
-[[status]]
-name = "paused"
 
 [[status]]
 name = "ended"
@@ -105,7 +104,7 @@ order = "recent"
 [[section]]
 heading = "Approved and paused"
 blurb = "Cleared to run, or stopped mid-flight. A paused row should say what would restart it."
-statuses = ["approved", "paused"]
+statuses = ["approved", "live"]
 order = "recent"
 
 [[section]]
