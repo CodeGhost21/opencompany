@@ -426,10 +426,19 @@ impl CompanyWorkspace {
         if self.is_own_home(&segments) || self.is_strictly_inside_own_home(&segments) {
             return true;
         }
-        let key = segments.join("/");
+        // Compared under the workspace naming rule, on both sides. A grant is
+        // written by hand in a manifest — often before this rule existed, and
+        // always without knowing which spelling the tree ended up storing — so
+        // an exact string match would refuse an agent the very document its
+        // operator granted it, over a capital letter. Normalizing both sides
+        // cannot widen a grant: two paths that normalize alike are one node in
+        // this tree, which is the same rule the index resolves by.
+        let key = crate::company::workspace_names::kebab_path(&segments.join("/"));
         scope.iter().any(|allowed| {
             crate::company::workspace_paths::split_logical_path(allowed)
-                .map(|allowed_segments| allowed_segments.join("/") == key)
+                .map(|allowed_segments| {
+                    crate::company::workspace_names::kebab_path(&allowed_segments.join("/")) == key
+                })
                 .unwrap_or(false)
         })
     }
