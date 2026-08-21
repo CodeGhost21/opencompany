@@ -187,7 +187,7 @@ const AUTOSAVE_DELAY_MS = 800;
 const SEARCH_DEBOUNCE_MS = 250;
 
 /** The folder created to hold notes rescued from the retired local scratchpad. */
-const IMPORT_FOLDER_NAME = "Imported from this browser";
+const IMPORT_FOLDER_NAME = "imported-from-this-browser";
 
 /**
  * The body of the import receipt, for a scratchpad of `files` notes and
