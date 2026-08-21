@@ -391,11 +391,11 @@ fn workspace_paths_render_and_terminate() {
         sha256: None,
     };
     let paths = workspace_paths(vec![
-        node("1", "Standards", None, NodeKind::Folder),
-        node("2", "Tone.md", Some("1"), NodeKind::File),
-        node("3", "README.md", None, NodeKind::File),
+        node("1", "standards", None, NodeKind::Folder),
+        node("2", "tone.md", Some("1"), NodeKind::File),
+        node("3", "readme.md", None, NodeKind::File),
     ]);
-    assert_eq!(paths, vec!["README.md", "Standards", "standards/Tone.md"]);
+    assert_eq!(paths, vec!["readme.md", "standards", "standards/tone.md"]);
 
     // A cycle is not a reachable state, but it must not be an infinite loop.
     let cyclic = workspace_paths(vec![

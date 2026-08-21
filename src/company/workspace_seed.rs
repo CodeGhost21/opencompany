@@ -181,9 +181,9 @@ mod tests {
     fn walk_is_deterministic_and_markdown_only() {
         let dir = std::env::temp_dir().join(format!("oc-ws-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(dir.join("Brand")).unwrap();
-        std::fs::create_dir_all(dir.join("Campaigns")).unwrap();
-        std::fs::write(dir.join("README.md"), "# Root\n[[Brand voice]]").unwrap();
+        std::fs::create_dir_all(dir.join("brand")).unwrap();
+        std::fs::create_dir_all(dir.join("campaigns")).unwrap();
+        std::fs::write(dir.join("readme.md"), "# Root\n[[Brand voice]]").unwrap();
         std::fs::write(dir.join("brand/brand-voice.md"), "# Voice").unwrap();
         std::fs::write(dir.join("campaigns/notes.txt"), "ignored").unwrap();
         std::fs::write(dir.join("cover.png"), b"\x89PNG").unwrap();
