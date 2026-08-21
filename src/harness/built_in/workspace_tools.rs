@@ -2549,7 +2549,7 @@ mod tests {
     #[test]
     fn an_absolute_host_path_resolves_to_nothing() {
         let index = PathIndex::build(vec![
-            folder("a", "Standards", None),
+            folder("a", "standards", None),
             file("b", "engineering-standards.md", Some("a")),
         ]);
         let err = index.resolve(Some("/etc/passwd"), None).unwrap_err();
@@ -2564,7 +2564,7 @@ mod tests {
     #[test]
     fn a_duplicated_path_is_refused_rather_than_guessed() {
         let index = PathIndex::build(vec![
-            folder("a", "Standards", None),
+            folder("a", "standards", None),
             file("b1", "dup.md", Some("a")),
             file("b2", "dup.md", Some("a")),
         ]);
@@ -2703,7 +2703,7 @@ mod tests {
         );
         assert!(all.contains("readme.md"), "{all}");
 
-        let scoped = text(&tool.execute(json!({"prefix": "Standards"})).await.unwrap());
+        let scoped = text(&tool.execute(json!({"prefix": "standards"})).await.unwrap());
         assert!(scoped.contains("engineering-standards.md"), "{scoped}");
         assert!(!scoped.contains("readme.md"), "{scoped}");
     }
@@ -2793,7 +2793,7 @@ mod tests {
     async fn reading_a_folder_points_at_the_listing_instead() {
         let (_dir, store) = seeded("acme").await;
         let tool = WorkspaceReadTool::new(ws(store, CompanyId::new("acme")));
-        let result = tool.execute(json!({"path": "Standards"})).await.unwrap();
+        let result = tool.execute(json!({"path": "standards"})).await.unwrap();
         assert!(result.is_error);
         let out = text(&result);
         assert!(out.contains("is a folder"), "{out}");
@@ -2914,7 +2914,7 @@ mod tests {
     /// A tree with one folder and one note inside it, for the fault doubles.
     fn small_tree() -> Vec<WorkspaceNode> {
         vec![
-            folder("f-standards", "Standards", None),
+            folder("f-standards", "standards", None),
             file("n-eng", "engineering-standards.md", Some("f-standards")),
         ]
     }
@@ -3083,7 +3083,7 @@ mod tests {
         // 3. The target is a folder, and the useful next call is a listing.
         let (_dir, store) = seeded("acme").await;
         let tool = WorkspaceReadTool::new(ws(store, id.clone()));
-        let outcome = tool.execute(json!({"path": "Standards"})).await.unwrap();
+        let outcome = tool.execute(json!({"path": "standards"})).await.unwrap();
         assert_own_sentence(&outcome, "is a folder, not a note");
 
         // 4. The note was deleted between the tree read and the body read.
@@ -3273,7 +3273,7 @@ mod tests {
         // "#" appears in both notes; the prefix keeps the root README out.
         let scoped = text(
             &tool
-                .execute(json!({"query": "#", "prefix": "Standards"}))
+                .execute(json!({"query": "#", "prefix": "standards"}))
                 .await
                 .unwrap(),
         );
@@ -3609,7 +3609,7 @@ mod tests {
         let tool = WorkspaceWriteTool::new(ws(store, CompanyId::new("acme")));
         let result = tool
             .execute(json!({
-                "path": "Standards",
+                "path": "standards",
                 "content": "x",
                 "expected_updated_at": 1_000,
             }))
@@ -3884,7 +3884,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_long_listing_fits_the_budget_and_carries_its_guidance_in_the_header() {
-        let mut nodes = vec![folder("f-standards", "Standards", None)];
+        let mut nodes = vec![folder("f-standards", "standards", None)];
         for n in 0..MAX_LIST_ENTRIES {
             nodes.push(file(
                 &format!("node-{n:04}-0000000000"),

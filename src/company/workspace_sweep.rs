@@ -494,7 +494,7 @@ mod tests {
         claim_folder(
             ws.as_ref(),
             &company,
-            "creative_studio",
+            "creative-studio",
             Some(&desks),
             WorkspaceOrigin::Seed,
         )
@@ -760,7 +760,7 @@ mod tests {
     fn a_nested_folder_named_agents_is_not_the_root() {
         let nodes = vec![
             folder("root", AGENTS_ROOT, None),
-            folder("archive", "Archive", None),
+            folder("archive", "archive", None),
             folder("decoy", AGENTS_ROOT, Some("archive")),
             folder("under-decoy", "ceo", Some("decoy")),
         ];

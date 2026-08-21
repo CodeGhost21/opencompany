@@ -52,7 +52,7 @@ fn store() -> (tempfile::TempDir, Arc<dyn WorkspaceStore>) {
 async fn seeded() -> (tempfile::TempDir, Arc<dyn WorkspaceStore>, CompanyId) {
     let (dir, ops) = store();
     let id = CompanyId::new("acme");
-    ops.create(&id, &folder("f-std", "Standards", None), None)
+    ops.create(&id, &folder("f-std", "standards", None), None)
         .await
         .unwrap();
     ops.create(
@@ -71,7 +71,7 @@ async fn seeded() -> (tempfile::TempDir, Arc<dyn WorkspaceStore>, CompanyId) {
     .unwrap();
     ops.create(
         &id,
-        &file("n-readme", "README.md", None, 1_000),
+        &file("n-readme", "readme.md", None, 1_000),
         Some("# Acme\nNothing to see."),
     )
     .await
@@ -153,7 +153,7 @@ async fn a_folder_matches_by_name_and_never_carries_an_excerpt() {
     let folder = outcome
         .hits
         .iter()
-        .find(|h| h.path == "Standards")
+        .find(|h| h.path == "standards")
         .expect("the folder itself must be a hit");
     assert_eq!(folder.node.kind, NodeKind::Folder);
     assert_eq!(folder.matched, MatchKind::Name);
@@ -456,16 +456,16 @@ async fn an_over_large_limit_is_clamped_to_the_maximum() {
 async fn a_prefix_scopes_the_search_to_one_subtree() {
     let (_dir, ops, id) = seeded().await;
     // "standards" matches the folder, the note under it, and nothing at the root.
-    let scoped = search_workspace(ops.as_ref(), &id, "e", Some("Standards"), limit(20))
+    let scoped = search_workspace(ops.as_ref(), &id, "e", Some("standards"), limit(20))
         .await
         .unwrap();
     assert!(
-        scoped.hits.iter().all(|h| h.path.starts_with("Standards")),
+        scoped.hits.iter().all(|h| h.path.starts_with("standards")),
         "{:?}",
         paths(&scoped)
     );
     assert!(
-        !paths(&scoped).contains(&"README.md"),
+        !paths(&scoped).contains(&"readme.md"),
         "the root note is outside the scope: {:?}",
         paths(&scoped)
     );

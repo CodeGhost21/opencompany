@@ -208,7 +208,7 @@ mod tests {
 
         let brand = nodes
             .iter()
-            .find(|n| n.rel_path == Path::new("Brand"))
+            .find(|n| n.rel_path == Path::new("brand"))
             .unwrap();
         assert_eq!(brand.kind, NodeKind::Folder);
         assert_eq!(brand.content, None);
