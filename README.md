@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="gitbooks/.gitbook/assets/opencompany-hero.gif" alt="OpenCompany — run an entire company with a headcount of one" />
+  <img src="gitbooks/.gitbook/assets/opencompany-hero.gif" alt="OpenCompany: run an entire company with a headcount of one" />
 </p>
 
 <h1 align="center">OpenCompany</h1>
@@ -10,7 +10,7 @@
 
 <p align="center">
   OpenCompany is the operating layer for one-person businesses powered by
-  agents. You bring the vision and the judgment calls. Your agents do the work —
+  agents. You bring the vision and the judgment calls. Your agents do the work:
   every function, around the clock, at the speed of software.
 </p>
 
@@ -32,7 +32,7 @@
 > [!WARNING]
 > **🚧 Work in progress.** OpenCompany is under active development and moving
 > fast. APIs, the CLI, the example harnesses, and the docs will change without
-> notice. Explore it, fork it, build on it — but don't depend on anything
+> notice. Explore it, fork it, build on it, but don't depend on anything
 > staying put yet. Not production-ready.
 
 ---
@@ -43,13 +43,13 @@ For a century, ambition meant headcount. Want to ship a product? Hire engineers.
 Want customers? Hire marketers, then sales, then support. Every new capability
 was a new payroll line, a new manager, a new quarter of ramp-up.
 
-That tax is gone. OpenCompany turns a single operator into a full org chart —
-scouts, founders, engineers, designers, marketers, lawyers, finance, support,
-recruiters — instantiated as agents, coordinated by one host, working while you
-sleep. You stay where humans are irreplaceable: **capital, taste, and the
+That tax is gone. OpenCompany turns a single operator into a full org chart.
+Scouts, founders, engineers, designers, marketers, lawyers, finance, support and
+recruiters, all instantiated as agents, coordinated by one host, working while
+you sleep. You stay where humans are irreplaceable: **capital, taste, and the
 decisions that actually matter.** Everything else is delegated.
 
-This isn't a chatbot with a to-do list. It's a **company runtime** — a durable
+This isn't a chatbot with a to-do list. It's a **company runtime**: a durable
 host that stands up a roster of specialized agents, gives each one a clear
 mandate, and runs them as a coordinated business on top of the OpenHuman and
 TinyHumans runtimes.
@@ -57,8 +57,8 @@ TinyHumans runtimes.
 ## What one person can now run
 
 Every folder under [`companies/`](companies/) is a complete company you can
-launch today — a roster of agents, their responsibilities, and the handful of
-moments where a human signs off:
+launch today, with a roster of agents, their responsibilities, and the handful
+of moments where a human signs off:
 
 | You want to run a… | Your agents handle | You keep |
 | --- | --- | --- |
@@ -82,7 +82,7 @@ moments where a human signs off:
 | **[Pharma Startup](companies/agentic_pharma_startup/)** | Literature, molecule discovery, simulation, trial planning | The lab work |
 | **[Signals + Opportunity Studio](companies/signals_opportunity_studio/)** | Scouting signals, clustering pains, ranking opportunities into a weekly brief | Which opportunities to fund |
 
-Nineteen companies. One operator. Pick one and run it — or run several at once.
+Nineteen companies. One operator. Pick one and run it, or run several at once.
 [`companies/README.md`](companies/README.md) has the full catalog.
 
 ## Quickstart
@@ -98,15 +98,15 @@ cd opencompany
 ```
 
 The first run takes a few minutes while it downloads and builds. When it
-settles, open **<http://localhost:5173>** — that's the console, where you watch
+settles, open **<http://localhost:5173>**. That's the console, where you watch
 your agents work and answer anything waiting on you.
 `./scripts/list-demos.sh` lists the other businesses you can launch in place of
 `marketing`, and `./scripts/launch-demo.sh marketing down` shuts it all down.
 
 Prefer to build the host from source, deploy it somewhere, or change the runtime
-itself? That path — Cargo builds, Compose, feature flags, the Tauri desktop
-preview, and DigitalOcean / AWS deploys — lives in
-[docs/running-locally.md](docs/running-locally.md).
+itself? That path lives in [docs/running-locally.md](docs/running-locally.md):
+Cargo builds, Compose, feature flags, the Tauri desktop preview, and
+DigitalOcean / AWS deploys.
 
 > **You'll want a TinyHumans API key.** It's what unlocks Medulla and lets the
 > agents think and act. Without one you can still launch a company and look
@@ -122,7 +122,7 @@ preview, and DigitalOcean / AWS deploys — lives in
 - **Humans in the loop where it counts.** Every harness names the exact
   decisions reserved for you. Delegate the work; keep the judgment.
 - **Built on proven runtimes.** OpenCompany is a light host over OpenHuman and
-  the TinyHumans agent modules — it reuses their runtime instead of
+  the TinyHumans agent modules, so it reuses their runtime instead of
   reinventing it.
 - **Rust-fast and inspectable.** An Axum HTTP surface, a small default build,
   and deeper capabilities behind feature flags. Simple to start, honest to
@@ -132,11 +132,11 @@ preview, and DigitalOcean / AWS deploys — lives in
 ## The engine: Medulla
 
 A company of one only works if something can hold the whole company in its head.
-That something is **Medulla** — TinyHumans' orchestrator model, purpose-built to
+That something is **Medulla**, TinyHumans' orchestrator model, purpose-built to
 run large fleets of agents as a single coordinated business.
 
-Medulla is orchestrator-first. Every event — a customer email, a market signal,
-a finished task — lands on a deep orchestration tier that reads the full
+Medulla is orchestrator-first. Every event, whether a customer email, a market
+signal or a finished task, lands on a deep orchestration tier that reads the full
 picture, decides what matters, and fans the work out across your agents. As your
 company grows from nine agents to nine hundred, Medulla is what keeps it
 coherent, on-strategy, and moving without you in every message. It's a hosted
@@ -145,7 +145,7 @@ that points your companies at it.
 
 ## Make it yours
 
-Each company folder holds a `company.toml` — a plain text file naming the roles,
+Each company folder holds a `company.toml`, a plain text file naming the roles,
 what each one owns, and where you want to be asked before anything happens. It's
 written to be read by people; changing a role is editing a few lines rather than
 programming. `opencompany check` reports any problems in plain language, and
@@ -166,8 +166,8 @@ adding a new business is a new folder, not a new program.
 ## Contributing
 
 New here? Start with the
-[good first issues](https://github.com/tinyhumansai/opencompany/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22)
-— they're scoped to be finishable in a sitting.
+[good first issues](https://github.com/tinyhumansai/opencompany/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22),
+which are scoped to be finishable in a sitting.
 [CONTRIBUTING.md](CONTRIBUTING.md) has the local checks to run before opening a
 pull request, and anything big enough to break an existing company starts as an
 [RFC](https://github.com/tinyhumansai/opencompany/discussions/categories/rfcs)
@@ -179,10 +179,10 @@ rather than a PR.
 questions get answered and large changes get argued out before they're built.
 [SUPPORT.md](SUPPORT.md) says which channel takes what.
 
-- **Discord** — <https://discord.tinyhumans.ai>
-- **X** — [@tinyhumansai](https://x.com/tinyhumansai)
-- **Reddit** — [r/tinyhumansai](https://www.reddit.com/r/tinyhumansai/)
-- **Website** — [tinyhumans.ai/opencompany](https://tinyhumans.ai/opencompany)
+- **Discord**: <https://discord.tinyhumans.ai>
+- **X**: [@tinyhumansai](https://x.com/tinyhumansai)
+- **Reddit**: [r/tinyhumansai](https://www.reddit.com/r/tinyhumansai/)
+- **Website**: [tinyhumans.ai/opencompany](https://tinyhumans.ai/opencompany)
 
 ## License
 
