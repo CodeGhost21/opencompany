@@ -685,7 +685,8 @@ async fn a_chat_created_card_lands_off_the_dispatch_trigger() {
         "a chat-created card must never arrive already dispatched"
     );
     assert_eq!(
-        created["column"], crate::ledger::board::PHASE_PENDING,
+        created["column"],
+        crate::ledger::board::PHASE_PENDING,
         "it lands in the board's intake lane, where the human drag is the gate"
     );
     assert_eq!(created["stage"], serde_json::Value::Null, "{created}");

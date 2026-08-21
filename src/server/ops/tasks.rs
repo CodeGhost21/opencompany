@@ -24,9 +24,8 @@ use crate::company::steer::{InflightEntry, MAX_REDIRECT_CHARS, SteerAction, Stee
 use crate::company::{WorkflowGraphSpec, create_company_workflow, raw_workflow_from_spec};
 use crate::error::OpenCompanyError;
 use crate::ports::tasks::{
-    COLUMN_DONE, COLUMN_TODO, TaskDeliverable, TaskOutput, TaskOutputAction,
-    TaskOutputSource, TaskOutputWorkflow, TaskRecord, TaskWorkflowProposal, cap_discussion,
-    is_board_column,
+    COLUMN_DONE, COLUMN_TODO, TaskDeliverable, TaskOutput, TaskOutputAction, TaskOutputSource,
+    TaskOutputWorkflow, TaskRecord, TaskWorkflowProposal, cap_discussion, is_board_column,
 };
 use crate::ports::types::CompanyEvent;
 use crate::ports::{generate_id, now_millis};

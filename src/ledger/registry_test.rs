@@ -80,10 +80,7 @@ fn the_boards_statuses_are_its_three_phases() {
         crate::ledger::board::phase_ids().to_vec(),
         "the ledger's statuses must be the board's phases, in board order"
     );
-    assert_eq!(
-        tasks.closing_statuses(),
-        [crate::ledger::board::PHASE_DONE]
-    );
+    assert_eq!(tasks.closing_statuses(), [crate::ledger::board::PHASE_DONE]);
 }
 
 /// The cap that makes this issue's point on every ledger at once: nothing a
