@@ -137,6 +137,30 @@ pub async fn start_with(
     // against the same default.
     let instance = opencompany::app::prepare_instance(Some(data_dir)).await?;
 
+    // Both of these must run before any company runtime or agent harness
+    // exists, and this is the last point in the boot where that is still true.
+    //
+    // The keyring pin registers the instance root as the vendored runtime's
+    // credential directory, so an MCP server's token lands beside the journal
+    // rather than at the end of the vendored resolver's own fallback chain
+    // (`$HOME`, then `/tmp` at no log level — issue #451). `main` exports
+    // `OPENHUMAN_WORKSPACE` for the same root, but that only wins if nothing
+    // has touched the keyring yet; registering says it outright.
+    //
+    // The identity tags every request the embedded core makes to the
+    // TinyHumans backend as opencompany's rather than the vendored runtime's
+    // own `openhuman` default (issue #376). Core reads it into a client's
+    // default headers AT CONSTRUCTION, so a later call would not re-tag a
+    // client that already exists.
+    #[cfg(feature = "openhuman")]
+    {
+        tracing::info!(
+            "{}",
+            opencompany::app::journal::pin_keyring(instance.journal()).summary()
+        );
+        opencompany::product::install_into_embedded_core();
+    }
+
     let config = AppConfig {
         bind: "127.0.0.1:0".to_string(),
         // The `[workspace]` section of the root's `config.toml`, resolved by
