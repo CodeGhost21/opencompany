@@ -210,13 +210,39 @@ pub fn column(id: &str) -> Option<&'static BoardColumn> {
     COLUMNS.iter().find(|column| column.id == id)
 }
 
-/// The distinct section headings, in the order their first column appears.
-pub fn sections() -> Vec<&'static BoardColumn> {
-    let mut out: Vec<&'static BoardColumn> = Vec::new();
-    for column in &COLUMNS {
-        if !out.iter().any(|held| held.section == column.section) {
-            out.push(column);
-        }
+/// The phase `id` names, if it names one.
+pub fn phase(id: &str) -> Option<&'static BoardPhase> {
+    PHASES.iter().find(|phase| phase.id == id)
+}
+
+/// The phase a stage is filed under, or the stage itself when this build has
+/// never heard of it.
+///
+/// Falling back to the input rather than to [`PHASE_PENDING`] is deliberate: a
+/// card carrying a stage from a newer build must not be silently reported as
+/// not-started, which would make *what is outstanding* answer wrong in the
+/// safest-looking direction. An unknown word renders as itself and is visibly
+/// odd.
+pub fn phase_of(stage: &str) -> &str {
+    column(stage).map_or(stage, |column| column.phase)
+}
+
+/// The stage a card enters when something drops it into `phase`.
+///
+/// `None` when `phase` is not one of the three — which is how the write
+/// boundary tells a phase word from a stage word without keeping a second list
+/// of either.
+pub fn entry_stage(phase: &str) -> Option<&'static str> {
+    self::phase(phase).map(|phase| phase.entry_stage)
+}
+
+/// Every phase id, in board order.
+pub const fn phase_ids() -> [&'static str; PHASES.len()] {
+    let mut out = [""; PHASES.len()];
+    let mut index = 0;
+    while index < PHASES.len() {
+        out[index] = PHASES[index].id;
+        index += 1;
     }
     out
 }
@@ -242,14 +268,63 @@ mod test {
         );
     }
 
-    /// The labels, pinned.
-    ///
-    /// This assertion used to be impossible to make here. The console kept its
-    /// own copy of these strings, so the only thing that could join the two
-    /// lists was an end-to-end test driving a rendered board against a live
-    /// host — `test/e2e/board-columns.spec.ts`, whose comment said as much:
-    /// *"a Rust test cannot see the TS list."* Now the console reads these off
-    /// the `tasks` ledger, so there is one list and this is it.
+    /// The three phases, pinned. This is the vocabulary every reader of the
+    /// board is shown, and the whole of it.
+    #[test]
+    fn there_are_exactly_three_phases_and_these_are_they() {
+        assert_eq!(phase_ids(), ["pending", "working", "done"]);
+        let labels: Vec<&str> = PHASES.iter().map(|phase| phase.label).collect();
+        assert_eq!(labels, ["Pending", "Working", "Done"]);
+    }
+
+    /// Every stage names a phase that exists, and the four middle stages all
+    /// name the same one — which is the collapse, asserted rather than assumed.
+    #[test]
+    fn every_stage_files_under_a_real_phase() {
+        for column in &COLUMNS {
+            assert!(
+                phase(column.phase).is_some(),
+                "`{}` files under `{}`, which is not a phase",
+                column.id,
+                column.phase
+            );
+        }
+        let working: Vec<&str> = COLUMNS
+            .iter()
+            .filter(|column| column.phase == PHASE_WORKING)
+            .map(|column| column.id)
+            .collect();
+        assert_eq!(
+            working,
+            [
+                COLUMN_PLANNING,
+                COLUMN_IN_PROGRESS,
+                COLUMN_PAUSED,
+                COLUMN_IN_REVIEW
+            ]
+        );
+    }
+
+    /// A phase word resolves to a stage; a stage word does not resolve to
+    /// itself. That asymmetry is what lets the write boundary tell them apart.
+    #[test]
+    fn a_phase_resolves_to_the_stage_a_drop_writes() {
+        assert_eq!(entry_stage(PHASE_PENDING), Some(COLUMN_TODO));
+        assert_eq!(entry_stage(PHASE_WORKING), Some(COLUMN_IN_PROGRESS));
+        assert_eq!(entry_stage(PHASE_DONE), Some(COLUMN_DONE));
+        assert_eq!(entry_stage(COLUMN_IN_REVIEW), None);
+        assert_eq!(entry_stage(""), None);
+    }
+
+    /// An unknown stage reports itself rather than being filed as pending.
+    #[test]
+    fn an_unknown_stage_is_its_own_phase() {
+        assert_eq!(phase_of(COLUMN_IN_REVIEW), PHASE_WORKING);
+        assert_eq!(phase_of("teleported"), "teleported");
+    }
+
+    /// The stage labels, pinned. These are what a card's badge and an exported
+    /// record read, now that they are no longer column headings.
     #[test]
     fn the_labels_are_the_ones_every_surface_renders() {
         let labels: Vec<&str> = COLUMNS.iter().map(|column| column.label).collect();
@@ -279,46 +354,25 @@ mod test {
         }
     }
 
-    /// Done is the only finished column, and it is reached only by a person's
+    /// Done is the only finished phase, and it is reached only by a person's
     /// verdict. Calling review or paused closed would make "what is still
     /// outstanding" answer wrong on every surface at once.
     #[test]
-    fn exactly_one_column_is_closed_and_it_is_done() {
-        let closed: Vec<&str> = COLUMNS
+    fn exactly_one_phase_is_closed_and_it_is_done() {
+        let closed: Vec<&str> = PHASES
             .iter()
-            .filter(|column| column.closed)
-            .map(|column| column.id)
+            .filter(|phase| phase.closed)
+            .map(|phase| phase.id)
             .collect();
-        assert_eq!(closed, [COLUMN_DONE]);
+        assert_eq!(closed, [PHASE_DONE]);
     }
 
     #[test]
-    fn columns_sharing_a_section_share_its_blurb() {
-        for column in &COLUMNS {
-            let first = COLUMNS
-                .iter()
-                .find(|held| held.section == column.section)
-                .expect("its own section exists");
-            assert_eq!(
-                column.blurb, first.blurb,
-                "`{}` disagrees with the rest of `{}` about what the section is for",
-                column.id, column.section
-            );
+    fn every_phase_says_what_it_is_for() {
+        for phase in &PHASES {
+            assert!(!phase.blurb.is_empty(), "{} has no blurb", phase.id);
+            assert!(!phase.label.is_empty(), "{} has no label", phase.id);
         }
-    }
-
-    #[test]
-    fn the_sections_are_the_distinct_headings_in_first_appearance_order() {
-        let headings: Vec<&str> = sections().iter().map(|column| column.section).collect();
-        assert_eq!(
-            headings,
-            [
-                "Not started",
-                "In flight",
-                "Waiting on a person",
-                "Recently done"
-            ]
-        );
     }
 
     #[test]
@@ -326,5 +380,12 @@ mod test {
         assert_eq!(column("done").map(|held| held.label), Some("Done"));
         assert!(column("in-progress").is_none());
         assert!(column("").is_none());
+    }
+
+    #[test]
+    fn a_phase_is_found_by_id_and_an_invented_one_is_not() {
+        assert_eq!(phase("working").map(|held| held.label), Some("Working"));
+        assert!(phase("in_progress").is_none());
+        assert!(phase("").is_none());
     }
 }
