@@ -78,6 +78,29 @@ Rules that hold on both paths:
 The runtime reports the outcome as `destination` (`tinyhumans` | `github` |
 `local`) so the console can describe what happened rather than infer it.
 
+## The shared board
+
+Forwarding a report is only half of a loop; the other half is seeing it beside
+everyone else's. A provisioned instance proxies the hub's **shared board** —
+the same list OpenHuman's console renders — under
+`GET /api/v1/companies/{id}/feedback/board` and its item, vote and comment
+routes ([runtime/api.md](../runtime/api.md)).
+
+- The board is the **hub's**, not the runtime's. Nothing about it is stored
+  locally; the runtime only lends the console its credential, so a browser
+  never holds one and there is no cross-origin call to a host it could not
+  authenticate to anyway.
+- A vote or a comment is the **instance's**, recorded against the credential's
+  owner — the same identity a forwarded report is filed under. Every console
+  on one host therefore shares one vote per item.
+- An **unprovisioned** instance has no board at all: every board route answers
+  `404 tinyhumans_no_board`, and the console hides the surface. An empty board
+  and an absent one must not look the same — the first says nobody has asked
+  for anything, and that would be a lie.
+- Filtering (`type`, `status`), ordering (`hot` / `top` / `new`) and paging are
+  the hub's; the runtime clamps `page` and `limit` into what the hub accepts and
+  ignores a filter value it does not recognize rather than refusing the request.
+
 ## Agent-filed issues
 
 Assisted/auto filings are posted by a shared bot account and **signed with

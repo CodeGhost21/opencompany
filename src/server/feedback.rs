@@ -50,14 +50,17 @@ struct FeedbackRequest {
     preview: bool,
 }
 
-fn lookup(state: &AppState, id: &str) -> Result<Arc<CompanyRuntime>, ApiError> {
+/// Resolves a company runtime by id. Shared with the board routes in
+/// [`super::feedback_board`], which address companies exactly the same way.
+pub(crate) fn lookup(state: &AppState, id: &str) -> Result<Arc<CompanyRuntime>, ApiError> {
     state
         .registry()
         .get(&CompanyId::new(id))
         .ok_or_else(|| ApiError(OpenCompanyError::CompanyNotFound(id.to_string())))
 }
 
-fn sole(state: &AppState) -> Result<Arc<CompanyRuntime>, ApiError> {
+/// The sole company on a single-company host, for the `/company/...` aliases.
+pub(crate) fn sole(state: &AppState) -> Result<Arc<CompanyRuntime>, ApiError> {
     state.registry().sole().ok_or_else(|| {
         ApiError(OpenCompanyError::CompanyNotFound(
             "single-company".to_string(),

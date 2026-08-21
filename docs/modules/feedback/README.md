@@ -23,9 +23,20 @@ a non-negotiable privacy gate in between.
   `POST /feedback/ingest`, where it is recorded on behalf of the credential's
   owner, and the filer above is skipped.
 
+- the **board** (`board.rs`) — the types for the hub's shared, cross-product
+  feedback board (items, comments, votes, a page). Nothing is stored locally;
+  `TinyHumansClient` grew four proxy calls (`list_board`, `board_item`,
+  `vote_board_item`, `comment_board_item`) and `src/server/feedback_board.rs`
+  exposes them under `.../feedback/board`. The mock client serves an in-memory
+  board, so filtering, paging and vote arithmetic are exercised offline.
+
 The scrub-then-preview gate returns the exact, byte-for-byte final issue body;
 nothing is transmitted without confirmation or standing per-category consent,
 and both destinations receive that identical body. Capture routes:
 `POST /api/v1/companies/{id}/feedback`, a built-in `feedback` tool, and an
 operator-chat intent. `GET` on the same path lists past reports as the
 `FeedbackSummary` projection, which omits the operator's local-only words.
+
+The console's Feedback page renders both halves: the local capture form, and —
+on a provisioned instance — the shared board, where the same asks everyone else
+filed can be voted on and replied to.

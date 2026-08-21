@@ -664,6 +664,79 @@ export interface FeedbackSummary {
 }
 
 /**
+ * The shared feedback board (`GET .../feedback/board`).
+ *
+ * The board is not this host's: it lives on the TinyHumans hub, where every
+ * product's operators file into the same list, and the host proxies it so the
+ * console never holds a hub credential. An instance with no credential has no
+ * board and every board route 404s with `tinyhumans_no_board` — the console
+ * hides the surface rather than rendering an empty one.
+ */
+export type BoardKind = "feature" | "bug";
+
+/** Where an item sits in the hub's triage. */
+export type BoardStatus = "open" | "planned" | "completed" | "closed";
+
+/** The orderings the board exposes. */
+export type BoardSort = "hot" | "top" | "new";
+
+/** `1` up, `-1` down, `0` no vote (or a retracted one). */
+export type BoardVote = 1 | -1 | 0;
+
+/** One row on the board. */
+export interface BoardItem {
+  id: string;
+  kind: BoardKind;
+  title: string;
+  body: string;
+  status: BoardStatus;
+  author: string | null;
+  upvotes: number;
+  downvotes: number;
+  score: number;
+  comment_count: number;
+  /**
+   * This *instance's* vote, not this operator's: every console on a host votes
+   * through the one hub account the host is provisioned with.
+   */
+  my_vote: BoardVote;
+  issue_url: string | null;
+  /** ISO-8601, as the hub reports it. */
+  created_at: string;
+}
+
+/** One comment on a board item. */
+export interface BoardComment {
+  id: string;
+  author: string | null;
+  body: string;
+  created_at: string;
+}
+
+/** One page of board rows, plus the total the query matches. */
+export interface BoardPage {
+  items: BoardItem[];
+  total: number;
+  page: number;
+  limit: number;
+}
+
+/** One board item with its comments. */
+export interface BoardDetail {
+  item: BoardItem;
+  comments: BoardComment[];
+}
+
+/** The query one board page is fetched with. */
+export interface BoardQuery {
+  sort?: BoardSort;
+  kind?: BoardKind;
+  status?: BoardStatus;
+  page?: number;
+  limit?: number;
+}
+
+/**
  * `GET /spec` — the host's runtime specification. Unauthenticated, so the
  * console can read it before (and regardless of) a session.
  */
