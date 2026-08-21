@@ -136,7 +136,7 @@ reads every ledger. A discovery surface that covers the ledgers a company
 invented but not the one it already had is a surface an agent stops trusting,
 and then stops using.
 
-### One column table, four consumers
+### One table, two vocabularies
 
 The board's columns lived in three places that could not check each other: a
 `[&str; 6]` on the port, a `match` from id to label beside it, and a
@@ -146,35 +146,79 @@ not the other keeps this green."* A column present on one side alone either
 never rendered (its cards silently vanished) or was refused by the write
 boundary.
 
-`ledger::board::COLUMNS` is now the one declaration. Each row carries the id,
-the label a person reads, whether it closes a card, and the section it renders
-under. Everything else derives:
+`ledger::board` is now the one declaration, and since issue #1512 it carries two
+vocabularies over one set of rows:
+
+* a **stage** (`COLUMNS`) — the six lifecycle states, unchanged. Persisted,
+  matched on by the dispatch edge, never widened.
+* a **phase** (`PHASES`) — the three states everything that reads the board is
+  shown: `pending`, `working`, `done`.
+
+Everything else derives:
 
 | consumer | what it takes |
 | --- | --- |
-| `ports::tasks::BOARD_COLUMNS` | the ids, via a `const fn` — still a genuine `const` |
-| `ports::tasks::column_label` | the labels |
-| the `tasks` ledger declaration | one status per column, one section per heading |
+| `ports::tasks::BOARD_COLUMNS` | the stage ids, via a `const fn` — still a genuine `const` |
+| `ports::tasks::column_label` | the labels, of either vocabulary |
+| the `tasks` ledger declaration | one status per **phase**, one section per phase |
 | the console | the ledger's `statuses`, labels included, over the wire |
+| `TaskCard.column` / `.stage` | the phase, and the stage when there is one |
 
-Adding a column is one edit. The labels are pinned in Rust by
+Adding a phase or a stage is one edit. The labels are pinned in Rust by
 `the_labels_are_the_ones_every_surface_renders` — an assertion that was
 impossible to write while the console kept a copy.
+
+### Why three, and not six
+
+Six lifecycle states is the right number for the runtime and the wrong number
+for a reader. The board asked every agent and every operator to hold a six-word
+vocabulary in which four of the words mean some shade of *a teammate has started
+this*, told apart by which machine is currently owed something — a distinction
+the runtime needs and nobody else does. What that bought was agents filing cards
+`in_review` when they meant paused, filing work as `planning` because a plan
+existed, and reading a rendered board they could not summarise.
+
+So the four middle stages are one column now:
+
+| phase | stages it covers | closed |
+| --- | --- | --- |
+| `pending` | `todo` | no |
+| `working` | `planning`, `in_progress`, `paused`, `in_review` | no |
+| `done` | `done` | yes |
+
+Nothing is lost. The stage rides on the row — a `stage` field in
+`derived/TASKS.md`, `Task.stage` on the wire, a badge beside the status on the
+card — so *waiting on your verdict* is still visible where it matters, as a
+property of a working card rather than as a fourth pile to file it into. The
+console reads the stage for everything genuinely stage-specific: Resume on a
+paused card, the review link on one waiting for a verdict.
+
+**Writes take a phase.** A drop sends `working`, and the write boundary resolves
+it to that phase's `entry_stage` — `in_progress`, which dispatches. Stage words
+are still accepted (the runtime's own paths speak them, and so does every stored
+card) but the refusal names only the three, because a caller who guessed wrong
+should be learning the small vocabulary rather than the large one.
+
+**Planning is an act, not a column.** Dragging a card into Planning was the one
+console route to a planning pass, and three columns has no drop target for it.
+It is a *Plan first* control on the card instead, which is where an act belonged
+rather than a state. It writes the `planning` stage and spends exactly what the
+drag spent.
 
 **The ids stay leaf constants.** `COLUMN_IN_PROGRESS` and its siblings remain
 plain `&str` consts on the port, and the table refers to them: entering
 `in_progress` *dispatches the card* and the edge keys off that exact literal, so
-a column's identity has to be something a `match` arm can name. Only its
+a stage's identity has to be something a `match` arm can name. Only its
 presentation and its grouping moved.
 
 **And the table is not itself declarable.** A company may declare any ledger it
-likes, but not this one: a column here is a lifecycle state that spends money.
+likes, but not this one: a stage here is a lifecycle state that spends money.
 `planning` fires a model call, `in_progress` opens an attempt, and `done` is
-reachable only through a human verdict. A seventh column from a JSON file would
+reachable only through a human verdict. A seventh stage from a JSON file would
 be a state the runtime has no edge for, and a card that entered it would sit
 there forever with nothing to say why.
 
-`done` is the only closed column: a card in review or paused is *stopped*, not
+`done` is the only closed phase: a card in review or paused is *stopped*, not
 finished, and calling either closed would make "what is still outstanding"
 answer wrong.
 
