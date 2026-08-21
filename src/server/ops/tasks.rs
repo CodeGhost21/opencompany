@@ -2670,6 +2670,8 @@ mod steer_redirect_test {
         let id = CompanyId::new("acme");
         FsCompanyStore::new(home.to_path_buf())
             .save(&CompanyRecord {
+                overlay_retired_agents: Vec::new(),
+                overlay_agent_edits: Vec::new(),
                 id: id.clone(),
                 manifest: manifest(),
                 ledger: Vec::new(),

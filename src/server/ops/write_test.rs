@@ -97,6 +97,8 @@ async fn state_with(
     let id = CompanyId::new("acme");
     store
         .save(&CompanyRecord {
+            overlay_retired_agents: Vec::new(),
+            overlay_agent_edits: Vec::new(),
             id: id.clone(),
             manifest: manifest(),
             ledger: Vec::new(),
@@ -2580,7 +2582,7 @@ async fn skills_install_toggle_custom_and_builtin_uninstall_conflict() {
 }
 
 #[tokio::test]
-async fn team_overlay_add_delete_and_manifest_delete_conflict() {
+async fn team_overlay_and_manifest_teammates_can_both_be_added_and_deleted() {
     let home_dir = home();
     let home = home_dir.path().to_path_buf();
     let state = state_with_company(&home).await;
@@ -2619,11 +2621,6 @@ async fn team_overlay_add_delete_and_manifest_delete_conflict() {
     assert_eq!(dana["name"], "Dana");
     assert_eq!(dana["role"], "Designer");
 
-    // Deleting a manifest teammate is a 409.
-    let (status, body) = send(&state, "DELETE", "/api/v1/company/team/ceo", None).await;
-    assert_eq!(status, StatusCode::CONFLICT);
-    assert_eq!(body["code"], "conflict");
-
     // Deleting the overlay teammate is a 204.
     let (status, _) = send(
         &state,
@@ -2654,6 +2651,22 @@ async fn team_overlay_add_delete_and_manifest_delete_conflict() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(ack["key"], "ceo");
+
+    // And a manifest teammate deletes too — recorded as a tombstone on the
+    // record, never as a rewrite of `company.toml`, so the blueprint being
+    // re-read on the next load does not bring it back.
+    let (status, _) = send(&state, "DELETE", "/api/v1/company/team/ceo", None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, roster) = send(&state, "GET", "/api/v1/company/team", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        roster
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|row| row["id"] != "ceo"),
+        "the manifest teammate is still listed after its delete: {roster:?}"
+    );
 }
 
 #[tokio::test]
@@ -3248,6 +3261,8 @@ async fn state_with_manifest_and_defaults(
     let id = CompanyId::new("acme");
     store
         .save(&CompanyRecord {
+            overlay_retired_agents: Vec::new(),
+            overlay_agent_edits: Vec::new(),
             id: id.clone(),
             manifest: manifest.clone(),
             ledger: Vec::new(),
@@ -3291,6 +3306,8 @@ async fn state_with_manifest_and_overlays(
     let id = CompanyId::new("acme");
     store
         .save(&CompanyRecord {
+            overlay_retired_agents: Vec::new(),
+            overlay_agent_edits: Vec::new(),
             id: id.clone(),
             manifest: manifest.clone(),
             ledger: Vec::new(),
@@ -3849,6 +3866,8 @@ async fn state_with_source_dir(
     let id = CompanyId::new("acme");
     store
         .save(&CompanyRecord {
+            overlay_retired_agents: Vec::new(),
+            overlay_agent_edits: Vec::new(),
             id: id.clone(),
             manifest: manifest.clone(),
             ledger: Vec::new(),
@@ -4245,6 +4264,8 @@ async fn state_with_telegram_at(
     let id = CompanyId::new("acme");
     store
         .save(&CompanyRecord {
+            overlay_retired_agents: Vec::new(),
+            overlay_agent_edits: Vec::new(),
             id: id.clone(),
             manifest: manifest(),
             ledger: Vec::new(),

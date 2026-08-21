@@ -318,7 +318,12 @@ impl HarnessBrain {
     /// else the first roster agent). The pool is shared so the roster is built
     /// once and reused across cycles.
     pub fn new(pool: Arc<HarnessPool>, deps: HarnessDeps, record: CompanyRecord) -> Self {
-        let responder = orchestrator::orchestrator_id(&record.manifest.agents).unwrap_or_default();
+        // Resolved over the roster as it effectively stands: a company whose
+        // first declared agent has since been removed still has an orchestrator,
+        // and answering as a teammate the harness no longer builds would leave
+        // the operator's message unanswered.
+        let responder =
+            orchestrator::orchestrator_id(&record.effective_agents()).unwrap_or_default();
         let default_harness = record.manifest.default_harness_id();
         let bindings = record
             .manifest
@@ -1812,7 +1817,7 @@ impl HarnessBrain {
     /// orchestrator to name at all, which is the same empty-roster case
     /// [`orchestrator::orchestrator_id`] already tolerates.
     fn orchestrator(&self) -> String {
-        orchestrator::orchestrator_id(&self.record().manifest.agents)
+        orchestrator::orchestrator_id(&self.record().effective_agents())
             .unwrap_or_else(|| self.responder.clone())
     }
 
@@ -3324,6 +3329,8 @@ description = "Runs Acme."
         )
         .expect("valid manifest");
         CompanyRecord {
+            overlay_retired_agents: Vec::new(),
+            overlay_agent_edits: Vec::new(),
             id: CompanyId::new("acme"),
             manifest,
             ledger: Vec::new(),
@@ -3511,6 +3518,8 @@ description = "Builds it."
         )
         .expect("valid manifest");
         CompanyRecord {
+            overlay_retired_agents: Vec::new(),
+            overlay_agent_edits: Vec::new(),
             id: CompanyId::new("acme"),
             manifest,
             ledger: Vec::new(),
@@ -5543,6 +5552,8 @@ members = ["engineer"]
         )
         .expect("valid manifest");
         CompanyRecord {
+            overlay_retired_agents: Vec::new(),
+            overlay_agent_edits: Vec::new(),
             id: CompanyId::new("acme"),
             manifest,
             ledger: Vec::new(),
@@ -5921,6 +5932,8 @@ name = "Design"
         )
         .expect("valid manifest");
         let record = CompanyRecord {
+            overlay_retired_agents: Vec::new(),
+            overlay_agent_edits: Vec::new(),
             id: CompanyId::new("acme"),
             manifest,
             ledger: Vec::new(),
@@ -5976,6 +5989,8 @@ members = ["eng1", "eng2"]
         )
         .expect("valid manifest");
         let record = CompanyRecord {
+            overlay_retired_agents: Vec::new(),
+            overlay_agent_edits: Vec::new(),
             id: CompanyId::new("acme"),
             manifest,
             ledger: Vec::new(),
@@ -6047,6 +6062,8 @@ members = ["eng1", "eng2"]
         let id = CompanyId::new("acme");
         store
             .save(&CompanyRecord {
+                overlay_retired_agents: Vec::new(),
+                overlay_agent_edits: Vec::new(),
                 id: id.clone(),
                 manifest,
                 ledger: Vec::new(),
@@ -9220,6 +9237,8 @@ agent = "claude"
         )
         .expect("valid manifest");
         let record = CompanyRecord {
+            overlay_retired_agents: Vec::new(),
+            overlay_agent_edits: Vec::new(),
             id: CompanyId::new("acme"),
             manifest,
             ledger: Vec::new(),

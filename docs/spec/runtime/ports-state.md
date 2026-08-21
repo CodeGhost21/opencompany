@@ -19,6 +19,35 @@ console cannot be honoured by one surface and ignored by another. At most one
 `overlay_budgets` entry may exist per teammate — the console write path upserts
 through `CompanyRecord::upsert_budget_override`, and a bundle import carrying two
 entries for the same teammate is rejected rather than resolved by guesswork.
+And `overlay_agent_edits`: an operator's edits of the **manifest-declared**
+teammates — their name, role, description and tool scope — read through
+`CompanyRecord::effective_agent` / `effective_agents`, which the harness roster
+build and every console read share, so a teammate renamed on the Team page is
+the teammate that takes the next turn. Before it, a `[[agent]]` in
+`company.toml` (which includes every agent from the global baseline, merged into
+every company) was uneditable from the console: the answer was "edit the
+blueprint and redeploy", which a hosted tenant can do neither half of. The merge
+is **per field**, so a field nobody edited keeps tracking the blueprint across a
+rebuild, and a stored empty description is the operator clearing it rather than
+"not overridden". `company.toml` is never rewritten. At most one entry per
+teammate — the write path merges through
+`CompanyRecord::upsert_agent_override`.
+
+And `overlay_retired_agents`: the tombstone half of the same layer — the ids of
+manifest teammates the operator has removed. A tombstone rather than a manifest
+rewrite for the reason the edits are an overlay: `company.toml` and the baseline
+merged into it are re-read on every rebuild, so a teammate "deleted" by editing
+the roster would simply come back. `effective_agents` filters them out and
+`is_roster_agent` / `effective_desk_members` answer accordingly, so a removed
+teammate is not built, not dispatchable, not seated on a desk, not a delegation
+target and not the orchestrator (the role moves to the next teammate that is
+actually there). `retire_agent` is idempotent — a second tombstone would change
+no roster but would move the harness's overlay fingerprint and drop every live
+session for a delete that had already happened. An id that names nobody is
+inert, which is what makes the tombstone safe to keep across a redeploy that
+drops the teammate from the blueprint too. The one refusal left is the
+company's **last** teammate: an empty roster has no orchestrator, nobody to
+answer a message, and no way back from the console.
 And (issue #562) `overlay_policy`: the operator's `[policy]` override — the
 autonomy tier and always-ask list an admin sets from the console, read through
 `CompanyRecord::effective_policy`, which resolves it *ahead* of the manifest for

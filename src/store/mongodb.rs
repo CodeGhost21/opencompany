@@ -609,6 +609,8 @@ impl CompanyStore for MongoStore {
             overlay_desks: overlay.desks,
             overlay_workflows: overlay.workflows,
             overlay_budgets: overlay.budgets,
+            overlay_agent_edits: overlay.agent_edits,
+            overlay_retired_agents: overlay.retired_agents,
             overlay_policy: overlay.policy,
             overlay_desk_tools: overlay.desk_tools,
             disabled_workflows: overlay.disabled_workflows,
@@ -4434,6 +4436,7 @@ mod test {
 
         for id in [&owned, &orphan] {
             let record = CompanyRecord {
+                overlay_retired_agents: Vec::new(),
                 id: id.clone(),
                 manifest: manifest.clone(),
                 ledger: Vec::new(),
@@ -4444,6 +4447,7 @@ mod test {
                 overlay_desks: Vec::new(),
                 overlay_workflows: Vec::new(),
                 overlay_budgets: Vec::new(),
+                overlay_agent_edits: Vec::new(),
                 overlay_policy: None,
                 overlay_desk_tools: Default::default(),
                 disabled_workflows: Vec::new(),
@@ -4509,6 +4513,7 @@ mod test {
 
         for (id, tenant) in [(&id_a, "tenant-a"), (&id_b, "tenant-b")] {
             let record = CompanyRecord {
+                overlay_retired_agents: Vec::new(),
                 id: id.clone(),
                 manifest: manifest.clone(),
                 ledger: Vec::new(),
@@ -4519,6 +4524,7 @@ mod test {
                 overlay_desks: Vec::new(),
                 overlay_workflows: Vec::new(),
                 overlay_budgets: Vec::new(),
+                overlay_agent_edits: Vec::new(),
                 overlay_policy: None,
                 overlay_desk_tools: Default::default(),
                 disabled_workflows: Vec::new(),
