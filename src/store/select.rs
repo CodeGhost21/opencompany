@@ -245,6 +245,32 @@ pub struct MemoryOverlay {
 }
 
 impl MemoryOverlay {
+    /// Bare overlay for wiring tests: the given ports, no facts, no scratch,
+    /// no probe. Lives here because `probe` is private by design (see the
+    /// field doc) — tests outside this module cannot construct the struct.
+    #[cfg(test)]
+    pub(crate) fn test_with_ports(
+        memory: Arc<dyn MemoryStore>,
+        context: Arc<dyn ContextStore>,
+        inbound_context: Option<Arc<dyn ContextStore>>,
+    ) -> Self {
+        Self {
+            memory,
+            context,
+            facts: None,
+            inbound_context,
+            scratch: None,
+            descriptor: MemoryDescriptor {
+                backend: MemoryBackend::Store,
+                driver_id: "test".into(),
+                capabilities: Vec::new(),
+                healthy: None,
+            },
+            #[cfg(feature = "tinymemory")]
+            probe: None,
+        }
+    }
+
     /// Probes the bound engine once and records the answer on the descriptor,
     /// so `/spec` can tell an operator "bound but unreachable" before the
     /// first cycle finds out — until this ran, a hosted engine with a dead

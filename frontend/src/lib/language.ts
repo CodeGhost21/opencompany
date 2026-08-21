@@ -213,6 +213,7 @@ const TOOL_LABELS: Readonly<Record<string, string>> = {
   repo_checkout: "Check out one of the company's repositories",
   repo_pr: "Fetch a pull request from one of the company's repositories",
   memory_store: "Save something to its memory",
+  memory_forget: "Discard one of its own saved memories",
   memory_recall: "Look something up in its memory",
   web_fetch: "Fetch a web page",
   query_company: "Look up something about the company",

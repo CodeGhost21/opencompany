@@ -917,6 +917,28 @@ pub async fn assert_export_totality(
     let hits = context.search(&id, "gamma", usize::MAX).await.unwrap();
     assert_eq!(hits.len(), 1);
     assert!(hits[0].snippet.contains("gamma"));
+
+    // Delete removes the addressed chunk — gone from the list, gone from peek —
+    // reports true for the removal and false for a second attempt, and leaves
+    // every other chunk untouched. `false` on the re-delete is the contract a
+    // forget tool leans on: forgetting the already-forgotten is a no-op, never
+    // a fault.
+    let victim = addrs[0].clone();
+    assert!(context.delete(&id, &victim).await.unwrap());
+    assert!(!context.delete(&id, &victim).await.unwrap());
+    let metas = context.list(&id, "").await.unwrap();
+    assert_eq!(metas.len(), bodies.len() - 1);
+    assert!(
+        metas.iter().all(|m| m.addr != victim),
+        "deleted addr still listed"
+    );
+    assert!(
+        context.peek(&id, &victim, None).await.is_err(),
+        "deleted chunk still peekable"
+    );
+    for addr in &addrs[1..] {
+        context.peek(&id, addr, None).await.unwrap();
+    }
 }
 
 /// Asserts the [`InboxStore`] contract: per-company isolation, per-inbox

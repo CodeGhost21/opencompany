@@ -14,6 +14,7 @@ import { toast } from "sonner";
 import { listPeople, me as fetchMe, type Person } from "@/api/auth";
 import type { OpenCompanyClient } from "@/api/client";
 import { deleteTask, type MessageIntent } from "@/api/tasks";
+import type { OpenTurn } from "@/lib/live-reply";
 import { setInboxEnabled } from "@/api/inbox";
 import {
   ApiError,
@@ -22,6 +23,7 @@ import {
   type TeamMemberDto,
   type TurnStep,
   type Verdict,
+  isDetachedChat,
 } from "@/api/types";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -106,6 +108,29 @@ interface Props {
   onSendStart?: (threadId: string) => void;
   onSendEnd?: (threadId: string) => void;
   /**
+   * The host accepted the turn and answered `202` instead of the reply
+   * (issue #983). Distinct from `onSendEnd`, which says the turn is *over*:
+   * this one says the POST is over and the turn is not, so the shell keeps the
+   * working row up and stops suppressing the live reply frame.
+   */
+  onSendDetached?: (threadId: string, turnId?: string) => void;
+  /**
+   * The chat POST **threw** rather than answering (issue #1000).
+   *
+   * The third outcome, and distinct from `onSendEnd` in the way that matters:
+   * `onSendEnd` promises the shell that the reply is already on screen, so the
+   * shell may drop the live frame it was holding. A throw promises the
+   * opposite — nothing was rendered, and since #983 the turn usually outlives
+   * the request that started it, so that held frame is the only copy of the
+   * answer anyone is going to get.
+   */
+  onSendFailed?: (threadId: string) => void;
+  /**
+   * Turns accepted but not settled, by host thread id — including ones this
+   * console never POSTed, which is what makes the indicator survive a reload.
+   */
+  openTurns?: Record<string, OpenTurn[]>;
+  /**
    * The in-flight tool timeline the shell folds out of the live turn frames,
    * keyed by **host thread id** — so this view has to resolve its channel to a
    * thread to read it (see `activeThreadId`). Covers turns this console never
@@ -178,6 +203,9 @@ export function ChatView({
   hydration = HISTORY_UNTRACKED,
   onSendStart,
   onSendEnd,
+  onSendDetached,
+  onSendFailed,
+  openTurns,
   liveStepsByThread,
   unread,
   onChannelViewed,
@@ -587,6 +615,15 @@ export function ChatView({
   const activeThreadId = active.kind === "channel" ? active.id : active.member?.id;
   const liveSteps = activeThreadId ? liveStepsByThread?.[activeThreadId] : undefined;
   /**
+   * The turn this channel is waiting on, if any (issue #983).
+   *
+   * Sourced from the shell rather than from local `sending`, which is the whole
+   * point: `sending` only knows about a POST *this* component made, so it went
+   * false on every reload and on every walk to another view. An open turn is a
+   * fact about the company, so the indicator survives both.
+   */
+  const openTurn = activeThreadId ? openTurns?.[activeThreadId]?.[0] : undefined;
+  /**
    * The count beside the channel title.
    *
    * A DM is stated as 2 rather than derived: it is a two-person conversation,
@@ -638,14 +675,45 @@ export function ChatView({
     // without this the shell injects that echo *and* the awaited reply lands
     // below — two bubbles for one turn.
     if (chatId) onSendStart?.(chatId);
+    // Which of the POST's three outcomes actually happened, decided here and
+    // reported once in the `finally`. Only `"resolved"` means the reply is on
+    // screen; the other two leave a turn running on the host and the stream as
+    // the delivery path, so telling the shell "ended" for either would take the
+    // working row down mid-turn (detached) or throw away the reply it was
+    // holding (failed). See `PendingSyncPosts` for the table.
+    let outcome: "resolved" | "detached" | "failed" = "resolved";
     try {
-      const reply = await client.chat(
+      const answer = await client.chat(
         text,
         company,
         chatId,
         toHostMessageId(parentId),
         intent,
+        // Ask for the turn's id rather than its answer. A host that predates the
+        // field ignores this and answers synchronously, which is why the branch
+        // below reads the response's shape and never this argument.
+        true,
       );
+      // Reconcile the optimistic id first, for BOTH shapes. On the detached one
+      // this is strictly better than what came before: since #983 the message is
+      // journaled at accept time, so its durable id is a fact within
+      // milliseconds instead of after the whole turn — the bubble becomes
+      // replyable and reactable immediately rather than at settle.
+      if (answer.messageId) {
+        setTranscripts((t) => ({
+          ...t,
+          [target]: reconcileIds(t[target] ?? [], local.id, answer.messageId!),
+        }));
+      }
+      if (isDetachedChat(answer)) {
+        outcome = "detached";
+        // Nothing to render: the reply arrives on the stream, and durably in
+        // `chat/history` when the shell sees the turn go terminal. The working
+        // row stays up, driven by the open turn rather than by this POST.
+        if (chatId) onSendDetached?.(chatId, answer.turnId);
+        return;
+      }
+      const reply = answer;
       const replies = reply.responses.length
         ? reply.responses.map((r) =>
             makeMessage("company", r.text, {
@@ -658,21 +726,32 @@ export function ChatView({
           )
         : [makeMessage("system", "(no reply)", { parentId })];
       append(target, ...replies);
-      // Swap the optimistic id for the durable one the host assigned, so this
-      // bubble can be replied to and reacted on straight away — and so anything
-      // that started replying to it mid-flight follows it (`reconcileIds`).
-      if (reply.messageId) {
-        setTranscripts((t) => ({
-          ...t,
-          [target]: reconcileIds(t[target] ?? [], local.id, reply.messageId!),
-        }));
-      }
       onReply?.();
     } catch (err) {
+      outcome = "failed";
+      // Still said, even when the reply arrives on the stream a moment later:
+      // the request did fail, and an operator not told that has no way to know
+      // whether their message was taken at all. The two facts are not in
+      // competition — this line reports the request, the shell renders whatever
+      // the turn goes on to produce.
       const msg = err instanceof ApiError ? err.message : "something went wrong";
       append(target, makeMessage("system", `Couldn't send — ${msg}`, { parentId }));
     } finally {
-      if (chatId) onSendEnd?.(chatId);
+      // A detached turn ends when its row settles, not when this POST resolves.
+      // Calling `onSendEnd` here would clear the live step timeline and take the
+      // working row down while the turn is still going.
+      //
+      // A *failed* POST must not reach `onSendEnd` either, and that one is
+      // easier to get wrong because the send really is over. `onSendEnd` tells
+      // the shell the reply is on screen, which lets it drop the live frame it
+      // was holding — but a throw rendered nothing, and since #983 the turn
+      // carries on regardless, so the frame it holds is the only copy of the
+      // answer. Routing the throw here is the drop this whole change removes,
+      // put back on the one path the feature exists for.
+      if (chatId) {
+        if (outcome === "resolved") onSendEnd?.(chatId);
+        else if (outcome === "failed") onSendFailed?.(chatId);
+      }
       setSending(false);
     }
   }
@@ -933,7 +1012,10 @@ export function ChatView({
               items={items}
               historyPending={historyPending}
               openThreadId={openThreadId}
-              typing={sending && !openThreadId}
+              // An open turn keeps the row up after the POST has resolved, and
+              // puts it back on a console that reloaded mid-turn (#983).
+              typing={(sending || !!openTurn) && !openThreadId}
+              queued={!!openTurn?.queued}
               liveSteps={openThreadId ? undefined : liveSteps}
               onOpenThread={setOpenThreadId}
               onReact={react}
