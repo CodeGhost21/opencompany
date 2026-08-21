@@ -27,6 +27,7 @@ import {
   agentEdits,
   draftFrom,
   draftIsValid,
+  emptyDraft,
   isEditable,
   summarizeGrants,
   tierLabel,
@@ -114,7 +115,7 @@ export function AgentDetailView({
   const [load, setLoad] = useState<Load>("loading");
   const [agent, setAgent] = useState<AgentDetailDto | null>(null);
   const [editing, setEditing] = useState(false);
-  const [draft, setDraft] = useState<AgentDraft>({ name: "", role: "", description: "" });
+  const [draft, setDraft] = useState<AgentDraft>(emptyDraft());
   const [saving, setSaving] = useState(false);
   /**
    * What this teammate is on and carrying (issue #1141), or `null` when the
@@ -347,6 +348,34 @@ export function AgentDetailView({
     }
   }
 
+  /**
+   * Drop this teammate's instructions override so its blueprint persona applies
+   * again (issue #1530). Sends `instructions: null` — the three-state reset,
+   * distinct from saving an emptied field only in that it needs no edit form
+   * open. Offered only when an override is actually in force.
+   */
+  async function resetInstructions() {
+    if (!agent) return;
+    setSaving(true);
+    try {
+      const updated = await client.updateAgent(agentId, { instructions: null }, company);
+      setAgent(updated);
+      setDraft(draftFrom(updated));
+      setEditing(false);
+      toast.success("Instructions reset to the blueprint.");
+    } catch (error) {
+      toast.error(
+        error instanceof ApiError && error.status === 409
+          ? error.message
+          : error instanceof Error
+            ? error.message
+            : "Couldn't reset the instructions.",
+      );
+    } finally {
+      setSaving(false);
+    }
+  }
+
   return (
     <div className="flex-1 overflow-y-auto">
       <div className="mx-auto w-full max-w-3xl space-y-6 px-4 py-6">
@@ -445,6 +474,22 @@ export function AgentDetailView({
             <Section
               title="Instructions"
               subtitle="What this teammate was defined to do. It frames every turn they take."
+              action={
+                // Reset is offered only when an override is actually masking the
+                // blueprint, and only to a viewer the host will let write
+                // instructions — otherwise it is a control that can only 409.
+                isEditable(agent, "instructions") && agent.instructionsOverridden ? (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => void resetInstructions()}
+                    disabled={saving}
+                    data-testid="agent-instructions-reset"
+                  >
+                    Reset to blueprint
+                  </Button>
+                ) : undefined
+              }
             >
               {editing ? (
                 <div className="grid gap-4">
@@ -456,6 +501,15 @@ export function AgentDetailView({
                     }
                     readOnly={(key) => !isEditable(agent, key)}
                   />
+                  {agent.instructionsOverridden && agent.blueprintInstructions?.trim() && (
+                    <p
+                      className="whitespace-pre-wrap text-xs text-muted-foreground"
+                      data-testid="agent-blueprint-hint"
+                    >
+                      Overriding the blueprint. Clearing this field, or “Reset to blueprint”,
+                      restores: {agent.blueprintInstructions.trim()}
+                    </p>
+                  )}
                   <div className="flex justify-end gap-2">
                     <Button
                       variant="ghost"
@@ -484,11 +538,25 @@ export function AgentDetailView({
                     {agent.description?.trim() ||
                       "No instructions were written for this teammate."}
                   </p>
-                  {agent.editable.length === 0 && (
+                  {agent.instructions?.trim() && (
+                    <div className="space-y-1">
+                      <p className="text-xs font-medium">
+                        Persona instructions
+                        {agent.instructionsOverridden ? " · overriding the blueprint" : ""}
+                      </p>
+                      <p
+                        className="whitespace-pre-wrap text-sm text-muted-foreground"
+                        data-testid="agent-instructions"
+                      >
+                        {agent.instructions.trim()}
+                      </p>
+                    </div>
+                  )}
+                  {agent.source === "manifest" && (
                     <p className="text-xs text-muted-foreground" data-testid="agent-readonly-note">
-                      This teammate is part of your company blueprint, so its name, role and
-                      instructions are set in company.toml. Its daily budget can still be changed
-                      below.
+                      This teammate is part of your company blueprint, so its name and role are set
+                      in company.toml. You can still tailor its instructions here, and change its
+                      daily budget below.
                     </p>
                   )}
                 </>
