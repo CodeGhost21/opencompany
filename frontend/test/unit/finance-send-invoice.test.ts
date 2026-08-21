@@ -16,47 +16,61 @@ import { SendInvoiceDialog } from "@/views/finance/SendInvoiceDialog";
  * either empty or a valid non-negative safe integer.
  */
 
-vi.mock("sonner", () => ({ toast: { info: vi.fn(), success: vi.fn(), error: vi.fn() } }));
-
-let container: HTMLDivElement;
-let root: Root;
-
 const sent = vi.fn();
-
 const CLIENT = {
   scopeFor: () => "/api/v1/companies/acme",
 } as unknown as OpenCompanyClient;
 
-function fill(field: string, value: string) {
-  const input = document.querySelector<HTMLInputElement>(`[data-testid="${field}"]`);
-  expect(input).not.toBeNull();
-  act(() => {
-    input!.value = value;
-    input!.dispatchEvent(new Event("input", { bubbles: true }));
-  });
+// A tiny harness that owns the `dueDays` state, so the dialog re-renders for
+// each input the way the real view does without re-mounting (and re-opening) a
+// portal every time.
+// The dialog owns its own field state, so rather than trying to drive React
+// through a portal, we mount a fresh instance per input value. Force it via a
+// key so a brand-new component mounts for each case.
+function Mount({ due }: { due: string }) {
+  return createElement(
+    SendInvoiceDialog,
+    {
+      client: CLIENT,
+      company: "acme",
+      site: "acme-test",
+      open: true,
+      onOpenChange: () => {},
+      onSent: sent,
+    },
+  );
 }
+
+let container: HTMLDivElement;
+let root: Root;
 
 function at(testid: string): HTMLElement | null {
   return document.querySelector<HTMLElement>(`[data-testid="${testid}"]`);
 }
 
-async function show(dueDays: string) {
+async function mountWith(due: string) {
   await act(async () => {
-    root.render(
-      createElement(SendInvoiceDialog, {
-        client: CLIENT,
-        company: "acme",
-        site: "acme-test",
-        open: true,
-        onOpenChange: () => {},
-        onSent: sent,
-      }),
-    );
+    root.render(createElement(Mount, { due }));
   });
-  fill("invoice-email", "alan@example.com");
-  fill("invoice-description", "Consulting");
-  fill("invoice-amount", "1250.00");
-  fill("invoice-due-days", dueDays);
+  // Type all the required fields.
+  await fill("invoice-email", "alan@example.com");
+  await fill("invoice-description", "Consulting");
+  await fill("invoice-amount", "1250.00");
+  await fill("invoice-due-days", due);
+}
+
+/** Types into a field the way an operator does, so React's state updates. */
+async function fill(field: string, value: string) {
+  const input = document.querySelector<HTMLInputElement>(`[data-testid="${field}"]`);
+  if (!input) throw new Error(`no input ${field}`);
+  await act(async () => {
+    const setter = Object.getOwnPropertyDescriptor(
+      window.HTMLInputElement.prototype,
+      "value",
+    )?.set;
+    setter?.call(input, value);
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  });
 }
 
 beforeEach(() => {
@@ -66,40 +80,43 @@ beforeEach(() => {
   root = createRoot(container);
 });
 
-afterEach(() => {
-  act(() => root.unmount());
+afterEach(async () => {
+  await act(async () => {
+    root.unmount();
+  });
   container.remove();
+  document.body.innerHTML = "";
   vi.clearAllMocks();
 });
 
 describe("the due-days field", () => {
   it("accepts an empty field", async () => {
-    await show("");
+    await mountWith("");
     expect(at("invoice-send")?.hasAttribute("disabled")).toBe(false);
   });
 
   it("accepts a whole non-negative number", async () => {
-    await show("7");
+    await mountWith("7");
     expect(at("invoice-send")?.hasAttribute("disabled")).toBe(false);
   });
 
   it("disables send on non-numeric input", async () => {
-    await show("abc");
+    await mountWith("abc");
     expect(at("invoice-send")?.hasAttribute("disabled")).toBe(true);
   });
 
   it("disables send on a decimal", async () => {
-    await show("1.5");
+    await mountWith("1.5");
     expect(at("invoice-send")?.hasAttribute("disabled")).toBe(true);
   });
 
   it("disables send on a negative number", async () => {
-    await show("-1");
+    await mountWith("-1");
     expect(at("invoice-send")?.hasAttribute("disabled")).toBe(true);
   });
 
   it("disables send on an out-of-safe-range number", async () => {
-    await show("999999999999999999999");
+    await mountWith("999999999999999999999");
     expect(at("invoice-send")?.hasAttribute("disabled")).toBe(true);
   });
 });

@@ -47,9 +47,18 @@ describe("toMinorUnits", () => {
   });
 
   it("refuses anything that is not an amount", () => {
-    for (const bad of ["", "  ", "abc", "-5", "1.2.3", "$10", "1e3", "10-"]) {
+    for (const bad of ["", "  ", "abc", "-5", "1.2.3", "$10", "1e3", "10-", "1,25", "12,34.56"]) {
       expect(toMinorUnits(bad, "USD")).toBeNull();
     }
+  });
+
+  it("rejects malformed grouping instead of silently relocating the comma", () => {
+    // `1,25` used to become `125` — a 12,500-unit bill from a two-decimal
+    // currency and a common typo. Grouping must occupy real thousand positions.
+    expect(toMinorUnits("1,250.00", "USD")).toBe(125000);
+    expect(toMinorUnits("1,25", "USD")).toBeNull();
+    expect(toMinorUnits("12,34.56", "USD")).toBeNull();
+    expect(toMinorUnits("1,234,567", "USD")).toBe(123456700);
   });
 
   it("uses the currency's own minor unit, not a hardcoded two", () => {

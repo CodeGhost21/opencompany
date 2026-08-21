@@ -89,7 +89,7 @@ function, serialize its existing projection. **No new business logic, no new
 money types.** If a shape is wrong for the console it is wrong for the agent
 too, and the fix belongs in `api`.
 
-```
+```text
 GET    …/finance/chargebee/invoices?status=&customerEmail=&limit=
 GET    …/finance/chargebee/invoices/:id
 GET    …/finance/chargebee/customers?email=
@@ -174,7 +174,7 @@ retired, and `console-routes.ts` is emphatic that those are different acts.
 sub-sidebar on `sm:` and up, a scrolling chip row below it, `aria-current="page"`
 on the active entry, and the sub-page id as the hash's second segment.
 
-```
+```text
 #/finances            → Overview   (the existing FinancesView, unchanged)
 #/finances/invoicing  → Chargebee
 #/finances/wallet     → PayPal
@@ -195,7 +195,7 @@ panel collapses to a single line once the provider is working. An operator
 configures once and reads daily; a permanently expanded credential form taxes
 every visit for a task performed once.
 
-```
+```text
 ┌─ Invoicing ───────────────────────────────────────────────┐
 │ ▸ Chargebee · acme-test · Connected      [Test] [Manage]  │  ← collapsed
 ├───────────────────────────────────────────────────────────┤
@@ -245,7 +245,7 @@ grant `chargebee`, so no agent can use any of this".
   amount, and a status chip decoding `S`/`P`/`V`/`D` into Success / Pending /
   Reversed / Denied. A raw `V` means nothing to an operator.
 - **The lag is stated on the page, not discovered.** PayPal serves transaction
-  data up to three hours behind and rejects a window starting inside that gap.
+  data up to three hours behind and rejects a window ending inside that gap.
   The default range therefore ends three hours ago, the range picker will not
   select later, and the panel says why. This is the one place the console
   encodes provider behaviour rather than passing it through, and it is justified

@@ -44,13 +44,16 @@ export function minorUnitDigits(currencyCode: string): number {
  */
 export function toMinorUnits(input: string, currencyCode: string): number | null {
   const digits = minorUnitDigits(currencyCode);
-  // Grouping separators are stripped: an operator pasting `1,250.00` from an
-  // invoice means 1250, and rejecting it teaches them nothing.
-  const raw = input.trim().replace(/,/g, "");
+  // Grouping separators are allowed only in the positions a real thousand
+  // separator would occupy: an operator pasting `1,250.00` off an invoice
+  // means 1250 (and rejecting it teaches them nothing), but `1,25` is a typo,
+  // not `125` — so the grouping is validated before it is stripped.
+  const raw = input.trim();
   if (raw === "") return null;
-  const match = /^(\d+)(?:\.(\d*))?$/.exec(raw);
+  const match = /^(\d+|\d{1,3}(?:,\d{3})+)(?:\.(\d*))?$/.exec(raw);
   if (!match) return null;
-  const [, whole, fraction = ""] = match;
+  const [, wholeWithGrouping, fraction = ""] = match;
+  const whole = wholeWithGrouping.replace(/,/g, "");
   // More precision than the currency has is a refusal, not a silent round:
   // "0.005 USD" is either a typo or a misunderstanding, and quietly making it
   // 0.01 or 0.00 hides which.
