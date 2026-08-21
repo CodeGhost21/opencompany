@@ -2,7 +2,7 @@
 
 > A venture firm of agents that sources founders, evaluates decks, sizes markets, reviews code, checks references and supports the portfolio — with a human making the investment decisions.
 
-This file is routed into every teammate's system prompt alongside `METHOD.md`
+This file is routed into every teammate's system prompt alongside `method.md`
 (`context_routing::UNIVERSAL_DOCUMENTS`), so it is the one place a convention
 reaches the whole roster without being repeated in every agent's `context`.
 
@@ -26,7 +26,7 @@ fine. The ledgers are aimed precisely at those two decays.
 | `portfolio_support` | Portfolio Support | — | Support companies after investment. |
 
 `founder_sourcer` is the orchestrator: it holds the routing picture
-(`BRIEF.md`, `CLAIMS.md`, `THREADS.md`) and unrestricted ledger access.
+(`brief.md`, `claims.md`, `threads.md`) and unrestricted ledger access.
 
 Humans keep **investment decisions**; everything up to the decision is the
 firm's to run.
@@ -84,16 +84,16 @@ Plus the baseline's `web-research`, `weekly-report` and `meeting-brief`.
 
 ## Workspace layout
 
-- `Standards/`, `Playbooks/`, `Deals/` — shared, operator-seeded notes.
-- `Agents/<your agent id>/` — your own folder, the default home for anything you
+- `standards/`, `playbooks/`, `deals/` — shared, operator-seeded notes.
+- `agents/<your agent id>/` — your own folder, the default home for anything you
   produce.
 - `derived/` — rendered ledger views. Never hand-write anything here.
 
 ## Write scope
 
 Every specialist but `founder_sourcer` declares an explicit `context` confining
-`workspace_write`/`workspace_create` to `Deals/Devtools seed round.md` — this
-firm's shared active-work document — plus its own `Agents/<id>/` home.
+`workspace_write`/`workspace_create` to `deals/devtools-seed-round.md` — this
+firm's shared active-work document — plus its own `agents/<id>/` home.
 
 ## The bar
 

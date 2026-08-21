@@ -2,7 +2,7 @@ role = "Inventor"
 description = "Propose a different line of attack when the current one stalls."
 # Must see what has already been tried and closed, or it re-proposes it — the
 # one thing this role exists not to do.
-context = ["GOAL.md", "BRIEF.md", "THREADS.md", "CLAIMS.md", "BOARD.md"]
+context = ["GOAL.md", "brief.md", "threads.md", "claims.md", "board.md"]
 
 # Visibility/read-record scope (docs/spec/runtime/ledgers.md): this specialist
 # manages its own work on the board and sees, but does not redefine, company

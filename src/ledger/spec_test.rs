@@ -8,7 +8,7 @@ fn minimal() -> serde_json::Value {
     json!({
         "slug": "risks",
         "title": "Risks",
-        "derived": "derived/RISKS.md",
+        "derived": "derived/risks.md",
         "fields": [
             { "name": "id", "role": "id" },
             { "name": "risk", "role": "title" },
@@ -141,11 +141,11 @@ fn a_slug_is_a_slug() {
 fn a_derived_path_is_one_flat_file_under_the_derived_folder() {
     let mut document = minimal();
     for bad in [
-        "RISKS.md",
-        "notes/RISKS.md",
-        "derived/nested/RISKS.md",
+        "risks.md",
+        "notes/risks.md",
+        "derived/nested/risks.md",
         "derived/../secrets.md",
-        "derived/RISKS.txt",
+        "derived/risks.txt",
         "derived/",
     ] {
         document["derived"] = json!(bad);
@@ -154,7 +154,7 @@ fn a_derived_path_is_one_flat_file_under_the_derived_folder() {
             "`{bad}` should not be a derived path"
         );
     }
-    document["derived"] = json!("derived/RISKS.md");
+    document["derived"] = json!("derived/risks.md");
     assert!(parse(&document, false).is_ok());
 }
 
@@ -166,11 +166,11 @@ fn an_unnamed_derived_path_is_derived_from_the_slug() {
     let mut document = minimal();
     document["derived"] = json!("");
     let spec = parse(&document, false).expect("valid");
-    assert_eq!(spec.derived, "derived/RISKS.md");
+    assert_eq!(spec.derived, "derived/risks.md");
 
     document["slug"] = json!("customer-promises");
     let spec = parse(&document, false).expect("valid");
-    assert_eq!(spec.derived, "derived/CUSTOMER_PROMISES.md");
+    assert_eq!(spec.derived, "derived/customer-promises.md");
 }
 
 #[test]

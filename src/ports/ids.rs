@@ -100,9 +100,9 @@ const AGENT_SLUG_MAX: usize = 64;
 /// `"Dana Designer"` becomes `dana_designer` — the same grammar the manifest
 /// validator enforces on hand-authored `[[agent]].id`s (lowercase letters,
 /// digits and underscores, starting with a letter), so a runtime-added teammate
-/// and a blueprint one name their `Agents/<id>/` folder the same way. Before
+/// and a blueprint one name their `agents/<id>/` folder the same way. Before
 /// this, runtime teammates took [`generate_id`] and read as
-/// `Agents/019fad5ada20-000000000003/` (issue #686).
+/// `agents/019fad5ada20-000000000003/` (issue #686).
 ///
 /// Deliberately **underscores, not hyphens** — unlike
 /// [`company_id_from_name`](crate::runtime::company_id_from_name), whose output

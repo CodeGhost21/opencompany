@@ -129,7 +129,7 @@ The Obsidian-style note tree (`src/ports/workspace.rs`), seeded from the
 company's `workspace/**` on first use and thereafter written by both the
 operator (console/REST) and the company's agents (`workspace_create` /
 `workspace_write`, plus `workspace_rename` / `workspace_delete` within
-`Agents/<agent-id>/` since issue #671).
+`agents/<agent-id>/` since issue #671).
 
 ```rust
 pub trait WorkspaceStore: Send + Sync {
@@ -204,9 +204,9 @@ at boot. Tenancy in the shared bucket is a filter on `metadata.company_id` **and
 `metadata.node_id` for every read, delete and sweep.
 
 **Folder claims (#759).** `adopt_or_create_folder` is the only way the publish
-walk and the `Agents/` scaffold create a folder. It is a store primitive rather
+walk and the `agents/` scaffold create a folder. It is a store primitive rather
 than a read plus a `create` because the read is honest about one instant and the
-create acts on it later: two publishes needing `Agents/<agent>/<task>/` both saw
+create acts on it later: two publishes needing `agents/<agent>/<task>/` both saw
 it free, and sqlite and mongodb both created — leaving two folders under one
 name. That state does not decay. Path resolution answers a duplicated name with
 `Conflict`, so a race lasting microseconds refuses every later publish beneath
@@ -330,28 +330,28 @@ Backends persist the node as opaque JSON and both fields are
 round-trip, the write stamp, and the rename non-stamp across all three
 backends.
 
-**System workspace roots.** `company::workspace_scaffold` owns `Agents/`,
-`Desks/`, and the operator-only `secrets/` subtree on different schedules:
+**System workspace roots.** `company::workspace_scaffold` owns `agents/`,
+`desks/`, and the operator-only `secrets/` subtree on different schedules:
 
 * `ensure_workspace_scaffold` adopt-or-creates the roots listed in
   `SYSTEM_ROOTS` — `Agents` and lowercase `secrets` — from one seam:
   `RuntimeBuilder::build` (boot). It takes no roster (a company with no agents
   still gets them), so an existing company picks them up on its next boot.
-  `Agents/` stays empty; `secrets/README.md` explains that every agent workspace
+  `agents/` stays empty; `secrets/README.md` explains that every agent workspace
   tool omits or refuses this subtree while operator APIs retain normal access.
   Idempotent.
 * `ensure_agent_folder` / `ensure_desk_folder` adopt-or-create
-  `Agents/<agent-id>/` and `Desks/<desk-id>/` **on demand**, returning the node
+  `agents/<agent-id>/` and `desks/<desk-id>/` **on demand**, returning the node
   id, called when that agent or desk first produces something. A folder means
   "this member produced something"; an eager folder per roster member would be
   a claim the tree cannot back. `workspace_create` calls the agent minter when
   an agent writes into its own home; #552's publish path is the next caller.
-* **`Desks/` is not scaffolded** (#645). Both minters have always created an
+* **`desks/` is not scaffolded** (#645). Both minters have always created an
   absent root on their way down, and `ensure_desk_folder` has no callers yet, so
   scaffolding the root gave every company a permanently empty folder
   advertising a feature nothing fills — the same promise-not-record shape #570
   removed at the member level. `ensure_desk_folder` now mints root and member
-  folder together on first use. A `Desks/` that already exists is untouched:
+  folder together on first use. A `desks/` that already exists is untouched:
   the scaffold only ever looks up the names in `SYSTEM_ROOTS`, so a legacy
   company keeps its root, its contents and its authorship, un-warned.
 

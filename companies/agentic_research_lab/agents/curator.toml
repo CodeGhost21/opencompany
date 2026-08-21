@@ -1,8 +1,8 @@
 role = "Curator"
 description = "Owns the brief. Keeps one current statement of what the lab knows, within budget."
-# The single writer of BRIEF.md, and the one role that sees everything, because
+# The single writer of brief.md, and the one role that sees everything, because
 # its whole job is compressing everything into the document the others read.
-context = ["GOAL.md", "BRIEF.md", "CLAIMS.md", "THREADS.md", "DEMANDS.md", "INDEX.md"]
+context = ["GOAL.md", "brief.md", "claims.md", "threads.md", "DEMANDS.md", "INDEX.md"]
 
 # Visibility/read-record scope (docs/spec/runtime/ledgers.md): this specialist
 # manages its own work on the board and sees, but does not redefine, company

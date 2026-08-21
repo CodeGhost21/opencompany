@@ -37,7 +37,7 @@ delegates_to = ["research"]        # desks this agent may hand work to ("*" = al
 budget_usd_daily = 5.0             # per-agent daily spend cap (UTC day)
 prompt = "Write for the reader."   # appended to the generated persona
 prompt_files = ["prompts/tone.md"] # checked-in briefing docs, under `agents/`
-context = ["BRIEF.md"]             # live workspace docs routed into the prompt
+context = ["brief.md"]             # live workspace docs routed into the prompt
 classes = ["evidence"]             # routing exclusions: evidence | judge | directive
 # A roster may instead live one file per teammate under `agents/<id>.toml`, with
 # these same keys and the filename as the id. The two forms are exclusive —
