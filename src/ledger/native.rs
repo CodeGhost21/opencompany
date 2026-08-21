@@ -91,7 +91,10 @@ pub fn entries_from_tasks(tasks: &[TaskRecord]) -> Entries {
 mod test {
     use super::*;
     use crate::ledger::registry::Registry;
-    use crate::ports::tasks::{COLUMN_DONE, COLUMN_IN_PROGRESS, COLUMN_TODO, TaskDeliverable};
+    use crate::ports::tasks::{
+        COLUMN_DONE, COLUMN_IN_PROGRESS, COLUMN_IN_REVIEW, COLUMN_PAUSED, COLUMN_TODO,
+        TaskDeliverable,
+    };
 
     fn card(id: &str, column: &str, updated: u64) -> TaskRecord {
         TaskRecord {
@@ -207,7 +210,11 @@ mod test {
             .lines()
             .filter(|line| line.starts_with("## "))
             .collect();
-        assert_eq!(headings, ["## Pending", "## Working", "## Done"], "{rendered}");
+        assert_eq!(
+            headings,
+            ["## Pending", "## Working", "## Done"],
+            "{rendered}"
+        );
         assert!(rendered.contains("In review"), "{rendered}");
         assert!(rendered.contains("Paused"), "{rendered}");
     }
