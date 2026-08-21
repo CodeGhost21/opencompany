@@ -10,13 +10,19 @@
 # purely to be too long — `workflow-canvas-fit.spec.ts` measures the zoom it
 # opens at and where its first node lands.
 #
+# The id MUST equal this file's stem. `load_company_workflow_union`
+# (src/company/workflow_file.rs) resolves a workflow by joining
+# `workflows/{id}.toml`, while the index endpoint reads the file's own `id`
+# field — so an id that disagrees with the filename lists on the index and then
+# 404s the moment it is opened. Discovered the hard way with `id = "long"`.
+#
 # Keep the id, the name and the FIRST node's id stable — the spec pins all
 # three. It is deliberately NOT listed in `[workflows].enabled` in
 # ../company.toml, for the reason `committed.toml` says: the console lists every
 # `workflows/*.toml` it finds, and leaving it disabled keeps it out of the
 # scheduler while the suite runs.
 
-id = "long"
+id = "long_pipeline"
 name = "Long pipeline"
 description = "Ten steps in a line — the shape a workflow canvas has to stay readable at."
 
