@@ -1,7 +1,24 @@
-// Custom domain + SMTP setup for a company. Persisted per company in
-// localStorage; the console has no provisioning API yet, so DNS verification
-// and SMTP tests are host-side once wired. Secrets live here only as a local
-// draft until the host stores them securely.
+// Custom domain + SMTP setup for a company.
+//
+// The NON-SECRET half of the form is remembered per company in localStorage so
+// a half-filled card survives a reload. The SMTP **password** never is, and
+// this module is the single place that guarantees it (issue #1460).
+//
+// It used to be: the card held the whole `MailSettings` in one `useState` and
+// an effect wrote all of it back on every change, so the password landed in
+// browser storage keystroke by keystroke — readable by any script on the
+// origin, and still there after sign-out. A sending credential does not belong
+// in a store with no expiry and no encryption; every other credential on this
+// surface (Billing, Hosting, MCP, the company credential) goes write-only into
+// the host's secret store instead.
+//
+// So the persisted shape is `StoredMailSettings`, which structurally has no
+// `password` field. `saveMailSettings` cannot write one because it does not
+// receive one, and `loadMailSettings` always hands back an empty password. The
+// password lives in React state for the life of the page and nowhere else.
+//
+// `purgeStoredSmtpPasswords` cleans up after the old behaviour on the way in —
+// see its docstring.
 
 import { type LocalScope, scopedKeyAdoptingLegacy } from "@/connections/types";
 
@@ -25,6 +42,29 @@ export interface SmtpConfig {
 export interface MailSettings {
   domain: DomainConfig;
   smtp: SmtpConfig;
+}
+
+/**
+ * The subset of {@link MailSettings} that is allowed into localStorage.
+ *
+ * `password` is omitted **structurally**, not by convention: `saveMailSettings`
+ * takes this type, so a future caller that tries to persist a credential does
+ * not compile. That is the point — a comment saying "don't store the password"
+ * rots, a type does not.
+ */
+export interface StoredMailSettings {
+  domain: DomainConfig;
+  smtp: Omit<SmtpConfig, "password"> & {
+    /**
+     * Never present. Typed `never` rather than simply omitted because omission
+     * alone would not stop anything: TypeScript is structural, so a full
+     * {@link MailSettings} — which has every field this shape asks for, plus a
+     * password — is assignable to a plain `Omit<…>` by width subtyping, and the
+     * old leaking call would still compile. `password?: never` rejects it,
+     * because `string` is not assignable to `never`.
+     */
+    password?: never;
+  };
 }
 
 export function emptyMailSettings(): MailSettings {
@@ -72,20 +112,106 @@ export function isValidDomain(domain: string): boolean {
 const KEY = (scope: LocalScope) =>
   scopedKeyAdoptingLegacy("oc-mail", scope, `oc-mail:${scope.company ?? "single"}`);
 
+/**
+ * Reads the remembered non-secret half back, with an empty password.
+ *
+ * The empty password is unconditional and deliberate: even if a stored blob
+ * still carries one — a key written by an older build, in a tab that has not
+ * reloaded since the purge ran — it is not read back into the form. Nothing
+ * downstream of this function can resurrect a credential from storage.
+ */
 export function loadMailSettings(scope: LocalScope): MailSettings {
   try {
     const raw = localStorage.getItem(KEY(scope));
-    if (raw) return { ...emptyMailSettings(), ...(JSON.parse(raw) as MailSettings) };
+    if (raw) {
+      const stored = JSON.parse(raw) as Partial<MailSettings>;
+      const merged = { ...emptyMailSettings(), ...stored };
+      return { ...merged, smtp: { ...merged.smtp, password: "" } };
+    }
   } catch {
     /* fall through */
   }
   return emptyMailSettings();
 }
 
-export function saveMailSettings(scope: LocalScope, settings: MailSettings): void {
+/**
+ * Strips the password off a full settings object, yielding the storable shape.
+ *
+ * Destructuring rather than deleting a key, so the result never transiently
+ * holds the credential and `JSON.stringify` has nothing to find.
+ */
+export function withoutSmtpPassword(settings: MailSettings): StoredMailSettings {
+  const { password: _password, ...smtp } = settings.smtp;
+  return { domain: settings.domain, smtp };
+}
+
+/**
+ * Persists the non-secret half of the card.
+ *
+ * Takes {@link StoredMailSettings}, so there is no password to write. Callers
+ * holding a full {@link MailSettings} pass it through
+ * {@link withoutSmtpPassword} first.
+ */
+export function saveMailSettings(scope: LocalScope, settings: StoredMailSettings): void {
   try {
     localStorage.setItem(KEY(scope), JSON.stringify(settings));
   } catch {
     /* storage unavailable */
   }
+}
+
+/** Every localStorage key this module has ever written a password under. */
+const MAIL_KEY_PREFIX = "oc-mail";
+
+/**
+ * Removes SMTP passwords left in localStorage by the pre-#1460 console.
+ *
+ * Stopping new writes only half-solves it: an operator who typed a password
+ * before upgrading still has it sitting in their browser, and it stays there
+ * until something deletes it. This runs once at boot (see `main.tsx`) and
+ * sweeps **every** `oc-mail*` key — scoped and legacy, every connection and
+ * company, not just the scope the current page happens to be looking at,
+ * because the operator is not required to visit Settings for the credential to
+ * need to be gone.
+ *
+ * It rewrites rather than deletes: host, port, security, username and the from
+ * fields are not secret and are work the operator did, so they survive. Only
+ * the password is dropped. A key holding unparseable JSON is removed outright —
+ * it cannot be shown to be password-free, and this function's contract is that
+ * afterwards no password remains.
+ *
+ * Returns the number of keys it rewrote or removed, which is what the
+ * regression test asserts on.
+ */
+export function purgeStoredSmtpPasswords(): number {
+  let cleaned = 0;
+  try {
+    const store = window.localStorage;
+    const keys: string[] = [];
+    for (let i = 0; i < store.length; i++) {
+      const key = store.key(i);
+      if (key !== null && key.startsWith(MAIL_KEY_PREFIX)) keys.push(key);
+    }
+    for (const key of keys) {
+      const raw = store.getItem(key);
+      if (raw === null) continue;
+      if (!raw.includes('"password"')) continue;
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(raw);
+      } catch {
+        // Unreadable, but it contains the word. Cannot be proven clean, so it
+        // goes — a stale draft is a far smaller loss than a retained secret.
+        store.removeItem(key);
+        cleaned++;
+        continue;
+      }
+      const settings = { ...emptyMailSettings(), ...(parsed as Partial<MailSettings>) };
+      store.setItem(key, JSON.stringify(withoutSmtpPassword(settings)));
+      cleaned++;
+    }
+  } catch {
+    /* storage unavailable — nothing was ever stored to clean */
+  }
+  return cleaned;
 }

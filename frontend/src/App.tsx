@@ -15,25 +15,33 @@ import {
   createLocalInstance,
   embeddedHost,
   localInstances,
+  openSshTunnel,
   startLocalInstance,
   stopLocalInstance,
   type LocalInstance,
 } from "@/api/transport/desktop";
 import { ApiError } from "@/api/types";
-import { AddHostDialog, ConsoleChrome } from "@/components/host-switcher";
+import { ConsoleChrome } from "@/components/host-switcher";
+import { ManageHostsPage } from "@/components/manage-hosts";
+import { Button } from "@/components/ui/button";
 import { resolveConfig } from "@/config";
 import {
   addConnection,
   adoptLocalHosts,
   clientFor,
+  editConnection,
   listConnections,
   probe,
+  removeConnection,
   restoreConnections,
   useConnections,
 } from "@/connections/registry";
-import { HostsProvider, type HostsValue } from "@/connections/HostsContext";
+import { HostsProvider, useHosts, type HostsValue } from "@/connections/HostsContext";
+import { firstHostCopy } from "@/connections/first-host";
 import type { ConnectionId } from "@/connections/types";
 import { ConnectionConsole } from "@/views/ConnectionConsole";
+import { AddHostPage } from "@/views/setup/AddHostPage";
+import { cn } from "@/lib/utils";
 
 /**
  * Reads `?company=&code=` off a magic-link landing.
@@ -245,7 +253,6 @@ function Console() {
     resolved: !isDesktopRuntime(),
     id: null,
     instances: [],
-    operatorEmails: {},
   }));
 
   /**
@@ -266,12 +273,7 @@ function Console() {
       // Adopted once. A second call would re-run the prune against a set it has
       // already reconciled, for a value this one already has.
       const id = host ? adoptLocalHosts([host])[0] : null;
-      setEmbedded({
-        resolved: true,
-        id,
-        instances: [],
-        operatorEmails: id && host?.operatorEmail ? { [id]: host.operatorEmail } : {},
-      });
+      setEmbedded({ resolved: true, id, instances: [] });
       return;
     }
 
@@ -296,11 +298,6 @@ function Console() {
         .map((instance) => instance.instanceId)
         .filter((id): id is string => id !== undefined),
     );
-    const operatorEmails: Record<ConnectionId, string> = {};
-    running.forEach((instance, index) => {
-      if (instance.operatorEmail) operatorEmails[ids[index]] = instance.operatorEmail;
-    });
-
     setEmbedded({
       resolved: true,
       // The first running instance, which is the one rooted at the data dir on
@@ -308,7 +305,6 @@ function Console() {
       // opens on when nothing else is selected.
       id: ids[0] ?? null,
       instances,
-      operatorEmails,
     });
   }, []);
 
@@ -486,8 +482,8 @@ function Console() {
     connections,
     selected: active?.id ?? null,
     onSelect: setSelected,
-    onAdd: (baseUrl) => {
-      const id = addConnection({ baseUrl });
+    onAdd: (baseUrl, connector) => {
+      const id = addConnection({ baseUrl, connector });
       setSelected(id);
       void probe(id);
     },
@@ -509,12 +505,46 @@ function Console() {
           }
         }
       : undefined,
+    // Only where a process can be started, like the local half above. The
+    // tunnel is opened here rather than left to the first probe so that a
+    // destination `ssh` refuses is reported in the dialog the operator is
+    // standing in front of, instead of becoming a red row they have to go and
+    // read. Every *later* launch does it from `probe`, where the address of a
+    // remembered tunnel is rebuilt.
+    onAddSsh: isDesktopRuntime()
+      ? async (target) => {
+          const tunnel = await openSshTunnel(target);
+          const id = addConnection({
+            baseUrl: tunnel.baseUrl,
+            // The machine's name, not the loopback port: the port is this
+            // launch's and means nothing to the person who typed the other.
+            label: target.destination,
+            connector: { kind: "ssh", target },
+          });
+          setSelected(id);
+          void probe(id);
+        }
+      : undefined,
     onStartLocal: isDesktopRuntime()
       ? async (id) => {
           await startLocalInstance(id);
           await refreshLocal();
         }
       : undefined,
+    onEditHost: (id, change) => editConnection(id, change),
+    // Selection has to move *with* the removal, in one step. `active` falls
+    // through to the first connection when nothing is selected, so a console
+    // whose host has just been forgotten would otherwise render the removed
+    // row's client for a frame — and in the desktop, where `selected` is
+    // ordinarily null, it would keep rendering whatever came next without ever
+    // recording the choice.
+    onRemoveHost: (id) => {
+      removeConnection(id);
+      const remaining = listConnections();
+      setSelected((current) =>
+        remaining.some((c) => c.id === current) ? current : (remaining[0]?.id ?? null),
+      );
+    },
     onStopLocal: isDesktopRuntime()
       ? async (id) => {
           await stopLocalInstance(id);
@@ -526,7 +556,7 @@ function Console() {
 
   return (
     <HostsProvider value={hosts}>
-      <div className="min-h-svh">
+      <ConsoleOrAddHost>
         {active && client ? (
           // Keyed by connection: switching hosts remounts rather than
           // reconciling, so no view can carry one host's in-flight state into
@@ -538,25 +568,48 @@ function Console() {
             defaultCompany={active.defaultCompany}
             notice={active.id === bootstrapId ? auth.notice : undefined}
             forceLogin={active.id === bootstrapId && auth.failed === true}
-            // Only ever the embedded host's own operator. Offering it on a
-            // remote connection would put a local address in front of someone
-            // signing in to a server that has never heard of it.
-            suggestedEmail={embedded.operatorEmails[active.id]}
           />
         ) : (
           // The switcher rides along, because an operator whose local host is
           // gone still has somewhere else to connect to — and "Add a host" is
           // the only way out of a desktop that holds none.
           <ConsoleChrome>
-            <NoConnection starting={!embedded.resolved} />
+            <NoConnection starting={!embedded.resolved} desktop={isDesktopRuntime()} />
           </ConsoleChrome>
         )}
-      </div>
-      {/* Beside the console rather than inside it: creating a host on this
-          computer selects it, and that remounts the console. A dialog mounted
-          within would take itself off screen at the moment it succeeded. */}
-      <AddHostDialog />
+      </ConsoleOrAddHost>
+      {/* Beside the console for the same reason, and more so: forgetting the
+          host on screen selects another one, which remounts the console. A page
+          mounted within would unmount itself mid-edit. */}
+      <ManageHostsPage />
     </HostsProvider>
+  );
+}
+
+/**
+ * The console, and the add-host screen that stands in front of it.
+ *
+ * Adding a host is a screen of the onboarding flow rather than a dialog over
+ * the console (`views/setup/AddHostPage.tsx`), so it needs somewhere to be
+ * drawn that is *outside* the console: creating a host on this computer selects
+ * it, and that remounts the console. Drawn within, the screen would take itself
+ * off screen at the moment it succeeded.
+ *
+ * The console is **hidden, not unmounted**, while it is up. The console owns
+ * this host's streams and its boot, and someone who opens the chooser and
+ * changes their mind should come back to the page they left rather than to
+ * "Connecting…".
+ *
+ * A component of its own only because the flag lives in `HostsContext`, which
+ * `App` provides and therefore cannot read.
+ */
+function ConsoleOrAddHost({ children }: { children: React.ReactNode }) {
+  const { addingHost } = useHosts();
+  return (
+    <>
+      <div className={cn("min-h-svh", addingHost && "hidden")}>{children}</div>
+      {addingHost ? <AddHostPage /> : null}
+    </>
   );
 }
 
@@ -573,19 +626,10 @@ interface EmbeddedState {
    * Every local instance the core knows about, running or not.
    *
    * The stopped ones are here and nowhere else: they have no address, so they
-   * cannot be connections. The switcher's "Add a host" dialog is where they
+   * cannot be connections. The switcher's "Add a host" screen is where they
    * are startable.
    */
   instances: LocalInstance[];
-  /**
-   * The address each local connection signs a person in as (#632), by
-   * connection id.
-   *
-   * Per connection rather than one field, because with a roster there are
-   * several — and offering one host's operator address on another host's login
-   * form is how a person signs in to the wrong company.
-   */
-  operatorEmails: Record<ConnectionId, string>;
 }
 
 function FullScreen({ children }: { children: React.ReactNode }) {
@@ -607,16 +651,25 @@ function Waiting({ children }: { children: React.ReactNode }) {
 /**
  * What to show when there is no connection at all.
  *
- * The browser build cannot reach this: its bootstrap connection exists whether
- * or not the host answers, and an unreachable one is a *console* rendering an
- * error rather than an absence. The desktop genuinely can — it holds only the
- * hosts it was told about, and the embedded one may not have started.
+ * Two runtimes reach this and they are not in the same situation. The desktop
+ * holds only the hosts it was told about, and the one inside it may not have
+ * started — something went wrong. A **hub** has no bootstrap connection at all
+ * (`hub-console.md`), so a hub nobody has added a host to yet is simply new.
+ * `firstHostCopy` is what keeps a first run from reading as a failure.
  *
- * The host switcher stays on screen above this (see `ConsoleChrome`), because
- * an operator whose local host is gone still has somewhere else to connect to,
- * and this is the state in which that matters most.
+ * The ordinary browser build still cannot reach it: its bootstrap connection
+ * exists whether or not the host answers, and an unreachable one is a *console*
+ * rendering an error rather than an absence.
+ *
+ * The host switcher stays on screen above this (see `ConsoleChrome`), and the
+ * button below opens its dialog. Both, deliberately: the switcher is where an
+ * operator will look next time, and the button is the answer *this* time —
+ * telling somebody with nothing on screen to go and find a control is not an
+ * answer, it is a description of one.
  */
-function NoConnection({ starting }: { starting: boolean }) {
+function NoConnection({ starting, desktop }: { starting: boolean; desktop: boolean }) {
+  const { setAddingHost } = useHosts();
+  const copy = firstHostCopy(desktop);
   return (
     <FullScreen>
       {starting ? (
@@ -624,13 +677,12 @@ function NoConnection({ starting }: { starting: boolean }) {
           <span data-testid="no-connection-starting">Starting the host on this computer…</span>
         </Waiting>
       ) : (
-        <div className="max-w-sm space-y-2" data-testid="no-connection">
-          <p className="text-sm font-medium">No host to show</p>
-          <p className="text-sm text-muted-foreground">
-            The host on this computer didn't start — another copy of OpenCompany may be
-            holding its data. Quit the other copy and reopen this one, or add a host from
-            the switcher above.
-          </p>
+        <div className="max-w-sm space-y-3" data-testid="no-connection">
+          <p className="text-sm font-medium">{copy.title}</p>
+          <p className="text-sm text-muted-foreground">{copy.body}</p>
+          <Button data-testid="no-connection-add" onClick={() => setAddingHost(true)}>
+            {copy.action}
+          </Button>
         </div>
       )}
     </FullScreen>

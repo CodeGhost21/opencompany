@@ -344,6 +344,15 @@ Pairing codes and login codes share `LoginCodeStore` and are kept apart by
 hashing under a domain prefix rather than by a flag: they are different
 keyspaces, not one keyspace with a check someone could forget.
 
+**Pairing needs a host that has a sign-in.** A `none`-mode company — which is
+every company on a packaged desktop install — will mint and redeem a pairing
+code quite happily and then refuse the resulting session from anywhere but its
+own machine, because `authenticate_session` declines any session on a company
+with no login and `resolve_principal` refuses a non-loopback peer outright. The
+consequence and the reasoning are in
+[sign-in modes](auth-modes.md#none). The desktop as a *client* of a remote host
+is unaffected: that host has a sign-in, which is the whole precondition.
+
 A paired device **cannot mint a pairing code**. Otherwise one compromised
 desktop could quietly enrol further machines that survive revoking it, and
 revocation would stop being a lever.
@@ -439,6 +448,15 @@ admin's request open.
   mailbox to spare there, only the plaintext's hash is stored (so a throttled
   answer cannot re-echo the live code), and throttling would lock the sole local
   sign-in path for a minute after every use.
+
+  The silence has a cost the console has to absorb: nothing in the response
+  distinguishes a mailed link from a swallowed one, so the "check your email"
+  card cannot ask whether a resend would land. It therefore keeps its own copy
+  of the window — it stamps the moment each `202` arrives and disables its
+  "Resend link" button, with the remaining seconds in the label, until a minute
+  has passed (`frontend/src/views/login/resend.ts`, issue #1333). The constant
+  there must track `RESEND_INTERVAL_MILLIS`: too short and the button fires
+  into the throttle and reports a send that never happened.
 - **Login codes are never echoed** from a host that is reachable from anywhere
   else. `dev_code` appears only on a loopback-only bind with no mail
   transport. A routable host with broken mail lets nobody in rather than

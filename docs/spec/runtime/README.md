@@ -29,6 +29,9 @@ Supporting docs:
   - [workspace-layout.md](workspace-layout.md) — the on-disk layout inside the
     data root: the embedded runtime's root, the agent sandboxes, choosing the
     root, and migrating a legacy doubled install
+  - [workspace-names.md](workspace-names.md) — the one naming rule for
+    everything the runtime puts in a workspace (lowercase, dashed), where it is
+    applied, and how a company created before it keeps working
   - [memory-engine.md](memory-engine.md) — the `OPENCOMPANY_MEMORY` overlay and
     why an ephemeral data root refuses to boot
   - [data-root.md](data-root.md) — the root itself: resolution order, ownership,
@@ -128,6 +131,9 @@ Supporting docs:
   (Chargebee) and Wallet (PayPal) as sub-pages, the host read plane that makes
   provider data reachable from the console at all, and how an operator tests a
   connection without billing a real customer
+- [connectors.md](connectors.md) — where the runtime runs: the four connectors
+  (this computer, TinyHumans Cloud, a remote gateway, over SSH), why the choice
+  is per host rather than per application, and what each one costs
 - [company-setup.md](company-setup.md) — first-run **company** setup: three
   questions asked once, turned into a real roster of agents. Distinct from
   [setup.md](setup.md), which configures the *instance*

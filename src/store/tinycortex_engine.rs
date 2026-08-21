@@ -781,11 +781,7 @@ fn semantic_snippet(body: &str, query: &str) -> String {
 /// A char-boundary-safe leading window of `body` (~48 chars), for a semantic hit
 /// with no lexical anchor.
 fn leading_snippet(body: &str) -> String {
-    let raw_end = 48.min(body.len());
-    let end = (raw_end..=body.len())
-        .find(|&i| body.is_char_boundary(i))
-        .unwrap_or(body.len());
-    body[..end].to_string()
+    crate::store::text::slice_on_char_boundaries(body, 0..48)
 }
 
 // ---------------------------------------------------------------------------
@@ -872,16 +868,14 @@ fn score_chunks(chunks: &[(String, StoredChunk)], query: &str) -> Vec<ChunkHit> 
 }
 
 /// Extracts a char-boundary-safe window around `pos` of a matched term.
+///
+/// Cuts the window with the same shared helper every other `ContextStore`
+/// backend uses, so identical content snippets identically whichever store
+/// answered. This copy used to *ceil* the start where the shared helper
+/// *floors* it, which dropped the leading character of a non-ASCII window here
+/// and nowhere else — a difference no `.contains(term)` assertion can see.
 fn snippet_around(body: &str, pos: usize, term_len: usize) -> String {
-    let raw_start = pos.saturating_sub(24);
-    let raw_end = (pos + term_len + 24).min(body.len());
-    let start = (raw_start..=pos)
-        .find(|&i| body.is_char_boundary(i))
-        .unwrap_or(pos);
-    let end = (raw_end..=body.len())
-        .find(|&i| body.is_char_boundary(i))
-        .unwrap_or(body.len());
-    body[start..end].to_string()
+    crate::store::text::slice_on_char_boundaries(body, pos.saturating_sub(24)..pos + term_len + 24)
 }
 
 #[cfg(test)]

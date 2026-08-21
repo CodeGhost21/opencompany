@@ -19,7 +19,7 @@ function node(partial: Partial<FsNode> & { id: string; name: string }): FsNode {
   return { kind: "file", parentId: null, updatedAt: 0, ...partial } as FsNode;
 }
 
-// The shape that motivated the issue: Standards/Engineering/Backend/Rust/API
+// The shape that motivated the issue: standards/Engineering/Backend/Rust/API
 // design/Pagination.md, five folders deep.
 const TREE: FsNode[] = [
   node({ id: "std", name: "Standards", kind: "folder" }),
@@ -49,7 +49,7 @@ describe("breadcrumbOf", () => {
 
   it("keeps the root and the last two folders when the trail is too long", () => {
     // The half that matters. Truncating a path *string* ellipsises the tail, so
-    // every note under Standards/Engineering/… renders an identical prefix and
+    // every note under standards/Engineering/… renders an identical prefix and
     // the discriminating end is exactly what is thrown away.
     const crumbs = breadcrumbOf(TREE, "page");
     expect(crumbs.map((c) => c?.name ?? "…")).toEqual(["Standards", "…", "Rust", "API design"]);

@@ -751,7 +751,7 @@ fn is_false(value: &bool) -> bool {
 
 /// One [`Agent::context`] entry.
 ///
-/// A bare TOML string (`"Brand/Voice.md"`) deserializes as [`Self::Path`], read
+/// A bare TOML string (`"brand/Voice.md"`) deserializes as [`Self::Path`], read
 /// access, matching every manifest written before write access existed. The
 /// table form (`{ path = "...", access = "write" }`) is [`Self::Detailed`].
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -843,7 +843,7 @@ impl Agent {
     /// `access = "write"` entry is unaffected by this field's existence.
     /// `Some(paths)` — returned as soon as `context` names at least one write
     /// entry — confines `workspace_write`/`workspace_create` to exactly those
-    /// paths, plus this agent's own `Agents/<id>/` home, which the workspace
+    /// paths, plus this agent's own `agents/<id>/` home, which the workspace
     /// tools always allow regardless of this scope.
     pub fn write_scope(&self) -> Option<Vec<String>> {
         let entries = self.context.as_ref()?;
@@ -983,6 +983,16 @@ pub struct McpServer {
     /// Exact remote tool names to always hide/block (takes precedence).
     #[serde(default)]
     pub disallowed_tools: Vec<String>,
+    /// Exact remote tool names on this server the operator declares **read-only**
+    /// (issue #1124): they read and change nothing, so a bridge call to one need
+    /// not park under `auto` the way calling *through* a server otherwise does.
+    ///
+    /// This is an operator declaration, not a claim read off the remote — there
+    /// is no client-side annotation to trust — so an undeclared tool always
+    /// gates. Independent of `allowed_tools`/`disallowed_tools`: it says nothing
+    /// about whether a tool is *exposed*, only how a call to it is priced.
+    #[serde(default)]
+    pub read_only_tools: Vec<String>,
     /// Per-request timeout in seconds.
     #[serde(default = "default_mcp_timeout_secs")]
     pub timeout_secs: u64,
@@ -1870,7 +1880,7 @@ mod test {
             r#"
             id = "critic"
             role = "Critic"
-            context = ["GOAL.md", "CLAIMS.md"]
+            context = ["GOAL.md", "claims.md"]
             "#,
         )
         .expect("parse toml");
@@ -1878,7 +1888,7 @@ mod test {
             populated.context,
             Some(vec![
                 ContextEntry::from("GOAL.md"),
-                ContextEntry::from("CLAIMS.md")
+                ContextEntry::from("claims.md")
             ])
         );
 
@@ -1903,7 +1913,7 @@ mod test {
         );
 
         let read_only: Agent =
-            toml::from_str("id = \"critic\"\nrole = \"Critic\"\ncontext = [\"Brand/Voice.md\"]\n")
+            toml::from_str("id = \"critic\"\nrole = \"Critic\"\ncontext = [\"brand/Voice.md\"]\n")
                 .unwrap();
         assert_eq!(
             read_only.write_scope(),
@@ -1915,13 +1925,13 @@ mod test {
             r#"
             id = "critic"
             role = "Critic"
-            context = ["Brand/Voice.md", { path = "Agents/critic/notes.md", access = "write" }]
+            context = ["brand/Voice.md", { path = "agents/critic/notes.md", access = "write" }]
             "#,
         )
         .expect("parse toml");
         assert_eq!(
             write_entry.write_scope(),
-            Some(vec!["Agents/critic/notes.md".to_string()]),
+            Some(vec!["agents/critic/notes.md".to_string()]),
             "only the declared write entry is in scope, not the read one"
         );
     }

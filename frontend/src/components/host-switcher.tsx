@@ -20,18 +20,8 @@
 // every host, and `data-worst-status` says the same thing to a test. Without it
 // removing the rail would be a net loss for anyone running more than one host.
 
-import { Building2, Check, ChevronsUpDown, Loader2, Play, Plus, Square } from "lucide-react";
-import { useState } from "react";
+import { Building2, Check, ChevronsUpDown, Plus, Settings2 } from "lucide-react";
 
-import { Button } from "@/components/ui/button";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -42,17 +32,13 @@ import {
   DropdownMenuShortcut,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 import {
   SidebarMenu,
   SidebarMenuButton,
   SidebarMenuItem,
   useSidebar,
 } from "@/components/ui/sidebar";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { isDesktopRuntime } from "@/api/transport";
-import type { LocalInstance } from "@/api/transport/desktop";
 import { hostShortcutLabel, useHosts } from "@/connections/HostsContext";
 import type { Connection, ConnectionStatus } from "@/connections/types";
 import { cn } from "@/lib/utils";
@@ -65,13 +51,33 @@ import { cn } from "@/lib/utils";
  * #1167), because hue alone tells an operator that *something* differs without
  * saying what, and tells someone who cannot separate amber from green nothing.
  */
-const STATUS_COPY: Record<ConnectionStatus, { label: string; dot: string }> = {
+export const STATUS_COPY: Record<ConnectionStatus, { label: string; dot: string }> = {
   connecting: { label: "Connecting…", dot: "bg-muted-foreground/50" },
   live: { label: "Connected", dot: "bg-status-done" },
   degraded: { label: "Partly available", dot: "bg-status-blocked" },
   down: { label: "Unreachable", dot: "bg-destructive" },
   unauthenticated: { label: "Sign-in needed", dot: "bg-status-blocked" },
 };
+
+/**
+ * How a host's state reads on its own row.
+ *
+ * {@link STATUS_COPY} keyed by status, except for the one case where the
+ * status alone is not the whole answer: a cloud tenant that has been idle is
+ * being *started*, not contacted, and that takes seconds rather than
+ * milliseconds. "Connecting…" for that long reads as a hang, so the connector
+ * supplies the word — which is why this takes a connection rather than a
+ * status.
+ *
+ * Deliberately not a fifth `ConnectionStatus`. Waking is a connecting host and
+ * ranks exactly like one on the trigger; a new status would need a place in the
+ * severity ordering, and every `switch` over the union would have to grow a
+ * branch for a state that behaves identically.
+ */
+export function statusCopy(connection: Connection): { label: string; dot: string } {
+  const copy = STATUS_COPY[connection.status];
+  return connection.waking ? { ...copy, label: "Waking…" } : copy;
+}
 
 /**
  * How loudly each state asks to be noticed.
@@ -128,9 +134,42 @@ export function worstStatus(connections: Connection[]): ConnectionStatus | null 
  *
  * This is the predicate `connectionRailVisible` used to be — same rule, moved
  * with the control it governs.
+ *
+ * It answers **two** of the three questions the switcher asks, and no longer
+ * the third: whether the floating standalone switcher is drawn at all, and
+ * whether the status dot earns its place. Whether the trigger *opens a menu*
+ * is {@link hostSwitcherMenu}, which parted company with this rule once the
+ * menu started carrying host management.
  */
 export function hostSwitcherInteractive(count: number, hub = false): boolean {
   return count >= 2 || hub || isDesktopRuntime();
+}
+
+/**
+ * Whether the trigger opens a menu, or is only a nameplate.
+ *
+ * This used to be {@link hostSwitcherInteractive} exactly, on the argument
+ * that a chevron over a menu of one is furniture. That argument was sound
+ * while the menu held nothing but the roster and "Add a host": with one host
+ * there is nothing to switch to, and adding a second is the desktop's and the
+ * hub's business.
+ *
+ * "Manage hosts" retires it. The menu now carries the *only* way to rename,
+ * re-address or forget a host — and an ordinary browser console with exactly
+ * one connection is precisely the arrangement whose host is most likely to
+ * move, since that bootstrap row is a plain `remote` connector (see
+ * `DEFAULT_CONNECTOR`) and therefore fully manageable. Under the old rule that
+ * console got a nameplate with no menu, so its one host could not be reached
+ * at all: a menu of one is not furniture once one is a menu of something to
+ * *do*.
+ *
+ * So: any host at all opens a menu. The zero cases are unchanged and still
+ * belong to the desktop and the hub, which need "Add a host" to have anything
+ * at all. A single `local` host — the one connector this page cannot manage —
+ * only ever exists on the desktop, which is already true here.
+ */
+export function hostSwitcherMenu(count: number, hub = false): boolean {
+  return count >= 1 || hostSwitcherInteractive(count, hub);
 }
 
 interface Props {
@@ -159,6 +198,7 @@ export function HostSwitcher({ variant = "sidebar", companyName }: Props) {
   const { connections, selected, hub } = hosts;
 
   const interactive = hostSwitcherInteractive(connections.length, hub);
+  const menu = hostSwitcherMenu(connections.length, hub);
   const active = connections.find((c) => c.id === selected) ?? null;
   const worst = worstStatus(connections);
 
@@ -225,7 +265,7 @@ export function HostSwitcher({ variant = "sidebar", companyName }: Props) {
     "data-worst-status": worst ?? "none",
   };
 
-  if (!interactive) {
+  if (!menu) {
     return (
       <SidebarMenu>
         <SidebarMenuItem>
@@ -248,7 +288,7 @@ export function HostSwitcher({ variant = "sidebar", companyName }: Props) {
       <DropdownMenuGroup>
         <DropdownMenuLabel>Hosts</DropdownMenuLabel>
         {connections.map((connection, index) => {
-          const status = STATUS_COPY[connection.status];
+          const status = statusCopy(connection);
           const shortcut = hostShortcutLabel(index);
           return (
             <DropdownMenuItem
@@ -303,6 +343,19 @@ export function HostSwitcher({ variant = "sidebar", companyName }: Props) {
       >
         <Plus className="size-4" />
         Add a host
+      </DropdownMenuItem>
+      {/* The other half of adding one. Kept out of the rows themselves: a row
+          is a *filter* — clicking it puts that host on screen — and hanging an
+          edit and a delete off the same row makes a menu whose click targets
+          disagree about what a row is for. The page says what each host is,
+          which the menu deliberately does not. */}
+      <DropdownMenuItem
+        data-testid="host-switcher-manage"
+        onClick={() => hosts.setManagingHosts(true)}
+        className="gap-2"
+      >
+        <Settings2 className="size-4" />
+        Manage hosts
       </DropdownMenuItem>
     </DropdownMenuContent>
   );
@@ -399,241 +452,5 @@ function SidebarHeaderTrigger({
         </DropdownMenu>
       </SidebarMenuItem>
     </SidebarMenu>
-  );
-}
-
-/**
- * Where a host comes from: an address somewhere else, or this machine.
- *
- * Lifted out of the rail unchanged — it is the same dialog, reached from the
- * menu's last item instead of from a `+` at the bottom of a strip of icons.
- *
- * **Mounted beside the console, not inside the switcher.** Creating a host on
- * this computer selects it, which remounts the console — and the switcher with
- * it — so a dialog owned by the switcher would close itself the moment it
- * succeeded, taking the roster away while the operator was still working in it.
- * Its open flag lives in `HostsContext` for the same reason.
- */
-export function AddHostDialog() {
-  const hosts = useHosts();
-  const {
-    addingHost: open,
-    setAddingHost: onOpenChange,
-    localInstances,
-    onAddLocal,
-    onStartLocal,
-    onStopLocal,
-  } = hosts;
-  const onAdd = (baseUrl: string) => {
-    hosts.onAdd(baseUrl);
-    onOpenChange(false);
-  };
-
-  return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent>
-        <DialogHeader>
-          <DialogTitle>Add a host</DialogTitle>
-          <DialogDescription>
-            A host is one OpenCompany server. Run another on this computer, or point at one
-            somewhere else. Either way it stays connected alongside the others.
-          </DialogDescription>
-        </DialogHeader>
-        {onAddLocal ? (
-          // The desktop leads with the local half, because starting a host is
-          // the thing it can do that a browser cannot — and because a person
-          // who has just installed the application has no URL to type.
-          <Tabs defaultValue="local">
-            <TabsList className="w-full">
-              <TabsTrigger value="local" data-testid="add-host-local">
-                On this computer
-              </TabsTrigger>
-              <TabsTrigger value="remote" data-testid="add-host-remote">
-                Somewhere else
-              </TabsTrigger>
-            </TabsList>
-            <TabsContent value="local">
-              <LocalInstances
-                instances={localInstances}
-                onAdd={onAddLocal}
-                onStart={onStartLocal}
-                onStop={onStopLocal}
-              />
-            </TabsContent>
-            <TabsContent value="remote">
-              <RemoteHost onAdd={onAdd} onCancel={() => onOpenChange(false)} />
-            </TabsContent>
-          </Tabs>
-        ) : (
-          <RemoteHost onAdd={onAdd} onCancel={() => onOpenChange(false)} />
-        )}
-      </DialogContent>
-    </Dialog>
-  );
-}
-
-/** The address of a host running somewhere this application did not start it. */
-function RemoteHost({
-  onAdd,
-  onCancel,
-}: {
-  onAdd: (baseUrl: string) => void;
-  onCancel: () => void;
-}) {
-  const [url, setUrl] = useState("");
-  return (
-    <>
-      <div className="space-y-2">
-        <Label htmlFor="connection-url">Host URL</Label>
-        <Input
-          id="connection-url"
-          placeholder="https://acme.example.com"
-          value={url}
-          onChange={(e) => setUrl(e.target.value)}
-        />
-      </div>
-      <DialogFooter>
-        <Button variant="ghost" onClick={onCancel}>
-          Cancel
-        </Button>
-        <Button disabled={!url.trim()} onClick={() => onAdd(url.trim())}>
-          Add
-        </Button>
-      </DialogFooter>
-    </>
-  );
-}
-
-/**
- * The hosts this machine runs: what is listening, what is not, and a name field
- * for one more.
- *
- * Stopped instances are listed rather than hidden, and this is the only place
- * they appear. A stopped instance has no address, so it cannot be a row in the
- * switcher — the menu lists connections, and a connection with nothing
- * listening at it is a permanent probe failure. Here it is a row with a Start
- * button, which is what it actually is.
- */
-function LocalInstances({
-  instances,
-  onAdd,
-  onStart,
-  onStop,
-}: {
-  instances: LocalInstance[];
-  onAdd: (label: string) => Promise<void>;
-  onStart?: (id: string) => Promise<void>;
-  onStop?: (id: string) => Promise<void>;
-}) {
-  const [label, setLabel] = useState("");
-  /** Which instance has a command in flight, or `"new"` for the create. */
-  const [busy, setBusy] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-
-  /**
-   * Runs one command, keeping its failure on screen.
-   *
-   * Every one of these can fail for a reason the operator has to read — most
-   * often the data root being held by an `opencompany serve` in a terminal —
-   * and a rejected promise with no `catch` is a console that silently does
-   * nothing when the button is pressed.
-   */
-  async function run(key: string, action: () => Promise<void>): Promise<void> {
-    setBusy(key);
-    setError(null);
-    try {
-      await action();
-    } catch (failure) {
-      setError(failure instanceof Error ? failure.message : String(failure));
-    } finally {
-      setBusy(null);
-    }
-  }
-
-  return (
-    <div className="space-y-4" data-testid="local-instances">
-      <ul className="space-y-1">
-        {instances.map((instance) => (
-          <li
-            key={instance.id}
-            data-testid={`local-instance-${instance.id}`}
-            data-running={instance.running}
-            className="flex items-center justify-between gap-2 rounded-md border px-3 py-2"
-          >
-            <div className="min-w-0">
-              <div className="truncate text-sm">{instance.label}</div>
-              <div className="truncate text-xs text-muted-foreground">
-                {instance.running ? instance.baseUrl : (instance.error ?? "Stopped")}
-              </div>
-            </div>
-            {instance.running ? (
-              <Button
-                variant="ghost"
-                size="sm"
-                disabled={!onStop || busy !== null}
-                onClick={() => void run(instance.id, () => onStop!(instance.id))}
-              >
-                {busy === instance.id ? (
-                  <Loader2 className="size-4 animate-spin" />
-                ) : (
-                  <Square className="size-4" />
-                )}
-                Stop
-              </Button>
-            ) : (
-              <Button
-                variant="ghost"
-                size="sm"
-                disabled={!onStart || busy !== null}
-                onClick={() => void run(instance.id, () => onStart!(instance.id))}
-              >
-                {busy === instance.id ? (
-                  <Loader2 className="size-4 animate-spin" />
-                ) : (
-                  <Play className="size-4" />
-                )}
-                Start
-              </Button>
-            )}
-          </li>
-        ))}
-      </ul>
-
-      <div className="space-y-2">
-        <Label htmlFor="local-instance-label">Name</Label>
-        <Input
-          id="local-instance-label"
-          placeholder="Acme"
-          value={label}
-          onChange={(e) => setLabel(e.target.value)}
-        />
-        <p className="text-xs text-muted-foreground">
-          A new host on this computer, with its own data and its own companies. Nothing is shared
-          with the ones above.
-        </p>
-      </div>
-
-      {error ? (
-        <p data-testid="local-instance-error" className="text-xs text-destructive">
-          {error}
-        </p>
-      ) : null}
-
-      <DialogFooter>
-        <Button
-          data-testid="local-instance-add"
-          disabled={!label.trim() || busy !== null}
-          onClick={() =>
-            void run("new", async () => {
-              await onAdd(label.trim());
-              setLabel("");
-            })
-          }
-        >
-          {busy === "new" ? <Loader2 className="size-4 animate-spin" /> : null}
-          Run it here
-        </Button>
-      </DialogFooter>
-    </div>
   );
 }

@@ -20,6 +20,7 @@ fn declared(name: &str, endpoint: &str, source: McpSource) -> McpServerDto {
         enabled: true,
         allowed_tools: Vec::new(),
         disallowed_tools: Vec::new(),
+        read_only_tools: Vec::new(),
         timeout_secs: 30,
         auth_configured: false,
         server_id: None,

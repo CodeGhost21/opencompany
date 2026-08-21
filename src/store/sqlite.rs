@@ -50,6 +50,7 @@ use crate::ports::types::{
 };
 use crate::ports::users::{InviteRecord, UserRecord};
 use crate::store::content_address;
+use crate::store::text::slice_on_char_boundaries;
 
 /// Schema for every port table. Idempotent: safe to run on each `open`.
 const MIGRATIONS: &str = r#"
@@ -591,6 +592,8 @@ impl CompanyStore for SqliteStore {
             overlay_desks: overlay.desks,
             overlay_workflows: overlay.workflows,
             overlay_budgets: overlay.budgets,
+            overlay_agent_edits: overlay.agent_edits,
+            overlay_retired_agents: overlay.retired_agents,
             overlay_policy: overlay.policy,
             overlay_desk_tools: overlay.desk_tools,
             disabled_workflows: overlay.disabled_workflows,
@@ -1023,15 +1026,37 @@ impl ContextStore for SqliteStore {
         })?;
         match range {
             None => Ok(body),
-            Some(r) => {
-                let start = r.start.min(body.len());
-                let end = r.end.min(body.len());
-                if start >= end {
-                    return Ok(String::new());
-                }
-                Ok(body[start..end].to_string())
-            }
+            // Byte offsets from the caller can land mid-codepoint; widen to
+            // the boundary rather than panic the slice.
+            Some(r) => Ok(slice_on_char_boundaries(&body, r)),
         }
+    }
+
+    async fn peek_many(&self, id: &CompanyId, addrs: &[ChunkAddr]) -> Result<Vec<Option<String>>> {
+        // One connection acquisition and one prepared statement for the whole
+        // batch, instead of the default's lock-per-chunk loop.
+        let conn = self.conn();
+        let mut stmt = conn
+            .prepare("SELECT body FROM context_chunks WHERE company_id = ?1 AND addr = ?2")
+            .map_err(sql_err)?;
+        let mut bodies = Vec::with_capacity(addrs.len());
+        for addr in addrs {
+            // Per-addr degrade, per the port contract: a row that fails to
+            // read (corrupt decode included) answers `None` like a missing
+            // one — only failing to prepare the statement fails the batch.
+            let body: Option<String> = match stmt
+                .query_row(params![id.as_ref(), addr.as_ref()], |r| r.get(0))
+                .optional()
+            {
+                Ok(body) => body,
+                Err(error) => {
+                    tracing::warn!(addr = %addr.as_ref(), %error, "context row failed to read");
+                    None
+                }
+            };
+            bodies.push(body);
+        }
+        Ok(bodies)
     }
 
     async fn delete(&self, id: &CompanyId, addr: &ChunkAddr) -> Result<bool> {
@@ -1062,11 +1087,14 @@ impl ContextStore for SqliteStore {
             }
             let (addr, body) = row.map_err(sql_err)?;
             if let Some(pos) = body.find(query) {
-                let start = pos.saturating_sub(24);
-                let end = (pos + query.len() + 24).min(body.len());
+                // The ±24-byte window can land mid-codepoint on a multibyte
+                // body; widen to the boundary rather than panic the slice.
                 hits.push(ChunkHit {
                     addr: ChunkAddr::new(addr),
-                    snippet: body[start..end].to_string(),
+                    snippet: slice_on_char_boundaries(
+                        &body,
+                        pos.saturating_sub(24)..pos + query.len() + 24,
+                    ),
                     score: 1.0,
                 });
             }
@@ -3671,6 +3699,18 @@ mod test {
         conformance::assert_context_chunk_stamps(store()).await;
     }
 
+    // Exercises this backend's single-connection `peek_many` override against
+    // the same positional contract the default implementation gives.
+    #[tokio::test]
+    async fn conformance_context_peek_many() {
+        conformance::assert_context_peek_many_answers_positionally(store()).await;
+    }
+
+    #[tokio::test]
+    async fn conformance_context_multibyte_bodies() {
+        conformance::assert_multibyte_bodies_survive_search_and_ranged_peek(store()).await;
+    }
+
     /// The migration path a fresh database never exercises.
     ///
     /// [`MIGRATIONS`] is all `CREATE TABLE IF NOT EXISTS`, which is a no-op
@@ -4093,7 +4133,7 @@ mod test {
     ///
     /// This backend does not reject it, and hosted tenants run this backend — so
     /// the shape is reachable data rather than a thought experiment, and that is
-    /// what this asserts: sqlite stores `q/r.md` under `Agents/ghost/`, and the
+    /// what this asserts: sqlite stores `q/r.md` under `agents/ghost/`, and the
     /// sweep leaves `ghost` alone. It lives here because
     /// `cargo test --features sqlite --lib store::sqlite` is the only lane that
     /// runs it.
@@ -4188,6 +4228,7 @@ mod test {
         let id = CompanyId::new("acme");
         company
             .save(&CompanyRecord {
+                overlay_retired_agents: Vec::new(),
                 id: id.clone(),
                 manifest: toml::from_str(
                     "[company]\nname=\"Acme\"\noutput=\"widgets\"\n[[agent]]\nid=\"ceo\"\nrole=\"Chief\"\n[policy]\nmode=\"supervised\"\n",
@@ -4201,6 +4242,7 @@ mod test {
                 overlay_desks: Vec::new(),
                 overlay_workflows: Vec::new(),
                 overlay_budgets: Vec::new(),
+                overlay_agent_edits: Vec::new(),
                 overlay_policy: None,
                 overlay_desk_tools: Default::default(),
                 disabled_workflows: Vec::new(),

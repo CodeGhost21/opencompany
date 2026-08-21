@@ -1,0 +1,102 @@
+# What prospects push back on, and what answer actually worked.
+#
+# The most reusable asset a sales organization has, and the one that reliably
+# lives nowhere. The same six objections come up in every deal; each rep invents
+# an answer, the good ones are never shared, and a bad answer given confidently
+# once becomes the house answer by accident.
+
+title = "Objections"
+purpose = """
+Every objection this company meets, the answer that worked, and the answer that \
+did not. Read it before a discovery or negotiation call — you are about to hear \
+one of these, and somebody has already found out what happens next.\
+"""
+written_by = "`record_entry` to log or revise an objection and its answer, `close_entry` when it stops arising"
+checks = ["required-field", "known-status", "closed-needs-reason"]
+
+[[field]]
+name = "id"
+role = "id"
+required = true
+
+[[field]]
+name = "objection"
+role = "title"
+required = true
+description = "The push-back, in the prospect's words rather than the sanitised version."
+
+[[field]]
+name = "status"
+role = "status"
+required = true
+
+[[field]]
+name = "underneath"
+role = "prose"
+description = "What it usually actually means. \"Too expensive\" is rarely about price."
+
+[[field]]
+name = "answer"
+role = "prose"
+required = true
+description = "The response that has worked, and what it rests on. Not a slogan."
+
+[[field]]
+name = "does_not_work"
+role = "prose"
+description = "What has been tried and failed. Half the value here, and never recorded anywhere else."
+
+[[field]]
+name = "frequency"
+role = "prose"
+description = "How often it comes up, and in which kind of account."
+
+[[field]]
+name = "owner"
+role = "owner"
+
+[[field]]
+name = "reason"
+role = "prose"
+description = "Why it closed — the product changed, or it stopped arising. Required when it closes."
+
+[[field]]
+name = "refs"
+role = "refs"
+
+[[status]]
+name = "recurring"
+
+[[status]]
+name = "occasional"
+
+[[status]]
+name = "resolved"
+closed = true
+needs_reason = true
+
+[[status]]
+name = "obsolete"
+closed = true
+needs_reason = true
+
+[[section]]
+heading = "Recurring"
+blurb = "You will hear these. Read the answers before the call, not after it."
+statuses = ["recurring"]
+order = "recent"
+
+[[section]]
+heading = "Occasional"
+blurb = "Seen in some accounts. Worth knowing which."
+statuses = ["occasional"]
+order = "recent"
+
+[[section]]
+heading = "Closed"
+blurb = """
+Resolved by a product change, or no longer arising — each with the reason. Kept \
+because an objection that stopped mattering can start again with one release.\
+"""
+statuses = ["resolved", "obsolete"]
+cap = 20

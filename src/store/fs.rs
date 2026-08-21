@@ -33,6 +33,7 @@ use crate::ports::types::{
 use crate::ports::{generate_id, now_millis};
 use crate::store::content_address;
 use crate::store::paths::Bundle;
+use crate::store::text::slice_on_char_boundaries;
 
 // ---------------------------------------------------------------------------
 // Shared helpers
@@ -732,6 +733,18 @@ struct Meta {
     /// `#[serde(default)]` keeps those loading with the manifest in charge.
     #[serde(default)]
     overlay_budgets: Vec<crate::ports::types::BudgetOverride>,
+    /// The operator's edits of manifest-declared teammates. Absent on meta files
+    /// written before the console could edit a blueprint teammate, and
+    /// `#[serde(default)]` reads that absence as "nothing is overridden" —
+    /// which leaves the manifest in charge, exactly as those companies ran.
+    #[serde(default)]
+    overlay_agent_edits: Vec<crate::ports::types::AgentOverride>,
+    /// The ids of manifest teammates the operator has removed. Absent on meta
+    /// files written before a blueprint teammate could be removed, which
+    /// `#[serde(default)]` reads as "nobody was removed" — exactly how those
+    /// companies ran.
+    #[serde(default)]
+    overlay_retired_agents: Vec<String>,
     /// The operator's `[policy]` override (issue #562). Absent on meta files
     /// written before the console could write a tier, so `#[serde(default)]`
     /// keeps those loading with the manifest's `[policy]` in charge.
@@ -775,6 +788,8 @@ impl Default for Meta {
             overlay_desks: Vec::new(),
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
+            overlay_agent_edits: Vec::new(),
+            overlay_retired_agents: Vec::new(),
             overlay_policy: None,
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
@@ -864,6 +879,8 @@ impl CompanyStore for FsCompanyStore {
         }
 
         Ok(Some(CompanyRecord {
+            overlay_agent_edits: meta.overlay_agent_edits,
+            overlay_retired_agents: meta.overlay_retired_agents,
             id: id.clone(),
             manifest,
             ledger,
@@ -898,6 +915,8 @@ impl CompanyStore for FsCompanyStore {
             overlay_desks: record.overlay_desks.clone(),
             overlay_workflows: record.overlay_workflows.clone(),
             overlay_budgets: record.overlay_budgets.clone(),
+            overlay_agent_edits: record.overlay_agent_edits.clone(),
+            overlay_retired_agents: record.overlay_retired_agents.clone(),
             overlay_policy: record.overlay_policy.clone(),
             overlay_desk_tools: record.overlay_desk_tools.clone(),
             disabled_workflows: record.disabled_workflows.clone(),
@@ -1291,9 +1310,11 @@ impl ContextStore for FsContextStore {
         let lock = path_lock(&index_path);
         let _guard = lock.lock().await;
         let blob_path = bundle.context_blob(&addr);
-        tokio::fs::write(&blob_path, &chunk.body)
-            .await
-            .map_err(|e| io_err(&blob_path, e))?;
+        // A re-`put` of an identical body rewrites an already-indexed blob
+        // while a concurrent peek/search may be mid-read; only the tmp-then-
+        // rename publish guarantees the reader full old bytes or full new
+        // bytes, never a truncated file.
+        write_atomic(&blob_path, &chunk.body).await?;
         let entry = IndexEntry {
             addr: addr.clone(),
             label: chunk.label,
@@ -1330,14 +1351,9 @@ impl ContextStore for FsContextStore {
             .map_err(|e| io_err(&path, e))?;
         match range {
             None => Ok(body),
-            Some(r) => {
-                let start = r.start.min(body.len());
-                let end = r.end.min(body.len());
-                if start >= end {
-                    return Ok(String::new());
-                }
-                Ok(body[start..end].to_string())
-            }
+            // Byte offsets from the caller can land mid-codepoint; widen to
+            // the boundary rather than panic the slice.
+            Some(r) => Ok(slice_on_char_boundaries(&body, r)),
         }
     }
 
@@ -1362,12 +1378,25 @@ impl ContextStore for FsContextStore {
         // The blob is shared by every index entry bearing this address (put
         // appends an entry per write, all pointing at one content-addressed
         // file). The filter above removed all of them, so the blob is
-        // unreferenced and goes too.
+        // unreferenced and goes too — best-effort, because the index is the
+        // source of truth and its rows are already gone: an orphaned blob is
+        // invisible to list and search (both index-driven), and while a
+        // direct `peek` of the exact addr can still read it until the file is
+        // reclaimed (peek is blob-path-driven), a caller holding that addr
+        // already held the body — nothing new is reachable. An `Err` here
+        // would instead tell the caller nothing was deleted after the index
+        // half already was.
         let blob_path = bundle.context_blob(addr.as_ref());
         match tokio::fs::remove_file(&blob_path).await {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(io_err(&blob_path, e)),
+            Err(e) => tracing::warn!(
+                addr = %addr,
+                path = %blob_path.display(),
+                error = %e,
+                "context index rows removed but the blob would not delete; \
+                 leaving an orphaned, unreferenced blob"
+            ),
         }
         Ok(true)
     }
@@ -1385,11 +1414,14 @@ impl ContextStore for FsContextStore {
                 continue;
             };
             if let Some(pos) = body.find(query) {
-                let start = pos.saturating_sub(24);
-                let end = (pos + query.len() + 24).min(body.len());
+                // The ±24-byte window can land mid-codepoint on a multibyte
+                // body; widen to the boundary rather than panic the slice.
                 hits.push(ChunkHit {
                     addr: ChunkAddr::new(entry.addr),
-                    snippet: body[start..end].to_string(),
+                    snippet: slice_on_char_boundaries(
+                        &body,
+                        pos.saturating_sub(24)..pos + query.len() + 24,
+                    ),
                     score: 1.0,
                 });
             }
@@ -2162,6 +2194,152 @@ mod test {
         conformance::assert_context_chunk_stamps(Arc::new(FsContextStore::new(&root))).await;
     }
 
+    // The fs backend keeps the port's default `peek_many` (per-file reads are
+    // its floor), so this run is also the default implementation's own proof.
+    #[tokio::test]
+    async fn conformance_context_peek_many() {
+        let root_dir = tmp_root();
+        let root = root_dir.path().to_path_buf();
+        conformance::assert_context_peek_many_answers_positionally(Arc::new(FsContextStore::new(
+            &root,
+        )))
+        .await;
+    }
+
+    #[tokio::test]
+    async fn conformance_context_multibyte_bodies() {
+        let root_dir = tmp_root();
+        let root = root_dir.path().to_path_buf();
+        conformance::assert_multibyte_bodies_survive_search_and_ranged_peek(Arc::new(
+            FsContextStore::new(&root),
+        ))
+        .await;
+    }
+
+    /// The deterministic half of the atomicity guarantee: a re-`put` publishes
+    /// a *new* file over the old name, so the blob's inode changes. A plain
+    /// truncating write — the shape that let a reader see a prefix — keeps the
+    /// same inode and fails this every run, where the racing test below only
+    /// reddens when the reader happens to land inside the truncate window.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_re_put_publishes_a_new_blob_instead_of_truncating_in_place() {
+        use std::os::unix::fs::MetadataExt;
+
+        let root_dir = tmp_root();
+        let store = FsContextStore::new(root_dir.path().to_path_buf());
+        let id = CompanyId::new("alpha");
+        let chunk = ContextChunk {
+            label: "agent/atomic".to_string(),
+            body: "the same body, published twice".to_string(),
+        };
+        let addr = store.put(&id, chunk.clone()).await.unwrap();
+        let blob_path = Bundle::new(root_dir.path().to_path_buf(), &id).context_blob(addr.as_ref());
+        let before = tokio::fs::metadata(&blob_path).await.unwrap().ino();
+
+        store.put(&id, chunk).await.unwrap();
+
+        let after = tokio::fs::metadata(&blob_path).await.unwrap().ino();
+        assert_ne!(
+            before, after,
+            "the blob was rewritten in place; a concurrent reader can see the \
+             truncate window"
+        );
+    }
+
+    /// A re-`put` of an already-indexed blob must never expose a torn body: the
+    /// blob is republished via tmp-then-rename, so a racing `peek` sees the
+    /// old bytes or the new bytes in full — with a plain truncating write it
+    /// could read an empty or partial file for the whole write window.
+    ///
+    /// Racing, so its redness is probabilistic (the reader must land inside the
+    /// write window); the inode test above is the every-run proof. This one
+    /// guards what the inode cannot: that the bytes a racing reader *does* get
+    /// are always a whole body.
+    #[tokio::test]
+    async fn a_concurrent_peek_never_sees_a_torn_blob_rewrite() {
+        let root_dir = tmp_root();
+        let store = Arc::new(FsContextStore::new(root_dir.path().to_path_buf()));
+        let id = CompanyId::new("alpha");
+        // Large enough that a truncate-then-stream write has a visible window.
+        let body = "x".repeat(64 * 1024);
+        let chunk = ContextChunk {
+            label: "agent/atomic".to_string(),
+            body: body.clone(),
+        };
+        let addr = store.put(&id, chunk.clone()).await.unwrap();
+
+        for _ in 0..50 {
+            let writer = {
+                let store = store.clone();
+                let id = id.clone();
+                let chunk = chunk.clone();
+                tokio::spawn(async move { store.put(&id, chunk).await.unwrap() })
+            };
+            let reader = {
+                let store = store.clone();
+                let id = id.clone();
+                let addr = addr.clone();
+                tokio::spawn(async move { store.peek(&id, &addr, None).await.unwrap() })
+            };
+            let read = reader.await.unwrap();
+            assert_eq!(
+                read.len(),
+                body.len(),
+                "a concurrent peek saw a torn blob rewrite"
+            );
+            assert_eq!(read, body);
+            writer.await.unwrap();
+        }
+    }
+
+    /// Once the index rows are gone the delete HAS happened; a blob that will
+    /// not remove is an unreferenced orphan, and reporting an error for it
+    /// would tell the caller nothing was deleted after half of it was.
+    #[tokio::test]
+    async fn delete_reports_the_index_result_even_when_the_blob_will_not_remove() {
+        let root_dir = tmp_root();
+        let store = FsContextStore::new(root_dir.path().to_path_buf());
+        let id = CompanyId::new("alpha");
+        let addr = store
+            .put(
+                &id,
+                ContextChunk {
+                    label: "agent/orphan".to_string(),
+                    body: "orphan me".to_string(),
+                },
+            )
+            .await
+            .unwrap();
+
+        // Swap the blob for a non-empty directory so `remove_file` must fail
+        // with something other than NotFound, on every platform.
+        let blob_path = Bundle::new(root_dir.path().to_path_buf(), &id).context_blob(addr.as_ref());
+        tokio::fs::remove_file(&blob_path).await.unwrap();
+        tokio::fs::create_dir(&blob_path).await.unwrap();
+        tokio::fs::write(blob_path.join("occupant"), b"x")
+            .await
+            .unwrap();
+
+        assert!(
+            store.delete(&id, &addr).await.unwrap(),
+            "the index rows were removed, so the delete happened"
+        );
+        assert!(
+            store.list(&id, "").await.unwrap().is_empty(),
+            "the index is the source of truth and it is empty"
+        );
+        assert!(
+            store.search(&id, "orphan", 8).await.unwrap().is_empty(),
+            "search is index-driven, so the orphan does not surface"
+        );
+        // Documented residual: peek is blob-path-driven, so the exact addr
+        // can still read the orphan until the file is reclaimed. Here the
+        // blob was replaced by a directory, so the read fails — the point
+        // pinned is that delete's answer did not depend on it either way.
+        let _ = store.peek(&id, &addr, None).await;
+    }
+
     /// Two event logs over one data root must not hand out the same sequence
     /// number (issue #388).
     ///
@@ -2286,6 +2464,8 @@ mod test {
         let store = FsCompanyStore::new(&root);
         let id = CompanyId::new("acme");
         let record = CompanyRecord {
+            overlay_retired_agents: Vec::new(),
+            overlay_agent_edits: Vec::new(),
             id: id.clone(),
             manifest: sample_manifest(),
             ledger: Vec::new(),
@@ -2344,6 +2524,8 @@ mod test {
         let id = CompanyId::new("acme");
         store
             .save(&CompanyRecord {
+                overlay_retired_agents: Vec::new(),
+                overlay_agent_edits: Vec::new(),
                 id: id.clone(),
                 manifest: sample_manifest(),
                 ledger: Vec::new(),
@@ -2403,6 +2585,8 @@ mod test {
         let id = CompanyId::new("acme");
         store
             .save(&CompanyRecord {
+                overlay_retired_agents: Vec::new(),
+                overlay_agent_edits: Vec::new(),
                 id: id.clone(),
                 manifest: sample_manifest(),
                 ledger: Vec::new(),

@@ -1,0 +1,91 @@
+# Workflow graph: kill_review
+#
+# Referenced by `[workflows].enabled` in ../company.toml. Every active venture is
+# tested against the kill criteria it agreed in advance. Reading the criteria
+# before the current numbers is deliberate: read afterwards, they are always
+# reinterpreted into something the venture has met.
+
+id = "kill_review"
+name = "Kill review"
+description = "Active ventures are tested against their own kill criteria and stopped or explicitly extended."
+
+[[node]]
+id = "due"
+kind = "trigger"
+name = "Review due"
+summary = "A quarter turns, or a validation failed."
+
+[[node]]
+id = "criteria"
+kind = "agent"
+name = "Read the kill criteria"
+summary = "As written, before looking at the current numbers."
+agent = "opportunity_scout"
+
+[[node]]
+id = "capacity"
+kind = "agent"
+name = "Price the capacity"
+summary = "What this venture consumes, and what the others would do with it. The real question, rarely asked directly."
+agent = "finance"
+
+[[node]]
+id = "met"
+kind = "condition"
+name = "Criteria met?"
+summary = "Branch on whether the agreed stopping conditions have been reached."
+[node.config]
+field = "=item.kill_criteria_met"
+
+[[node]]
+id = "stop"
+kind = "agent"
+name = "Wind it down"
+summary = "Close the row with the criterion that was met, and register anything reusable as a shared asset."
+agent = "founder"
+
+[[node]]
+id = "extend"
+kind = "agent"
+name = "Restate what would end it"
+summary = "A venture continuing without a refreshed criterion has quietly lost the criterion."
+agent = "founder"
+
+[[node]]
+id = "decide"
+kind = "output"
+name = "Park the capital decision"
+summary = "The honest read is the studio's; the allocation is the operator's."
+[node.destination]
+kind = "channel"
+target = "venture_launch"
+
+[[edge]]
+from = "due"
+to = "criteria"
+
+[[edge]]
+from = "criteria"
+to = "capacity"
+
+[[edge]]
+from = "capacity"
+to = "met"
+
+[[edge]]
+from = "met"
+to = "stop"
+label = "yes"
+
+[[edge]]
+from = "met"
+to = "extend"
+label = "no"
+
+[[edge]]
+from = "stop"
+to = "decide"
+
+[[edge]]
+from = "extend"
+to = "decide"

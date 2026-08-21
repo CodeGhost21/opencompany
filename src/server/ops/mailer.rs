@@ -430,6 +430,7 @@ impl TenantMailboxConfig {
 #[derive(Clone, Default)]
 pub struct RecordingMailSender {
     sent: Arc<Mutex<Vec<(String, OutboundEmail)>>>,
+    presented: Arc<Mutex<Vec<MailCredentials>>>,
 }
 
 impl RecordingMailSender {
@@ -441,6 +442,17 @@ impl RecordingMailSender {
     /// Every `(from_email, email)` sent so far.
     pub fn sent(&self) -> Vec<(String, OutboundEmail)> {
         self.sent.lock().expect("mail sender poisoned").clone()
+    }
+
+    /// The credentials each send actually presented, in order.
+    ///
+    /// Recorded alongside [`sent`](Self::sent) rather than folded into it, so
+    /// existing callers keep their tuple. It exists because "which password
+    /// reached the transport" is otherwise unobservable from a test, and that
+    /// is precisely the question a patching `PUT …/smtp` has to answer: a save
+    /// that omitted the password must still send under the stored one.
+    pub fn presented(&self) -> Vec<MailCredentials> {
+        self.presented.lock().expect("mail sender poisoned").clone()
     }
 }
 
@@ -455,6 +467,10 @@ impl MailSender for RecordingMailSender {
             .lock()
             .expect("mail sender poisoned")
             .push((creds.from_email().to_string(), email.clone()));
+        self.presented
+            .lock()
+            .expect("mail sender poisoned")
+            .push(creds.clone());
         Ok(())
     }
 }

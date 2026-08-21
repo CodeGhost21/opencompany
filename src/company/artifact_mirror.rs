@@ -79,7 +79,8 @@ use crate::ports::now_millis;
 use crate::ports::types::CompanyId;
 use crate::ports::workspace::{NodeKind, WorkspaceNode, WorkspaceOrigin, WorkspaceStore};
 
-use super::workspace_scaffold::ensure_agent_folder;
+use super::workspace_names::{kebab_name, kebab_name_or};
+use super::workspace_scaffold::ensure_artifact_folder;
 
 /// One publish, as [`materialize`] needs it.
 ///
@@ -88,7 +89,7 @@ use super::workspace_scaffold::ensure_agent_folder;
 /// perfectly and file every deliverable in the wrong folder.
 #[derive(Debug, Clone, Copy)]
 pub struct PublishTarget<'a> {
-    /// The agent that published this file — the owner of the `Agents/<id>/`
+    /// The agent that published this file — the owner of the `agents/<id>/`
     /// folder it lands under, and the authorship stamped on every node created
     /// or written along the way.
     pub agent_id: &'a str,
@@ -144,11 +145,19 @@ pub struct Mirrored {
 
 /// Put `target`'s body into the shared tree and return what it left there.
 ///
-/// The layout is `Agents/<agent-id>/<task-id>/<source…>`. The agent's folder is
-/// minted on demand by
-/// [`ensure_agent_folder`](super::workspace_scaffold::ensure_agent_folder) —
-/// member folders appear the first time somebody produces something, so this
+/// The layout is `artifacts/<agent-id>/<task-id>/<source…>`. The agent's folder
+/// beneath that root is minted on demand by
+/// [`ensure_artifact_folder`](super::workspace_scaffold::ensure_artifact_folder)
+/// — member folders appear the first time somebody publishes something, so this
 /// must **call** it rather than assume it exists.
+///
+/// It used to be `agents/<agent-id>/<task-id>/…`, which filed a deliverable in
+/// the same folder as its author's scratch notes. Nothing migrates: a record
+/// carrying an `existing_node_id` still revises the node it already has, so a
+/// company that published before this change keeps its old nodes and its
+/// console deep links, and only new paths land under `artifacts/`. A migration
+/// would have to move nodes an operator may have organised by hand, to fix
+/// something that is untidy rather than wrong.
 ///
 /// # Interior path segments become folders
 ///
@@ -205,10 +214,10 @@ pub async fn materialize(
     let segments = split_source(target.source)?;
     let (dirs, filename) = segments
         .split_last()
-        .map(|(last, rest)| (rest, *last))
+        .map(|(last, rest)| (rest, last.as_str()))
         .expect("split_source rejects an empty path");
 
-    let agent_folder = ensure_agent_folder(workspace, company, target.agent_id).await?;
+    let agent_folder = ensure_artifact_folder(workspace, company, target.agent_id).await?;
 
     // One tree read, then a walk that keeps its own view current: each folder
     // this creates is pushed onto `nodes`, so a `specs/deep/note.md` resolves
@@ -216,7 +225,8 @@ pub async fn materialize(
     // against a snapshot that predates it.
     let mut nodes = workspace.tree(company).await?;
     let mut parent = agent_folder;
-    for name in std::iter::once(target.task_id).chain(dirs.iter().copied()) {
+    let task_folder = kebab_name_or(target.task_id, target.task_id);
+    for name in std::iter::once(task_folder.as_str()).chain(dirs.iter().map(String::as_str)) {
         parent = resolve_folder(
             workspace,
             company,
@@ -639,7 +649,7 @@ fn origin(agent_id: &str) -> WorkspaceOrigin {
 /// reaching [`WorkspaceStore::create`] as a node *name* would render a
 /// traversal-shaped path in the console, and the sqlite and mongodb backends do
 /// not reject one.
-fn split_source(source: &str) -> Result<Vec<&str>> {
+fn split_source(source: &str) -> Result<Vec<String>> {
     let segments: Vec<&str> = source
         .split('/')
         .map(str::trim)
@@ -657,7 +667,17 @@ fn split_source(source: &str) -> Result<Vec<&str>> {
             )));
         }
     }
-    Ok(segments)
+    // Every segment becomes a node name, so it is minted under the workspace's
+    // one naming rule: lowercase and dashed. The sandbox is the agent's own
+    // scratch and names files however it likes; the tree is what the operator
+    // reads, and `specs/Launch Plan.md` arriving there as `specs/launch-plan.md`
+    // is what keeps one document to one spelling.
+    //
+    // The artifact record's `source` is deliberately *not* rewritten to match:
+    // it names the file in the sandbox the agent actually published, and it is
+    // the key a republish extends the same record by. Normalizing it would make
+    // the record claim a path the agent cannot read back.
+    Ok(segments.into_iter().map(kebab_name).collect())
 }
 
 /// Adopt-or-create the folder `name` under `parent`, keeping `nodes` current.
@@ -745,7 +765,7 @@ mod test {
     use std::sync::Arc;
 
     use super::*;
-    use crate::company::workspace_scaffold::AGENTS_ROOT;
+    use crate::company::workspace_scaffold::ARTIFACTS_ROOT;
     use crate::ports::artifacts::ArtifactKind;
     use crate::store::FsOps;
 
@@ -802,7 +822,7 @@ mod test {
             Err(OpenCompanyError::InvalidRequest("over quota".to_string()))
         }
         /// Folders are claimed for real, for the same reason `create` lets them
-        /// through: the scaffold walks `Agents/<id>/<task>/` on the way in, and
+        /// through: the scaffold walks `agents/<id>/<task>/` on the way in, and
         /// refusing that would fail the publish before it ever reaches the file
         /// this double exists to refuse.
         async fn adopt_or_create_folder(
@@ -907,14 +927,17 @@ mod test {
     }
 
     /// The headline: a published deliverable lands in the shared tree, under
-    /// the publishing agent's own folder, attributed to it.
+    /// `artifacts/<agent-id>/`, attributed to the agent that published it.
     ///
-    /// The agent folder is asserted rather than assumed because it does not
+    /// The member folder is asserted rather than assumed because it does not
     /// exist beforehand — member folders are minted on first use (#570), so
     /// this proves `materialize` calls the minter instead of expecting a
-    /// folder somebody else laid down.
+    /// folder somebody else laid down. The root it hangs off is the
+    /// deliverables root, never the publishing agent's scratch home: filing a
+    /// deliverable beside its author's working notes is what made "what has
+    /// this company produced?" unanswerable by navigation.
     #[tokio::test]
-    async fn a_publish_lands_under_the_agents_own_folder_it_mints() {
+    async fn a_publish_lands_under_the_agents_own_artifacts_folder_it_mints() {
         let (_dir, ops, co) = stores();
         let ws: &dyn WorkspaceStore = ops.as_ref();
 
@@ -925,7 +948,7 @@ mod test {
 
         assert_eq!(
             path_of(ws, &co, &id).await,
-            format!("{AGENTS_ROOT}/cmo/t-1/launch.md")
+            format!("{ARTIFACTS_ROOT}/cmo/t-1/launch.md")
         );
         let (node, body) = ws.read(&co, &id).await.unwrap().expect("the node exists");
         assert_eq!(body, "# Launch");
@@ -937,6 +960,54 @@ mod test {
             },
             "a published deliverable is the agent's work, and the tree must say so"
         );
+    }
+
+    /// A sandbox path with a space and a capital in it becomes a tree path
+    /// under the workspace naming rule.
+    ///
+    /// The sandbox is the agent's own scratch and it names files however it
+    /// likes; the tree is what the operator reads, and one document there has
+    /// one spelling. Every interior segment goes through the rule too, not just
+    /// the file, or a deliverable would land in `specs/` beside `Specs/`.
+    #[tokio::test]
+    async fn a_published_path_is_normalized_into_the_tree() {
+        let (_dir, ops, co) = stores();
+        let ws: &dyn WorkspaceStore = ops.as_ref();
+
+        let id = materialize(ws, &co, target("Specs/Launch Plan.md", "# Launch"))
+            .await
+            .expect("materialize")
+            .node_id;
+
+        assert_eq!(
+            path_of(ws, &co, &id).await,
+            format!("{ARTIFACTS_ROOT}/cmo/t-1/specs/launch-plan.md")
+        );
+    }
+
+    /// Two spellings of one sandbox path are one node in the tree, and the
+    /// second publish revises the first rather than opening a rival beside it.
+    ///
+    /// Without this the normalization would be worse than no rule at all: a
+    /// path that resolved differently per publish is exactly the ambiguity the
+    /// mirror refuses everywhere else.
+    #[tokio::test]
+    async fn two_spellings_of_one_path_revise_one_node() {
+        let (_dir, ops, co) = stores();
+        let ws: &dyn WorkspaceStore = ops.as_ref();
+
+        let first = materialize(ws, &co, target("Launch Plan.md", "v1"))
+            .await
+            .expect("first")
+            .node_id;
+        let second = materialize(ws, &co, target("launch-plan.md", "v2"))
+            .await
+            .expect("second")
+            .node_id;
+
+        assert_eq!(first, second, "one deliverable, one node");
+        let (_, body) = ws.read(&co, &second).await.unwrap().expect("the node");
+        assert_eq!(body, "v2");
     }
 
     /// A **binary** publish lands real bytes in the tree (issue #553).
@@ -968,7 +1039,7 @@ mod test {
 
         assert_eq!(
             path_of(ws, &co, &id).await,
-            format!("{AGENTS_ROOT}/cmo/t-1/shots/hero.png")
+            format!("{ARTIFACTS_ROOT}/cmo/t-1/shots/hero.png")
         );
         let (node, stream) = ws
             .read_bytes(&co, &id)
@@ -1035,7 +1106,7 @@ mod test {
         assert_eq!(node.mime.as_deref(), Some("application/pdf"));
         assert_eq!(
             path_of(ws, &co, &second).await,
-            format!("{AGENTS_ROOT}/cmo/t-1/report.md"),
+            format!("{ARTIFACTS_ROOT}/cmo/t-1/report.md"),
             "the deliverable keeps its path"
         );
         assert!(
@@ -1083,7 +1154,7 @@ mod test {
         assert!(!node.is_binary());
         assert_eq!(
             path_of(ws, &co, &second).await,
-            format!("{AGENTS_ROOT}/cmo/t-1/report.md")
+            format!("{ARTIFACTS_ROOT}/cmo/t-1/report.md")
         );
         assert!(ws.read_bytes(&co, &first).await.unwrap().is_none());
 
@@ -1296,7 +1367,7 @@ mod test {
 
         // A different deliverable is published first, purely to mint the agent
         // and task folders the racers will share. Without it each publisher
-        // walks `ensure_agent_folder` / `resolve_folder` itself and mints its
+        // walks `ensure_artifact_folder` / `resolve_folder` itself and mints its
         // OWN parent, so the two `report.md` nodes land under different folders
         // and never contend for one path — the test would pass while asserting
         // nothing about the race it names. (That folder walk is racy in its own
@@ -1539,7 +1610,7 @@ mod test {
             },
         )
         .await
-        .expect("seeding `Agents/cmo/`");
+        .expect("seeding `agents/cmo/`");
         let agent_folder = ws
             .tree(&co)
             .await
@@ -1620,7 +1691,7 @@ mod test {
     }
 
     /// The same race one level up, on the folders the *scaffold* mints:
-    /// `Agents/` and `Agents/<agent-id>/`.
+    /// `agents/` and `agents/<agent-id>/`.
     ///
     /// Nothing is seeded, so both publishers read an empty tree and both need
     /// the root and the agent's own folder. Different task ids keep the task
@@ -1661,12 +1732,12 @@ mod test {
         let nodes = ws.tree(&co).await.unwrap();
         let roots: Vec<&WorkspaceNode> = nodes
             .iter()
-            .filter(|n| n.parent_id.is_none() && n.name == AGENTS_ROOT)
+            .filter(|n| n.parent_id.is_none() && n.name == ARTIFACTS_ROOT)
             .collect();
         assert_eq!(
             roots.len(),
             1,
-            "one `{AGENTS_ROOT}` root — two would make every agent folder ambiguous: {nodes:?}"
+            "one `{ARTIFACTS_ROOT}` root — two would make every agent folder ambiguous: {nodes:?}"
         );
         assert_eq!(
             named_children(&nodes, &roots[0].id, "cmo").len(),
@@ -1852,11 +1923,11 @@ mod test {
         assert_ne!(spec, doc, "one node for two paths would lose a deliverable");
         assert_eq!(
             path_of(ws, &co, &spec).await,
-            format!("{AGENTS_ROOT}/cmo/t-1/specs/a.md")
+            format!("{ARTIFACTS_ROOT}/cmo/t-1/specs/a.md")
         );
         assert_eq!(
             path_of(ws, &co, &doc).await,
-            format!("{AGENTS_ROOT}/cmo/t-1/docs/a.md")
+            format!("{ARTIFACTS_ROOT}/cmo/t-1/docs/a.md")
         );
         assert_eq!(ws.read(&co, &spec).await.unwrap().unwrap().1, "spec body");
         assert_eq!(ws.read(&co, &doc).await.unwrap().unwrap().1, "doc body");
@@ -1922,7 +1993,7 @@ mod test {
         assert_ne!(again, first, "a deleted node must not be resurrected by id");
         assert_eq!(
             path_of(ws, &co, &again).await,
-            format!("{AGENTS_ROOT}/cmo/t-1/launch.md"),
+            format!("{ARTIFACTS_ROOT}/cmo/t-1/launch.md"),
             "the replacement belongs at the same path"
         );
         assert_eq!(ws.read(&co, &again).await.unwrap().unwrap().1, "draft two");
@@ -1959,7 +2030,7 @@ mod test {
         let (_dir, ops, co) = stores();
         let ws: &dyn WorkspaceStore = ops.as_ref();
 
-        // Publish once to lay down `Agents/cmo/t-1/`, then put a folder where
+        // Publish once to lay down `agents/cmo/t-1/`, then put a folder where
         // the next publish's note wants to be.
         let sibling = materialize(ws, &co, target("other.md", "x"))
             .await

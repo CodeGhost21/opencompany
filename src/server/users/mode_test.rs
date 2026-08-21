@@ -26,6 +26,9 @@ use crate::company::CompanyManifest;
 use crate::ports::CompanyStore;
 use crate::ports::types::{CompanyId, CompanyRecord};
 use crate::runtime::RuntimeBuilder;
+use crate::server::ops::ConnectionsRuntime;
+use crate::server::ops::mailer::{MailCredentials, RecordingMailSender};
+use crate::server::ops::smtp::{SmtpCredentials, SmtpSecurity};
 use crate::server::router;
 use crate::server::users::token;
 use crate::server::users::wallet::{self, VerifyRequest};
@@ -54,6 +57,26 @@ async fn state_in_mode(
     mode: AuthMode,
     bootstrap: Option<&str>,
 ) -> AppState {
+    state_in_mode_on(
+        home,
+        mode,
+        bootstrap,
+        AppConfig::default(),
+        ConnectionsRuntime::new(),
+    )
+    .await
+}
+
+/// The same host, over an explicit config and connection set — for the
+/// questions whose answer is a property of the *deployment* rather than the
+/// mode: whether the bind is routable, and whether mail is wired.
+async fn state_in_mode_on(
+    home: &std::path::Path,
+    mode: AuthMode,
+    bootstrap: Option<&str>,
+    config: AppConfig,
+    connections: ConnectionsRuntime,
+) -> AppState {
     let toml_src = match (mode, bootstrap) {
         (AuthMode::Email, Some(who)) => {
             format!("[company]\nname = \"Acme\"\n[users]\nmode = \"email\"\nadmins = [\"{who}\"]\n")
@@ -79,6 +102,8 @@ async fn state_in_mode(
     let id = CompanyId::new("acme");
     store
         .save(&CompanyRecord {
+            overlay_retired_agents: Vec::new(),
+            overlay_agent_edits: Vec::new(),
             id: id.clone(),
             manifest: manifest.clone(),
             ledger: Vec::new(),
@@ -102,9 +127,35 @@ async fn state_in_mode(
         .build()
         .await
         .unwrap();
-    let state = AppState::new(AppConfig::default()).with_home(home.to_path_buf());
+    let state = AppState::new(config)
+        .with_home(home.to_path_buf())
+        .with_connections(connections);
     state.registry().insert(id, Arc::new(runtime));
     state
+}
+
+/// A routable bind: nothing is echoed back to the caller here, so a magic link
+/// is only usable if it can genuinely be mailed.
+fn routable() -> AppConfig {
+    AppConfig {
+        bind: "0.0.0.0:8080".to_string(),
+        ..AppConfig::default()
+    }
+}
+
+/// A wired mail transport, so a link is actually sent.
+fn mail_connections() -> ConnectionsRuntime {
+    ConnectionsRuntime::new()
+        .with_mail(Arc::new(RecordingMailSender::new()))
+        .with_mail_credentials(MailCredentials::Smtp(SmtpCredentials {
+            host: "smtp.test".into(),
+            port: 587,
+            security: SmtpSecurity::Starttls,
+            username: "u".into(),
+            password: "p".into(),
+            from_name: "Acme".into(),
+            from_email: "noreply@acme.test".into(),
+        }))
 }
 
 fn post(uri: &str, body: serde_json::Value) -> Request<Body> {
@@ -170,6 +221,71 @@ async fn auth_config_publishes_the_mode_to_an_anonymous_caller() {
         assert_eq!(body["mode"], mode.as_str(), "{mode}");
         assert_eq!(body["passwords"], passwords, "{mode}");
     }
+}
+
+/// A routable host with no transport cannot deliver a magic link and will not
+/// echo the code either, so the form is a dead end. The console has to be told
+/// that in the payload — from the outside a link request there answers `sent`
+/// exactly like one that worked.
+#[tokio::test]
+async fn auth_config_reports_a_magic_link_that_cannot_arrive() {
+    let dir = home();
+    let state = state_in_mode_on(
+        dir.path(),
+        AuthMode::Email,
+        None,
+        routable(),
+        ConnectionsRuntime::new(),
+    )
+    .await;
+    let response = router(state)
+        .oneshot(get("/api/v1/company/auth/config"))
+        .await
+        .unwrap();
+    let body = body_json(response).await;
+
+    assert_eq!(
+        body["magicLink"], false,
+        "no transport and no echo is a dead end: {body}"
+    );
+}
+
+/// The two ways a link does reach the person: mailed, or — on a loopback host —
+/// handed straight back in the response. The second is the laptop case, and
+/// treating it as "no magic link" would take the form away from the only host
+/// where it needs no configuration at all.
+#[tokio::test]
+async fn auth_config_reports_a_magic_link_that_is_mailed_or_echoed() {
+    let dir = home();
+    let mailed = state_in_mode_on(
+        dir.path(),
+        AuthMode::Email,
+        None,
+        routable(),
+        mail_connections(),
+    )
+    .await;
+    let response = router(mailed)
+        .oneshot(get("/api/v1/company/auth/config"))
+        .await
+        .unwrap();
+    let body = body_json(response).await;
+    assert_eq!(
+        body["magicLink"], true,
+        "a wired transport sends it: {body}"
+    );
+
+    let echoed = home();
+    let loopback = state_in_mode(echoed.path(), AuthMode::Email, None).await;
+    let response = router(loopback)
+        .oneshot(get("/api/v1/company/auth/config"))
+        .await
+        .unwrap();
+    let body = body_json(response).await;
+    assert_eq!(
+        body["magicLink"], true,
+        "a loopback host hands the code back: {body}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -937,4 +1053,89 @@ async fn the_host_override_beats_the_manifest() {
         .await
         .unwrap();
     assert_eq!(runtime.auth_mode(), AuthMode::None);
+}
+
+/// **Accepted regression:** pairing a *remote* device to a `none`-mode host
+/// produces a credential that is inert from anywhere but the host's own
+/// machine.
+///
+/// Worth a test rather than a sentence in a doc, because the flow does not fail
+/// where an operator would notice. Every step succeeds: the person at the
+/// machine is the local owner, so they can mint a pairing code; `claim` looks
+/// the code's user up by identity and finds `local:owner`, so it redeems and
+/// hands back a device token that is a perfectly real `SessionRecord`. Only the
+/// *use* of it fails, and only from the one place it was minted to be used.
+///
+/// Two independent refusals stand in the way, and either alone is enough:
+///
+/// - `authenticate_session` returns `None` for any session on a company whose
+///   mode has no login. That rule exists so a session minted before a mode flip
+///   cannot outlive it — see
+///   `a_session_from_before_a_mode_flip_does_not_survive_it` — and a device
+///   session is the same kind of record.
+/// - `resolve_principal` asks `local_owner` first, and a remote device's peer
+///   is not loopback, so it answers `GatesRefused` and the request is refused
+///   outright rather than degrading to the session path at all.
+///
+/// This is a real capability the desktop loses by moving to `none`, and it is
+/// accepted rather than worked around: pairing a phone to a laptop's company is
+/// a *second person on a second machine*, which is the exact premise `none`
+/// gives up in exchange for having no accounts. A desktop that wants it should
+/// choose `email` in setup, which is why that choice is a preselection rather
+/// than a lock.
+#[tokio::test]
+async fn none_mode_pairs_a_device_that_cannot_then_be_used_remotely() {
+    let dir = home();
+    let state = state_in_mode(dir.path(), AuthMode::None, None).await;
+
+    // Minting works: the local caller *is* the owner, with no credential shown.
+    let pairing = body_json(
+        router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/company/devices")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap(),
+    )
+    .await;
+    let code = pairing["code"]
+        .as_str()
+        .expect("a none-mode owner can still mint a pairing code")
+        .to_string();
+
+    // Redeeming works too, and hands back a genuine session token.
+    let claimed = body_json(
+        router(state.clone())
+            .oneshot(post(
+                "/api/v1/company/devices/claim",
+                serde_json::json!({ "code": code, "label": "Ada's phone" }),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let token = claimed["token"]
+        .as_str()
+        .expect("the code redeems into a device session")
+        .to_string();
+
+    // And it is worth nothing from the machine it was paired for.
+    let mut req = get("/api/v1/company/feedback");
+    req.extensions_mut().insert(ConnectInfo(
+        "203.0.113.9:1".parse::<std::net::SocketAddr>().unwrap(),
+    ));
+    req.headers_mut().insert(
+        crate::server::users::cookie::SESSION_HEADER,
+        format!("acme.{token}").parse().unwrap(),
+    );
+    let response = router(state).oneshot(req).await.unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::UNAUTHORIZED,
+        "a device session must not authenticate against a company with no login"
+    );
 }

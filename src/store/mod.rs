@@ -35,6 +35,11 @@ pub mod paths;
 /// a dedicated engine on top of that base.
 pub mod select;
 
+/// Char-boundary-safe slicing shared by the context backends' ranged `peek`
+/// and search-snippet windows, so a byte offset landing mid-codepoint widens
+/// to the boundary instead of panicking the slice.
+pub(crate) mod text;
+
 #[cfg(feature = "sqlite")]
 pub mod sqlite;
 
@@ -99,7 +104,7 @@ pub use layout::DataLayout;
 pub use migrate::migrate_legacy_nest_announced;
 pub use paths::{Bundle, DATA_DIR_ENV, home_divergence_warning, resolve_home};
 pub use select::{
-    MemoryBackend, MemoryOverlay, StorageHandles, StorageKind, StorageSettings,
+    MemoryBackend, MemoryOverlay, MemorySelection, StorageHandles, StorageKind, StorageSettings,
     open_memory_overlay, open_storage, plaintext_secret_refusal, refuse_bundle_env,
 };
 

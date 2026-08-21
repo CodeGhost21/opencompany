@@ -40,6 +40,8 @@ pub mod mailer;
 pub mod mcp;
 pub mod mcp_registry;
 pub mod memory;
+pub mod memory_engine;
+pub mod memory_ingest;
 pub mod pages;
 pub mod policy;
 pub mod read_state;
@@ -96,8 +98,19 @@ use crate::server::ops::mailer::{MailCredentials, MailSender};
 
 /// SecretStore key holding the JSON [`DomainStatus`](crate::company::dns::DomainStatus).
 pub(crate) const DOMAIN_KEY: &str = "__domain";
-/// SecretStore key holding the JSON SMTP credentials.
+/// SecretStore key holding the JSON SMTP configuration — everything but the
+/// password. See [`SMTP_PASSWORD_KEY`].
 pub(crate) const SMTP_KEY: &str = "__smtp";
+/// SecretStore key holding the SMTP password on its own.
+///
+/// Split out of [`SMTP_KEY`] so that "keep the stored password" is the
+/// *absence* of a write rather than a read-modify-write: `PUT …/smtp` without a
+/// password rewrites only the configuration blob and never touches this key, so
+/// it cannot write a stale secret back over a concurrent rotation. Credentials
+/// written before the split still carry the password inside the `SMTP_KEY`
+/// blob; reads fall back to it, and the first write after the split migrates it
+/// here. See `src/server/ops/smtp.rs`.
+pub(crate) const SMTP_PASSWORD_KEY: &str = "__smtp_password";
 /// SecretStore key holding the shared secret the inbound ingest HMAC is verified against.
 pub(crate) const INGEST_SECRET_KEY: &str = "ingest_secret";
 
@@ -195,6 +208,8 @@ pub fn router() -> Router<AppState> {
         .merge(runs::router())
         .merge(artifacts::router())
         .merge(memory::router())
+        .merge(memory_engine::router())
+        .merge(memory_ingest::router())
         .merge(workspace::router())
         .merge(pages::router())
         .merge(skills::router())

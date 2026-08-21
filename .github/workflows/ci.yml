@@ -218,6 +218,14 @@ jobs:
             frontend:
               - '.github/workflows/ci.yml'
               - 'frontend/**'
+              # The repository-wide policy checks ride this job, so a change to
+              # one of them has to select it. Without this line the guards are
+              # the one thing their own diff cannot run: a PR touching only
+              # `scripts/ci/**` skipped `Console` entirely, and a guard that
+              # asserts nothing merges green. That is how the broken
+              # `assert-single-tauri-app.sh` got in. `rust` already lists this
+              # path; `frontend` is where the scripts actually execute.
+              - 'scripts/ci/**'
             desktop:
               - '.github/workflows/ci.yml'
               - 'src-tauri/**'
@@ -1454,6 +1462,24 @@ jobs:
       # Node-only and cheap; the rule itself is repository-wide.
       - run: ./scripts/ci/assert-md-line-cap.sh
 
+      # Exactly one Tauri app, and no script that picks it by working directory
+      # rather than by name.
+      #
+      # The tree had two apps sharing a `productName`, and because the Tauri CLI
+      # finds a project by scanning SUBFOLDERS of the working directory,
+      # `npm run tauri:dev` from `frontend/` ran the dead console wrapper rather
+      # than the shell — a desktop that opened, rendered the console, and
+      # reached no host, because the app that starts one was never the app that
+      # ran. Both crates compiled and both were tested, so nothing in this file
+      # could see it.
+      #
+      # Rides the `Console` job for the reason the cap above does: a policy
+      # grep, no toolchain. It also guards `frontend/package.json`, this job's
+      # own file — and the `Desktop` lane is path-filtered on `src-tauri/**`, so
+      # a second app added under `frontend/` would not have triggered that lane
+      # at all.
+      - run: ./scripts/ci/assert-single-tauri-app.sh
+
       # Issue #858. `pnpm-lock.yaml`, read by nothing until now.
       #
       # `npm ci` above is the fidelity guard for `package-lock.json`. There is a
@@ -1461,8 +1487,10 @@ jobs:
       # this file mentions pnpm, and the `Desktop` job runs `npm ci` plus
       # `npm run build` directly rather than `tauri build`, so it never reaches
       # Tauri's `beforeBuildCommand` either. The file is not vestigial —
-      # `frontend/src-tauri/tauri.conf.json` declares `pnpm dev` / `pnpm build`,
-      # so a developer running `npm run tauri:dev` locally resolves through it.
+      # `pnpm-workspace.yaml` declares the `esbuild` build opt-in the console's
+      # production build needs, and `scripts/desktop-dev.sh` prefers `pnpm` when
+      # it is on PATH, so a developer running `npm run tauri:dev` locally still
+      # resolves through it.
       # It went out of sync on `main` and stayed there until #857 regenerated
       # it; the person who would have found out is whoever next built the
       # desktop app.
@@ -1908,7 +1936,6 @@ jobs:
         with:
           workspaces: |
             src-tauri
-            frontend/src-tauri
 
       # Issue #1298. This lane installs no toolchain of its own — unlike the
       # four `dtolnay/rust-toolchain` call sites elsewhere in this file — and
@@ -1938,18 +1965,25 @@ jobs:
       - name: Test
         run: cargo test --manifest-path src-tauri/Cargo.toml --locked
 
-      # The console's Tauri wrapper is also an independent workspace. It used
-      # to inherit the root workspace metadata and lockfile, but OpenHuman now
-      # contains nested workspaces of its own, so keeping it independent is
-      # what lets Cargo compose the current vendored graph.
-      - name: Format console desktop wrapper
-        run: cargo fmt --manifest-path frontend/src-tauri/Cargo.toml --all -- --check
-
-      - name: Clippy console desktop wrapper
-        run: cargo clippy --manifest-path frontend/src-tauri/Cargo.toml --locked --all-targets --no-deps -- -D warnings
-
-      - name: Test console desktop wrapper
-        run: cargo test --manifest-path frontend/src-tauri/Cargo.toml --locked
+      # There used to be a SECOND Tauri app here, `frontend/src-tauri/`, with
+      # three more steps of its own. It is deleted, and its absence is the
+      # point rather than a tidy-up.
+      #
+      # The CLI finds a project by searching SUBFOLDERS of the working
+      # directory, so `npm run tauri:dev` — run from `frontend/`, because that
+      # is where the script it names lives — resolved to that wrapper rather
+      # than to the shell. The wrapper registered exactly one command,
+      # `desktop_config`, and the console had stopped invoking it (see the
+      # comment at the top of `frontend/src/main.tsx`); every `oc_*` command the
+      # console uses to reach a host — `oc_embedded` first — was missing from
+      # its `generate_handler!`. So the window opened, the console rendered, and
+      # no host ever appeared. Two apps sharing a `productName`, one of them
+      # dead, and the working directory deciding which one a developer got.
+      #
+      # `frontend/package.json` now points `tauri:dev` at
+      # `scripts/desktop-dev.sh` and `tauri:build` at `src-tauri/`, and
+      # `scripts/ci/assert-single-tauri-app.sh` in the `Console` job keeps both
+      # halves from coming back.
 
       # Everything above proves the desktop crate COMPILES. Nothing above proves
       # it PACKAGES, and those are different claims: the steps above drive
@@ -2000,9 +2034,10 @@ jobs:
       # nearly free: same profile, same cache, everything already built.
       #
       # These two and no others: the CLI finds a project by searching SUBFOLDERS
-      # of the working directory rather than ancestors, so from `frontend/` it
-      # would package the console wrapper above instead — a different app that
-      # happens to share this one's `productName`.
+      # of the working directory rather than ancestors. That is what made the
+      # deleted `frontend/src-tauri/` wrapper reachable from `frontend/`, and
+      # running from these two directories is what keeps the shell the only app
+      # any invocation can find.
       - name: Package (from the repository root)
         run: ./frontend/node_modules/.bin/tauri build --debug --no-bundle
 

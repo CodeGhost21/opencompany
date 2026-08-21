@@ -51,7 +51,7 @@ import {
 import type { CompanyStreamEvent } from "@/hooks/use-events";
 import type { OpenCompanyClient } from "@/api/client";
 import { ApiError } from "@/api/types";
-import type { ApprovalSummary, GrantScope, Verdict } from "@/api/types";
+import type { ApprovalSummary, GrantScope, TeamMemberDto, Verdict } from "@/api/types";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -91,15 +91,18 @@ import { workflowSavedToast } from "@/lib/workflow-saved-toast";
 // a copilot. See `workflows/graph.ts` for why the fold is pure.
 import {
   elapsedFromRun,
+  failedNodeOf,
   failureLocation,
   foldLiveRun,
   initialRunState,
   layout,
   LEGIBLE_FIT_ZOOM,
+  nodeName,
   statesFromRun,
   windowHasRunStart,
 } from "@/views/workflows/graph";
 import { WorkflowMiniMap } from "@/views/workflows/WorkflowMiniMap";
+import { WorkflowZoomReadout } from "@/views/workflows/WorkflowZoomReadout";
 // Issue #1361: opens a long pipeline at a zoom its node titles survive.
 import { FitGraphToPane } from "@/views/workflows/FitGraphToPane";
 // Issue #1231: keeps the inspector from opening on top of the node it describes.
@@ -411,6 +414,8 @@ export function WorkflowsView({
   // A run the copilot judged un-fixable, shown inline under that run's row.
   const [fixReason, setFixReason] = useState<{ seq: number; reason: string } | null>(null);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
+  /** Roster used only while an assigned agent node is being inspected. */
+  const [nodeRoster, setNodeRoster] = useState<TeamMemberDto[]>([]);
   // Issue #228: what past runs did, read back from the host's journal. This is
   // the half that survives a reload — before it, a manual run's delivery rows
   // vanished when the drawer was dismissed and a scheduled run's never reached
@@ -1366,6 +1371,8 @@ export function WorkflowsView({
             atMillis: Date.now(),
             request: asked,
             dryRun,
+            runId: ownRunIdRef.current ?? undefined,
+            sawRunStart: sawOwnRunStartRef.current,
           }),
         );
         // A run that failed is journaled too (#228), and is the outcome most
@@ -2064,6 +2071,27 @@ export function WorkflowsView({
     [graph, selectedNodeId],
   );
 
+  // Resolve an agent id to the teammate's display name in the inspector. Keep
+  // this lazy: workflows with no selected agent node do not need a roster read.
+  useEffect(() => {
+    if (!selectedNode?.agent) {
+      setNodeRoster([]);
+      return;
+    }
+    let live = true;
+    void client
+      .listTeam(company)
+      .then((team) => {
+        if (live) setNodeRoster(team);
+      })
+      .catch(() => {
+        if (live) setNodeRoster([]);
+      });
+    return () => {
+      live = false;
+    };
+  }, [client, company, selectedNode?.agent]);
+
   // Issue #596: lazily fetch a past run's per-node output ONCE when it is
   // overlaid, so clicking any of its nodes can show what that node produced. A
   // 404 (predates capture / dry / hard-aborted / older host) settles to `record:
@@ -2182,6 +2210,18 @@ export function WorkflowsView({
       ...runs,
     ];
   }, [runs, pendingRun, starting, activeRunId, selectedId]);
+
+  // The failure panel can only promise a node or copilot repair once the
+  // journal has returned the matching durable run. Until then it can still
+  // open History, but never guesses at a row based on time or position.
+  const failureRun = useMemo(
+    () =>
+      runFailure?.runId
+        ? runs.find((run) => run.runId === runFailure.runId) ?? null
+        : null,
+    [runFailure, runs],
+  );
+  const failureNode = failureRun ? failedNodeOf(failureRun) : null;
 
   // `runs` already holds only the selected workflow's runs, newest first — the
   // host filters and orders them. Re-filtering here would be a second source of
@@ -2873,6 +2913,28 @@ export function WorkflowsView({
               <RunFailurePanel
                 failure={runFailure}
                 onClose={() => setRunFailure(null)}
+                onOpenHistory={
+                  historySupported
+                    ? () => {
+                        setHistoryOpen(true);
+                        if (failureRun) setOverlayRun(failureRun);
+                      }
+                    : undefined
+                }
+                onFixWithCopilot={
+                  failureRun ? () => void handleFixWithCopilot(failureRun) : undefined
+                }
+                fixing={failureRun ? fixingRunSeq === failureRun.seq : false}
+                failedStepName={failureNode ? nodeName(graph, failureNode) : null}
+                onShowFailedStep={
+                  failureRun && failureNode
+                    ? () => {
+                        setHistoryOpen(true);
+                        setOverlayRun(failureRun);
+                        setSelectedNodeId(failureNode);
+                      }
+                    : undefined
+                }
               />
             ) : null
           }
@@ -2916,7 +2978,9 @@ export function WorkflowsView({
                 proOptions={{ hideAttribution: true }}
               >
                 <Background variant={BackgroundVariant.Dots} gap={20} size={1} />
-                <Controls showInteractive={false} />
+                <Controls showInteractive={false}>
+                  <WorkflowZoomReadout />
+                </Controls>
                 {/* Issue #1259: a custom minimap, not React Flow's built-in
                     `<MiniMap>` — see WorkflowMiniMap.tsx for why. */}
                 <WorkflowMiniMap nodes={nodes} className="!hidden sm:!block" />
@@ -2970,6 +3034,7 @@ export function WorkflowsView({
                 selectedNode && (
                   <NodeDetailPanel
                     node={selectedNode}
+                    roster={nodeRoster}
                     output={selectedNodeOutput}
                     onClose={() => setSelectedNodeId(null)}
                   />
@@ -3005,8 +3070,7 @@ export function WorkflowsView({
                 will guess wrong in both directions. */}
             <DialogDescription>
               What this run should work on. It is handed to the workflow&rsquo;s first
-              step, and any step bound to <code className="font-mono">=items</code>{" "}
-              reads it. Leave it empty to run the workflow as its schedule does.
+              step. Leave it empty to run the workflow as its schedule does.
             </DialogDescription>
           </DialogHeader>
           <Input

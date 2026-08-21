@@ -37,6 +37,11 @@ pub mod credentials;
 pub mod dns;
 pub mod hosting;
 pub mod inference;
+/// Ledger declaration files: `companies/<name>/ledgers/<slug>.toml`. A vertical
+/// ships the axes it is about — a matter list, a deal pipeline, an experiment
+/// log — the way it already ships its roster, rather than waiting for some turn
+/// to think of declaring one.
+pub mod ledger_file;
 /// Dynamic ledgers: the one place a ledger is read, written, declared or
 /// retired. Every surface routes through it, because the rules that matter —
 /// only a person deletes, a close says why, the derived file follows the
@@ -56,6 +61,11 @@ pub mod mcp_oauth;
 // rules are ordinary text handling with real edge cases, and they are worth
 // testing in the default build rather than only where the agent runtime links.
 pub mod prompt;
+// Rendering that composition back out for a human, from a manifest alone. Same
+// always-compiled argument as `prompt` above, one step further: a debugging
+// surface that only existed in a `--features openhuman` build is one nobody
+// runs, so the default build renders what it can and names the rest.
+pub mod prompt_dump;
 pub mod runtime;
 // First-run company setup (issue: docs/spec/runtime/company-setup.md): the
 // curated starting rosters and the rules a proposed roster obeys. Always
@@ -101,19 +111,24 @@ pub(crate) mod workspace_paths;
 // beside it is: its only caller is the console's REST route, and it touches
 // nothing but the `WorkspaceStore` port.
 pub mod workspace_repair;
+// The one naming rule for everything the runtime puts in a workspace: lowercase,
+// dashed. Always compiled and dependency-free — the scaffold, the publish
+// mirror, the page tools and the workspace write tools all mint names, and one
+// shared rule is what stops them minting four different spellings.
+pub mod workspace_names;
 // Issue #607: text search over the shared tree, behind the agent
 // `workspace_search` tool, the REST `GET …/workspace/search` route and the
 // GraphQL `Company.workspaceSearch` resolver. Always compiled and openhuman-free
 // for the same reason `workspace_links` is: two of its three callers are in the
 // default build, and one shared scan is what stops them answering differently.
 pub mod workspace_search;
-// The workspace's `Agents/` + `Desks/` system roots, and the folders minted
+// The workspace's `agents/` + `desks/` system roots, and the folders minted
 // beneath them on first use (issue #551). Always compiled and openhuman-free:
 // the scaffold is called from the runtime builder at boot, which is in the
 // default build, and it touches nothing but the `WorkspaceStore` port.
 pub mod workspace_scaffold;
 pub mod workspace_seed;
-// Issue #700: the operator-triggered removal of the empty `Agents/<id>/` folders
+// Issue #700: the operator-triggered removal of the empty `agents/<id>/` folders
 // a pre-#570 company still carries. Always compiled and openhuman-free, like the
 // scaffold whose fail-closed root lookup it shares: its only caller is the
 // console's REST route, and it touches nothing but the `WorkspaceStore` port.
@@ -122,6 +137,7 @@ pub mod workspace_sweep;
 use std::path::Path;
 
 pub use credentials::{Credential, CredentialSource, TinyhumansTokenSource, TokenTier};
+pub use ledger_file::{LEDGERS_DIR, has_ledger_files, load_dir_ledgers};
 /// The roster-id grammar check, shared with the runtime id minter so a slug and
 /// a hand-authored `[[agent]].id` are held to one rule (issue #686). Not `pub`:
 /// outside the crate the validator speaks through `CompanyManifest::validate`.
