@@ -258,7 +258,7 @@ async fn harness(
     store
         .create(
             &id,
-            &note("n-eng", "Engineering standards.md", "f-std"),
+            &note("n-eng", "engineering-standards.md", "f-std"),
             Some("# Engineering\nReview every PR before merge."),
         )
         .await
@@ -465,7 +465,7 @@ async fn a_real_turn_lists_reads_and_revises_a_workspace_note() {
         body,
         "# Engineering\nReview every PR before merge.\nShip on Fridays."
     );
-    assert_eq!(node.name, "Engineering standards.md");
+    assert_eq!(node.name, "engineering-standards.md");
 }
 
 /// The compare-and-swap guard, proven through a real turn: a model writing with
