@@ -1946,6 +1946,91 @@ mod test {
         }
     }
 
+    /// The same refusal for the roster edits, which arrive through the same one
+    /// door and are read the same first-match way.
+    ///
+    /// The two rows here disagree about the teammate's role and were set by
+    /// different people, which is the point: there is no correct row to pick.
+    /// Applying whichever deserialized first would restore a name an operator
+    /// changed — or, through `tools`, a grant they narrowed — and attribute it to
+    /// somebody who did not do it.
+    #[tokio::test]
+    async fn a_bundle_with_duplicate_agent_edits_is_rejected() {
+        let home1 = tmp_root("dupedit-src");
+        let home2 = tmp_root("dupedit-dst");
+        let dest = tmp_root("dupedit-bundle");
+        let id = CompanyId::new("dupedit-co");
+
+        let (s1, e1, m1, c1) = fs_ports(&home1);
+        s1.save(&CompanyRecord {
+            overlay_retired_agents: Vec::new(),
+            overlay_agent_edits: Vec::new(),
+            id: id.clone(),
+            manifest: budget_manifest(),
+            ledger: Vec::new(),
+            lifecycle: "running".into(),
+            overlay_agents: Vec::new(),
+            overlay_desk_members: Vec::new(),
+            overlay_desk_order: Vec::new(),
+            overlay_desks: Vec::new(),
+            overlay_workflows: Vec::new(),
+            overlay_budgets: Vec::new(),
+            overlay_policy: None,
+            overlay_desk_tools: Default::default(),
+            disabled_workflows: Vec::new(),
+            template_provenance: None,
+            setup: None,
+        })
+        .await
+        .unwrap();
+        export_bundle(&id, &dest, s1, e1, m1, c1, None, ExportOpts::default())
+            .await
+            .unwrap();
+
+        // The shape an import can be handed but `upsert_agent_override` can never
+        // produce: it replaces in place, so a second row for one teammate only
+        // exists in a bundle written elsewhere.
+        let meta_path = dest.join(META_JSON);
+        let mut meta: BundleMeta =
+            serde_json::from_str(&tokio::fs::read_to_string(&meta_path).await.unwrap()).unwrap();
+        meta.overlay_agent_edits = vec![
+            AgentOverride {
+                agent_id: "ceo".into(),
+                role: Some("Chief Vibes".into()),
+                ..Default::default()
+            },
+            AgentOverride {
+                agent_id: "ceo".into(),
+                role: Some("Interim Chief".into()),
+                tools: Some(vec!["docs.read".into()]),
+                ..Default::default()
+            },
+        ];
+        tokio::fs::write(&meta_path, serde_json::to_string(&meta).unwrap())
+            .await
+            .unwrap();
+
+        let (s2, e2, m2, c2) = fs_ports(&home2);
+        let err = import_bundle(&dest, s2.clone(), e2, m2, c2, None)
+            .await
+            .expect_err("import must refuse a bundle with two edits for one teammate");
+        let message = err.to_string();
+        assert!(
+            message.contains("ceo") && message.contains("more than one edit"),
+            "the refusal must name the teammate so an operator can fix the bundle: {message}"
+        );
+
+        // And nothing was written: a refused import must not half-apply.
+        assert!(
+            s2.load(&id).await.unwrap().is_none(),
+            "a rejected bundle must not persist a partial company record"
+        );
+
+        for dir in [home1, home2, dest] {
+            tokio::fs::remove_dir_all(&dir).await.ok();
+        }
+    }
+
     #[cfg(feature = "export")]
     #[tokio::test]
     async fn tar_pack_unpack_roundtrip() {
