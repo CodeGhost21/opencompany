@@ -123,6 +123,17 @@ fn sample_budget_overrides() -> Vec<crate::ports::types::BudgetOverride> {
     ]
 }
 
+/// The operator-set persona overrides the fixture seeds every record with, so
+/// each backend (fs, sqlite, mongodb) proves a console-edited persona survives
+/// persistence (issue #1530).
+fn sample_agent_overrides() -> Vec<crate::ports::types::AgentOverride> {
+    use crate::ports::types::AgentOverride;
+    vec![AgentOverride {
+        agent_id: "ceo".to_string(),
+        instructions: Some("Be exceedingly concise and decisive.".to_string()),
+    }]
+}
+
 /// A populated `[policy]` override, so every store's round-trip proves a
 /// console-set tier survives persistence (issue #562).
 ///
@@ -163,6 +174,7 @@ fn record(id: &CompanyId) -> CompanyRecord {
         overlay_desks: Vec::new(),
         overlay_workflows: vec![sample_overlay_workflow()],
         overlay_budgets: sample_budget_overrides(),
+        overlay_agent_overrides: sample_agent_overrides(),
         overlay_policy: Some(sample_policy_override()),
         // Non-empty so a backend that drops the field is caught: an empty map
         // survives every possible bug, including not persisting it at all.
@@ -291,6 +303,14 @@ pub async fn assert_isolation_by_company(
         loaded.overlay_budgets,
         sample_budget_overrides(),
         "overlay_budgets did not survive save/load"
+    );
+    // The operator-set persona overrides survive the round-trip (issue #1530):
+    // a backend that dropped the field would silently revert a console-edited
+    // persona to the manifest's `prompt`.
+    assert_eq!(
+        loaded.overlay_agent_overrides,
+        sample_agent_overrides(),
+        "overlay_agent_overrides did not survive save/load"
     );
     assert!(
         loaded
@@ -874,6 +894,13 @@ pub async fn assert_export_totality(
         loaded.overlay_budgets,
         sample_budget_overrides(),
         "overlay_budgets did not round-trip through the store"
+    );
+    // Issue #1530: the console-edited persona round-trips on every backend —
+    // "no redeploy" durability for instructions, the same as the caps above.
+    assert_eq!(
+        loaded.overlay_agent_overrides,
+        sample_agent_overrides(),
+        "overlay_agent_overrides did not round-trip through the store"
     );
     // Issue #562: the console-set tier round-trips on every backend, for the
     // same reason — an approval gate that forgets across a restart is not a gate.

@@ -2815,6 +2815,89 @@ impl BudgetOverride {
     }
 }
 
+/// An operator-set per-agent override of a teammate's editable persona,
+/// persisted on the [`CompanyRecord`] so it wins over the manifest without
+/// rewriting `company.toml` and without a redeploy (issue #1530).
+///
+/// The persona sibling of [`BudgetOverride`], and it exists for the same reason:
+/// the manifest is a **boot snapshot** baked into the tenant image, so before
+/// this the shipped `prompt` was the only instruction an agent could ever run
+/// with. An entry here is the durable override the console writes;
+/// [`CompanyRecord::effective_instructions`] is the one place the override and
+/// the blueprint are reconciled.
+///
+/// # A record, not a lone column
+///
+/// This is deliberately a struct keyed by `agent_id` rather than a bare
+/// `instructions` map, so a later per-agent field (**per-agent skills are the
+/// planned next one — DEFERRED here, this is the seam**) rides the same vec with
+/// no new migration and no new route shape: the write paths just learn one more
+/// field. Every optional field is `skip_serializing_if`-absent when unset, so a
+/// record that only overrides instructions serializes exactly one key beyond the
+/// id.
+///
+/// # Empty means "not overridden"
+///
+/// An entry whose every field is absent carries nothing and resolves to a no-op.
+/// The write boundary drops such a record rather than persisting a row the
+/// console would render as "overridden" — see [`Self::is_empty`]. That is what
+/// makes "reset to blueprint" (drop the record) distinct from "set to empty
+/// text", and what keeps an emptied override from silently blanking a persona.
+///
+/// **At most one entry per `agent_id`.** [`CompanyRecord::agent_override`] reads
+/// the first match, so a second row for one teammate is a silently unreachable
+/// override whose winner depends on serialization order. Mutate through
+/// [`CompanyRecord::upsert_agent_override`] rather than pushing, and check
+/// untrusted input with [`Self::duplicate_agent_id`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentOverride {
+    /// The teammate this overrides — a manifest `[[agent]]` id or an
+    /// [`OverlayAgent`] id. Because the override wins over the manifest, this is
+    /// how a **manifest/blueprint** agent's persona is edited without touching
+    /// read-only `company.toml`.
+    pub agent_id: String,
+    /// The operator's replacement instructions/persona, or `None` when this
+    /// override leaves the manifest's `prompt` in force. Trimmed-empty is
+    /// normalized to `None` at the write boundary, so an override never blanks a
+    /// persona — it resets to the blueprint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instructions: Option<String>,
+    // DEFERRED (issue #1530): per-agent `skills` land as a field ON THIS record,
+    // resolved by a sibling `effective_skills(agent_id)` mirroring
+    // `effective_instructions` and injected at the existing `skill_deltas`
+    // parameter — no new migration, no new route shape. Only the slot and this
+    // note are added now.
+}
+
+impl AgentOverride {
+    /// Does this override actually change anything?
+    ///
+    /// An override with every field absent carries no instruction and resolving
+    /// it is a no-op. The write route drops one rather than persisting a row that
+    /// says nothing but whose presence the console renders as "overridden" — the
+    /// same contract [`PolicyOverride::is_empty`] draws.
+    pub fn is_empty(&self) -> bool {
+        self.instructions.is_none()
+    }
+
+    /// The first `agent_id` appearing more than once in `entries`, if any.
+    ///
+    /// For validating a set this process did not write — an imported bundle,
+    /// principally. [`CompanyRecord::agent_override`] reads the *first* match, so
+    /// a second row for one teammate makes the applied persona a function of
+    /// serialization order. Mirrors [`BudgetOverride::duplicate_agent_id`].
+    pub fn duplicate_agent_id(entries: &[AgentOverride]) -> Option<&str> {
+        let mut seen: Vec<&str> = Vec::with_capacity(entries.len());
+        for entry in entries {
+            if seen.contains(&entry.agent_id.as_str()) {
+                return Some(&entry.agent_id);
+            }
+            seen.push(&entry.agent_id);
+        }
+        None
+    }
+}
+
 /// An operator-set override of the company's `[policy]` block, persisted on the
 /// [`CompanyRecord`] so a tier change wins over the manifest without rewriting
 /// `company.toml` and without a redeploy (issue #562).
@@ -2937,6 +3020,12 @@ pub struct OverlayBlob {
     /// loads them as empty — which is exactly "the manifest still decides".
     #[serde(default)]
     pub budgets: Vec<BudgetOverride>,
+    /// The operator-set per-teammate persona overrides (issue #1530). Absent on
+    /// rows written before console persona edits existed, so `#[serde(default)]`
+    /// loads them as empty — "the manifest `prompt` still decides", the pre-#1530
+    /// behaviour exactly.
+    #[serde(default)]
+    pub agent_overrides: Vec<AgentOverride>,
     /// The operator's `[policy]` override (issue #562). Absent on rows written
     /// before console policy writes existed, and `#[serde(default)]` reads that
     /// absence as `None` — "the manifest's `[policy]` still decides", which is
@@ -2984,6 +3073,7 @@ impl OverlayBlob {
             desks: record.overlay_desks.clone(),
             workflows: record.overlay_workflows.clone(),
             budgets: record.overlay_budgets.clone(),
+            agent_overrides: record.overlay_agent_overrides.clone(),
             policy: record.overlay_policy.clone(),
             desk_tools: record.overlay_desk_tools.clone(),
             disabled_workflows: record.disabled_workflows.clone(),
@@ -3011,6 +3101,7 @@ impl OverlayBlob {
                     desks: Vec::new(),
                     workflows: Vec::new(),
                     budgets: Vec::new(),
+                    agent_overrides: Vec::new(),
                     policy: None,
                     desk_tools: Default::default(),
                     disabled_workflows: Vec::new(),
@@ -3099,6 +3190,19 @@ pub struct CompanyRecord {
     /// check untrusted input with [`Self::duplicate_budget_agent_id`].
     #[serde(default)]
     pub overlay_budgets: Vec<BudgetOverride>,
+    /// Operator-set per-teammate persona overrides that win over the manifest's
+    /// `prompt` (issue #1530). Read through [`Self::effective_instructions`] —
+    /// never directly — so the console write path and the roster build cannot
+    /// drift. Empty means the manifest decides, which is byte-for-byte the
+    /// pre-#1530 behaviour; the `#[serde(default)]` keeps records written before
+    /// console persona edits existed loading without a migration.
+    ///
+    /// **At most one entry per `agent_id`.** [`Self::agent_override`] reads the
+    /// first match, so a second entry for one teammate is a silently unreachable
+    /// override. Mutate through [`Self::upsert_agent_override`] rather than
+    /// pushing, and check untrusted input with [`Self::duplicate_override_agent_id`].
+    #[serde(default)]
+    pub overlay_agent_overrides: Vec<AgentOverride>,
     /// The operator's `[policy]` override, if one is set (issue #562).
     ///
     /// `None` — the manifest's `[policy]` applies, exactly as before this
@@ -3885,6 +3989,7 @@ mod test {
             overlay_desks: Vec::new(),
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
+            overlay_agent_overrides: Vec::new(),
             overlay_policy: None,
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
@@ -4903,6 +5008,7 @@ mod test {
             overlay_desks: Vec::new(),
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
+            overlay_agent_overrides: Vec::new(),
             overlay_policy: None,
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),

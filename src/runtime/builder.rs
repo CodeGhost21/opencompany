@@ -1966,6 +1966,7 @@ impl RuntimeBuilder {
             overlay_desks: overlay_desks.clone(),
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
+            overlay_agent_overrides: Vec::new(),
             overlay_policy: None,
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
@@ -2015,6 +2016,15 @@ impl RuntimeBuilder {
         let overlay_budgets = existing
             .as_ref()
             .map(|r| r.overlay_budgets.clone())
+            .unwrap_or_default();
+        // Issue #1530: the operator-set per-agent persona overrides. Carried
+        // across the rebuild for the same reason as the budget caps above — the
+        // manifest is a read-only boot snapshot on a hosted tenant, so dropping
+        // these would silently revert every console-edited persona to the text
+        // baked into the image on the next restart.
+        let overlay_agent_overrides = existing
+            .as_ref()
+            .map(|r| r.overlay_agent_overrides.clone())
             .unwrap_or_default();
         // Issue #562: the operator's `[policy]` override, carried across the
         // rebuild — but ONLY while the seed's `[policy]` has not itself changed.
@@ -2711,6 +2721,7 @@ impl RuntimeBuilder {
                                 overlay_desks: overlay_desks.clone(),
                                 overlay_workflows: overlay_workflows.clone(),
                                 overlay_budgets: overlay_budgets.clone(),
+                                overlay_agent_overrides: overlay_agent_overrides.clone(),
                                 overlay_policy: overlay_policy.clone(),
                                 overlay_desk_tools: Default::default(),
                                 disabled_workflows: disabled_workflows.clone(),
@@ -2938,6 +2949,7 @@ impl RuntimeBuilder {
                 overlay_desks,
                 overlay_workflows,
                 overlay_budgets,
+                overlay_agent_overrides,
                 overlay_policy,
                 overlay_desk_tools,
                 disabled_workflows,
@@ -6008,6 +6020,7 @@ needs_reason = true
                 }],
                 overlay_workflows: Vec::new(),
                 overlay_budgets: Vec::new(),
+                overlay_agent_overrides: Vec::new(),
                 overlay_policy: None,
                 overlay_desk_tools: Default::default(),
                 disabled_workflows: Vec::new(),
@@ -6180,6 +6193,7 @@ needs_reason = true
                 }],
                 overlay_workflows: Vec::new(),
                 overlay_budgets: Vec::new(),
+                overlay_agent_overrides: Vec::new(),
                 overlay_policy: None,
                 overlay_desk_tools: Default::default(),
                 disabled_workflows: Vec::new(),
@@ -6474,6 +6488,7 @@ needs_reason = true
                 overlay_desks: Vec::new(),
                 overlay_workflows: Vec::new(),
                 overlay_budgets: Vec::new(),
+                overlay_agent_overrides: Vec::new(),
                 overlay_policy: None,
                 overlay_desk_tools: Default::default(),
                 disabled_workflows: Vec::new(),
@@ -6592,6 +6607,7 @@ needs_reason = true
                 overlay_desks: Vec::new(),
                 overlay_workflows: Vec::new(),
                 overlay_budgets: Vec::new(),
+                overlay_agent_overrides: Vec::new(),
                 overlay_policy: None,
                 overlay_desk_tools: Default::default(),
                 disabled_workflows: Vec::new(),
@@ -6731,6 +6747,7 @@ needs_reason = true
                 overlay_desks: Vec::new(),
                 overlay_workflows: Vec::new(),
                 overlay_budgets: Vec::new(),
+                overlay_agent_overrides: Vec::new(),
                 overlay_policy: None,
                 overlay_desk_tools: Default::default(),
                 disabled_workflows: Vec::new(),

@@ -32,7 +32,8 @@ use crate::ports::facts::{FactRecord, FactStore};
 use crate::ports::memory::MemoryStore;
 use crate::ports::store::CompanyStore;
 use crate::ports::types::{
-    BudgetOverride, CompanyEvent, CompanyId, CompanyRecord, CompressedTrace, ContextChunk,
+    AgentOverride, BudgetOverride, CompanyEvent, CompanyId, CompanyRecord, CompressedTrace,
+    ContextChunk,
     EventSeq, LedgerEntry, OverlayAgent, OverlayDesk, OverlayDeskMember, OverlayDeskOrder,
     OverlayWorkflow, PolicyOverride, StoredEvent, TemplateProvenance,
 };
@@ -133,6 +134,12 @@ struct BundleMeta {
     /// `#[serde(default)]` for back-compat with older bundles.
     #[serde(default)]
     overlay_budgets: Vec<BudgetOverride>,
+    /// The operator-set per-teammate persona overrides (issue #1530). Preserved
+    /// so an export→import keeps a console-edited persona rather than reverting
+    /// to the manifest's `prompt`. `#[serde(default)]` for back-compat with older
+    /// bundles.
+    #[serde(default)]
+    overlay_agent_overrides: Vec<AgentOverride>,
     /// The operator's `[policy]` override at export time (issue #562).
     /// `#[serde(default)]` for back-compat with older bundles, which read as
     /// `None` — the manifest's `[policy]` decides, exactly as before.
@@ -214,6 +221,9 @@ struct BundleContents {
     /// The operator-set per-teammate daily spend caps, carried through the
     /// bundle so export→import preserves console-set budgets (issue #343).
     overlay_budgets: Vec<BudgetOverride>,
+    /// The operator-set per-teammate persona overrides, carried through the
+    /// bundle so export→import preserves a console-edited persona (issue #1530).
+    overlay_agent_overrides: Vec<AgentOverride>,
     /// The operator's `[policy]` override, carried through the bundle so
     /// export→import preserves a console-set autonomy tier (issue #562).
     ///
@@ -286,6 +296,7 @@ impl BundleContents {
             overlay_desks: record.overlay_desks,
             overlay_workflows: record.overlay_workflows,
             overlay_budgets: record.overlay_budgets,
+            overlay_agent_overrides: record.overlay_agent_overrides,
             overlay_policy: record.overlay_policy,
             overlay_desk_tools: record.overlay_desk_tools,
             disabled_workflows: record.disabled_workflows,
@@ -337,6 +348,7 @@ impl BundleContents {
                 overlay_desks: self.overlay_desks.clone(),
                 overlay_workflows: self.overlay_workflows.clone(),
                 overlay_budgets: self.overlay_budgets.clone(),
+                overlay_agent_overrides: self.overlay_agent_overrides.clone(),
                 overlay_policy: self.overlay_policy.clone(),
                 overlay_desk_tools: self.overlay_desk_tools.clone(),
                 disabled_workflows: self.disabled_workflows.clone(),
@@ -384,6 +396,7 @@ impl BundleContents {
             overlay_desks: self.overlay_desks.clone(),
             overlay_workflows: self.overlay_workflows.clone(),
             overlay_budgets: self.overlay_budgets.clone(),
+            overlay_agent_overrides: self.overlay_agent_overrides.clone(),
             overlay_policy: self.overlay_policy.clone(),
             overlay_desk_tools: self.overlay_desk_tools.clone(),
             disabled_workflows: self.disabled_workflows.clone(),
@@ -474,6 +487,17 @@ impl BundleContents {
                 meta.id
             )));
         }
+        // Same guard for persona overrides (issue #1530), the one place they
+        // arrive from outside this process. `CompanyRecord::agent_override` reads
+        // the first match, so importing two rows for one teammate would apply
+        // whichever the bundle serialized first — refuse rather than resolve.
+        if let Some(agent_id) = AgentOverride::duplicate_agent_id(&meta.overlay_agent_overrides) {
+            return Err(OpenCompanyError::Store(format!(
+                "invalid {META_JSON}: {} carries more than one persona override for teammate \
+                 '{agent_id}'; at most one is allowed",
+                meta.id
+            )));
+        }
 
         let ledger = read_jsonl::<LedgerEntry>(&src.join(LEDGER_JSONL)).await?;
         // Scrubbed on the way IN as well as on the way out (issue #358), which
@@ -519,6 +543,7 @@ impl BundleContents {
             overlay_desks: meta.overlay_desks,
             overlay_workflows: meta.overlay_workflows,
             overlay_budgets: meta.overlay_budgets,
+            overlay_agent_overrides: meta.overlay_agent_overrides,
             overlay_policy: meta.overlay_policy,
             overlay_desk_tools: meta.overlay_desk_tools,
             disabled_workflows: meta.disabled_workflows,
@@ -848,6 +873,7 @@ mod test {
             overlay_desks: Vec::new(),
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
+            overlay_agent_overrides: Vec::new(),
             overlay_policy: None,
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
@@ -1079,6 +1105,7 @@ mod test {
             overlay_desks: Vec::new(),
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
+            overlay_agent_overrides: Vec::new(),
             overlay_policy: None,
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
@@ -1160,6 +1187,7 @@ mod test {
             overlay_desks: Vec::new(),
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
+            overlay_agent_overrides: Vec::new(),
             overlay_policy: None,
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
@@ -1292,6 +1320,7 @@ mod test {
             overlay_desks: Vec::new(),
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
+            overlay_agent_overrides: Vec::new(),
             overlay_policy: None,
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
@@ -1384,6 +1413,7 @@ mod test {
             overlay_desks: Vec::new(),
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
+            overlay_agent_overrides: Vec::new(),
             overlay_policy: None,
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
@@ -1501,6 +1531,7 @@ mod test {
             overlay_desks: desks.clone(),
             overlay_workflows: workflows.clone(),
             overlay_budgets: Vec::new(),
+            overlay_agent_overrides: Vec::new(),
             overlay_policy: None,
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
@@ -1657,6 +1688,7 @@ mod test {
             overlay_desks: Vec::new(),
             overlay_workflows: Vec::new(),
             overlay_budgets: budgets.clone(),
+            overlay_agent_overrides: Vec::new(),
             // Issue #562: a console-set tier rides the same bundle, and for the
             // same reason the paused workflow below does — a `None` here could
             // not have detected the field being dropped, and dropping it would
@@ -1785,6 +1817,7 @@ mod test {
             overlay_desks: Vec::new(),
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
+            overlay_agent_overrides: Vec::new(),
             overlay_policy: None,
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
