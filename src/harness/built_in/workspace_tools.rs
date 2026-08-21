@@ -2028,12 +2028,21 @@ impl Tool for WorkspaceCreateTool {
         // supposed to bring it into existence. It stays one node per call:
         // nothing else in the tree is auto-made, and a path one level deeper
         // (`Agents/<self>/drafts/x.md`) still gets the ordinary refusal.
+        // Both halves of "where did it go": the id to parent it under, and the
+        // parent's *stored* path. They differ whenever the agent typed a legacy
+        // spelling — `Agents/ceo` for a folder stored as `agents/ceo` — and the
+        // reply has to name the path the node can actually be read back at, not
+        // the one that was asked for.
+        let mut parent_display: Option<String> = None;
         let parent_id = if parent_segments.is_empty() {
             None
         } else {
             let parent_path = parent_segments.join("/");
             match index.lookup(&parent_path).map(Vec::as_slice) {
-                Some([entry]) if entry.node.kind == NodeKind::Folder => Some(entry.node.id.clone()),
+                Some([entry]) if entry.node.kind == NodeKind::Folder => {
+                    parent_display = Some(entry.path.clone());
+                    Some(entry.node.id.clone())
+                }
                 Some([entry]) => {
                     return Ok(ToolResult::error(format!(
                         "Refused: `{parent}` is a note, not a folder, so nothing can be created \
@@ -2073,6 +2082,14 @@ impl Tool for WorkspaceCreateTool {
                     )));
                 }
             }
+        };
+
+        // The home the branch above may have just minted is named by the
+        // scaffold, not by what the agent typed, so re-derive the display path
+        // from the segments rather than assuming they match.
+        let normalized = match &parent_display {
+            Some(parent) => format!("{parent}/{name}"),
+            None => normalized,
         };
 
         let origin = self.workspace.origin();
