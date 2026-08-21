@@ -60,9 +60,11 @@ use crate::server::ops::scope::{ScopedCompany, scoped};
 const INGEST_BODY_LIMIT: usize = 8 * MAX_DOCUMENT_BYTES;
 
 /// The largest page body a link ingest will read.
+#[cfg(feature = "documents")]
 const MAX_LINK_BYTES: usize = 4 * 1024 * 1024;
 
 /// How long the host waits for a link to answer.
+#[cfg(feature = "documents")]
 const LINK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
 /// Builds the ingest route fragment.
@@ -123,8 +125,16 @@ impl IngestedDto {
 }
 
 /// Links to fetch and remember.
+///
+/// Deserialized even in a build without the feature — the refusing handler
+/// still takes the body, so a console gets the honest "this build cannot" and
+/// not a deserialization error about a shape it sent correctly.
 #[derive(Debug, Deserialize)]
 struct LinksRequest {
+    #[cfg_attr(
+        not(feature = "documents"),
+        allow(dead_code, reason = "the refusing handler reads no field")
+    )]
     urls: Vec<String>,
 }
 

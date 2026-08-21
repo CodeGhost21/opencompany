@@ -7,6 +7,7 @@
 //! else because a feature moved.
 
 use super::Extracted;
+#[cfg(feature = "documents")]
 use super::text::normalize;
 
 /// Extracts a PDF's text layer.
