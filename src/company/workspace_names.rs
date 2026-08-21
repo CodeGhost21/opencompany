@@ -116,18 +116,23 @@ fn normalize(raw: &str) -> Option<String> {
     let mut pending_dash = false;
 
     for ch in raw.chars() {
-        // Budget checked before the push, so the result never exceeds the cap
-        // mid-character.
-        if out.len() >= MAX_NAME_BYTES {
-            break;
-        }
         if ch.is_ascii_alphanumeric() {
-            if pending_dash && !out.is_empty() {
+            let dash = usize::from(pending_dash && !out.is_empty());
+            // Budget checked before the push — including the separator the push
+            // would need — so the result never exceeds the cap, and never ends
+            // on a separator the next character was going to justify.
+            if out.len() + dash + 1 > MAX_NAME_BYTES {
+                break;
+            }
+            if dash == 1 {
                 out.push('-');
             }
             pending_dash = false;
             out.extend(ch.to_lowercase());
         } else if ch == '.' {
+            if out.len() + 1 > MAX_NAME_BYTES {
+                break;
+            }
             // A dot only counts once something precedes it, so a leading dot is
             // dropped rather than producing a hidden file or a `.`/`..` segment.
             if !out.is_empty() {
