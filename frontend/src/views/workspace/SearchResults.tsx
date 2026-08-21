@@ -31,6 +31,7 @@ import {
   isSecretPath,
   SECRETS_LABEL,
   SECRETS_REASON,
+  titleOf,
 } from "@/lib/workspace";
 
 interface Props {
@@ -192,8 +193,13 @@ export function SearchResults({
                     <FileText className="size-3.5 shrink-0 text-muted-foreground" />
                   )}
                   <span className="truncate text-sm">
+                    {/* The same title the tree and the header show (issue
+                        #1382). Search rendered the raw `name`, so a hit read
+                        `Pagination.md` and clicking it renamed the thing on
+                        screen to `Pagination`. A query rarely spans the
+                        extension, so the highlight offsets are unaffected. */}
                     {highlightRuns(
-                      hit.name,
+                      hit.kind === "file" ? titleOf(hit) : hit.name,
                       hit.matched === "name" ? query : "",
                     ).map((run, i) =>
                       run.hit ? (

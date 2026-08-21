@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ChevronDown,
   ChevronRight,
+  ChevronsDownUp,
   EyeOff,
   FilePlus2,
   FileText,
@@ -1441,6 +1442,18 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
           <IconBtn label="Upload" onClick={() => uploadRef.current?.click()}>
             <Upload className="size-4" />
           </IconBtn>
+          {/* Expansion persists for the session and a deep tree stays open
+              behind every reveal, so there was no way back to a readable
+              explorer short of collapsing each folder by hand (issue #1382).
+              `setExpanded(new Set())` already existed; nothing invoked it. */}
+          <IconBtn
+            label="Collapse all"
+            disabled={expanded.size === 0}
+            onClick={() => setExpanded(new Set())}
+            data-testid="workspace-collapse-all"
+          >
+            <ChevronsDownUp className="size-4" />
+          </IconBtn>
           {/* The two controls after this line repair the tree rather than adding
               to it, and both can remove folders. Kept visually apart from the
               make-something group so the row is not six identical glyphs with
@@ -1730,6 +1743,20 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
                 Edited{" "}
                 {formatUpdated(openFile?.updatedAt ?? openNode.updatedAt)}
               </span>
+              {/* The backlink count, always visible (issue #1382). The rail
+                  that lists them is `xl:flex`, so below about 1280px a note
+                  with eleven backlinks and one with none looked identical —
+                  the whole signal disappeared rather than degrading. */}
+              {openFile && openFile.backlinks.length > 0 && (
+                <span
+                  className="hidden shrink-0 items-center gap-1 text-xs text-muted-foreground sm:inline-flex"
+                  data-testid="workspace-backlink-count"
+                  title="Notes that link here"
+                >
+                  <Link2 className="size-3" aria-hidden />
+                  {openFile.backlinks.length}
+                </span>
+              )}
               <SaveStatus state={saveState} />
               {/* A payload has no prose to read or edit, so the mode switch is
                   hidden rather than shown-and-broken (issue #553). The host
