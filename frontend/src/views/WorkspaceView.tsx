@@ -3067,9 +3067,17 @@ function RepairDialog({
                 // note-looking rows.
                 const node = nodeById(nodes, residual.id);
                 const Icon = node?.kind === "folder" ? Folder : FileText;
-                const where = pathOf(nodes, residual.parentId ?? null)
-                  .map((p) => p.name)
-                  .join(" / ");
+                // A root-level residual (`parentId === null`) walks zero
+                // folders, so the join is empty — and `where && (...)` used to
+                // read that as "nothing to say" and drop the location
+                // entirely, for exactly the residuals with the shortest
+                // answer to give (#1498 review). "Workspace root" is the
+                // same fallback label the move dialog already uses for this
+                // spot (see `DestRow` above), reused rather than reworded.
+                const where =
+                  pathOf(nodes, residual.parentId ?? null)
+                    .map((p) => p.name)
+                    .join(" / ") || "Workspace root";
                 return (
                   <li key={residual.id}>
                     <button
@@ -3081,11 +3089,9 @@ function RepairDialog({
                       <span className="flex items-center gap-2">
                         <Icon className="size-4 shrink-0 text-tone-2" />
                         <span className="truncate">{residual.name}</span>
-                        {where && (
-                          <span className="ml-auto shrink-0 truncate text-xs text-muted-foreground">
-                            in {where}
-                          </span>
-                        )}
+                        <span className="ml-auto shrink-0 truncate text-xs text-muted-foreground">
+                          in {where}
+                        </span>
                       </span>
                       <span className="mt-0.5 block pl-6 text-xs text-muted-foreground">
                         {residualReason(residual.cause)}
