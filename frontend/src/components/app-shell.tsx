@@ -10,6 +10,7 @@ import {
   Settings2,
   ShieldCheck,
   BookText,
+  Wallet,
   Workflow,
 } from "lucide-react";
 

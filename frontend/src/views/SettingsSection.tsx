@@ -14,7 +14,6 @@ import {
 import type { OpenCompanyClient } from "@/api/client";
 import type { CompanyFeed } from "@/hooks/use-company";
 import { cn } from "@/lib/utils";
-import { BillingView } from "@/views/BillingView";
 import { ConnectionsView } from "@/views/ConnectionsView";
 import { HostingView } from "@/views/HostingView";
 import { McpServersView } from "@/views/McpServersView";
@@ -31,11 +30,11 @@ export const SETTINGS_PAGES = [
   { id: "people", label: "People", icon: UserCog, hint: "Who can sign in, and as what" },
   { id: "connections", label: "Connections", icon: Plug, hint: "Third-party accounts" },
   { id: "mcp", label: "MCP Servers", icon: Blocks, hint: "Tool servers and their tools" },
-  // Sits beside Connections rather than inside it: an operator looking for
-  // "where do I put my Chargebee key" searches for billing, not for a
-  // third-party-accounts drawer.
-  { id: "billing", label: "Billing", icon: CreditCard, hint: "Invoicing through Chargebee" },
-  // Beside Billing for the same reason it sits beside Connections: an operator
+  // Billing was here. It moved to Finance → Invoicing and Finance → Wallet
+  // (docs/spec/runtime/finance-console.md): a credential form belongs beside
+  // the data it unlocks, not in a tab an operator visits once, and "Billing"
+  // read as *what OpenCompany charges me* — which is Usage, two rows down.
+  // Beside Connections for the same reason it did: an operator
   // looking for "where do I put my Vercel token" searches for hosting.
   { id: "hosting", label: "Hosting", icon: Globe, hint: "Where this company's sites go live" },
   // "What this company knows how to do" read as capability the company performs
@@ -131,14 +130,8 @@ export function SettingsSection({ client, company, feed, sub, onNavigate, onFlag
         {page === "connections" && <ConnectionsView client={client} company={company} />}
         {page === "mcp" && <McpServersView client={client} company={company} />}
         {/* `key` remounts on a company switch, which is what keeps one
-            company's typed-but-unsaved credentials out of another's Save. See
-            the note above `load` in BillingView. */}
-        {page === "billing" && (
-          <BillingView key={company ?? "self"} client={client} company={company} />
-        )}
-        {/* Same `key` remount as Billing, and for the same reason: a hosting
-            token typed for one company must not survive a company switch into
-            another company's Save. */}
+            company's typed-but-unsaved hosting token out of another's Save —
+            the same guard `FinanceSection` puts on its two provider pages. */}
         {page === "hosting" && (
           <HostingView key={company ?? "self"} client={client} company={company} />
         )}
