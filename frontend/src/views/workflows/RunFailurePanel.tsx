@@ -16,6 +16,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 
 import { formatDuration } from "./run-health";
+import { stripEnginePrefixes } from "./run-error-message";
 import {
   failureDisposition,
   type FailureDisposition,
@@ -60,6 +61,7 @@ export function RunFailurePanel({
   // died after four minutes got somewhere first.
   const ranFor = Math.max(0, failure.atMillis - failure.startedAtMillis);
   const disposition = failureDisposition(failure);
+  const message = stripEnginePrefixes(failure.message);
   return (
     // Issue #1205: a right rail at `xl`, the bottom strip it used to always be
     // below that — same pattern as `RunResultPanel` next door, which is the
@@ -102,7 +104,7 @@ export function RunFailurePanel({
             className="text-xs"
             data-testid="workflow-run-failure-message"
           >
-            {failure.message}
+            {message}
           </AlertDescription>
         </Alert>
         <p className="mt-2 text-2xs text-muted-foreground">

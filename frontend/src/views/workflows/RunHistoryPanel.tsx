@@ -33,6 +33,7 @@ import {
   undeliveredCount,
   undeliveredNodes,
 } from "./run-health";
+import { stripEnginePrefixes } from "./run-error-message";
 
 /** Badge styling per delivery outcome. A report that did NOT go out must not
  * look like one that did — `denied` and `failed` are the two an operator has to
@@ -121,7 +122,7 @@ export function LastRunChip({ run }: { run: WorkflowRunOutcome }) {
         run.running
           ? "This run is still going."
           : run.error
-            ? `Last run failed: ${run.error}`
+            ? `Last run failed: ${stripEnginePrefixes(run.error)}`
             : run.cancelled
               ? "An operator stopped this run before it finished."
               : `Last ${run.scheduled ? "scheduled" : "manual"} run — ${tone.label}`
@@ -377,6 +378,7 @@ function RunHistoryRow({
   // worse than a parked one — there is no card to click.
   const unparkable = blocked.reduce((n, b) => n + (b.unparkable ?? 0), 0);
   const failedNode = failedNodeOf(run);
+  const errorMessage = run.error ? stripEnginePrefixes(run.error) : null;
   const duration = runDuration(run, now);
   return (
     <div
@@ -497,7 +499,7 @@ function RunHistoryRow({
             {failedNode
               ? `This run failed at “${nodeName(graph, failedNode)}”: `
               : "This run failed: "}
-            {run.error}
+            {errorMessage}
             {/* Issue #840 (PR-3): correct the workflow with the copilot. Offered
                 only on the journaled failed run (keyed by runId) — the one
                 surface that always carries the failure, unlike the sync run
