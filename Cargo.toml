@@ -378,7 +378,11 @@ default = ["oauth", "platform-jwt", "documents"]
 # storing an empty memory — while plain text, Markdown, HTML, JSON, CSV and
 # source files are extracted by the always-compiled path. In the default set;
 # see the dependency block for why.
-documents = ["dep:pdf-extract", "dep:calamine", "dep:quick-xml", "dep:zip"]
+# `reqwest` rides along because "remember this link" is the same feature as
+# "remember this file" from the operator's side, and a build that reads a
+# dropped PDF but cannot fetch a URL would be a distinction nobody asked for.
+# It is already in the default set via `oauth`, so this adds nothing there.
+documents = ["dep:pdf-extract", "dep:calamine", "dep:quick-xml", "dep:zip", "dep:reqwest"]
 
 tiny = ["tinyagents"]
 # WS4: embed `vendor/openhuman` (`openhuman_core`) directly as the tenant agent
