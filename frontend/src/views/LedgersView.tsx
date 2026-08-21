@@ -91,6 +91,7 @@ import {
   type LedgerRead,
   type LedgerSummary,
 } from "@/api/ledgers";
+import { inlineCode } from "@/lib/inline-code";
 import { Markdown } from "@/components/markdown";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -222,7 +223,10 @@ export const MANAGE_SEGMENT = "manage";
 export const NEW_LIST_FLAG = "new";
 
 /** Slugs a declared list may not take — reserved for routing, not data. */
-export const RESERVED_SEGMENTS: readonly string[] = [MANAGE_SEGMENT, NEW_LIST_FLAG];
+export const RESERVED_SEGMENTS: readonly string[] = [
+  MANAGE_SEGMENT,
+  NEW_LIST_FLAG,
+];
 
 /**
  * A stable empty default for `approvals`.
@@ -555,7 +559,8 @@ export function LedgersView({
       restage(was);
       const label = labelFor(columnsOf(ledger), status);
       toast.error(`Could not move "${entry.title || entry.id}" to ${label}.`, {
-        description: e instanceof Error ? e.message : "the host refused the move",
+        description:
+          e instanceof Error ? e.message : "the host refused the move",
       });
     }
   };
@@ -613,7 +618,10 @@ export function LedgersView({
               affordance is the `<button>` inside it, not the heading itself,
               so a screen reader still announces "heading level 1: Goals"
               rather than losing the page's landmark structure to a button. */}
-          <h1 className="text-xl font-semibold">
+          {/* A flex row, because the trigger inside is a flex button: as
+              ordinary inline content the count badge wrapped to a line of its
+              own and cost back the space this header just saved. */}
+          <h1 className="flex flex-wrap items-center gap-2 text-xl font-semibold">
             <DropdownMenu>
               <DropdownMenuTrigger
                 render={
@@ -627,7 +635,10 @@ export function LedgersView({
                   </button>
                 }
               />
-              <DropdownMenuContent align="start" className="max-h-[60vh] w-56 overflow-y-auto">
+              <DropdownMenuContent
+                align="start"
+                className="max-h-[60vh] w-56 overflow-y-auto"
+              >
                 {ledgers.map((held) => (
                   <DropdownMenuItem
                     key={held.slug}
@@ -637,7 +648,9 @@ export function LedgersView({
                     <Check
                       className={cn(
                         "size-4",
-                        held.slug === ledger?.slug ? "opacity-100" : "opacity-0",
+                        held.slug === ledger?.slug
+                          ? "opacity-100"
+                          : "opacity-0",
                       )}
                     />
                     <span className="flex-1 truncate">{held.title}</span>
@@ -646,7 +659,9 @@ export function LedgersView({
                         count information" for the zero case, not as "zero" —
                         the same ambiguity `filteredEmptyNotice` exists to
                         rule out elsewhere in this file. */}
-                    <span className="text-xs text-muted-foreground">{held.open}</span>
+                    <span className="text-xs text-muted-foreground">
+                      {held.open}
+                    </span>
                   </DropdownMenuItem>
                 ))}
                 <DropdownMenuSeparator />
@@ -673,44 +688,103 @@ export function LedgersView({
                 </DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>
+            {/* How much is live here, beside the name — the one fact about a
+                list that changes, and the one the switcher already shows for
+                every *other* list while saying nothing about the open one. */}
+            {ledger && (
+              <span
+                title={`${ledger.open} open`}
+                className="rounded-full bg-muted px-2 py-0.5 text-xs font-medium tabular-nums text-muted-foreground"
+              >
+                {ledger.open}
+              </span>
+            )}
           </h1>
-          <p className="text-sm text-muted-foreground">
-            {ledger
-              ? ledger.purpose
-              : "This list does not exist, or was retired. Pick another from the title menu."}
-          </p>
+          {!ledger && (
+            <p className="text-sm text-muted-foreground">
+              This list does not exist, or was retired. Pick another from the
+              title menu.
+            </p>
+          )}
           {ledger && (
+            // The purpose lives in here now (issue #1349). It is a fixed
+            // sentence about the engine — "this ledger is written through the
+            // board, not with `record_entry`" — written for whoever declares a
+            // list, not for the operator working one, and it was holding two
+            // permanent lines above the board on the console's most-visited
+            // screen. Read once, then never again; a disclosure is what that
+            // shape of text is for.
             <details className="text-xs text-muted-foreground">
-              <summary className="cursor-pointer select-none">Details</summary>
-              <div className="mt-1 space-y-1">
+              <summary className="w-fit cursor-pointer select-none rounded px-1 py-0.5 hover:bg-accent/50 hover:text-foreground">
+                About this list
+              </summary>
+              <div className="mt-1 max-w-prose space-y-1 px-1">
+                <p>{inlineCode(ledger.purpose)}</p>
                 <p>
                   Renders into <code>{ledger.derived}</code>
                 </p>
                 {!isWritable(ledger) && (
                   <p className="flex items-start gap-1.5">
                     <Lock className="mt-0.5 size-3 shrink-0" />
-                    Rows here are opened elsewhere: {ledger.writtenBy}. You can
-                    still move one between columns — that goes through the
-                    board, which is what makes it start work.
+                    <span>
+                      Rows here are opened elsewhere:{" "}
+                      {inlineCode(ledger.writtenBy)}. You can still move one
+                      between columns — that goes through the board, which is
+                      what makes it start work.
+                    </span>
                   </p>
                 )}
               </div>
             </details>
           )}
         </div>
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={() => {
-            void refreshRead();
-            // The board's cards are decorated from a second read, and this
-            // button is the whole manual fallback on a screen with no timer.
-            void refreshTasks();
-          }}
-        >
-          <RefreshCw className="mr-2 size-4" />
-          Refresh
-        </Button>
+        <div className="flex shrink-0 items-center gap-2">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => {
+              void refreshRead();
+              // The board's cards are decorated from a second read, and this
+              // button is the whole manual fallback on a screen with no timer.
+              void refreshTasks();
+            }}
+          >
+            <RefreshCw className="mr-2 size-4" />
+            Refresh
+          </Button>
+          {/* The primary action sits on the title row, not in the filter bar
+              below it (issue #1349). Down there it was the fourth of four
+              buttons in one flat row, at the same weight as a view toggle and
+              a file viewer — three different kinds of control, one of which
+              opens work and two of which change how you are looking at it. The
+              reference puts it here, beside the name and the count, and it is
+              right: this is the row about the list, that one is about the
+              view. */}
+          {ledger &&
+            (isWritable(ledger) ? (
+              <Button
+                size="sm"
+                onClick={() =>
+                  setComposing({
+                    id: "",
+                    fields: {},
+                    status: ledger.statuses[0]?.name ?? "",
+                    closing: false,
+                  })
+                }
+              >
+                <Plus className="mr-2 size-4" />
+                Record
+              </Button>
+            ) : (
+              ledger.slug === BOARD_LEDGER && (
+                <Button size="sm" onClick={() => setCreatingCard(true)}>
+                  <Plus className="mr-2 size-4" />
+                  Add task
+                </Button>
+              )
+            ))}
+        </div>
       </header>
 
       {error && (
@@ -736,7 +810,9 @@ export function LedgersView({
                 </div>
                 <Select
                   value={statusFilter}
-                  onValueChange={(value) => setStatusFilter(value ?? EVERY_STATUS)}
+                  onValueChange={(value) =>
+                    setStatusFilter(value ?? EVERY_STATUS)
+                  }
                 >
                   {/* Explicit trigger text, for the reason issue #813 gave the
                       destination picker its own: base-ui renders the stored
@@ -745,7 +821,9 @@ export function LedgersView({
                       status", and a chosen board column read `in_progress`
                       beside columns headed "In progress". */}
                   <SelectTrigger className="w-[12rem]">
-                    <SelectValue>{statusFilterLabel(ledger, statusFilter)}</SelectValue>
+                    <SelectValue>
+                      {statusFilterLabel(ledger, statusFilter)}
+                    </SelectValue>
                   </SelectTrigger>
                   <SelectContent>
                     <SelectItem value={EVERY_STATUS}>Every status</SelectItem>
@@ -773,33 +851,16 @@ export function LedgersView({
                   )}
                   {mode === "board" ? "List" : "Board"}
                 </Button>
-                <Button variant="outline" size="sm" onClick={() => void showRendered()}>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => void showRendered()}
+                >
                   <FileText className="mr-2 size-4" />
                   Rendered file
                 </Button>
-                {isWritable(ledger) ? (
-                  <Button
-                    size="sm"
-                    onClick={() =>
-                      setComposing({
-                        id: "",
-                        fields: {},
-                        status: ledger.statuses[0]?.name ?? "",
-                        closing: false,
-                      })
-                    }
-                  >
-                    <Plus className="mr-2 size-4" />
-                    Record
-                  </Button>
-                ) : (
-                  ledger.slug === BOARD_LEDGER && (
-                    <Button size="sm" onClick={() => setCreatingCard(true)}>
-                      <Plus className="mr-2 size-4" />
-                      Add task
-                    </Button>
-                  )
-                )}
+                {/* The primary action moved up to the title row (issue
+                    #1349): this row is the view, that one is the list. */}
                 {/* Retiring a list moved to Manage Lists (issue #1284),
                     reached from the Company page — the same place it is
                     declared. This screen is about a list's rows now, never
@@ -817,8 +878,10 @@ export function LedgersView({
                   indistinguishably — the read is filtered server-side. The two
                   are not the same claim, and saying the stronger one over a
                   ledger the nav is counting 14 rows for is simply false. */}
-              {read && read.entries.length === 0 && !reading && (
-                emptyNotice ? (
+              {read &&
+                read.entries.length === 0 &&
+                !reading &&
+                (emptyNotice ? (
                   <div
                     className="flex flex-wrap items-center gap-2 text-sm text-muted-foreground"
                     data-testid="ledger-filtered-empty"
@@ -829,11 +892,13 @@ export function LedgersView({
                     </Button>
                   </div>
                 ) : (
-                  <p className="text-sm text-muted-foreground" data-testid="ledger-empty">
+                  <p
+                    className="text-sm text-muted-foreground"
+                    data-testid="ledger-empty"
+                  >
                     Nothing recorded here yet.
                   </p>
-                )
-              )}
+                ))}
 
               {mode === "board" && read ? (
                 <BoardMode
@@ -842,7 +907,9 @@ export function LedgersView({
                   onMove={(entry, status) => void move(entry, status)}
                   // A drop on dead board pixels. Saying so is the whole fix:
                   // silence here is indistinguishable from a frozen app.
-                  onMiss={() => toast.error("Drop the card on a column to move it.")}
+                  onMiss={() =>
+                    toast.error("Drop the card on a column to move it.")
+                  }
                   onOpen={(entry) =>
                     ledger.source === "native" && onOpenCard
                       ? onOpenCard(entry.id)
@@ -855,7 +922,9 @@ export function LedgersView({
                   }
                   // The `Task` behind a native board row, when there is one.
                   // Absent for every declared ledger, whose rows are rows.
-                  taskFor={isBoard ? (entry) => taskById.get(entry.id) : undefined}
+                  taskFor={
+                    isBoard ? (entry) => taskById.get(entry.id) : undefined
+                  }
                   approvals={approvals}
                   now={clock}
                   // Resume is a move, not a second write path: back into In
@@ -907,12 +976,34 @@ export function LedgersView({
                 </p>
               )}
 
-              {read?.faults?.map((fault) => (
-                <Alert key={fault}>
+              {/* One row, not one per fault (issue #1347).
+                  
+                  A ledger whose rows are written by agents produces faults in
+                  batches — a required field one pass forgot is missing from
+                  every row that pass wrote — so this was seven full-width
+                  alerts, 364px of the same sentence with a different id in it,
+                  stacked below the board and out-weighing the content they are
+                  about. The count is the whole headline; the ids are what you
+                  open when you go looking. */}
+              {read?.faults && read.faults.length > 0 && (
+                <Alert data-testid="ledger-faults">
                   <AlertTriangle className="size-4" />
-                  <AlertDescription>{fault}</AlertDescription>
+                  <AlertDescription>
+                    <details>
+                      <summary className="w-fit cursor-pointer select-none">
+                        {read.faults.length === 1
+                          ? "1 row could not be read"
+                          : `${read.faults.length} rows could not be read`}
+                      </summary>
+                      <ul className="mt-2 space-y-1">
+                        {read.faults.map((fault) => (
+                          <li key={fault}>{inlineCode(fault)}</li>
+                        ))}
+                      </ul>
+                    </details>
+                  </AlertDescription>
                 </Alert>
-              ))}
+              )}
             </>
           )}
         </section>
@@ -1293,7 +1384,9 @@ function ComposeDialog({
               <Label htmlFor={`ledger-field-${field.name}`}>
                 {field.name}
                 {field.required && " *"}
-                {field.name === "reason" && needsReason && " — required to close"}
+                {field.name === "reason" &&
+                  needsReason &&
+                  " — required to close"}
               </Label>
               {field.role === "prose" ? (
                 <Textarea
