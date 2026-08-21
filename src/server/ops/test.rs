@@ -1128,3 +1128,25 @@ async fn a_rotation_racing_the_legacy_migration_is_not_lost() {
         );
     }
 }
+
+#[test]
+fn debugging_the_stored_config_does_not_print_a_legacy_password() {
+    // `StoredConfig` is the one place a password can still ride along inside
+    // otherwise non-secret configuration, so a derived `Debug` would put a live
+    // credential into any log line or panic message that formats one.
+    let config: super::smtp::StoredConfig = serde_json::from_value(serde_json::json!({
+        "host": "smtp.acme.test",
+        "port": 587,
+        "security": "starttls",
+        "username": "mailer",
+        "password": "must-not-appear",
+        "from_name": "Acme",
+        "from_email": "ceo@acme.test",
+    }))
+    .unwrap();
+    let rendered = format!("{config:?}");
+    assert!(!rendered.contains("must-not-appear"), "{rendered}");
+    assert!(rendered.contains("<redacted>"), "{rendered}");
+    // Still useful for diagnosis.
+    assert!(rendered.contains("smtp.acme.test"), "{rendered}");
+}

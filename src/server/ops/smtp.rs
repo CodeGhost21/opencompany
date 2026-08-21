@@ -168,8 +168,8 @@ async fn get_smtp(company: ScopedCompany) -> Result<Json<SmtpStatus>, ApiError> 
 /// still falls back to it; nothing writes it, because
 /// `skip_serializing_if = "Option::is_none"` and every construction site leaves
 /// it `None`.
-#[derive(Debug, Serialize, Deserialize)]
-struct StoredConfig {
+#[derive(Serialize, Deserialize)]
+pub(super) struct StoredConfig {
     /// SMTP server host.
     host: String,
     /// SMTP server port.
@@ -187,6 +187,27 @@ struct StoredConfig {
     from_name: String,
     /// Envelope/from address.
     from_email: String,
+}
+
+impl std::fmt::Debug for StoredConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Never the legacy password: a derived Debug would print it, and this
+        // struct is the one place a password can still ride along inside
+        // otherwise non-secret configuration. Same rule as
+        // [`TenantMailboxConfig`](super::mailer::TenantMailboxConfig).
+        f.debug_struct("StoredConfig")
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("security", &self.security)
+            .field("username", &self.username)
+            .field("from_name", &self.from_name)
+            .field("from_email", &self.from_email)
+            .field(
+                "legacy_password",
+                &self.password.as_ref().map(|_| "<redacted>"),
+            )
+            .finish()
+    }
 }
 
 impl StoredConfig {
