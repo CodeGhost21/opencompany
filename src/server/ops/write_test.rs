@@ -1829,11 +1829,11 @@ async fn workspace_sweep_previews_then_removes_only_the_empty_agent_folders() {
     assert_eq!(
         provisioned_names(&tree),
         vec![
-            "Agents".to_string(),
-            "README.md".to_string(),
-            "README.md".to_string(),
+            "agents".to_string(),
             "cmo".to_string(),
             "launch-brief.md".to_string(),
+            "readme.md".to_string(),
+            "readme.md".to_string(),
             "secrets".to_string(),
         ],
         "the folder holding a deliverable, the operator's note and the root all stay"
