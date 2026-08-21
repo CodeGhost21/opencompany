@@ -142,11 +142,81 @@ fn sample_policy_override() -> crate::ports::types::PolicyOverride {
     }
 }
 
+/// The console-created teammates the fixture seeds every record with, so each
+/// backend (fs, sqlite, mongodb) proves an operator-added agent survives
+/// persistence (issue #1504).
+///
+/// This overlay is the **only** copy of such a teammate — it is deliberately not
+/// written back into the version-controlled `company.toml` — so a backend that
+/// dropped it would delete the teammate on the next restart, and on a hosted
+/// tenant there would be nothing to restore from.
+///
+/// Deliberately **two** rows that differ in their optional fields, because the
+/// field's whole point is that those states stay apart across a round-trip:
+///
+/// - `aria_stone` has a `description` and a **narrowed** `tools` grant. Both are
+///   `skip_serializing_if`-elided when empty, so a backend that persisted only
+///   the required `id`/`name`/`role` triple would still round-trip a bare agent
+///   and pass. This row is what makes that fail.
+/// - `pax_ivory` has `description: None` and an **empty** `tools` list, which
+///   means the standard company-wide grant rather than "no tools" (see
+///   [`OverlayAgent::tools`](crate::ports::types::OverlayAgent::tools)). A
+///   backend that rehydrated the absent key as anything other than empty would
+///   silently re-scope that teammate's tool belt.
+fn sample_overlay_agents() -> Vec<crate::ports::types::OverlayAgent> {
+    use crate::ports::types::OverlayAgent;
+    vec![
+        OverlayAgent {
+            id: "aria_stone".to_string(),
+            name: "Aria Stone".to_string(),
+            role: "Head of Support".to_string(),
+            description: Some("Answers customer mail and escalates refunds.".to_string()),
+            tools: vec!["docs.*".to_string(), "web".to_string()],
+        },
+        OverlayAgent {
+            id: "pax_ivory".to_string(),
+            name: "Pax Ivory".to_string(),
+            role: "Analyst".to_string(),
+            description: None,
+            tools: Vec::new(),
+        },
+    ]
+}
+
+/// The console-created desk the fixture seeds every record with, so each backend
+/// proves an operator-created group chat survives persistence (issue #1504).
+///
+/// Its `members` name one manifest agent (`ceo`) and one overlay agent
+/// (`aria_stone`), which is the mixed case a real console desk produces, and
+/// `description` is `Some` so the `skip_serializing_if` field is exercised.
+fn sample_overlay_desks() -> Vec<crate::ports::types::OverlayDesk> {
+    use crate::ports::types::OverlayDesk;
+    vec![OverlayDesk {
+        id: "support".to_string(),
+        name: "Support".to_string(),
+        description: Some("Customer mail triage.".to_string()),
+        members: vec!["ceo".to_string(), "aria_stone".to_string()],
+    }]
+}
+
+/// The console-added desk memberships the fixture seeds every record with, so
+/// each backend proves an operator's "add to desk" survives persistence
+/// (issue #1504). Targets the manifest-shaped desk id used by the desk-order
+/// overlay, so the two overlays are proven to persist independently.
+fn sample_overlay_desk_members() -> Vec<crate::ports::types::OverlayDeskMember> {
+    use crate::ports::types::OverlayDeskMember;
+    vec![OverlayDeskMember {
+        desk_id: "studio".to_string(),
+        agent_id: "pax_ivory".to_string(),
+    }]
+}
+
 /// Builds a running record for `id` carrying a non-empty desk-order overlay (so
 /// the store round-trip covers the operator desk-hierarchy field, issue #131), a
 /// runtime-authored workflow body (issue #168), a populated budget-override set
 /// (issue #343), a `[policy]` override (issue #562), a paused workflow id
-/// (issue #276), and stamped with the sample template provenance (so round-trips
+/// (issue #276), console-created teammates, desks and desk memberships
+/// (issue #1504), and stamped with the sample template provenance (so round-trips
 /// assert it survives persistence, issue #85).
 fn record(id: &CompanyId) -> CompanyRecord {
     CompanyRecord {
@@ -154,13 +224,17 @@ fn record(id: &CompanyId) -> CompanyRecord {
         manifest: sample_manifest(),
         ledger: Vec::new(),
         lifecycle: "running".to_string(),
-        overlay_agents: Vec::new(),
-        overlay_desk_members: Vec::new(),
+        // Non-empty for the same reason `overlay_desk_tools` below is: an empty
+        // vec survives every possible bug, including not persisting the field at
+        // all. Issue #1504 — this was the one overlay field left empty, so a
+        // backend that dropped console-created teammates passed the whole suite.
+        overlay_agents: sample_overlay_agents(),
+        overlay_desk_members: sample_overlay_desk_members(),
         overlay_desk_order: vec![crate::ports::types::OverlayDeskOrder {
             desk_id: "studio".to_string(),
             ordered: vec!["ceo".to_string(), "eng".to_string()],
         }],
-        overlay_desks: Vec::new(),
+        overlay_desks: sample_overlay_desks(),
         overlay_workflows: vec![sample_overlay_workflow()],
         overlay_budgets: sample_budget_overrides(),
         overlay_policy: Some(sample_policy_override()),
@@ -267,6 +341,71 @@ pub async fn assert_isolation_by_company(
     // `alpha` still sees its own data.
     let loaded = store.load(&alpha).await.unwrap().expect("alpha record");
     assert_eq!(loaded.ledger.len(), 1);
+    // The console-created teammates survive the store round-trip (issue #1504).
+    // Until this assertion existed the fixture seeded an empty vec, so a backend
+    // that never persisted the field passed the entire suite — and the overlay
+    // is the only copy of an operator-added teammate, so losing it deletes them.
+    assert_eq!(
+        loaded.overlay_agents,
+        sample_overlay_agents(),
+        "overlay_agents did not survive save/load"
+    );
+    // Spelled out per optional field, because equality alone would not say which
+    // half broke and both halves are elided from the persisted JSON when empty.
+    let aria = loaded
+        .overlay_agents
+        .iter()
+        .find(|agent| agent.id == "aria_stone")
+        .expect("the console-created teammate survived save/load");
+    assert_eq!(
+        aria.description,
+        Some("Answers customer mail and escalates refunds.".to_string()),
+        "the teammate's mandate decayed into an absent description"
+    );
+    assert_eq!(
+        aria.tools,
+        vec!["docs.*".to_string(), "web".to_string()],
+        "the teammate's narrowed tool grant decayed into the standard company grant"
+    );
+    let pax = loaded
+        .overlay_agents
+        .iter()
+        .find(|agent| agent.id == "pax_ivory")
+        .expect("the standard-grant teammate survived save/load");
+    assert!(
+        pax.tools.is_empty(),
+        "the standard-grant teammate came back with a narrowed tool belt"
+    );
+    // And the round-tripped teammate is on the roster, which is what the overlay
+    // is for: a backend could persist the rows and still fail to make them count.
+    assert!(
+        loaded.is_roster_agent("aria_stone"),
+        "the console-created teammate did not rejoin the roster after save/load"
+    );
+    // The operator-created desk survives too (issue #1504) — the desk analogue
+    // of the teammate overlay, and equally the only copy of that group chat.
+    assert_eq!(
+        loaded.overlay_desks,
+        sample_overlay_desks(),
+        "overlay_desks did not survive save/load"
+    );
+    assert!(
+        loaded.desk_exists("support"),
+        "the console-created desk did not survive save/load"
+    );
+    // As does the operator's "add this teammate to that desk" (issue #1504),
+    // which is a separate overlay and can be dropped on its own.
+    assert_eq!(
+        loaded.overlay_desk_members,
+        sample_overlay_desk_members(),
+        "overlay_desk_members did not survive save/load"
+    );
+    assert!(
+        loaded
+            .effective_desk_members("studio")
+            .contains(&"pax_ivory".to_string()),
+        "the console-added desk membership did not survive save/load"
+    );
     // The operator desk-order overlay survives the store round-trip (issue #131).
     assert_eq!(
         loaded.overlay_desk_order,
@@ -859,6 +998,24 @@ pub async fn assert_export_totality(
         loaded.setup,
         Some(sample_setup_answers()),
         "setup answers did not round-trip through the store"
+    );
+    // Issue #1504: the console-created teammates, desks and desk memberships
+    // round-trip on every backend. An export that dropped them would lose the
+    // only copy of every teammate the operator added outside the manifest.
+    assert_eq!(
+        loaded.overlay_agents,
+        sample_overlay_agents(),
+        "overlay_agents did not round-trip through the store"
+    );
+    assert_eq!(
+        loaded.overlay_desks,
+        sample_overlay_desks(),
+        "overlay_desks did not round-trip through the store"
+    );
+    assert_eq!(
+        loaded.overlay_desk_members,
+        sample_overlay_desk_members(),
+        "overlay_desk_members did not round-trip through the store"
     );
     // Issue #168: the runtime-authored graph bodies round-trip too — an export
     // that dropped them would lose every console-created workflow.
