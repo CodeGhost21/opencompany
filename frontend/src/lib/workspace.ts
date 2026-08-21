@@ -83,6 +83,48 @@ export function isDerivedNode(nodes: FsNode[], id: string | null): boolean {
   return head.kind === "folder" && head.name.trim().toLowerCase() === DERIVED_DIR;
 }
 
+/**
+ * The same rule as {@link isDerivedNode}, applied to a **path string** rather
+ * than a tree (issue #1377).
+ *
+ * The search hit list has no tree to walk — it is a flat list of results, and
+ * the nodes it names may sit in folders the explorer has never expanded. But
+ * every hit carries its own `path`, so the folder rule can be read straight off
+ * that. Kept beside `isDerivedNode` and written from the same `DERIVED_DIR`
+ * constant, so the two cannot drift into disagreeing about which files a person
+ * may write.
+ *
+ * Leading slashes are tolerated for the same reason `is_derived_path` tolerates
+ * them: the guard must not be steppable around by a formatting difference.
+ */
+export function isDerivedPath(path: string): boolean {
+  const head = path.trim().replace(/^\/+/, "").split("/")[0];
+  return head !== undefined && head.trim().toLowerCase() === DERIVED_DIR;
+}
+
+/**
+ * What the tree, the search list and the note header all call a `derived/`
+ * file (issue #1377).
+ *
+ * One phrase in three places on purpose. "Read only" — what the header chip
+ * used to say — reports that an edit is unwelcome without saying *why*, and a
+ * rule with no reason behind it is the kind of rule people work around or file
+ * as a bug. "Written by a ledger" is the reason, and it is short enough to fit
+ * a tree row, a search hit and a header chip alike.
+ */
+export const DERIVED_LABEL = "Written by a ledger";
+
+/**
+ * The long form of {@link DERIVED_LABEL} — what happens if you edit it anyway,
+ * and where the edit actually belongs.
+ *
+ * Lives here rather than in `WorkspaceView` because the search list is a
+ * sibling module that would otherwise have to import from its own parent.
+ */
+export const DERIVED_REASON =
+  "This file is written by a ledger and re-derived on every write to it — " +
+  "an edit here would be erased. Change it on the Ledgers page instead.";
+
 /** Ancestor folders (root → current), for breadcrumbs. */
 export function pathOf(nodes: FsNode[], id: string | null): FsNode[] {
   const path: FsNode[] = [];

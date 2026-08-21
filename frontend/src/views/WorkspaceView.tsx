@@ -75,7 +75,9 @@ import {
 import {
   DropdownMenu,
   DropdownMenuContent,
+  DropdownMenuGroup,
   DropdownMenuItem,
+  DropdownMenuLabel,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
@@ -93,6 +95,8 @@ import {
   breadcrumbOf,
   childrenOf,
   clearLegacyLocal,
+  DERIVED_LABEL,
+  DERIVED_REASON,
   ensureMdExt,
   fileByTitle,
   type FsNode,
@@ -149,19 +153,6 @@ interface Props {
 
 /** How long typing settles before the editor pushes a save to the host. */
 const AUTOSAVE_DELAY_MS = 800;
-
-/**
- * Why a file under `derived/` has no Edit tab (issue #1222).
- *
- * Says what writes it instead, because "read only" on its own tells an operator
- * that their edit is unwelcome without telling them where the edit belongs —
- * and there IS somewhere it belongs. The host's own refusal names the specific
- * ledger; this is the pane's version of the same sentence, said before the
- * typing rather than after it.
- */
-const READ_ONLY_TITLE =
-  "This file is written by a ledger and re-derived on every write to it — " +
-  "an edit here would be erased. Change it on the Ledgers page instead.";
 
 /**
  * How long the search box waits after the last keystroke before asking the host
@@ -1474,10 +1465,23 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
                 <Breadcrumb nodes={nodes} nodeId={openNode.id} onOpenFolder={revealFolder} />
                 <span className="truncate text-sm font-medium">{titleOf(openNode)}</span>
               </span>
-              <Authorship
-                createdBy={openFile?.createdBy ?? openNode.createdBy}
-                updatedBy={openFile?.updatedBy ?? openNode.updatedBy}
-              />
+              {/* No authorship on a derived file (#1377). `derived::publish`
+                  stamps `WorkspaceOrigin::Seed` — that is how the write guard
+                  tells its own derivation from a person — so `originLabel`
+                  renders `Seeded` on every one of these. "Seeded" means "it
+                  shipped with the company bundle and was typed by nobody",
+                  which is a different and wrong story: this file was rendered
+                  seconds ago and is rewritten on every `record_entry`. Two
+                  console-authored badges disagreeing about the same file is
+                  worse than one, so the chip that IS true says it alone. The
+                  breadcrumb above stays either way: where a derived file lives
+                  is the fact that explains which ledger wrote it. */}
+              {!readOnlyNote && (
+                <Authorship
+                  createdBy={openFile?.createdBy ?? openNode.createdBy}
+                  updatedBy={openFile?.updatedBy ?? openNode.updatedBy}
+                />
+              )}
               <span className="hidden shrink-0 text-xs text-muted-foreground sm:inline">
                 {formatUpdated(openFile?.updatedAt ?? openNode.updatedAt)}
               </span>
@@ -1500,10 +1504,9 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
                   variant="outline"
                   className="ml-auto shrink-0 gap-1 font-normal"
                   data-testid="workspace-read-only"
-                  title={READ_ONLY_TITLE}
                 >
                   <Lock className="size-3" />
-                  Read only
+                  {DERIVED_LABEL}
                 </Badge>
               ) : (
                 <Tabs
@@ -1549,6 +1552,24 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
                   />
                 ) : (
                   <div className="mx-auto max-w-3xl px-6 py-6" data-testid="workspace-note">
+                    {/* The reason, said in the console's own voice and in plain
+                        sight (issue #1377). It used to live in a native `title`
+                        on the chip — a tooltip that waits a second, never
+                        appears on touch, and is never met by anyone who does
+                        not think to hover a passive-looking status label. The
+                        rendered body often explains itself too, but that text
+                        is the ledger's, not ours: a ledger whose template omits
+                        it would leave the operator with two words and no
+                        reason. */}
+                    {readOnlyNote && (
+                      <p
+                        className="mb-6 flex items-start gap-2 rounded-lg border border-border bg-muted/50 px-3 py-2 text-xs text-muted-foreground"
+                        data-testid="workspace-read-only-reason"
+                      >
+                        <Lock className="mt-0.5 size-3.5 shrink-0" />
+                        <span>{DERIVED_REASON}</span>
+                      </p>
+                    )}
                     <NoteMarkdown source={body} nodes={nodes} onWiki={(t) => void onWiki(t)} />
                   </div>
                 )}
@@ -1835,6 +1856,21 @@ function TreeRow({ node, ...props }: TreeProps & { node: FsNode }) {
   // level below `Agents/`.
   const isRosterFolder = isFolder && isAgentsFolder(nodeById(nodes, node.parentId));
   const displayName = isRosterFolder ? rosterDisplayName(node.name, rosterNames) : node.name;
+  /**
+   * Whether this row is the `derived/` folder or something inside it (#1377).
+   *
+   * The tree is where a person decides what to open, so it is where "this one
+   * is not yours to edit" has to be readable. Before this, `derived/GOALS.md`
+   * rendered identically to a hand-written note — same icon, same weight, same
+   * `…` menu offering Rename and Move — and the only console-authored signal
+   * was a chip in the header of a file you had already opened.
+   *
+   * Recomputed per row rather than threaded down through {@link Tree}, so the
+   * rule stays the single {@link isDerivedNode} both this and the header ask.
+   * It walks the ancestry of one node, against a tree that is a few hundred
+   * nodes at most and is already re-sorted per level on every render.
+   */
+  const derived = isDerivedNode(nodes, node.id);
 
   return (
     <>
@@ -1843,6 +1879,9 @@ function TreeRow({ node, ...props }: TreeProps & { node: FsNode }) {
         className={cn(
           "group flex items-center gap-1 rounded-md px-1.5 py-1 text-sm",
           active ? "bg-accent font-medium" : "hover:bg-accent/50",
+          // Muted whether or not it is the open note: what writes the file does
+          // not change when you select it.
+          derived && "text-muted-foreground",
         )}
         style={{ paddingLeft: 6 + depth * 12 }}
       >
@@ -1861,6 +1900,21 @@ function TreeRow({ node, ...props }: TreeProps & { node: FsNode }) {
           <span className="truncate" title={isRosterFolder ? node.name : undefined}>
             {isFolder ? displayName : titleOf(node)}
           </span>
+          {/* The lock is the whole of the tree-side signal: an icon, not a
+              badge, because a row in a 256px pane has no width for a phrase and
+              the name is the thing being scanned. The label rides along for a
+              screen reader, which gets no glyph, and the full reason is on the
+              `title` for a pointer. */}
+          {derived && (
+            <span
+              className="flex shrink-0 items-center"
+              title={DERIVED_REASON}
+              data-testid="workspace-tree-derived"
+            >
+              <Lock className="size-3" aria-hidden />
+              <span className="sr-only">{DERIVED_LABEL}</span>
+            </span>
+          )}
           {/* Agent-created nodes get a marker in the tree itself, so "what has
               the company been writing" is answerable by scanning rather than by
               opening each note. Only the agent case — badging the operator's
@@ -1882,13 +1936,48 @@ function TreeRow({ node, ...props }: TreeProps & { node: FsNode }) {
           >
             <MoreHorizontal className="size-3.5" />
           </DropdownMenuTrigger>
-          <DropdownMenuContent align="end">
-            <DropdownMenuItem onClick={() => props.onRename(node)}>Rename</DropdownMenuItem>
-            <DropdownMenuItem onClick={() => props.onMove(node)}>Move to…</DropdownMenuItem>
-            <DropdownMenuSeparator />
-            <DropdownMenuItem variant="destructive" onClick={() => props.onDelete(node)}>
-              Delete
-            </DropdownMenuItem>
+          {/* `w-auto` for the derived menu only: the popup is pinned to
+              `w-(--anchor-width)` — the width of the tiny `…` button — with a
+              128px floor, and the heading below is wider than that. Every other
+              menu in the tree fits the floor. */}
+          <DropdownMenuContent align="end" className={derived ? "w-auto" : undefined}>
+            {/* Exactly the actions the host will accept, which is not the same
+                set the issue asked for (#1377 said drop all three).
+                `DerivedGuardWorkspace::rename_move` refuses both ends — moving a
+                derived file out strands one the next derivation recreates, and
+                moving a note *in* puts a hand-written file in the folder whose
+                meaning is that nothing in it is hand-written — so Rename and
+                Move are controls whose only outcome is an error toast.
+
+                `delete` is deliberately unguarded there, and the module says
+                why: nothing is silently lost, the next write re-derives the
+                file, and a retired ledger's stale file has to be clearable by
+                somebody. Removing it here would take away the one remedy the
+                host actually offers. The heading is what explains the short
+                menu — an absence on its own reads as a broken menu. */}
+            {derived ? (
+              // Grouped because `DropdownMenuLabel` is Base UI's
+              // `Menu.GroupLabel`, which throws outside a `Menu.Group`.
+              <DropdownMenuGroup>
+                <DropdownMenuLabel className="flex items-center gap-1.5 font-normal whitespace-nowrap">
+                  <Lock className="size-3 shrink-0" />
+                  {DERIVED_LABEL}
+                </DropdownMenuLabel>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem variant="destructive" onClick={() => props.onDelete(node)}>
+                  Delete
+                </DropdownMenuItem>
+              </DropdownMenuGroup>
+            ) : (
+              <>
+                <DropdownMenuItem onClick={() => props.onRename(node)}>Rename</DropdownMenuItem>
+                <DropdownMenuItem onClick={() => props.onMove(node)}>Move to…</DropdownMenuItem>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem variant="destructive" onClick={() => props.onDelete(node)}>
+                  Delete
+                </DropdownMenuItem>
+              </>
+            )}
           </DropdownMenuContent>
         </DropdownMenu>
       </div>
