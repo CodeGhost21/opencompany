@@ -101,6 +101,11 @@ pub(crate) mod workspace_paths;
 // beside it is: its only caller is the console's REST route, and it touches
 // nothing but the `WorkspaceStore` port.
 pub mod workspace_repair;
+// The one naming rule for everything the runtime puts in a workspace: lowercase,
+// dashed. Always compiled and dependency-free — the scaffold, the publish
+// mirror, the page tools and the workspace write tools all mint names, and one
+// shared rule is what stops them minting four different spellings.
+pub mod workspace_names;
 // Issue #607: text search over the shared tree, behind the agent
 // `workspace_search` tool, the REST `GET …/workspace/search` route and the
 // GraphQL `Company.workspaceSearch` resolver. Always compiled and openhuman-free
