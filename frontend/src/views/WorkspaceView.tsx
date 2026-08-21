@@ -1799,7 +1799,7 @@ interface TreeProps {
   revealId: string | null;
   /** Called by the row that scrolled itself, so the reveal fires once. */
   onRevealed: () => void;
-  /** id -> display name for roster ids (issue #973). See {@link isAgentsFolder}. */
+  /** id -> display name for roster ids (issue #973). See {@link isRosterIdFolder}. */
   rosterNames: RosterNames;
   onToggle: (id: string) => void;
   onOpen: (id: string) => void;
@@ -1809,17 +1809,29 @@ interface TreeProps {
 }
 
 /**
- * Whether `folder` is the workspace's `Agents/` root — the one folder whose
- * direct children are named by roster id rather than anything an operator
- * chose (issue #973). Root-scoped (`parentId === null`) so a note or folder an
- * operator names "Agents" somewhere else in the tree is never mistaken for it.
+ * The workspace roots whose direct children are named by roster id rather than
+ * by anything an operator chose (issue #973): `Agents/`, each teammate's own
+ * folder, and `Artifacts/`, where every published deliverable is filed under
+ * the agent that published it. Both need the id resolved to a display name, and
+ * both sort by that name rather than by the raw id.
  */
-function isAgentsFolder(folder: FsNode | undefined): boolean {
-  return folder?.kind === "folder" && folder.name === "Agents" && folder.parentId === null;
+const ROSTER_ID_ROOTS = ["Agents", "Artifacts"];
+
+/**
+ * Whether `folder` is one of {@link ROSTER_ID_ROOTS}. Root-scoped
+ * (`parentId === null`) so a note or folder an operator names "Agents" or
+ * "Artifacts" somewhere else in the tree is never mistaken for one.
+ */
+function isRosterIdFolder(folder: FsNode | undefined): boolean {
+  return (
+    folder?.kind === "folder" &&
+    folder.parentId === null &&
+    ROSTER_ID_ROOTS.includes(folder.name)
+  );
 }
 
 /**
- * `Agents/`'s children, sorted by display name rather than the lexical id
+ * A roster-id root's children, sorted by display name rather than the lexical id
  * {@link childrenOf} sorts everywhere else (issue #973). The pre-#686 ULID ids
  * all sort before every readable slug under the plain id ordering, which is
  * not an order an operator can read anything into.
@@ -1828,7 +1840,7 @@ function sortRosterFolders(items: FsNode[], names: RosterNames): FsNode[] {
   return [...items].sort((a, b) => {
     if (a.kind !== b.kind) return a.kind === "folder" ? -1 : 1;
     // Only a roster folder's name is an id worth resolving. A direct file
-    // under `Agents/` is unusual but not impossible, and its raw name could
+    // under such a root is unusual but not impossible, and its raw name could
     // coincidentally collide with a roster id — that must not reorder it by
     // a display name it was never given one for.
     return a.kind === "folder"
@@ -1839,7 +1851,7 @@ function sortRosterFolders(items: FsNode[], names: RosterNames): FsNode[] {
 
 function Tree(props: TreeProps) {
   const items = childrenOf(props.nodes, props.parentId);
-  const ordered = isAgentsFolder(nodeById(props.nodes, props.parentId))
+  const ordered = isRosterIdFolder(nodeById(props.nodes, props.parentId))
     ? sortRosterFolders(items, props.rosterNames)
     : items;
   return (
@@ -1920,7 +1932,7 @@ function TreeRow({ node, ...props }: TreeProps & { node: FsNode }) {
   // recognizes the teammate by name, not by that id (issue #973). The id stays
   // the label everywhere else in the tree: it is only ever a roster id one
   // level below `Agents/`.
-  const isRosterFolder = isFolder && isAgentsFolder(nodeById(nodes, node.parentId));
+  const isRosterFolder = isFolder && isRosterIdFolder(nodeById(nodes, node.parentId));
   const displayName = isRosterFolder ? rosterDisplayName(node.name, rosterNames) : node.name;
   /**
    * Whether this row is the `derived/` folder or something inside it (#1377).

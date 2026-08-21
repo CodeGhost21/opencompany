@@ -1213,7 +1213,17 @@ async fn empty_surfaces_resolve_to_empty_lists() {
         .map(|node| node["name"].as_str().unwrap())
         .collect();
     names.sort_unstable();
-    assert_eq!(names, vec!["Agents", "README.md", "maya", "secrets"]);
+    assert_eq!(
+        names,
+        vec![
+            "Agents",
+            "Artifacts",
+            "README.md",
+            "README.md",
+            "maya",
+            "secrets"
+        ]
+    );
     let root = tree
         .iter()
         .find(|node| node["name"] == serde_json::json!("Agents"))

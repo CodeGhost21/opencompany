@@ -4243,7 +4243,7 @@ members = ["engineer"]
     }
 
     /// A deliverable is never dropped for tree bookkeeping. When the node
-    /// cannot be written — here a `Standards` *file* squatting the `Agents`
+    /// cannot be written — here an operator's *file* squatting the `Artifacts`
     /// root name, which the fail-closed resolver refuses rather than guesses —
     /// the artifact is still recorded, just without a node id.
     ///
@@ -4252,7 +4252,7 @@ members = ["engineer"]
     /// of the two failures by a wide margin.
     #[tokio::test]
     async fn a_failed_node_write_still_records_the_artifact() {
-        use crate::company::workspace_scaffold::AGENTS_ROOT;
+        use crate::company::workspace_scaffold::ARTIFACTS_ROOT;
         use crate::harness::publish::PendingPublish;
         use crate::ports::artifacts::ArtifactStore;
         use crate::ports::workspace::{NodeKind, WorkspaceNode, WorkspaceOrigin, WorkspaceStore};
@@ -4261,14 +4261,15 @@ members = ["engineer"]
         let (brain, ops) = brain_with_artifacts_and_workspace(dir.path());
         let company = CompanyId::new("acme");
 
-        // A *file* named `Agents` at the workspace root. The minter refuses to
-        // resolve a folder through it rather than clobbering an operator's note.
+        // A *file* named `Artifacts` at the workspace root — the root a publish
+        // now resolves through. The minter refuses to resolve a folder through
+        // it rather than clobbering an operator's note.
         WorkspaceStore::create(
             &*ops,
             &company,
             &WorkspaceNode {
                 id: crate::ports::generate_id(),
-                name: AGENTS_ROOT.to_string(),
+                name: ARTIFACTS_ROOT.to_string(),
                 kind: NodeKind::File,
                 parent_id: None,
                 updated_at_millis: now_millis(),
