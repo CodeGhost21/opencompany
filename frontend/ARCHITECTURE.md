@@ -92,10 +92,18 @@ workload or committed.
 | GET | `…/{id}/approvals` | parked approvals |
 | POST | `…/{id}/approvals/{approvalId}` | `{verdict, note?}` → follow-up reply |
 | POST | `…/{id}/feedback` | scrub-then-preview feedback |
-| POST | `…/{id}/{pause\|resume\|suspend\|archive}` | lifecycle control |
+| POST | `…/{id}/{pause\|resume}` | lifecycle control (company-scoped) |
+| POST | `…/{id}/{suspend\|archive}` | lifecycle control (**platform-scoped**) |
 
 These back Overview, Conversation (send/reply), Approvals, Feedback, Settings
-(connection + lifecycle). Everything below is now **delivered** too — the
+(connection + lifecycle). The two scopes are not interchangeable, and the
+Settings lifecycle card renders accordingly: `suspend` and `archive` resolve
+through `resolve_claims`, which cannot return a human, so a console
+authenticating with a session cookie can never reach them — it offers them only
+when it carries a platform bearer, and otherwise says so in the page rather than
+failing after the confirmation (issue #1401). `resume` is company-scoped but the
+handler refuses a non-platform caller on a `suspended` company, so that button is
+withheld there too. Everything below is now **delivered** too — the
 sections document the surface, its read (GraphQL) and its writes (REST).
 
 ---
