@@ -81,8 +81,11 @@ needs_reason = true
 name = "declined"
 closed = true
 needs_reason = true
-aliases = ["withdrawn"]
 
+[[status]]
+name = "withdrawn"
+closed = true
+needs_reason = true
 
 [[section]]
 heading = "Live"
@@ -103,5 +106,5 @@ Implemented, declined, or withdrawn — each with the reason and, where known, \
 the outcome. A declined recommendation's reason is what stops this firm making \
 the same case to the same client twice.\
 """
-statuses = ["implemented", "declined"]
+statuses = ["implemented", "declined", "withdrawn"]
 cap = 20

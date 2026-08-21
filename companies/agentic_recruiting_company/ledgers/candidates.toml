@@ -63,10 +63,13 @@ Why they closed, stated against the bar and specific enough to defend. \
 name = "sourced"
 
 [[status]]
-name = "in_process"
-aliases = ["interviewing", "offer"]
+name = "screening"
 
+[[status]]
+name = "interviewing"
 
+[[status]]
+name = "offer"
 
 [[status]]
 name = "hired"
@@ -86,7 +89,7 @@ needs_reason = true
 [[section]]
 heading = "In process"
 blurb = "Live. Each should name which must-have is not yet evidenced."
-statuses = ["screening", "in_process"]
+statuses = ["screening", "interviewing", "offer"]
 order = "recent"
 
 [[section]]
