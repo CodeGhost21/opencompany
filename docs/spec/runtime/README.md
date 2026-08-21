@@ -124,6 +124,10 @@ Supporting docs:
   `wallet`, or `none` (no sign-in, for the desktop app), and what each changes
 - [hub-console.md](hub-console.md) — one console deployment operating many hosts
   on other origins: the carried session, CORS, and what it costs
+- [finance-console.md](finance-console.md) — the Finance section: Invoicing
+  (Chargebee) and Wallet (PayPal) as sub-pages, the host read plane that makes
+  provider data reachable from the console at all, and how an operator tests a
+  connection without billing a real customer
 - [company-setup.md](company-setup.md) — first-run **company** setup: three
   questions asked once, turned into a real roster of agents. Distinct from
   [setup.md](setup.md), which configures the *instance*
