@@ -136,6 +136,14 @@ same rule `companies/` follows: whoever owns a subtree mints it on demand.
   _workflow/<workflow>/<run>/workspace/   ← one workflow run's sandbox
 ```
 
+`<company>` and `<agent>` are the ids under the workspace naming rule —
+lowercase and dashed, so a roster id `page_builder` lands at `page-builder/`
+([`workspace-names.md`](workspace-names.md)). A sandbox left at the pre-rule
+path is moved onto the canonical one, once, by `ensure_agent_workspace`: unlike
+the note tree, this directory is private scratch that nothing outside the
+process addresses, so an in-place move is invisible — and losing an agent's
+half-finished work to a silent path change would not be.
+
 An agent's sandbox is named by `harness::build::agent_workspace` and created by
 `harness::build::ensure_agent_workspace`; a workflow run's is named and created
 by `workflows::caps`. It must exist **before** the agent acts, not merely by the
