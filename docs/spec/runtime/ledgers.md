@@ -222,6 +222,40 @@ there forever with nothing to say why.
 finished, and calling either closed would make "what is still outstanding"
 answer wrong.
 
+## Three statuses, everywhere
+
+Every built-in ledger declares exactly three statuses, and
+`no_built_in_ledger_declares_more_than_three_statuses` is what keeps it that
+way. The board is the loudest case, but it was not the only one: `goals`
+declared six and `decisions` four, and both were narrowed for the same reason.
+
+| ledger | statuses | what went, and why |
+| --- | --- | --- |
+| `tasks` | `pending`, `working`, `done` | four stages that all meant "started, not finished" |
+| `goals` | `active`, `met`, `dropped` | `proposed` (a goal nobody committed to is a chat message), `at_risk` (that is what `progress` says, and nothing ever moved a goal back out of it), and the `met`/`missed` split (both are "this is over"; which one is the first clause of the required reason) |
+| `decisions` | `proposed`, `accepted`, `retired` | `superseded` and `reversed` — one status wearing two words, told apart only by the reason both already require |
+
+The rule behind all three: a status answers *where does this row stand*. Every
+fourth status was answering a second question in the same place — how is it
+going, who is owed something, which flavour of over — and asking a writer to
+encode two answers in one word buys a coin-flip, not information. The second
+answer goes in a field: `progress` on a goal, `reason` on a closed row, `stage`
+on a working card.
+
+**Retired words heal on read.** A row stored as `at_risk` or `superseded` is a
+row somebody wrote, and a spec that simply stopped declaring the word would
+report it as a fault *and* leave it out of the rendered file, since sections
+select by status. So each surviving status names the words it adopted
+(`StatusSpec::aliases`), `Entry::status` resolves through them, and the row
+renders and counts under the survivor. A **write** of a retired word is still
+refused — the same reads-heal/writes-fail asymmetry `LEGACY_COLUMN_BACKLOG`
+already makes for a stored card, and for the same reason: a client should learn
+the surviving vocabulary once rather than be kept quietly on the old one.
+
+A ledger a company declares is not capped at three — the wizard's presets are
+three, and the argument above is an argument, not a mechanism. What is
+guaranteed is that nothing the runtime ships asks a reader to hold more.
+
 ## What a declaration cannot do
 
 - **It cannot reason.** `Check` is a closed set — a required field, an unknown
