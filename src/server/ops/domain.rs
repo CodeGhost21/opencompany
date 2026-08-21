@@ -82,8 +82,14 @@ pub(crate) async fn load_domain(
 /// whether they resolved — so it stays open to any member, exactly as
 /// `POST …/domain/verify` and `GET …/hosting` already are
 /// (`docs/modules/server/authority.md`). Making it admin-only would `403` a
-/// member on the Settings screen while the identical data stayed readable to
-/// them over GraphQL as `Company.domain`.
+/// member on the Settings screen while the same domain, its records and its
+/// verified flag stayed readable to them over GraphQL as `Company.domain`.
+///
+/// "The same", not "identical". Both surfaces read through [`load_domain`], so
+/// neither can be staler than the other, but they do not answer the same
+/// detail: this route returns the whole [`DomainStatus`], and `DomainStatusGql`
+/// projects only `domain`, `verified` and `records`. The per-record `checks`
+/// from the last verify pass are REST-only.
 ///
 /// `null` rather than a synthesized empty status, matching the nullability
 /// `Company.domain` already reports.

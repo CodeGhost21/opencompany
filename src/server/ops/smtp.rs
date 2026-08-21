@@ -4,8 +4,12 @@
 //! adapter it plugs into lives in [`mailer`](super::mailer).
 //!
 //! `PUT …/smtp` stores credentials in [`SecretStore`](crate::ports::SecretStore)
-//! under [`SMTP_KEY`](super::SMTP_KEY) and returns a non-secret
-//! [`SmtpStatus`] — the password never appears in any response. `POST …/smtp/test`
+//! and returns a non-secret [`SmtpStatus`] — the password never appears in any
+//! response. They are stored under two keys, not one: the configuration under
+//! [`SMTP_KEY`](super::SMTP_KEY) and the password under
+//! [`SMTP_PASSWORD_KEY`](super::SMTP_PASSWORD_KEY). That split is what lets a
+//! save that omits the password keep the stored one without reading it first —
+//! see [`put_smtp`]. `POST …/smtp/test`
 //! sends a test email through the mockable
 //! [`MailSender`](super::mailer::MailSender) seam, pulling the stored
 //! credentials per send, and records the sent mail in the company's
@@ -32,7 +36,7 @@ use crate::ports::types::SecretValue;
 use crate::ports::{generate_id, now_millis};
 use crate::server::error::ApiError;
 use crate::server::ops::mailer::{MailCredentials, OutboundEmail};
-use crate::server::ops::{AdminScopedCompany, SMTP_KEY, ScopedCompany, scoped};
+use crate::server::ops::{AdminScopedCompany, SMTP_KEY, SMTP_PASSWORD_KEY, ScopedCompany, scoped};
 
 /// The SMTP security mode. Mirrors the console's `SmtpSecurity`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -148,26 +152,89 @@ pub fn router() -> Router<AppState> {
 /// type already carries a `configured` flag to say so, and the GraphQL field is
 /// the non-null `SmtpStatus!`.
 async fn get_smtp(company: ScopedCompany) -> Result<Json<SmtpStatus>, ApiError> {
-    let stored = load_credentials(&company.runtime).await?;
-    Ok(Json(stored.as_ref().map_or_else(
-        SmtpStatus::unconfigured,
-        SmtpStatus::from_credentials,
-    )))
+    let stored = load_config(&company.runtime).await?;
+    Ok(Json(
+        stored.map_or_else(SmtpStatus::unconfigured, |config| config.status()),
+    ))
 }
 
 // -- PUT smtp ---------------------------------------------------------------
 
-/// Persists credentials and returns the non-secret status.
-async fn store_credentials(
+/// What lives under [`SMTP_KEY`]: the credentials minus the password, which has
+/// its own key ([`SMTP_PASSWORD_KEY`]).
+///
+/// `password` is a **legacy read path only**. Blobs written before the split
+/// embedded it here, so [`load_config`] still parses it and [`load_credentials`]
+/// still falls back to it; nothing writes it, because
+/// `skip_serializing_if = "Option::is_none"` and every construction site leaves
+/// it `None`.
+#[derive(Debug, Serialize, Deserialize)]
+struct StoredConfig {
+    /// SMTP server host.
+    host: String,
+    /// SMTP server port.
+    port: u16,
+    /// Transport security mode.
+    #[serde(default)]
+    security: SmtpSecurity,
+    /// Login username.
+    username: String,
+    /// The pre-split password location. Read, never written.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    password: Option<String>,
+    /// Display name on the `From` header.
+    #[serde(default)]
+    from_name: String,
+    /// Envelope/from address.
+    from_email: String,
+}
+
+impl StoredConfig {
+    /// Projects the stored configuration to its non-secret status.
+    fn status(&self) -> SmtpStatus {
+        SmtpStatus {
+            configured: true,
+            host: Some(self.host.clone()),
+            port: Some(self.port),
+            security: Some(self.security),
+            username: Some(self.username.clone()),
+            from_name: Some(self.from_name.clone()),
+            from_email: Some(self.from_email.clone()),
+        }
+    }
+}
+
+/// Reads the stored configuration blob, if any.
+async fn load_config(runtime: &CompanyRuntime) -> Result<Option<StoredConfig>, OpenCompanyError> {
+    let Some(value) = runtime.secrets().get(runtime.id(), SMTP_KEY).await? else {
+        return Ok(None);
+    };
+    Ok(Some(serde_json::from_str(value.expose())?))
+}
+
+/// Writes the password to its own key.
+async fn store_password(runtime: &CompanyRuntime, password: &str) -> Result<(), OpenCompanyError> {
+    runtime
+        .secrets()
+        .set(
+            runtime.id(),
+            SMTP_PASSWORD_KEY,
+            SecretValue(password.to_string()),
+        )
+        .await
+}
+
+/// Persists the configuration blob and returns the non-secret status.
+async fn store_config(
     runtime: Arc<CompanyRuntime>,
-    creds: SmtpCredentials,
+    config: StoredConfig,
 ) -> Result<Json<SmtpStatus>, ApiError> {
-    let json = serde_json::to_string(&creds)?;
+    let json = serde_json::to_string(&config)?;
     runtime
         .secrets()
         .set(runtime.id(), SMTP_KEY, SecretValue(json))
         .await?;
-    Ok(Json(SmtpStatus::from_credentials(&creds)))
+    Ok(Json(config.status()))
 }
 
 /// The save-credentials body: [`SmtpCredentials`], except that the password is
@@ -214,37 +281,73 @@ struct SmtpConfigBody {
 /// console can actually offer; with nothing supplied and nothing stored, the
 /// request is refused rather than persisting credentials that could never
 /// authenticate.
+///
+/// The password is taken **byte for byte** as supplied. Trimming is only ever
+/// used to decide whether the caller supplied one at all: an SMTP password may
+/// legitimately open or close with a space, and silently storing `" hunter2 "`
+/// as `"hunter2"` would fail authentication with nothing in any response or log
+/// to explain why.
+///
+/// Keeping the stored password is the *absence* of a write, not a
+/// read-modify-write: the two live under separate keys ([`SMTP_KEY`] and
+/// [`SMTP_PASSWORD_KEY`]), so a passwordless save rewrites the configuration
+/// blob and leaves the secret untouched. A rotation landing concurrently is
+/// therefore preserved rather than reverted. The one exception is credentials
+/// written before the split, whose password still sits inside the blob: the
+/// first passwordless save after the split migrates it to its own key, and that
+/// single migration is a genuine read-modify-write. It is no worse than the
+/// behaviour it replaces, and it can only ever happen once per company.
 async fn put_smtp(
     company: AdminScopedCompany,
     Json(body): Json<SmtpConfigBody>,
 ) -> Result<Json<SmtpStatus>, ApiError> {
-    let supplied = body
-        .password
-        .as_deref()
-        .map(str::trim)
-        .filter(|password| !password.is_empty())
-        .map(str::to_string);
-    let password = match supplied {
-        Some(password) => password,
-        None => load_credentials(&company.runtime)
-            .await?
-            .map(|stored| stored.password)
-            .ok_or_else(|| {
-                ApiError(OpenCompanyError::InvalidRequest(
-                    "an SMTP password is required".to_string(),
-                ))
-            })?,
-    };
-    let creds = SmtpCredentials {
+    match body.password.filter(|password| !password.trim().is_empty()) {
+        // A rotation. Write the secret before the configuration blob: the blob
+        // is what makes the company read as `configured`, so this order can
+        // never leave a configured company pointing at no password.
+        Some(password) => store_password(&company.runtime, &password).await?,
+        // A passwordless save. Confirm a password exists — migrating a
+        // pre-split one to its own key — and otherwise leave it alone.
+        None => ensure_password_stored(&company.runtime).await?,
+    }
+    let config = StoredConfig {
         host: body.host,
         port: body.port,
         security: body.security,
         username: body.username,
-        password,
+        password: None,
         from_name: body.from_name,
         from_email: body.from_email,
     };
-    store_credentials(company.runtime, creds).await
+    store_config(company.runtime, config).await
+}
+
+/// Confirms a password is stored ahead of a passwordless save, and refuses the
+/// save when none is.
+///
+/// In the steady state this reads one key and writes nothing, which is what
+/// keeps the passwordless save free of a read-modify-write. It writes only to
+/// migrate a pre-split password out of the configuration blob, because the
+/// blob is about to be rewritten without it.
+async fn ensure_password_stored(runtime: &CompanyRuntime) -> Result<(), ApiError> {
+    if runtime
+        .secrets()
+        .get(runtime.id(), SMTP_PASSWORD_KEY)
+        .await?
+        .is_some()
+    {
+        return Ok(());
+    }
+    let legacy = load_config(runtime)
+        .await?
+        .and_then(|config| config.password);
+    let legacy = legacy.ok_or_else(|| {
+        ApiError(OpenCompanyError::InvalidRequest(
+            "an SMTP password is required".to_string(),
+        ))
+    })?;
+    store_password(runtime, &legacy).await?;
+    Ok(())
 }
 
 // -- POST smtp/test ---------------------------------------------------------
@@ -310,15 +413,36 @@ async fn run_test(
     }
 }
 
-/// Loads and parses stored SMTP credentials, if any.
+/// Loads stored SMTP credentials, if any, recombining the configuration blob
+/// with the separately stored password.
+///
+/// The password comes from [`SMTP_PASSWORD_KEY`], falling back to the copy
+/// inside the blob for credentials written before the two were split. Only the
+/// send path needs this; [`get_smtp`] reads the configuration alone so that
+/// rendering the settings page never touches the secret.
 pub(crate) async fn load_credentials(
     runtime: &CompanyRuntime,
 ) -> Result<Option<SmtpCredentials>, OpenCompanyError> {
-    let Some(value) = runtime.secrets().get(runtime.id(), SMTP_KEY).await? else {
+    let Some(config) = load_config(runtime).await? else {
         return Ok(None);
     };
-    let creds: SmtpCredentials = serde_json::from_str(value.expose())?;
-    Ok(Some(creds))
+    let password = match runtime
+        .secrets()
+        .get(runtime.id(), SMTP_PASSWORD_KEY)
+        .await?
+    {
+        Some(value) => value.expose().to_string(),
+        None => config.password.clone().unwrap_or_default(),
+    };
+    Ok(Some(SmtpCredentials {
+        host: config.host,
+        port: config.port,
+        security: config.security,
+        username: config.username,
+        password,
+        from_name: config.from_name,
+        from_email: config.from_email,
+    }))
 }
 
 /// Appends a sent email to the sender's inbox so the console shows outbound mail.

@@ -328,15 +328,29 @@ POST   …/connections/{provider}/disconnect   drop a legacy stored OAuth token 
 GET    /api/v1/oauth/callback                retired browser landing page → 410 HTML until 2026-09-30  [feature: oauth]
 ```
 
-The two `GET`s are REST twins of the GraphQL `Company.domain` / `Company.smtp`
-reads and serve the same loader, so the planes cannot answer differently. They
-are open to any member (the `[admin]` line guards the company's outward
-identity, not the reading of it) and neither carries credential material: the
-SMTP password is absent from `SmtpStatus` by construction. `PUT …/smtp` treats
-the password as a **patch** — a body that omits it keeps the stored one, so a
-form can offer "stored — leave blank to keep" instead of charging a credential
-re-entry for a from-name fix. A body carrying one behaves exactly as before, and
-one that supplies neither with nothing stored is `400`.
+The two `GET`s are the REST siblings of the GraphQL `Company.domain` /
+`Company.smtp` reads and share their loaders, so the planes cannot disagree
+about the fields they both carry. They can still differ in *detail*: REST
+answers the full `DomainStatus` and `SmtpStatus`, while `DomainStatusGql` omits
+the per-record `checks` from the last verify pass and `SmtpStatusGql` omits
+`security`, `from_name` and `from_email`. Both are open to any member (the
+`[admin]` line guards the company's outward identity, not the reading of it) and
+neither carries credential material: the SMTP password is absent from
+`SmtpStatus` by construction.
+
+`PUT …/smtp` treats the password as a **patch** — a body that omits it keeps the
+stored one, so a form can offer "stored — leave blank to keep" instead of
+charging a credential re-entry for a from-name fix. A body carrying one behaves
+exactly as before, and one that supplies neither with nothing stored is `400`.
+The supplied password is stored byte for byte; trimming decides only whether one
+was supplied at all, because leading and trailing spaces can be significant.
+
+Keeping the stored password costs no read-modify-write. The configuration and
+the password live under separate secret keys, so a passwordless save rewrites
+the configuration and never touches the secret — a rotation arriving at the same
+moment survives instead of being reverted. Credentials written before that split
+still carry the password inside the configuration blob; reads fall back to it,
+and the first passwordless save after the split migrates it to its own key.
 
 `…/credential` is the company's **one** TinyHumans key, presented by every
 surface wired to it (**Composio today**) — see

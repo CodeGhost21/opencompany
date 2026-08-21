@@ -37,6 +37,19 @@ fn manifest() -> CompanyManifest {
 
 /// Builds state holding one running company `acme`, with `connections` injected.
 async fn state_with(home: &std::path::Path, connections: ConnectionsRuntime) -> AppState {
+    state_with_secrets(home, connections, None).await
+}
+
+/// [`state_with`], optionally over an injected
+/// [`SecretStore`](crate::ports::SecretStore).
+///
+/// The seam exists for the tests that have to observe *when* the SMTP secrets
+/// are read and written, which the on-disk store gives no way to see.
+async fn state_with_secrets(
+    home: &std::path::Path,
+    connections: ConnectionsRuntime,
+    secrets: Option<Arc<dyn crate::ports::SecretStore>>,
+) -> AppState {
     let store = crate::store::FsCompanyStore::new(home.to_path_buf());
     let id = CompanyId::new("acme");
     store
@@ -59,11 +72,11 @@ async fn state_with(home: &std::path::Path, connections: ConnectionsRuntime) -> 
         })
         .await
         .unwrap();
-    let runtime = RuntimeBuilder::new(home.to_path_buf(), manifest())
-        .with_id(id.clone())
-        .build()
-        .await
-        .unwrap();
+    let mut builder = RuntimeBuilder::new(home.to_path_buf(), manifest()).with_id(id.clone());
+    if let Some(secrets) = secrets {
+        builder = builder.with_secrets(secrets);
+    }
+    let runtime = builder.build().await.unwrap();
     let state = AppState::new(AppConfig::default())
         .with_home(home.to_path_buf())
         .with_connections(connections);
@@ -665,4 +678,338 @@ async fn put_smtp_without_a_password_and_nothing_stored_is_refused() {
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let value = body_json(response).await;
     assert_eq!(value["code"], "invalid_request", "{value}");
+}
+
+#[tokio::test]
+async fn a_password_keeps_its_leading_and_trailing_spaces() {
+    // `str::trim` on the way in would store `" pad ded "` as `"pad ded"`, and
+    // the operator would watch authentication fail against a password they can
+    // see is correct, with nothing in any response or log naming the edit. SMTP
+    // passwords are opaque bytes; only the caller knows where they end.
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let sender = Arc::new(RecordingMailSender::new());
+    let state = state_with(&home, ConnectionsRuntime::new().with_mail(sender.clone())).await;
+    let app = router(state);
+
+    // Deliberately fake, and deliberately padded at both ends.
+    let padded = "  pad ded  ";
+    let body = serde_json::json!({
+        "host": "smtp.acme.test",
+        "port": 587,
+        "security": "starttls",
+        "username": "mailer",
+        "password": padded,
+        "from_name": "Acme",
+        "from_email": "ceo@acme.test",
+    });
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/api/v1/company/smtp")
+                .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // What reached the transport is the only observable answer — the password is
+    // write-only, so no read can report it back.
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/company/smtp/test")
+                .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let presented = sender.presented();
+    assert_eq!(presented.len(), 1);
+    let crate::server::ops::mailer::MailCredentials::Smtp(creds) = &presented[0];
+    assert_eq!(
+        creds.password, padded,
+        "the stored password must be byte-for-byte what was supplied",
+    );
+}
+
+/// A secret store that lets one "concurrent rotation" land at a chosen moment.
+///
+/// The rotation commits immediately *before* this request's first write, which
+/// is the only interleaving that can lose it: the other admin's `PUT …/smtp`
+/// has landed after this request read whatever it read, so anything this
+/// request now writes is written on top of the rotation. Hanging it off the
+/// write rather than the read is deliberate — a request may read several times,
+/// and firing on the first read would let a later read observe the rotation and
+/// quietly launder the bug into a pass.
+///
+/// It is applied to both places a password can live — its own key and the
+/// pre-split configuration blob — so it is a genuine rotation under either
+/// storage layout, and the test can ask the one question that matters: does the
+/// save that follows revert it?
+#[derive(Default)]
+struct RotatingSecrets {
+    entries: std::sync::Mutex<std::collections::HashMap<String, String>>,
+    /// `(password, blob)` to commit just before the next SMTP write, once.
+    rotation: std::sync::Mutex<Option<(String, String)>>,
+}
+
+impl RotatingSecrets {
+    /// Arms the one-shot rotation.
+    fn arm(&self, password: &str, blob: &str) {
+        *self.rotation.lock().unwrap() = Some((password.to_string(), blob.to_string()));
+    }
+
+    /// The password an ordinary read would now resolve to.
+    fn stored_password(&self) -> Option<String> {
+        self.entries
+            .lock()
+            .unwrap()
+            .get(super::SMTP_PASSWORD_KEY)
+            .cloned()
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::ports::SecretStore for RotatingSecrets {
+    async fn get(
+        &self,
+        _company: &CompanyId,
+        key: &str,
+    ) -> crate::Result<Option<crate::ports::types::SecretValue>> {
+        let seen = self.entries.lock().unwrap().get(key).cloned();
+        Ok(seen.map(SecretValue))
+    }
+
+    async fn set(&self, _company: &CompanyId, key: &str, value: SecretValue) -> crate::Result<()> {
+        // The other admin gets in first; this request's write lands on top of
+        // theirs, which is what makes a lost rotation observable.
+        if matches!(key, super::SMTP_KEY | super::SMTP_PASSWORD_KEY)
+            && let Some((password, blob)) = self.rotation.lock().unwrap().take()
+        {
+            let mut entries = self.entries.lock().unwrap();
+            entries.insert(super::SMTP_PASSWORD_KEY.to_string(), password);
+            entries.insert(super::SMTP_KEY.to_string(), blob);
+        }
+        self.entries
+            .lock()
+            .unwrap()
+            .insert(key.to_string(), value.expose().to_string());
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn a_passwordless_save_does_not_revert_a_concurrent_rotation() {
+    // Two admins, overlapping requests. One is correcting the display name and
+    // sends no password; the other is rotating the credential. If the first
+    // request keeps the password by loading it and writing it back, it reverts
+    // the rotation it never knew about, and nothing anywhere reports that the
+    // company is now authenticating with a retired secret.
+    //
+    // The fix is structural rather than a lock: the password lives under its own
+    // key, so "keep the stored password" is the absence of a write.
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let secrets = Arc::new(RotatingSecrets::default());
+    let sender = Arc::new(RecordingMailSender::new());
+    let state = state_with_secrets(
+        &home,
+        ConnectionsRuntime::new().with_mail(sender.clone()),
+        Some(secrets.clone()),
+    )
+    .await;
+    let app = router(state);
+
+    // Fake throughout; these never leave the test process.
+    let original = "original-pw";
+    let rotated = "rotated-pw";
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/api/v1/company/smtp")
+                .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "host": "smtp.acme.test",
+                        "port": 587,
+                        "security": "starttls",
+                        "username": "mailer",
+                        "password": original,
+                        "from_name": "Acme",
+                        "from_email": "ceo@acme.test",
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(secrets.stored_password().as_deref(), Some(original));
+
+    // The other admin's rotation, committing mid-request. The blob carries the
+    // rotated password too, so this is a real rotation even for a reader that
+    // still expects the password to live inside it.
+    secrets.arm(
+        rotated,
+        &serde_json::json!({
+            "host": "smtp.acme.test",
+            "port": 587,
+            "security": "starttls",
+            "username": "mailer",
+            "password": rotated,
+            "from_name": "Acme",
+            "from_email": "ceo@acme.test",
+        })
+        .to_string(),
+    );
+
+    // The display-name correction: same body, no password.
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/api/v1/company/smtp")
+                .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "host": "smtp.acme.test",
+                        "port": 587,
+                        "security": "starttls",
+                        "username": "mailer",
+                        "from_name": "Acme Inc",
+                        "from_email": "ceo@acme.test",
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // The rotation stands, and the display name still took effect.
+    assert_eq!(
+        secrets.stored_password().as_deref(),
+        Some(rotated),
+        "the passwordless save wrote a stale password back over the rotation",
+    );
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/company/smtp/test")
+                .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let presented = sender.presented();
+    assert_eq!(presented.len(), 1);
+    let crate::server::ops::mailer::MailCredentials::Smtp(creds) = &presented[0];
+    assert_eq!(creds.password, rotated);
+    assert_eq!(creds.from_name, "Acme Inc");
+}
+
+#[tokio::test]
+async fn a_pre_split_password_survives_a_passwordless_save() {
+    // Credentials written before the password moved to its own key keep it
+    // inside the configuration blob. A passwordless save rewrites that blob, so
+    // without the migration the secret would be dropped on the floor and the
+    // company would silently stop being able to send.
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let secrets = Arc::new(RotatingSecrets::default());
+    let sender = Arc::new(RecordingMailSender::new());
+    let state = state_with_secrets(
+        &home,
+        ConnectionsRuntime::new().with_mail(sender.clone()),
+        Some(secrets.clone()),
+    )
+    .await;
+
+    // Seed the old layout directly: one blob, password inside, no password key.
+    let legacy = "legacy-pw";
+    crate::ports::SecretStore::set(
+        secrets.as_ref(),
+        &CompanyId::new("acme"),
+        super::SMTP_KEY,
+        SecretValue(
+            serde_json::json!({
+                "host": "smtp.acme.test",
+                "port": 587,
+                "security": "starttls",
+                "username": "mailer",
+                "password": legacy,
+                "from_name": "Acme",
+                "from_email": "ceo@acme.test",
+            })
+            .to_string(),
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(secrets.stored_password(), None);
+
+    let app = router(state);
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/api/v1/company/smtp")
+                .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "host": "smtp.acme.test",
+                        "port": 587,
+                        "security": "starttls",
+                        "username": "mailer",
+                        "from_name": "Acme Inc",
+                        "from_email": "ceo@acme.test",
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // Migrated to its own key, and still the password that reaches the wire.
+    assert_eq!(secrets.stored_password().as_deref(), Some(legacy));
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/company/smtp/test")
+                .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let presented = sender.presented();
+    let crate::server::ops::mailer::MailCredentials::Smtp(creds) = &presented[0];
+    assert_eq!(creds.password, legacy);
+    assert_eq!(creds.from_name, "Acme Inc");
 }
