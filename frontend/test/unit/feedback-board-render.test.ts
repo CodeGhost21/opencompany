@@ -131,8 +131,10 @@ describe("FeedbackBoard", () => {
     act(() => upvote!.click());
 
     // Optimistic: the score moved and the arrow is pressed while the call hangs.
-    const pressed = container.querySelector('button[aria-pressed="true"]');
-    expect(pressed?.getAttribute("aria-label")).toBe("Take your upvote back");
+    // Scoped to the row's own controls — the sort buttons carry `aria-pressed`
+    // too, and the active sort is pressed from the first render.
+    expect(container.querySelector('button[aria-label="Take your upvote back"]')).not.toBeNull();
+    expect(container.querySelector("li")?.textContent).toContain("3");
     expect(voteFeedbackBoard).toHaveBeenCalledWith("one", 1, "acme");
 
     // The server is the final word — including when it disagrees with the guess.
@@ -158,7 +160,8 @@ describe("FeedbackBoard", () => {
     await settle();
 
     expect(container.textContent).toContain("hub unreachable");
-    // Back to the untouched row: score 2, nothing pressed.
-    expect(container.querySelector('button[aria-pressed="true"]')).toBeNull();
+    // Back to the untouched row: the upvote is on offer again, not standing.
+    expect(container.querySelector('button[aria-label="Take your upvote back"]')).toBeNull();
+    expect(container.querySelector('button[aria-label="Upvote"]')).not.toBeNull();
   });
 });
