@@ -87,15 +87,17 @@ describe("sortedFolders", () => {
     const order = sortedFolders(TREE, new Set()).map((f) => f.id);
 
     // Depth-first through `childrenOf`, which is the tree's own sort.
+    // `derived` sorts last among folders (issue #1382), and the destination
+    // list follows the explorer rather than second-guessing it.
     expect(order).toEqual([
       "agents",
       "roster",
-      "derived",
-      "d-child",
       "product",
       "p-drafts",
       "standards",
       "s-drafts",
+      "derived",
+      "d-child",
     ]);
     // And it agrees with the tree at the top level.
     expect(
