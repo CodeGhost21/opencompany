@@ -749,6 +749,65 @@ fn every_company_ledger_declaration_parses_and_fits_under_the_cap() {
     }
 }
 
+/// No shipped template declares a ledger with more than five statuses.
+///
+/// The same argument the built-ins were narrowed to three by (issue #1512),
+/// applied to authored content and stopped one notch looser. A template ledger
+/// is a *pipeline* far more often than a built-in is — a candidate, a deal, a
+/// filing genuinely moves through stages — so five leaves room for two or three
+/// real stages plus the outcomes, where three would have forced every template
+/// to throw away either its pipeline or its outcome.
+///
+/// What five does forbid is the sprawl these started at: seven statuses, four of
+/// which an agent had to choose between on every write with nothing to tell them
+/// apart but a blurb. Past five, the extra status is reliably answering a second
+/// question — how is it going, which flavour of over — and that answer belongs
+/// in a field (`progress`, `reason`) where it does not have to be guessed.
+///
+/// Covers the `globals/` baseline as well as `companies/`: the baseline ships
+/// into every company, so a sprawling one there is sprawl nobody opted into.
+///
+/// It fails here rather than at run time because nothing at run time would say
+/// so: a ledger with nine statuses loads, renders and works, and only the
+/// company using it discovers that its agents cannot keep the vocabulary
+/// straight.
+#[test]
+fn no_shipped_template_ledger_declares_more_than_five_statuses() {
+    /// Enough for a short pipeline and its outcomes; not enough for a taxonomy.
+    const MAX_STATUSES: usize = 5;
+
+    let mut checked = 0;
+    let mut check = |origin: String, spec: &crate::ledger::LedgerSpec| {
+        checked += 1;
+        let names: Vec<&str> = spec.statuses.iter().map(|s| s.name.as_str()).collect();
+        assert!(
+            spec.statuses.len() <= MAX_STATUSES,
+            "{origin}/{} declares {} statuses, past the {MAX_STATUSES} ceiling: {names:?}. \
+             Merge the ones that answer a question other than *where does this row stand* \
+             and keep the retired words as `aliases` so stored rows still render.",
+            spec.slug,
+            spec.statuses.len(),
+        );
+    };
+
+    // The baseline first, and it matters more than any single template: these
+    // ship into *every* company, so a sprawling one is sprawl every operator
+    // gets whichever vertical they started from.
+    for spec in crate::globals::ledgers() {
+        check("globals/ledgers".to_string(), spec);
+    }
+    for company in subdirs(&repo_root().join("companies")) {
+        let declared = load_dir_ledgers(&company)
+            .unwrap_or_else(|err| panic!("{}/ledgers: {err}", company.display()));
+        for spec in &declared {
+            check(format!("{}/ledgers", company.display()), spec);
+        }
+    }
+    // A walk that found nothing would pass this silently, which is the one way
+    // a content test can be green and worthless.
+    assert!(checked > 0, "no template ledgers were checked");
+}
+
 /// Every `[[agent]].ledgers` grant must name a ledger that company actually has.
 ///
 /// A grant is a *narrowing*: an agent that declares one can see exactly the

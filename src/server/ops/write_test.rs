@@ -215,8 +215,9 @@ async fn tasks_crud_round_trips_under_both_scopes() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(task["title"], "Q2 brief");
-    // Issue #206/#301: manual entry lands in To-do, the board's one intake lane.
-    assert_eq!(task["column"], "todo");
+    // Issue #206/#301: manual entry lands in To-do, the board's one intake lane
+    // — which reads as `pending`, its phase, since issue #1512.
+    assert_eq!(task["column"], "pending");
     let id = task["id"].as_str().unwrap().to_string();
 
     // Drag (PATCH column) via the {id} scope.
@@ -348,7 +349,7 @@ async fn task_writes_reject_a_column_the_board_cannot_render() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert!(
-        body.to_string().contains("in_progress"),
+        body.to_string().contains("working"),
         "the refusal must list the columns that do exist: {body}"
     );
 
@@ -371,7 +372,11 @@ async fn task_writes_reject_a_column_the_board_cannot_render() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     let (_, board) = send(&state, "GET", "/api/v1/company/tasks", None).await;
-    assert_eq!(board.as_array().expect("board")[0]["column"], "paused");
+    // The refused patch left the card where it was: paused, which reads as the
+    // `working` phase with `paused` named as the stage (issue #1512).
+    let card = &board.as_array().expect("board")[0];
+    assert_eq!(card["column"], "working");
+    assert_eq!(card["stage"], "paused");
 }
 
 /// #334: `in_review → done` is a move the write boundary accepts, and the one
@@ -447,7 +452,7 @@ async fn created_tasks_default_to_the_todo_column() {
         Some(json!({"title": "queued work"})),
     )
     .await;
-    assert_eq!(defaulted["column"], crate::ports::tasks::COLUMN_TODO);
+    assert_eq!(defaulted["column"], crate::ledger::board::PHASE_PENDING);
 
     // An explicit column is still honored verbatim — `spawn_task`, the
     // orchestrator's `revise`, and a failed run all place their own card.
@@ -459,7 +464,8 @@ async fn created_tasks_default_to_the_todo_column() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(explicit["column"], crate::ports::tasks::COLUMN_PLANNING);
+    assert_eq!(explicit["column"], crate::ledger::board::PHASE_WORKING);
+    assert_eq!(explicit["stage"], crate::ports::tasks::COLUMN_PLANNING);
 
     // Issue #301: `backlog` is gone from the board, so a client still writing
     // it is refused rather than persisting a card nothing renders. Legacy data
@@ -474,7 +480,7 @@ async fn created_tasks_default_to_the_todo_column() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert!(
-        refused.to_string().contains("todo"),
+        refused.to_string().contains("pending"),
         "the refusal must name the columns that replaced it: {refused}"
     );
 
@@ -670,14 +676,21 @@ async fn a_chat_created_card_lands_off_the_dispatch_trigger() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
+    // Asserted on `stage`, not on `column`: since issue #1512 the DTO's
+    // `column` is the phase, and `working` covers both the dispatched stage and
+    // three that are not — so a phase assertion could not tell "dispatched"
+    // from "being planned", which is the only thing this test is about.
     assert_ne!(
-        created["column"], COLUMN_IN_PROGRESS,
+        created["stage"], COLUMN_IN_PROGRESS,
         "a chat-created card must never arrive already dispatched"
     );
     assert_eq!(
-        created["column"], COLUMN_TODO,
+        created["column"],
+        crate::ledger::board::PHASE_PENDING,
         "it lands in the board's intake lane, where the human drag is the gate"
     );
+    assert_eq!(created["stage"], serde_json::Value::Null, "{created}");
+    let _ = COLUMN_TODO;
 
     // Issue #301 added a second pre-dispatch column and made To-do the only
     // intake lane, so the spend gate is re-checked across every creation shape
@@ -691,7 +704,7 @@ async fn a_chat_created_card_lands_off_the_dispatch_trigger() {
     ] {
         let (status, created) = send(&state, "POST", "/api/v1/company/tasks", Some(body)).await;
         assert_eq!(status, StatusCode::OK);
-        assert_ne!(created["column"], COLUMN_IN_PROGRESS, "{created}");
+        assert_ne!(created["stage"], COLUMN_IN_PROGRESS, "{created}");
     }
 
     let journal = runtime
@@ -5631,7 +5644,7 @@ async fn task_export_serves_a_readable_document_and_alters_nothing() {
     let html = String::from_utf8(bytes.to_vec()).expect("the document is utf-8");
     assert!(html.starts_with("<!doctype html>"));
     assert!(html.contains("Launch post"));
-    assert!(html.contains("<dd>In review</dd>"));
+    assert!(html.contains("<dd>Working — In review</dd>"));
     assert!(html.contains("First draft is up."));
 
     let after_board = runtime.tasks().list(&company).await.unwrap();
@@ -7714,7 +7727,7 @@ async fn a_proposal_that_fails_validation_keeps_the_card_in_review() {
     // The card is untouched save for the reason on its note: still In Review,
     // still carrying the proposal to retry once the roster is fixed.
     let (_status, card) = send(&state, "GET", &format!("/api/v1/company/tasks/{id}"), None).await;
-    assert_eq!(card["task"]["column"], "in_review");
+    assert_eq!(card["task"]["stage"], "in_review");
     assert!(card["task"].get("workflowProposal").is_some(), "{card}");
 
     // …and no workflow was created.
@@ -7808,7 +7821,7 @@ async fn applying_a_proposal_with_an_unwired_channel_is_refused_and_keeps_the_ca
     // The card is recoverable, exactly as it is for roster drift: still In
     // Review, still carrying its proposal, with the reason on its note.
     let (_status, card) = send(&state, "GET", &format!("/api/v1/company/tasks/{id}"), None).await;
-    assert_eq!(card["task"]["column"], "in_review", "{card}");
+    assert_eq!(card["task"]["stage"], "in_review", "{card}");
     assert!(card["task"].get("workflowProposal").is_some(), "{card}");
     assert!(
         card["task"]["note"]
@@ -7898,7 +7911,7 @@ async fn rejecting_a_proposal_returns_the_card_to_todo() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{card}");
-    assert_eq!(card["column"], "todo");
+    assert_eq!(card["column"], "pending");
     assert!(card.get("workflowProposal").is_none(), "{card}");
     assert_eq!(
         card["deliverable"], "workflow",

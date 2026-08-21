@@ -132,7 +132,9 @@ async fn the_listing_carries_the_built_ins_with_their_shape() {
     // The console needs the shape to render a form; it must not have to guess.
     let goals = &body["ledgers"][1];
     assert!(goals["fields"].as_array().unwrap().len() > 3);
-    assert!(goals["statuses"].as_array().unwrap().len() > 3);
+    // Three, on every ledger, since issue #1512 — so this asserts the ceiling
+    // rather than a floor it used to assert in the other direction.
+    assert_eq!(goals["statuses"].as_array().unwrap().len(), 3);
     assert_eq!(goals["open"], 0);
     assert_eq!(
         body["remaining"],

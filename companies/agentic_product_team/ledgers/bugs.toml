@@ -97,15 +97,18 @@ name = "fixed"
 closed = true
 needs_reason = true
 
+# One closed status for every row that ends without a change to the product,
+# rather than the `wont_fix`/`not_a_bug` pair this shipped with (issue #1512).
+# Both said the same thing about where the row stands — it is over and nothing
+# was fixed — and differed only in *why*, which `reason` is required to carry
+# anyway. Splitting them asked the triager to relitigate "is this a bug we are
+# declining, or not a bug at all" on the way out, which is the argument the row
+# was closed to end. The retired words stay as aliases so rows already stored
+# under them still render here.
 [[status]]
-name = "wont_fix"
-label = "Won't fix"
-closed = true
-needs_reason = true
-
-[[status]]
-name = "not_a_bug"
-label = "Not a bug"
+name = "rejected"
+label = "Rejected"
+aliases = ["wont_fix", "not_a_bug"]
 closed = true
 needs_reason = true
 
@@ -126,6 +129,6 @@ order = "recent"
 
 [[section]]
 heading = "Closed"
-blurb = "Fixed, withdrawn or rejected, each with the reason. The reason is what stops it being re-triaged next month."
-statuses = ["fixed", "wont_fix", "not_a_bug"]
+blurb = "Fixed, or rejected as declined or not a bug — each with the reason, which is what tells those apart and what stops the row being re-triaged next month."
+statuses = ["fixed", "rejected"]
 cap = 20
