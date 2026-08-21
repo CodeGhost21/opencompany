@@ -1742,7 +1742,7 @@ prompt = "Lead decisively."
     /// persona prompt. The leading portion is kept and the cut is marked.
     #[tokio::test]
     async fn overlong_instructions_are_capped_at_the_write_boundary() {
-        use crate::company::types::PROMPT_FILE_BUDGET_CHARS;
+        use crate::company::PROMPT_FILE_BUDGET_CHARS;
 
         let home_dir = home();
         let state = state_with_manifest(home_dir.path(), ROSTER).await;
