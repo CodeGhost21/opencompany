@@ -163,3 +163,26 @@ test("a copied address reopens the host it named, failure and all", async ({ pag
   await expect(page.getByTestId("connection-error")).toBeVisible({ timeout: 30_000 });
   await expect(page.getByRole("button", { name: "Add task" })).toHaveCount(0);
 });
+
+test("a host that cannot be reached can be forgotten from the failure itself", async ({
+  page,
+}) => {
+  // The adjacent half of the issue. This screen used to offer Retry and the
+  // single-host boot hint — telling somebody who picked a row out of a switcher
+  // to "set the host with ?api=" — and no way to dispose of a host that is
+  // simply gone.
+  await seedTwoHosts(page);
+  await page.goto("/#/ledgers/tasks?host=conn-dead");
+  await expect(page.getByTestId("connection-error")).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByTestId("connection-error")).not.toContainText("?api=");
+
+  await page.getByTestId("connection-error-forget").click();
+
+  // Forgetting selects what is left, and the console it lands on is a working
+  // one. The switcher drops to a single host, so the address stops carrying a
+  // scope there is no longer anything to disambiguate.
+  await expect(page.getByRole("button", { name: "Add task" })).toHaveCount(1, {
+    timeout: 30_000,
+  });
+  await expect(page.getByTestId("host-switcher")).toHaveAttribute("data-host-count", "1");
+});

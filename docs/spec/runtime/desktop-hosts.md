@@ -83,6 +83,21 @@ An address naming a connection this client no longer holds is not an error: it
 resolves to whatever `App` would otherwise have opened, and the bar is corrected
 to say so.
 
+### What a failure may say
+
+A host that cannot be reached renders its own full-screen error, with the
+switcher over it. What that screen says depends on how many hosts this console
+holds, because the two situations are not the same one.
+
+Alone, it keeps the boot hint — *set the host with `?api=`, or run `opencompany
+serve`* — which is advice for a console that has not found its host yet. With a
+roster, that hint tells somebody who picked a row out of a switcher to configure
+a host they already configured, so it is dropped, and **Forget this host** is
+offered beside Retry instead. Forgetting is local to this client (see
+`removeConnection`); it is never offered for the only host, because a console
+with no connections at all is a worse place to be left than one with a host that
+is down.
+
 ## Authenticating as a person
 
 **About remote hosts.** The embedded host on this machine has no sign-in to
