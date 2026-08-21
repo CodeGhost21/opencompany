@@ -110,7 +110,7 @@ tree on an upgrade nobody asked for. `?dry_run=true` answers
 `{"wouldRemove":[{id,name}…]}` and touches nothing, so the console can name
 every folder on a confirm dialog; the real call answers `{"removed":[…]}`, and
 which field carries the list is what actually happened. A node qualifies only
-when it is a direct child of the `Agents` root **by id**, is a folder, and has
+when it is a direct child of the `agents` root **by id**, is a folder, and has
 **no children counted structurally** — over every node in the tree, before any
 path is rendered, because a folder whose only child carries a path separator
 reads as empty to anything path-shaped while the recursive delete would still
