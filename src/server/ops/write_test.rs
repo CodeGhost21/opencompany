@@ -1413,7 +1413,7 @@ async fn workspace_tree_and_file_reads_reflect_writes() {
     // "the runtime laid this down" from "somebody wrote this".
     let root = tree
         .iter()
-        .find(|node| node["name"] == json!("Agents"))
+        .find(|node| node["name"] == json!("agents"))
         .expect("the Agents root is in the tree");
     assert_eq!(root["createdBy"], json!({"kind": "seed"}));
     assert_eq!(root["kind"], json!("folder"));
@@ -1719,7 +1719,7 @@ async fn workspace_sweep_previews_then_removes_only_the_empty_agent_folders() {
         .as_array()
         .unwrap()
         .iter()
-        .find(|node| node["name"] == "Agents")
+        .find(|node| node["name"] == "agents")
         .expect("boot scaffolds the Agents root")["id"]
         .as_str()
         .unwrap()
