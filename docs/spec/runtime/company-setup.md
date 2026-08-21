@@ -322,11 +322,25 @@ For setup it is not fine, because setup *creates things*. Someone who clears
 their browser data or signs in from their phone would run it again and get a
 second team stacked on the first.
 
-**Decision D4: no flag. We ask a question we already know the answer to — does
-this company have any staff yet?** Empty team means setup has not run. A team
-with people on it means it has. This survives a cleared browser, a new laptop,
+**Decision D4: no flag. We ask a question we already know the answer to — has
+anybody staffed this company yet?** Nobody staffed means setup has not run.
+People on the team means it has. This survives a cleared browser, a new laptop,
 and a second person joining the same company, with no stored flag to drift out
 of step with reality.
+
+**"Staffed" is narrower than "has a roster", and the difference is load-bearing.**
+The [global baseline](globals.md) merges a fixed set of teammates into *every*
+company whatever its manifest says, and they cannot be deleted — `DELETE
+…/team/{id}` answers `409` on each. So "is the roster empty?" is false on every
+company this product can serve. Asked that way, as it was until issue #1404, the
+gate never opened anywhere: not on a fresh tenant, not on `companies/e2e_setup`,
+which exists for no other purpose than to reach it.
+
+The question the console asks is therefore *has this company any teammate that
+is not part of the baseline every company gets*. It reads that from the roster
+itself — `GET …/team` carries `global` on each row, the same `Agent::global`
+marker the merge sets — rather than from a list of the baseline's ids copied
+into the console, which would break silently the next time a global is added.
 
 It also happens to be exactly the signal Phase 2 needs, so nothing here has to
 change later.
@@ -342,12 +356,28 @@ against the shipped examples. `companies/e2e_setup` exists for exactly that
 reason: a company that ships with nobody on it, which the end-to-end lane runs
 against.
 
+And the lane has to actually run it. It did not, for as long as the flow was
+broken: `frontend/test/e2e/company-setup.spec.ts` carried a `test.skip` written
+for a host serving the wrong company, no CI job set the variable that would have
+selected the right one, and once the baseline landed the guard fired on every
+run. The console lane was green over a feature that could not open. The spec now
+**asserts** its host instead of skipping, `playwright.config.ts` selects it only
+in a first-run run (`npm run e2e:first-run`, which serves `companies/e2e_setup`
+on a data root of its own), and `Console E2E (first run)` runs it through
+`scripts/ci/assert-e2e-spec-ran.sh` — which fails on a reported count of zero,
+because a lane whose only guarantee is its configuration can be silently
+vacuous.
+
 Two related problems surfaced in the same run, both fixed:
 
 - The Team page fabricated a twelve-agent starter roster whenever the host
   answered with nobody, so "this company has no team yet" rendered directly above
   twelve agents that did not exist on the host. A genuinely empty company now
-  shows an honest empty state.
+  shows an honest empty state. The same sentence had to go for the mirror-image
+  reason once the gate started opening again: the prompt renders above the
+  baseline's teammates, who *do* exist on the host, so it now reads "this company
+  hasn't been set up yet" — true whether the roster below it holds nobody or the
+  baseline's four.
 - The product tour is held not only while the dialog is open but for as long as
   the company is unstaffed. Otherwise skipping setup popped the tour's welcome
   straight over an empty console — the first impression this document exists to
@@ -395,6 +425,7 @@ most likely to go stale — trust the code over this list.
 | Create an agent | `POST …/team` (`add_member`, `src/server/ops/team.rs`) | exists |
 | Set an agent's role/description | `PATCH …/team/{agent_id}` (`src/server/ops/team_agent.rs`) | exists |
 | Read the roster (first-run check, D4) | `GET …/team` (`list_team`) | exists |
+| Tell baseline teammates from staffed ones | `TeamMemberDto.global` (`list_team`, `team_agent::is_global`) | exists |
 | Desk and agent folders | `ensure_workspace_scaffold`, `ensure_agent_folder`, `ensure_desk_folder` (`src/company/workspace_scaffold.rs`) | exists |
 | Talk to an agent afterwards | existing chat surface | exists |
 | Answers → proposed roster | — | **new** |

@@ -103,6 +103,15 @@ rather than a bare `toml::from_str`: a company is provisioned once and read
 thereafter, so a baseline applied only where bundles are parsed would reach new
 companies and no existing one.
 
+`Agent::global` also travels to the console, on every `GET …/team` row. That is
+not decoration: because the baseline is merged into every company, "is this
+roster empty?" is false everywhere, and the console's first-run gate asked
+exactly that — so [company setup](company-setup.md) could not open on any
+company, including the fixture built to reach it (issue #1404). The gate now
+asks whether any teammate is *not* from the baseline, which is a question only
+the provenance marker can answer. A console re-deriving it from a copied list of
+global ids would break on the next global added, silently.
+
 ## Adding to the baseline
 
 1. Add the file under `globals/agents/` or `globals/workflows/`, or the slug to

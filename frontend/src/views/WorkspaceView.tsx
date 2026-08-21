@@ -75,7 +75,9 @@ import {
 import {
   DropdownMenu,
   DropdownMenuContent,
+  DropdownMenuGroup,
   DropdownMenuItem,
+  DropdownMenuLabel,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
@@ -88,11 +90,18 @@ import { rosterDisplayName, rosterNameMap, type RosterNames } from "@/lib/roster
 import { fromDto } from "@/lib/team";
 import { cn } from "@/lib/utils";
 import {
+  createSaveBuffer,
+  createUnloadGuard,
+  type SaveBuffer,
+} from "@/lib/workspace-save-buffer";
+import {
   ancestorFolderIds,
   applyRepair,
   breadcrumbOf,
   childrenOf,
   clearLegacyLocal,
+  DERIVED_LABEL,
+  DERIVED_REASON,
   ensureMdExt,
   fileByTitle,
   type FsNode,
@@ -149,19 +158,6 @@ interface Props {
 
 /** How long typing settles before the editor pushes a save to the host. */
 const AUTOSAVE_DELAY_MS = 800;
-
-/**
- * Why a file under `derived/` has no Edit tab (issue #1222).
- *
- * Says what writes it instead, because "read only" on its own tells an operator
- * that their edit is unwelcome without telling them where the edit belongs —
- * and there IS somewhere it belongs. The host's own refusal names the specific
- * ledger; this is the pane's version of the same sentence, said before the
- * typing rather than after it.
- */
-const READ_ONLY_TITLE =
-  "This file is written by a ledger and re-derived on every write to it — " +
-  "an edit here would be erased. Change it on the Ledgers page instead.";
 
 /**
  * How long the search box waits after the last keystroke before asking the host
@@ -225,7 +221,36 @@ export function migrationBannerText(files: number, folders: number): string {
 }
 
 /** What the editor's status line is currently reporting. */
-type SaveState = "idle" | "saving" | "saved" | "error";
+export type SaveState = "idle" | "dirty" | "saving" | "saved" | "error";
+
+/**
+ * What the status line says for a state, or `null` for the states with nothing
+ * to report (issue #1372).
+ *
+ * `dirty` exists because the line used to be **silent for the only window in
+ * which the operator's words are at risk**. Typing set `idle`, `idle` rendered
+ * nothing, and the first thing the header ever said was "Saved" — after the
+ * risk had passed. An operator who typed a sentence and reloaded inside the
+ * autosave debounce lost it, having been told nothing.
+ *
+ * So the two silent states are now the two honest silences: `idle` is an
+ * untouched note, and everything the operator has typed is announced until the
+ * host has acknowledged it.
+ */
+export function saveStatusLabel(state: SaveState): string | null {
+  switch (state) {
+    case "dirty":
+      return "Unsaved";
+    case "saving":
+      return "Saving…";
+    case "saved":
+      return "Saved";
+    case "error":
+      return "Not saved — retrying on edit";
+    default:
+      return null;
+  }
+}
 
 /**
  * Text the operator wrote into a note that no longer exists, held out of the
@@ -613,9 +638,14 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
 
   /* ---- the editor's dirty buffer ---- */
 
-  // The pending save, held in a ref so the debounce timer and the unmount
+  // The unsaved-text buffer, held in a ref so the debounce timer and the unmount
   // cleanup both see the latest value without re-subscribing on every keystroke.
-  const pending = useRef<{ id: string; content: string } | null>(null);
+  // It owns the two ordering rules the editor cannot get wrong — what counts as
+  // unsaved, and which write gets to speak — and both are unit-tested away from
+  // React in `lib/workspace-save-buffer.ts`.
+  const bufferRef = useRef<SaveBuffer | null>(null);
+  if (!bufferRef.current) bufferRef.current = createSaveBuffer();
+  const buffer = bufferRef.current;
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const flush = useCallback(async () => {
@@ -623,49 +653,47 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
       clearTimeout(timer.current);
       timer.current = null;
     }
-    const job = pending.current;
-    if (!job) return;
-    pending.current = null;
-    setSaveState("saving");
-    try {
-      const ack = await writeFile(client, company, job.id, job.content);
-      setSaveState("saved");
-      // Patch the authoritative stamp onto both the open file and the tree row,
-      // so "last updated" is the host's answer and not a guess. `updatedBy`
-      // rides along: this route stamps the operator server-side, and leaving
-      // the stale value would keep showing "edited by <agent>" on a note the
-      // operator has just rewritten, until the next refetch.
-      setOpenFile((f) =>
-        f && f.id === job.id
-          ? { ...f, content: job.content, updatedAt: ack.updatedAt, updatedBy: OPERATOR_ORIGIN }
-          : f,
-      );
-      setNodes((all) =>
-        all.map((n) =>
-          n.id === job.id ? { ...n, updatedAt: ack.updatedAt, updatedBy: OPERATOR_ORIGIN } : n,
-        ),
-      );
-    } catch (e) {
-      // Keep the buffer: the operator's text is never dropped because a save
-      // failed. A 404 means the note is gone on the host, which needs a decision
-      // rather than a retry, so say so explicitly.
-      //
-      // Only restore when nothing newer arrived. The operator can keep typing
-      // during the await above, and that typing writes a fresher job into
-      // `pending.current` — overwriting it with the job we just failed to save
-      // would silently discard every keystroke made while the request was in
-      // flight, which is the exact loss this buffer exists to prevent.
-      if (!pending.current) pending.current = job;
-      setSaveState("error");
-      if (isNotFound(e)) {
-        toast.error("This note no longer exists on the host.", {
-          description: "Someone deleted it. Your text is still here — save it as a new note.",
-        });
-      } else {
-        toast.error(message(e, "could not save this note"));
-      }
-    }
-  }, [client, company]);
+    // The buffer decides whether there is anything to send and whether the
+    // answer is still the newest word; a superseded write lands on none of
+    // these callbacks, so it can neither claim "Saved" over text the host has
+    // never seen nor overwrite an honest "Unsaved" with its own failure.
+    await buffer.flush({
+      write: (job) => writeFile(client, company, job.id, job.content),
+      onSaving: () => setSaveState("saving"),
+      onSaved: (job, ack) => {
+        setSaveState("saved");
+        // Patch the authoritative stamp onto both the open file and the tree
+        // row, so "last updated" is the host's answer and not a guess.
+        // `updatedBy` rides along: this route stamps the operator server-side,
+        // and leaving the stale value would keep showing "edited by <agent>" on
+        // a note the operator has just rewritten, until the next refetch.
+        setOpenFile((f) =>
+          f && f.id === job.id
+            ? { ...f, content: job.content, updatedAt: ack.updatedAt, updatedBy: OPERATOR_ORIGIN }
+            : f,
+        );
+        setNodes((all) =>
+          all.map((n) =>
+            n.id === job.id ? { ...n, updatedAt: ack.updatedAt, updatedBy: OPERATOR_ORIGIN } : n,
+          ),
+        );
+      },
+      onFailed: (_job, e) => {
+        // The buffer has already kept the text — the operator's words are never
+        // dropped because a save failed, and the next edit retries them. A 404
+        // means the note is gone on the host, which needs a decision rather than
+        // a retry, so say so explicitly.
+        setSaveState("error");
+        if (isNotFound(e)) {
+          toast.error("This note no longer exists on the host.", {
+            description: "Someone deleted it. Your text is still here — save it as a new note.",
+          });
+        } else {
+          toast.error(message(e, "could not save this note"));
+        }
+      },
+    });
+  }, [buffer, client, company]);
 
   // Always flush through the newest closure, including from cleanup callbacks
   // that captured an older one.
@@ -681,10 +709,29 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
     };
   }, []);
 
+  // …and neither must unloading the page (issue #1372). The unmount cleanup
+  // above covers every navigation React knows about, which is why switching
+  // notes was already safe. A reload, a tab close or a link out of the console
+  // is not one of those: the debounce timer dies with the document and the
+  // typing goes with it, silently — and so does the request, because the
+  // browser cancels an in-flight `PUT` on unload. The guard therefore asks the
+  // buffer, which counts a write in flight as unsaved just as it counts a job
+  // waiting on the debounce; checking a pending ref alone would leave the whole
+  // round trip unguarded.
+  useEffect(() => {
+    const guard = createUnloadGuard(buffer);
+    window.addEventListener("beforeunload", guard);
+    return () => window.removeEventListener("beforeunload", guard);
+  }, [buffer]);
+
   function onEdit(id: string, content: string) {
     setDraft(content);
-    setSaveState("idle");
-    pending.current = { id, content };
+    // `dirty`, not `idle`: from this keystroke until the host acknowledges the
+    // write, the only copy of these words is in this tab (issue #1372).
+    setSaveState("dirty");
+    // Also invalidates any write already in flight: its answer is about text
+    // this keystroke has just superseded, so it no longer gets to set the state.
+    buffer.stage({ id, content });
     if (timer.current) clearTimeout(timer.current);
     timer.current = setTimeout(() => void flushRef.current(), AUTOSAVE_DELAY_MS);
   }
@@ -793,10 +840,10 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
     }
     // Preferred over the plan's answer because it is a ref and therefore
     // current: the operator can keep typing during the tree refetch above, and
-    // those keystrokes reach `pending` while the plan was computed from the
+    // those keystrokes reach the buffer while the plan was computed from the
     // `draft` of the render the frame arrived in.
-    const job = pending.current;
-    pending.current = null;
+    const job = buffer.peek();
+    buffer.clear();
     const keep = job?.content ?? rescue;
     if (keep !== null) {
       const gone = nodeById(nodes, openId);
@@ -1091,7 +1138,7 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
       await deleteNodeApi(client, company, node.id);
       setNodes((all) => all.filter((n) => !removed.has(n.id)));
       if (openId && removed.has(openId)) {
-        pending.current = null;
+        buffer.clear();
         setOpenId(null);
         setOpenFile(null);
         setDraft(null);
@@ -1474,10 +1521,23 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
                 <Breadcrumb nodes={nodes} nodeId={openNode.id} onOpenFolder={revealFolder} />
                 <span className="truncate text-sm font-medium">{titleOf(openNode)}</span>
               </span>
-              <Authorship
-                createdBy={openFile?.createdBy ?? openNode.createdBy}
-                updatedBy={openFile?.updatedBy ?? openNode.updatedBy}
-              />
+              {/* No authorship on a derived file (#1377). `derived::publish`
+                  stamps `WorkspaceOrigin::Seed` — that is how the write guard
+                  tells its own derivation from a person — so `originLabel`
+                  renders `Seeded` on every one of these. "Seeded" means "it
+                  shipped with the company bundle and was typed by nobody",
+                  which is a different and wrong story: this file was rendered
+                  seconds ago and is rewritten on every `record_entry`. Two
+                  console-authored badges disagreeing about the same file is
+                  worse than one, so the chip that IS true says it alone. The
+                  breadcrumb above stays either way: where a derived file lives
+                  is the fact that explains which ledger wrote it. */}
+              {!readOnlyNote && (
+                <Authorship
+                  createdBy={openFile?.createdBy ?? openNode.createdBy}
+                  updatedBy={openFile?.updatedBy ?? openNode.updatedBy}
+                />
+              )}
               <span className="hidden shrink-0 text-xs text-muted-foreground sm:inline">
                 {formatUpdated(openFile?.updatedAt ?? openNode.updatedAt)}
               </span>
@@ -1500,10 +1560,9 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
                   variant="outline"
                   className="ml-auto shrink-0 gap-1 font-normal"
                   data-testid="workspace-read-only"
-                  title={READ_ONLY_TITLE}
                 >
                   <Lock className="size-3" />
-                  Read only
+                  {DERIVED_LABEL}
                 </Badge>
               ) : (
                 <Tabs
@@ -1549,6 +1608,24 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
                   />
                 ) : (
                   <div className="mx-auto max-w-3xl px-6 py-6" data-testid="workspace-note">
+                    {/* The reason, said in the console's own voice and in plain
+                        sight (issue #1377). It used to live in a native `title`
+                        on the chip — a tooltip that waits a second, never
+                        appears on touch, and is never met by anyone who does
+                        not think to hover a passive-looking status label. The
+                        rendered body often explains itself too, but that text
+                        is the ledger's, not ours: a ledger whose template omits
+                        it would leave the operator with two words and no
+                        reason. */}
+                    {readOnlyNote && (
+                      <p
+                        className="mb-6 flex items-start gap-2 rounded-lg border border-border bg-muted/50 px-3 py-2 text-xs text-muted-foreground"
+                        data-testid="workspace-read-only-reason"
+                      >
+                        <Lock className="mt-0.5 size-3.5 shrink-0" />
+                        <span>{DERIVED_REASON}</span>
+                      </p>
+                    )}
                     <NoteMarkdown source={body} nodes={nodes} onWiki={(t) => void onWiki(t)} />
                   </div>
                 )}
@@ -1681,20 +1758,30 @@ function Breadcrumb({
   );
 }
 
-/** The editor's save indicator: quiet when idle, explicit when it matters. */
+/**
+ * The editor's save indicator: quiet only on a note nobody has touched.
+ *
+ * `dirty` carries a filled dot as well as the word, because "Unsaved" and
+ * "Saved" are one letter apart in a 12px muted line and the operator is meant
+ * to be able to read this at a glance, mid-sentence, without stopping to parse
+ * it (issue #1372).
+ */
 function SaveStatus({ state }: { state: SaveState }) {
-  if (state === "idle") return null;
-  const label =
-    state === "saving" ? "Saving…" : state === "saved" ? "Saved" : "Not saved — retrying on edit";
+  const label = saveStatusLabel(state);
+  if (!label) return null;
   return (
     <span
       data-testid="workspace-save-state"
       data-state={state}
       className={cn(
-        "shrink-0 text-xs",
+        "flex shrink-0 items-center gap-1.5 text-xs",
         state === "error" ? "text-destructive" : "text-muted-foreground",
+        state === "dirty" && "text-foreground",
       )}
     >
+      {state === "dirty" && (
+        <span aria-hidden="true" className="size-1.5 rounded-full bg-tone-2" />
+      )}
       {label}
     </span>
   );
@@ -1835,6 +1922,21 @@ function TreeRow({ node, ...props }: TreeProps & { node: FsNode }) {
   // level below `Agents/`.
   const isRosterFolder = isFolder && isAgentsFolder(nodeById(nodes, node.parentId));
   const displayName = isRosterFolder ? rosterDisplayName(node.name, rosterNames) : node.name;
+  /**
+   * Whether this row is the `derived/` folder or something inside it (#1377).
+   *
+   * The tree is where a person decides what to open, so it is where "this one
+   * is not yours to edit" has to be readable. Before this, `derived/GOALS.md`
+   * rendered identically to a hand-written note — same icon, same weight, same
+   * `…` menu offering Rename and Move — and the only console-authored signal
+   * was a chip in the header of a file you had already opened.
+   *
+   * Recomputed per row rather than threaded down through {@link Tree}, so the
+   * rule stays the single {@link isDerivedNode} both this and the header ask.
+   * It walks the ancestry of one node, against a tree that is a few hundred
+   * nodes at most and is already re-sorted per level on every render.
+   */
+  const derived = isDerivedNode(nodes, node.id);
 
   return (
     <>
@@ -1843,6 +1945,9 @@ function TreeRow({ node, ...props }: TreeProps & { node: FsNode }) {
         className={cn(
           "group flex items-center gap-1 rounded-md px-1.5 py-1 text-sm",
           active ? "bg-accent font-medium" : "hover:bg-accent/50",
+          // Muted whether or not it is the open note: what writes the file does
+          // not change when you select it.
+          derived && "text-muted-foreground",
         )}
         style={{ paddingLeft: 6 + depth * 12 }}
       >
@@ -1861,6 +1966,21 @@ function TreeRow({ node, ...props }: TreeProps & { node: FsNode }) {
           <span className="truncate" title={isRosterFolder ? node.name : undefined}>
             {isFolder ? displayName : titleOf(node)}
           </span>
+          {/* The lock is the whole of the tree-side signal: an icon, not a
+              badge, because a row in a 256px pane has no width for a phrase and
+              the name is the thing being scanned. The label rides along for a
+              screen reader, which gets no glyph, and the full reason is on the
+              `title` for a pointer. */}
+          {derived && (
+            <span
+              className="flex shrink-0 items-center"
+              title={DERIVED_REASON}
+              data-testid="workspace-tree-derived"
+            >
+              <Lock className="size-3" aria-hidden />
+              <span className="sr-only">{DERIVED_LABEL}</span>
+            </span>
+          )}
           {/* Agent-created nodes get a marker in the tree itself, so "what has
               the company been writing" is answerable by scanning rather than by
               opening each note. Only the agent case — badging the operator's
@@ -1882,13 +2002,48 @@ function TreeRow({ node, ...props }: TreeProps & { node: FsNode }) {
           >
             <MoreHorizontal className="size-3.5" />
           </DropdownMenuTrigger>
-          <DropdownMenuContent align="end">
-            <DropdownMenuItem onClick={() => props.onRename(node)}>Rename</DropdownMenuItem>
-            <DropdownMenuItem onClick={() => props.onMove(node)}>Move to…</DropdownMenuItem>
-            <DropdownMenuSeparator />
-            <DropdownMenuItem variant="destructive" onClick={() => props.onDelete(node)}>
-              Delete
-            </DropdownMenuItem>
+          {/* `w-auto` for the derived menu only: the popup is pinned to
+              `w-(--anchor-width)` — the width of the tiny `…` button — with a
+              128px floor, and the heading below is wider than that. Every other
+              menu in the tree fits the floor. */}
+          <DropdownMenuContent align="end" className={derived ? "w-auto" : undefined}>
+            {/* Exactly the actions the host will accept, which is not the same
+                set the issue asked for (#1377 said drop all three).
+                `DerivedGuardWorkspace::rename_move` refuses both ends — moving a
+                derived file out strands one the next derivation recreates, and
+                moving a note *in* puts a hand-written file in the folder whose
+                meaning is that nothing in it is hand-written — so Rename and
+                Move are controls whose only outcome is an error toast.
+
+                `delete` is deliberately unguarded there, and the module says
+                why: nothing is silently lost, the next write re-derives the
+                file, and a retired ledger's stale file has to be clearable by
+                somebody. Removing it here would take away the one remedy the
+                host actually offers. The heading is what explains the short
+                menu — an absence on its own reads as a broken menu. */}
+            {derived ? (
+              // Grouped because `DropdownMenuLabel` is Base UI's
+              // `Menu.GroupLabel`, which throws outside a `Menu.Group`.
+              <DropdownMenuGroup>
+                <DropdownMenuLabel className="flex items-center gap-1.5 font-normal whitespace-nowrap">
+                  <Lock className="size-3 shrink-0" />
+                  {DERIVED_LABEL}
+                </DropdownMenuLabel>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem variant="destructive" onClick={() => props.onDelete(node)}>
+                  Delete
+                </DropdownMenuItem>
+              </DropdownMenuGroup>
+            ) : (
+              <>
+                <DropdownMenuItem onClick={() => props.onRename(node)}>Rename</DropdownMenuItem>
+                <DropdownMenuItem onClick={() => props.onMove(node)}>Move to…</DropdownMenuItem>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem variant="destructive" onClick={() => props.onDelete(node)}>
+                  Delete
+                </DropdownMenuItem>
+              </>
+            )}
           </DropdownMenuContent>
         </DropdownMenu>
       </div>

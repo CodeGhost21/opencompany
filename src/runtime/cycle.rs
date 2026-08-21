@@ -138,9 +138,11 @@ pub(crate) const BUILDER_ANNOTATION: &str = "\n\n[This request is already being 
 /// What settling an approval's verdict produced — the outcome of the fast half
 /// of a resolve, before any model is called (issue #383).
 ///
-/// Both arms mean the operator's decision is final. They differ only in what is
-/// still owed: `Settled` owes one follow-up cycle, `AlreadyResolved` owes
-/// nothing because a previous resolve already ran it.
+/// Every arm means the operator has no decision left to make. They differ in
+/// what is still owed and, crucially, in **what may be claimed about the
+/// operator**: `Settled` owes one follow-up cycle and is the only arm that may
+/// be journaled as this person's verdict; `AlreadyResolved` and `Expired` owe
+/// no cycle because nothing of the operator's was recorded at all.
 #[derive(Debug, Clone)]
 pub enum ResolveReceipt {
     /// Nothing was parked under this id — an unknown id, or one a concurrent
@@ -148,6 +150,24 @@ pub enum ResolveReceipt {
     /// written and no cycle is owed. Issue #243 made this a safe no-op rather
     /// than a second grant; surfacing it here lets the HTTP layer say so.
     AlreadyResolved,
+    /// The approval was still parked but past its deadline, so the gate
+    /// default-denied it whatever the operator asked for (issue #1449).
+    ///
+    /// **This is not the operator's verdict and must never be recorded as
+    /// one.** The click arrived too late to be a decision: no grant is minted,
+    /// nothing is executed, and the durable record is an
+    /// [`ApprovalExpired`](crate::runtime::journal) — the same line the sweeper
+    /// writes for the identical outcome reached by silence. Before this the arm
+    /// fell through to `Settled`, so a late click journaled a named operator
+    /// approving something the host had already refused, and told them in green
+    /// that it was being carried out.
+    ///
+    /// The retirement transaction it owes — journal, pending mark, continuation
+    /// release, event — is
+    /// [`CompanyRuntime::retire_approval`](crate::runtime::CompanyRuntime), run
+    /// by the caller that holds the `Arc`. See
+    /// [`settle_approval`](CycleRunner::settle_approval).
+    Expired,
     /// The verdict is journaled and any approved effect settled — the grant is
     /// minted, or the native effect executed. The carried `ApprovalResolved` is
     /// the event the follow-up cycle must run so the brain learns the verdict.
@@ -163,6 +183,25 @@ impl ResolveReceipt {
     /// Whether this resolve found nothing left to resolve.
     pub fn already_resolved(&self) -> bool {
         matches!(self, Self::AlreadyResolved)
+    }
+
+    /// Whether the deadline decided this rather than the operator (issue #1449).
+    pub fn expired(&self) -> bool {
+        matches!(self, Self::Expired)
+    }
+
+    /// The wire discriminator for what actually happened (issue #1449).
+    ///
+    /// A string rather than a third boolean because the arms are mutually
+    /// exclusive and there is a fourth coming: two independent `bool`s can spell
+    /// states that cannot exist, and every console reading them has to know
+    /// which combinations are real. One field with one value per arm cannot.
+    pub fn outcome(&self) -> &'static str {
+        match self {
+            Self::AlreadyResolved => "already_resolved",
+            Self::Expired => "expired",
+            Self::Settled(_) => "settled",
+        }
     }
 }
 
@@ -841,6 +880,15 @@ approval.]"
     /// [`ResolveReceipt::AlreadyResolved`] (issue #243). It writes no journal
     /// record and owes no cycle.
     ///
+    /// Resolving one that is **past its deadline** yields
+    /// [`ResolveReceipt::Expired`] and likewise writes nothing here — the
+    /// operator's click arrived too late to be a decision, so nothing about it
+    /// may be journaled (issue #1449). **The caller owes that approval its
+    /// retirement**: `Expired` means the gate has already dropped the entry, and
+    /// [`CompanyRuntime::retire_approval`](crate::runtime::CompanyRuntime) is
+    /// the one transaction that finishes the job. `resolve_approval_spawned` —
+    /// the only production caller — does exactly that.
+    ///
     /// Before this the double-submit path was indistinguishable from a deny (see
     /// [`ResolveOutcome`]), so a double-clicked approve appended a second
     /// `ApprovalResolved` to the journal and ran a second follow-up cycle over an
@@ -871,6 +919,27 @@ approval.]"
             .resolve_outcome(id, verdict, by.clone(), now_millis());
         if outcome == ResolveOutcome::NotParked {
             return Ok(ResolveReceipt::AlreadyResolved);
+        }
+        // Issue #1449: past its deadline is NOT this operator's verdict.
+        //
+        // The gate has already default-denied it — that is what `Expired`
+        // means, and the safety half has always held: no grant is minted and
+        // nothing runs. What did not exist was the *reporting* half. Falling
+        // through here appended `ApprovalResolved` — the record for "the
+        // operator decided this" — and returned `Settled { verdict: Approve }`,
+        // so the durable audit trail said a named person approved something the
+        // host had refused, and the console said so in green.
+        //
+        // Returning early leaves the retirement to the caller rather than doing
+        // it here, because the transaction an expiry owes is four steps, not
+        // one — journal, pending mark, continuation release, event — and it
+        // already exists whole as `CompanyRuntime::retire_approval`, which the
+        // sweeper reaches the identical outcome through. Re-implementing three
+        // of its four steps at this seam is exactly the failure that function's
+        // doc comment exists to prevent, and it needs an `Arc<Self>` to release
+        // the continuation, which a `CycleRunner` does not hold.
+        if outcome == ResolveOutcome::Expired {
+            return Ok(ResolveReceipt::Expired);
         }
         // Issue #796: the approval has left the parked set — drop its pending
         // mark. On approve the grant minted just below now names the task; on
@@ -1238,6 +1307,37 @@ approval.]"
         }
     }
 
+    /// The synthetic report for a decision that arrived after the deadline
+    /// (issue #1449).
+    ///
+    /// Same shape and same purpose as
+    /// [`already_resolved_report`](Self::already_resolved_report) — a receipt
+    /// that owes no cycle still answers on a handle of the same shape — and a
+    /// different sentence, because it is a different thing to have happened. The
+    /// approval was not resolved by anybody; its deadline passed and the host
+    /// declined it. Saying "already resolved" here would be the smaller version
+    /// of the same false claim this issue is about.
+    pub(crate) fn expired_report(&self) -> CycleReport {
+        CycleReport {
+            cycle_id: generate_id(),
+            responses: vec![OutboundMessage {
+                task_id: None,
+                channel: OPERATOR_CHANNEL.to_string(),
+                agent: None,
+                text: "This approval had passed its deadline, so it was declined automatically. \
+                       Nothing was carried out."
+                    .to_string(),
+                steps: Vec::new(),
+                reply_to: None,
+                message_id: None,
+            }],
+            executed_effects: Vec::new(),
+            parked: Vec::new(),
+            persisted_seq: None,
+            input_seqs: Vec::new(),
+        }
+    }
+
     /// Settles a parked approval to an operator-amended effect
     /// (approve-with-edit): overlays `amended_payload` onto the parked effect and
     /// executes the amended version (at-most-once).
@@ -1247,6 +1347,9 @@ approval.]"
     /// no `AlreadyResolved` arm: an id with nothing parked yields no executable
     /// effect and simply settles to a resolution the brain is still told about,
     /// exactly as before.
+    ///
+    /// It **does** have an [`Expired`](ResolveReceipt::Expired) arm, on the same
+    /// terms as the plain path (issue #1449), and the caller owes the retirement.
     ///
     /// Both the original and the amended effect are preserved in the immutable
     /// journal (`ApprovalParked` + `ApprovalAmended`), so the audit trail shows
@@ -1265,12 +1368,26 @@ approval.]"
             original.payload = overlay_payload(original.payload, amended_payload);
             original
         });
-        let executed = match amended {
-            Some(effect) => self
-                .rt
-                .approval_gate
-                .resolve_amended(id, effect, by.clone(), now),
-            None => None,
+        let outcome = match amended {
+            Some(effect) => {
+                self.rt
+                    .approval_gate
+                    .resolve_amended_outcome(id, effect, by.clone(), now)
+            }
+            None => ResolveOutcome::NotParked,
+        };
+        // Issue #1449, the amend half of the same defect. An edit applied to a
+        // card past its deadline is still not a decision — and it is the worse
+        // half of the bug, because the fall-through recorded an `ApprovalAmended`
+        // too: a named operator both editing and approving an effect the gate
+        // had already refused. Same answer as the plain path; the caller retires
+        // it.
+        if outcome == ResolveOutcome::Expired {
+            return Ok(ResolveReceipt::Expired);
+        }
+        let executed = match outcome {
+            ResolveOutcome::Approved(effect) => Some(effect),
+            _ => None,
         };
 
         // Audit the amendment (when one ran) and drain the queue durably.
@@ -4266,6 +4383,212 @@ mod test {
             0,
             "an expired approval is a deny, so it hands out no permission"
         );
+    }
+
+    /// Parks one harness tool call behind a **zero-TTL** gate, so it is past its
+    /// deadline the instant it lands — the state an operator meets when they get
+    /// to the queue late (issue #1449).
+    async fn park_one_past_its_deadline(
+        home: std::path::PathBuf,
+    ) -> (Arc<CompanyRuntime>, ApprovalId) {
+        let gate = Arc::new(
+            ManifestApprovalGate::new(manifest("supervised").policy.clone()).with_ttl_millis(0),
+        );
+        let rt = Arc::new(
+            RuntimeBuilder::new(home, manifest("supervised"))
+                .with_approvals(gate)
+                .with_brain(Arc::new(EffectBrain {
+                    effect: harness_effect(
+                        "finance",
+                        "composio_execute",
+                        serde_json::json!({ "to": "a@b.test" }),
+                    ),
+                }))
+                .build()
+                .await
+                .unwrap(),
+        );
+        let report = rt
+            .run_cycle(vec![CompanyEvent::OperatorMessage {
+                parent: None,
+                text: "do it".into(),
+                by: None,
+                chat: None,
+                deliverable: None,
+            }])
+            .await
+            .unwrap();
+        assert_eq!(report.parked.len(), 1);
+        let id = report.parked[0].clone();
+        (rt, id)
+    }
+
+    /// **The assertion this whole fix exists for** (issue #1449).
+    ///
+    /// The safety half was always right — an expired approval mints nothing, and
+    /// [`an_expired_approval_mints_nothing_even_on_approve`] pins that. What was
+    /// missing was the *reporting* half: the arm fell through to
+    /// `record_resolved`, so the immutable journal said **a named operator
+    /// approved this** about a call the host had already refused. That is a
+    /// false statement about a person, written permanently, on the surface whose
+    /// entire job is answering "who authorised this?".
+    ///
+    /// So: after a late approve, the journal must carry the expiry — the same
+    /// line the sweeper writes when the identical outcome is reached by silence
+    /// — and must carry **no** `ApprovalResolved` for that id at all.
+    #[tokio::test]
+    async fn a_late_approve_is_journaled_as_an_expiry_never_as_the_operators_verdict() {
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
+        let (rt, id) = park_one_past_its_deadline(home.clone()).await;
+
+        rt.resolve_approval(&id, Verdict::Approve, operator())
+            .await
+            .unwrap();
+
+        let raw = tokio::fs::read_to_string(Bundle::new(&home, rt.id()).journal_jsonl())
+            .await
+            .unwrap();
+        let lines: Vec<serde_json::Value> = raw
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .filter_map(|l| serde_json::from_str(l).ok())
+            .collect();
+        let about_this_approval = |record: &str| {
+            lines.iter().any(|line| {
+                line["record"] == record && line["id"] == serde_json::json!(id.as_ref() as &str)
+            })
+        };
+
+        assert!(
+            about_this_approval("ApprovalExpired"),
+            "a late click leaves the SAME record as a deadline nobody noticed, got {raw}"
+        );
+        assert!(
+            !about_this_approval("ApprovalResolved"),
+            "the journal must never say this operator resolved an approval the \
+             host had already default-denied, got {raw}"
+        );
+        assert!(
+            !about_this_approval("ApprovalAmended"),
+            "and it must not record an amendment either, got {raw}"
+        );
+        // The safety half, re-checked here rather than assumed: reporting the
+        // truth is only half a fix if the grant came back.
+        assert_eq!(rt.grants.live_count(), 0);
+        assert!(rt.pending_approvals().is_empty());
+    }
+
+    /// The event log — what the brain and the operator's SSE feed read — must
+    /// agree with the journal (issue #1449).
+    ///
+    /// Before this it received `ApprovalResolved { verdict: Approve, by: <the
+    /// operator> }`, so the agent was re-dispatched to make a call it had never
+    /// been granted, and the timeline named a person who approved nothing. An
+    /// expiry is a default-**deny** by the **system**, exactly as the sweeper
+    /// appends it.
+    #[tokio::test]
+    async fn a_late_approve_appends_a_system_deny_not_the_operators_approve() {
+        let home_dir = tmp_home();
+        let (rt, id) = park_one_past_its_deadline(home_dir.path().to_path_buf()).await;
+
+        rt.resolve_approval(&id, Verdict::Approve, operator())
+            .await
+            .unwrap();
+
+        let events = rt
+            .events()
+            .read_from(rt.id(), EventSeq::new(0), usize::MAX)
+            .await
+            .unwrap();
+        let resolutions: Vec<_> = events
+            .iter()
+            .filter_map(|stored| match &stored.event {
+                CompanyEvent::ApprovalResolved {
+                    approval_id,
+                    verdict,
+                    by,
+                } if approval_id == &id => Some((*verdict, by.clone())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            resolutions.len(),
+            1,
+            "exactly one resolution event, got {resolutions:?}"
+        );
+        assert_eq!(resolutions[0].0, Verdict::Deny);
+        assert_eq!(
+            resolutions[0].1.kind,
+            ActorKind::System,
+            "the deadline decided this, not the person who clicked"
+        );
+    }
+
+    /// The receipt says which end state was reached, so the HTTP layer can too.
+    #[tokio::test]
+    async fn a_late_approve_answers_with_an_expired_receipt() {
+        let home_dir = tmp_home();
+        let (rt, id) = park_one_past_its_deadline(home_dir.path().to_path_buf()).await;
+
+        let (receipt, follow_up) = rt
+            .resolve_approval_spawned(&id, Verdict::Approve, operator(), GrantScope::Once)
+            .await
+            .unwrap();
+        assert_eq!(receipt.outcome(), "expired");
+        assert!(receipt.expired());
+        assert!(
+            !receipt.already_resolved(),
+            "the approval WAS parked — it ran out, which is a different answer \
+             from somebody else having decided it"
+        );
+        // And it owes no continuation of its own: `retire_approval` already
+        // released the turn.
+        let report = crate::company::runtime::join_follow_up(follow_up)
+            .await
+            .unwrap();
+        assert!(report.responses[0].text.contains("deadline"));
+
+        // A second click on the same card is now the ordinary already-gone case.
+        let (again, _) = rt
+            .resolve_approval_spawned(&id, Verdict::Approve, operator(), GrantScope::Once)
+            .await
+            .unwrap();
+        assert_eq!(again.outcome(), "already_resolved");
+    }
+
+    /// The amend half of the same defect: an edit applied after the deadline is
+    /// still not a decision, and recorded an `ApprovalAmended` on top of the
+    /// false approval before this (issue #1449).
+    #[tokio::test]
+    async fn a_late_amend_records_an_expiry_and_no_amendment() {
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
+        let (rt, id) = park_one_past_its_deadline(home.clone()).await;
+
+        let (receipt, _) = rt
+            .resolve_approval_amended_spawned(
+                &id,
+                serde_json::json!({ "to": "elsewhere@b.test" }),
+                operator(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(receipt.outcome(), "expired");
+
+        let raw = tokio::fs::read_to_string(Bundle::new(&home, rt.id()).journal_jsonl())
+            .await
+            .unwrap();
+        assert!(raw.contains("ApprovalExpired"));
+        assert!(
+            !raw.contains("ApprovalAmended"),
+            "an edit the host refused is not an amendment the operator made, got {raw}"
+        );
+        assert!(
+            !raw.contains("elsewhere@b.test"),
+            "and the edited arguments must not be recorded as approved, got {raw}"
+        );
+        assert_eq!(rt.grants.live_count(), 0);
     }
 
     /// A live grant survives a restart; a consumed one does not come back.

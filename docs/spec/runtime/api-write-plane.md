@@ -246,6 +246,15 @@ write. See [runtime/tools.md](tools.md).
 "orchestrator"` agent, else the first declared) rather than read off `tier`, so
 a company that tags nobody still names its orchestrator.
 
+`global` marks the teammates the [global baseline](globals.md) merged in — the
+ones every company has whichever vertical it started from, and the ones
+`DELETE …/team/{agentId}` refuses. It is sent on every row because a client
+cannot otherwise tell a company somebody staffed from one nobody has: the
+baseline is on every roster, so `length === 0` is a question with one answer.
+The console's first-run gate turns on it
+([company-setup.md](company-setup.md)); before the field existed that gate could
+never open.
+
 `PATCH …/team/{agentId}` edits an **overlay** teammate's `name`, `role` and
 `description`. It is a patch: an omitted key is left alone, and `"description":
 null` clears it — the two must stay apart or every partial save would erase an
