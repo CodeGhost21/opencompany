@@ -419,7 +419,7 @@ fn company_builder(
         builder = builder.with_stores(stores);
     }
     if let Some(overlay) = state.memory_overlay() {
-        builder = builder.with_memory_overlay(overlay);
+        builder = builder.with_memory_overlay(&overlay);
     }
     #[cfg(feature = "smtp")]
     if let Ok(Some(cfg)) = opencompany::server::ops::mailer::TenantMailboxConfig::from_env() {
