@@ -13,6 +13,15 @@
 //! sequences are 0-based and strictly monotonic per company, and that
 //! everything written through the ports reads back byte-identically (the
 //! export-totality precondition).
+//!
+//! **Fixtures are non-empty on purpose.** An empty vec, map or `None` survives
+//! every possible bug, including a backend that never persisted the field at
+//! all, so seeding one certifies the gap it was meant to close. Issue #1504 was
+//! exactly that: `overlay_agents` seeded as `Vec::new()` with no assertion, so a
+//! backend that dropped every console-created teammate passed the whole suite.
+//!
+//! **No credential material appears here.** [`assert_secret_store`] uses
+//! obviously fake placeholder values (`sk-not-a-real-key-…`).
 
 use std::sync::Arc;
 
@@ -34,7 +43,7 @@ use crate::ports::store::CompanyStore;
 use crate::ports::tasks::{TaskRecord, TaskStore};
 use crate::ports::types::{
     ChunkAddr, CompanyEvent, CompanyId, CompanyRecord, CompressedTrace, ContextChunk, EventSeq,
-    LedgerEntry, TemplateProvenance,
+    LedgerEntry, SecretValue, TemplateProvenance,
 };
 use crate::ports::usage::{SampleKind, UsageMeter, UsageSample};
 use crate::ports::users::{InviteRecord, UserRecord, UserRole, UserStatus, UserStore};
@@ -2379,6 +2388,207 @@ pub async fn assert_workflow_run_output_store(outputs: Arc<dyn WorkflowRunOutput
             .unwrap()
             .is_some(),
         "one company's prune must not touch another's records"
+    );
+}
+
+/// Asserts the [`SecretStore`] contract: read-back, absence, overwrite, per-key
+/// independence, and — the property with security consequences — isolation
+/// between companies (issue #1505).
+///
+/// Before this function existed the port had **no** conformance case on any
+/// backend, while holding a tenant's inference credential, its MCP OAuth tokens,
+/// its Composio connected-account tokens and its SMTP password. A backend that
+/// failed to persist, failed to scope a read by company, or returned a stale
+/// value after an overwrite would have passed the entire suite. On a hosted
+/// deployment the storage backend *is* the tenant boundary, so "all three
+/// behave identically here" is a security guarantee, not a tidiness one.
+///
+/// The port intentionally exposes no `delete` — callers clear a secret by
+/// writing an empty value (`src/company/mcp.rs::clear_auth`,
+/// `src/company/inference.rs::clear_key`) — so there is no deletion case, and
+/// the empty-value case below is the one that stands in for it.
+///
+/// Keys are the real shapes the runtime uses (`inference/key`,
+/// `mcp/<name>/auth`, `harness/<id>/…`). **Every value is an obviously fake
+/// placeholder**; nothing here resembles a live credential.
+///
+/// # One property this does NOT yet assert, and why
+///
+/// **Two distinct keys must stay distinct.** They do not on the filesystem
+/// backend: `Bundle::secret` slugs the key through
+/// [`slug`](crate::store::paths), which folds every character outside
+/// `[A-Za-z0-9._-]` to `_` and is therefore not injective, so `mcp/acme
+/// prod/auth` and `mcp/acme_prod/auth` are one file. SQLite and MongoDB keep
+/// them apart. Two MCP servers whose names differ only by such a character
+/// consequently share one credential on fs — issue #1510, found while writing
+/// this function.
+///
+/// The case is left out rather than added-and-failing because the fix is an
+/// on-disk filename change with a migration to think about, not a test fix.
+/// It is named here so the gap is countable instead of silent, which is the
+/// same complaint #1505 was filed about one level up.
+pub async fn assert_secret_store(secrets: Arc<dyn crate::ports::secrets::SecretStore>) {
+    let alpha = CompanyId::new("alpha");
+    let beta = CompanyId::new("beta");
+    // Compare the exposed `&str` rather than `Option<SecretValue>` so an
+    // assertion message never carries a `SecretValue`'s `Debug` rendering.
+    let read = |company: &CompanyId, key: &'static str| {
+        let secrets = secrets.clone();
+        let company = company.clone();
+        async move {
+            secrets
+                .get(&company, key)
+                .await
+                .unwrap()
+                .map(|value| value.expose().to_string())
+        }
+    };
+
+    // 1. An unset key reads `None` — not an empty string, and not an error.
+    assert_eq!(
+        read(&alpha, "inference/key").await,
+        None,
+        "an unset secret must read as absent"
+    );
+
+    // 2. Write, then read back byte-identically. The value carries a newline and
+    //    a non-ASCII character on purpose: the filesystem backend writes the raw
+    //    bytes to a file, so a backend that appended a trailing newline, trimmed
+    //    one, or round-tripped through a lossy encoding fails here.
+    let token = "sk-not-a-real-key-alpha\nline2 café";
+    secrets
+        .set(&alpha, "inference/key", SecretValue(token.to_string()))
+        .await
+        .unwrap();
+    assert_eq!(
+        read(&alpha, "inference/key").await.as_deref(),
+        Some(token),
+        "a stored secret did not read back byte-identically"
+    );
+
+    // 3. Distinct keys are independent. `mcp/<name>/auth` and `mcp/<name>/health`
+    //    are the real pair the MCP surface writes, and only one of them is a
+    //    credential — a backend that conflated them would serve a scrubbed
+    //    health record where a token belongs, or worse, the reverse.
+    secrets
+        .set(
+            &alpha,
+            "mcp/conformance/auth",
+            SecretValue("{\"bearer\":\"not-a-real-token\"}".to_string()),
+        )
+        .await
+        .unwrap();
+    secrets
+        .set(
+            &alpha,
+            "mcp/conformance/health",
+            SecretValue("{\"ok\":true}".to_string()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        read(&alpha, "mcp/conformance/auth").await.as_deref(),
+        Some("{\"bearer\":\"not-a-real-token\"}"),
+        "writing a second key overwrote the first"
+    );
+    assert_eq!(
+        read(&alpha, "mcp/conformance/health").await.as_deref(),
+        Some("{\"ok\":true}"),
+        "the second key did not persist alongside the first"
+    );
+    assert_eq!(
+        read(&alpha, "inference/key").await.as_deref(),
+        Some(token),
+        "writing unrelated keys disturbed an existing secret"
+    );
+
+    // 4. Overwrite replaces. A backend that appended, or that served a cached or
+    //    stale row, would hand a rotated credential's *predecessor* to the next
+    //    outbound call — which fails as an authentication error days later, far
+    //    from the rotation that caused it.
+    secrets
+        .set(
+            &alpha,
+            "inference/key",
+            SecretValue("sk-not-a-real-key-alpha-rotated".to_string()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        read(&alpha, "inference/key").await.as_deref(),
+        Some("sk-not-a-real-key-alpha-rotated"),
+        "an overwritten secret still reads as its previous value"
+    );
+
+    // 5. Clearing writes an empty value, and an empty value is NOT absence. This
+    //    distinction is load-bearing: `clear_auth`/`clear_key` clear a credential
+    //    by writing `""`, and a backend that collapsed that into "unset" would
+    //    fall back to whatever the manifest or the environment supplies — so the
+    //    operator's revocation would silently not take.
+    secrets
+        .set(&alpha, "mcp/conformance/auth", SecretValue(String::new()))
+        .await
+        .unwrap();
+    assert_eq!(
+        read(&alpha, "mcp/conformance/auth").await.as_deref(),
+        Some(""),
+        "a cleared secret decayed into an unset one, so the revocation did not take"
+    );
+
+    // 6. ISOLATION — the property with security consequences. `beta` has written
+    //    nothing, and must not observe `alpha`'s credentials under any key.
+    for key in [
+        "inference/key",
+        "mcp/conformance/auth",
+        "mcp/conformance/health",
+    ] {
+        assert_eq!(
+            read(&beta, key).await,
+            None,
+            "company beta read company alpha's secret at `{key}` — a cross-tenant \
+             credential disclosure"
+        );
+    }
+
+    // 7. And the isolation holds in both directions once `beta` writes the SAME
+    //    key: neither company sees the other's value. A backend that keyed only
+    //    on `key` (dropping the company scope) passes step 6 and fails here,
+    //    because until `beta` writes there is nothing for the missing scope to
+    //    confuse.
+    secrets
+        .set(
+            &beta,
+            "inference/key",
+            SecretValue("sk-not-a-real-key-beta".to_string()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        read(&beta, "inference/key").await.as_deref(),
+        Some("sk-not-a-real-key-beta"),
+        "beta could not read back its own secret"
+    );
+    assert_eq!(
+        read(&alpha, "inference/key").await.as_deref(),
+        Some("sk-not-a-real-key-alpha-rotated"),
+        "beta's write overwrote alpha's secret at the same key — the company scope \
+         is not part of the key"
+    );
+
+    // 8. A key that exists only for `beta` is still absent for `alpha`, which is
+    //    the mirror of step 6 and catches a scope applied on write but not read.
+    secrets
+        .set(
+            &beta,
+            "harness/second/inference/key",
+            SecretValue("sk-not-a-real-key-beta-second".to_string()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        read(&alpha, "harness/second/inference/key").await,
+        None,
+        "alpha read a secret only beta ever wrote"
     );
 }
 
