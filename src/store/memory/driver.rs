@@ -329,10 +329,14 @@ fn require<'a>(value: Option<&'a str>, refusal: &str) -> Result<&'a str> {
 ///    under the checks meant for the other class — so it is refused rather than
 ///    quietly resolved in the registry's favour.
 fn admit(driver_id: &str, expected: DriverClass) -> Result<DriverClass> {
-    // `namespace` is `tinymemory-core`'s own durable store; the vendored
-    // registry does not know it, and `with_reserved` is the registry's door
-    // for exactly that ("a host that bundles an adapter this crate does not
-    // know about"). Reserved unconditionally — with the `tinymemory-embedded`
+    // `namespace` is `tinymemory-core`'s own durable store. Since the v1.1.0
+    // pin the vendored registry reserves the id itself
+    // (`registry/mod.rs:182`), so this `with_reserved` restates the same
+    // class the builtin table already carries — kept deliberately: repeating
+    // a reserved id's class is the one thing the registry's own rule permits
+    // ("may repeat, never override"), and the host-side line keeps the
+    // reservation visible where the driver is routed rather than only inside
+    // the vendor. Reserved unconditionally — with the `tinymemory-embedded`
     // feature off, nothing reaches this function with that id.
     let registry =
         DriverRegistry::builtin().with_reserved(NAMESPACE_DRIVER_ID, DriverClass::Embedded);
@@ -428,6 +432,10 @@ pub const NAMESPACE_DRIVER_ID: &str = "namespace";
 /// `EngineCortex` mints a subdirectory per company under its own, so sharing
 /// one directory would interleave the two schemas and put a company named
 /// anything that sanitises to `namespaces` on top of the store's own layout.
+// Gated with its only consumer (`namespace_provider`): the new strict
+// `acp,runner,tinymemory` clippy lane compiles this file without
+// `tinymemory-embedded`, where an ungated const is dead code.
+#[cfg(feature = "tinymemory-embedded")]
 const NAMESPACE_STORE_SUBDIR: &str = "memory-namespace";
 
 /// Builds the in-pod contract driver over `tinymemory-core`'s durable store.
