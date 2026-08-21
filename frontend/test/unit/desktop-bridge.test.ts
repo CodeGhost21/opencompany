@@ -294,24 +294,6 @@ describe("the embedded host", () => {
     });
   });
 
-  it("carries the operator the console should offer at sign-in", async () => {
-    // A packaged install admits one standing local address and mails nothing,
-    // so a console that did not carry this showed a blank form on a host where
-    // every other address is answered with the same silent acknowledgement
-    // (#632). Optional on the wire — an older shell omits it and the form is
-    // blank as before — which is exactly why nothing else would catch a rename.
-    installBridge({
-      embedded: {
-        baseUrl: "http://127.0.0.1:52341",
-        dataDir: "/tmp/oc",
-        instanceId: "0f9d8c7b6a5e4f3d2c1b0a9988776655",
-        operatorEmail: "operator@opencompany.local",
-      },
-    });
-    const host = await embeddedHost();
-    expect(host?.operatorEmail).toBe("operator@opencompany.local");
-  });
-
   it("is null when the core could not start one", async () => {
     // Most often the data root is already held — by another window, or by an
     // `opencompany serve` in a terminal. The desktop still holds remote hosts,

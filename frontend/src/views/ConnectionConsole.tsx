@@ -55,14 +55,6 @@ interface Props {
   notice?: string;
   /** Forces the sign-in view — a magic link that failed to redeem, say. */
   forceLogin?: boolean;
-  /**
-   * An address to offer the sign-in form, when the caller knows one.
-   *
-   * Only the embedded host has one: this client starts it, so it can be told
-   * who that host admits (#632). Undefined everywhere else, and the form is
-   * blank as before.
-   */
-  suggestedEmail?: string;
 }
 
 export function ConnectionConsole({
@@ -71,7 +63,6 @@ export function ConnectionConsole({
   defaultCompany,
   notice,
   forceLogin,
-  suggestedEmail,
 }: Props) {
   const [phase, setPhase] = useState<Phase>(
     forceLogin ? { kind: "login", company: defaultCompany, notice } : { kind: "loading" },
@@ -217,7 +208,6 @@ export function ConnectionConsole({
           client={client}
           company={defaultCompany}
           notice={notice}
-          suggestedEmail={suggestedEmail}
           onSignedIn={reBoot}
         />
       </ConsoleChrome>
@@ -252,7 +242,6 @@ export function ConnectionConsole({
             client={client}
             company={phase.company}
             notice={phase.notice}
-            suggestedEmail={suggestedEmail}
             onSignedIn={reBoot}
           />
         </ConsoleChrome>
