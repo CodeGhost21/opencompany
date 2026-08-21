@@ -26,7 +26,7 @@ interface Props {
 const STATUS_STYLES: Record<BoardStatus, string> = {
   open: "bg-muted text-muted-foreground",
   planned: "bg-primary/10 text-primary",
-  completed: "bg-emerald-500/12 text-emerald-600 dark:text-emerald-400",
+  completed: "bg-status-done-soft text-status-done-text",
   closed: "bg-muted text-muted-foreground line-through decoration-1",
 };
 
