@@ -25,6 +25,16 @@ export function childrenOf(nodes: FsNode[], parentId: string | null): FsNode[] {
     .filter((x) => x.parentId === parentId)
     .sort((a, b) => {
       if (a.kind !== b.kind) return a.kind === "folder" ? -1 : 1;
+      // `derived/` sorts after the folders a person made (issue #1382). It is
+      // the one folder nobody in the company named or can write to, and sitting
+      // alphabetically among `Campaigns` and `Standards` presented it as a peer
+      // of theirs. Cosmetic and name-based, but the name is the host's and only
+      // one folder has it.
+      const aDerived =
+        a.kind === "folder" && a.name.toLowerCase() === DERIVED_DIR;
+      const bDerived =
+        b.kind === "folder" && b.name.toLowerCase() === DERIVED_DIR;
+      if (aDerived !== bDerived) return aDerived ? 1 : -1;
       return a.name.localeCompare(b.name);
     });
 }
@@ -427,6 +437,67 @@ export function sortedFolders(
   };
   walk(null);
   return out;
+}
+
+/**
+ * The root folders the host lays down on every boot, by name.
+ *
+ * Mirrors `SYSTEM_ROOTS` in `src/company/workspace_scaffold.rs`. Kept in step
+ * by name rather than by a wire field, and the risk is the same one
+ * {@link isDerivedNode} documents: if the host scaffolds a third root, this
+ * const has to follow or a fresh company will briefly look as though somebody
+ * has already been working in it.
+ */
+export const SYSTEM_ROOTS = ["agents", "secrets"] as const;
+
+/** The note the host provisions inside `secrets/` on first boot. */
+const SECRETS_README = "readme.md";
+
+/**
+ * Whether anything in this tree was put there by a person (issue #1481).
+ *
+ * `ensure_workspace_scaffold` runs on every boot, so `nodes.length === 0` is
+ * unreachable on a live company and "is this workspace empty?" cannot be asked
+ * that way. What the empty state actually needs to know is different: has
+ * anyone written anything here *yet* — because "pick a note from the explorer"
+ * is the wrong instruction to give someone whose explorer holds three rows they
+ * did not create and have no reason to open.
+ */
+export function hasOperatorContent(nodes: FsNode[]): boolean {
+  const systemRootIds = new Set(
+    nodes
+      .filter(
+        (node) =>
+          node.parentId === null &&
+          node.kind === "folder" &&
+          (SYSTEM_ROOTS as readonly string[]).includes(node.name.toLowerCase()),
+      )
+      .map((node) => node.id),
+  );
+  const agentsRootId = nodes.find((node) => isAgentsFolder(node))?.id ?? null;
+  return nodes.some((node) => {
+    if (systemRootIds.has(node.id)) return false;
+    // The scaffolded README inside `secrets/` is the host's words, not the
+    // operator's — a workspace holding only it has still never been written in.
+    if (
+      node.parentId &&
+      systemRootIds.has(node.parentId) &&
+      node.name.toLowerCase() === SECRETS_README
+    ) {
+      return false;
+    }
+    // A teammate's own `Agents/<roster-id>/` folder is minted by the host and
+    // named by id; nobody chose it. A note filed *inside* one is a person's
+    // work and counts.
+    if (
+      node.kind === "folder" &&
+      agentsRootId !== null &&
+      node.parentId === agentsRootId
+    ) {
+      return false;
+    }
+    return true;
+  });
 }
 
 export type Crumb = FsNode | null;
