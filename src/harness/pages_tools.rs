@@ -399,9 +399,17 @@ impl CompanyPages {
     /// resolved from a single company-scoped tree read.
     async fn all_pages(&self) -> crate::Result<Vec<(String, PageBundle)>> {
         let nodes = self.store.tree(&self.company).await?;
-        let pages_root = nodes
-            .iter()
-            .find(|n| n.parent_id.is_none() && n.kind == NodeKind::Folder && n.name == PAGES_ROOT);
+        // Case-insensitive on all four names, and for one reason: the root and
+        // the two source files were `Pages/`, `Page.tsx` and `Page.compiled.mjs`
+        // before the workspace's lowercase-dashed rule
+        // ([`crate::company::workspace_names`]). A company created then still
+        // carries them, and an exact match would report every one of its pages
+        // as missing while they sit in the tree.
+        let pages_root = nodes.iter().find(|n| {
+            n.parent_id.is_none()
+                && n.kind == NodeKind::Folder
+                && n.name.eq_ignore_ascii_case(PAGES_ROOT)
+        });
         let Some(pages_root) = pages_root else {
             return Ok(Vec::new());
         };
@@ -422,11 +430,13 @@ impl CompanyPages {
                 .iter()
                 .filter(|n| n.parent_id.as_deref() == Some(folder.id.as_str()))
             {
-                match child.name.as_str() {
-                    MANIFEST_NAME => bundle.manifest = Some(child.clone()),
-                    SOURCE_NAME => bundle.source = Some(child.clone()),
-                    COMPILED_NAME => bundle.compiled = Some(child.clone()),
-                    _ => {}
+                let name = child.name.as_str();
+                if name.eq_ignore_ascii_case(MANIFEST_NAME) {
+                    bundle.manifest = Some(child.clone());
+                } else if name.eq_ignore_ascii_case(SOURCE_NAME) {
+                    bundle.source = Some(child.clone());
+                } else if name.eq_ignore_ascii_case(COMPILED_NAME) {
+                    bundle.compiled = Some(child.clone());
                 }
             }
             out.push((folder.name.clone(), bundle));
@@ -449,13 +459,25 @@ impl CompanyPages {
     /// page — mirrors [`crate::company::workspace_scaffold::ensure_agent_folder`]'s
     /// on-demand-root pattern for `Agents/`.
     async fn ensure_slug_folder(&self, slug: &str) -> crate::Result<String> {
-        let pages_root = self
-            .store
-            .adopt_or_create_folder(&self.company, None, PAGES_ROOT, self.origin())
-            .await?;
+        // A legacy `Pages/` root is adopted rather than joined by a lowercase
+        // twin — the same call the scaffold makes for `agents/`, and made
+        // through the scaffold's own resolver so the two cannot drift.
+        let nodes = self.store.tree(&self.company).await?;
+        let pages_root = match crate::company::workspace_scaffold::find(&nodes, None, PAGES_ROOT) {
+            crate::company::workspace_scaffold::Found::Folder(id) => id,
+            crate::company::workspace_scaffold::Found::Collision(why) => {
+                return Err(crate::error::OpenCompanyError::Conflict(why));
+            }
+            crate::company::workspace_scaffold::Found::Free => self
+                .store
+                .adopt_or_create_folder(&self.company, None, PAGES_ROOT, self.origin())
+                .await?
+                .into_node()
+                .id,
+        };
         let claim: FolderClaim = self
             .store
-            .adopt_or_create_folder(&self.company, Some(pages_root.id()), slug, self.origin())
+            .adopt_or_create_folder(&self.company, Some(&pages_root), slug, self.origin())
             .await?;
         Ok(claim.id().to_string())
     }
