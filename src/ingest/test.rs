@@ -120,7 +120,7 @@ fn a_long_document_splits_into_bounded_chunks() {
             chunk.body.chars().count() <= 3_100,
             "chunk of {} chars: {}",
             chunk.body.chars().count(),
-            &chunk.label
+            chunk.label
         );
     }
     // Labels stay ordered, so the console and recall both see the document in
