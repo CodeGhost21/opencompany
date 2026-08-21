@@ -3008,8 +3008,7 @@ export function WorkflowsView({
                 will guess wrong in both directions. */}
             <DialogDescription>
               What this run should work on. It is handed to the workflow&rsquo;s first
-              step, and any step bound to <code className="font-mono">=items</code>{" "}
-              reads it. Leave it empty to run the workflow as its schedule does.
+              step. Leave it empty to run the workflow as its schedule does.
             </DialogDescription>
           </DialogHeader>
           <Input
