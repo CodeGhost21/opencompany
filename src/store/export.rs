@@ -32,9 +32,9 @@ use crate::ports::facts::{FactRecord, FactStore};
 use crate::ports::memory::MemoryStore;
 use crate::ports::store::CompanyStore;
 use crate::ports::types::{
-    BudgetOverride, CompanyEvent, CompanyId, CompanyRecord, CompressedTrace, ContextChunk,
-    EventSeq, LedgerEntry, OverlayAgent, OverlayDesk, OverlayDeskMember, OverlayDeskOrder,
-    OverlayWorkflow, PolicyOverride, StoredEvent, TemplateProvenance,
+    AgentOverride, BudgetOverride, CompanyEvent, CompanyId, CompanyRecord, CompressedTrace,
+    ContextChunk, EventSeq, LedgerEntry, OverlayAgent, OverlayDesk, OverlayDeskMember,
+    OverlayDeskOrder, OverlayWorkflow, PolicyOverride, StoredEvent, TemplateProvenance,
 };
 
 /// Canonical bundle file and directory names, matching the fs
@@ -133,6 +133,20 @@ struct BundleMeta {
     /// `#[serde(default)]` for back-compat with older bundles.
     #[serde(default)]
     overlay_budgets: Vec<BudgetOverride>,
+    /// The operator's edits of manifest-declared teammates at export time.
+    /// Preserved so an export→import keeps the roster the operator shaped from
+    /// the console, rather than silently reverting every blueprint teammate to
+    /// the name, role, instructions and scope `company.toml` declared.
+    /// `#[serde(default)]` for back-compat with older bundles.
+    #[serde(default)]
+    overlay_agent_edits: Vec<AgentOverride>,
+    /// The ids of manifest teammates removed from the console at export time.
+    /// Preserved so an import does not silently restore a teammate the operator
+    /// retired — the blueprint still declares it, so without the tombstone it
+    /// comes straight back. `#[serde(default)]` for back-compat with older
+    /// bundles.
+    #[serde(default)]
+    overlay_retired_agents: Vec<String>,
     /// The operator's `[policy]` override at export time (issue #562).
     /// `#[serde(default)]` for back-compat with older bundles, which read as
     /// `None` — the manifest's `[policy]` decides, exactly as before.
@@ -214,6 +228,12 @@ struct BundleContents {
     /// The operator-set per-teammate daily spend caps, carried through the
     /// bundle so export→import preserves console-set budgets (issue #343).
     overlay_budgets: Vec<BudgetOverride>,
+    /// The operator's edits of manifest-declared teammates, carried through the
+    /// bundle so export→import preserves a console-shaped roster.
+    overlay_agent_edits: Vec<AgentOverride>,
+    /// The ids of manifest teammates the operator removed, carried through the
+    /// bundle so an import does not restore them.
+    overlay_retired_agents: Vec<String>,
     /// The operator's `[policy]` override, carried through the bundle so
     /// export→import preserves a console-set autonomy tier (issue #562).
     ///
@@ -286,6 +306,8 @@ impl BundleContents {
             overlay_desks: record.overlay_desks,
             overlay_workflows: record.overlay_workflows,
             overlay_budgets: record.overlay_budgets,
+            overlay_agent_edits: record.overlay_agent_edits,
+            overlay_retired_agents: record.overlay_retired_agents,
             overlay_policy: record.overlay_policy,
             overlay_desk_tools: record.overlay_desk_tools,
             disabled_workflows: record.disabled_workflows,
@@ -327,6 +349,8 @@ impl BundleContents {
         // append-only ledger stays authoritative.
         store
             .save(&CompanyRecord {
+                overlay_agent_edits: self.overlay_agent_edits.clone(),
+                overlay_retired_agents: self.overlay_retired_agents.clone(),
                 id: self.id.clone(),
                 manifest: self.manifest.clone(),
                 ledger: Vec::new(),
@@ -384,6 +408,8 @@ impl BundleContents {
             overlay_desks: self.overlay_desks.clone(),
             overlay_workflows: self.overlay_workflows.clone(),
             overlay_budgets: self.overlay_budgets.clone(),
+            overlay_agent_edits: self.overlay_agent_edits.clone(),
+            overlay_retired_agents: self.overlay_retired_agents.clone(),
             overlay_policy: self.overlay_policy.clone(),
             overlay_desk_tools: self.overlay_desk_tools.clone(),
             disabled_workflows: self.disabled_workflows.clone(),
@@ -519,6 +545,8 @@ impl BundleContents {
             overlay_desks: meta.overlay_desks,
             overlay_workflows: meta.overlay_workflows,
             overlay_budgets: meta.overlay_budgets,
+            overlay_agent_edits: meta.overlay_agent_edits,
+            overlay_retired_agents: meta.overlay_retired_agents,
             overlay_policy: meta.overlay_policy,
             overlay_desk_tools: meta.overlay_desk_tools,
             disabled_workflows: meta.disabled_workflows,
@@ -838,6 +866,8 @@ mod test {
     /// A minimal running company record for tests that only need one to exist.
     fn company_record(id: &CompanyId) -> CompanyRecord {
         CompanyRecord {
+            overlay_retired_agents: Vec::new(),
+            overlay_agent_edits: Vec::new(),
             id: id.clone(),
             manifest: manifest(),
             ledger: Vec::new(),
@@ -1069,6 +1099,8 @@ mod test {
 
         let (s1, e1, m1, c1) = fs_ports(&home1);
         s1.save(&CompanyRecord {
+            overlay_retired_agents: Vec::new(),
+            overlay_agent_edits: Vec::new(),
             id: id.clone(),
             manifest: manifest(),
             ledger: Vec::new(),
@@ -1150,6 +1182,8 @@ mod test {
 
         let (s1, e1, m1, c1) = fs_ports(&home1);
         s1.save(&CompanyRecord {
+            overlay_retired_agents: Vec::new(),
+            overlay_agent_edits: Vec::new(),
             id: id.clone(),
             manifest: manifest(),
             ledger: Vec::new(),
@@ -1282,6 +1316,8 @@ mod test {
 
         let (s1, e1, m1, c1) = fs_ports(&home1);
         s1.save(&CompanyRecord {
+            overlay_retired_agents: Vec::new(),
+            overlay_agent_edits: Vec::new(),
             id: id.clone(),
             manifest: manifest(),
             ledger: Vec::new(),
@@ -1374,6 +1410,8 @@ mod test {
         // Register a company carrying template provenance in the source home.
         let (s1, e1, m1, c1) = fs_ports(&home1);
         s1.save(&CompanyRecord {
+            overlay_retired_agents: Vec::new(),
+            overlay_agent_edits: Vec::new(),
             id: id.clone(),
             manifest: manifest(),
             ledger: Vec::new(),
@@ -1491,6 +1529,8 @@ mod test {
 
         let (s1, e1, m1, c1) = fs_ports(&home1);
         s1.save(&CompanyRecord {
+            overlay_retired_agents: Vec::new(),
+            overlay_agent_edits: Vec::new(),
             id: id.clone(),
             manifest: manifest.clone(),
             ledger: Vec::new(),
@@ -1682,6 +1722,18 @@ mod test {
             // an operator had switched off, which is the one direction an
             // import must never move on its own.
             disabled_workflows: vec!["digest".to_string()],
+            // A console-shaped roster rides the same bundle: without the field
+            // an imported company would silently come back on the blueprint's
+            // names, roles and scopes, undoing every edit an operator made.
+            overlay_agent_edits: vec![AgentOverride {
+                agent_id: "ceo".to_string(),
+                role: Some("Chief Vibes".to_string()),
+                ..Default::default()
+            }],
+            // And a tombstone, for the sharper version of the same loss: the
+            // blueprint still declares this teammate, so a bundle that dropped
+            // the field would restore somebody the operator had removed.
+            overlay_retired_agents: vec!["cto".to_string()],
             template_provenance: None,
             setup: None,
         })
@@ -1709,6 +1761,18 @@ mod test {
         assert!(
             !dst_record.workflow_enabled("digest"),
             "the bundle round-trip re-armed a paused workflow"
+        );
+        assert_eq!(
+            dst_record
+                .effective_agent("ceo")
+                .expect("the roster still names the ceo")
+                .role,
+            "Chief Vibes",
+            "the bundle round-trip restored the blueprint's role over the operator's edit"
+        );
+        assert!(
+            dst_record.effective_agent("cto").is_none(),
+            "the bundle round-trip restored a teammate the operator had removed"
         );
         // Issue #562: the console-set tier survives export→import, attribution
         // included. Without this the seeded fixture proves nothing — a bundle
@@ -1775,6 +1839,8 @@ mod test {
 
         let (s1, e1, m1, c1) = fs_ports(&home1);
         s1.save(&CompanyRecord {
+            overlay_retired_agents: Vec::new(),
+            overlay_agent_edits: Vec::new(),
             id: id.clone(),
             manifest: budget_manifest(),
             ledger: Vec::new(),

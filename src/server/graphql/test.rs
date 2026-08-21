@@ -65,6 +65,8 @@ pub(crate) async fn state_with_manifest(
     let id = CompanyId::new("acme");
     store
         .save(&CompanyRecord {
+            overlay_retired_agents: Vec::new(),
+            overlay_agent_edits: Vec::new(),
             id: id.clone(),
             manifest: manifest.clone(),
             ledger: Vec::new(),
@@ -455,6 +457,8 @@ async fn state_with_rich_company(home: &std::path::Path) -> AppState {
     let id = CompanyId::new("acme");
     store
         .save(&CompanyRecord {
+            overlay_retired_agents: Vec::new(),
+            overlay_agent_edits: Vec::new(),
             id: id.clone(),
             manifest: rich_manifest(),
             ledger: Vec::new(),
@@ -1400,6 +1404,8 @@ async fn skills_and_workflows_resolve_from_source_dir() {
     let store = FsCompanyStore::new(home.to_path_buf());
     store
         .save(&CompanyRecord {
+            overlay_retired_agents: Vec::new(),
+            overlay_agent_edits: Vec::new(),
             id: id.clone(),
             manifest: manifest.clone(),
             ledger: Vec::new(),
@@ -1476,6 +1482,8 @@ async fn company_skills_project_the_pinned_snapshot_of_a_registry_install() {
     let store = FsCompanyStore::new(home.clone());
     store
         .save(&CompanyRecord {
+            overlay_retired_agents: Vec::new(),
+            overlay_agent_edits: Vec::new(),
             id: id.clone(),
             manifest: manifest(),
             ledger: Vec::new(),
@@ -1586,6 +1594,8 @@ async fn workflows_resolve_from_the_record_overlay_with_no_source_dir() {
     let store = FsCompanyStore::new(home.to_path_buf());
     store
         .save(&CompanyRecord {
+            overlay_retired_agents: Vec::new(),
+            overlay_agent_edits: Vec::new(),
             id: id.clone(),
             manifest: manifest.clone(),
             ledger: Vec::new(),
@@ -1684,6 +1694,8 @@ async fn workflows_summary_lists_an_overlay_workflow_with_no_enabled_entry() {
     let store = FsCompanyStore::new(home.to_path_buf());
     store
         .save(&CompanyRecord {
+            overlay_retired_agents: Vec::new(),
+            overlay_agent_edits: Vec::new(),
             id: id.clone(),
             manifest: manifest.clone(),
             ledger: Vec::new(),
@@ -1778,6 +1790,8 @@ async fn graphql_lists_a_company_override_of_a_global_id_by_its_own_content() {
     let store = FsCompanyStore::new(home.to_path_buf());
     store
         .save(&CompanyRecord {
+            overlay_retired_agents: Vec::new(),
+            overlay_agent_edits: Vec::new(),
             id: id.clone(),
             manifest: manifest(),
             ledger: Vec::new(),
@@ -1859,6 +1873,8 @@ async fn graphql_hides_a_company_disabled_global_workflow() {
     let store = FsCompanyStore::new(home.to_path_buf());
     store
         .save(&CompanyRecord {
+            overlay_retired_agents: Vec::new(),
+            overlay_agent_edits: Vec::new(),
             id: id.clone(),
             manifest: disabling_manifest.clone(),
             ledger: Vec::new(),

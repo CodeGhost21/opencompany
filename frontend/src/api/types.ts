@@ -928,10 +928,11 @@ export interface AgentDetailDto {
    */
   description?: string;
   /**
-   * Which half of the roster this teammate comes from, and therefore what may
-   * be done to it. `manifest` teammates are declared in the version-controlled
-   * `company.toml`; `overlay` teammates were added at runtime and live on the
-   * company record this host writes.
+   * Which half of the roster this teammate comes from. `manifest` teammates are
+   * declared in the version-controlled `company.toml`; `overlay` teammates were
+   * added at runtime. Both are editable — a manifest teammate's edits are stored
+   * as an override on the company record — but only an `overlay` teammate can be
+   * removed here.
    */
   source: "manifest" | "overlay";
   /**

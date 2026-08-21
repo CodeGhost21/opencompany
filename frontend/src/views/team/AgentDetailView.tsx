@@ -90,9 +90,11 @@ async function classifyFailure(
  * ## Read-only is a fact about the agent, not a state of this screen
  *
  * A **manifest** teammate is declared in the company's version-controlled
- * `company.toml`. Its fields are shown read-only, with the reason next to them:
- * the console does not rewrite the blueprint, so the edit belongs in the file.
- * An **overlay** teammate was added here and is edited here.
+ * `company.toml` and is edited here too: the host stores the change as an
+ * override on the company record rather than rewriting the blueprint, so a
+ * deployed company's own roster — including the global baseline every company
+ * gets — is the operator's to change without a redeploy they may not be able to
+ * make. An **overlay** teammate was added here and is edited here.
  *
  * Which is which comes from the host's own `editable` list rather than from a
  * rule this file re-implements. A console that decided for itself would
@@ -401,7 +403,7 @@ export function AgentDetailView({
               disabled={agent.editable.length === 0}
               title={
                 agent.editable.length === 0
-                  ? "This teammate is declared in your company blueprint (company.toml), so its name, role and instructions are edited there."
+                  ? "This teammate can't be edited from here."
                   : undefined
               }
               data-testid="agent-edit"
@@ -486,8 +488,7 @@ export function AgentDetailView({
                   </p>
                   {agent.editable.length === 0 && (
                     <p className="text-xs text-muted-foreground" data-testid="agent-readonly-note">
-                      This teammate is part of your company blueprint, so its name, role and
-                      instructions are set in company.toml. Its daily budget can still be changed
+                      This teammate can't be edited from here. Its daily budget can still be changed
                       below.
                     </p>
                   )}

@@ -1956,6 +1956,8 @@ impl RuntimeBuilder {
         // removed there would linger as one. The overlay halves are already
         // lifted out of `existing` above, so this loses nothing.
         let desk_record = CompanyRecord {
+            overlay_retired_agents: Vec::new(),
+            overlay_agent_edits: Vec::new(),
             id: id.clone(),
             manifest: self.manifest.clone(),
             ledger: Vec::new(),
@@ -2697,6 +2699,12 @@ impl RuntimeBuilder {
                             };
                             workflow_harness_deps = Some(deps.clone());
                             let record = CompanyRecord {
+                                overlay_retired_agents: Vec::new(),
+                                // Matches every other construction site in this
+                                // file: an agent edit is an operator overlay the
+                                // brain re-reads from the store, not something
+                                // boot seeds.
+                                overlay_agent_edits: Vec::new(),
                                 id: id.clone(),
                                 manifest: self.manifest.clone(),
                                 ledger: Vec::new(),
@@ -2928,6 +2936,8 @@ impl RuntimeBuilder {
         // revoking it in version control.
         store
             .save(&CompanyRecord {
+                overlay_retired_agents: Vec::new(),
+                overlay_agent_edits: Vec::new(),
                 id: id.clone(),
                 manifest: self.manifest.clone(),
                 ledger,
@@ -5993,6 +6003,8 @@ needs_reason = true
         let id = CompanyId::new("acme");
         FsCompanyStore::new(dir.path())
             .save(&CompanyRecord {
+                overlay_retired_agents: Vec::new(),
+                overlay_agent_edits: Vec::new(),
                 id: id.clone(),
                 manifest: manifest.clone(),
                 ledger: Vec::new(),
@@ -6165,6 +6177,8 @@ needs_reason = true
         let id = CompanyId::new("acme");
         FsCompanyStore::new(dir.path())
             .save(&CompanyRecord {
+                overlay_retired_agents: Vec::new(),
+                overlay_agent_edits: Vec::new(),
                 id: id.clone(),
                 manifest: persisted,
                 ledger: Vec::new(),
@@ -6464,6 +6478,8 @@ needs_reason = true
         let store = FsCompanyStore::new(home.clone());
         store
             .save(&CompanyRecord {
+                overlay_retired_agents: Vec::new(),
+                overlay_agent_edits: Vec::new(),
                 id: id.clone(),
                 manifest: manifest.clone(),
                 ledger: Vec::new(),
@@ -6582,6 +6598,8 @@ needs_reason = true
         let store = FsCompanyStore::new(home.clone());
         store
             .save(&CompanyRecord {
+                overlay_retired_agents: Vec::new(),
+                overlay_agent_edits: Vec::new(),
                 id: id.clone(),
                 manifest: manifest.clone(),
                 ledger: Vec::new(),
@@ -6718,6 +6736,8 @@ needs_reason = true
         let store = FsCompanyStore::new(home.clone());
         store
             .save(&CompanyRecord {
+                overlay_retired_agents: Vec::new(),
+                overlay_agent_edits: Vec::new(),
                 id: id.clone(),
                 manifest: manifest.clone(),
                 ledger: Vec::new(),

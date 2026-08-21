@@ -283,15 +283,18 @@ async fn list_team(company: ScopedCompany) -> Result<Json<Vec<TeamMemberDto>>, A
     };
     let members = record
         .map(|record| {
+            // Resolved through the record, so a manifest teammate an operator
+            // has edited from the console lists under the name, role and
+            // description it now has rather than the ones `company.toml`
+            // launched it with.
             let mut members: Vec<TeamMemberDto> = record
-                .manifest
-                .agents
-                .iter()
+                .effective_agents()
+                .into_iter()
                 .map(|agent| {
                     member_row(
                         &record,
                         &agent.id,
-                        None,
+                        agent.name.clone(),
                         agent.role.clone(),
                         agent.description.clone(),
                         enabled(&agent.id),
@@ -391,8 +394,9 @@ pub(super) async fn daily_spend_samples(
     Ok(Some(samples))
 }
 
-/// Every roster teammate's id — manifest agents first, then overlay teammates.
-/// The same union `CompanyRecord::is_roster_agent` accepts.
+/// Every roster teammate's id — manifest agents first, then overlay teammates,
+/// minus the ones the operator has removed. The same union
+/// `CompanyRecord::is_roster_agent` accepts.
 fn roster_ids(record: &CompanyRecord) -> impl Iterator<Item = &String> {
     record
         .manifest
@@ -400,6 +404,7 @@ fn roster_ids(record: &CompanyRecord) -> impl Iterator<Item = &String> {
         .iter()
         .map(|agent| &agent.id)
         .chain(record.overlay_agents.iter().map(|agent| &agent.id))
+        .filter(|id| !record.is_retired(id))
 }
 
 /// `POST {scope}/team` — add an operator-defined teammate, optionally with a
@@ -529,19 +534,48 @@ async fn remove_member(
         .load(company.id())
         .await?
         .ok_or_else(|| OpenCompanyError::CompanyNotFound(company.id().to_string()))?;
-    // A manifest teammate is part of the version-controlled blueprint.
-    if record.manifest.agents.iter().any(|a| a.id == agent_id) {
-        return Err(ApiError(OpenCompanyError::Conflict(
-            language::MANIFEST_TEAMMATE_DELETE.to_string(),
-        )));
-    }
-    let before = record.overlay_agents.len();
-    record.overlay_agents.retain(|a| a.id != agent_id);
-    if record.overlay_agents.len() == before {
+    if !record.is_roster_agent(&agent_id) {
         return Err(ApiError(OpenCompanyError::CompanyNotFound(format!(
             "teammate {agent_id}"
         ))));
     }
+    // The one refusal left: a company with nobody on it has no orchestrator, no
+    // one to answer a message and no way back from the console. Counted over the
+    // roster as it effectively stands, so the check sees the teammates that are
+    // actually there rather than the ones the blueprint declared.
+    if roster_ids(&record).count() <= 1 {
+        return Err(ApiError(OpenCompanyError::Conflict(
+            language::LAST_TEAMMATE_DELETE.to_string(),
+        )));
+    }
+
+    let is_manifest = record.manifest.agents.iter().any(|a| a.id == agent_id);
+    if is_manifest {
+        // A tombstone, not a manifest rewrite: `company.toml` and the global
+        // baseline merged into it are re-read on every rebuild, so a teammate
+        // "removed" by editing the roster would simply come back. Recorded here
+        // and filtered out by `CompanyRecord::effective_agents`, which is what
+        // takes the teammate off the roster, off its desks and out of the
+        // harness build rather than merely off the Team page.
+        record.retire_agent(&agent_id);
+    } else {
+        record.overlay_agents.retain(|a| a.id != agent_id);
+    }
+    // Desk seats an operator added are dropped with the teammate either way. A
+    // blueprint seat is left alone — `effective_desk_members` already filters a
+    // retired teammate out of it, and the manifest is not rewritten.
+    record
+        .overlay_desk_members
+        .retain(|member| member.agent_id != agent_id);
+    // The teammate's edit overlay goes with it too, for the same
+    // id-reuse reason the budget override below does: the id is a slug of the
+    // display name, so a later teammate can take this seat and would otherwise
+    // inherit a rename nobody made for it. A retired manifest teammate loses its
+    // edits as well — if it ever comes back it comes back as the blueprint
+    // declares it.
+    record
+        .overlay_agent_edits
+        .retain(|edit| edit.agent_id != agent_id);
     // Drop the teammate's budget override with it (issue #343). Since #686 the
     // id is a slug of the display name rather than a generated one, so removing
     // a teammate *frees its id*: re-adding the same name mints the same slug and
@@ -855,6 +889,8 @@ mod tests {
         let id = CompanyId::new("acme");
         store
             .save(&CompanyRecord {
+                overlay_retired_agents: Vec::new(),
+                overlay_agent_edits: Vec::new(),
                 id: id.clone(),
                 manifest: manifest.clone(),
                 ledger: Vec::new(),
@@ -1925,11 +1961,12 @@ mod tests {
         );
     }
 
-    /// A baseline teammate cannot be deleted — the 409 that made "just delete
-    /// them to reach first-run" impossible. Pinned beside the marker so the two
-    /// answers to the same question stay together.
+    /// A baseline teammate — a blueprint row like any other, merged into every
+    /// company — can be deleted, and stays deleted across a reload. It is a
+    /// tombstone rather than a manifest rewrite, so this is the assertion that
+    /// says the blueprint being re-read on every load does not resurrect it.
     #[tokio::test]
-    async fn a_baseline_teammate_refuses_deletion() {
+    async fn a_baseline_teammate_can_be_deleted_and_stays_deleted() {
         let home_dir = home();
         let state = state_with_globals(
             home_dir.path(),
@@ -1937,11 +1974,14 @@ mod tests {
         )
         .await;
 
-        let (_, body) = get_team(&state).await;
-        let id = body.as_array().unwrap()[0]["id"]
-            .as_str()
-            .unwrap()
-            .to_string();
+        let (_, before) = get_team(&state).await;
+        let before = before.as_array().unwrap().clone();
+        assert!(
+            before.len() > 1,
+            "the baseline seeds more than one teammate: {before:?}"
+        );
+        let id = before[0]["id"].as_str().unwrap().to_string();
+
         let (status, _) = send(
             &state,
             "DELETE",
@@ -1950,11 +1990,62 @@ mod tests {
             Some(&admin_cookie()),
         )
         .await;
-        assert_eq!(
-            status,
-            StatusCode::CONFLICT,
-            "a baseline teammate is part of the blueprint; the console must not \
-             be able to empty the roster to reach first-run setup"
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        let (_, after) = get_team(&state).await;
+        let after = after.as_array().unwrap();
+        assert_eq!(after.len(), before.len() - 1, "{after:?}");
+        assert!(
+            !after.iter().any(|row| row["id"] == id.as_str()),
+            "the blueprint still declares it, so a re-read must not bring it \
+             back: {after:?}"
         );
+    }
+
+    /// The one refusal the roster keeps: a company must not be left with nobody
+    /// on it. Without this the console could empty the roster entirely, which
+    /// has no orchestrator, nobody to answer a message, and no way back.
+    #[tokio::test]
+    async fn the_last_teammate_cannot_be_deleted() {
+        let home_dir = home();
+        let state = state_with_globals(
+            home_dir.path(),
+            "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n",
+        )
+        .await;
+
+        // Delete every teammate but one, which must succeed all the way down.
+        let (_, body) = get_team(&state).await;
+        let ids: Vec<String> = body
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["id"].as_str().unwrap().to_string())
+            .collect();
+        for id in &ids[..ids.len() - 1] {
+            let (status, _) = send(
+                &state,
+                "DELETE",
+                &format!("/api/v1/company/team/{id}"),
+                None,
+                Some(&admin_cookie()),
+            )
+            .await;
+            assert_eq!(status, StatusCode::NO_CONTENT, "removing {id}");
+        }
+
+        let last = ids.last().unwrap();
+        let (status, refusal) = send(
+            &state,
+            "DELETE",
+            &format!("/api/v1/company/team/{last}"),
+            None,
+            Some(&admin_cookie()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{refusal:?}");
+
+        let (_, after) = get_team(&state).await;
+        assert_eq!(after.as_array().unwrap().len(), 1, "{after}");
     }
 }
