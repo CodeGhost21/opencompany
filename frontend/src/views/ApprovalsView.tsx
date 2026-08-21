@@ -22,7 +22,12 @@ import {
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import type { CompanyFeed } from "@/hooks/use-company";
-import { approvedByRuntimeLine, approvedLine, batchPositions } from "@/lib/approval-wording";
+import {
+  approvedByRuntimeLine,
+  approvedLine,
+  batchPositions,
+  staleDecisionLine,
+} from "@/lib/approval-wording";
 import { approvalSummary, grantHeadline, timeAgo, toolAction, untilLabel } from "@/lib/language";
 import { approvalsForTask } from "@/lib/task-approvals";
 import { startVisiblePolling } from "@/lib/visible-poll";
@@ -211,6 +216,32 @@ export function ApprovalsView({
       // so approving one of several releases nothing — and saying otherwise is
       // the one part of this flow that actively misleads.
       const stillAwaiting = "stillAwaiting" in answer ? answer.stillAwaiting : undefined;
+      // Issue #1449, and it comes FIRST because everything below it is written
+      // for a decision that actually happened. The host answers `200` to a click
+      // on a card whose deadline has passed — it has to, nothing failed — and
+      // then default-denies it. Read that way, the wording below was a green
+      // success line over work the host had just refused, and the operator's
+      // only next signal was the work silently not happening.
+      //
+      // `null` means the host said `settled`, or is too old to say. Both keep
+      // the pre-#1449 wording: guessing is the defect, in either direction.
+      const stale = staleDecisionLine(
+        "outcome" in answer ? answer.outcome : undefined,
+        approvalSummary(a),
+      );
+      if (stale) {
+        onResolved(stale);
+        // Neither success nor error, exactly as the #380 timeout line is
+        // neither: the request was answered correctly and the answer is that
+        // there was no decision left to make. Still exactly one toast for this
+        // click (#1211) — the SSE echo for the id is suppressed by
+        // `onDecideStart` above, whichever verdict the host ends up appending.
+        toast.info(stale);
+        // The queue is the reconciliation: this card is gone from the host's
+        // parked set either way, so a refresh drops it.
+        void feed.refresh();
+        return;
+      }
       const line =
         verdict !== "approve"
           ? `Declined: ${approvalSummary(a)}`
