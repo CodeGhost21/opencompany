@@ -567,6 +567,84 @@ mod http {
                     .map(str::to_string),
             })
         }
+
+        async fn list_board(&self, query: BoardQuery) -> Result<BoardPage> {
+            let query = query.clamped();
+            let mut request = self
+                .authed(reqwest::Method::GET, "/feedback")
+                .query(&[("sort", query.sort.as_str())])
+                .query(&[
+                    ("page", query.page.to_string()),
+                    ("limit", query.limit.to_string()),
+                ]);
+            if let Some(kind) = query.kind {
+                request = request.query(&[("type", kind.as_str())]);
+            }
+            if let Some(status) = query.status {
+                request = request.query(&[("status", status.as_str())]);
+            }
+            let data = self.data(request).await?;
+            let items = data
+                .get("items")
+                .and_then(|v| v.as_array())
+                .ok_or_else(|| decode_err("board page without items"))?
+                .iter()
+                .map(parse_item)
+                .collect::<Result<Vec<_>>>()?;
+            let number = |key: &str, fallback: u32| {
+                data.get(key).and_then(|v| v.as_u64()).unwrap_or(u64::from(fallback)) as u32
+            };
+            Ok(BoardPage {
+                total: number("total", items.len() as u32),
+                page: number("page", query.page),
+                limit: number("limit", query.limit),
+                items,
+            })
+        }
+
+        async fn board_item(&self, id: &str) -> Result<BoardDetail> {
+            let path = format!("/feedback/{}", urlencode(id));
+            let data = self.data(self.authed(reqwest::Method::GET, &path)).await?;
+            let item = data
+                .get("feedback")
+                .ok_or_else(|| decode_err("detail without a feedback item"))?;
+            Ok(BoardDetail {
+                item: parse_item(item)?,
+                comments: parse_comments(&data),
+            })
+        }
+
+        async fn vote_board_item(&self, id: &str, value: VoteValue) -> Result<BoardItem> {
+            let path = format!("/feedback/{}/vote", urlencode(id));
+            let request = self
+                .authed(reqwest::Method::POST, &path)
+                .json(&serde_json::json!({ "value": value.as_i8() }));
+            parse_item(&self.data(request).await?)
+        }
+
+        async fn comment_board_item(&self, id: &str, body: &str) -> Result<BoardComment> {
+            let path = format!("/feedback/{}/comments", urlencode(id));
+            let request = self
+                .authed(reqwest::Method::POST, &path)
+                .json(&serde_json::json!({ "body": body }));
+            Ok(parse_comment(&self.data(request).await?))
+        }
+    }
+
+    /// Percent-encodes a path segment.
+    ///
+    /// Board ids are hub ObjectIds today, but an id is the hub's to choose: a
+    /// future one containing `/` or `?` must not rewrite the route it travels in.
+    fn urlencode(segment: &str) -> String {
+        segment
+            .bytes()
+            .map(|b| match b {
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                    (b as char).to_string()
+                }
+                other => format!("%{other:02X}"),
+            })
+            .collect()
     }
 
     /// The `error` string from a failure envelope, when present.
