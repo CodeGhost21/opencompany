@@ -165,7 +165,18 @@ pub async fn start_with(
         // Safe only because this host binds loopback with no `public_url`, which
         // is what `is_local_only()` asks and what `desktop::register` refuses a
         // `none`-mode company without.
-        auth_mode_override: Some(opencompany::app::config::AuthMode::None),
+        //
+        // A *default*, though, not a ceiling: the root's `config.toml` wins when
+        // it names a mode, because the setup wizard writes that key and an
+        // operator who deliberately turned a sign-in on — to share their
+        // instance with somebody — must not find it off again at the next
+        // launch. This host builds its config by hand rather than through
+        // `AppConfig::load`, so that layer reaches it only here.
+        auth_mode_override: Some(
+            instance
+                .auth_mode()
+                .unwrap_or(opencompany::app::config::AuthMode::None),
+        ),
         ..AppConfig::default()
     };
     let state = AppState::new(config)
@@ -315,6 +326,38 @@ mod test {
             requested.status(),
             409,
             "a magic link is refused by mode, not answered with a silent 202"
+        );
+    }
+
+    /// A `none`-mode desktop is the **default**, not a ceiling.
+    ///
+    /// The setup wizard offers all three modes on a loopback host, and an
+    /// operator who wants to share their instance with a colleague can pick
+    /// `email` — it writes `auth_mode` to the root's `config.toml` and applies
+    /// it live. But this host builds its `AppConfig` by hand rather than through
+    /// `AppConfig::load`, so a mode forced in the literal above would be a mode
+    /// the file can never win against: the choice would hold until quit and
+    /// silently revert on the next launch, which is precisely the "configuration
+    /// ignored" failure the setup surface exists to prevent.
+    ///
+    /// So the file is read and `none` is what it falls back to.
+    #[tokio::test]
+    async fn a_configured_sign_in_survives_a_relaunch() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("config.toml"), "auth_mode = \"email\"\n").unwrap();
+
+        let host = start(dir.path().to_path_buf()).await.expect("host starts");
+        let requested = reqwest::Client::new()
+            .post(format!("{}/api/v1/company/auth/request", host.base_url()))
+            .json(&serde_json::json!({ "email": "ada@example.com" }))
+            .send()
+            .await
+            .unwrap();
+
+        assert_ne!(
+            requested.status(),
+            409,
+            "409 is `auth_mode` refusing the route by mode — the file said email"
         );
     }
 
