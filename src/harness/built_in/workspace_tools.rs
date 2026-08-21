@@ -430,9 +430,13 @@ impl CompanyWorkspace {
         // written by hand in a manifest — often before this rule existed, and
         // always without knowing which spelling the tree ended up storing — so
         // an exact string match would refuse an agent the very document its
-        // operator granted it, over a capital letter. Normalizing both sides
-        // cannot widen a grant: two paths that normalize alike are one node in
-        // this tree, which is the same rule the index resolves by.
+        // operator granted it, over a capital letter.
+        //
+        // The one thing this widens, stated rather than glossed: in a tree that
+        // holds *both* `Notes.md` and `notes.md`, a grant on either covers
+        // both. That shape is already ambiguous for every reader here — it is
+        // what the naming rule exists to stop — and the alternative is a grant
+        // that silently does not apply to the note the operator meant.
         let key = crate::company::workspace_names::kebab_path(&segments.join("/"));
         scope.iter().any(|allowed| {
             crate::company::workspace_paths::split_logical_path(allowed)
