@@ -56,6 +56,7 @@ import {
   jobItems,
   type SetupDraft,
 } from "@/lib/company-setup";
+import { isDesktopRuntime } from "@/api/transport";
 import { cn } from "@/lib/utils";
 
 /**
@@ -256,6 +257,33 @@ export function SetupWizard({ client, onDone, onCancel }: Props) {
         // re-running setup edits their configuration rather than a blank one.
         const seeded: Record<string, string> = {};
         for (const f of s.fields) if (f.value !== null) seeded[f.key] = f.value;
+        // Answer the sign-in question for a desktop install, because where this
+        // console is running has already answered it. The packaged app is a
+        // `none`-mode host — one machine, one person, no mailbox to send a link
+        // to — so asking would be asking an operator to re-derive a fact about
+        // their own computer, and then asking them for an address to go with the
+        // wrong answer. Seeding it removes the address step before they see it
+        // rather than taking it away after (see `visibleSteps`).
+        //
+        // A preselection, not a lock: the mode is still on screen and still
+        // changeable, which is what someone sharing their instance with a
+        // colleague needs. The host reads the choice back out of `config.toml`
+        // at the next launch, so it survives the quit.
+        //
+        // Both conditions are load-bearing. `auth_modes` is checked because this
+        // console can be pointed at a *remote* host through the switcher, and a
+        // routable host withholds `none` on purpose — it would be an
+        // unauthenticated admin console — so seeding it there would walk the
+        // operator into a choice the apply refuses. And only when the file names
+        // nothing: an operator re-running setup is editing their own
+        // configuration, not being told what it should have been.
+        if (
+          seeded.auth_mode === undefined &&
+          isDesktopRuntime() &&
+          s.auth_modes.includes("none")
+        ) {
+          seeded.auth_mode = "none";
+        }
         setValues(seeded);
         // Pre-fill the model step from what the host already holds. A hosted
         // operator has a credential injected by the control plane, no key of
