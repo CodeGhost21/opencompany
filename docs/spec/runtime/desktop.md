@@ -31,6 +31,61 @@ directory, not ancestors.** From `frontend/` it finds the wrapper; from the
 repository root or from `src-tauri/` it finds this one. That is worth knowing
 before reading a build failure, because the two apps share a `productName`.
 
+## What the desktop compiles in
+
+The desktop links the host with an explicit feature set, declared on the
+`opencompany` dependency in `src-tauri/Cargo.toml`:
+
+```toml
+opencompany = { path = "..", default-features = false, features = [
+  "sqlite", "platform-jwt", "oauth", "mcp",
+] }
+```
+
+`mcp` is the one that puts an agent harness in the app. It implies `openhuman`,
+which is what compiles `src/harness/` at all; without it the bundle boots, seeds
+a company, serves the console — and cannot think. The visible symptom was the
+setup wizard's inference test answering *"This build cannot reach a model — the
+agent harness is not compiled in."* for every provider, however good the key.
+
+The belt a desktop agent gets is deliberately the minimal one. The host declares
+`openhuman_core` with `default-features = false, features = ["skills", "mcp",
+"hosting"]`, so what a company can use is **built-in tools, MCP servers and
+skills** — no memory engine, no TokenJuice, no voice or inference stack out of
+the vendored runtime. Features left off, each on purpose:
+
+| Off | Why |
+| --- | --- |
+| `tinycortex`, `tinymemory*` | In-pod memory engines. They carry tinycortex, `tinyagents/sqlite` and a second bundled SQLite into the bundle for a surface the desktop does not offer; the runtime keeps its fs-backed memory stores. |
+| `media`, `composio`, and the other managed backends | Each needs a platform credential the desktop has no way to hold, and each fails closed without one. |
+| `acp` | `src-tauri/src/acp/` is an ACP *client* and compiles without it (see below). Turning it on additionally wires `RuntimeBuilder::with_acp_agents`, which is a separate decision from having a harness. |
+| `mongodb` | A per-tenant cluster is a hosting concern. |
+
+### The `[patch]` table is replicated, not inherited
+
+A `[patch]` section only applies in the workspace root that declares it, and
+this crate is its own workspace. Until `mcp` put `openhuman_core` in the graph
+none of the vendored crates were reachable from here, so the table could be
+omitted. Now it cannot: without it Cargo resolves `tinycortex-api`, `tinyflows`
+and the rest from crates.io — where some do not exist at all — and any that did
+resolve would be a *second* copy whose trait identities would not match the ones
+the host compiled against. `src-tauri/Cargo.toml` therefore carries a replica of
+the host's table with every path prefixed `../`. Keep the two in step.
+
+### Attaching the harness is the library's job
+
+Compiling the harness in is half of it; something has to hand each company a
+pool. That sequence — the pool, plus whichever managed media/search/inference
+backends the environment supplies — lives in `opencompany::app::attach_harness`
+and is called by both `serve` and `desktop::register`. It used to be a private
+function in `src/bin/opencompany.rs`, which is precisely why the desktop path
+built companies with no harness even once the feature was on.
+
+`embedded::start_with` additionally pins the vendored keyring to the instance
+root and installs the product identity before any runtime exists — the same two
+startup calls `serve` makes, and for the same ordering reasons (see
+`src/app/journal.rs` and `src/product.rs`).
+
 ## Packaging is a claim the lane has to make
 
 Compiling and packaging are different claims. `cargo fmt`, `cargo clippy` and
