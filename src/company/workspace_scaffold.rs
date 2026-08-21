@@ -631,7 +631,10 @@ mod tests {
                 node.name
             );
         }
-        let readme = nodes.iter().find(|node| node.name == "README.md").unwrap();
+        let readme = nodes
+            .iter()
+            .find(|node| node.name == SECRETS_README_NAME)
+            .unwrap();
         let (_, body) = ws.read(&company, &readme.id).await.unwrap().unwrap();
         assert_eq!(body, SECRETS_README);
     }
@@ -772,7 +775,7 @@ mod tests {
         );
         assert_eq!(
             paths(&nodes),
-            vec!["Agents", "Agents", "secrets", "secrets/README.md"],
+            vec!["agents", "agents", "secrets", "secrets/readme.md"],
             "only the unrelated secrets scaffold may be created beside the collision"
         );
     }
@@ -813,7 +816,7 @@ mod tests {
         assert_eq!(first, second, "a second call minted a rival folder");
         assert_eq!(
             tree_paths(&ws, &company).await,
-            vec!["Agents", "agents/ceo", "secrets", "secrets/README.md"]
+            vec!["agents", "agents/ceo", "secrets", "secrets/readme.md"]
         );
         let nodes = ws.tree(&company).await.unwrap();
         let ceo = nodes.iter().find(|n| n.name == "ceo").unwrap();
@@ -837,7 +840,7 @@ mod tests {
 
         assert_eq!(
             tree_paths(&ws, &company).await,
-            vec!["Agents", "agents/cmo", "secrets", "secrets/README.md"]
+            vec!["agents", "agents/cmo", "secrets", "secrets/readme.md"]
         );
     }
 
@@ -854,7 +857,7 @@ mod tests {
             .unwrap();
 
         let nodes = ws.tree(&company).await.unwrap();
-        assert_eq!(paths(&nodes), vec!["Agents", "agents/ceo"]);
+        assert_eq!(paths(&nodes), vec!["agents", "agents/ceo"]);
         let root = nodes.iter().find(|n| n.name == AGENTS_ROOT).unwrap();
         assert_eq!(root.created_by, WorkspaceOrigin::Seed);
         assert_eq!(nodes.iter().find(|n| n.id == id).unwrap().name, "ceo");
@@ -1008,7 +1011,7 @@ mod tests {
         assert_eq!(first, second, "a second call minted a rival folder");
         assert_eq!(
             tree_paths(&ws, &company).await,
-            vec!["Desks", "desks/creative_studio"],
+            vec!["desks", "desks/creative-studio"],
             "the root appears with its first occupant, and brings nothing else"
         );
         let nodes = ws.tree(&company).await.unwrap();
@@ -1061,7 +1064,7 @@ mod tests {
         let nodes = ws.tree(&company).await.unwrap();
         assert_eq!(
             paths(&nodes),
-            vec!["Agents", "Desks", "secrets", "secrets/README.md"],
+            vec!["agents", "desks", "secrets", "secrets/readme.md"],
             "dropping `desks/` from the scaffold must not delete an existing one"
         );
         let desks = nodes.iter().find(|n| n.name == DESKS_ROOT).unwrap();
@@ -1116,7 +1119,7 @@ mod tests {
 
         assert_eq!(
             tree_paths(&ws, &company).await,
-            vec!["Agents", "agents/shared", "Desks", "desks/shared"]
+            vec!["agents", "agents/shared", "desks", "desks/shared"]
         );
     }
 

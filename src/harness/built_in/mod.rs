@@ -4191,7 +4191,7 @@ description = "Builds the product."
         let tree = ws.tree(&rec.id).await.expect("tree");
         let mut names: Vec<&str> = tree.iter().map(|n| n.name.as_str()).collect();
         names.sort_unstable();
-        assert_eq!(names, vec!["Agents", "designer"]);
+        assert_eq!(names, vec!["agents", "designer"]);
         assert_eq!(
             tree.iter().find(|n| n.id == minted).unwrap().created_by,
             crate::ports::WorkspaceOrigin::Agent {
