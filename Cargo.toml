@@ -277,9 +277,9 @@ tinycortex = { version = "0.1", optional = true }
 # NOT part of `tinymemory`: depending on it unconditionally would drag
 # `tinycortex`, and with it a bundled SQLite build, into a tenant that
 # selected a hosted engine over HTTP and needs neither (tinymemory#18 §D).
-tinymemory = { path = "vendor/openhuman/vendor/tinymemory", optional = true }
-tinymemory-api = { path = "vendor/openhuman/vendor/tinymemory/api", optional = true }
-tinymemory-remote = { path = "vendor/openhuman/vendor/tinymemory/adapters/remote", optional = true }
+tinymemory = { path = "vendor/openhuman/vendor/tinymemory/crates/tinymemory", optional = true }
+tinymemory-api = { path = "vendor/openhuman/vendor/tinymemory/crates/tinymemory-api", optional = true }
+tinymemory-remote = { path = "vendor/openhuman/vendor/tinymemory/crates/tinymemory-remote", optional = true }
 # `tinymemory-core` carries `UnifiedMemory` — the contract's own durable SQLite
 # store (`impl Memory for UnifiedMemory`, driver id `namespace`) — which is what
 # lets the *embedded* mode bind through the provider seam instead of around it
@@ -292,8 +292,8 @@ tinymemory-remote = { path = "vendor/openhuman/vendor/tinymemory/adapters/remote
 # (tinymemory#18 §D). `remote` and `null` continue to need only the three
 # contract crates above. Same single-checkout rule as those three: the path is
 # byte-identical to the one `vendor/openhuman/Cargo.toml` declares.
-tinymemory-core = { path = "vendor/openhuman/vendor/tinymemory/core", optional = true }
-tinymemory-tinycortex = { path = "vendor/openhuman/vendor/tinymemory/adapters/tinycortex", optional = true }
+tinymemory-core = { path = "vendor/openhuman/vendor/tinymemory/crates/tinymemory-core", optional = true }
+tinymemory-tinycortex = { path = "vendor/openhuman/vendor/tinymemory/crates/tinymemory-tinycortex", optional = true }
 
 # Single-file `.tar` packing/unpacking for `opencompany export`/`import`. Pure
 # Rust, no system libs, no network. Only links under the `export` feature; the
@@ -556,7 +556,7 @@ paypal = ["dep:reqwest"]
 # in its Cargo.toml); replicated here with the path rebased onto the vendored
 # checkout, same as the WS4 entries below.
 [patch."https://github.com/tinyhumansai/tinymemory"]
-tinymemory-api = { path = "vendor/openhuman/vendor/tinymemory/api" }
+tinymemory-api = { path = "vendor/openhuman/vendor/tinymemory/crates/tinymemory-api" }
 
 [patch.crates-io]
 # Reuse OpenHuman's own TinyAgents pin (2.1.0). This satisfies OpenHuman's
@@ -595,7 +595,7 @@ tempfile = "3"
 # (tinymemory-api + async-trait + serde_json + anyhow), deliberately barred
 # from reaching any engine, so it adds no engine weight to any lane's graph.
 # Same byte-identical-path rule as the `tinymemory*` entries above.
-tinymemory-conformance = { path = "vendor/openhuman/vendor/tinymemory/conformance" }
+tinymemory-conformance = { path = "vendor/openhuman/vendor/tinymemory/crates/tinymemory-conformance" }
 # `test-util` only — for `#[tokio::test(start_paused = true)]`, which the git
 # deadline test needs to fire a timeout deterministically instead of racing a
 # real child process. Dev-only: under resolver v2 this feature is not unified
