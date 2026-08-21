@@ -99,6 +99,11 @@ let snapshot: Connection[] = [];
  * connection list and looking for `connecting` fires again — probing forever
  * and taking the tab down with it. Making the guard a property of the registry
  * rather than of the caller means every future caller inherits it.
+ *
+ * Probes are additionally versioned by the address they are working against:
+ * `reseat` swaps in a new client when a connection moves, so a probe that
+ * captured the previous address must discard its writes (`stale`) and the
+ * `probe` finalizer starts the replacement client's probe it suppressed.
  */
 const probing = new Set<ConnectionId>();
 
