@@ -22,6 +22,7 @@ import {
 } from "@/api/transport/desktop";
 import { ApiError } from "@/api/types";
 import { AddHostDialog, ConsoleChrome } from "@/components/host-switcher";
+import { Button } from "@/components/ui/button";
 import { resolveConfig } from "@/config";
 import {
   addConnection,
@@ -32,7 +33,8 @@ import {
   restoreConnections,
   useConnections,
 } from "@/connections/registry";
-import { HostsProvider, type HostsValue } from "@/connections/HostsContext";
+import { HostsProvider, useHosts, type HostsValue } from "@/connections/HostsContext";
+import { firstHostCopy } from "@/connections/first-host";
 import type { ConnectionId } from "@/connections/types";
 import { ConnectionConsole } from "@/views/ConnectionConsole";
 
@@ -569,7 +571,7 @@ function Console() {
           // gone still has somewhere else to connect to — and "Add a host" is
           // the only way out of a desktop that holds none.
           <ConsoleChrome>
-            <NoConnection starting={!embedded.resolved} />
+            <NoConnection starting={!embedded.resolved} desktop={isDesktopRuntime()} />
           </ConsoleChrome>
         )}
       </div>
@@ -628,16 +630,25 @@ function Waiting({ children }: { children: React.ReactNode }) {
 /**
  * What to show when there is no connection at all.
  *
- * The browser build cannot reach this: its bootstrap connection exists whether
- * or not the host answers, and an unreachable one is a *console* rendering an
- * error rather than an absence. The desktop genuinely can — it holds only the
- * hosts it was told about, and the embedded one may not have started.
+ * Two runtimes reach this and they are not in the same situation. The desktop
+ * holds only the hosts it was told about, and the one inside it may not have
+ * started — something went wrong. A **hub** has no bootstrap connection at all
+ * (`hub-console.md`), so a hub nobody has added a host to yet is simply new.
+ * `firstHostCopy` is what keeps a first run from reading as a failure.
  *
- * The host switcher stays on screen above this (see `ConsoleChrome`), because
- * an operator whose local host is gone still has somewhere else to connect to,
- * and this is the state in which that matters most.
+ * The ordinary browser build still cannot reach it: its bootstrap connection
+ * exists whether or not the host answers, and an unreachable one is a *console*
+ * rendering an error rather than an absence.
+ *
+ * The host switcher stays on screen above this (see `ConsoleChrome`), and the
+ * button below opens its dialog. Both, deliberately: the switcher is where an
+ * operator will look next time, and the button is the answer *this* time —
+ * telling somebody with nothing on screen to go and find a control is not an
+ * answer, it is a description of one.
  */
-function NoConnection({ starting }: { starting: boolean }) {
+function NoConnection({ starting, desktop }: { starting: boolean; desktop: boolean }) {
+  const { setAddingHost } = useHosts();
+  const copy = firstHostCopy(desktop);
   return (
     <FullScreen>
       {starting ? (
@@ -645,13 +656,12 @@ function NoConnection({ starting }: { starting: boolean }) {
           <span data-testid="no-connection-starting">Starting the host on this computer…</span>
         </Waiting>
       ) : (
-        <div className="max-w-sm space-y-2" data-testid="no-connection">
-          <p className="text-sm font-medium">No host to show</p>
-          <p className="text-sm text-muted-foreground">
-            The host on this computer didn't start — another copy of OpenCompany may be
-            holding its data. Quit the other copy and reopen this one, or add a host from
-            the switcher above.
-          </p>
+        <div className="max-w-sm space-y-3" data-testid="no-connection">
+          <p className="text-sm font-medium">{copy.title}</p>
+          <p className="text-sm text-muted-foreground">{copy.body}</p>
+          <Button data-testid="no-connection-add" onClick={() => setAddingHost(true)}>
+            {copy.action}
+          </Button>
         </div>
       )}
     </FullScreen>
