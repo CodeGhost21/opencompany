@@ -72,7 +72,10 @@ async fn desktop_preset_boots_and_needs_no_sign_in() {
     assert!(me.starts_with("HTTP/1.1 200"), "{me}");
     let who: serde_json::Value = serde_json::from_str(body(&me)).unwrap();
     assert_eq!(who["email"], "local:owner", "{who}");
-    assert_eq!(who["role"], "admin", "the owner of the machine owns the company: {who}");
+    assert_eq!(
+        who["role"], "admin",
+        "the owner of the machine owns the company: {who}"
+    );
 
     // And there is no second way in to drift from. A magic link asked for here
     // is refused by mode rather than answered with the same silent 202 an
