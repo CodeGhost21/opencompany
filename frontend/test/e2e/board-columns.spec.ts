@@ -31,15 +31,8 @@ import { LIVE_BRAIN } from "./capabilities";
 
 const API = "/api/v1/company";
 
-/** Epic #183 §3's vocabulary, in board order. */
-const EXPECTED_COLUMNS = [
-  "To-do",
-  "Planning",
-  "In progress",
-  "Paused",
-  "In review",
-  "Done",
-];
+/** The board's vocabulary, in board order — three phases since issue #1512. */
+const EXPECTED_COLUMNS = ["Pending", "Working", "Done"];
 
 test.beforeEach(async ({ page }) => {
   // The first-run tour opens a modal over the board and swallows clicks.
@@ -123,18 +116,24 @@ test("the retired #/tasks lands on the board, and #/tasks/<id> still opens the c
   expect(new URL(page.url()).hash).toBe(`#/tasks/${id}`);
 });
 
-test("the board renders the six #183 columns in order, with Backlog gone", async ({ page }) => {
+test("the board renders the three phases in order, and none of the retired columns", async ({
+  page,
+}) => {
   await page.goto("/#/ledgers/tasks");
   await dismissTour(page);
 
   // The columns are a read now, not a literal, so the board is not itself
   // until they land.
   await expect(columnLabels(page)).toHaveText(EXPECTED_COLUMNS, { timeout: 15_000 });
-  // The collapse, stated as its own assertion: Backlog is not a column any more.
-  await expect(page.getByText("Backlog", { exact: true })).toHaveCount(0);
+  // The collapse, stated as its own assertion. Backlog went in #301; the four
+  // stages between To-do and Done went in #1512, and they are the ones an
+  // operator would notice missing — so each is named rather than counted.
+  for (const gone of ["Backlog", "To-do", "Planning", "In progress", "Paused", "In review"]) {
+    await expect(columnLabels(page).filter({ hasText: gone })).toHaveCount(0);
+  }
 });
 
-test("new work enters through one prompt box and lands in To-do", async ({ page, request }) => {
+test("new work enters through one prompt box and lands in Pending", async ({ page, request }) => {
   await page.goto("/#/ledgers/tasks");
   await dismissTour(page);
 
@@ -178,7 +177,7 @@ test("new work enters through one prompt box and lands in To-do", async ({ page,
   await expect.poll(async () => (await find()) !== undefined, { timeout: 15_000 }).toBe(true);
   const created = (await find())!;
 
-  expect(created.column).toBe("todo");
+  expect(created.column).toBe("pending");
   expect(created.title.length).toBeLessThanOrEqual(81); // 80 + the ellipsis
   expect(created.note).toBe(long);
   // The #1106 default, and the reason adding the control is a no-op for anyone
