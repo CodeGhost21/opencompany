@@ -42,7 +42,10 @@ import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
   DropdownMenuContent,
+  DropdownMenuGroup,
   DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -908,49 +911,93 @@ function DeskNode({
             />
           ))}
 
-          <div className="flex items-center gap-1 pt-1">
+          {/*
+            One control, two ways to staff a desk.
+
+            This was two adjacent controls: a full-width "Add teammate" button
+            that seated somebody already on the roster, and — flush against it,
+            with no label — a `UserPlus` icon that *created* a teammate here.
+            Three problems, all of them the same problem:
+
+            - the labelled one said "Add teammate" and meant "add an existing
+              one", while the page header's "New teammate" wore the identical
+              icon to the unlabelled one beside it. "Add teammate" named two
+              different actions on the same screen;
+            - an icon button with no visible label, touching a button that
+              already says the words, is not discoverable. Nobody looking for
+              "define a new teammate on this desk" finds a bare glyph;
+            - when every roster teammate was already seated, the labelled
+              control went disabled and read "Everyone is on this desk" — so
+              the only remaining way in was the affordance nobody can see.
+
+            Now the button always says "Add teammate", is never disabled, and
+            its menu carries both: whoever is left on the roster, then
+            "New teammate…". "Everyone on the roster is already here" is a
+            piece of information inside the menu rather than a dead trigger.
+          */}
+          <div className="pt-1">
             <DropdownMenu>
               <DropdownMenuTrigger
                 render={
                   <Button
                     variant="outline"
                     size="sm"
-                    className="min-w-0 flex-1"
-                    disabled={addable.length === 0 || locked}
+                    className="w-full"
+                    // Only an in-flight write holds this shut. A fully-staffed
+                    // desk does not: creating a teammate here is still a thing
+                    // an operator can do.
+                    disabled={locked}
                   />
                 }
               >
                 <Plus className="size-4" />
-                {addable.length === 0
-                  ? "Everyone is on this desk"
-                  : "Add teammate"}
+                Add teammate
               </DropdownMenuTrigger>
-              {addable.length > 0 && (
-                <DropdownMenuContent
-                  align="start"
-                  className="max-h-64 overflow-y-auto"
+              {/*
+                A fixed width, not the trigger's. The trigger is full-bleed
+                across a desk card — over a thousand pixels at 1440 — and the
+                menu inherited it, so ten short names sat down the left edge of
+                an enormous empty panel.
+              */}
+              <DropdownMenuContent align="start" className="w-64">
+                {addable.length > 0 ? (
+                  // Grouped, because `DropdownMenuLabel` is Base UI's
+                  // `Menu.GroupLabel` and it throws outside a `Menu.Group` —
+                  // a blank page, not a warning.
+                  // The *group* scrolls, not the whole menu. Put the cap on
+                  // the popup and "New teammate…" falls below the fold on any
+                  // company with a roster — which is the one item that had to
+                  // become findable for merging the two controls to be worth
+                  // anything.
+                  <DropdownMenuGroup className="max-h-64 overflow-y-auto">
+                    <DropdownMenuLabel>On the roster</DropdownMenuLabel>
+                    {addable.map((member) => (
+                      <DropdownMenuItem
+                        key={member.id}
+                        onClick={() => onAdd(member.id)}
+                      >
+                        <span className="truncate">{member.name}</span>
+                      </DropdownMenuItem>
+                    ))}
+                  </DropdownMenuGroup>
+                ) : (
+                  // Plain text, not a `GroupLabel`: there is no group here to
+                  // label, and this is a statement about the roster rather
+                  // than a heading over items.
+                  <p className="px-1.5 py-1 text-xs text-muted-foreground">
+                    Everyone on the roster is already here.
+                  </p>
+                )}
+                <DropdownMenuSeparator />
+                <DropdownMenuItem
+                  onClick={onCreateMember}
+                  aria-label={`Create teammate on ${desk.name}`}
                 >
-                  {addable.map((member) => (
-                    <DropdownMenuItem
-                      key={member.id}
-                      onClick={() => onAdd(member.id)}
-                    >
-                      <span className="truncate">{member.name}</span>
-                    </DropdownMenuItem>
-                  ))}
-                </DropdownMenuContent>
-              )}
+                  <UserPlus className="size-4" />
+                  New teammate…
+                </DropdownMenuItem>
+              </DropdownMenuContent>
             </DropdownMenu>
-            <Button
-              variant="ghost"
-              size="icon"
-              className="size-8 shrink-0"
-              aria-label={`Create teammate on ${desk.name}`}
-              disabled={locked}
-              onClick={onCreateMember}
-            >
-              <UserPlus className="size-4" />
-            </Button>
           </div>
         </div>
       </div>
