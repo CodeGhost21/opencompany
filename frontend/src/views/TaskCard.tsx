@@ -39,19 +39,12 @@ import { PRIORITY_STYLES } from "@/lib/board-columns";
 import { formatUsdCost } from "@/lib/cost";
 import { approvalAction, timeAgo } from "@/lib/language";
 import type { TaskApprovalBlock } from "@/lib/task-approvals";
-import {
-  extraOutputCount,
-  primaryLink,
-  type TaskLink,
-} from "@/lib/task-output";
+import { extraOutputCount, primaryLink, type TaskLink } from "@/lib/task-output";
 import { cn } from "@/lib/utils";
 import { tallyPrerequisites } from "./TaskPlanBrief";
 
 function priorityStyle(priority: string): string {
-  return (
-    PRIORITY_STYLES[priority as keyof typeof PRIORITY_STYLES] ??
-    PRIORITY_STYLES.low
-  );
+  return PRIORITY_STYLES[priority as keyof typeof PRIORITY_STYLES] ?? PRIORITY_STYLES.low;
 }
 
 /**
@@ -144,10 +137,7 @@ export function TaskItem({
             `low` neutral "for the same reason `idle` does: nothing is being
             asked of anyone". This finishes that thought. */}
         {task.priority !== "low" && (
-          <Badge
-            variant="outline"
-            className={cn("shrink-0 capitalize", priorityStyle(task.priority))}
-          >
+          <Badge variant="outline" className={cn("shrink-0 capitalize", priorityStyle(task.priority))}>
             {task.priority}
           </Badge>
         )}
@@ -165,9 +155,7 @@ export function TaskItem({
           >
             {initials(task.assignee)}
           </span>
-          <span className="truncate text-xs text-muted-foreground">
-            {task.assignee}
-          </span>
+          <span className="truncate text-xs text-muted-foreground">{task.assignee}</span>
         </div>
       )}
       {formatUsdCost(task.cost, "total") && (
@@ -332,7 +320,9 @@ function PlanBadgeRow({ plan }: { plan: TaskPlan }) {
     return (
       <div className="mt-2 flex items-center gap-1.5 text-2xs text-status-blocked-text">
         <CircleHelp className="size-3 shrink-0" />
-        <span>Planned — {unresolved} to be aware of</span>
+        <span>
+          Planned — {unresolved} to be aware of
+        </span>
       </div>
     );
   }
@@ -341,8 +331,7 @@ function PlanBadgeRow({ plan }: { plan: TaskPlan }) {
       <ClipboardList className="size-3 shrink-0" />
       <span>
         Planned
-        {plan.steps.length > 0 &&
-          ` · ${plan.steps.length} step${plan.steps.length === 1 ? "" : "s"}`}
+        {plan.steps.length > 0 && ` · ${plan.steps.length} step${plan.steps.length === 1 ? "" : "s"}`}
       </span>
     </div>
   );
