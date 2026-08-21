@@ -928,6 +928,38 @@ function ControlBar({
     }
   }
 
+  /**
+   * Buy one planning pass before any work is dispatched (issue #1512).
+   *
+   * The gesture the Planning **column** used to be. Collapsing the board to
+   * three columns took the drop target away, and the pass is not something to
+   * lose with it: it is the one way to have a card turned into a brief — and to
+   * have its hard prerequisites checked — before an agent turn is paid for.
+   *
+   * So it becomes a control on the card, which is where it belonged anyway. A
+   * column is a *state*, and "plan this first" is an act. It writes the
+   * `planning` stage directly, because there is no phase word that means it:
+   * dropping into Working means dispatch, and always has.
+   *
+   * It spends money, exactly as the drag into Planning did, which is why it is
+   * a deliberate second button rather than something folded into Dispatch.
+   */
+  async function planFirst() {
+    setBusy(true);
+    try {
+      const saved = await patchTask(client, company, task.id, {
+        column: "planning",
+      });
+      onSaved(saved);
+      await onChanged();
+      toast.success("Planning — a brief is being written for this card.");
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "could not plan the task");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function saveAssignee() {
     const next = assignee.trim();
     // Only an unchanged value is a no-op. Blank used to short-circuit here too,
@@ -1019,14 +1051,32 @@ function ControlBar({
             )}
           </>
         ) : (
-          <RetryButton
-            label={resumeLabel}
-            title={task.title}
-            irreversible={irreversible}
-            historyIncomplete={historyIncomplete}
-            disabled={busy}
-            onConfirm={() => void patchColumn()}
-          />
+          <>
+            <RetryButton
+              label={resumeLabel}
+              title={task.title}
+              irreversible={irreversible}
+              historyIncomplete={historyIncomplete}
+              disabled={busy}
+              onConfirm={() => void patchColumn()}
+            />
+            {/* Only before anything has started: planning a card that has
+                already been worked would write a brief for work that exists,
+                which is the one shape the pass has nothing useful to say
+                about (issue #1512). */}
+            {task.column === "pending" && (
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-8"
+                disabled={busy}
+                onClick={() => void planFirst()}
+              >
+                <ClipboardList className="mr-1.5 size-3.5" />
+                Plan first
+              </Button>
+            )}
+          </>
         )}
 
         <div className="ml-auto flex items-center gap-2">
