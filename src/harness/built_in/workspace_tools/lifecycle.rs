@@ -328,13 +328,6 @@ impl Tool for WorkspaceDeleteTool {
             )));
         };
 
-        // The host owns the name (the same rule `workspace_create` applies to
-        // the name it mints): a rename lands lowercase and dashed, so renaming
-        // cannot walk a node back out of the convention the tree is kept in.
-        // The reply below echoes the path it actually landed at.
-        let new_name = new_name.map(kebab_name);
-        let new_name = new_name.as_deref();
-
         let (index, entry) = match resolve_in_index(&self.workspace, path, id).await {
             Ok(pair) => pair,
             Err(refusal) => return Ok(refusal),
@@ -535,6 +528,14 @@ impl Tool for WorkspaceRenameTool {
                 shown = echo_path(name),
             )));
         }
+
+        // The host owns the name (the same rule `workspace_create` applies to
+        // the name it mints): a rename lands lowercase and dashed, so renaming
+        // cannot walk a node back out of the convention the tree is kept in.
+        // The reply below echoes the path it actually landed at.
+        let new_name = new_name.map(kebab_name);
+        let new_name = new_name.as_deref();
+
 
         let (index, entry) = match resolve_in_index(&self.workspace, path, id).await {
             Ok(pair) => pair,
