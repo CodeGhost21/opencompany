@@ -11,12 +11,8 @@
 // rebinds it live.
 import { describe, expect, it } from "vitest";
 
-import {
-  documentSlug,
-  type MemoryEngineState,
-  type MemoryStats,
-  teammateMemoryCount,
-} from "@/api/memory";
+import { documentSlug, type MemoryEngineState, type MemoryStats } from "@/api/memory";
+import { teammateMemoryCount } from "@/views/MemoryView";
 
 function engine(overrides: Partial<MemoryEngineState>): MemoryEngineState {
   return {
