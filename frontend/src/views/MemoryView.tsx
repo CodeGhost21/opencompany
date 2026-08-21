@@ -197,6 +197,14 @@ export function MemoryView({ client, company }: Props) {
     return counts;
   }, [entries]);
 
+  // The one engine state the *writing* half of this page has to respect: the
+  // null engine takes every write and throws it away, so a live "New memory"
+  // button beside that warning invites work the host will silently drop
+  // (issue #1410). The panel's health dot already refuses to go green here for
+  // the same reason.
+  const mode = enginePanelMode(engine);
+  const discarding = mode === "discard";
+
   async function add(fields: { kind: MemoryKind; title: string; body: string }) {
     await createMemory(client, company, fields);
     await load({ silent: true });
@@ -228,13 +236,23 @@ export function MemoryView({ client, company }: Props) {
             </p>
           </div>
           <div className="flex items-center gap-3">
-            {engine && engine.backend !== "store" && (
+            {engine && mode !== "hidden" && (
               <span
-                className="rounded-full border px-3 py-1 text-xs text-muted-foreground"
+                className={cn(
+                  "rounded-full border px-3 py-1 text-xs",
+                  // A capability count in the calm register, inches above an
+                  // alert saying every write is discarded, reads as a fact
+                  // about a working engine. Amber, like the dot (issue #1410).
+                  discarding
+                    ? "border-status-blocked/40 text-status-blocked-text"
+                    : "text-muted-foreground",
+                )}
                 title={
-                  engine.capabilities.length
-                    ? `Capability families: ${engine.capabilities.join(", ")}`
-                    : "Capabilities not negotiated"
+                  discarding
+                    ? "This engine discards every write — nothing saved here is retained."
+                    : engine.capabilities.length
+                      ? `Capability families: ${engine.capabilities.join(", ")}`
+                      : "Capabilities not negotiated"
                 }
                 data-testid="memory-engine-badge"
               >
@@ -244,9 +262,28 @@ export function MemoryView({ client, company }: Props) {
                 )}
               </span>
             )}
-            <Button onClick={() => setAddOpen(true)} data-testid="memory-add">
-              <Plus className="size-4" /> New memory
-            </Button>
+            {/*
+              The reason rides on the wrapper, not the button: `Button` carries
+              `disabled:pointer-events-none`, so a `title` on a disabled button
+              never surfaces — the span still takes the hover and shows it.
+            */}
+            <span
+              title={
+                discarding
+                  ? "This engine discards every write — nothing saved here is retained."
+                  : undefined
+              }
+            >
+              <Button
+                onClick={() => setAddOpen(true)}
+                disabled={discarding}
+                // Rendered, not hidden: the operator should see that writing is
+                // the thing this engine cannot do, not find the control missing.
+                data-testid="memory-add"
+              >
+                <Plus className="size-4" /> New memory
+              </Button>
+            </span>
           </div>
         </div>
 
