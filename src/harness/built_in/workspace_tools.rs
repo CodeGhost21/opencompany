@@ -2537,7 +2537,7 @@ mod tests {
     fn an_absolute_host_path_resolves_to_nothing() {
         let index = PathIndex::build(vec![
             folder("a", "Standards", None),
-            file("b", "Engineering standards.md", Some("a")),
+            file("b", "engineering-standards.md", Some("a")),
         ]);
         let err = index.resolve(Some("/etc/passwd"), None).unwrap_err();
         assert!(matches!(err, ResolveError::NotFound(_)), "{err:?}");
@@ -2609,7 +2609,7 @@ mod tests {
         let tool = WorkspaceListTool::new(ws(store.clone(), CompanyId::new("other")));
         let out = text(&tool.execute(json!({})).await.unwrap());
         assert!(out.contains("workspace is empty"), "{out}");
-        assert!(!out.contains("Engineering standards.md"), "{out}");
+        assert!(!out.contains("engineering-standards.md"), "{out}");
     }
 
     /// Step 2: a *valid* node id lifted from company A cannot be read by
@@ -2688,11 +2688,11 @@ mod tests {
             all.contains("file\tstandards/engineering-standards.md\tid=n-eng\trev=2000"),
             "{all}"
         );
-        assert!(all.contains("README.md"), "{all}");
+        assert!(all.contains("readme.md"), "{all}");
 
         let scoped = text(&tool.execute(json!({"prefix": "Standards"})).await.unwrap());
-        assert!(scoped.contains("Engineering standards.md"), "{scoped}");
-        assert!(!scoped.contains("README.md"), "{scoped}");
+        assert!(scoped.contains("engineering-standards.md"), "{scoped}");
+        assert!(!scoped.contains("readme.md"), "{scoped}");
     }
 
     #[tokio::test]
@@ -2902,7 +2902,7 @@ mod tests {
     fn small_tree() -> Vec<WorkspaceNode> {
         vec![
             folder("f-standards", "Standards", None),
-            file("n-eng", "Engineering standards.md", Some("f-standards")),
+            file("n-eng", "engineering-standards.md", Some("f-standards")),
         ]
     }
 
@@ -3875,7 +3875,7 @@ mod tests {
         for n in 0..MAX_LIST_ENTRIES {
             nodes.push(file(
                 &format!("node-{n:04}-0000000000"),
-                &format!("Engineering standards v{n:03}.md"),
+                &format!("engineering-standards-v{n:03}.md"),
                 Some("f-standards"),
             ));
         }
@@ -4208,7 +4208,7 @@ mod tests {
             .await
             .unwrap()
             .into_iter()
-            .find(|n| n.name == "Agent addendum.md")
+            .find(|n| n.name == "agent-addendum.md")
             .unwrap();
         assert_eq!(node.created_by, agent_origin());
         assert_eq!(node.updated_by, agent_origin());
@@ -4300,7 +4300,7 @@ mod tests {
         }
 
         let tree = store.tree(&id).await.unwrap();
-        let brief = tree.iter().find(|n| n.name == "Launch brief.md").unwrap();
+        let brief = tree.iter().find(|n| n.name == "launch-brief.md").unwrap();
         let ceo = tree.iter().find(|n| n.name == "ceo").unwrap();
         assert_eq!(brief.parent_id.as_deref(), Some(ceo.id.as_str()));
         assert_eq!(ceo.kind, NodeKind::Folder);
@@ -4348,7 +4348,7 @@ mod tests {
             agent_origin(),
             "the folder belongs to the agent that earned it"
         );
-        let brief = tree.iter().find(|n| n.name == "Launch brief.md").unwrap();
+        let brief = tree.iter().find(|n| n.name == "launch-brief.md").unwrap();
         assert_eq!(brief.parent_id.as_deref(), Some(home.id.as_str()));
 
         // A second note goes into the same folder — minting is find-or-create,
@@ -4910,7 +4910,7 @@ mod tests {
             vec![AGENTS_ROOT],
             vec![AGENTS_ROOT, "cmo"],
             vec![AGENTS_ROOT, "cmo", "brief.md"],
-            vec!["Standards", "Engineering standards.md"],
+            vec!["standards", "engineering-standards.md"],
             // A name that merely starts with the agent's id is a different
             // folder, because the comparison is segment-wise and not a prefix.
             vec![AGENTS_ROOT, "ceo-archive", "brief.md"],
@@ -5382,7 +5382,7 @@ mod tests {
         // discriminator, so it must not appear on text entries.
         let note = out
             .lines()
-            .find(|l| l.contains("README.md"))
+            .find(|l| l.contains("readme.md"))
             .expect("the note is listed");
         assert!(!note.contains("image/"), "{note}");
     }
