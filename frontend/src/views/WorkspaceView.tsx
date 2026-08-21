@@ -1140,12 +1140,16 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
   // Answers whether the note actually landed, which only the rescue banner
   // reads: it is holding the last copy of some text and must not clear itself
   // on a create that failed.
-  async function createAndOpen(name: string, content?: string): Promise<boolean> {
+  async function createAndOpen(
+    name: string,
+    content?: string,
+    parentId?: string | null,
+  ): Promise<boolean> {
     try {
       const created = await createNode(client, company, {
         name: ensureMdExt(name.trim() || "Untitled"),
         kind: "file",
-        parentId: null,
+        parentId: parentId ?? defaultParentId,
         content: content ?? "",
       });
       setNodes((all) => [...all, created]);
@@ -1173,14 +1177,15 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
     }
   }
 
-  async function createFolder(name: string) {
+  async function createFolder(name: string, parentId?: string | null) {
     try {
       const created = await createNode(client, company, {
         name: name.trim() || "New folder",
         kind: "folder",
-        parentId: null,
+        parentId: parentId ?? defaultParentId,
       });
       setNodes((all) => [...all, created]);
+      if (created.parentId) revealFolder(created.parentId);
     } catch (e) {
       toast.error(message(e, "could not create the folder"));
     }
@@ -1213,9 +1218,7 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
       // the confirmation either.
       toast.success(
         `Moved “${titleOf(node)}” to ${
-          destId
-            ? folderPathLabel(nodes, destId, rosterNames)
-            : "the workspace root"
+          destId ? folderPathLabel(nodes, destId, rosterNames) : "the workspace root"
         }.`,
       );
     } catch (e) {
@@ -1357,7 +1360,7 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
     if (!files?.length) return;
     for (const file of Array.from(files)) {
       try {
-        const created = await uploadFile(client, company, file, null);
+        const created = await uploadFile(client, company, file, defaultParentId);
         setNodes((all) => [...all, created]);
       } catch (e) {
         toast.error(`${file.name}: ${message(e, "upload failed")}`);
@@ -1367,6 +1370,24 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
 
   const body = draft ?? openFile?.content ?? "";
   const openNode = nodeById(nodes, openId);
+  /**
+   * Where a create with no named destination lands (issue #1477).
+   *
+   * Every create passed `parentId: null`, so an operator standing in
+   * `Standards/Engineering/` made a note and it appeared at the root,
+   * unannounced — and the only way to file it was the Move dialog, which was
+   * itself unusable (#1381). "Where I am" is the open note's folder, or the
+   * folder itself if a folder is what is open; only a genuinely empty selection
+   * falls back to the root.
+   *
+   * Never `derived/`: the host refuses writes there, so inheriting it from an
+   * open ledger file would turn every create into an error toast.
+   */
+  const defaultParentId: string | null = (() => {
+    if (!openNode) return null;
+    const parent = openNode.kind === "folder" ? openNode.id : openNode.parentId;
+    return parent && !isDerivedNode(nodes, parent) ? parent : null;
+  })();
   /**
    * Whether the host will refuse a write to the open note (issue #1222).
    *
@@ -1549,6 +1570,7 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
               onRename={(node) => setPrompt({ mode: "rename", node })}
               onMove={(node) => setMoving(node)}
               onDelete={(node) => setConfirmDelete(node)}
+              onNewHere={(folder, mode) => setPrompt({ mode, parentId: folder.id })}
             />
           )}
         </div>
@@ -1839,10 +1861,12 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
       <NamePrompt
         nodes={nodes}
         state={prompt}
+        rosterNames={rosterNames}
+        defaultParentId={defaultParentId}
         onClose={() => setPrompt(null)}
         onSubmit={(name) => {
-          if (prompt?.mode === "folder") void createFolder(name);
-          else if (prompt?.mode === "file") void createAndOpen(name);
+          if (prompt?.mode === "folder") void createFolder(name, prompt.parentId);
+          else if (prompt?.mode === "file") void createAndOpen(name, undefined, prompt.parentId);
           else if (prompt?.mode === "rename" && prompt.node) void rename(prompt.node, name);
           setPrompt(null);
         }}
@@ -1997,6 +2021,8 @@ interface TreeProps {
   onRename: (node: FsNode) => void;
   onMove: (node: FsNode) => void;
   onDelete: (node: FsNode) => void;
+  /** Create inside this folder (issue #1477). */
+  onNewHere: (folder: FsNode, mode: "file" | "folder") => void;
 }
 
 /**
@@ -2313,6 +2339,21 @@ function TreeRow({ node, ...props }: TreeProps & { node: FsNode }) {
               </DropdownMenuGroup>
             ) : (
               <>
+                {/* The tree is where an operator decides where a note belongs,
+                    and until now it was the one place that could not make one
+                    (issue #1477). The toolbar's New note has no idea which
+                    folder is on screen; this does. */}
+                {isFolder && (
+                  <>
+                    <DropdownMenuItem onClick={() => props.onNewHere(node, "file")}>
+                      New note here
+                    </DropdownMenuItem>
+                    <DropdownMenuItem onClick={() => props.onNewHere(node, "folder")}>
+                      New folder here
+                    </DropdownMenuItem>
+                    <DropdownMenuSeparator />
+                  </>
+                )}
                 <DropdownMenuItem onClick={() => props.onRename(node)}>Rename</DropdownMenuItem>
                 <DropdownMenuItem onClick={() => props.onMove(node)}>Move to…</DropdownMenuItem>
                 <DropdownMenuSeparator />
@@ -2561,9 +2602,7 @@ function MissingNote({
         <div className="flex flex-1 flex-col items-center justify-center gap-3 px-6 text-center">
           <FileX className="size-8 text-muted-foreground" />
           <div className="space-y-1">
-            <p className="font-medium">
-              That note is no longer in this workspace
-            </p>
+            <p className="font-medium">That note is no longer in this workspace</p>
             <p className="max-w-md text-sm text-muted-foreground">
               The link you followed points at a note this company does not have.
             </p>
@@ -2670,6 +2709,14 @@ function IconBtn({
 interface PromptState {
   mode: "folder" | "file" | "rename";
   node?: FsNode;
+  /**
+   * Where a create lands (issue #1477).
+   *
+   * `undefined` means "wherever the view decides"; an explicit value is a
+   * destination the operator named — including `null`, the workspace root,
+   * which is a real answer and not the absence of one.
+   */
+  parentId?: string | null;
 }
 
 /**
@@ -2687,11 +2734,16 @@ interface PromptState {
 function NamePrompt({
   nodes,
   state,
+  rosterNames,
+  defaultParentId,
   onClose,
   onSubmit,
 }: {
   nodes: FsNode[];
   state: PromptState | null;
+  rosterNames: RosterNames;
+  /** Where a create with no named destination will land (issue #1477). */
+  defaultParentId: string | null;
   onClose: () => void;
   onSubmit: (name: string) => void;
 }) {
@@ -2741,6 +2793,23 @@ function NamePrompt({
                 ? "Notes get a .md extension automatically."
                 : "Give it a name."}
           </DialogDescription>
+          {/* Where it will land, before it lands (issue #1477). Every create
+              used to go to the root regardless of what the operator had open,
+              and said so nowhere — the note simply appeared somewhere else. */}
+          {state && state.mode !== "rename" && (
+            <p className="text-xs text-muted-foreground" data-testid="workspace-prompt-dest">
+              Goes in{" "}
+              <span className="font-medium text-foreground">
+                {(() => {
+                  const parent = state.parentId === undefined ? defaultParentId : state.parentId;
+                  return parent
+                    ? folderPathLabel(nodes, parent, rosterNames)
+                    : "the workspace root";
+                })()}
+              </span>
+              .
+            </p>
+          )}
         </DialogHeader>
         {pending ? (
           <MoveAudienceConfirm

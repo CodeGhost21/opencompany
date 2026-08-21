@@ -21,16 +21,12 @@ import { WorkspaceView } from "@/views/WorkspaceView";
  * Cancel and no undo.
  */
 
-function node(over: {
-  id: string;
-  name: string;
-  kind: "folder" | "file";
-  parentId?: string;
-}) {
+function node(over: { id: string; name: string; kind: "folder" | "file"; parentId?: string }) {
   return { ...over, updatedAt: 1 };
 }
 
 const TREE = [
+  node({ id: "secrets", name: "secrets", kind: "folder" }),
   node({ id: "standards", name: "Standards", kind: "folder" }),
   node({
     id: "s-drafts",
@@ -73,9 +69,7 @@ function host(team: TeamMemberDto[]) {
 }
 
 beforeEach(() => {
-  (
-    globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }
-  ).IS_REACT_ACT_ENVIRONMENT = true;
+  (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
   Element.prototype.scrollIntoView = vi.fn();
   localStorage.clear();
   container = document.createElement("div");
@@ -92,8 +86,7 @@ function menuItem(label: string): HTMLElement {
   const found = Array.from(document.querySelectorAll('[role="menuitem"]')).find(
     (el) => el.textContent?.trim() === label,
   );
-  if (!found)
-    throw new Error(`no “${label}” menu item in:\n${document.body.innerHTML}`);
+  if (!found) throw new Error(`no “${label}” menu item in:\n${document.body.innerHTML}`);
   return found as HTMLElement;
 }
 
@@ -114,7 +107,12 @@ function destinations(): HTMLButtonElement[] {
 
 function labels(): string[] {
   return destinations().map(
-    (d) => d.textContent?.replace("Here", "").trim() ?? "",
+    (d) =>
+      d.textContent
+        ?.replace("Here", "")
+        // The audience marker (#1465) rides on the row; the label is the path.
+        .replace(/Hides it|Shares it/, "")
+        .trim() ?? "",
   );
 }
 
@@ -160,6 +158,7 @@ describe("the Move dialog says where each destination is (issue #1381)", () => {
       "Agents / Nadia",
       "Product",
       "Product / Drafts",
+      "secrets",
       "Standards",
       "Standards / Drafts",
     ]);
@@ -184,9 +183,7 @@ describe("the Move dialog says where each destination is (issue #1381)", () => {
 describe("picking a destination is not the same as moving (issue #1381)", () => {
   it("does not move on the first click", async () => {
     await openMove();
-    const target = destinations().find((d) =>
-      d.textContent?.includes("Product / Drafts"),
-    );
+    const target = destinations().find((d) => d.textContent?.includes("Product / Drafts"));
 
     await act(async () => {
       target?.click();
@@ -208,11 +205,8 @@ describe("picking a destination is not the same as moving (issue #1381)", () => 
       destinations()[1]?.click();
     });
     expect(
-      (
-        document.querySelector(
-          '[data-testid="workspace-move-confirm"]',
-        ) as HTMLButtonElement
-      ).disabled,
+      (document.querySelector('[data-testid="workspace-move-confirm"]') as HTMLButtonElement)
+        .disabled,
     ).toBe(false);
   });
 
@@ -226,17 +220,12 @@ describe("picking a destination is not the same as moving (issue #1381)", () => 
     });
     await act(async () => {
       (
-        document.querySelector(
-          '[data-testid="workspace-move-confirm"]',
-        ) as HTMLButtonElement
+        document.querySelector('[data-testid="workspace-move-confirm"]') as HTMLButtonElement
       ).click();
     });
 
     expect(client.patch).toHaveBeenCalledTimes(1);
-    const [, body] = client.patch.mock.calls[0] as [
-      string,
-      { parentId: string },
-    ];
+    const [, body] = client.patch.mock.calls[0] as [string, { parentId: string }];
     expect(body.parentId).toBe("p-drafts");
   });
 
@@ -262,19 +251,95 @@ describe("picking a destination is not the same as moving (issue #1381)", () => 
 describe("a long destination list can be narrowed (issue #1381)", () => {
   it("filters on the path label", async () => {
     await openMove();
-    const box = document.querySelector(
-      '[data-testid="workspace-move-filter"]',
-    ) as HTMLInputElement;
+    const box = document.querySelector('[data-testid="workspace-move-filter"]') as HTMLInputElement;
 
     await act(async () => {
-      const setter = Object.getOwnPropertyDescriptor(
-        HTMLInputElement.prototype,
-        "value",
-      )?.set;
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
       setter?.call(box, "product /");
       box.dispatchEvent(new Event("input", { bubbles: true }));
     });
 
     expect(labels()).toEqual(["Product / Drafts"]);
+  });
+});
+
+/**
+ * The audience half (issue #1465) meeting select-then-confirm (issue #1381).
+ *
+ * #1465 shipped the warning on a dialog where an ordinary destination committed
+ * on one click, so the warning *was* the confirm step. Now every destination
+ * has a Move button — so the warning has to be what that button leads to for a
+ * boundary-crossing destination, rather than being skipped because a confirm
+ * already happened.
+ */
+describe("moving across the secrets boundary still asks (issues #1381, #1465)", () => {
+  it("marks the row before it is picked", async () => {
+    await openMove();
+    const secrets = destinations().find((d) => d.textContent?.startsWith("secrets"));
+
+    expect(secrets?.getAttribute("data-audience-change")).toBe("hidden");
+    expect(secrets?.textContent).toContain("Hides it");
+  });
+
+  it("does not move when Move is pressed — it names the consequence first", async () => {
+    await openMove();
+
+    await act(async () => {
+      destinations()
+        .find((d) => d.textContent?.startsWith("secrets"))
+        ?.click();
+    });
+    await act(async () => {
+      (
+        document.querySelector('[data-testid="workspace-move-confirm"]') as HTMLButtonElement
+      ).click();
+    });
+
+    expect(client.patch).not.toHaveBeenCalled();
+    expect(document.body.textContent).toContain("This changes who can read it.");
+  });
+
+  it("moves once the consequence is acknowledged", async () => {
+    await openMove();
+
+    await act(async () => {
+      destinations()
+        .find((d) => d.textContent?.startsWith("secrets"))
+        ?.click();
+    });
+    await act(async () => {
+      (
+        document.querySelector('[data-testid="workspace-move-confirm"]') as HTMLButtonElement
+      ).click();
+    });
+    const confirm = Array.from(document.querySelectorAll("button")).find((b) =>
+      /hide|move/i.test(b.textContent ?? ""),
+    );
+    await act(async () => {
+      confirm?.click();
+    });
+
+    expect(client.patch).toHaveBeenCalledTimes(1);
+    expect((client.patch.mock.calls[0] as [string, { parentId: string }])[1].parentId).toBe(
+      "secrets",
+    );
+  });
+
+  it("leaves an ordinary destination one press away, as before", async () => {
+    await openMove();
+
+    await act(async () => {
+      destinations()
+        .find((d) => d.textContent?.includes("Product / Drafts"))
+        ?.click();
+    });
+    await act(async () => {
+      (
+        document.querySelector('[data-testid="workspace-move-confirm"]') as HTMLButtonElement
+      ).click();
+    });
+
+    expect(client.patch).toHaveBeenCalledTimes(1);
+    expect(document.body.textContent).not.toContain("This changes who can read it.");
   });
 });
