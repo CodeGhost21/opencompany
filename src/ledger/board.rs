@@ -51,7 +51,7 @@ pub struct BoardColumn {
     /// outstanding. A card in review or paused is **stopped, not finished** —
     /// calling either closed would make "what is still open" answer wrong.
     pub closed: bool,
-    /// The heading this column's cards render under in `derived/TASKS.md`.
+    /// The heading this column's cards render under in `derived/tasks.md`.
     ///
     /// Several columns share one heading on purpose: a reader opening the file
     /// wants *in flight* and *waiting on a person*, not six lists of one. The

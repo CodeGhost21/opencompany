@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   ArrowRight,
   Building2,
@@ -58,18 +58,6 @@ interface Props {
    */
   notice?: string;
   /**
-   * An address to start the form with, when the caller knows one.
-   *
-   * Only the desktop's embedded host does: a packaged install admits one
-   * standing local operator and mails nothing, so a blank field asked a person
-   * to guess an address they have never seen, and every guess came back as the
-   * same silent acknowledgement (#632).
-   *
-   * A suggestion, not a lock — it seeds the field and the person can replace
-   * it, which matters as soon as they invite anyone else to their own host.
-   */
-  suggestedEmail?: string;
-  /**
    * Reports a completed sign-in.
    *
    * Handed the whole {@link SignIn}, not just the user, because a cross-origin
@@ -86,9 +74,12 @@ type Mode = "link" | "password";
  *
  * `email` because that is what every company did before the mode was
  * configurable, so an older host — which has no `/auth/config` route — renders
- * exactly the screen it always did.
+ * exactly the screen it always did. `magicLink` is assumed to work for the same
+ * reason: a host that has not told us otherwise is one that either mails links
+ * or echoes them, and starting from false would blank the form on every
+ * deployment for the length of one fetch.
  */
-const ASSUMED_CONFIG: AuthConfig = { mode: "email", passwords: true };
+const ASSUMED_CONFIG: AuthConfig = { mode: "email", passwords: true, magicLink: true };
 
 /**
  * The sign-in view: magic link by default, password for anyone who set one.
@@ -108,7 +99,6 @@ export function Login({
   company,
   companyName,
   notice,
-  suggestedEmail,
   onSignedIn,
 }: Props) {
   const [mode, setMode] = useState<Mode>("link");
@@ -130,19 +120,14 @@ export function Login({
    * of them should be offered a wallet button.
    */
   const [authConfig, setAuthConfig] = useState<AuthConfig>(ASSUMED_CONFIG);
-  const [email, setEmail] = useState(suggestedEmail ?? "");
-  // The suggestion usually arrives *after* this mounts. A relaunch restores the
-  // embedded connection from its remembered profile immediately, while the
-  // address and the operator come over IPC a moment later — so on every launch
-  // but the first, seeding the initial state alone would leave the field blank.
-  //
-  // Only into an empty field: a suggestion must never overwrite what somebody
-  // has typed, and clearing the prefilled address on purpose (to sign in as
-  // someone else) must not be undone — this runs when the *suggestion* changes,
-  // which it does once.
-  useEffect(() => {
-    if (suggestedEmail) setEmail((current) => (current === "" ? suggestedEmail : current));
-  }, [suggestedEmail]);
+  // Always blank. The desktop used to prefill a synthetic
+  // `operator@opencompany.local` here, because a packaged install admitted that
+  // one address and mailed nothing, so a blank field asked a person to guess a
+  // credential they had never seen (#632). The desktop now runs `none` mode and
+  // has no address at all, and it was the only caller that ever knew one — so
+  // there is nothing left to suggest, and a form on any other host is a form
+  // where the person genuinely knows their own address.
+  const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -171,6 +156,31 @@ export function Login({
   useEffect(() => {
     if (!authConfig.passwords && mode === "password") setMode("link");
   }, [authConfig.passwords, mode]);
+
+  /**
+   * A host in `email` mode that can deliver nothing.
+   *
+   * Not the same as "no email sign-in": hub OAuth and passwords never touch a
+   * mailbox, so this company still signs people in exactly as it says it does.
+   * What is dead is the *link*, and only the host knows that — `auth/request`
+   * answers `sent: true` here precisely as it does where the mail went out.
+   */
+  const linkGoesNowhere = authConfig.mode === "email" && !authConfig.magicLink;
+
+  /**
+   * Step out of link mode once, on such a host, when there is somewhere to step.
+   *
+   * Once, deliberately: someone may switch back on purpose — an operator who
+   * has just configured a transport behind this very screen is the likeliest
+   * visitor here — and a rule that re-applied itself would make the toggle
+   * beneath the form unusable rather than merely mistaken.
+   */
+  const demotedLink = useRef(false);
+  useEffect(() => {
+    if (demotedLink.current || !linkGoesNowhere || !authConfig.passwords) return;
+    demotedLink.current = true;
+    setMode("password");
+  }, [linkGoesNowhere, authConfig.passwords]);
 
   useEffect(() => {
     let cancelled = false;
@@ -412,6 +422,27 @@ export function Login({
           </div>
         )}
 
+        {/*
+          Said here because it is the last place it can be said. Every other
+          surface reports a link as sent, so an operator who is never told will
+          type an address, be thanked, and wait for a message no process on this
+          host will ever produce. The form stays below regardless: mail can be
+          configured without restarting this console, and a person who knows a
+          link is coming should still be able to ask for one.
+        */}
+        {linkGoesNowhere && (
+          <Alert className="mb-4" data-testid="login-no-mail">
+            <TriangleAlert className="size-4" />
+            <AlertDescription className="text-foreground">
+              {hubProviders.length > 0
+                ? `This host can't send mail, so a sign-in link won't arrive. Use one of the buttons above${authConfig.passwords ? ", or the password you set for this company." : "."}`
+                : authConfig.passwords
+                  ? "This host can't send mail, so a sign-in link won't arrive. Sign in with the password you set for this company — an admin can issue you one if you have none."
+                  : "This host can't send mail, so a sign-in link won't arrive. Whoever runs it needs to configure a mail transport before this screen can sign anyone in."}
+            </AlertDescription>
+          </Alert>
+        )}
+
         {authConfig.mode === "email" ? (
         <Card className="p-6">
           {sent && mode === "link" ? (
@@ -475,23 +506,7 @@ export function Login({
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
                   placeholder="you@company.com"
-                  aria-describedby={
-                    suggestedEmail && email === suggestedEmail ? "email-hint" : undefined
-                  }
                 />
-                {suggestedEmail && email === suggestedEmail ? (
-                  // Otherwise the prefilled address reads as somebody else's,
-                  // and the natural move is to clear it — which is the one
-                  // address this host will not answer for.
-                  <p
-                    id="email-hint"
-                    className="text-xs text-muted-foreground"
-                    data-testid="suggested-email-hint"
-                  >
-                    The operator account on this computer. Nothing is mailed —
-                    the link comes back here.
-                  </p>
-                ) : null}
               </div>
 
               {mode === "password" ? (
@@ -554,6 +569,9 @@ export function Login({
 function subtitle(config: AuthConfig, mode: Mode): string {
   if (config.mode === "none") return "";
   if (config.mode === "wallet") return "Prove you hold the wallet. Nothing is emailed.";
+  // Promising a link from a host with no transport is the one line here that
+  // sends someone away to wait for nothing.
+  if (mode === "link" && !config.magicLink) return "This host can\'t email you a link.";
   return mode === "link"
     ? "We\'ll email you a link. No password needed."
     : "Use the password you set for this company.";

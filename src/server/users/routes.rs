@@ -714,7 +714,7 @@ pub(crate) fn mail_transport_wired(state: &AppState) -> bool {
 /// that shape — there is no mailbox to flood and no remote caller to leak to —
 /// which is what makes skipping the resend throttle there safe. Any other host
 /// keeps the throttle.
-fn echoes_code_in_response(state: &AppState) -> bool {
+pub(crate) fn echoes_code_in_response(state: &AppState) -> bool {
     state.config().is_local_only() && !mail_transport_wired(state)
 }
 
@@ -1240,6 +1240,11 @@ struct AuthConfigResult {
     /// Whether a password may be offered alongside the magic-link form. Only
     /// ever true in `email` mode.
     passwords: bool,
+    /// Whether a magic link asked for here can actually reach the person: a
+    /// wired transport, or a loopback host that hands the code back in the
+    /// response. False means the link form is a dead end and the console must
+    /// say so rather than draw it.
+    magic_link: bool,
 }
 
 /// `GET …/auth/config` — the sign-in mode this company uses.
@@ -1253,11 +1258,18 @@ struct AuthConfigResult {
 /// The console must branch on this rather than on which routes 404, so that a
 /// company with no sign-in renders "open the desktop app" instead of an email
 /// box that can never work.
-async fn auth_config(company: PublicCompany) -> Json<AuthConfigResult> {
+async fn auth_config(
+    company: PublicCompany,
+    State(state): State<AppState>,
+) -> Json<AuthConfigResult> {
     let mode = company.runtime.auth_mode();
     Json(AuthConfigResult {
         mode: mode.as_str(),
         passwords: mode.uses_email(),
+        // The same two predicates `request_code` itself branches on, asked
+        // rather than restated: whether the console draws the form and whether
+        // the code goes anywhere must never be two separate opinions.
+        magic_link: mail_transport_wired(&state) || state.config().is_local_only(),
     })
 }
 

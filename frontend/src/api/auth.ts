@@ -34,6 +34,16 @@ export interface AuthConfig {
   mode: AuthMode;
   /** Whether a password may be offered. Only ever true in `email` mode. */
   passwords: boolean;
+  /**
+   * Whether a magic link asked for here reaches anybody: the host has a mail
+   * transport, or it is loopback-bound and hands the code straight back.
+   *
+   * False is a routable host with no transport, and the console has to act on
+   * it — `auth/request` answers `sent: true` there exactly as it does on a host
+   * that delivered, so nothing else in the flow will ever reveal that the link
+   * went nowhere.
+   */
+  magicLink: boolean;
 }
 
 /**
@@ -46,15 +56,21 @@ export interface AuthConfig {
  *
  * Defaults to `email` if the host cannot answer, which is what every host
  * predating this route does.
+ *
+ * `magicLink` defaults to true through both kinds of rollout skew — no route,
+ * and a route that omits the field — because a host old enough not to report it
+ * either mails links or echoes them. Assuming false there would withdraw a
+ * working sign-in from every deployment that has not updated yet.
  */
 export async function fetchAuthConfig(
   client: OpenCompanyClient,
   company: string | null,
 ): Promise<AuthConfig> {
   try {
-    return await client.get<AuthConfig>(`${client.scopeFor(company)}/auth/config`);
+    const config = await client.get<AuthConfig>(`${client.scopeFor(company)}/auth/config`);
+    return { ...config, magicLink: config.magicLink ?? true };
   } catch {
-    return { mode: "email", passwords: true };
+    return { mode: "email", passwords: true, magicLink: true };
   }
 }
 

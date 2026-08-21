@@ -9,6 +9,8 @@ Start here:
 - [[Support playbook]] — how a ticket gets resolved
 - [[Support policy]] — the rules for refunds and escalation
 - [[Login outage]] — the incident in flight
+- [[Answering well]] — what makes an answer worth sending
+- [[Exception log]] — how a judgement call becomes policy
 
 Everything here is a plain `.md` file, so it version-controls cleanly and seeds
 the operator console's Workspace view.

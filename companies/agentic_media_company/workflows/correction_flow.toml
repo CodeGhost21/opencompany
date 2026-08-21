@@ -1,0 +1,91 @@
+# Workflow graph: correction_flow
+#
+# Referenced by `[workflows].enabled` in ../company.toml. A reported error is
+# confirmed, classified by whether it changes the meaning of the piece, and
+# corrected in public. The row is opened before the decision is made, so the
+# handling is not decided by whoever finds it least convenient.
+
+id = "correction_flow"
+name = "Correction flow"
+description = "A reported error is confirmed, classified and corrected in public."
+
+[[node]]
+id = "reported"
+kind = "trigger"
+name = "Error reported"
+summary = "A reader, a subject, or the newsroom itself finds something wrong in a published piece."
+
+[[node]]
+id = "open"
+kind = "agent"
+name = "Open the correction row"
+summary = "Before deciding anything. Recording it first is what keeps the decision honest."
+agent = "source_verifier"
+
+[[node]]
+id = "check"
+kind = "agent"
+name = "Establish whether it is wrong"
+summary = "A complaint is not proof. `unfounded` is a legitimate outcome and needs its reasoning."
+agent = "source_verifier"
+
+[[node]]
+id = "material"
+kind = "condition"
+name = "Does it change the meaning?"
+summary = "A wrong middle initial and a wrong allegation are not the same class."
+[node.config]
+field = "=item.changes_meaning"
+
+[[node]]
+id = "retract"
+kind = "agent"
+name = "Correct prominently"
+summary = "A correction note on the piece, and everyone named adversely told."
+agent = "writer"
+
+[[node]]
+id = "note"
+kind = "agent"
+name = "Append a correction note"
+summary = "Recorded on the piece. Never a silent edit, and never only on social."
+agent = "writer"
+
+[[node]]
+id = "publish"
+kind = "output"
+name = "Publish the correction"
+summary = "In public, proportionate to the error, with how it got through recorded."
+[node.destination]
+kind = "channel"
+target = "newsroom"
+
+[[edge]]
+from = "reported"
+to = "open"
+
+[[edge]]
+from = "open"
+to = "check"
+
+[[edge]]
+from = "check"
+to = "material"
+
+[[edge]]
+from = "material"
+to = "retract"
+label = "yes"
+
+[[edge]]
+from = "material"
+to = "note"
+label = "no"
+
+[[edge]]
+from = "retract"
+to = "publish"
+
+[[edge]]
+from = "note"
+to = "publish"

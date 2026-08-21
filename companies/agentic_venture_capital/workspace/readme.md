@@ -9,6 +9,8 @@ Start here:
 - [[Investment process]] — how a deal moves to a decision
 - [[Investment thesis]] — what we look for and why
 - [[Devtools seed round]] — the deal in flight
+- [[Diligence honesty]] — telling checked claims from asserted ones
+- [[Portfolio contact]] — why quiet is a signal
 
 Everything here is a plain `.md` file, so it version-controls cleanly and seeds
 the operator console's Workspace view.

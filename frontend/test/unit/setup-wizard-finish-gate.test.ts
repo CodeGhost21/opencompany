@@ -42,6 +42,7 @@ function status(over: Partial<SetupStatus> = {}): SetupStatus {
     },
     companies: [],
     inference: { ready: false, provider: null, base_url: null },
+    mail: { wired: false, echoes_code: false },
     ...over,
   };
 }
@@ -129,10 +130,14 @@ async function skipModel() {
   await next(); // -> business
 }
 
-/** model -> business -> account -> advanced -> review. */
+/** model -> business -> sign-in -> account -> advanced -> review. */
 async function goToReview() {
   await skipModel();
   await fill("setup-field-industry", "E-commerce — homeware");
+  await next(); // -> sign-in
+  // Left as it stands: the host default is email sign-in, which is the case
+  // this file is about — an operator who will have to sign in and so needs an
+  // address on the next screen.
   await next(); // -> account
   // The address is required on any host that asks people to sign in — leaving
   // it blank holds the wizard here, which is its own assertion below.
@@ -205,7 +210,8 @@ describe("finishing setup with no companies on the host", () => {
     await show(clientWith(status()));
     await skipModel();
     await fill("setup-field-industry", "E-commerce — homeware");
-    await next(); // -> account
+    await next(); // -> sign-in
+    await next(); // -> account, because the mode above asks people to sign in
 
     // Pressing on with no address must not leave this step.
     await next();

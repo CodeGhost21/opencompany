@@ -26,6 +26,7 @@
 //! never fire; if it does, the alternative was serving one tenant another's
 //! memory.
 
+use std::collections::HashMap;
 use std::ops::Range;
 
 use async_trait::async_trait;
@@ -40,6 +41,7 @@ use crate::ports::{
     ChunkAddr, ChunkHit, ChunkMeta, CompanyId, CompressedTrace, ContextChunk, ContextStore,
     EvictionPolicy, FactKind, FactRecord, FactStore, MemoryStore, TaskResult,
 };
+use crate::store::text::{ceil_boundary, slice_on_char_boundaries};
 use crate::{Result, store::content_address};
 
 /// Envelope version. Bumped only if the on-the-wire shape of a record changes
@@ -453,6 +455,25 @@ impl ContextStore for ProviderContextStore {
         Ok(slice_on_char_boundaries(&chunk.body, range))
     }
 
+    async fn peek_many(
+        &self,
+        company: &CompanyId,
+        addrs: &[ChunkAddr],
+    ) -> Result<Vec<Option<String>>> {
+        // `bound.list` already decodes every body in the partition, so one
+        // enumeration answers the whole batch — the default's per-addr `peek`
+        // would walk the provider once per chunk for the same bytes.
+        let chunks: Vec<StoredChunk> = self.bound.list(company).await?;
+        let by_addr: HashMap<String, String> = chunks
+            .into_iter()
+            .map(|chunk| (content_address(&chunk.body), chunk.body))
+            .collect();
+        Ok(addrs
+            .iter()
+            .map(|addr| by_addr.get(addr.as_ref()).cloned())
+            .collect())
+    }
+
     async fn delete(&self, company: &CompanyId, addr: &ChunkAddr) -> Result<bool> {
         // The engine keys chunks by their content address (see `put`), so the
         // port's addr IS the engine key. On an address collision (64-bit
@@ -485,36 +506,6 @@ impl ContextStore for ProviderContextStore {
             .take(limit)
             .collect())
     }
-}
-
-/// Clamps `range` to the string's length and to char boundaries.
-///
-/// A byte range that lands mid-character would panic on a naive slice. The
-/// callers here are the brain's own `peek` offsets, which are byte counts it
-/// derived from a previous read, so a mid-character bound is reachable with any
-/// non-ASCII body. Widening outward to the nearest boundary returns slightly
-/// more than asked rather than failing the read.
-fn slice_on_char_boundaries(body: &str, range: Range<usize>) -> String {
-    let start = floor_boundary(body, range.start.min(body.len()));
-    let end = ceil_boundary(body, range.end.min(body.len()));
-    if start >= end {
-        return String::new();
-    }
-    body[start..end].to_string()
-}
-
-fn floor_boundary(s: &str, mut at: usize) -> usize {
-    while at > 0 && !s.is_char_boundary(at) {
-        at -= 1;
-    }
-    at
-}
-
-fn ceil_boundary(s: &str, mut at: usize) -> usize {
-    while at < s.len() && !s.is_char_boundary(at) {
-        at += 1;
-    }
-    at
 }
 
 /// The leading window of a body, used as a search snippet.
@@ -768,24 +759,9 @@ mod test {
         assert!(decode::<FactRecord>(&entry, &facts).is_none());
     }
 
-    // The inverted range below is the point of the last assertion: `peek` takes
-    // its range from a caller, and a caller that computed one backwards must get
-    // an empty read rather than a panic in a tenant container.
-    #[expect(
-        clippy::reversed_empty_ranges,
-        reason = "the reversed range is the input under test"
-    )]
-    #[test]
-    fn peek_range_widens_to_char_boundaries_instead_of_panicking() {
-        // "é" is two bytes; a range that splits it would panic on a raw slice.
-        let body = "aébc";
-        assert_eq!(slice_on_char_boundaries(body, 0..2), "aé");
-        assert_eq!(slice_on_char_boundaries(body, 1..2), "é");
-        // Past the end clamps rather than panicking.
-        assert_eq!(slice_on_char_boundaries(body, 0..999), body);
-        // An inverted range yields nothing, not a panic.
-        assert_eq!(slice_on_char_boundaries(body, 3..1), "");
-    }
+    // The range-widening behavior `peek` relies on is pinned where the helper
+    // now lives: `crate::store::text` (shared with the fs/sqlite/mongo
+    // backends' peek and search-snippet slices).
 
     #[test]
     fn a_snippet_never_splits_a_character() {

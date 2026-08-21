@@ -70,7 +70,7 @@ export interface LedgerSummary {
   title: string;
   purpose: string;
   source: LedgerSource;
-  /** Where its rendered file lives in the workspace, e.g. `derived/GOALS.md`. */
+  /** Where its rendered file lives in the workspace, e.g. `derived/goals.md`. */
   derived: string;
   /**
    * How it is actually written, in a sentence. Rendered in place of a compose

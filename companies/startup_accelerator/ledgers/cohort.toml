@@ -1,0 +1,110 @@
+# The companies in the programme, and how each is actually doing.
+#
+# An accelerator's hardest problem is that every company reports well. The
+# founders are selected for optimism, the weekly update is a performance, and
+# the company that most needs help is the one whose update looks most like
+# everybody else's. A row with a stated progress measure and a date on the last
+# real conversation is what makes the quiet ones visible.
+
+title = "Cohort"
+purpose = """
+Every company in the programme: what they are building, what they committed to \
+this cycle, how they are actually doing, and what they need. Read it before any \
+mentor session or investor introduction.\
+"""
+written_by = "`record_entry` to add or update a company, `close_entry` when it graduates or leaves"
+checks = ["required-field", "known-status", "closed-needs-reason"]
+
+[[field]]
+name = "id"
+role = "id"
+required = true
+
+[[field]]
+name = "company"
+role = "title"
+required = true
+description = "The company and what it does, in one line."
+
+[[field]]
+name = "status"
+role = "status"
+required = true
+
+[[field]]
+name = "committed_to"
+role = "prose"
+required = true
+description = "What they said they would achieve this cycle, in their own words. This is what progress is measured against."
+
+[[field]]
+name = "actually"
+role = "prose"
+description = "How they are really doing. Founders are selected for optimism; the update is a performance."
+
+[[field]]
+name = "last_real_conversation"
+role = "date"
+description = "Not the last update — the last conversation where somebody heard something they did not expect."
+
+[[field]]
+name = "needs"
+role = "prose"
+description = "What would actually help. Usually a specific introduction, rarely more advice."
+
+[[field]]
+name = "owner"
+role = "owner"
+
+[[field]]
+name = "reason"
+role = "prose"
+description = "How they left — graduated, withdrew, or were asked to leave. Required when it closes."
+
+[[field]]
+name = "refs"
+role = "refs"
+
+[[status]]
+name = "admitted"
+
+[[status]]
+name = "progressing"
+
+[[status]]
+name = "struggling"
+
+[[status]]
+name = "graduated"
+closed = true
+needs_reason = true
+
+[[status]]
+name = "withdrew"
+closed = true
+needs_reason = true
+
+[[section]]
+heading = "Needs attention"
+blurb = """
+Struggling, or progressing with a stale `last_real_conversation` — which is the \
+same thing wearing a better update.\
+"""
+statuses = ["struggling"]
+order = "recent"
+
+[[section]]
+heading = "In the programme"
+blurb = "Admitted and progressing, each against what they themselves committed to."
+statuses = ["admitted", "progressing"]
+order = "recent"
+
+[[section]]
+heading = "Closed"
+blurb = """
+Graduated or left, each with the reason. Honest reasons here are what let the \
+next admission round mean anything — a cohort where everybody \"graduated\" \
+teaches nobody.\
+"""
+statuses = ["graduated", "withdrew"]
+cap = 20

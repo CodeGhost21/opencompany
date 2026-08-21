@@ -590,9 +590,14 @@ pub fn normalize_slug(raw: &str) -> Result<String> {
 fn normalize_derived(raw: &str, slug: &str) -> Result<String> {
     let value = raw.trim();
     if value.is_empty() {
+        // Lowercase and dashed, like every other name the runtime puts in a
+        // workspace ([`crate::company::workspace_names`]). This used to shout —
+        // `derived/DEAL_PIPELINE.md` — which made the one folder nothing
+        // hand-writes the loudest thing in the tree, and made a ledger's file
+        // the only path an agent had to spell differently from its slug.
         return Ok(format!(
             "{DERIVED_DIR}/{}.md",
-            slug.to_ascii_uppercase().replace('-', "_")
+            crate::company::workspace_names::kebab_name(slug)
         ));
     }
     let Some(name) = value.strip_prefix(&format!("{DERIVED_DIR}/")) else {
@@ -611,7 +616,12 @@ fn normalize_derived(raw: &str, slug: &str) -> Result<String> {
             "`{value}` is not a derived path; use `{DERIVED_DIR}/<NAME>.md` with no sub-folders"
         )));
     }
-    Ok(value.to_string())
+    // An explicitly declared name is held to the rule too, so `derived/` cannot
+    // become the one folder where a caller picks the convention.
+    Ok(format!(
+        "{DERIVED_DIR}/{}",
+        crate::company::workspace_names::kebab_name(name)
+    ))
 }
 
 fn trimmed_or(value: &str, fallback: &str) -> String {

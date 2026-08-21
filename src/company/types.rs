@@ -983,6 +983,16 @@ pub struct McpServer {
     /// Exact remote tool names to always hide/block (takes precedence).
     #[serde(default)]
     pub disallowed_tools: Vec<String>,
+    /// Exact remote tool names on this server the operator declares **read-only**
+    /// (issue #1124): they read and change nothing, so a bridge call to one need
+    /// not park under `auto` the way calling *through* a server otherwise does.
+    ///
+    /// This is an operator declaration, not a claim read off the remote — there
+    /// is no client-side annotation to trust — so an undeclared tool always
+    /// gates. Independent of `allowed_tools`/`disallowed_tools`: it says nothing
+    /// about whether a tool is *exposed*, only how a call to it is priced.
+    #[serde(default)]
+    pub read_only_tools: Vec<String>,
     /// Per-request timeout in seconds.
     #[serde(default = "default_mcp_timeout_secs")]
     pub timeout_secs: u64,

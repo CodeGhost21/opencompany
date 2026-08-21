@@ -237,8 +237,8 @@ test("a valid workflow still saves", async ({ page }) => {
   await openCreateDialog(page);
   const dialog = page.getByRole("dialog");
 
-  // `exact` matters: "Id" is also a substring of the row-level "Node id".
-  await dialog.getByLabel("Id", { exact: true }).fill(`e2e_feedback_${stamp}`);
+  // `exact` matters: the dialog also carries a row-level "Node ID" field.
+  await dialog.getByLabel("Workflow ID", { exact: true }).fill(`e2e_feedback_${stamp}`);
   await dialog.getByLabel("Name", { exact: true }).fill(`Feedback probe ${stamp}`);
 
   // Trigger row: a preset schedule, which previews too.
@@ -345,7 +345,7 @@ test("submitting with an empty id surfaces the validation message on-screen (#81
   // #813 defect 6: the banner sat below the fold, so Create looked dead. On a
   // failed submit it must be brought into view (and focused).
   const dialog = await openCreateDialog(page);
-  await dialog.getByLabel("Id", { exact: true }).fill("");
+  await dialog.getByLabel("Workflow ID", { exact: true }).fill("");
   await dialog.getByRole("button", { name: "Create workflow" }).click();
 
   const banner = dialog.getByText("Give the workflow an id.");

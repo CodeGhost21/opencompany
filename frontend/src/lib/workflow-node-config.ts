@@ -5,9 +5,9 @@
 //
 // The engine (`vendor/openhuman/vendor/tinyflows`) parses and runs all five
 // kinds already; only the console lacked controls to author their config, so
-// `tool_call`/`http_request`/`switch`/`output_parser`/`sub_workflow` were kept
-// off the palette (`CREATABLE_NODE_KINDS`) rather than shipping a node that
-// errors at run time. These forms emit EXACTLY the keys the tinyflows executors
+// `tool_call`/`http_request`/`switch`/`output_parser`/`sub_workflow` needed
+// matching controls before they joined the shared `NODE_KINDS` palette. These
+// forms emit EXACTLY the keys the tinyflows executors
 // read — verified against `catalog.rs`, `nodes/integration/*`, and
 // OpenCompany's `translate.rs` (which lays a node's `config` over the derived
 // defaults verbatim):

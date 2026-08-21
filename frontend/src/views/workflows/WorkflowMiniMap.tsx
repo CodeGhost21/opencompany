@@ -160,7 +160,10 @@ export function WorkflowMiniMap({ nodes, className }: WorkflowMiniMapProps) {
   return (
     <Panel
       position="bottom-right"
-      className={cn("react-flow__minimap", className)}
+      className={cn(
+        "react-flow__minimap rounded-lg border bg-card/95 p-1 shadow-lg backdrop-blur",
+        className,
+      )}
       data-testid="rf__minimap"
     >
       <svg

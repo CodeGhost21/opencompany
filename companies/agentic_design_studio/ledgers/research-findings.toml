@@ -1,0 +1,105 @@
+# What testing actually showed, as opposed to what the studio hoped it would.
+#
+# User research has a specific failure mode: it is commissioned to confirm a
+# direction, and a finding that contradicts the direction gets remembered as
+# "mixed" and then not at all. A row with the observation, the sample and the
+# confidence is much harder to soften six weeks later than a paragraph in a
+# deck is.
+
+title = "Research findings"
+purpose = """
+What user testing and research established: what was observed, how many people, \
+and how confident that makes anyone. Read it before defending a design choice \
+on instinct — the studio may already have watched somebody fail at it.\
+"""
+written_by = "`record_entry` to record or revise a finding, `close_entry` when it is acted on or superseded"
+checks = ["required-field", "known-status", "closed-needs-reason"]
+
+[[field]]
+name = "id"
+role = "id"
+required = true
+
+[[field]]
+name = "finding"
+role = "title"
+required = true
+description = "What was observed, as behaviour rather than opinion. What people did, not what they said they liked."
+
+[[field]]
+name = "status"
+role = "status"
+required = true
+
+[[field]]
+name = "method"
+role = "prose"
+required = true
+description = "How it was learned — moderated test, unmoderated, interview, analytics."
+
+[[field]]
+name = "sample"
+role = "prose"
+required = true
+description = "How many people, and who. Five people is a real sample for usability and no sample at all for preference."
+
+[[field]]
+name = "confidence"
+role = "prose"
+description = "How strongly this is held, and why not higher."
+
+[[field]]
+name = "implication"
+role = "prose"
+description = "What the work should do about it. A finding with no implication is trivia."
+
+[[field]]
+name = "owner"
+role = "owner"
+
+[[field]]
+name = "reason"
+role = "prose"
+description = "Why it closed — designed around, or superseded by later testing. Required when it closes."
+
+[[field]]
+name = "refs"
+role = "refs"
+
+[[status]]
+name = "observed"
+
+[[status]]
+name = "confirmed"
+
+[[status]]
+name = "addressed"
+closed = true
+needs_reason = true
+
+[[status]]
+name = "superseded"
+closed = true
+needs_reason = true
+
+[[section]]
+heading = "Confirmed"
+blurb = "Seen more than once. These outrank anybody's instinct, including the creative director's."
+statuses = ["confirmed"]
+order = "recent"
+
+[[section]]
+heading = "Observed once"
+blurb = "Seen, not yet repeated. Worth designing around; not worth rebuilding around."
+statuses = ["observed"]
+order = "recent"
+
+[[section]]
+heading = "Closed"
+blurb = """
+Addressed in the work, or superseded by later testing — each with the reason. \
+An inconvenient finding is kept here precisely because it is the one that \
+otherwise gets remembered as \"mixed\" and then not at all.\
+"""
+statuses = ["addressed", "superseded"]
+cap = 20
