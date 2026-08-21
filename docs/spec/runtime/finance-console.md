@@ -5,8 +5,9 @@ sub-pages — **Invoicing** (Chargebee, issue #788) and **Wallet** (PayPal, issu
 #789) — where each provider is connected, verified, and exercised against the
 real account without leaving the console.
 
-This is a design document. Nothing below is implemented yet; the sections marked
-**Exists** are what it builds on.
+**Status: implemented.** The host module is `src/server/ops/finance.rs`; the
+console lives under `frontend/src/views/finance/`. This document remains the
+reasoning behind both — read it before changing either.
 
 ## Why a section and not a settings tab
 
@@ -107,8 +108,15 @@ POST   …/finance/paypal/test
   sensitive than the ledger the Overview page already shows them.
 - `POST …/test` is a **read** dressed as a POST: it is non-idempotent only in
   that it costs a provider round-trip, and making it a GET invites a browser or
-  a link preview to fire it. It takes no body and returns
-  `{ ok, detail, checkedAt }`.
+  a link preview to fire it. It takes no body and returns `{ ok, detail }`,
+  where `detail` names the site or environment that answered.
+
+  There is no `ok: false`. A failed check is the provider's own failure and
+  renders as the `502` below, carrying the provider's code and message —
+  collapsing that into a `200 {ok: false}` would throw away the only part of the
+  answer an operator can act on. And there is no `checkedAt`: the console knows
+  when it clicked, so stamping a time on the host would mean a clock in a module
+  that otherwise needs none.
 - `POST …/invoices` is `AdminScopedCompany`. It bills a real customer real
   money. See **Testing without billing a customer** below.
 - There is no `DELETE`. Voiding an invoice is a Chargebee operation with
@@ -125,7 +133,14 @@ flags instead of a `connected` boolean:
 | --- | --- | --- |
 | feature not compiled in (`cfg!(feature = "chargebee")` false) | `501` | `{ code: "not_in_build" }` |
 | credentials absent from the secret store | `409` | `{ code: "not_configured" }` |
-| provider rejected or was unreachable | `502` | `{ code: "provider_error", providerStatus, providerCode, message }` |
+| provider rejected or was unreachable | `502` | `{ code: "provider_error", provider, providerStatus, providerCode, message }` |
+| an argument was rejected before the call (`status: 0`) | `400` | `{ code: "invalid_arguments", … }` |
+
+The last row is the one the design missed and the implementation needed. The
+`api` functions already mark a locally rejected argument — an empty invoice id, a
+missing date window — with `status: 0`, meaning the call never left the process.
+Rendering that as a `502` would send an operator to check PayPal's status page
+over a date range they can fix themselves.
 
 `OpenCompanyError::Chargebee`/`::Paypal` already carry `status`, `code` and
 `message`; `provider_error` passes them through verbatim. PayPal's rewritten
@@ -286,8 +301,13 @@ about whether it does.
 | `frontend/src/views/finance/FinanceSection.tsx` | new — sub-router |
 | `frontend/src/views/finance/InvoicingView.tsx` | new |
 | `frontend/src/views/finance/WalletView.tsx` | new |
-| `frontend/src/views/finance/ConnectionPanel.tsx` | new — collapsed/expanded credential card, shared |
-| `frontend/src/views/BillingView.tsx` | split into the two connection panels; file retired |
+| `frontend/src/views/finance/ConnectionPanel.tsx` | new — the collapsed/expanded shell, shared |
+| `frontend/src/views/finance/ChargebeeForm.tsx` | new — the credential form, lifted out of `BillingView` |
+| `frontend/src/views/finance/PaypalForm.tsx` | new — likewise |
+| `frontend/src/views/finance/SendInvoiceDialog.tsx` | new |
+| `frontend/src/views/finance/health.ts` | new — the four-state precedence, pure |
+| `frontend/src/views/finance/money.ts` | new — minor units, status decodes, the PayPal window; pure |
+| `frontend/src/views/BillingView.tsx` | **deleted** — its two cards became the forms above |
 | `frontend/src/views/SettingsSection.tsx` | drop the `billing` row |
 | `frontend/src/components/app-shell.tsx` | `NAV` row + `sub` threaded to `FinanceSection` |
 
@@ -295,6 +315,20 @@ about whether it does.
 calls, made from a different page.
 
 ## Testing
+
+What was actually written, against the plan above:
+
+- Host: `src/server/ops/finance.rs`'s own module, 8 tests in the default lane and
+  10 with both features. The `501` case is asserted by a test compiled **only**
+  on a build with neither feature, which is the only place that arm exists.
+- Console: `finance-money.test.ts` (18), `finance-health.test.ts` (9),
+  `finance-invoicing.test.ts` (6), `finance-company-switch.test.ts` (3).
+- `scripts/ci/feature-lanes.txt` gained `server::ops::finance` on both the
+  `chargebee` and `paypal` rows, and the matching filter is in ci.yml. Without
+  it the two feature-gated tests here would be compiled by the lane and selected
+  by nothing — the #770 pathology, arrived at from a new direction.
+
+The original plan:
 
 - **Host, per route:** not-in-build → `501`, unconfigured → `409`,
   provider 4xx → `502` carrying the provider's code, happy path → the
@@ -314,6 +348,21 @@ calls, made from a different page.
   resolver — mirroring `test/unit/billing-view-branches.test.ts`.
 - **E2E:** a company with no provider configured lands on Overview and shows
   both sub-pages in their `not_configured` state without an error toast.
+
+## Deviations from the design
+
+- **The invoice detail sheet was not built.** The list row carries the id, the
+  customer, the total, the status and the payment link, which is what the design
+  said the sheet was for minus the line items. A sheet showing three more fields
+  is not worth a component until somebody asks for one; `GET
+  …/finance/chargebee/invoices/{id}` exists and is tested, so it is a render away.
+- **The customer lookup route has no UI.** `GET …/finance/chargebee/customers`
+  is implemented and tested; the Invoicing page uses customer only as an invoice
+  filter, which is open question 1 below, still open.
+- **`live` detection is a heuristic.** Chargebee's API does not report whether a
+  site is a test site, so `SendInvoiceDialog` treats a slug not ending in `-test`
+  as live. Wrong in the safe direction: a test site named without the suffix gets
+  a warning it did not need.
 
 ## Open questions
 
