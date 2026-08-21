@@ -757,8 +757,12 @@ async fn updated_row(
         .into_iter()
         .any(|meta| meta.key == agent_id && meta.enabled);
 
-    // A manifest teammate is named by its role and carries no display name; an
-    // overlay teammate always has one. Same rule as `list_team`.
+    // Same rule as `list_team`, and resolved the same way: through the record,
+    // so a manifest teammate an operator has edited answers a budget write with
+    // the name, role and description it now has. Reading the raw manifest row
+    // here would make one card change identity depending on which route last
+    // touched it — a rename would show on the roster and vanish the moment a cap
+    // was set.
     let overlay = record.overlay_agents.iter().find(|a| a.id == agent_id);
     let (name, role, description) = match overlay {
         Some(agent) => (
@@ -768,12 +772,13 @@ async fn updated_row(
         ),
         None => {
             let agent = record
-                .manifest
-                .agents
-                .iter()
-                .find(|a| a.id == agent_id)
+                .effective_agent(agent_id)
                 .expect("roster membership was checked before the write");
-            (None, agent.role.clone(), agent.description.clone())
+            (
+                agent.name.clone(),
+                agent.role.clone(),
+                agent.description.clone(),
+            )
         }
     };
     Ok(Json(member_row(
