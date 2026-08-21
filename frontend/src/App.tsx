@@ -245,7 +245,6 @@ function Console() {
     resolved: !isDesktopRuntime(),
     id: null,
     instances: [],
-    operatorEmails: {},
   }));
 
   /**
@@ -266,12 +265,7 @@ function Console() {
       // Adopted once. A second call would re-run the prune against a set it has
       // already reconciled, for a value this one already has.
       const id = host ? adoptLocalHosts([host])[0] : null;
-      setEmbedded({
-        resolved: true,
-        id,
-        instances: [],
-        operatorEmails: id && host?.operatorEmail ? { [id]: host.operatorEmail } : {},
-      });
+      setEmbedded({ resolved: true, id, instances: [] });
       return;
     }
 
@@ -296,11 +290,6 @@ function Console() {
         .map((instance) => instance.instanceId)
         .filter((id): id is string => id !== undefined),
     );
-    const operatorEmails: Record<ConnectionId, string> = {};
-    running.forEach((instance, index) => {
-      if (instance.operatorEmail) operatorEmails[ids[index]] = instance.operatorEmail;
-    });
-
     setEmbedded({
       resolved: true,
       // The first running instance, which is the one rooted at the data dir on
@@ -308,7 +297,6 @@ function Console() {
       // opens on when nothing else is selected.
       id: ids[0] ?? null,
       instances,
-      operatorEmails,
     });
   }, []);
 
@@ -538,10 +526,6 @@ function Console() {
             defaultCompany={active.defaultCompany}
             notice={active.id === bootstrapId ? auth.notice : undefined}
             forceLogin={active.id === bootstrapId && auth.failed === true}
-            // Only ever the embedded host's own operator. Offering it on a
-            // remote connection would put a local address in front of someone
-            // signing in to a server that has never heard of it.
-            suggestedEmail={embedded.operatorEmails[active.id]}
           />
         ) : (
           // The switcher rides along, because an operator whose local host is
@@ -577,15 +561,6 @@ interface EmbeddedState {
    * are startable.
    */
   instances: LocalInstance[];
-  /**
-   * The address each local connection signs a person in as (#632), by
-   * connection id.
-   *
-   * Per connection rather than one field, because with a roster there are
-   * several — and offering one host's operator address on another host's login
-   * form is how a person signs in to the wrong company.
-   */
-  operatorEmails: Record<ConnectionId, string>;
 }
 
 function FullScreen({ children }: { children: React.ReactNode }) {

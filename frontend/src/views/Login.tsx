@@ -58,18 +58,6 @@ interface Props {
    */
   notice?: string;
   /**
-   * An address to start the form with, when the caller knows one.
-   *
-   * Only the desktop's embedded host does: a packaged install admits one
-   * standing local operator and mails nothing, so a blank field asked a person
-   * to guess an address they have never seen, and every guess came back as the
-   * same silent acknowledgement (#632).
-   *
-   * A suggestion, not a lock — it seeds the field and the person can replace
-   * it, which matters as soon as they invite anyone else to their own host.
-   */
-  suggestedEmail?: string;
-  /**
    * Reports a completed sign-in.
    *
    * Handed the whole {@link SignIn}, not just the user, because a cross-origin
@@ -111,7 +99,6 @@ export function Login({
   company,
   companyName,
   notice,
-  suggestedEmail,
   onSignedIn,
 }: Props) {
   const [mode, setMode] = useState<Mode>("link");
@@ -133,19 +120,14 @@ export function Login({
    * of them should be offered a wallet button.
    */
   const [authConfig, setAuthConfig] = useState<AuthConfig>(ASSUMED_CONFIG);
-  const [email, setEmail] = useState(suggestedEmail ?? "");
-  // The suggestion usually arrives *after* this mounts. A relaunch restores the
-  // embedded connection from its remembered profile immediately, while the
-  // address and the operator come over IPC a moment later — so on every launch
-  // but the first, seeding the initial state alone would leave the field blank.
-  //
-  // Only into an empty field: a suggestion must never overwrite what somebody
-  // has typed, and clearing the prefilled address on purpose (to sign in as
-  // someone else) must not be undone — this runs when the *suggestion* changes,
-  // which it does once.
-  useEffect(() => {
-    if (suggestedEmail) setEmail((current) => (current === "" ? suggestedEmail : current));
-  }, [suggestedEmail]);
+  // Always blank. The desktop used to prefill a synthetic
+  // `operator@opencompany.local` here, because a packaged install admitted that
+  // one address and mailed nothing, so a blank field asked a person to guess a
+  // credential they had never seen (#632). The desktop now runs `none` mode and
+  // has no address at all, and it was the only caller that ever knew one — so
+  // there is nothing left to suggest, and a form on any other host is a form
+  // where the person genuinely knows their own address.
+  const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -524,23 +506,7 @@ export function Login({
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
                   placeholder="you@company.com"
-                  aria-describedby={
-                    suggestedEmail && email === suggestedEmail ? "email-hint" : undefined
-                  }
                 />
-                {suggestedEmail && email === suggestedEmail ? (
-                  // Otherwise the prefilled address reads as somebody else's,
-                  // and the natural move is to clear it — which is the one
-                  // address this host will not answer for.
-                  <p
-                    id="email-hint"
-                    className="text-xs text-muted-foreground"
-                    data-testid="suggested-email-hint"
-                  >
-                    The operator account on this computer. Nothing is mailed —
-                    the link comes back here.
-                  </p>
-                ) : null}
               </div>
 
               {mode === "password" ? (
