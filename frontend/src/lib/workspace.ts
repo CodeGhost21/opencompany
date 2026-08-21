@@ -94,6 +94,50 @@ export function pathOf(nodes: FsNode[], id: string | null): FsNode[] {
   return path;
 }
 
+/**
+ * One step of a note's location, for the header breadcrumb (issue #1371).
+ *
+ * `null` is the elided middle — a crumb the trail could not fit, rendered as an
+ * ellipsis rather than dropped, so the operator can see that the path is longer
+ * than what is shown instead of reading a shortened path as the whole truth.
+ */
+export type Crumb = FsNode | null;
+
+/**
+ * The folders a note sits inside, shortened to at most `max` of them.
+ *
+ * The note itself is **not** in the trail: its name is already the heading beside
+ * it, and repeating it would spend the widest crumb saying what the operator is
+ * looking straight at.
+ *
+ * When the trail is too long, the **root and the last two folders** survive and
+ * the middle collapses. That split is the useful one: the root says which part
+ * of the company this belongs to, and the last two say what it sits next to.
+ * Truncating the string instead — which is what `truncate` on a single span did
+ * — ellipsises the *tail*, so every note under `Standards/Engineering/…` renders
+ * the identical prefix and the discriminating end is exactly what is thrown away.
+ */
+export function breadcrumbOf(nodes: FsNode[], id: string | null, max = 3): Crumb[] {
+  const folders = pathOf(nodes, id).slice(0, -1);
+  if (folders.length <= max) return folders;
+  // `max - 2` leading crumbs, the ellipsis, then the final two.
+  return [...folders.slice(0, Math.max(max - 2, 1)), null, ...folders.slice(-2)];
+}
+
+/**
+ * The ids of every folder a node is nested in — what has to be expanded for the
+ * node's own row to exist in the tree (issue #1371).
+ *
+ * Excludes the node itself even when it is a folder: revealing a folder means
+ * showing its row, not opening it.
+ */
+export function ancestorFolderIds(nodes: FsNode[], id: string | null): string[] {
+  return pathOf(nodes, id)
+    .slice(0, -1)
+    .filter((node) => node.kind === "folder")
+    .map((node) => node.id);
+}
+
 /** Ids of a node and all its descendants (for delete / move guards). */
 export function subtreeIds(nodes: FsNode[], id: string): Set<string> {
   const ids = new Set<string>([id]);
