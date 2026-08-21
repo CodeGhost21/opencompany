@@ -263,7 +263,8 @@ a replacement for it.
 
 ## What the console is told
 
-`GET …/auth/config` → `{"mode": "email"|"wallet"|"none", "passwords": bool}`.
+`GET …/auth/config` →
+`{"mode": "email"|"wallet"|"none", "passwords": bool, "magicLink": bool}`.
 
 Unauthenticated by construction, like every other login route: the console asks
 before anyone has a credential, because it cannot choose a screen otherwise. It
@@ -271,6 +272,14 @@ must branch on this rather than on which routes fail — a wallet company and a
 misconfigured email company both refuse `auth/request`, and only one of them
 should be offered a wallet button. A console that cannot reach this route assumes
 `email`, which is what every host predating it does.
+
+`magicLink` is whether a link asked for here reaches anybody: a wired mail
+transport, or a loopback host that hands the code back in the response. It is
+false on a routable host with no transport, and the console must say so instead
+of drawing the form — `auth/request` answers `sent: true` there exactly as it
+does on a host that delivered, deliberately, so nothing about the response
+itself tells the person their link went nowhere. A host predating the field is
+assumed `true`, matching the `email` default above.
 
 ## Related
 

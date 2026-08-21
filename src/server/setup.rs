@@ -172,6 +172,11 @@ pub struct SetupDto {
     pub templates: Vec<TemplateDto>,
     /// The sign-in modes this host will accept. `none` is absent on a routable
     /// bind, where it would mean an unauthenticated admin console.
+    ///
+    /// Which modes are *legal*, not which are convenient: `email` is listed on
+    /// a host with no mail transport too, because hub OAuth and passwords sign
+    /// people in there perfectly well. Read [`mail`](Self::mail) for what the
+    /// magic-link path specifically can do today.
     pub auth_modes: Vec<&'static str>,
     /// Which optional surfaces this build has.
     pub build: BuildDto,
@@ -180,6 +185,22 @@ pub struct SetupDto {
     pub companies: Vec<String>,
     /// What this host can already reach without the operator supplying anything.
     pub inference: InferenceReadyDto,
+    /// What this host can do with a mailbox.
+    pub mail: MailReadyDto,
+}
+
+/// What this host can do with a mailbox, so the wizard never offers a
+/// sign-in that arrives nowhere.
+#[derive(Clone, Debug, Serialize, PartialEq)]
+pub struct MailReadyDto {
+    /// A transport *and* credentials are wired (`OPENCOMPANY_MAIL_*`). Not
+    /// "a send will succeed" — the same predicate the login and invite
+    /// routes branch on, so all three keep one answer.
+    pub wired: bool,
+    /// A minted code comes back in the response instead of going to a
+    /// mailbox: loopback bind, no `public_url`, no transport. The laptop
+    /// case, where the honest hand-off is a link rather than an inbox.
+    pub echoes_code: bool,
 }
 
 /// The credential this host already holds, for the wizard's first step.
@@ -549,6 +570,14 @@ fn snapshot(state: &AppState, env: &dyn EnvSource) -> Result<SetupDto, OpenCompa
         fields,
         templates: templates(),
         auth_modes: auth_modes(state),
+        // Asked through the login route's own predicates rather than re-read
+        // from the environment here: a second spelling of "can this host mail"
+        // is exactly how the wizard's copy and the route's behaviour drift into
+        // contradicting each other.
+        mail: MailReadyDto {
+            wired: crate::server::users::routes::mail_transport_wired(state),
+            echoes_code: crate::server::users::routes::echoes_code_in_response(state),
+        },
         build: build_flags(),
         companies: state
             .registry()

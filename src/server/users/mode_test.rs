@@ -26,6 +26,9 @@ use crate::company::CompanyManifest;
 use crate::ports::CompanyStore;
 use crate::ports::types::{CompanyId, CompanyRecord};
 use crate::runtime::RuntimeBuilder;
+use crate::server::ops::ConnectionsRuntime;
+use crate::server::ops::mailer::{MailCredentials, RecordingMailSender};
+use crate::server::ops::smtp::{SmtpCredentials, SmtpSecurity};
 use crate::server::router;
 use crate::server::users::token;
 use crate::server::users::wallet::{self, VerifyRequest};
@@ -53,6 +56,26 @@ async fn state_in_mode(
     home: &std::path::Path,
     mode: AuthMode,
     bootstrap: Option<&str>,
+) -> AppState {
+    state_in_mode_on(
+        home,
+        mode,
+        bootstrap,
+        AppConfig::default(),
+        ConnectionsRuntime::new(),
+    )
+    .await
+}
+
+/// The same host, over an explicit config and connection set — for the
+/// questions whose answer is a property of the *deployment* rather than the
+/// mode: whether the bind is routable, and whether mail is wired.
+async fn state_in_mode_on(
+    home: &std::path::Path,
+    mode: AuthMode,
+    bootstrap: Option<&str>,
+    config: AppConfig,
+    connections: ConnectionsRuntime,
 ) -> AppState {
     let toml_src = match (mode, bootstrap) {
         (AuthMode::Email, Some(who)) => {
@@ -102,9 +125,35 @@ async fn state_in_mode(
         .build()
         .await
         .unwrap();
-    let state = AppState::new(AppConfig::default()).with_home(home.to_path_buf());
+    let state = AppState::new(config)
+        .with_home(home.to_path_buf())
+        .with_connections(connections);
     state.registry().insert(id, Arc::new(runtime));
     state
+}
+
+/// A routable bind: nothing is echoed back to the caller here, so a magic link
+/// is only usable if it can genuinely be mailed.
+fn routable() -> AppConfig {
+    AppConfig {
+        bind: "0.0.0.0:8080".to_string(),
+        ..AppConfig::default()
+    }
+}
+
+/// A wired mail transport, so a link is actually sent.
+fn mail_connections() -> ConnectionsRuntime {
+    ConnectionsRuntime::new()
+        .with_mail(Arc::new(RecordingMailSender::new()))
+        .with_mail_credentials(MailCredentials::Smtp(SmtpCredentials {
+            host: "smtp.test".into(),
+            port: 587,
+            security: SmtpSecurity::Starttls,
+            username: "u".into(),
+            password: "p".into(),
+            from_name: "Acme".into(),
+            from_email: "noreply@acme.test".into(),
+        }))
 }
 
 fn post(uri: &str, body: serde_json::Value) -> Request<Body> {
@@ -170,6 +219,71 @@ async fn auth_config_publishes_the_mode_to_an_anonymous_caller() {
         assert_eq!(body["mode"], mode.as_str(), "{mode}");
         assert_eq!(body["passwords"], passwords, "{mode}");
     }
+}
+
+/// A routable host with no transport cannot deliver a magic link and will not
+/// echo the code either, so the form is a dead end. The console has to be told
+/// that in the payload — from the outside a link request there answers `sent`
+/// exactly like one that worked.
+#[tokio::test]
+async fn auth_config_reports_a_magic_link_that_cannot_arrive() {
+    let dir = home();
+    let state = state_in_mode_on(
+        dir.path(),
+        AuthMode::Email,
+        None,
+        routable(),
+        ConnectionsRuntime::new(),
+    )
+    .await;
+    let response = router(state)
+        .oneshot(get("/api/v1/company/auth/config"))
+        .await
+        .unwrap();
+    let body = body_json(response).await;
+
+    assert_eq!(
+        body["magicLink"], false,
+        "no transport and no echo is a dead end: {body}"
+    );
+}
+
+/// The two ways a link does reach the person: mailed, or — on a loopback host —
+/// handed straight back in the response. The second is the laptop case, and
+/// treating it as "no magic link" would take the form away from the only host
+/// where it needs no configuration at all.
+#[tokio::test]
+async fn auth_config_reports_a_magic_link_that_is_mailed_or_echoed() {
+    let dir = home();
+    let mailed = state_in_mode_on(
+        dir.path(),
+        AuthMode::Email,
+        None,
+        routable(),
+        mail_connections(),
+    )
+    .await;
+    let response = router(mailed)
+        .oneshot(get("/api/v1/company/auth/config"))
+        .await
+        .unwrap();
+    let body = body_json(response).await;
+    assert_eq!(
+        body["magicLink"], true,
+        "a wired transport sends it: {body}"
+    );
+
+    let echoed = home();
+    let loopback = state_in_mode(echoed.path(), AuthMode::Email, None).await;
+    let response = router(loopback)
+        .oneshot(get("/api/v1/company/auth/config"))
+        .await
+        .unwrap();
+    let body = body_json(response).await;
+    assert_eq!(
+        body["magicLink"], true,
+        "a loopback host hands the code back: {body}"
+    );
 }
 
 // ---------------------------------------------------------------------------

@@ -26,8 +26,17 @@ is separate and still to come.
 
 `GET /api/v1/setup` returns everything the wizard needs to draw itself: each
 configurable field with **the layer that owns it**, the shipped template
-catalog, the sign-in modes this host accepts, and which optional surfaces are
-compiled into the build.
+catalog, the sign-in modes this host accepts, which optional surfaces are
+compiled into the build, and — in `mail` — what this host can do with a mailbox.
+
+`mail` is two booleans, `wired` and `echoes_code`, computed from the very
+predicates the login route branches on rather than re-read from the environment
+here. It answers a different question from `auth_modes`: that list says which
+modes are *legal*, and `email` stays on it whatever mail this host has, because
+hub OAuth and passwords sign people in without a transport. `mail` says which
+sign-in the wizard can honestly offer *today* — mailed on `wired`, handed back
+as a link on `echoes_code`, and neither on a routable host that has configured
+no transport.
 
 `POST /api/v1/setup` applies a completed wizard: writes `config.toml`, seeds the
 chosen template when the registry is empty, and stamps `setup_completed_at`.
