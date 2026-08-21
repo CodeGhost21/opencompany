@@ -83,11 +83,7 @@ label = "Realised"
 name = "retired"
 closed = true
 needs_reason = true
-
-[[status]]
-name = "accepted"
-closed = true
-needs_reason = true
+aliases = ["accepted"]
 
 [[status]]
 name = "materialised"

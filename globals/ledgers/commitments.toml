@@ -81,9 +81,7 @@ name = "promised"
 [[status]]
 name = "in_progress"
 label = "Being delivered"
-
-[[status]]
-name = "at_risk"
+aliases = ["at_risk"]
 
 [[status]]
 name = "kept"
