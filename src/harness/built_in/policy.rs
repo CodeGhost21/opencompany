@@ -132,7 +132,7 @@ use oh::agent::tool_policy::{ToolPolicy, ToolPolicyDecision, ToolPolicyRequest};
 
 use crate::company::Policy;
 use crate::metering::{usd_spent_by_agent, utc_day_start_millis};
-use crate::policy::CallPath;
+use crate::policy::{CallPath, McpReadSet};
 use crate::ports::UsageMeter;
 use crate::ports::types::{CompanyId, Effect, EffectGroup};
 use crate::runtime::grants::{GrantSet, GrantSubject, GrantedCall};
@@ -783,6 +783,20 @@ pub struct ApprovalPolicy {
     /// gate pass builds its own policy for its own pass, and nothing else shares
     /// it.
     call_path: CallPath,
+    /// The operator's per-server declaration of which remote MCP tools only read
+    /// (issue #1124), consulted by the tier dispatch to downgrade a
+    /// server-declared read-only bridge call so it does not park under `auto`.
+    ///
+    /// **Empty at every non-harness construction site** — the default — which
+    /// keeps every one of them (and the workflow gate, and every test that sets
+    /// no declaration) gating every `mcp_call_tool` / `mcp_registry_tool_call`
+    /// exactly as before. Only `build_roster` chains
+    /// [`with_mcp_reads`](Self::with_mcp_reads), from the company's effective MCP
+    /// servers. `consequence_of` cannot read this because it is a pure,
+    /// company-blind free function; the declaration is company context, so it
+    /// arrives here and the gate applies it through
+    /// [`mcp_call_reach`](crate::policy::consequence::mcp_call_reach).
+    mcp_reads: McpReadSet,
 }
 
 /// Where the per-agent daily spend cap reads today's spend from (issue #304):
@@ -823,6 +837,9 @@ impl ApprovalPolicy {
             no_meter_warned: AtomicBool::new(false),
             // The strict path by default — see `for_authored_workflow_nodes`.
             call_path: CallPath::Agent,
+            // No read declaration by default, so every MCP bridge call gates
+            // exactly as before — see `with_mcp_reads`.
+            mcp_reads: McpReadSet::default(),
         }
     }
 
@@ -847,6 +864,21 @@ impl ApprovalPolicy {
     /// effect knows whose tool call it came from (issue #243).
     pub fn with_agent(mut self, agent: impl Into<String>) -> Self {
         self.agent = Some(agent.into());
+        self
+    }
+
+    /// Installs the operator's per-server declaration of which remote MCP tools
+    /// only read (issue #1124), so a server-declared read-only bridge call does
+    /// not park under `auto`.
+    ///
+    /// Without this the declaration is empty and every `mcp_call_tool` /
+    /// `mcp_registry_tool_call` gates — which is exactly what every non-harness
+    /// construction site wants. Chained by `build_roster` alongside
+    /// [`with_requests`](Self::with_requests) / [`with_agent`](Self::with_agent),
+    /// the same way those are, because the declaration is company context the
+    /// pure `consequence_of` cannot see.
+    pub fn with_mcp_reads(mut self, reads: McpReadSet) -> Self {
+        self.mcp_reads = reads;
         self
     }
 
@@ -1259,6 +1291,25 @@ impl ApprovalPolicy {
         );
         ToolPolicyDecision::require_approval(reason)
     }
+
+    /// What this call reaches, with the one company-context downgrade the pure
+    /// [`consequence_of`](crate::policy::consequence_of) cannot make: an MCP
+    /// bridge call whose remote tool the operator has declared read-only on this
+    /// server (issue #1124).
+    ///
+    /// Every non-bridge tool takes the plain classifier, so nothing else changes.
+    /// A bridge call is graded by [`mcp_call_reach`](crate::policy::consequence::mcp_call_reach),
+    /// which downgrades to [`Reach::ExternalRead`](crate::policy::Reach::ExternalRead)
+    /// only on affirmative membership of this policy's declaration and returns the
+    /// gated base otherwise — so an undeclared server, an unreadable argument, or
+    /// a policy with no declaration all keep the parking verdict this arm read
+    /// before.
+    fn consequence_for(&self, tool: &str, args: &serde_json::Value) -> crate::policy::Consequence {
+        if crate::policy::consequence::is_mcp_bridge_tool(tool) {
+            return crate::policy::consequence::mcp_call_reach(tool, args, &self.mcp_reads);
+        }
+        crate::policy::consequence_of(tool, args)
+    }
 }
 
 #[async_trait]
@@ -1405,7 +1456,7 @@ impl ToolPolicy for ApprovalPolicy {
         // operator who does want a per-call gate has
         // `[policy].always_approve = ["web_search"]`, which wins over every
         // tier including `full`.
-        let consequence = crate::policy::consequence_of(tool, &request.arguments);
+        let consequence = self.consequence_for(tool, &request.arguments);
         let reach = consequence.reach;
         let by_mode = match self.mode {
             PolicyMode::Full => ToolPolicyDecision::Allow,
@@ -1936,6 +1987,96 @@ mod tests {
                 "{tool} leaves the company or spends money and must still park under auto"
             );
         }
+    }
+
+    /// **Issue #1124, end to end at the policy layer.** A bridge call to a
+    /// remote tool the operator has declared read-only on this server runs
+    /// unattended under `auto`; the same call with no declaration, a write on
+    /// the same server, and a read on an undeclared server all still park.
+    ///
+    /// The `consequence.rs` tests prove [`mcp_call_reach`](crate::policy::consequence::mcp_call_reach)
+    /// in isolation. This one proves the wiring that makes it fire in
+    /// production — `with_mcp_reads` installs the declaration, `consequence_for`
+    /// routes the bridge tool through it, and the `auto` arm of `check` reads
+    /// the downgraded reach. Reverting any link (dropping `with_mcp_reads`,
+    /// routing the bridge tool through the plain `consequence_of`, or reverting
+    /// the classifier) puts the first two `Allow`s back to `RequireApproval`.
+    #[tokio::test]
+    async fn auto_runs_a_server_declared_read_only_mcp_call_but_parks_the_rest() {
+        let reads = crate::policy::McpReadSet::from_pairs([
+            ("jira".to_string(), "get_issue".to_string()),
+            ("registry-42".to_string(), "list_rows".to_string()),
+        ]);
+        let p = policy("auto", &[], None).with_mcp_reads(reads);
+
+        // The declared read on each bridge tool runs unattended.
+        for (tool, args) in [
+            (
+                "mcp_call_tool",
+                serde_json::json!({ "server": "jira", "tool": "get_issue", "arguments": {} }),
+            ),
+            (
+                "mcp_registry_tool_call",
+                serde_json::json!({
+                    "server_id": "registry-42",
+                    "tool_name": "list_rows",
+                    "arguments": {},
+                }),
+            ),
+        ] {
+            assert_eq!(
+                p.check(&request(tool, args)).await,
+                ToolPolicyDecision::Allow,
+                "{tool} names a server-declared read and must run unattended under auto"
+            );
+        }
+
+        // Everything else through the same policy still parks: a write on the
+        // declared server, a read on an undeclared server, and a bridge call the
+        // gate cannot read the (server, tool) pair from.
+        for (tool, args) in [
+            (
+                "mcp_call_tool",
+                serde_json::json!({ "server": "jira", "tool": "create_issue", "arguments": {} }),
+            ),
+            (
+                "mcp_call_tool",
+                serde_json::json!({ "server": "confluence", "tool": "get_issue", "arguments": {} }),
+            ),
+            (
+                "mcp_registry_tool_call",
+                serde_json::json!({
+                    "server_id": "registry-42",
+                    "tool_name": "write_row",
+                    "arguments": {},
+                }),
+            ),
+            ("mcp_call_tool", serde_json::json!({})),
+        ] {
+            assert!(
+                matches!(
+                    p.check(&request(tool, args)).await,
+                    ToolPolicyDecision::RequireApproval { .. }
+                ),
+                "{tool} is not an affirmatively-declared read and must still park under auto"
+            );
+        }
+
+        // And with NO declaration — the default at every non-harness site — even
+        // the declared pair parks, exactly as it did before this issue.
+        let no_reads = policy("auto", &[], None);
+        assert!(
+            matches!(
+                no_reads
+                    .check(&request(
+                        "mcp_call_tool",
+                        serde_json::json!({ "server": "jira", "tool": "get_issue", "arguments": {} }),
+                    ))
+                    .await,
+                ToolPolicyDecision::RequireApproval { .. }
+            ),
+            "a policy with no read declaration must gate every bridge call, as before #1124"
+        );
     }
 
     /// `always_approve` wins over `auto` exactly as it wins over `full`, and the

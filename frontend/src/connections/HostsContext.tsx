@@ -23,7 +23,7 @@
 import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
 
 import type { LocalInstance } from "@/api/transport/desktop";
-import type { Connection, ConnectionId } from "@/connections/types";
+import type { Connection, ConnectionId, Connector, SshTarget } from "@/connections/types";
 
 export interface HostsValue {
   connections: Connection[];
@@ -31,8 +31,15 @@ export interface HostsValue {
   selected: ConnectionId | null;
   /** Puts another host's console on screen. A filter — see the note above. */
   onSelect: (id: ConnectionId) => void;
-  /** Registers a host reachable at `baseUrl`, and opens it. */
-  onAdd: (baseUrl: string) => void;
+  /**
+   * Registers a host reachable at `baseUrl`, and opens it.
+   *
+   * The connector says which of the four this is, and is not derivable from
+   * the address: a cloud tenant and a gateway someone runs are both
+   * `https://…`, and only the first is worth waiting for when it does not
+   * answer. See `docs/spec/runtime/connectors.md`.
+   */
+  onAdd: (baseUrl: string, connector?: Connector) => void;
   /**
    * The hosts this machine runs, running or not.
    *
@@ -44,6 +51,17 @@ export interface HostsValue {
   onAddLocal?: (label: string) => Promise<void>;
   onStartLocal?: (id: string) => Promise<void>;
   onStopLocal?: (id: string) => Promise<void>;
+  /**
+   * Opens a tunnel to a host on another machine and registers it.
+   *
+   * Absent in a browser, which cannot start a process — and absent on a shell
+   * built before tunnels existed, so the tab is offered only where the button
+   * behind it can be honoured.
+   *
+   * Rejects with what `ssh` said, which the form shows: a refused key names
+   * a specific thing to go and fix.
+   */
+  onAddSsh?: (target: SshTarget) => Promise<void>;
   /** Whether this is a hub deployment, which offers the switcher at any count. */
   hub: boolean;
 }
@@ -51,15 +69,16 @@ export interface HostsValue {
 /**
  * The roster plus the one piece of UI state that must not live in the switcher.
  *
- * "Add a host" opens a dialog, and creating a host on this computer *selects*
- * it — which remounts the console the switcher is drawn inside, taking the
- * dialog with it and closing the roster mid-flow. The rail did not have this
- * problem because it stood outside the console; keeping the open flag here, and
- * the dialog mounted beside the console rather than within it, is how the
- * switcher keeps that property from its new home.
+ * "Add a host" opens a screen (`views/setup/AddHostPage.tsx`), and creating a
+ * host on this computer *selects* it — which remounts the console the switcher
+ * is drawn inside, taking that screen with it and closing the flow halfway
+ * through. The rail did not have this problem because it stood outside the
+ * console; keeping the open flag here, and the screen mounted beside the
+ * console rather than within it, is how the switcher keeps that property from
+ * its new home.
  */
 export interface HostsContextValue extends HostsValue {
-  /** Whether the "Add a host" dialog is open. */
+  /** Whether the "Add a host" screen is up. */
   addingHost: boolean;
   setAddingHost: (open: boolean) => void;
 }

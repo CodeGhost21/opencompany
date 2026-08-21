@@ -798,7 +798,10 @@ pub fn parse_workflow(toml_src: &str) -> Result<WorkflowFile> {
 /// Loads the enabled workflow graphs from a company directory.
 ///
 /// `dir` is the company root; each enabled id resolves to
-/// `dir/workflows/<id>.toml`. A missing or malformed file is an error.
+/// `dir/workflows/<id>.toml`. A missing or malformed file is an error. A file
+/// whose parsed `id` does not match its filename stem is skipped with a warning:
+/// serving it under the embedded id would list a workflow that the id-based read
+/// path can never open.
 pub fn load_company_workflows(dir: &Path, enabled: &[String]) -> Result<Vec<WorkflowFile>> {
     let mut out = Vec::with_capacity(enabled.len());
     for id in enabled {
@@ -818,6 +821,19 @@ pub fn load_company_workflows(dir: &Path, enabled: &[String]) -> Result<Vec<Work
             }
             Err(other) => return Err(other),
         };
+        let stem = path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or_default();
+        if workflow.id != stem {
+            tracing::warn!(
+                path = %path.display(),
+                stem,
+                workflow_id = %workflow.id,
+                "skipping workflow whose filename stem does not match its id"
+            );
+            continue;
+        }
         out.push(workflow);
     }
     Ok(out)
@@ -1889,6 +1905,61 @@ fn contains_non_finite_float(value: &toml::Value) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const LOADABLE_WORKFLOW: &str = r#"
+        id = "valid"
+        name = "Valid"
+        [[node]]
+        id = "start"
+        kind = "trigger"
+        name = "Start"
+        [[node]]
+        id = "done"
+        kind = "output"
+        name = "Done"
+        [[edge]]
+        from = "start"
+        to = "done"
+    "#;
+
+    /// The filename is the id-based lookup key. A different id inside the body
+    /// must never leak into a list as a row that `GET /workflows/{id}` cannot
+    /// open, while a valid sibling continues to load.
+    #[test]
+    fn load_company_workflows_skips_filename_id_mismatches() {
+        let dir = tempfile::tempdir().unwrap();
+        let workflows = dir.path().join("workflows");
+        std::fs::create_dir_all(&workflows).unwrap();
+        std::fs::write(workflows.join("valid.toml"), LOADABLE_WORKFLOW).unwrap();
+        std::fs::write(
+            workflows.join("wrong-stem.toml"),
+            LOADABLE_WORKFLOW.replace("id = \"valid\"", "id = \"different\""),
+        )
+        .unwrap();
+
+        let loaded =
+            load_company_workflows(dir.path(), &["wrong-stem".to_string(), "valid".to_string()])
+                .expect("a mismatched body is skipped rather than failing the load");
+
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].id, "valid");
+    }
+
+    /// The directory scan shares the loader's stem/id choke point, so a bad
+    /// file is absent from the picker rather than listed under its embedded id.
+    #[test]
+    fn list_source_workflows_never_lists_a_mismatched_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let workflows = dir.path().join("workflows");
+        std::fs::create_dir_all(&workflows).unwrap();
+        std::fs::write(
+            workflows.join("wrong-stem.toml"),
+            LOADABLE_WORKFLOW.replace("id = \"valid\"", "id = \"different\""),
+        )
+        .unwrap();
+
+        assert!(list_source_workflows(Some(dir.path())).is_empty());
+    }
 
     #[test]
     fn render_workflow_round_trips_through_parse_workflow() {

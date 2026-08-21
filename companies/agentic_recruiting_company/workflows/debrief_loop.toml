@@ -1,0 +1,91 @@
+# Workflow graph: debrief_loop
+#
+# Referenced by `[workflows].enabled` in ../company.toml. Scorecards are read
+# against the search's stated bar, disagreements between interviewers are
+# surfaced rather than averaged into a number, and a recommendation with its
+# evidence goes to the person who decides.
+
+id = "debrief_loop"
+name = "Debrief loop"
+description = "Scorecards are read against the bar, disagreements surfaced, and a recommendation sent to the decision maker."
+
+[[node]]
+id = "loop_done"
+kind = "trigger"
+name = "Interview loop complete"
+summary = "Every scheduled interview for a candidate has a recorded scorecard."
+
+[[node]]
+id = "gather"
+kind = "agent"
+name = "Read the scorecards"
+summary = "Against the search's must-haves and signals, not against the last candidate."
+agent = "interviewer"
+
+[[node]]
+id = "gaps"
+kind = "agent"
+name = "Name what is still unevidenced"
+summary = "Which must-have has no observation behind it, and what would produce one."
+agent = "resume_analyst"
+
+[[node]]
+id = "agree"
+kind = "condition"
+name = "Do the scorecards agree?"
+summary = "Sharp disagreement usually means two interviewers measured different things."
+[node.config]
+field = "=item.scorecards_agree"
+
+[[node]]
+id = "reconcile"
+kind = "agent"
+name = "Surface the disagreement"
+summary = "State what each interviewer was actually measuring. Never average two verdicts into a number."
+agent = "candidate_sourcer"
+
+[[node]]
+id = "recommend"
+kind = "agent"
+name = "Write the recommendation"
+summary = "Against the bar, with the evidence and the remaining gaps stated plainly."
+agent = "candidate_sourcer"
+
+[[node]]
+id = "decide"
+kind = "output"
+name = "Park for the hiring decision"
+summary = "The decision is a person's. This delivers the evidence it rests on."
+[node.destination]
+kind = "channel"
+target = "hiring"
+
+[[edge]]
+from = "loop_done"
+to = "gather"
+
+[[edge]]
+from = "gather"
+to = "gaps"
+
+[[edge]]
+from = "gaps"
+to = "agree"
+
+[[edge]]
+from = "agree"
+to = "recommend"
+label = "yes"
+
+[[edge]]
+from = "agree"
+to = "reconcile"
+label = "no"
+
+[[edge]]
+from = "reconcile"
+to = "recommend"
+
+[[edge]]
+from = "recommend"
+to = "decide"

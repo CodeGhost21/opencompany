@@ -190,7 +190,10 @@ describe("the run input is off the toolbar but still reachable (#1204)", () => {
 
     expect(byTestId("workflow-run-input-dialog")).toBeNull();
     await click("workflow-run-with-input");
-    expect(byTestId("workflow-run-input-dialog")).not.toBeNull();
+    const dialog = byTestId("workflow-run-input-dialog");
+    expect(dialog).not.toBeNull();
+    expect(dialog?.textContent).toContain("It is handed to the workflow’s first step.");
+    expect(dialog?.textContent).not.toContain("=items");
     expect(requestField()).not.toBeNull();
   });
 

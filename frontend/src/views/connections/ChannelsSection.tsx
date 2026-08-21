@@ -11,6 +11,9 @@ import {
   type TelegramChannelStatus,
 } from "@/api/channels";
 import { ApiError } from "@/api/types";
+import { classifyLoadFailure } from "@/lib/section-load";
+import { SectionUnreachable } from "@/views/connections/SectionUnreachable";
+import { telegramDelivery } from "@/lib/channels";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -27,7 +30,7 @@ interface Props {
   canManage: boolean;
 }
 
-type Load = "loading" | "ready" | "unavailable";
+type Load = "loading" | "ready" | "unavailable" | "error";
 
 /**
  * Configure the company's Telegram channel.
@@ -53,9 +56,11 @@ export function ChannelsSection({ client, company, canManage }: Props) {
     try {
       setStatus(await getTelegramChannel(client, company));
       setLoad("ready");
-    } catch {
-      // The channels surface isn't wired on this host — hide the section.
-      setLoad("unavailable");
+    } catch (err) {
+      // A 404 means the channels surface isn't wired on this host — hide it.
+      // Anything else is a host that could not answer; keep the section and say
+      // so rather than vanishing (issue #1470).
+      setLoad(classifyLoadFailure(err));
     }
   }, [client, company]);
 
@@ -139,20 +144,31 @@ export function ChannelsSection({ client, company, canManage }: Props) {
   // hosts without the channels routes).
   if (load === "unavailable") return null;
 
+  // One reading of what the saved channel is doing, shared by the badge and the
+  // rebuild notice so they cannot disagree (issue #1467).
+  const delivery = telegramDelivery(status);
+
   return (
     <section className="space-y-3">
       <div className="flex items-center justify-between gap-3">
         <h3 className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
           Channels
         </h3>
-        {load === "ready" && status?.configured && (
+        {/* The badge asserts a working channel, so it must agree with the
+            "can neither collect nor reply" notice below (issue #1467): a stored
+            token alone is not delivery. `telegramDelivery` is the one decision
+            both read, so they cannot contradict. */}
+        {load === "ready" && delivery === "delivering" && (
           <Badge variant="secondary" className="gap-1">
             <Check className="size-3" /> Telegram configured
           </Badge>
         )}
       </div>
 
-      <Card>
+      {load === "error" ? (
+        <SectionUnreachable label="Couldn't read this company's channel settings" />
+      ) : (
+        <Card>
         <CardContent className="space-y-4 pt-6">
           <div className="space-y-1">
             <p className="text-sm font-medium">Telegram</p>
@@ -212,7 +228,9 @@ export function ChannelsSection({ client, company, canManage }: Props) {
               Listening for messages by polling Telegram — no public URL needed.
             </p>
           )}
-          {status?.configured && !status.polling && (
+          {/* Fires only when the host explicitly reports `polling: false`, never
+              on a missing field (issue #1467) — see `telegramDelivery`. */}
+          {delivery === "stored-not-delivering" && (
             <p className="text-xs text-muted-foreground">
               This host has no outbound Telegram transport, so it can neither collect messages nor
               reply. Rebuild it with the <code className="font-mono">telegram</code> feature.
@@ -287,6 +305,7 @@ export function ChannelsSection({ client, company, canManage }: Props) {
           )}
         </CardContent>
       </Card>
+      )}
     </section>
   );
 }

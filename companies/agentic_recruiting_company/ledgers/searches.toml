@@ -1,0 +1,104 @@
+# Open roles: what is being hired for, against what bar, and how each search
+# ended.
+#
+# A search is not a task and its rows are not candidates. It is an agreement
+# about what "good" means for a particular role — and the failure this ledger
+# prevents is the one every recruiting organization has, where the bar drifts
+# quietly downward across a long search until somebody is hired who would have
+# been rejected in week one.
+
+title = "Searches"
+purpose = """
+Every open search: the role, the bar, the constraints, and how it was filled or \
+closed. Read it before screening anybody — the bar is here, and it is not \
+whatever the last three candidates made it feel like.\
+"""
+written_by = "`record_entry` to open or update a search, `close_entry` when it is filled or closed"
+checks = ["required-field", "known-status", "closed-needs-reason"]
+
+[[field]]
+name = "id"
+role = "id"
+required = true
+
+[[field]]
+name = "search"
+role = "title"
+required = true
+description = "The role and the team."
+
+[[field]]
+name = "status"
+role = "status"
+required = true
+
+[[field]]
+name = "must_have"
+role = "prose"
+required = true
+description = "What somebody cannot do this job without. Short — a long list here is a list nobody meets."
+
+[[field]]
+name = "nice_to_have"
+role = "prose"
+description = "What would help. Kept separate, because the two get blurred under time pressure and that is how the bar drifts."
+
+[[field]]
+name = "signals"
+role = "prose"
+description = "What evidence would show the must-haves, agreed before anybody is screened."
+
+[[field]]
+name = "compensation"
+role = "prose"
+description = "The range, and whether it is competitive for the market being searched. A search with an uncompetitive range fails for that reason and no other."
+
+[[field]]
+name = "owner"
+role = "owner"
+
+[[field]]
+name = "reason"
+role = "prose"
+description = "How it ended — filled, closed, or cancelled. Required when it closes."
+
+[[field]]
+name = "refs"
+role = "refs"
+
+[[status]]
+name = "open"
+
+[[status]]
+name = "interviewing"
+
+[[status]]
+name = "offer_out"
+label = "Offer out"
+
+[[status]]
+name = "filled"
+closed = true
+needs_reason = true
+
+[[status]]
+name = "closed_unfilled"
+label = "Closed unfilled"
+closed = true
+needs_reason = true
+
+[[section]]
+heading = "Active"
+blurb = "Open or interviewing. The bar is on the row, not in anyone's memory of the last three candidates."
+statuses = ["open", "interviewing", "offer_out"]
+order = "recent"
+
+[[section]]
+heading = "Closed"
+blurb = """
+Filled or closed unfilled, each with the reason. An unfilled search's reason is \
+the most useful row here — it is usually the compensation or the must-have \
+list, and both are fixable.\
+"""
+statuses = ["filled", "closed_unfilled"]
+cap = 20

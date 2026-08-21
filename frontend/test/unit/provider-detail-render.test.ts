@@ -276,6 +276,7 @@ function mcpServer(over: Partial<McpServer> = {}): McpServer {
     enabled: true,
     allowedTools: [],
     disallowedTools: [],
+    readOnlyTools: [],
     timeoutSecs: 30,
     authConfigured: true,
     ...over,

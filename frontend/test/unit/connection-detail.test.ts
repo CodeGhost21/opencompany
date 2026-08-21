@@ -108,6 +108,7 @@ describe("mcpStanding", () => {
       enabled: true,
       allowedTools: [],
       disallowedTools: [],
+      readOnlyTools: [],
       timeoutSecs: 30,
       authConfigured: true,
       ...over,

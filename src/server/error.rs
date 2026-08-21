@@ -92,6 +92,13 @@ impl ApiError {
             OpenCompanyError::TinyHumans { code, .. } if code == "unreachable" => {
                 StatusCode::SERVICE_UNAVAILABLE
             }
+            // The shared feedback board needs a TinyHumans account; an instance
+            // provisioned without one simply has no board. That is a missing
+            // surface, not an upstream fault, so it is a 404 the console can
+            // treat as "hide the board" without special-casing a 502.
+            OpenCompanyError::TinyHumans { code, .. } if code == "no_board" => {
+                StatusCode::NOT_FOUND
+            }
             OpenCompanyError::TinyHumans { .. } => StatusCode::BAD_GATEWAY,
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         }

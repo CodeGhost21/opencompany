@@ -33,8 +33,19 @@ the world as, and which third-party accounts its agents act through:
 
 Reads on those same surfaces stay open to any member: they carry a tier name and
 non-secret routing, never a credential, and knowing *that* Gmail is connected is
-what lets a member understand why an agent can read mail. So do the probes over
-already-stored config — `POST …/inference/test`, `GET …/mcp/servers/{name}/tools`,
+what lets a member understand why an agent can read mail. `GET …/domain` (the
+domain, its published DNS records, and whether they resolved) and `GET …/smtp`
+(host, port, username, from-address — the password is absent from `SmtpStatus`
+by construction) are that rule applied to the two rows above, and are the reason
+this is not a per-module habit: admin-only, they would `403` a member on the
+Settings screen while the same domain and the same non-secret SMTP routing
+stayed readable to them over GraphQL as `Company.domain` and `Company.smtp`.
+The GraphQL projections are narrower, not fresher or staler — they share the
+REST loaders, but they answer less detail: `DomainStatusGql` drops the
+per-record `checks` from the last verify pass, and `SmtpStatusGql` drops
+`security`, `from_name` and `from_email`. Neither carries anything secret.
+So do the probes over already-stored config
+— `POST …/inference/test`, `GET …/mcp/servers/{name}/tools`,
 `POST …/mcp/servers/{name}/test`, `POST …/domain/verify` — which name no
 destination of their own.
 
@@ -44,4 +55,6 @@ differently on purpose; an extractor named for the HTTP verb would have to take
 capabilities away from members that are meant to be theirs.
 
 `server::ops::write_test` pins the whole table against a member session, so a
-route joining this plane joins that list too.
+route joining this plane joins that list too — and pins the other direction as
+well, that a member is let through `GET …/domain` and `GET …/smtp`, so the
+sentence above stays a test rather than only a claim.

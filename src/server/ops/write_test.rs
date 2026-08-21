@@ -6917,7 +6917,7 @@ async fn a_member_cannot_change_what_the_company_reaches_the_world_as() {
             "/api/v1/company/smtp",
             Some(
                 json!({ "provider": "smtp", "host": "mail.example.test", "port": 587,
-                         "username": "u", "password": "p", "from": "a@example.test" }),
+                         "username": "u", "password": "p", "from_email": "a@example.test" }),
             ),
         ),
         (
@@ -6967,6 +6967,39 @@ async fn a_member_cannot_change_what_the_company_reaches_the_world_as() {
         assert_eq!(
             response["code"], "forbidden",
             "{method} {uri} refused without saying why: {response}"
+        );
+    }
+}
+
+/// The counterpart to the table above, on the same two surfaces: a member is
+/// let *through* the reads.
+///
+/// `docs/modules/server/authority.md` asserts in prose that reads on these
+/// surfaces stay open to any member — they carry non-secret routing and never a
+/// credential — and until now nothing pinned it. `GET …/domain` and
+/// `GET …/smtp` are new (issue #1460), and the easy mistake when adding a route
+/// to a module whose every other handler takes `AdminScopedCompany` is to reach
+/// for the same extractor: the console's Settings screen would then `403` for
+/// every member while the identical data stayed readable to them over GraphQL
+/// as `Company.domain` and `Company.smtp`.
+///
+/// `200` specifically, not merely "not 403": these read stored config that may
+/// be absent, and both answer that case with a body rather than a status, so
+/// anything else would mean the route did not run.
+#[tokio::test]
+async fn a_member_may_read_what_the_company_reaches_the_world_as() {
+    let home_dir = home();
+    let state = state_with_company(home_dir.path()).await;
+    let member =
+        crate::server::test_support::seed_session(&state, "acme", crate::ports::UserRole::Member)
+            .await;
+
+    for uri in ["/api/v1/company/domain", "/api/v1/company/smtp"] {
+        let (status, response) = send_cookie(&state, "GET", uri, None, &member).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "GET {uri} refused a member: {response}"
         );
     }
 }

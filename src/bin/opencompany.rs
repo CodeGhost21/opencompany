@@ -782,62 +782,13 @@ fn attach_openhuman(builder: RuntimeBuilder) -> RuntimeBuilder {
 
 /// Attaches the embedded OpenHuman harness under the `openhuman` feature.
 ///
-/// The harness pool is **always** attached, so cognition routes through a live
-/// company agent whenever *any* inference source is configured — the managed
-/// env default (`TINYHUMANS_API_KEY` / `OPENCOMPANY_INFERENCE_*`), a manifest
-/// `[inference]` section, or a runtime console override (issue #56 — BYOK).
-/// Attaching the pool unconditionally is what unblocks a BYOK-only tenant that
-/// has no platform credential: the builder still constructs the harness brain
-/// from its manifest/runtime config. Without any source, the runtime keeps its
-/// hosted/echo brain.
-///
-/// Without the feature this is the identity function, so the default build is
-/// unaffected.
-#[cfg(not(feature = "openhuman"))]
+/// One line, because the sequence itself lives in the library
+/// ([`opencompany::app::attach_harness`]) — the desktop shell builds companies
+/// through `desktop::register` rather than through this binary, and a second
+/// copy of the wiring here is exactly how that path came to build companies
+/// with no harness at all.
 fn attach_harness(builder: RuntimeBuilder) -> RuntimeBuilder {
-    builder
-}
-
-#[cfg(feature = "openhuman")]
-fn attach_harness(builder: RuntimeBuilder) -> RuntimeBuilder {
-    use opencompany::app::config::ProcessEnv;
-    use opencompany::harness::HarnessPool;
-    use opencompany::harness::provider::{
-        PlatformCredentialStatus, harness_inference_from_env, media_backend_from_env,
-        search_backend_from_env,
-    };
-
-    // Issue #879: every managed surface below fails closed and says nothing at
-    // boot, so a tenant provisioned without its platform token comes up looking
-    // healthy and only reveals the gap when an agent is built or a workflow node
-    // 500s. Say it once, here, where an operator reading the pod's first lines
-    // will see it.
-    if let Some(warning) = PlatformCredentialStatus::resolve(&ProcessEnv).boot_warning() {
-        tracing::warn!("[boot] {warning}");
-    }
-
-    let builder = builder.with_harness(Arc::new(HarnessPool::new()));
-    // Issue #109: the MANAGED media-generation backend, resolved from the
-    // environment only (never a tenant secret). Absent ⇒ media tools stay unwired
-    // even for a company that grants `media` (fail-closed).
-    let builder = match media_backend_from_env(&ProcessEnv) {
-        Some(media_backend) => builder.with_media_backend(media_backend),
-        None => builder,
-    };
-    // Issue #238: the MANAGED web-search backend, on the same platform identity
-    // as managed inference and resolved from the environment only. Absent ⇒
-    // `web_search` stays unwired even for a company that grants `search`.
-    let builder = match search_backend_from_env(&ProcessEnv) {
-        Some(search_backend) => builder.with_search_backend(search_backend),
-        None => builder,
-    };
-    // The managed env default is an *optional*, lowest-precedence source; a
-    // BYOK-only tenant supplies none and still gets a harness brain from its
-    // manifest/runtime config.
-    match harness_inference_from_env(&ProcessEnv) {
-        Some((config, model_override)) => builder.with_harness_inference(config, model_override),
-        None => builder,
-    }
+    opencompany::app::attach_harness(builder)
 }
 
 /// Routes feedback to the TinyHumans hub when this instance is provisioned with

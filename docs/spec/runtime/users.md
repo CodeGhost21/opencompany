@@ -344,6 +344,15 @@ Pairing codes and login codes share `LoginCodeStore` and are kept apart by
 hashing under a domain prefix rather than by a flag: they are different
 keyspaces, not one keyspace with a check someone could forget.
 
+**Pairing needs a host that has a sign-in.** A `none`-mode company — which is
+every company on a packaged desktop install — will mint and redeem a pairing
+code quite happily and then refuse the resulting session from anywhere but its
+own machine, because `authenticate_session` declines any session on a company
+with no login and `resolve_principal` refuses a non-loopback peer outright. The
+consequence and the reasoning are in
+[sign-in modes](auth-modes.md#none). The desktop as a *client* of a remote host
+is unaffected: that host has a sign-in, which is the whole precondition.
+
 A paired device **cannot mint a pairing code**. Otherwise one compromised
 desktop could quietly enrol further machines that survive revoking it, and
 revocation would stop being a lever.

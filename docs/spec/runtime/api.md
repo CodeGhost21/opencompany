@@ -28,6 +28,13 @@ POST   /api/v1/companies/{id}/approvals/{aid}  { "verdict": "approve"|"deny", "n
                                                "detach": false }
 POST   /api/v1/companies/{id}/feedback         submit feedback (see feedback-loop/)
 GET    /api/v1/companies/{id}/feedback         past reports (no operator words)
+GET    /api/v1/companies/{id}/feedback/board   the shared board, one page
+                                               ?sort=hot|top|new&type=feature|bug
+                                               &status=open|planned|completed
+                                               &page=1&limit=20
+GET    .../feedback/board/{item}               one board item + its comments
+POST   .../feedback/board/{item}/vote          { "value": 1 | -1 | 0 }
+POST   .../feedback/board/{item}/comments      { "body": "…" }
 GET    /api/v1/companies/{id}/memory/traces    inspect working memory (debug)
 POST   /api/v1/companies/{id}/export           export bundle (tar)
 POST   /api/v1/companies/{id}/pause            pause / resume lifecycle transitions
@@ -35,6 +42,14 @@ POST   /api/v1/companies/{id}/pause            pause / resume lifecycle transiti
 
 Single-company (prosumer) mode aliases everything under `/api/v1/company/...`
 with no `{id}`.
+
+The `/feedback/board/...` routes are a **proxy** of the TinyHumans hub's shared
+board, spent with this instance's credential so a browser never holds one. An
+instance without a credential has no board and every one of them answers
+`404 tinyhumans_no_board` — the console hides the surface rather than rendering
+an empty board. A vote is the *instance's* vote, since every console on a host
+shares its one hub account. See
+[feedback-loop/README.md](../feedback-loop/README.md).
 
 `detach` on the approval resolve chooses what the response waits for. Omitted
 (or `false`) it holds the response open for the agent's follow-up turn and
