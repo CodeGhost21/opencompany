@@ -444,14 +444,17 @@ export function sortedFolders(
  *
  * Mirrors `SYSTEM_ROOTS` in `src/company/workspace_scaffold.rs`. Kept in step
  * by name rather than by a wire field, and the risk is the same one
- * {@link isDerivedNode} documents: if the host scaffolds a third root, this
+ * {@link isDerivedNode} documents: if the host scaffolds another root, this
  * const has to follow or a fresh company will briefly look as though somebody
  * has already been working in it.
  */
-export const SYSTEM_ROOTS = ["agents", "secrets"] as const;
+export const SYSTEM_ROOTS = ["agents", "artifacts", "secrets"] as const;
 
 /** The note the host provisions inside `secrets/` on first boot. */
 const SECRETS_README = "readme.md";
+
+/** The note the host provisions inside Artifacts/ on first boot. */
+const ARTIFACTS_README = "readme.md";
 
 /**
  * Whether anything in this tree was put there by a person (issue #1481).
@@ -482,7 +485,7 @@ export function hasOperatorContent(nodes: FsNode[]): boolean {
     if (
       node.parentId &&
       systemRootIds.has(node.parentId) &&
-      node.name.toLowerCase() === SECRETS_README
+      (node.name.toLowerCase() === SECRETS_README || node.name.toLowerCase() === ARTIFACTS_README)
     ) {
       return false;
     }
