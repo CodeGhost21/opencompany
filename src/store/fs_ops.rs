@@ -2494,7 +2494,7 @@ mod test {
             &company,
             &WorkspaceNode {
                 id: "f1".into(),
-                name: "Brand".into(),
+                name: "brand".into(),
                 kind: NodeKind::Folder,
                 parent_id: None,
                 updated_at_millis: now,
