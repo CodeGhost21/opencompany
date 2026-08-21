@@ -410,8 +410,16 @@ async fn register(
     manifest: CompanyManifest,
     provenance: Option<crate::ports::types::TemplateProvenance>,
 ) -> Result<()> {
-    let mut builder = RuntimeBuilder::new(state.home().to_path_buf(), manifest)
-        .with_id(id.clone())
+    // The embedded agent harness, on the same terms `serve` attaches it: the
+    // pool unconditionally, plus whichever managed backends the environment
+    // supplies. Without this a desktop company had no harness even in a build
+    // that compiled one in, so every turn fell back to the echo brain and the
+    // console reported that this build cannot reach a model.
+    let mut builder = crate::app::attach_harness(RuntimeBuilder::new(
+        state.home().to_path_buf(),
+        manifest,
+    ))
+    .with_id(id.clone())
         // The host-wide sign-in mode (`OPENCOMPANY_AUTH_MODE` / `config.toml`
         // `auth_mode`), which outranks this manifest's own `[users].mode`.
         //
@@ -473,10 +481,13 @@ pub async fn start_local(home: impl Into<PathBuf>, preset_id: &str) -> Result<De
     .with_cors(CorsConfig {
         allowed_origins: vec![TAURI_WEBVIEW_ORIGIN.to_string()],
     });
-    let runtime = RuntimeBuilder::new(state.home().to_path_buf(), manifest)
-        .with_id(company_id.clone())
-        .build()
-        .await?;
+    let runtime = crate::app::attach_harness(RuntimeBuilder::new(
+        state.home().to_path_buf(),
+        manifest,
+    ))
+    .with_id(company_id.clone())
+    .build()
+    .await?;
     state
         .registry()
         .insert(company_id.clone(), std::sync::Arc::new(runtime));
