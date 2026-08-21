@@ -1,3 +1,11 @@
+# The ledger console: rendering a list's screen
+
+Split out of `ledgers.md` when that file outgrew the 500-line cap enforced by
+`scripts/ci/assert-md-line-cap.sh`. The engine spec, declared `LedgerSpec`,
+the append-only fold, bounds-are-code and one derived Markdown file per list,
+stays in [ledgers.md](ledgers.md). The console-facing IA, naming and sidebar
+placement is the separate `ledgers-console-ia.md` (issue #1284).
+
 ## The console
 
 The console-facing IA — naming ("ledger" stays an internal word only), how a
