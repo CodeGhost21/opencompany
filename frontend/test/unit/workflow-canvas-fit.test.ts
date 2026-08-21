@@ -48,11 +48,21 @@ function chain(n: number) {
   return layout(graph(nodes, edges)).nodes;
 }
 
-/** The canvas pane at a 1440px window: the app sidebar and the detail header
- * take the rest. Measured, not assumed. */
-const PANE_1440 = { width: 1224, height: 782 };
-/** The same at 1100px, where the fit was worse. */
-const PANE_1100 = { width: 884, height: 702 };
+/**
+ * The canvas pane at a 1440px window: the app sidebar and the detail header
+ * take the rest. Measured in a browser, not assumed.
+ *
+ * These numbers MOVE, and are expected to. The pane was 1224x782 when #1361 was
+ * measured; #1297's inset card and the shell's content-surface work have since
+ * taken it to 1198x756. That drift is the argument FOR a constant floor rather
+ * than a computed one: `LEGIBLE_FIT_ZOOM` is derived from the type scale, not
+ * from the pane, so every assertion below holds at both sizes and at any other
+ * the shell arrives at. If one of these ever fails because the pane changed,
+ * the pane got small enough to be its own bug — re-measure and say so here.
+ */
+const PANE_1440 = { width: 1198, height: 756 };
+/** The same at 1100px, where the unclamped fit was worse (0.28). */
+const PANE_1100 = { width: 858, height: 756 };
 
 describe("the opening viewport for a workflow canvas", () => {
   it("holds a ten-node pipeline at the legible floor rather than fitting it", () => {
