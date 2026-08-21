@@ -317,14 +317,26 @@ credential: the old credential was unreachable by agents.
 ```text
 GET    …/credential                         whether the company has its own key + which tier it presents
 PUT    …/credential                         set / rotate / clear the company's TinyHumans key  [admin]
-PUT    …/domain                             set the custom domain
+GET    …/domain                             the stored domain + records + last verify result, or `null`
+PUT    …/domain                             set the custom domain  [admin]
 POST   …/domain/verify                       server-side DNS check
-PUT    …/smtp                               store SMTP credentials (secret store)
-POST   …/smtp/test                           send a test email
+GET    …/smtp                               non-secret SMTP status (`configured: false` when unset)
+PUT    …/smtp                               store SMTP credentials (secret store)  [admin]
+POST   …/smtp/test                           send a test email  [admin]
 POST   …/connections/{provider}/start        retired native OAuth bridge → 410 JSON until 2026-09-30  [feature: oauth]
 POST   …/connections/{provider}/disconnect   drop a legacy stored OAuth token  [feature: oauth]
 GET    /api/v1/oauth/callback                retired browser landing page → 410 HTML until 2026-09-30  [feature: oauth]
 ```
+
+The two `GET`s are REST twins of the GraphQL `Company.domain` / `Company.smtp`
+reads and serve the same loader, so the planes cannot answer differently. They
+are open to any member (the `[admin]` line guards the company's outward
+identity, not the reading of it) and neither carries credential material: the
+SMTP password is absent from `SmtpStatus` by construction. `PUT …/smtp` treats
+the password as a **patch** — a body that omits it keeps the stored one, so a
+form can offer "stored — leave blank to keep" instead of charging a credential
+re-entry for a from-name fix. A body carrying one behaves exactly as before, and
+one that supplies neither with nothing stored is `400`.
 
 `…/credential` is the company's **one** TinyHumans key, presented by every
 surface wired to it (**Composio today**) — see
