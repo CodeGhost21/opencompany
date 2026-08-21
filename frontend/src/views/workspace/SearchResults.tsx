@@ -11,12 +11,13 @@
 // want?") and showing both at once would leave the operator reading a tree that
 // is not what they just asked for.
 
-import { FileText, Folder, Loader2, Search } from "lucide-react";
+import { FileText, Folder, Loader2, Lock, Search } from "lucide-react";
 
 import { formatBytes, highlightRuns, isBinary, originLabel, type SearchHit } from "@/api/workspace";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
+import { DERIVED_LABEL, DERIVED_REASON, isDerivedPath } from "@/lib/workspace";
 
 interface Props {
   /** The query the results below answer — not the input's live value. */
@@ -92,7 +93,18 @@ export function SearchResults({ query, hits, total, loading, error, onOpen }: Pr
       </p>
       <ul>
         {hits.map((hit) => {
-          const origin = originLabel(hit.updatedBy);
+          /**
+           * Whether this hit is a ledger's file (issue #1377).
+           *
+           * Read off `hit.path` rather than the tree, because a search replaces
+           * the tree in this pane — and the hits may name notes in folders the
+           * explorer has never expanded, so there is no ancestry here to walk.
+           */
+          const derived = isDerivedPath(hit.path);
+          // `Seeded` on a derived hit is not merely uninformative, it is
+          // wrong — see the note above `Authorship` in `WorkspaceView`. The
+          // badge slot says the true thing instead of the false one.
+          const origin = derived ? null : originLabel(hit.updatedBy);
           return (
             <li key={hit.id}>
               <button
@@ -125,10 +137,22 @@ export function SearchResults({ query, hits, total, loading, error, onOpen }: Pr
                       ),
                     )}
                   </span>
-                  {origin && (
-                    <Badge variant="outline" className="shrink-0 text-3xs">
-                      {origin}
+                  {derived ? (
+                    <Badge
+                      variant="outline"
+                      className="shrink-0 gap-1 pl-1 text-3xs font-normal"
+                      title={DERIVED_REASON}
+                      data-testid="workspace-search-derived"
+                    >
+                      <Lock className="size-2.5" aria-hidden />
+                      {DERIVED_LABEL}
                     </Badge>
+                  ) : (
+                    origin && (
+                      <Badge variant="outline" className="shrink-0 text-3xs">
+                        {origin}
+                      </Badge>
+                    )
                   )}
                 </span>
                 {/* The path is the reason a flat hit list is usable at all — two

@@ -98,9 +98,32 @@ export function isDerivedNode(nodes: FsNode[], id: string | null): boolean {
  * them: the guard must not be steppable around by a formatting difference.
  */
 export function isDerivedPath(path: string): boolean {
-  const head = path.replace(/^\/+/, "").split("/")[0];
+  const head = path.trim().replace(/^\/+/, "").split("/")[0];
   return head !== undefined && head.trim().toLowerCase() === DERIVED_DIR;
 }
+
+/**
+ * What the tree, the search list and the note header all call a `derived/`
+ * file (issue #1377).
+ *
+ * One phrase in three places on purpose. "Read only" — what the header chip
+ * used to say — reports that an edit is unwelcome without saying *why*, and a
+ * rule with no reason behind it is the kind of rule people work around or file
+ * as a bug. "Written by a ledger" is the reason, and it is short enough to fit
+ * a tree row, a search hit and a header chip alike.
+ */
+export const DERIVED_LABEL = "Written by a ledger";
+
+/**
+ * The long form of {@link DERIVED_LABEL} — what happens if you edit it anyway,
+ * and where the edit actually belongs.
+ *
+ * Lives here rather than in `WorkspaceView` because the search list is a
+ * sibling module that would otherwise have to import from its own parent.
+ */
+export const DERIVED_REASON =
+  "This file is written by a ledger and re-derived on every write to it — " +
+  "an edit here would be erased. Change it on the Ledgers page instead.";
 
 /** Ancestor folders (root → current), for breadcrumbs. */
 export function pathOf(nodes: FsNode[], id: string | null): FsNode[] {
