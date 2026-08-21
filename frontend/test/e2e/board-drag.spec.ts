@@ -212,7 +212,27 @@ test("a card drags from Working to Done, and the board scrolls to get there", as
   // the board cannot scroll and the park below lands on zero. Narrow the
   // window so the board genuinely overflows: the sidebar stays expanded above
   // `md` (768px), and the park needs ~260px of overflow to land mid-range.
+  const pane = () => board(page).evaluate((el) => el.clientWidth);
+  const wide = await pane();
   await page.setViewportSize({ width: 800, height: 720 });
+  // The board learns its own width through a `ResizeObserver`, so the frame
+  // after `setViewportSize` is not the frame it has re-measured on. Everything
+  // below turns on that measurement — which columns collapse, and by how much
+  // the board overflows — so wait for it rather than for a timeout.
+  await expect.poll(pane).toBeLessThan(wide);
+
+  // And expand *again*, because narrowing the window is what created the rails.
+  // `openBoard` ran `expandAll` at 1280px, where three phases fit and the board
+  // therefore collapses nothing — so it found no rails and pinned nothing.
+  // Narrowing is what makes the columns stop fitting, and an empty Done folds
+  // itself into a ~40px rail. Dragging onto that rail is a different gesture
+  // from the one this test is about — the rail opens under the drag, reflowing
+  // the board mid-drop — and it also leaves the board barely wider than its
+  // pane, so the park below lands on zero and the edge-scroll claim stops being
+  // tested. Pinning every phase open puts the board back to the full
+  // three-phase width the assertions below assume.
+  await expandAll(page);
+  await expect(board(page).locator('[data-collapsed="true"]')).toHaveCount(0);
 
   // Park the board so Working is on screen and Done is not. This is the
   // operator's actual starting position, and the case the gesture could not
