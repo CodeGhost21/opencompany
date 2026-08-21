@@ -62,6 +62,7 @@ use crate::ports::types::{
 };
 use crate::ports::users::{InviteRecord, UserRecord};
 use crate::store::content_address;
+use crate::store::text::slice_on_char_boundaries;
 
 fn mongo_err(e: impl std::fmt::Display) -> OpenCompanyError {
     OpenCompanyError::Store(format!("mongodb error: {e}"))
@@ -1012,15 +1013,40 @@ impl ContextStore for MongoStore {
         let body = get_str(&doc, "body")?;
         match range {
             None => Ok(body),
-            Some(r) => {
-                let start = r.start.min(body.len());
-                let end = r.end.min(body.len());
-                if start >= end {
-                    return Ok(String::new());
+            // Byte offsets from the caller can land mid-codepoint; widen to
+            // the boundary rather than panic the slice.
+            Some(r) => Ok(slice_on_char_boundaries(&body, r)),
+        }
+    }
+
+    async fn peek_many(&self, id: &CompanyId, addrs: &[ChunkAddr]) -> Result<Vec<Option<String>>> {
+        // One `$in` find for the whole batch, instead of the default's
+        // round-trip-per-chunk loop.
+        let wanted: Vec<&str> = addrs.iter().map(|a| a.as_ref()).collect();
+        let mut cursor = self
+            .collection("context_chunks")
+            .find(doc! {"company_id": id.as_ref(), "addr": {"$in": wanted}})
+            .await
+            .map_err(mongo_err)?;
+        let mut by_addr = HashMap::new();
+        while let Some(doc) = cursor.try_next().await.map_err(mongo_err)? {
+            // Per-addr degrade, per the port contract: a document missing its
+            // fields answers `None` for its addr rather than failing the
+            // batch — only the find/cursor itself is batch-level.
+            match (get_str(&doc, "addr"), get_str(&doc, "body")) {
+                (Ok(addr), Ok(body)) => {
+                    by_addr.insert(addr, body);
                 }
-                Ok(body[start..end].to_string())
+                (addr, body) => {
+                    let error = addr.err().or(body.err()).expect("one side failed");
+                    tracing::warn!(%error, "malformed context document skipped in bulk read");
+                }
             }
         }
+        Ok(addrs
+            .iter()
+            .map(|addr| by_addr.get(addr.as_ref()).cloned())
+            .collect())
     }
 
     async fn search(&self, id: &CompanyId, query: &str, limit: usize) -> Result<Vec<ChunkHit>> {
@@ -1037,11 +1063,14 @@ impl ContextStore for MongoStore {
             }
             let body = get_str(&doc, "body")?;
             if let Some(pos) = body.find(query) {
-                let start = pos.saturating_sub(24);
-                let end = (pos + query.len() + 24).min(body.len());
+                // The ±24-byte window can land mid-codepoint on a multibyte
+                // body; widen to the boundary rather than panic the slice.
                 hits.push(ChunkHit {
                     addr: ChunkAddr::new(get_str(&doc, "addr")?),
-                    snippet: body[start..end].to_string(),
+                    snippet: slice_on_char_boundaries(
+                        &body,
+                        pos.saturating_sub(24)..pos + query.len() + 24,
+                    ),
                     score: 1.0,
                 });
             }
@@ -4621,6 +4650,22 @@ mod test {
     async fn conformance_context_chunk_stamps() {
         let Some(s) = store().await else { return };
         conformance::assert_context_chunk_stamps(s.clone()).await;
+        drop_db(&s).await;
+    }
+
+    // Exercises this backend's single-`$in`-find `peek_many` override against
+    // the same positional contract the default implementation gives.
+    #[tokio::test]
+    async fn conformance_context_peek_many() {
+        let Some(s) = store().await else { return };
+        conformance::assert_context_peek_many_answers_positionally(s.clone()).await;
+        drop_db(&s).await;
+    }
+
+    #[tokio::test]
+    async fn conformance_context_multibyte_bodies() {
+        let Some(s) = store().await else { return };
+        conformance::assert_multibyte_bodies_survive_search_and_ranged_peek(s.clone()).await;
         drop_db(&s).await;
     }
 
