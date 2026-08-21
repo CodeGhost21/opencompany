@@ -25,6 +25,15 @@ name = "live_company_turn"
 path = "examples/live_company_turn.rs"
 required-features = ["openhuman"]
 
+# Server-only end-to-end drive of team orchestration: a company template on the
+# real host, mock inference + MCP credentials, one operator message through a
+# three-agent hand-off chain. Runs on loopback with no real key, so it is an
+# example anyone can run — but it is not built by the default `cargo build`.
+[[example]]
+name = "team_orchestration_e2e"
+path = "examples/team_orchestration_e2e.rs"
+required-features = ["openhuman", "mcp"]
+
 [dependencies]
 # Compiles agent-authored `Page.tsx` (issue: agent-authored dashboard pages)
 # into browser-runnable JS inside `pages_write` (`src/harness/pages_tools.rs`).
@@ -207,6 +216,27 @@ hmac = { version = "0.12", optional = true }
 # links no network crates" invariant is untouched. Feature-gating them instead
 # would push `#[cfg]` through StorageHandles, three backends, and the
 # conformance suite to defend nothing.
+# ────────────────────────────────────────────────────────────────────────────
+# Document text extraction for Brain uploads (`documents` feature)
+# ────────────────────────────────────────────────────────────────────────────
+# What a file dropped on the Brain page has to become before memory can hold
+# it: text. Plain formats need nothing; these three cover the ones an operator
+# actually drops — a contract PDF, a spec `.docx`, a pricing `.xlsx`, a deck.
+#
+# In the DEFAULT feature set, on the `oauth` precedent: the drop zone is a
+# first-class console surface, and a shipped build where dropping a PDF stores
+# nothing would be a feature that exists only for people who compile their own
+# binary. All three are pure Rust with no system libraries.
+#
+# `zip` + `quick-xml` are the whole of OOXML: `.docx`, `.pptx` are zip archives
+# of XML, and walking them directly is smaller than a document library. `.xlsx`
+# is not — shared-string tables and cell typing make hand-parsing it a
+# liability — so `calamine` reads that one.
+pdf-extract = { version = "0.12", optional = true }
+calamine = { version = "0.34", optional = true }
+quick-xml = { version = "0.41", optional = true }
+zip = { version = "6", default-features = false, features = ["deflate"], optional = true }
+
 sha2 = "0.10"
 getrandom = "0.4"
 
@@ -268,9 +298,9 @@ tinycortex = { version = "0.1", optional = true }
 # NOT part of `tinymemory`: depending on it unconditionally would drag
 # `tinycortex`, and with it a bundled SQLite build, into a tenant that
 # selected a hosted engine over HTTP and needs neither (tinymemory#18 §D).
-tinymemory = { path = "vendor/openhuman/vendor/tinymemory", optional = true }
-tinymemory-api = { path = "vendor/openhuman/vendor/tinymemory/api", optional = true }
-tinymemory-remote = { path = "vendor/openhuman/vendor/tinymemory/adapters/remote", optional = true }
+tinymemory = { path = "vendor/openhuman/vendor/tinymemory/crates/tinymemory", optional = true }
+tinymemory-api = { path = "vendor/openhuman/vendor/tinymemory/crates/tinymemory-api", optional = true }
+tinymemory-remote = { path = "vendor/openhuman/vendor/tinymemory/crates/tinymemory-remote", optional = true }
 # `tinymemory-core` carries `UnifiedMemory` — the contract's own durable SQLite
 # store (`impl Memory for UnifiedMemory`, driver id `namespace`) — which is what
 # lets the *embedded* mode bind through the provider seam instead of around it
@@ -283,8 +313,8 @@ tinymemory-remote = { path = "vendor/openhuman/vendor/tinymemory/adapters/remote
 # (tinymemory#18 §D). `remote` and `null` continue to need only the three
 # contract crates above. Same single-checkout rule as those three: the path is
 # byte-identical to the one `vendor/openhuman/Cargo.toml` declares.
-tinymemory-core = { path = "vendor/openhuman/vendor/tinymemory/core", optional = true }
-tinymemory-tinycortex = { path = "vendor/openhuman/vendor/tinymemory/adapters/tinycortex", optional = true }
+tinymemory-core = { path = "vendor/openhuman/vendor/tinymemory/crates/tinymemory-core", optional = true }
+tinymemory-tinycortex = { path = "vendor/openhuman/vendor/tinymemory/crates/tinymemory-tinycortex", optional = true }
 
 # Single-file `.tar` packing/unpacking for `opencompany export`/`import`. Pure
 # Rust, no system libs, no network. Only links under the `export` feature; the
@@ -350,7 +380,19 @@ rand_core = { version = "0.6", default-features = false, features = ["getrandom"
 # and *run* by nothing. Moving it into the default set makes both `cargo test`
 # lanes execute them, which is why this needs no new CI lane. It costs one pure
 # dependency (`jsonwebtoken`), already in `Cargo.lock`.
-default = ["oauth", "platform-jwt"]
+default = ["oauth", "platform-jwt", "documents"]
+# Text extraction for files dropped on the Brain page (PDF, Word, Excel,
+# PowerPoint). Without it those formats still upload and are still refused
+# honestly — the route reports "no text could be extracted" rather than
+# storing an empty memory — while plain text, Markdown, HTML, JSON, CSV and
+# source files are extracted by the always-compiled path. In the default set;
+# see the dependency block for why.
+# `reqwest` rides along because "remember this link" is the same feature as
+# "remember this file" from the operator's side, and a build that reads a
+# dropped PDF but cannot fetch a URL would be a distinction nobody asked for.
+# It is already in the default set via `oauth`, so this adds nothing there.
+documents = ["dep:pdf-extract", "dep:calamine", "dep:quick-xml", "dep:zip", "dep:reqwest"]
+
 tiny = ["tinyagents"]
 # WS4: embed `vendor/openhuman` (`openhuman_core`) directly as the tenant agent
 # harness via `AgentBuilder`. `src/harness/` compiles only under this feature;
@@ -547,7 +589,7 @@ paypal = ["dep:reqwest"]
 # in its Cargo.toml); replicated here with the path rebased onto the vendored
 # checkout, same as the WS4 entries below.
 [patch."https://github.com/tinyhumansai/tinymemory"]
-tinymemory-api = { path = "vendor/openhuman/vendor/tinymemory/api" }
+tinymemory-api = { path = "vendor/openhuman/vendor/tinymemory/crates/tinymemory-api" }
 
 [patch.crates-io]
 # Reuse OpenHuman's own TinyAgents pin (2.1.0). This satisfies OpenHuman's
@@ -586,7 +628,7 @@ tempfile = "3"
 # (tinymemory-api + async-trait + serde_json + anyhow), deliberately barred
 # from reaching any engine, so it adds no engine weight to any lane's graph.
 # Same byte-identical-path rule as the `tinymemory*` entries above.
-tinymemory-conformance = { path = "vendor/openhuman/vendor/tinymemory/conformance" }
+tinymemory-conformance = { path = "vendor/openhuman/vendor/tinymemory/crates/tinymemory-conformance" }
 # `test-util` only — for `#[tokio::test(start_paused = true)]`, which the git
 # deadline test needs to fire a timeout deterministically instead of racing a
 # real child process. Dev-only: under resolver v2 this feature is not unified

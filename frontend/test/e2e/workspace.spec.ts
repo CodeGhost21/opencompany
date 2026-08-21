@@ -245,11 +245,12 @@ test("the retired local scratchpad is offered for import, its seed discarded", a
 
   await page.getByTestId("workspace-migration-import").click();
 
-  // The receipt names what was actually imported, per kind (#500). Two notes
-  // and one folder — not the flat list's length, and not the import folder the
-  // console creates to hold them, which is packaging rather than content.
+  // The receipt names what was actually imported, per kind (#500) — two notes
+  // and one folder, not the flat list's length — and where it went (#1472).
+  // The import folder itself is still packaging rather than content, so it is
+  // named as the destination and stays out of the tally.
   await expect(page.locator("[data-sonner-toast] [data-title]").first()).toHaveText(
-    "Imported 2 notes and 1 folder.",
+    "Imported 2 notes and 1 folder into “Imported from this browser”.",
     { timeout: 30_000 },
   );
 

@@ -13,9 +13,10 @@
 
 export type { FsNode } from "@/api/workspace";
 
-import { type LocalScope, scopedKeyAdoptingLegacy } from "@/connections/types";
+import { type LocalScope, scopedKey, scopedKeyAdoptingLegacy } from "@/connections/types";
 
 import type { FsNode, RepairOutcome } from "@/api/workspace";
+import { rosterDisplayName, type RosterNames } from "@/lib/roster-names";
 
 /* ---- queries ---- */
 
@@ -24,6 +25,16 @@ export function childrenOf(nodes: FsNode[], parentId: string | null): FsNode[] {
     .filter((x) => x.parentId === parentId)
     .sort((a, b) => {
       if (a.kind !== b.kind) return a.kind === "folder" ? -1 : 1;
+      // `derived/` sorts after the folders a person made (issue #1382). It is
+      // the one folder nobody in the company named or can write to, and sitting
+      // alphabetically among `Campaigns` and `Standards` presented it as a peer
+      // of theirs. Cosmetic and name-based, but the name is the host's and only
+      // one folder has it.
+      const aDerived =
+        a.kind === "folder" && a.name.toLowerCase() === DERIVED_DIR;
+      const bDerived =
+        b.kind === "folder" && b.name.toLowerCase() === DERIVED_DIR;
+      if (aDerived !== bDerived) return aDerived ? 1 : -1;
       return a.name.localeCompare(b.name);
     });
 }
@@ -360,6 +371,135 @@ export function pathOf(nodes: FsNode[], id: string | null): FsNode[] {
  * ellipsis rather than dropped, so the operator can see that the path is longer
  * than what is shown instead of reading a shortened path as the whole truth.
  */
+/**
+ * Whether `folder` is the workspace's `Agents/` root — the one folder whose
+ * direct children are named by roster id rather than anything an operator
+ * chose (issue #973). Root-scoped (`parentId === null`) so a note or folder an
+ * operator names "Agents" somewhere else in the tree is never mistaken for it.
+ *
+ * Lives here rather than in the view because the tree is no longer the only
+ * surface that has to resolve those ids: the Move dialog lists the same folders
+ * (issue #1381).
+ */
+export function isAgentsFolder(folder: FsNode | undefined): boolean {
+  return (
+    folder?.kind === "folder" &&
+    folder.name === "Agents" &&
+    folder.parentId === null
+  );
+}
+
+/**
+ * A folder's full path as one line, with roster ids resolved (issue #1381).
+ *
+ * The Move dialog listed every folder by bare `name`, so two `Drafts` under
+ * different parents were identical rows and a roster folder was a raw ULID —
+ * in a list the operator is choosing a destination from, where picking the
+ * wrong one silently re-files a note.
+ */
+export function folderPathLabel(
+  nodes: FsNode[],
+  id: string,
+  names: RosterNames,
+): string {
+  return pathOf(nodes, id)
+    .map((node) =>
+      isAgentsFolder(nodeById(nodes, node.parentId))
+        ? rosterDisplayName(node.name, names)
+        : node.name,
+    )
+    .join(" / ");
+}
+
+/**
+ * Every folder in the tree, in the order the explorer draws them (issue #1381).
+ *
+ * `fetchTree` returns the host's order unmodified, and the host calls its own
+ * `tree()` order unspecified — so the destination list was arbitrary while the
+ * tree beside it was sorted. This walks the same {@link childrenOf} the tree
+ * does, depth-first, so the two agree.
+ *
+ * `blocked` drops a subtree wholesale: the moving node's own descendants (which
+ * would be a cycle), and the read-only `derived/` root, which the host refuses
+ * writes under — offering it could only ever produce an error toast.
+ */
+export function sortedFolders(
+  nodes: FsNode[],
+  blocked: ReadonlySet<string>,
+): FsNode[] {
+  const out: FsNode[] = [];
+  const walk = (parentId: string | null) => {
+    for (const node of childrenOf(nodes, parentId)) {
+      if (node.kind !== "folder" || blocked.has(node.id)) continue;
+      out.push(node);
+      walk(node.id);
+    }
+  };
+  walk(null);
+  return out;
+}
+
+/**
+ * The root folders the host lays down on every boot, by name.
+ *
+ * Mirrors `SYSTEM_ROOTS` in `src/company/workspace_scaffold.rs`. Kept in step
+ * by name rather than by a wire field, and the risk is the same one
+ * {@link isDerivedNode} documents: if the host scaffolds a third root, this
+ * const has to follow or a fresh company will briefly look as though somebody
+ * has already been working in it.
+ */
+export const SYSTEM_ROOTS = ["agents", "secrets"] as const;
+
+/** The note the host provisions inside `secrets/` on first boot. */
+const SECRETS_README = "readme.md";
+
+/**
+ * Whether anything in this tree was put there by a person (issue #1481).
+ *
+ * `ensure_workspace_scaffold` runs on every boot, so `nodes.length === 0` is
+ * unreachable on a live company and "is this workspace empty?" cannot be asked
+ * that way. What the empty state actually needs to know is different: has
+ * anyone written anything here *yet* — because "pick a note from the explorer"
+ * is the wrong instruction to give someone whose explorer holds three rows they
+ * did not create and have no reason to open.
+ */
+export function hasOperatorContent(nodes: FsNode[]): boolean {
+  const systemRootIds = new Set(
+    nodes
+      .filter(
+        (node) =>
+          node.parentId === null &&
+          node.kind === "folder" &&
+          (SYSTEM_ROOTS as readonly string[]).includes(node.name.toLowerCase()),
+      )
+      .map((node) => node.id),
+  );
+  const agentsRootId = nodes.find((node) => isAgentsFolder(node))?.id ?? null;
+  return nodes.some((node) => {
+    if (systemRootIds.has(node.id)) return false;
+    // The scaffolded README inside `secrets/` is the host's words, not the
+    // operator's — a workspace holding only it has still never been written in.
+    if (
+      node.parentId &&
+      systemRootIds.has(node.parentId) &&
+      node.name.toLowerCase() === SECRETS_README
+    ) {
+      return false;
+    }
+    // A teammate's own `Agents/<roster-id>/` folder is minted by the host and
+    // named by id; nobody chose it. A note filed *inside* one is a person's
+    // work and counts.
+    if (
+      node.kind === "folder" &&
+      agentsRootId !== null &&
+      node.parentId === agentsRootId
+    ) {
+      return false;
+    }
+    return true;
+  });
+}
+
 export type Crumb = FsNode | null;
 
 /**
@@ -523,6 +663,38 @@ export function readLegacyLocalNodes(scope: LocalScope): FsNode[] {
 export function hasLegacyLocal(scope: LocalScope): boolean {
   try {
     return localStorage.getItem(KEY(scope)) !== null;
+  } catch {
+    return false;
+  }
+}
+
+/** Where a declined migration offer is remembered, per connection. */
+const DECLINED_KEY = (scope: LocalScope) => scopedKey("oc-workspace-migration-declined", scope);
+
+/**
+ * Remember that the operator said "not now" to the migration offer.
+ *
+ * A decline is deliberately *not* a discard. The banner used to offer exactly
+ * two exits — import, or destroy the notes — so an operator who wanted neither
+ * met the same offer on every mount, and the quietest way to make it stop was
+ * the button that deleted the only copy. This is the third exit: the notes stay
+ * in the browser, untouched, and the offer stops asking.
+ *
+ * Scoped per connection like every other console key, so declining on one host
+ * cannot hide the offer on another that has never made it.
+ */
+export function declineLegacyImport(scope: LocalScope): void {
+  try {
+    localStorage.setItem(DECLINED_KEY(scope), "1");
+  } catch {
+    /* storage unavailable — the offer will simply be made again */
+  }
+}
+
+/** Whether this connection has already declined the migration offer. */
+export function legacyImportDeclined(scope: LocalScope): boolean {
+  try {
+    return localStorage.getItem(DECLINED_KEY(scope)) !== null;
   } catch {
     return false;
   }

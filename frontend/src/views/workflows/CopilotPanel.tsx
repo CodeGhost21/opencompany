@@ -184,6 +184,14 @@ export function CopilotPanel({
   const workflowId = graph.id;
   const sourceDefined = graph.editable === false;
 
+  useEffect(() => {
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [onClose]);
+
   // Replay this workflow's transcript. Keyed on the workflow id, so switching
   // workflow swaps transcripts rather than appending to the previous one.
   //

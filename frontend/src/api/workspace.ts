@@ -22,9 +22,7 @@ export type NodeKind = "folder" | "file";
  * nobody. `agentId` is present exactly when `kind` is `"agent"`.
  */
 export type WorkspaceOrigin =
-  | { kind: "seed" }
-  | { kind: "operator" }
-  | { kind: "agent"; id: string };
+  { kind: "seed" } | { kind: "operator" } | { kind: "agent"; id: string };
 
 /** The origin every node falls back to — what the host defaults a legacy node to. */
 export const OPERATOR_ORIGIN: WorkspaceOrigin = { kind: "operator" };
@@ -37,7 +35,9 @@ export const OPERATOR_ORIGIN: WorkspaceOrigin = { kind: "operator" };
  * origin, whereas here the operator is the unremarkable default and badging it
  * would put a chip on nearly every note while saying nothing.
  */
-export function originLabel(origin: WorkspaceOrigin | undefined): string | null {
+export function originLabel(
+  origin: WorkspaceOrigin | undefined,
+): string | null {
   switch (origin?.kind) {
     case "agent":
       return `Teammate · ${origin.id}`;
@@ -106,7 +106,10 @@ export interface WorkspaceFile {
  * by a host that predates issue #326 gets neither field, and defaulting is
  * cheaper than a blank badge.
  */
-interface FsNodeWire extends Omit<FsNode, "parentId" | "createdBy" | "updatedBy"> {
+interface FsNodeWire extends Omit<
+  FsNode,
+  "parentId" | "createdBy" | "updatedBy"
+> {
   parentId?: string | null;
   createdBy?: WorkspaceOrigin;
   updatedBy?: WorkspaceOrigin;
@@ -135,7 +138,9 @@ export async function fetchTree(
   client: OpenCompanyClient,
   company: string | null,
 ): Promise<FsNode[]> {
-  const nodes = await client.get<FsNodeWire[]>(`${client.scopeFor(company)}/workspace`);
+  const nodes = await client.get<FsNodeWire[]>(
+    `${client.scopeFor(company)}/workspace`,
+  );
   return nodes.map(normalize);
 }
 
@@ -208,7 +213,11 @@ export async function searchWorkspace(
   if (options?.prefix) params.set("prefix", options.prefix);
   if (options?.limit !== undefined) params.set("limit", String(options.limit));
   const results = await client.get<{
-    hits: (FsNodeWire & { path: string; matched: "name" | "content"; excerpt?: string })[];
+    hits: (FsNodeWire & {
+      path: string;
+      matched: "name" | "content";
+      excerpt?: string;
+    })[];
     total: number;
   }>(`${client.scopeFor(company)}/workspace/search?${params.toString()}`);
   return {
@@ -236,7 +245,10 @@ export async function searchWorkspace(
  * An empty query yields one unmatched run, which is what keeps a cleared box
  * from marking every character.
  */
-export function highlightRuns(text: string, query: string): { text: string; hit: boolean }[] {
+export function highlightRuns(
+  text: string,
+  query: string,
+): { text: string; hit: boolean }[] {
   const needle = query.trim().toLowerCase();
   if (!needle) return [{ text, hit: false }];
   const haystack = text.toLowerCase();
@@ -246,7 +258,11 @@ export function highlightRuns(text: string, query: string): { text: string; hit:
   // Rust: JavaScript indexes strings by UTF-16 code unit and `toLowerCase` is
   // length-preserving for every character the browser will render in a note
   // title, so the two strings stay aligned.
-  for (let found = haystack.indexOf(needle); found !== -1; found = haystack.indexOf(needle, at)) {
+  for (
+    let found = haystack.indexOf(needle);
+    found !== -1;
+    found = haystack.indexOf(needle, at)
+  ) {
     if (found > at) runs.push({ text: text.slice(at, found), hit: false });
     runs.push({ text: text.slice(found, found + needle.length), hit: true });
     at = found + needle.length;
@@ -255,13 +271,65 @@ export function highlightRuns(text: string, query: string): { text: string; hit:
   return runs;
 }
 
+/**
+ * The most matches one search can return (issue #1457).
+ *
+ * Mirrors the host's `MAX_SEARCH_RESULTS` (`src/company/workspace_search.rs`).
+ * The host's *default* is 20 and its ceiling is 50, and `clamp_limit` clamps
+ * rather than refusing — so the console naming no limit at all was what capped
+ * every search at 20 while the header truthfully reported "20 of 50 matches"
+ * and offered no way to reach the other 30. There is no offset on the route, so
+ * 50 is a genuine hard ceiling; past it the honest remedy is a narrower query,
+ * which is what the foot of the list now says.
+ */
+export const SEARCH_LIMIT = 50;
+
+/**
+ * Slide an excerpt so its first match is near the front (issue #1375).
+ *
+ * The host returns a window of context around the match, and the console
+ * renders it into a `line-clamp-2` paragraph about 250px wide. When the match
+ * sits past the first dozen or so words the browser clamps *before* reaching
+ * it, so the operator gets two lines of arbitrary mid-file prose and no visible
+ * highlight — the one thing the excerpt exists to show.
+ *
+ * Pure and conservative: an early match is returned untouched (no leading `…`
+ * on text that was already fine), and a query that does not appear at all is
+ * left exactly as the host sent it. Cutting is done at a word boundary where
+ * one is near, so the result does not open mid-word.
+ */
+export function centerExcerpt(
+  excerpt: string,
+  query: string,
+  budget = 24,
+): string {
+  const needle = query.trim().toLowerCase();
+  if (!needle) return excerpt;
+  const at = excerpt.toLowerCase().indexOf(needle);
+  if (at === -1 || at <= budget) return excerpt;
+  let cut = at - budget;
+  // Prefer the next space, so the excerpt starts on a whole word — but only if
+  // one is close, or a line with no spaces would be shifted arbitrarily far.
+  const space = excerpt.indexOf(" ", cut);
+  if (space !== -1 && space < at && space - cut < budget) cut = space + 1;
+  return `…${excerpt.slice(cut)}`;
+}
+
 /** Create a folder or file. The host mints the id and the timestamp. */
 export async function createNode(
   client: OpenCompanyClient,
   company: string | null,
-  input: { name: string; kind: NodeKind; parentId?: string | null; content?: string },
+  input: {
+    name: string;
+    kind: NodeKind;
+    parentId?: string | null;
+    content?: string;
+  },
 ): Promise<FsNode> {
-  const node = await client.post<FsNodeWire>(`${client.scopeFor(company)}/workspace`, input);
+  const node = await client.post<FsNodeWire>(
+    `${client.scopeFor(company)}/workspace`,
+    input,
+  );
   return normalize(node);
 }
 
@@ -314,7 +382,9 @@ export function deleteNode(
   company: string | null,
   id: string,
 ): Promise<void> {
-  return client.del<void>(`${client.scopeFor(company)}/workspace/${encodeURIComponent(id)}`);
+  return client.del<void>(
+    `${client.scopeFor(company)}/workspace/${encodeURIComponent(id)}`,
+  );
 }
 
 /** One folder the sweep removed, or would remove (issue #700). */
@@ -378,7 +448,8 @@ export interface MergedFolder {
 }
 
 /** Why the repair left a node exactly where it found it. */
-export type ResidualCause = "fileSharesTheName" | "fileInTheWay" | "treeMovedOn";
+export type ResidualCause =
+  "fileSharesTheName" | "fileInTheWay" | "treeMovedOn";
 
 /** One node the repair deliberately did not touch (issue #759). */
 export interface Residual {
@@ -536,6 +607,7 @@ export function formatBytes(bytes: number | undefined): string {
   if (bytes === undefined) return "unknown size";
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  if (bytes < 1024 * 1024 * 1024)
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
   return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
 }

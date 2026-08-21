@@ -39,6 +39,8 @@ pub mod mailer;
 pub mod mcp;
 pub mod mcp_registry;
 pub mod memory;
+pub mod memory_engine;
+pub mod memory_ingest;
 pub mod pages;
 pub mod policy;
 pub mod read_state;
@@ -204,6 +206,8 @@ pub fn router() -> Router<AppState> {
         .merge(runs::router())
         .merge(artifacts::router())
         .merge(memory::router())
+        .merge(memory_engine::router())
+        .merge(memory_ingest::router())
         .merge(workspace::router())
         .merge(pages::router())
         .merge(skills::router())
