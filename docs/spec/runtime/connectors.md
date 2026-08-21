@@ -385,24 +385,24 @@ because that is where an operator will look next time.
 
 ### Modifying one afterwards
 
-Adding a host was for a long time the only thing that could be done to one, and
-the missing half is not cosmetic: a host's address changes — a gateway gets a
-domain, a VPS moves, a tenant is renamed — and the only recourse was to forget
-it and add it again. That mints a **new connection id**, and every browser-local
-key is scoped by it, so re-adding a host that merely moved silently resets its
-tour progress, its last-read channel and its drafts.
+Adding a host was long the only thing that could be done to one, and the missing
+half is not cosmetic: a host's address changes — a gateway gets a domain, a VPS
+moves, a tenant is renamed — and the only recourse was to forget it and add it
+again. That mints a **new connection id**, and every browser-local key is scoped
+by it, so re-adding a host that merely moved silently resets its tour progress,
+its last-read channel and its drafts.
 
 So the switcher offers **"Manage hosts"** beside "Add a host", and it opens a
 page rather than a menu of row-level buttons: a switcher row is a *filter*, so
 hanging a rename and a delete off it makes a control whose click targets
 disagree about what a row is for. That menu now opens on **any** host rather
-than only on two (`hostSwitcherMenu`): one host was furniture while the menu
-held nothing but the roster, but it is the only route to this page now, and a
-browser console with exactly one connection — the shape whose host is most
-likely to move — was getting a nameplate with nothing behind it.
+than only on two (`hostSwitcherMenu`): one host was furniture while the menu held
+nothing but the roster, but it is the only route to this page now, and a browser
+console with exactly one connection — the shape whose host is most likely to
+move — got a nameplate with nothing behind it.
 
-The page does three things, and `editConnection` in `connections/registry.ts` is
-where the first two land:
+The page does three things, and `editConnection` in `registry.ts` does the first
+two:
 
 - **rename**, which is the only edit a host reached over `ssh` accepts. A
   `local` host is not renamed here at all: its name and its address are
@@ -411,12 +411,12 @@ where the first two land:
 - **re-address**, offered for `remote` and `cloud` only. `local` and `ssh`
   addresses are assigned by this application — an ephemeral port and a loopback
   port this client chose — so an address typed here would be overwritten by the
-  next launch. A move drops the identity, the company list and the error — all
-  of which describe the host that *was* there — and re-probes, discarding any
-  probe still in flight against the old address rather than letting it answer
-  for the new one. A move onto an address another row already holds is refused:
-  `canonicalAddress` compares the two, so the same-origin row's `""`, a
-  trailing slash, hostname case and a default port cannot mint a second id;
+  next launch. A move drops the identity, the company list and the error — all of
+  which describe the host that *was* there — and re-probes, discarding any probe
+  still in flight against the old address rather than letting it answer for the
+  new one. Moving onto an address another row already holds is refused, over
+  `canonicalAddress` values: the same-origin row's `""`, a trailing slash,
+  hostname case and a default port must not mint a second id for one host;
 - **forget**, which is `removeConnection`: local to this client, closing an
   `ssh` tunnel opened for it, and confirmed — the connection id goes with it,
   and with it every scoped key underneath. Not offered for a `local` host,
