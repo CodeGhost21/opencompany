@@ -1856,14 +1856,7 @@ members = ["writer", "ceo"]
 
         // Remove `writer` through the route an operator would use, leaving the
         // blueprint that declares it untouched.
-        let (status, _) = send(
-            &state,
-            "DELETE",
-            "/api/v1/company/team/writer",
-            None,
-            Some(&admin_cookie()),
-        )
-        .await;
+        let (status, _) = send(&state, "DELETE", "/api/v1/company/team/writer", None).await;
         assert_eq!(status, StatusCode::NO_CONTENT);
 
         let (status, _) = get_agent(&state, "writer").await;
