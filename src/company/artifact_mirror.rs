@@ -205,7 +205,7 @@ pub async fn materialize(
     let segments = split_source(target.source)?;
     let (dirs, filename) = segments
         .split_last()
-        .map(|(last, rest)| (rest, *last))
+        .map(|(last, rest)| (rest, last.as_str()))
         .expect("split_source rejects an empty path");
 
     let agent_folder = ensure_agent_folder(workspace, company, target.agent_id).await?;
@@ -216,7 +216,8 @@ pub async fn materialize(
     // against a snapshot that predates it.
     let mut nodes = workspace.tree(company).await?;
     let mut parent = agent_folder;
-    for name in std::iter::once(target.task_id).chain(dirs.iter().copied()) {
+    let task_folder = kebab_name_or(target.task_id, target.task_id);
+    for name in std::iter::once(task_folder.as_str()).chain(dirs.iter().map(String::as_str)) {
         parent = resolve_folder(
             workspace,
             company,
@@ -639,7 +640,7 @@ fn origin(agent_id: &str) -> WorkspaceOrigin {
 /// reaching [`WorkspaceStore::create`] as a node *name* would render a
 /// traversal-shaped path in the console, and the sqlite and mongodb backends do
 /// not reject one.
-fn split_source(source: &str) -> Result<Vec<&str>> {
+fn split_source(source: &str) -> Result<Vec<String>> {
     let segments: Vec<&str> = source
         .split('/')
         .map(str::trim)
@@ -657,7 +658,17 @@ fn split_source(source: &str) -> Result<Vec<&str>> {
             )));
         }
     }
-    Ok(segments)
+    // Every segment becomes a node name, so it is minted under the workspace's
+    // one naming rule: lowercase and dashed. The sandbox is the agent's own
+    // scratch and names files however it likes; the tree is what the operator
+    // reads, and `specs/Launch Plan.md` arriving there as `specs/launch-plan.md`
+    // is what keeps one document to one spelling.
+    //
+    // The artifact record's `source` is deliberately *not* rewritten to match:
+    // it names the file in the sandbox the agent actually published, and it is
+    // the key a republish extends the same record by. Normalizing it would make
+    // the record claim a path the agent cannot read back.
+    Ok(segments.into_iter().map(kebab_name).collect())
 }
 
 /// Adopt-or-create the folder `name` under `parent`, keeping `nodes` current.
