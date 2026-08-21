@@ -53,6 +53,9 @@ export function InvoicingView({ client, company }: Props) {
   // working in it — and a `useState` here would re-render for a value nothing
   // renders.
   const expandedSeeded = useRef(false);
+  // Monotonic token so a stale invoice-list response (one fired for an older
+  // status/customer filter) cannot overwrite the results for the visible one.
+  const invoiceRequest = useRef(0);
 
   const [invoices, setInvoices] = useState<Invoice[] | null>(null);
   const [listError, setListError] = useState<{ code: string; message: string } | null>(null);
@@ -76,24 +79,26 @@ export function InvoicingView({ client, company }: Props) {
   }, [client, company]);
 
   const loadInvoices = useCallback(async () => {
+    const request = ++invoiceRequest.current;
     setLoading(true);
     try {
-      setInvoices(
-        await listInvoices(client, company, {
-          status: filter || undefined,
-          customerEmail: customerEmail.trim() || undefined,
-          limit: 50,
-        }),
-      );
+      const next = await listInvoices(client, company, {
+        status: filter || undefined,
+        customerEmail: customerEmail.trim() || undefined,
+        limit: 50,
+      });
+      if (request !== invoiceRequest.current) return;
+      setInvoices(next);
       setListError(null);
     } catch (err) {
+      if (request !== invoiceRequest.current) return;
       setInvoices(null);
       setListError({
         code: err instanceof ApiError ? err.code : "unknown",
         message: err instanceof Error ? err.message : String(err),
       });
     } finally {
-      setLoading(false);
+      if (request === invoiceRequest.current) setLoading(false);
     }
   }, [client, company, filter, customerEmail]);
 
