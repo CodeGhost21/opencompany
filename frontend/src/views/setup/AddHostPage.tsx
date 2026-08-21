@@ -120,7 +120,7 @@ export function AddHostPage() {
           ))}
         </TabsList>
         {onAddLocal ? (
-          <TabsContent value="local">
+          <TabsContent value="local" className="mt-4">
             <LocalInstances
               instances={localInstances}
               onAdd={onAddLocal}
@@ -129,17 +129,17 @@ export function AddHostPage() {
             />
           </TabsContent>
         ) : null}
-        <TabsContent value="cloud">
+        <TabsContent value="cloud" className="mt-4">
           <CloudHost onAdd={(baseUrl) => onAdd(baseUrl, "cloud")} />
         </TabsContent>
-        <TabsContent value="remote">
+        <TabsContent value="remote" className="mt-4">
           <RemoteHost
             onAdd={(baseUrl) => onAdd(baseUrl, "remote")}
             desktop={Boolean(onAddLocal)}
           />
         </TabsContent>
         {onAddSsh ? (
-          <TabsContent value="ssh">
+          <TabsContent value="ssh" className="mt-4">
             <SshHost onAdd={onAddSsh} onDone={close} />
           </TabsContent>
         ) : null}
