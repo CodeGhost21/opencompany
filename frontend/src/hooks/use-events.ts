@@ -7,6 +7,9 @@ import type {
   WorkflowBlockedNode,
   WorkflowRunApprovalRow,
 } from "@/api/workflows";
+// Issue #981: the one definition of "this report did not go out", shared with
+// the run drawer, the history rows and the host itself.
+import { undeliveredCount } from "@/views/workflows/run-health";
 
 /**
  * One attention item off the company → operator SSE feed (issue #66). Mirrors
@@ -513,6 +516,23 @@ interface Options {
    * buttons for a decision that is already made.
    */
   onApprovalEvent?: (event: CompanyStreamEvent) => void;
+  /**
+   * Asked once per non-`automatic` `approval_resolved` frame (issue #1211):
+   * "did THIS console just decide this?" A true answer suppresses the generic
+   * echo toast below — the click that made the decision already raised its own,
+   * specific toast (`ApprovalsView.decide()`, the inline card's `decideApproval`
+   * in `AppShell`), and stacking a second, vaguer one on top of it is the defect
+   * this callback exists to remove.
+   *
+   * **Consuming, not peeking.** An approval id is decided exactly once, so once
+   * this returns true for an id, the caller is expected to have cleared its own
+   * record of it — a second frame for the same id (a replayed reconnect, a
+   * test) is not this tab's decision to swallow silently.
+   *
+   * Absent, or false, means "not mine" — including every decision made from the
+   * Approvals page or another tab, which is the case this toast exists for.
+   */
+  isOwnDecision?: (approvalId: string) => boolean;
 }
 
 /**
@@ -549,6 +569,7 @@ export function useEvents(
     onWorkflowRunEvent,
     onWorkflowChanged,
     onApprovalEvent,
+    isOwnDecision,
     onResync,
     onRecoveryError,
   }: Options,
@@ -590,6 +611,10 @@ export function useEvents(
   useEffect(() => {
     onApprovalEventRef.current = onApprovalEvent;
   }, [onApprovalEvent]);
+  const isOwnDecisionRef = useRef(isOwnDecision);
+  useEffect(() => {
+    isOwnDecisionRef.current = isOwnDecision;
+  }, [isOwnDecision]);
   const onResyncRef = useRef(onResync);
   useEffect(() => {
     onResyncRef.current = onResync;
@@ -680,6 +705,7 @@ export function useEvents(
             onWorkflowRunEvent: onWorkflowRunEventRef.current,
             onWorkflowChanged: onWorkflowChangedRef.current,
             onApprovalEvent: onApprovalEventRef.current,
+            isOwnDecision: isOwnDecisionRef.current,
             onResync: recover,
           });
         },
@@ -731,6 +757,7 @@ export function handleEvent(
     onWorkflowRunEvent,
     onWorkflowChanged,
     onApprovalEvent,
+    isOwnDecision,
     onResync,
   } = subscribers;
   switch (event.type) {
@@ -848,7 +875,18 @@ export function handleEvent(
           description:
             "It passed its deadline with no decision, so it was declined.",
         });
-      } else {
+      } else if (!isOwnDecision?.(event.approvalId)) {
+        // #1211: skip the generic echo when THIS console is the one that just
+        // decided it — the click already raised its own, specific toast
+        // (verdict, tool name, and for an approve the honest "picking it up
+        // now" wording from #243). Same guard `approval_parked` above already
+        // needed for #379, one case over: without it, a decision made here
+        // toasted twice — once informative, once generic and taller, burying
+        // the first for the length of the stack animation.
+        //
+        // Still fires for a decision made on the Approvals page while this
+        // card sits in Chat, or from another tab, or by another operator —
+        // exactly the case this toast exists for.
         toast(
           event.verdict === "approve" ? "Approval granted" : "Approval denied",
           {
@@ -890,21 +928,15 @@ export function handleEvent(
         });
         break;
       }
-      // `pending` is not a failure: it is a report parked for approval, and
-      // toasting it red would send the operator hunting for a bug that isn't
-      // there. Excluded from the count that speaks up.
+      // Issue #981: the shared rung, so this toast, the run's dot, the drawer's
+      // badge and the host's own verdict cannot disagree about a single row. The
+      // filter it replaces fired "1 report didn't go out" on every test run — a
+      // `dry-run` row is a report nothing attempted, on purpose.
       //
-      // Compared through a widened `string` because `pending` joins
-      // `DeliveryStatus` in issue #227 — a literal would be a no-overlap type
-      // error against today's union, and the host can already send a status
-      // this console's type doesn't name yet.
-      const pendingStatus: string = "pending";
       // `deliveries` is host-controlled and may be absent on an event shape this
       // console's types don't name yet (see note above) — default to empty so a
       // missing field can never throw and blank the subscriber.
-      const undelivered = (event.deliveries ?? []).filter(
-        (d) => d.status !== "sent" && d.status !== pendingStatus,
-      ).length;
+      const undelivered = undeliveredCount(event.deliveries ?? []);
       if (undelivered > 0) {
         toast.warning(
           `${undelivered} report${undelivered === 1 ? "" : "s"} didn't go out`,

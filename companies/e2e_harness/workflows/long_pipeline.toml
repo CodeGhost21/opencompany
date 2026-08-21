@@ -1,0 +1,144 @@
+# Workflow graph: long — the e2e suite's LONG fixture (issue #1361).
+#
+# Ten nodes in a single left-to-right chain, which is the shape every shipped
+# company template has (`layout()` puts one node per depth layer) and the shape
+# that broke the canvas: fit to a 1224px pane, a graph 2890 units wide opened at
+# 0.353 zoom, rendering a 14px node title at 5px.
+#
+# The harness's other fixture (`committed.toml`) is three nodes and fits whole
+# at a legible zoom, so it cannot exercise the clamp at all. This one exists
+# purely to be too long — `workflow-canvas-fit.spec.ts` measures the zoom it
+# opens at and where its first node lands.
+#
+# The id MUST equal this file's stem. `load_company_workflow_union`
+# (src/company/workflow_file.rs) resolves a workflow by joining
+# `workflows/{id}.toml`, while the index endpoint reads the file's own `id`
+# field — so an id that disagrees with the filename lists on the index and then
+# 404s the moment it is opened. Discovered the hard way with `id = "long"`.
+#
+# Keep the id, the name and the FIRST node's id stable — the spec pins all
+# three. It is deliberately NOT listed in `[workflows].enabled` in
+# ../company.toml, for the reason `committed.toml` says: the console lists every
+# `workflows/*.toml` it finds, and leaving it disabled keeps it out of the
+# scheduler while the suite runs.
+
+id = "long_pipeline"
+name = "Long pipeline"
+description = "Ten steps in a line — the shape a workflow canvas has to stay readable at."
+
+
+[[node]]
+id = "start"
+kind = "trigger"
+name = "A request lands"
+summary = "Something asks for a change."
+
+[[node]]
+id = "spec"
+kind = "agent"
+name = "Write the spec"
+summary = "Turn the request into a scoped spec."
+agent = "writer"
+
+[[node]]
+id = "plan"
+kind = "agent"
+name = "Plan the work"
+summary = "Break the spec into steps."
+agent = "engineer"
+
+[[node]]
+id = "build"
+kind = "agent"
+name = "Build it"
+summary = "Implement the change."
+agent = "engineer"
+
+[[node]]
+id = "test"
+kind = "agent"
+name = "Test it"
+summary = "Exercise the change end to end."
+agent = "engineer"
+
+[[node]]
+id = "review"
+kind = "agent"
+name = "Review it"
+summary = "Read the change for risk."
+agent = "ceo"
+
+[[node]]
+id = "docs"
+kind = "agent"
+name = "Document it"
+summary = "Write the user-facing note."
+agent = "writer"
+
+[[node]]
+id = "sign"
+kind = "agent"
+name = "Sign it off"
+summary = "Decide whether it ships."
+agent = "ceo"
+
+[[node]]
+id = "ship"
+kind = "agent"
+name = "Ship it"
+summary = "Release the change."
+agent = "engineer"
+
+[[node]]
+id = "tell"
+kind = "output"
+name = "Tell the operator"
+summary = "Report what shipped."
+
+# Engineering, not content: the two nodes before this are `ship` and `sign`, so
+# the audience is the desk that built and released the change.
+#
+# `channel` rather than `owner` is not a preference — `content_test.rs`'s
+# `every_seeded_output_destination_resolves_against_its_own_manifest` refuses
+# `owner` in any seeded template, because it reports Failed on a tenant with no
+# mailbox, which every freshly provisioned one is. The target must also be a
+# desk this company's manifest declares.
+[node.destination]
+kind = "channel"
+target = "engineering"
+
+[[edge]]
+from = "start"
+to = "spec"
+
+[[edge]]
+from = "spec"
+to = "plan"
+
+[[edge]]
+from = "plan"
+to = "build"
+
+[[edge]]
+from = "build"
+to = "test"
+
+[[edge]]
+from = "test"
+to = "review"
+
+[[edge]]
+from = "review"
+to = "docs"
+
+[[edge]]
+from = "docs"
+to = "sign"
+
+[[edge]]
+from = "sign"
+to = "ship"
+
+[[edge]]
+from = "ship"
+to = "tell"

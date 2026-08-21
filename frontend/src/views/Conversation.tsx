@@ -22,18 +22,32 @@ import type { OpenCompanyClient } from "@/api/client";
 import { ApiError, type TurnStep, type TurnStepKind } from "@/api/types";
 import {
   createTask,
+  deleteTask,
   listInflight,
   steerTask,
   type InflightRun,
   type SteerAction,
 } from "@/api/tasks";
 import { Markdown } from "@/components/markdown";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
-import { type ChatMessage, makeMessage, titleFromMessage } from "@/lib/chat";
+import { clearTaskCard, type ChatMessage, makeMessage, titleFromMessage } from "@/lib/chat";
 import { WorkingIndicator } from "@/views/chat/WorkingIndicator";
+import { isDetachedChat } from "@/api/types";
+import type { OpenTurn } from "@/lib/live-reply";
 import type { Thread, ThreadContact } from "@/lib/threads";
 
 interface Props {
@@ -57,13 +71,30 @@ interface Props {
   onSendStart?: (threadId: string) => void;
   /** Clears the in-flight mark + live timeline once the POST resolves. */
   onSendEnd?: (threadId: string) => void;
+  /**
+   * The host accepted the turn and answered `202` rather than the reply
+   * (issue #983). Unlike `onSendEnd` this does NOT end the turn — it only ends
+   * the POST, so the parent keeps the working row up and stops suppressing the
+   * live reply frame, which in this mode is the delivery path.
+   */
+  onSendDetached?: (threadId: string, turnId?: string) => void;
+  /**
+   * The chat POST **threw** (issue #1000). The third outcome, and not
+   * `onSendEnd`: that one promises the parent the reply is already on screen,
+   * which licenses it to drop the live frame it was holding. A throw rendered
+   * nothing and the turn usually outlives the request, so that frame is the
+   * only copy of the answer.
+   */
+  onSendFailed?: (threadId: string) => void;
+  /** Turns accepted but not settled, by thread id — survives a reload (#983). */
+  openTurns?: Record<string, OpenTurn[]>;
 }
 
 /** Consecutive messages from one sender within this window group together. */
 const GROUP_WINDOW_MS = 5 * 60 * 1000;
 
 /** WhatsApp-style two-pane chat: a thread list on the left, transcript right. */
-export function Conversation({ client, company, threads, activeId, onSelect, setMessages, onReply, taskEventTick, liveStepsByThread, onSendStart, onSendEnd }: Props) {
+export function Conversation({ client, company, threads, activeId, onSelect, setMessages, onReply, taskEventTick, liveStepsByThread, onSendStart, onSendEnd, onSendDetached, onSendFailed, openTurns }: Props) {
   const active = threads.find((t) => t.id === activeId) ?? threads[0];
   // On mobile, the list and the chat share the pane — track which is showing.
   const [mobilePane, setMobilePane] = useState<"list" | "chat">("chat");
@@ -90,6 +121,9 @@ export function Conversation({ client, company, threads, activeId, onSelect, set
         liveSteps={liveStepsByThread?.[active.id] ?? []}
         onSendStart={onSendStart}
         onSendEnd={onSendEnd}
+        onSendDetached={onSendDetached}
+        onSendFailed={onSendFailed}
+        openTurn={openTurns?.[active.id]?.[0]}
         onOpenList={() => setMobilePane("list")}
         className={cn("md:flex", mobilePane === "chat" ? "flex" : "hidden")}
       />
@@ -163,6 +197,9 @@ function ChatPane({
   liveSteps,
   onSendStart,
   onSendEnd,
+  onSendDetached,
+  onSendFailed,
+  openTurn,
   onOpenList,
   className,
 }: {
@@ -175,6 +212,10 @@ function ChatPane({
   liveSteps?: TurnStep[];
   onSendStart?: (threadId: string) => void;
   onSendEnd?: (threadId: string) => void;
+  onSendDetached?: (threadId: string, turnId?: string) => void;
+  onSendFailed?: (threadId: string) => void;
+  /** This thread's turn, when one is accepted but not settled (#983). */
+  openTurn?: OpenTurn;
   onOpenList: () => void;
   className?: string;
 }) {
@@ -182,6 +223,12 @@ function ChatPane({
   const [sending, setSending] = useState(false);
   /** The message whose "Add to board" create is in flight (issue #246). */
   const [addingId, setAddingId] = useState<string | null>(null);
+  /**
+   * The **card** whose delete is in flight — a task id, unlike its sibling
+   * `addingId` above, which is a message id. Named for the namespace it holds
+   * so the two cannot be read as the same kind of thing.
+   */
+  const [dismissingCardId, setDismissingCardId] = useState<string | null>(null);
   const scroller = useRef<HTMLDivElement>(null);
 
   const messages = thread.messages;
@@ -198,10 +245,26 @@ function ChatPane({
     setMessages(thread.id, (m) => [...m, makeMessage("you", text)]);
     setSending(true);
     onSendStart?.(thread.id);
+    // Which of the POST's three outcomes happened, reported once in the
+    // `finally`. Only `"resolved"` means the reply reached the screen — the
+    // other two leave a turn running with the stream as its delivery path.
+    let outcome: "resolved" | "detached" | "failed" = "resolved";
     try {
       // Address the active desk thread (issue #53). "main" and any id the
       // company doesn't define fall to the orchestrator on the backend.
-      const reply = await client.chat(text, company, thread.id);
+      //
+      // `detach` is asked for, never assumed: a host that predates it answers
+      // the full synchronous body, so the branch below reads what came back.
+      const answer = await client.chat(text, company, thread.id, undefined, undefined, true);
+      if (isDetachedChat(answer)) {
+        outcome = "detached";
+        // The reply arrives on the stream, and durably in `chat/history` when
+        // the turn settles. Nothing to render here — but the id IS known now,
+        // at accept time rather than at settle, which is the improvement.
+        onSendDetached?.(thread.id, answer.turnId);
+        return;
+      }
+      const reply = answer;
       const replies = reply.responses.length
         ? reply.responses.map((r) =>
             // `taskId` (issue #246): when the turn opened a board card, the
@@ -217,11 +280,23 @@ function ChatPane({
       setMessages(thread.id, (m) => [...m, ...replies]);
       onReply?.();
     } catch (err) {
+      outcome = "failed";
+      // Still said even when the reply lands on the stream a moment later: the
+      // request did fail, and the operator has no other way to know whether
+      // their message was taken.
       const msg = err instanceof ApiError ? err.message : "something went wrong";
       setMessages(thread.id, (m) => [...m, makeMessage("system", `Couldn't send — ${msg}`)]);
     } finally {
       setSending(false);
-      onSendEnd?.(thread.id);
+      // A detached turn is not over when its POST is: ending the send here would
+      // clear the live timeline and drop the working row mid-turn.
+      //
+      // Nor is a *failed* one, which is the easier miss. `onSendEnd` tells the
+      // parent the reply is on screen and so licenses it to drop the live frame
+      // it held; a throw rendered nothing and the turn carries on regardless, so
+      // that frame is the only copy of the answer this console will be handed.
+      if (outcome === "resolved") onSendEnd?.(thread.id);
+      else if (outcome === "failed") onSendFailed?.(thread.id);
     }
   }
 
@@ -266,6 +341,53 @@ function ChatPane({
       }
     },
     [addingId, client, company, setMessages, thread.id],
+  );
+
+  /**
+   * Delete the board card a chat line opened, and stop drawing its chip
+   * (issue #984).
+   *
+   * #442 allowed a turn to open a card from an ordinary message on the grounds
+   * that *"a spurious card can be dismissed in one click"*. That click did not
+   * exist on this surface: the chip was a bare link to the card's detail
+   * screen, so dismissing a mis-fired card meant leaving chat, finding the
+   * card, and deleting it there. This is that click.
+   *
+   * Deletes on the host FIRST and clears the chip only on success, which is
+   * the opposite of the optimistic reaction toggle nearby and deliberately so:
+   * a reaction that rolls back costs nothing, whereas a chip that vanishes
+   * while the card survives tells the operator the board is clean when it is
+   * not. A refusal leaves the chip exactly where it was and says why.
+   *
+   * Clears by CARD id rather than by the message clicked - see
+   * {@link clearTaskCard}. Once the card is gone, every chip naming it is a
+   * link to a 404, not just the one under the pointer.
+   */
+  const dismissCard = useCallback(
+    async (taskId: string) => {
+      if (dismissingCardId) return;
+      setDismissingCardId(taskId);
+      try {
+        await deleteTask(client, company, taskId);
+        setMessages(thread.id, (all) => clearTaskCard(all, taskId));
+        toast.success("Card dismissed.");
+      } catch (e) {
+        // A 404 means the card is already gone — deleted from the board, most
+        // likely, which tells this surface nothing. The chip would otherwise be
+        // a permanent link to a 404 that clicking can never clear. Treat it as
+        // the success it is for the operator. Copy matches `ChatView`: the same
+        // action on two surfaces should not report itself two ways.
+        if (e instanceof ApiError && e.status === 404) {
+          setMessages(thread.id, (all) => clearTaskCard(all, taskId));
+          toast.success("That card was already gone — chip cleared.");
+        } else {
+          toast.error(e instanceof Error && e.message ? e.message : "Couldn't dismiss that card.");
+        }
+      } finally {
+        setDismissingCardId(null);
+      }
+    },
+    [client, company, dismissingCardId, setMessages, thread.id],
   );
 
   function onKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
@@ -314,15 +436,17 @@ function ChatPane({
               prev={groups[i - 1]}
               onAddToBoard={addToBoard}
               addingId={addingId}
+              onDismissCard={dismissCard}
+              dismissingCardId={dismissingCardId}
             />
           ))}
-          {sending && (
+          {(sending || !!openTurn) && (
             <>
               {/* Live tool timeline — the running/done rows stream in over SSE as
                   the turn works, before the final reply lands (issue: tool calls
                   weren't visible until the turn finished). */}
               {liveSteps && liveSteps.length > 0 && <StepTimeline steps={liveSteps} />}
-              <TypingIndicator contact={thread.contact} />
+              <TypingIndicator contact={thread.contact} queued={openTurn?.queued} />
             </>
           )}
         </div>
@@ -591,6 +715,8 @@ function MessageGroup({
   prev,
   onAddToBoard,
   addingId,
+  onDismissCard,
+  dismissingCardId,
 }: {
   group: Group;
   prev?: Group;
@@ -598,6 +724,10 @@ function MessageGroup({
   onAddToBoard: (message: ChatMessage) => void;
   /** The message whose create is in flight, if any. */
   addingId: string | null;
+  /** Deletes the card a line opened and drops its chip (issue #984). */
+  onDismissCard: (taskId: string) => void;
+  /** The card whose delete is in flight, if any. */
+  dismissingCardId: string | null;
 }) {
   const showDay = !prev || !sameDay(prev.at, group.at);
 
@@ -643,7 +773,13 @@ function MessageGroup({
                   mine ? "flex-row-reverse" : "flex-row",
                 )}
               >
-                <Bubble message={m} mine={mine} last={i === group.messages.length - 1} />
+                <Bubble
+                  message={m}
+                  mine={mine}
+                  last={i === group.messages.length - 1}
+                  onDismissCard={onDismissCard}
+                  dismissingCardId={dismissingCardId}
+                />
                 <AddToBoardAction
                   message={m}
                   busy={addingId === m.id}
@@ -659,7 +795,19 @@ function MessageGroup({
   );
 }
 
-function Bubble({ message, mine, last }: { message: ChatMessage; mine: boolean; last: boolean }) {
+function Bubble({
+  message,
+  mine,
+  last,
+  onDismissCard,
+  dismissingCardId,
+}: {
+  message: ChatMessage;
+  mine: boolean;
+  last: boolean;
+  onDismissCard: (taskId: string) => void;
+  dismissingCardId: string | null;
+}) {
   return (
     <div
       className={cn(
@@ -686,7 +834,15 @@ function Bubble({ message, mine, last }: { message: ChatMessage; mine: boolean; 
         // block margins so a reply stays flush inside the tight bubble padding.
         <Markdown className="[&>:first-child]:mt-0 [&>:last-child]:mb-0">{message.text}</Markdown>
       )}
-      {message.taskId && <CardChip taskId={message.taskId} mine={mine} />}
+      {message.taskId && (
+        <CardChip
+          taskId={message.taskId}
+          mine={mine}
+          busy={dismissingCardId === message.taskId}
+          disabled={dismissingCardId !== null && dismissingCardId !== message.taskId}
+          onDismiss={onDismissCard}
+        />
+      )}
     </div>
   );
 }
@@ -704,20 +860,74 @@ function Bubble({ message, mine, last }: { message: ChatMessage; mine: boolean; 
  * `clear-both` because the bubble floats its timestamp right; without it the
  * chip tucks under the time instead of starting a fresh line.
  */
-function CardChip({ taskId, mine }: { taskId: string; mine: boolean }) {
+function CardChip({
+  taskId,
+  mine,
+  busy,
+  disabled,
+  onDismiss,
+}: {
+  taskId: string;
+  mine: boolean;
+  busy: boolean;
+  disabled: boolean;
+  onDismiss: (taskId: string) => void;
+}) {
+  const tone = mine
+    ? "bg-primary-foreground/15 text-primary-foreground"
+    : "bg-accent text-accent-foreground";
   return (
-    <a
-      href={`#/tasks/${encodeURIComponent(taskId)}`}
-      className={cn(
-        "mt-1.5 flex w-fit clear-both items-center gap-1 rounded-full px-2 py-0.5 text-2xs font-medium transition-opacity hover:opacity-80",
-        mine
-          ? "bg-primary-foreground/15 text-primary-foreground"
-          : "bg-accent text-accent-foreground",
-      )}
-    >
-      <SquareKanban className="size-3 shrink-0" />
-      {mine ? "Added to the board" : "Card opened"}
-    </a>
+    <span className={cn("mt-1.5 flex w-fit clear-both items-center rounded-full", tone)}>
+      <a
+        href={`#/tasks/${encodeURIComponent(taskId)}`}
+        className="flex items-center gap-1 py-0.5 pl-2 pr-1 text-2xs font-medium transition-opacity hover:opacity-80"
+      >
+        <SquareKanban className="size-3 shrink-0" />
+        {mine ? "Added to the board" : "Card opened"}
+      </a>
+      <AlertDialog>
+        <AlertDialogTrigger
+          render={
+            <button
+              type="button"
+              // Always in the DOM and focusable rather than revealed on hover:
+              // the chip is the only place this card can be dismissed from
+              // chat, and a hover-only control is unreachable by keyboard and
+              // on touch. `AddToBoardAction` above can afford hover because
+              // its absence costs nothing.
+              className="flex items-center rounded-full py-0.5 pl-0.5 pr-1.5 transition-opacity hover:opacity-80 disabled:opacity-50"
+              disabled={busy || disabled}
+              title="Dismiss this card"
+              aria-label="Dismiss this card"
+            >
+              {busy ? (
+                <Loader2 className="size-3 shrink-0 animate-spin" />
+              ) : (
+                <X className="size-3 shrink-0" />
+              )}
+            </button>
+          }
+        />
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Dismiss this card?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This deletes the card from the board and can’t be undone. The message
+              stays in the conversation.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Keep card</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => onDismiss(taskId)}
+              className="bg-destructive text-white hover:bg-destructive/90"
+            >
+              Dismiss card
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </span>
   );
 }
 
@@ -885,7 +1095,7 @@ function ContactAvatar({ contact, className }: { contact: ThreadContact; classNa
   );
 }
 
-function TypingIndicator({ contact }: { contact: ThreadContact }) {
+function TypingIndicator({ contact, queued }: { contact: ThreadContact; queued?: boolean }) {
   return (
     <div className="mt-2 flex gap-2.5">
       <ContactAvatar contact={contact} className="mt-0.5 size-8" />
@@ -894,6 +1104,7 @@ function TypingIndicator({ contact }: { contact: ThreadContact }) {
           this surface's own — only the contents are shared. */}
       <WorkingIndicator
         srLabel="Replying…"
+        queued={queued}
         className="rounded-2xl rounded-bl-md border bg-card px-3.5 py-3"
       />
     </div>

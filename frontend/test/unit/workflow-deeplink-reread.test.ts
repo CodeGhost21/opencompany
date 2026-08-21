@@ -107,7 +107,7 @@ function makeClient(
       if (path.endsWith("/workflows")) return listFor();
       if (path.includes("/workflows/tool-slugs")) return { slugs: [], unwired: [] };
       if (path.includes("/workflows/wired-channels")) return { channels: [] };
-      if (path.includes("/workflows/runs")) return [];
+      if (path.includes("/workflows/runs")) return { runs: [], hasMore: false };
       const m = path.match(/\/workflows\/([^/?]+)$/);
       if (m) {
         const id = decodeURIComponent(m[1]);

@@ -90,11 +90,15 @@ L0  Substrate       api.tinyhumans.ai, openhuman-core, tiny.place, filesystem
 | [runtime/ports-runs.md](runtime/ports-runs.md) | `RunStore`: attempts and their traces |
 | [runtime/events.md](runtime/events.md) | `CompanyEvent` vocabulary + journal correlation rules |
 | [runtime/manifest.md](runtime/manifest.md) | `company.toml` schema, `agents.toml` compatibility |
+| [runtime/harnesses.md](runtime/harnesses.md) | Named execution engines: `built_in` vs `acp`, transports, per-agent binding |
+| [runtime/providers.md](runtime/providers.md) | Inference providers, dual-mode OpenRouter, per-harness credentials |
 | [runtime/globals.md](runtime/globals.md) | The global baseline every company gets: agents, workflows, skills, the starting tool belt, and `[globals].disable` |
 | [runtime/lifecycle.md](runtime/lifecycle.md) | Company state machine and durability |
 | [runtime/planning.md](runtime/planning.md) | The Planning station: pass contract, prerequisite verdicts, boot sweep |
 | [runtime/ledgers.md](runtime/ledgers.md) | Dynamic ledgers: declared record shapes, the append-only fold, who may delete, the `derived/` folder |
-| [runtime/pages.md](runtime/pages.md) | Agent-authored internal dashboard pages: the `Pages/<slug>/` convention, the compile-on-write contract, and the two-part isolation model |
+| [runtime/ledger-statuses.md](runtime/ledger-statuses.md) | How many statuses a ledger may declare, the board's phase/stage split, and how a retired status word heals |
+| [runtime/ledgers-console-ia.md](runtime/ledgers-console-ia.md) | The console surface over ledgers: naming ("ledger" is internal-only), per-list sidebar rows, Manage Lists, the declare wizard |
+| [runtime/pages.md](runtime/pages.md) | Agent-authored internal dashboard pages: the `pages/<slug>/` convention, the compile-on-write contract, and the two-part isolation model |
 | [runtime/orchestration/README.md](runtime/orchestration/README.md) | Making a many-agent company converge: the three collapses, the three principles, phasing |
 | [runtime/orchestration/memory.md](runtime/orchestration/memory.md) | One memory contract: `MemoryProvider` replaces three ports, and the host decorator that keeps tenants apart |
 | [runtime/orchestration/context-routing.md](runtime/orchestration/context-routing.md) | Which workspace documents reach which role's prompt, the load-bearing exclusions, and assembly order |
@@ -109,6 +113,7 @@ L0  Substrate       api.tinyhumans.ai, openhuman-core, tiny.place, filesystem
 | [runtime/data-root.md](runtime/data-root.md) | Data-root resolution, the single-writer lock, instance identity |
 | [runtime/desktop.md](runtime/desktop.md) | The desktop client: connections, transport seam, embedded host |
 | [runtime/desktop-instances.md](runtime/desktop-instances.md) | Several local hosts on one machine: the roster, onboarding, dev runs |
+| [runtime/connectors.md](runtime/connectors.md) | Connectors: choosing where the runtime runs — this computer, TinyHumans Cloud, a remote gateway, or over SSH |
 | [runtime/offline.md](runtime/offline.md) | Running with no network: the configuration, what is not local, and the CI lane that proves it |
 | [runtime/hub-console.md](runtime/hub-console.md) | One console deployment operating many hosts on other origins |
 | [security/agent-isolation.md](security/agent-isolation.md) | What confines an agent and what does not — enforced controls, the gaps, and the capability that survives every planned control |

@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import { hostSwitcherInteractive, worstStatus } from "@/components/host-switcher";
+import {
+  hostSwitcherInteractive,
+  hostSwitcherMenu,
+  statusCopy,
+  worstStatus,
+} from "@/components/host-switcher";
 import { hostShortcutLabel, HOST_SHORTCUT_LIMIT } from "@/connections/HostsContext";
 import type { Connection, ConnectionStatus } from "@/connections/types";
 
@@ -24,6 +29,7 @@ function host(status: ConnectionStatus, id: string = status): Connection {
     status,
     identity: null,
     companies: [],
+    connector: { kind: "remote" },
   };
 }
 
@@ -52,8 +58,28 @@ describe("worstStatus", () => {
   });
 });
 
+describe("statusCopy", () => {
+  it("says what an ordinary host is doing", () => {
+    expect(statusCopy(host("connecting")).label).toBe("Connecting…");
+    expect(statusCopy(host("down")).label).toBe("Unreachable");
+  });
+
+  it("says a hibernating tenant is being started, not merely contacted", () => {
+    // "Connecting…" for the seconds a cold tenant takes to boot reads as a
+    // hang, and the operator's next move is to go looking for a fault that is
+    // not there.
+    const waking = { ...host("connecting"), waking: true };
+    expect(statusCopy(waking).label).toBe("Waking…");
+    // Same dot: it is a connecting host, and ranks as one on the trigger.
+    expect(statusCopy(waking).dot).toBe(statusCopy(host("connecting")).dot);
+  });
+});
+
 describe("hostSwitcherInteractive", () => {
-  it("is a nameplate on an ordinary single-host browser console", () => {
+  it("has nothing to say on an ordinary single-host browser console", () => {
+    // The dot and the standalone chrome still sit this one out: a permanently
+    // green dot says nothing, and that console's host being unreachable is a
+    // full-screen error rather than a corner to notice.
     expect(hostSwitcherInteractive(1, false)).toBe(false);
   });
 
@@ -63,6 +89,24 @@ describe("hostSwitcherInteractive", () => {
 
   it("opens at any count on a hub, which has no bootstrap host to fall back on", () => {
     expect(hostSwitcherInteractive(0, true)).toBe(true);
+  });
+});
+
+describe("hostSwitcherMenu", () => {
+  it("opens on a single-host browser console, which is the only way to manage it", () => {
+    // "Manage hosts" lives in this menu and nowhere else, and that console's
+    // one host is a plain `remote` connector — renameable, re-addressable and
+    // forgettable. A nameplate there is a host nobody can fix.
+    expect(hostSwitcherMenu(1, false)).toBe(true);
+  });
+
+  it("stays a nameplate only when there is no host at all to manage", () => {
+    expect(hostSwitcherMenu(0, false)).toBe(false);
+  });
+
+  it("still opens at zero on a hub and wherever the switcher is already a control", () => {
+    expect(hostSwitcherMenu(0, true)).toBe(true);
+    expect(hostSwitcherMenu(2, false)).toBe(true);
   });
 });
 

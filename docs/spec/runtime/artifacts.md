@@ -83,6 +83,40 @@ The honest consequence: a company that ran before this change still has refusal
 messages in its artifact list, now visibly demoted rather than silently
 masquerading as output.
 
+## Where it lands in the shared tree
+
+The record is one half; the other is a node in the company workspace, so a
+deliverable is something an operator and every other agent can navigate to
+rather than a row behind one card's Artifacts tab. `company::artifact_mirror`
+files it at:
+
+```text
+artifacts/<agent-id>/<task-id>/<source…>
+```
+
+`artifacts/` is an eagerly-scaffolded system root carrying a `readme.md`; the
+member folder beneath it is minted the first time that agent publishes
+(`workspace_scaffold::ensure_artifact_folder`), so the list under it is a record
+of who has delivered rather than a copy of the roster.
+
+It used to be `agents/<agent-id>/<task-id>/…`, which filed a deliverable in the
+same folder as its author's scratch notes — the two populations were
+indistinguishable by eye, and "what has this company produced?" had no answer
+that was a place. Filing by kind first and author second keeps the attribution
+and makes the deliverable list navigable.
+
+**Nothing migrates.** A record that already carries a node id keeps revising
+that node, so a company that published before this change keeps its existing
+nodes and every console deep link into them; only new paths land under
+`artifacts/`. Moving nodes an operator may have organised by hand, to fix
+something untidy rather than wrong, is the worse trade.
+
+The node is a **projection**: it holds the current body, while the artifact
+chain remains authoritative for the version history and for
+`human_edit_diff`. The invariant, the write ordering that protects it, and what
+an operator edit to one of these nodes records are all in
+`src/company/artifact_mirror.rs`.
+
 ## Bodies, caps and references
 
 `MAX_ARTIFACT_BODY_BYTES` is 256 KiB.
@@ -164,6 +198,45 @@ after that change never contains one. The skip stays for workspaces provisioned
 before it, and because the name is a plausible one for something else to write.
 
 The walk is capped at 5,000 entries. A truncated scan can only miss changes.
+
+## A workflow run cannot file a deliverable, and now says so (issue #1192)
+
+Publishing needs somewhere to record the version. The chat and task paths each
+claim a destination before the turn (`PublishDestination::Conversation` /
+`::Task`); a **workflow run claims nothing**, because `publish_artifact` needs a
+card to attach a version to and a run has neither a card nor a conversation. So
+a node that calls the tool is refused in-turn, and that refusal is correct —
+`Unclaimed` is the `#[default]`, which is the fail-safe direction: a turn-running
+path added later inherits an honest refusal rather than a silent drop.
+
+What was wrong was who heard about it. The refusal was told to the model and to
+`tracing::warn!`, and to nobody else. The model wrote an apology, the apology
+became the node's `text` output, the `=items` binding delivered it downstream as
+though it were the deliverable, and the run settled clean — the same shape issue
+`#881` fixed for the *gated* case, which the `Unclaimed` case never got.
+
+The refusal is now a **typed fact recorded where it is raised**: a second bucket
+on `PendingPublishQueue` (`push_refusal` / `drain_refusals`), drained after every
+agent-node turn into one deduped `WorkflowRun::notices` line naming the path.
+Three properties are load-bearing:
+
+- **Recorded at the raise site, never classified from prose.** Matching on the
+  refusal sentence would be a classifier keyed on agent-facing copy: the wording
+  will be reworded, and the day it is, the notice silently stops appearing with
+  every test still green.
+- **A notice, not a `Blocked` node.** A refused publish did not stop the node —
+  the turn ran and the branch continued. `Blocked` halts a branch and is not
+  auto-resumable, and there is no approval here for anyone to give.
+- **A refusal is not a `sources()` entry.** The unpublished-file scan above is
+  `changed − sources()`, so counting a refusal as staged would make the nudge go
+  quiet on the file *most* at risk — the one an agent explicitly tried and failed
+  to hand over. The two buckets are separate for exactly this reason, and
+  `clear()` (the steer-redirect abandon) empties both.
+
+Whether a run *should* be able to publish is a separate, open question:
+`origin_run_id` (M5 / issue #661) taught runs to open cards, which arguably makes
+the "a run has nowhere to file one" premise stale. This change does not settle
+it — it only removes the silence around the current answer.
 
 ## Storage
 

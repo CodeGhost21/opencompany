@@ -312,22 +312,52 @@ impl ManifestApprovalGate {
     /// Removes the parked entry and returns the `amended` effect to execute, or
     /// `None` when the approval is unknown or has expired past its TTL — the
     /// same default-deny-on-silence that governs [`resolve_at`](Self::resolve_at).
+    ///
+    /// Prefer [`resolve_amended_outcome`](Self::resolve_amended_outcome) when
+    /// the caller has to *report* what happened: this `None` collapses "there
+    /// was nothing parked" into "the deadline had passed", and those are
+    /// different things to write into an audit trail (issue #1449).
     pub fn resolve_amended(
+        &self,
+        id: &ApprovalId,
+        amended: Effect,
+        by: Actor,
+        now_millis: u64,
+    ) -> Option<Effect> {
+        match self.resolve_amended_outcome(id, amended, by, now_millis) {
+            ResolveOutcome::Approved(effect) => Some(effect),
+            _ => None,
+        }
+    }
+
+    /// The amend counterpart to
+    /// [`resolve_outcome`](Self::resolve_outcome): resolves a parked approval to
+    /// an operator-amended effect and says **which** outcome that was
+    /// (issue #1449).
+    ///
+    /// An amend is an approve, so the outcomes it can produce are the same
+    /// three the plain approve can: [`ResolveOutcome::NotParked`],
+    /// [`ResolveOutcome::Expired`], and [`ResolveOutcome::Approved`] carrying
+    /// the *amended* effect. It never denies — a deny cannot carry an
+    /// amendment, and the route refuses the pairing.
+    ///
+    /// The removal and the outcome decision are one critical section, for the
+    /// same reason they are on `resolve_outcome`: two concurrent resolves of
+    /// one id must not both win.
+    pub fn resolve_amended_outcome(
         &self,
         id: &ApprovalId,
         amended: Effect,
         _by: Actor,
         now_millis: u64,
-    ) -> Option<Effect> {
-        let parked = self
-            .parked
-            .lock()
-            .expect("parked map poisoned")
-            .remove(id)?;
+    ) -> ResolveOutcome {
+        let Some(parked) = self.parked.lock().expect("parked map poisoned").remove(id) else {
+            return ResolveOutcome::NotParked;
+        };
         if now_millis.saturating_sub(parked.parked_at_millis) >= self.ttl_millis {
-            return None;
+            return ResolveOutcome::Expired;
         }
-        Some(amended)
+        ResolveOutcome::Approved(amended)
     }
 
     /// Resolves a parked approval as of `now`, reporting **which** of the four

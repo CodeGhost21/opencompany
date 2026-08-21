@@ -70,8 +70,9 @@ use tinyflows::error::{EngineError, Result as TfResult};
 
 use crate::harness::orchestrator::MAX_DELEGATIONS_PER_TURN;
 use crate::harness::policy::{ApprovalScope, MAX_APPROVAL_REQUESTS_PER_TURN, PolicyMode};
-use crate::harness::{HarnessDeps, HarnessPool, toolbelt};
+use crate::harness::{HarnessDeps, toolbelt};
 use crate::ports::types::{CompanyId, CompanyRecord};
+use crate::runtime::delegation::RunTurn;
 
 use self::http::GuardedHttpClient;
 use self::resolver::StoreWorkflowResolver;
@@ -141,8 +142,8 @@ pub struct RunContext<'a> {
 /// `_` prefix keeps it from ever colliding with a roster agent's own workspace
 /// directory.
 ///
-/// `pool`/`deps` are shared with the rest of the harness surface — the roster the
-/// agent nodes address is the one already resident in `pool`.
+/// `turn`/`deps` are shared with the rest of the harness surface — the roster the
+/// agent nodes address is the one resident in the harness(es) the turn routes to.
 ///
 /// `run_request` is the operator's topic for this run (issue #154), threaded to
 /// the agent capability so every agent node's turn message carries what was
@@ -168,7 +169,7 @@ pub struct RunContext<'a> {
 /// rather than proceeding with effects pointed at a directory that does not
 /// exist. A dry run builds no workspace and is infallible.
 pub async fn build_capabilities(
-    pool: Arc<HarnessPool>,
+    turn: Arc<dyn RunTurn>,
     deps: HarnessDeps,
     record: &CompanyRecord,
     run: RunContext<'_>,
@@ -345,7 +346,7 @@ pub async fn build_capabilities(
         // `deps.search`, `deps.meter`, `deps.secrets`, `deps.workspace_root`,
         // `deps.delegations`) are all done by here.
         let agent: Arc<dyn AgentRunner> = Arc::new(HarnessAgentRunner::new(
-            pool,
+            turn,
             deps,
             record.clone(),
             company.clone(),
@@ -474,8 +475,25 @@ fn hex_segment(value: &str) -> String {
 /// It still takes no [`PublishClaim`](crate::harness::publish::PublishClaim):
 /// `publish_artifact` needs a card to attach a version to, which a run does not
 /// have, so a refusal there remains the truthful answer.
+///
+/// What changed in issue #1192 is who hears about that refusal. It used to be
+/// told only to the model, which meant the only operator-visible trace was
+/// whatever prose the model wrote in reaction — and that prose became the node's
+/// output and rode the `=items` binding downstream while the run scored clean,
+/// which is the same shape #881 fixed for the *gated* case one paragraph up.
+/// The refusal is now recorded as a typed fact on the queue where it is raised
+/// and drained after every node turn into a run notice; see
+/// [`drain_publish_refusals`](HarnessAgentRunner::drain_publish_refusals). The
+/// tool's answer is unchanged — only the silence around it is.
+///
+/// Whether a run *should* be able to publish is a separate question this does
+/// not settle: `origin_run_id` (M5 / issue #661) taught runs to open cards,
+/// which arguably makes the "a run has nowhere to file one" premise stale.
 pub struct HarnessAgentRunner {
-    pool: Arc<HarnessPool>,
+    /// The turn a workflow agent node runs on: the lane-aware router in a
+    /// multi-harness company, the default lane over the pool in a
+    /// single-harness one (see `run_workflow`'s single-pool entrypoint).
+    turn: Arc<dyn RunTurn>,
     deps: HarnessDeps,
     /// The company record, for the board drain's desk/assignee resolution (issue
     /// #661 / M5) — the same record the rest of this bundle was built from, so a
@@ -675,12 +693,14 @@ impl ParkedCalls {
 }
 
 impl HarnessAgentRunner {
-    /// Builds a runner over an already-populated pool for `company`, carrying
-    /// the run's id (issue #395) and the operator's run request (issue #154)
-    /// when one was supplied.
+    /// Builds a runner over `turn` for `company`, carrying the run's id (issue
+    /// #395) and the operator's run request (issue #154) when one was supplied.
+    /// The turn is the lane-aware router where lanes are declared, or the
+    /// default lane over the pool otherwise, so a workflow agent node addressing
+    /// a named-harness agent reaches that harness's engine.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        pool: Arc<HarnessPool>,
+        turn: Arc<dyn RunTurn>,
         deps: HarnessDeps,
         record: CompanyRecord,
         company: CompanyId,
@@ -694,7 +714,7 @@ impl HarnessAgentRunner {
         board_claim: Arc<crate::harness::orchestrator::DelegationClaim>,
     ) -> Self {
         Self {
-            pool,
+            turn,
             deps,
             record,
             company,
@@ -796,6 +816,88 @@ impl HarnessAgentRunner {
             }
         }
         self.board.extend(rows);
+    }
+
+    /// Issue #1192: say on the run that a node's publish was refused.
+    ///
+    /// The `Unclaimed` refusal is honest and stays — a run has no card to attach
+    /// a version to — but before this its **only** operator-visible record was
+    /// the model's own reaction to it. The tool refused, the model wrote an
+    /// apology, the apology became the node's `text` output, the `=items`
+    /// binding delivered it downstream as though it were the deliverable, and
+    /// the run scored clean. `caps`'s own doc already named this failure for the
+    /// *gated* case ("that is exactly how a gated `publish_artifact` came to hand
+    /// the model's apology downstream"), which #881 fixed with a structural
+    /// notice; the `Unclaimed` case never got the same treatment.
+    ///
+    /// # A notice, deliberately not a block
+    ///
+    /// [`RunNotices`] rather than [`RunBlocks`]: a refused publish did **not**
+    /// stop the node. The turn ran, the branch
+    /// continued, and whatever else the node produced is real. `Blocked` halts
+    /// the branch and is not auto-resumable — there is no approval to give here
+    /// and nothing to release, so promoting this to a block would tell the
+    /// operator to go answer a card that will never exist.
+    ///
+    /// # Structural wording only
+    ///
+    /// The sentence is composed from the source path and nothing else — never
+    /// the tool's refusal text and never the model's prose — the same split
+    /// [`drain_board_writes`](Self::drain_board_writes) keeps. Notices reach host
+    /// logs.
+    ///
+    /// Deduped by path: a turn that called `publish_artifact` on the same file
+    /// three times should name it once, for the reason
+    /// [`push_tool`] gives.
+    ///
+    /// # Known limitation: the bucket is unscoped
+    ///
+    /// The queue handle is shared across every path in the company, and the
+    /// chat cycle's `clear()` at the top of each turn empties it. So a chat
+    /// cycle starting between a node's refusal and this drain can discard the
+    /// notice. That is the **safe** direction and the reason it is left as is:
+    /// the loss is a notice that does not appear, never one attributed to a run
+    /// that did not earn it — a claimed destination records no refusal at all
+    /// (pinned by `a_claimed_destination_records_no_refusal`), so nothing a chat
+    /// or task turn does can *add* to this bucket.
+    ///
+    /// A *different* workflow run can add to it, though: two overlapping runs
+    /// of the same company share this same bucket, and whichever run's
+    /// `drain_publish_refusals` executes first takes every refusal queued so
+    /// far, including one a sibling run just raised — a misattribution, not a
+    /// loss (tracked as issue #1243). Closing it properly is **not** as simple
+    /// as handing each run a private queue at `build_capabilities` time: the
+    /// `agent` node type dispatches through `HarnessPool::run_background` to a
+    /// roster agent built **once** by `HarnessPool::ensure` and cached behind
+    /// fingerprints, so the `PublishArtifactTool` a model's turn actually calls
+    /// captures its `pending_publishes` handle at that cache-build time, not at
+    /// per-run dispatch time — a fork made here never reaches it. The fix needs
+    /// the same *task-local* run scope issue #771 gave the delegation queue
+    /// (`ApprovalScope` / `DelegationScope` / `board_claim.scoped(..)` above),
+    /// read by `push_refusal` at call time rather than baked in at tool
+    /// construction, which is a wider change than this fix.
+    fn drain_publish_refusals(&self) {
+        let refusals = self.deps.pending_publishes.drain_refusals();
+        let mut seen: Vec<String> = Vec::new();
+        for source in refusals {
+            if seen.iter().any(|s| s == &source) {
+                continue;
+            }
+            tracing::warn!(
+                company = %self.company,
+                workflow = %self.workflow_id,
+                run_id = %self.run_id,
+                path = %source,
+                "workflow agent node: a publish was refused because a run claims no publish \
+                 destination; reporting it as a run notice"
+            );
+            self.notices.push(format!(
+                "A step in this workflow wrote \"{source}\" and could not hand it over as a \
+                 deliverable — a workflow run has nowhere to file one. The file is still in that \
+                 teammate's sandbox."
+            ));
+            seen.push(source);
+        }
     }
 
     /// Parks every approval-gated tool call this node's turn just recorded
@@ -1139,7 +1241,7 @@ impl AgentRunner for HarnessAgentRunner {
         tracing::debug!(
             company = %self.company,
             agent = agent_ref,
-            "workflow agent node: routing to harness pool"
+            "workflow agent node: routing through harness turn"
         );
         // Issue #439: this run's own approval scope, replacing #395's boundary
         // index. The index was only ever a narrowing — it was taken against a
@@ -1168,11 +1270,10 @@ impl AgentRunner for HarnessAgentRunner {
         // first spawning run without these.
         let turn = Box::pin(async {
             let outcome = claim
-                .scoped(Box::pin(self.pool.run_background(
+                .scoped(Box::pin(self.turn.run_background(
                     &self.company,
                     agent_ref,
                     &message,
-                    &self.deps,
                 )))
                 .await;
             // Drained on BOTH arms, deliberately. A turn that errored may still have
@@ -1198,6 +1299,11 @@ impl AgentRunner for HarnessAgentRunner {
             // card would be opened; refusing to drain would make that receipt false
             // and destroy the write when the scope ends.
             Box::pin(self.drain_board_writes()).await;
+            // Issue #1192: likewise on both arms. A turn that failed after being
+            // refused a publish was still refused one, and the file it wrote is
+            // still stranded — dropping the fact because the turn ended badly is
+            // how the refusal became invisible in the first place.
+            self.drain_publish_refusals();
             (outcome, parked)
         });
         let (outcome, parked) = self.board_claim.scoped(turn).await;
@@ -1606,6 +1712,15 @@ impl CodeRunner for UnwiredCode {
 mod tests {
     use super::*;
 
+    /// The single-harness turn over a fresh pool, as the non-lane entrypoint
+    /// wraps — what a workflow agent node runs on when no lanes are declared.
+    fn single_turn(deps: &HarnessDeps) -> Arc<dyn RunTurn> {
+        Arc::new(crate::harness::built_in::run_turn::HarnessRunTurn::new(
+            Arc::new(crate::harness::HarnessPool::new()),
+            Arc::new(deps.clone()),
+        ))
+    }
+
     /// Issue #638: a node that gates more calls than the cap allows leaves the
     /// operator a **notice**, not only a log line.
     ///
@@ -1683,7 +1798,7 @@ mod tests {
         let notices = RunNotices::default();
         let board_claim = Arc::new(deps.delegations.claim_board("run-1"));
         let runner = HarnessAgentRunner::new(
-            Arc::new(HarnessPool::new()),
+            single_turn(&deps),
             deps,
             crate::workflows::gated_tool_turn_test::record(),
             CompanyId::new("acme"),
@@ -2230,7 +2345,7 @@ mod tests {
         let record = crate::workflows::gated_tool_turn_test::record();
 
         let caps = build_capabilities(
-            Arc::new(HarnessPool::new()),
+            single_turn(&deps),
             deps,
             &record,
             RunContext {
@@ -2276,7 +2391,7 @@ mod tests {
         let record = crate::workflows::gated_tool_turn_test::record();
 
         let caps = build_capabilities(
-            Arc::new(HarnessPool::new()),
+            single_turn(&deps),
             deps,
             &record,
             RunContext {
@@ -2439,7 +2554,7 @@ mod tests {
 
         // `Capabilities` is not `Debug`, so match rather than `expect_err`.
         let err = match build_capabilities(
-            Arc::new(HarnessPool::new()),
+            single_turn(&deps),
             deps,
             &record,
             RunContext {
@@ -2492,7 +2607,7 @@ mod tests {
         let record = crate::workflows::gated_tool_turn_test::record();
 
         build_capabilities(
-            Arc::new(HarnessPool::new()),
+            single_turn(&deps),
             deps,
             &record,
             RunContext {

@@ -134,6 +134,47 @@ same reason: it used to tell operators "this company has no Composio credential,
 so no Composio account can be reached" on a card whose own evidence listed the
 connectors as connected.
 
+## The capabilities panel reports publishing, in two rungs not three (issue #1192)
+
+Publishing was the one capability on that panel with **no field at all**. Media,
+Composio, search and `repo` each carry a Granted/InBuild shape; whether an
+agent could hand its work over as a deliverable was answerable only by reading
+the manifest and knowing that `publish_artifact` rides the `files`/`docs` grant.
+
+`GET …/capabilities` now sends two fields:
+
+| Field | Question | Shape |
+| --- | --- | --- |
+| `publishGranted` | do this company's grants confer `publish_artifact`? | boolean |
+| `publishInBuild` | is the harness carrying the tool compiled into this build? | boolean; there is no `publish` Cargo feature, it rides `openhuman` exactly as `searchInBuild` does |
+
+Two things about the shape are deliberate and easy to get wrong:
+
+- **A bare `*` DOES confer publishing**, unlike every `*Granted` neighbour on
+  this panel. Publishing spends nothing and reaches nothing outside the
+  company's own board, so it rides the ordinary namespace rule rather than the
+  opt-in-by-name rule the real-money surfaces use. `grants_files_or_docs` is
+  therefore **not** a `grants_*_explicit` sibling, and folding it into that
+  family would silently revoke publishing for the majority of shipped manifests,
+  which grant `*` and nothing else. `repoGranted` on the same response answers
+  the opposite way for the same input; that asymmetry is intended.
+- **There is no third rung, and adding one would be the #886 mistake again.**
+  The other capabilities carry a credential/config flag because each can be
+  granted and still wire nothing. Publishing has neither a credential nor a
+  store toggle: the artifact store is non-optional on the runtime ops bundle and
+  the single production `HarnessDeps` literal always sets it, so an
+  `artifactStoreConfigured` field could only ever serialize a hardcoded `true`
+  for every company on every deployment. The fail-closed "no artifact store
+  configured" branch in `build_agent` is reachable from tests only.
+
+The verdict comes from `company::grants_files_or_docs`, which is the same
+predicate `build_agent`'s `wants_files` gate calls — one derivation, so the
+panel cannot report a capability the toolbelt does not wire. That equality is
+asserted over a grant matrix by
+`harness::build::tests::the_capability_verdict_matches_what_the_toolbelt_wires`,
+which is the standard #886 stated: prove the two agree by running both, not by
+reading them.
+
 ## Releasing a connection: two routes, not interchangeable (issue #404)
 
 There are two disconnects and they act on different things:

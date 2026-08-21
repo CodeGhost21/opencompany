@@ -8,6 +8,7 @@
 
 mod ids;
 
+pub mod acp;
 pub mod approvals;
 pub mod artifacts;
 pub mod brain;
@@ -40,6 +41,7 @@ pub mod workflow_runner;
 pub mod workflow_verdict;
 pub mod workspace;
 
+pub use acp::{AcpAgent, AcpAgentFactory, AcpTurn, AcpUpdate};
 pub use approvals::ApprovalGate;
 pub use artifacts::{
     ArtifactAuthor, ArtifactDiff, ArtifactKind, ArtifactRecord, ArtifactStore, ArtifactVersion,
@@ -51,7 +53,9 @@ pub use context::ContextStore;
 pub use economy::AgentEconomy;
 pub use events::{EventLog, PruneReport, RetentionClass, RetentionPolicy, plan_prune};
 pub use facts::{FactKind, FactRecord, FactStore};
-pub use ids::{AGENT_SLUG_FALLBACK, CONFINED_AGENT_ID, agent_slug, generate_id, now_millis};
+pub use ids::{
+    AGENT_SLUG_FALLBACK, CONFINED_AGENT_ID, SYSTEM_AUTHOR, agent_slug, generate_id, now_millis,
+};
 pub use inbox::{EmailRecord, InboxMeta, InboxStore};
 pub use journal::{Durability, JournalStore};
 pub use ledgers::LedgerStore;
@@ -88,7 +92,7 @@ pub use workflow_runner::{
     WorkflowRunBoardRow, WorkflowRunContext, WorkflowRunNodeRow, WorkflowRunner,
 };
 pub use workflow_verdict::{
-    RunVerdictFacts, WorkflowRunVerdict, awaiting_count, undelivered_count,
+    RunVerdictFacts, WorkflowRunVerdict, awaiting_count, is_undelivered, undelivered_count,
 };
 pub use workspace::{NodeKind, WorkspaceNode, WorkspaceOrigin, WorkspaceStore};
 

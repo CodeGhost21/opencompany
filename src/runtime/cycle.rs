@@ -32,7 +32,8 @@ use crate::feedback::tool::SEND_EMAIL_TOOL;
 use crate::policy::gate::ResolveOutcome;
 use crate::ports::brain::{CycleHost, UsageMetering};
 use crate::ports::runs::{RunOutcome, RunStatus};
-use crate::ports::tasks::{COLUMN_TODO, TaskDeliverable, TaskRecord};
+use crate::ports::tasks::{COLUMN_TODO, TaskRecord};
+use crate::ports::types::MessageIntent;
 use crate::ports::types::{
     Actor, ApprovalId, CompanyEvent, CompanyId, CompanyRecord, ContextOp, ContextOpResult,
     CycleRequest, Effect, EffectDisposition, EffectGroup, EventSeq, LedgerEntry, OutboundMessage,
@@ -137,9 +138,11 @@ pub(crate) const BUILDER_ANNOTATION: &str = "\n\n[This request is already being 
 /// What settling an approval's verdict produced — the outcome of the fast half
 /// of a resolve, before any model is called (issue #383).
 ///
-/// Both arms mean the operator's decision is final. They differ only in what is
-/// still owed: `Settled` owes one follow-up cycle, `AlreadyResolved` owes
-/// nothing because a previous resolve already ran it.
+/// Every arm means the operator has no decision left to make. They differ in
+/// what is still owed and, crucially, in **what may be claimed about the
+/// operator**: `Settled` owes one follow-up cycle and is the only arm that may
+/// be journaled as this person's verdict; `AlreadyResolved` and `Expired` owe
+/// no cycle because nothing of the operator's was recorded at all.
 #[derive(Debug, Clone)]
 pub enum ResolveReceipt {
     /// Nothing was parked under this id — an unknown id, or one a concurrent
@@ -147,6 +150,24 @@ pub enum ResolveReceipt {
     /// written and no cycle is owed. Issue #243 made this a safe no-op rather
     /// than a second grant; surfacing it here lets the HTTP layer say so.
     AlreadyResolved,
+    /// The approval was still parked but past its deadline, so the gate
+    /// default-denied it whatever the operator asked for (issue #1449).
+    ///
+    /// **This is not the operator's verdict and must never be recorded as
+    /// one.** The click arrived too late to be a decision: no grant is minted,
+    /// nothing is executed, and the durable record is an
+    /// [`ApprovalExpired`](crate::runtime::journal) — the same line the sweeper
+    /// writes for the identical outcome reached by silence. Before this the arm
+    /// fell through to `Settled`, so a late click journaled a named operator
+    /// approving something the host had already refused, and told them in green
+    /// that it was being carried out.
+    ///
+    /// The retirement transaction it owes — journal, pending mark, continuation
+    /// release, event — is
+    /// [`CompanyRuntime::retire_approval`](crate::runtime::CompanyRuntime), run
+    /// by the caller that holds the `Arc`. See
+    /// [`settle_approval`](CycleRunner::settle_approval).
+    Expired,
     /// The verdict is journaled and any approved effect settled — the grant is
     /// minted, or the native effect executed. The carried `ApprovalResolved` is
     /// the event the follow-up cycle must run so the brain learns the verdict.
@@ -162,6 +183,25 @@ impl ResolveReceipt {
     /// Whether this resolve found nothing left to resolve.
     pub fn already_resolved(&self) -> bool {
         matches!(self, Self::AlreadyResolved)
+    }
+
+    /// Whether the deadline decided this rather than the operator (issue #1449).
+    pub fn expired(&self) -> bool {
+        matches!(self, Self::Expired)
+    }
+
+    /// The wire discriminator for what actually happened (issue #1449).
+    ///
+    /// A string rather than a third boolean because the arms are mutually
+    /// exclusive and there is a fourth coming: two independent `bool`s can spell
+    /// states that cannot exist, and every console reading them has to know
+    /// which combinations are real. One field with one value per arm cannot.
+    pub fn outcome(&self) -> &'static str {
+        match self {
+            Self::AlreadyResolved => "already_resolved",
+            Self::Expired => "expired",
+            Self::Settled(_) => "settled",
+        }
     }
 }
 
@@ -468,6 +508,7 @@ impl<'a> CycleRunner<'a> {
             // never pruned, and a cycle needs the link for at most the couple of
             // `ApprovalResolved` ids in its own batch.
             cycle_task_id(&request.events, |id| self.rt.journal.approval_task(id)),
+            cycle_is_external(&request.events),
             // Issue #379: and which conversation, on the same terms — read off
             // the same trigger events, from the same retained origins. Issue
             // #435 widened this to the channel *and* the thread within it, in
@@ -796,7 +837,7 @@ working on):\n{}\n]",
         for event in events.iter_mut() {
             let CompanyEvent::OperatorMessage {
                 text,
-                deliverable: Some(TaskDeliverable::Workflow),
+                deliverable: Some(MessageIntent::Workflow),
                 ..
             } = event
             else {
@@ -839,6 +880,15 @@ approval.]"
     /// [`ResolveReceipt::AlreadyResolved`] (issue #243). It writes no journal
     /// record and owes no cycle.
     ///
+    /// Resolving one that is **past its deadline** yields
+    /// [`ResolveReceipt::Expired`] and likewise writes nothing here — the
+    /// operator's click arrived too late to be a decision, so nothing about it
+    /// may be journaled (issue #1449). **The caller owes that approval its
+    /// retirement**: `Expired` means the gate has already dropped the entry, and
+    /// [`CompanyRuntime::retire_approval`](crate::runtime::CompanyRuntime) is
+    /// the one transaction that finishes the job. `resolve_approval_spawned` —
+    /// the only production caller — does exactly that.
+    ///
     /// Before this the double-submit path was indistinguishable from a deny (see
     /// [`ResolveOutcome`]), so a double-clicked approve appended a second
     /// `ApprovalResolved` to the journal and ran a second follow-up cycle over an
@@ -869,6 +919,27 @@ approval.]"
             .resolve_outcome(id, verdict, by.clone(), now_millis());
         if outcome == ResolveOutcome::NotParked {
             return Ok(ResolveReceipt::AlreadyResolved);
+        }
+        // Issue #1449: past its deadline is NOT this operator's verdict.
+        //
+        // The gate has already default-denied it — that is what `Expired`
+        // means, and the safety half has always held: no grant is minted and
+        // nothing runs. What did not exist was the *reporting* half. Falling
+        // through here appended `ApprovalResolved` — the record for "the
+        // operator decided this" — and returned `Settled { verdict: Approve }`,
+        // so the durable audit trail said a named person approved something the
+        // host had refused, and the console said so in green.
+        //
+        // Returning early leaves the retirement to the caller rather than doing
+        // it here, because the transaction an expiry owes is four steps, not
+        // one — journal, pending mark, continuation release, event — and it
+        // already exists whole as `CompanyRuntime::retire_approval`, which the
+        // sweeper reaches the identical outcome through. Re-implementing three
+        // of its four steps at this seam is exactly the failure that function's
+        // doc comment exists to prevent, and it needs an `Arc<Self>` to release
+        // the continuation, which a `CycleRunner` does not hold.
+        if outcome == ResolveOutcome::Expired {
+            return Ok(ResolveReceipt::Expired);
         }
         // Issue #796: the approval has left the parked set — drop its pending
         // mark. On approve the grant minted just below now names the task; on
@@ -1236,6 +1307,37 @@ approval.]"
         }
     }
 
+    /// The synthetic report for a decision that arrived after the deadline
+    /// (issue #1449).
+    ///
+    /// Same shape and same purpose as
+    /// [`already_resolved_report`](Self::already_resolved_report) — a receipt
+    /// that owes no cycle still answers on a handle of the same shape — and a
+    /// different sentence, because it is a different thing to have happened. The
+    /// approval was not resolved by anybody; its deadline passed and the host
+    /// declined it. Saying "already resolved" here would be the smaller version
+    /// of the same false claim this issue is about.
+    pub(crate) fn expired_report(&self) -> CycleReport {
+        CycleReport {
+            cycle_id: generate_id(),
+            responses: vec![OutboundMessage {
+                task_id: None,
+                channel: OPERATOR_CHANNEL.to_string(),
+                agent: None,
+                text: "This approval had passed its deadline, so it was declined automatically. \
+                       Nothing was carried out."
+                    .to_string(),
+                steps: Vec::new(),
+                reply_to: None,
+                message_id: None,
+            }],
+            executed_effects: Vec::new(),
+            parked: Vec::new(),
+            persisted_seq: None,
+            input_seqs: Vec::new(),
+        }
+    }
+
     /// Settles a parked approval to an operator-amended effect
     /// (approve-with-edit): overlays `amended_payload` onto the parked effect and
     /// executes the amended version (at-most-once).
@@ -1245,6 +1347,9 @@ approval.]"
     /// no `AlreadyResolved` arm: an id with nothing parked yields no executable
     /// effect and simply settles to a resolution the brain is still told about,
     /// exactly as before.
+    ///
+    /// It **does** have an [`Expired`](ResolveReceipt::Expired) arm, on the same
+    /// terms as the plain path (issue #1449), and the caller owes the retirement.
     ///
     /// Both the original and the amended effect are preserved in the immutable
     /// journal (`ApprovalParked` + `ApprovalAmended`), so the audit trail shows
@@ -1263,12 +1368,26 @@ approval.]"
             original.payload = overlay_payload(original.payload, amended_payload);
             original
         });
-        let executed = match amended {
-            Some(effect) => self
-                .rt
-                .approval_gate
-                .resolve_amended(id, effect, by.clone(), now),
-            None => None,
+        let outcome = match amended {
+            Some(effect) => {
+                self.rt
+                    .approval_gate
+                    .resolve_amended_outcome(id, effect, by.clone(), now)
+            }
+            None => ResolveOutcome::NotParked,
+        };
+        // Issue #1449, the amend half of the same defect. An edit applied to a
+        // card past its deadline is still not a decision — and it is the worse
+        // half of the bug, because the fall-through recorded an `ApprovalAmended`
+        // too: a named operator both editing and approving an effect the gate
+        // had already refused. Same answer as the plain path; the caller retires
+        // it.
+        if outcome == ResolveOutcome::Expired {
+            return Ok(ResolveReceipt::Expired);
+        }
+        let executed = match outcome {
+            ResolveOutcome::Approved(effect) => Some(effect),
+            _ => None,
         };
 
         // Audit the amendment (when one ran) and drain the queue durably.
@@ -1873,6 +1992,28 @@ fn short_thread_digest(thread: &str) -> String {
 /// [`TaskLink::Unlinked`](crate::runtime::journal::TaskLink::Unlinked): honest,
 /// and deliberately *not* a fall-back to the run window, which would put the
 /// approval right back on whichever card was running.
+/// Whether a cycle's trigger batch contains content that arrived from
+/// OUTSIDE — a `WebhookReceived` (a channel message, an email, a third-party
+/// callback). Operator speech (`OperatorMessage`), dispatches, schedule fires
+/// and payment notifications are the company's own machinery: Internal, per
+/// the operator-facts authorship precedent. Named and pure so the boundary is
+/// testable — see `CycleHostImpl::external_trigger` for what rides on it.
+///
+/// `A2aTaskReceived` sits WITH `WebhookReceived`: it is a remote agent's raw
+/// payload (the operator surface calls both "raw third-party payloads", and
+/// the A2A route promptguard-sanitizes it for exactly that reason) — the #68
+/// sibling review's M1 caught it missing here. `FeedbackFiled` is a
+/// deliberate Internal: feedback is filed through the company's own console
+/// by its own people — operator authorship, not outside content.
+fn cycle_is_external(events: &[CompanyEvent]) -> bool {
+    events.iter().any(|event| {
+        matches!(
+            event,
+            CompanyEvent::WebhookReceived { .. } | CompanyEvent::A2aTaskReceived { .. }
+        )
+    })
+}
+
 fn cycle_task_id(
     events: &[CompanyEvent],
     approval_task: impl Fn(&ApprovalId) -> Option<Option<TaskLink>>,
@@ -2248,6 +2389,17 @@ struct CycleHostImpl<'a> {
     /// agrees on a channel but not on a thread within it — which degrades to
     /// exactly the pre-#435 behaviour of answering in the channel.
     thread_parent: Option<EventSeq>,
+    /// Whether this cycle was triggered by content that arrived from OUTSIDE —
+    /// a `WebhookReceived` (a channel message, an email, a third-party
+    /// callback) or an `A2aTaskReceived` (a remote agent's payload) in its
+    /// trigger batch. Computed once, like `task_id`. A brain-chosen
+    /// `ContextOp::Put` in such a cycle can be (and on the medulla path
+    /// routinely is) the raw inbound payload echoed back, so the write goes
+    /// through the taint-stamping inbound port instead of the internal one
+    /// (issue #1113). Coarse by design: the host cannot see which put quoted
+    /// the payload, so every put of an externally-triggered cycle carries the
+    /// external stamp — over-tainting is safe, under-tainting is the leak.
+    external_trigger: bool,
 }
 
 impl<'a> CycleHostImpl<'a> {
@@ -2256,6 +2408,7 @@ impl<'a> CycleHostImpl<'a> {
         cycle_id: String,
         rt: &'a CompanyRuntime,
         task_id: Option<String>,
+        external_trigger: bool,
         conversation: ApprovalConversation,
     ) -> Self {
         Self {
@@ -2266,6 +2419,7 @@ impl<'a> CycleHostImpl<'a> {
             executed: StdMutex::new(Vec::new()),
             parked: StdMutex::new(Vec::new()),
             task_id,
+            external_trigger,
             thread_id: conversation.thread,
             thread_parent: conversation.parent,
         }
@@ -2676,9 +2830,16 @@ impl CycleHost for CycleHostImpl<'_> {
 
     async fn context_op(&self, op: ContextOp) -> Result<ContextOpResult> {
         match op {
-            ContextOp::Put(chunk) => Ok(ContextOpResult::Addr(
-                self.rt.context.put(&self.company, chunk).await?,
-            )),
+            ContextOp::Put(chunk) => Ok(ContextOpResult::Addr({
+                // External-triggered cycles write through the taint-stamping
+                // port; see `external_trigger` on this struct.
+                let port = if self.external_trigger {
+                    &self.rt.inbound_context
+                } else {
+                    &self.rt.context
+                };
+                port.put(&self.company, chunk).await?
+            })),
             ContextOp::List { prefix } => Ok(ContextOpResult::Metas(
                 self.rt.context.list(&self.company, &prefix).await?,
             )),
@@ -2712,6 +2873,12 @@ mod test {
     /// desk agent answering the same message was telling the operator that it
     /// "cannot make it exist". The turn was right about its own toolset and
     /// wrong about the company, because nothing told it.
+    ///
+    /// The `chat` case is issue #1152's, and "nothing else does" is why it is
+    /// pinned here rather than assumed: a "Just chatting" message opens no card,
+    /// so there is no builder pass owning anything, so briefing the turn that a
+    /// build is under way would be telling it something untrue. The injection
+    /// matches `Workflow` exactly and this is what keeps it exact.
     #[test]
     fn only_a_workflow_message_gets_the_builder_briefing() {
         let msg = |deliverable| CompanyEvent::OperatorMessage {
@@ -2727,9 +2894,10 @@ mod test {
         };
 
         let mut events = vec![
-            msg(Some(TaskDeliverable::Workflow)),
-            msg(Some(TaskDeliverable::Once)),
+            msg(Some(MessageIntent::Workflow)),
+            msg(Some(MessageIntent::Once)),
             msg(None),
+            msg(Some(MessageIntent::Chat)),
             // A non-operator event must be left entirely alone.
             CompanyEvent::ScheduleFired {
                 cron: "0 6 * * 5".to_string(),
@@ -2750,14 +2918,18 @@ mod test {
             "{briefed}"
         );
 
-        for (i, label) in [(1, "once"), (2, "no choice")] {
+        for (i, label) in [(1, "once"), (2, "no choice"), (3, "chat")] {
             let text = text_of(&events[i]);
             assert_eq!(
                 text, "set up a weekly AEO audit",
                 "a `{label}` message must reach the brain exactly as typed"
             );
+            assert!(
+                !text.contains(BUILDER_ANNOTATION),
+                "a `{label}` message must carry no builder briefing: {text}"
+            );
         }
-        assert!(matches!(events[3], CompanyEvent::ScheduleFired { .. }));
+        assert!(matches!(events[4], CompanyEvent::ScheduleFired { .. }));
     }
 
     /// Issue #845, the wiring: the briefing actually reaches the brain.
@@ -2801,7 +2973,7 @@ mod test {
         };
 
         let workflow = rt
-            .run_cycle(vec![ask(Some(TaskDeliverable::Workflow))])
+            .run_cycle(vec![ask(Some(MessageIntent::Workflow))])
             .await
             .unwrap();
         let seen = workflow
@@ -2817,7 +2989,7 @@ mod test {
         // …and a one-off is handed through byte-for-byte, so the annotation is
         // not simply always on.
         let once = rt
-            .run_cycle(vec![ask(Some(TaskDeliverable::Once))])
+            .run_cycle(vec![ask(Some(MessageIntent::Once))])
             .await
             .unwrap();
         let seen_once = once
@@ -3576,6 +3748,10 @@ mod test {
         async fn search(&self, id: &CompanyId, query: &str, limit: usize) -> Result<Vec<ChunkHit>> {
             self.inner.search(id, query, limit).await
         }
+
+        async fn delete(&self, id: &CompanyId, addr: &ChunkAddr) -> Result<bool> {
+            self.inner.delete(id, addr).await
+        }
     }
 
     /// Issue #1175: a cycle used to load 32 recent traces *and the whole context
@@ -4207,6 +4383,212 @@ mod test {
             0,
             "an expired approval is a deny, so it hands out no permission"
         );
+    }
+
+    /// Parks one harness tool call behind a **zero-TTL** gate, so it is past its
+    /// deadline the instant it lands — the state an operator meets when they get
+    /// to the queue late (issue #1449).
+    async fn park_one_past_its_deadline(
+        home: std::path::PathBuf,
+    ) -> (Arc<CompanyRuntime>, ApprovalId) {
+        let gate = Arc::new(
+            ManifestApprovalGate::new(manifest("supervised").policy.clone()).with_ttl_millis(0),
+        );
+        let rt = Arc::new(
+            RuntimeBuilder::new(home, manifest("supervised"))
+                .with_approvals(gate)
+                .with_brain(Arc::new(EffectBrain {
+                    effect: harness_effect(
+                        "finance",
+                        "composio_execute",
+                        serde_json::json!({ "to": "a@b.test" }),
+                    ),
+                }))
+                .build()
+                .await
+                .unwrap(),
+        );
+        let report = rt
+            .run_cycle(vec![CompanyEvent::OperatorMessage {
+                parent: None,
+                text: "do it".into(),
+                by: None,
+                chat: None,
+                deliverable: None,
+            }])
+            .await
+            .unwrap();
+        assert_eq!(report.parked.len(), 1);
+        let id = report.parked[0].clone();
+        (rt, id)
+    }
+
+    /// **The assertion this whole fix exists for** (issue #1449).
+    ///
+    /// The safety half was always right — an expired approval mints nothing, and
+    /// [`an_expired_approval_mints_nothing_even_on_approve`] pins that. What was
+    /// missing was the *reporting* half: the arm fell through to
+    /// `record_resolved`, so the immutable journal said **a named operator
+    /// approved this** about a call the host had already refused. That is a
+    /// false statement about a person, written permanently, on the surface whose
+    /// entire job is answering "who authorised this?".
+    ///
+    /// So: after a late approve, the journal must carry the expiry — the same
+    /// line the sweeper writes when the identical outcome is reached by silence
+    /// — and must carry **no** `ApprovalResolved` for that id at all.
+    #[tokio::test]
+    async fn a_late_approve_is_journaled_as_an_expiry_never_as_the_operators_verdict() {
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
+        let (rt, id) = park_one_past_its_deadline(home.clone()).await;
+
+        rt.resolve_approval(&id, Verdict::Approve, operator())
+            .await
+            .unwrap();
+
+        let raw = tokio::fs::read_to_string(Bundle::new(&home, rt.id()).journal_jsonl())
+            .await
+            .unwrap();
+        let lines: Vec<serde_json::Value> = raw
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .filter_map(|l| serde_json::from_str(l).ok())
+            .collect();
+        let about_this_approval = |record: &str| {
+            lines.iter().any(|line| {
+                line["record"] == record && line["id"] == serde_json::json!(id.as_ref() as &str)
+            })
+        };
+
+        assert!(
+            about_this_approval("ApprovalExpired"),
+            "a late click leaves the SAME record as a deadline nobody noticed, got {raw}"
+        );
+        assert!(
+            !about_this_approval("ApprovalResolved"),
+            "the journal must never say this operator resolved an approval the \
+             host had already default-denied, got {raw}"
+        );
+        assert!(
+            !about_this_approval("ApprovalAmended"),
+            "and it must not record an amendment either, got {raw}"
+        );
+        // The safety half, re-checked here rather than assumed: reporting the
+        // truth is only half a fix if the grant came back.
+        assert_eq!(rt.grants.live_count(), 0);
+        assert!(rt.pending_approvals().is_empty());
+    }
+
+    /// The event log — what the brain and the operator's SSE feed read — must
+    /// agree with the journal (issue #1449).
+    ///
+    /// Before this it received `ApprovalResolved { verdict: Approve, by: <the
+    /// operator> }`, so the agent was re-dispatched to make a call it had never
+    /// been granted, and the timeline named a person who approved nothing. An
+    /// expiry is a default-**deny** by the **system**, exactly as the sweeper
+    /// appends it.
+    #[tokio::test]
+    async fn a_late_approve_appends_a_system_deny_not_the_operators_approve() {
+        let home_dir = tmp_home();
+        let (rt, id) = park_one_past_its_deadline(home_dir.path().to_path_buf()).await;
+
+        rt.resolve_approval(&id, Verdict::Approve, operator())
+            .await
+            .unwrap();
+
+        let events = rt
+            .events()
+            .read_from(rt.id(), EventSeq::new(0), usize::MAX)
+            .await
+            .unwrap();
+        let resolutions: Vec<_> = events
+            .iter()
+            .filter_map(|stored| match &stored.event {
+                CompanyEvent::ApprovalResolved {
+                    approval_id,
+                    verdict,
+                    by,
+                } if approval_id == &id => Some((*verdict, by.clone())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            resolutions.len(),
+            1,
+            "exactly one resolution event, got {resolutions:?}"
+        );
+        assert_eq!(resolutions[0].0, Verdict::Deny);
+        assert_eq!(
+            resolutions[0].1.kind,
+            ActorKind::System,
+            "the deadline decided this, not the person who clicked"
+        );
+    }
+
+    /// The receipt says which end state was reached, so the HTTP layer can too.
+    #[tokio::test]
+    async fn a_late_approve_answers_with_an_expired_receipt() {
+        let home_dir = tmp_home();
+        let (rt, id) = park_one_past_its_deadline(home_dir.path().to_path_buf()).await;
+
+        let (receipt, follow_up) = rt
+            .resolve_approval_spawned(&id, Verdict::Approve, operator(), GrantScope::Once)
+            .await
+            .unwrap();
+        assert_eq!(receipt.outcome(), "expired");
+        assert!(receipt.expired());
+        assert!(
+            !receipt.already_resolved(),
+            "the approval WAS parked — it ran out, which is a different answer \
+             from somebody else having decided it"
+        );
+        // And it owes no continuation of its own: `retire_approval` already
+        // released the turn.
+        let report = crate::company::runtime::join_follow_up(follow_up)
+            .await
+            .unwrap();
+        assert!(report.responses[0].text.contains("deadline"));
+
+        // A second click on the same card is now the ordinary already-gone case.
+        let (again, _) = rt
+            .resolve_approval_spawned(&id, Verdict::Approve, operator(), GrantScope::Once)
+            .await
+            .unwrap();
+        assert_eq!(again.outcome(), "already_resolved");
+    }
+
+    /// The amend half of the same defect: an edit applied after the deadline is
+    /// still not a decision, and recorded an `ApprovalAmended` on top of the
+    /// false approval before this (issue #1449).
+    #[tokio::test]
+    async fn a_late_amend_records_an_expiry_and_no_amendment() {
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
+        let (rt, id) = park_one_past_its_deadline(home.clone()).await;
+
+        let (receipt, _) = rt
+            .resolve_approval_amended_spawned(
+                &id,
+                serde_json::json!({ "to": "elsewhere@b.test" }),
+                operator(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(receipt.outcome(), "expired");
+
+        let raw = tokio::fs::read_to_string(Bundle::new(&home, rt.id()).journal_jsonl())
+            .await
+            .unwrap();
+        assert!(raw.contains("ApprovalExpired"));
+        assert!(
+            !raw.contains("ApprovalAmended"),
+            "an edit the host refused is not an amendment the operator made, got {raw}"
+        );
+        assert!(
+            !raw.contains("elsewhere@b.test"),
+            "and the edited arguments must not be recorded as approved, got {raw}"
+        );
+        assert_eq!(rt.grants.live_count(), 0);
     }
 
     /// A live grant survives a restart; a consumed one does not come back.
@@ -5400,6 +5782,246 @@ mod test {
         assert!(recipient_is_established(&rt, "X@EXT.COM").await);
     }
 
+    /// Issue #1113: the trigger boundary, named event by event. Outside
+    /// content — a webhook here, an A2A task in the sibling test — makes a
+    /// cycle external; the company's own machinery — operator speech,
+    /// payments, dispatches, schedule fires — stays Internal, per the
+    /// operator-facts authorship precedent.
+    #[test]
+    fn outside_content_makes_a_cycle_external_and_own_machinery_does_not() {
+        use crate::ports::types::Actor;
+        let webhook = CompanyEvent::WebhookReceived {
+            channel: "telegram".into(),
+            body: serde_json::json!({"text": "raw payload"}),
+        };
+        let operator = CompanyEvent::OperatorMessage {
+            text: "please do the thing".into(),
+            by: Option::<Actor>::None,
+            chat: None,
+            parent: None,
+            deliverable: None,
+        };
+        // The company's own machinery stays Internal, event by event: a
+        // payment landing is the company's ledger speaking, not third-party
+        // prose riding an open boundary.
+        let payment = CompanyEvent::PaymentReceived {
+            amount_usd: 10.0,
+            memo: "invoice".into(),
+        };
+        assert!(cycle_is_external(&[webhook]));
+        assert!(!cycle_is_external(&[operator]));
+        assert!(!cycle_is_external(&[payment]));
+        assert!(!cycle_is_external(&[]));
+    }
+
+    /// The #68 sibling review's M1: an A2A task is a remote agent's payload —
+    /// third-party content, external. Mixed batches over-taint (any(), not
+    /// all()): the safe direction, asserted in both orderings.
+    #[test]
+    fn a2a_tasks_are_external_and_mixed_batches_over_taint() {
+        use crate::ports::types::Actor;
+        let a2a = || CompanyEvent::A2aTaskReceived {
+            from: "remote-agent".into(),
+            task: serde_json::json!({"text": "do the thing"}),
+        };
+        let operator = || CompanyEvent::OperatorMessage {
+            text: "hi".into(),
+            by: Option::<Actor>::None,
+            chat: None,
+            parent: None,
+            deliverable: None,
+        };
+        assert!(cycle_is_external(&[a2a()]));
+        assert!(cycle_is_external(&[operator(), a2a()]));
+        assert!(cycle_is_external(&[a2a(), operator()]));
+    }
+
+    /// The routing the flag drives: an externally-triggered cycle's
+    /// `ContextOp::Put` lands on the inbound (taint-stamping) port, an
+    /// ordinary cycle's on the plain context port — proven with two disjoint
+    /// stores, so a write to the wrong one is a visible row, not a guess.
+    #[tokio::test]
+    async fn external_cycles_put_through_the_inbound_port() {
+        use crate::ports::ContextStore;
+        use crate::store::FsContextStore;
+
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
+        let plain_dir = tempfile::tempdir().unwrap();
+        let inbound_dir = tempfile::tempdir().unwrap();
+        let plain: Arc<dyn ContextStore> =
+            Arc::new(FsContextStore::new(plain_dir.path().to_path_buf()));
+        let inbound: Arc<dyn ContextStore> =
+            Arc::new(FsContextStore::new(inbound_dir.path().to_path_buf()));
+        let rt = RuntimeBuilder::new(home, manifest("full"))
+            .with_context(plain.clone())
+            .with_inbound_context(inbound.clone())
+            .build()
+            .await
+            .unwrap();
+
+        for (external, cycle) in [(false, "cyc-int"), (true, "cyc-ext")] {
+            let host = CycleHostImpl::new(
+                rt.id().clone(),
+                cycle.into(),
+                &rt,
+                None,
+                external,
+                ApprovalConversation::default(),
+            );
+            host.context_op(ContextOp::Put(crate::ports::types::ContextChunk {
+                label: format!("probe/{cycle}"),
+                body: format!("body {cycle}"),
+            }))
+            .await
+            .unwrap();
+        }
+
+        let company = rt.id().clone();
+        let plain_rows = plain.list(&company, "probe/").await.unwrap();
+        let inbound_rows = inbound.list(&company, "probe/").await.unwrap();
+        assert_eq!(
+            plain_rows
+                .iter()
+                .map(|m| m.label.as_str())
+                .collect::<Vec<_>>(),
+            ["probe/cyc-int"],
+            "the ordinary cycle writes the plain port, and only it"
+        );
+        assert_eq!(
+            inbound_rows
+                .iter()
+                .map(|m| m.label.as_str())
+                .collect::<Vec<_>>(),
+            ["probe/cyc-ext"],
+            "the external cycle writes the inbound port, and only it"
+        );
+    }
+
+    /// The same routing guarantee through `with_memory_overlay`: the overlay
+    /// carries the inbound port, and dropping it in the builder was the break
+    /// that once left the whole firewall dead (issue #1113). An external
+    /// cycle on an overlay-built runtime must still write the taint-stamping
+    /// store.
+    #[tokio::test]
+    async fn overlay_built_runtimes_route_external_puts_through_the_inbound_port() {
+        use crate::ports::ContextStore;
+        use crate::store::{FsContextStore, FsMemoryStore, MemoryOverlay};
+
+        let home_dir = tmp_home();
+        let plain_dir = tempfile::tempdir().unwrap();
+        let inbound_dir = tempfile::tempdir().unwrap();
+        let plain: Arc<dyn ContextStore> =
+            Arc::new(FsContextStore::new(plain_dir.path().to_path_buf()));
+        let inbound: Arc<dyn ContextStore> =
+            Arc::new(FsContextStore::new(inbound_dir.path().to_path_buf()));
+        let memory_dir = tempfile::tempdir().unwrap();
+        let overlay = MemoryOverlay::test_with_ports(
+            Arc::new(FsMemoryStore::new(memory_dir.path().to_path_buf())),
+            plain.clone(),
+            Some(inbound.clone()),
+        );
+        let rt = RuntimeBuilder::new(home_dir.path().to_path_buf(), manifest("full"))
+            .with_memory_overlay(&overlay)
+            .build()
+            .await
+            .unwrap();
+
+        let host = CycleHostImpl::new(
+            rt.id().clone(),
+            "cyc-overlay-ext".into(),
+            &rt,
+            None,
+            true,
+            ApprovalConversation::default(),
+        );
+        host.context_op(ContextOp::Put(crate::ports::types::ContextChunk {
+            label: "probe/overlay".into(),
+            body: "external body".into(),
+        }))
+        .await
+        .unwrap();
+
+        let company = rt.id().clone();
+        assert_eq!(
+            inbound
+                .list(&company, "probe/")
+                .await
+                .unwrap()
+                .iter()
+                .map(|m| m.label.as_str())
+                .collect::<Vec<_>>(),
+            ["probe/overlay"],
+            "the overlay's inbound port receives the external cycle's put"
+        );
+        assert!(
+            plain.list(&company, "probe/").await.unwrap().is_empty(),
+            "the plain port must not see the external put"
+        );
+    }
+
+    /// And through `RuntimeHandover`: a successor runtime adopts the
+    /// predecessor's inbound port, so an external cycle after a live swap
+    /// still writes taint-stamped. A handover that dropped the port would
+    /// silently revert every post-swap external put to internal trust.
+    #[tokio::test]
+    async fn handover_preserves_the_inbound_port_for_external_puts() {
+        use crate::ports::ContextStore;
+        use crate::store::FsContextStore;
+
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
+        let plain_dir = tempfile::tempdir().unwrap();
+        let inbound_dir = tempfile::tempdir().unwrap();
+        let plain: Arc<dyn ContextStore> =
+            Arc::new(FsContextStore::new(plain_dir.path().to_path_buf()));
+        let inbound: Arc<dyn ContextStore> =
+            Arc::new(FsContextStore::new(inbound_dir.path().to_path_buf()));
+        let first = RuntimeBuilder::new(home.clone(), manifest("full"))
+            .with_context(plain.clone())
+            .with_inbound_context(inbound.clone())
+            .build()
+            .await
+            .unwrap();
+        let successor = RuntimeBuilder::new(home, manifest("full"))
+            .with_handover(first.handover())
+            .build()
+            .await
+            .unwrap();
+
+        let host = CycleHostImpl::new(
+            successor.id().clone(),
+            "cyc-swap-ext".into(),
+            &successor,
+            None,
+            true,
+            ApprovalConversation::default(),
+        );
+        host.context_op(ContextOp::Put(crate::ports::types::ContextChunk {
+            label: "probe/swap".into(),
+            body: "external body".into(),
+        }))
+        .await
+        .unwrap();
+
+        let company = successor.id().clone();
+        assert_eq!(
+            inbound
+                .list(&company, "probe/")
+                .await
+                .unwrap()
+                .iter()
+                .map(|m| m.label.as_str())
+                .collect::<Vec<_>>(),
+            ["probe/swap"],
+            "the successor's external cycle writes the inherited inbound port"
+        );
+        assert!(
+            plain.list(&company, "probe/").await.unwrap().is_empty(),
+            "the successor's plain port must not see the external put"
+        );
+    }
+
     #[tokio::test]
     async fn send_email_without_mail_returns_clean_error() {
         let home_dir = tmp_home();
@@ -5414,6 +6036,7 @@ mod test {
             "cyc-nomail".into(),
             &rt,
             None,
+            false,
             ApprovalConversation::default(),
         );
 
@@ -5443,6 +6066,7 @@ mod test {
             "cyc-bad".into(),
             &rt,
             None,
+            false,
             ApprovalConversation::default(),
         );
 
@@ -5472,6 +6096,7 @@ mod test {
             "cyc-park".into(),
             &rt,
             None,
+            false,
             ApprovalConversation::default(),
         );
 
@@ -5503,6 +6128,7 @@ mod test {
             "cyc-task".into(),
             &rt,
             Some("t-42".to_string()),
+            false,
             ApprovalConversation::default(),
         );
 
@@ -5556,6 +6182,7 @@ mod test {
             "cyc-chat".into(),
             &rt,
             None,
+            false,
             ApprovalConversation::default(),
         );
 
@@ -5593,6 +6220,7 @@ mod test {
             "cyc-thread".into(),
             &rt,
             None,
+            false,
             ApprovalConversation {
                 thread: Some("desk-finance".to_string()),
                 parent: None,
@@ -5654,6 +6282,7 @@ mod test {
             "cyc-none".into(),
             &rt,
             None,
+            false,
             ApprovalConversation::default(),
         );
 
@@ -5726,6 +6355,7 @@ mod test {
             "cyc-research".into(),
             &rt,
             None,
+            false,
             ApprovalConversation {
                 thread: Some("desk-marketing".to_string()),
                 parent: None,
@@ -5752,6 +6382,7 @@ mod test {
             "cyc-later".into(),
             &rt,
             None,
+            false,
             ApprovalConversation {
                 thread: Some("desk-marketing".to_string()),
                 parent: None,
@@ -6408,6 +7039,7 @@ mod test {
             "cyc-send".into(),
             &rt,
             None,
+            false,
             ApprovalConversation::default(),
         );
 
@@ -6478,6 +7110,7 @@ mod test {
             "cyc-deep".into(),
             &rt,
             None,
+            false,
             ApprovalConversation::default(),
         );
         let res = host
@@ -6570,6 +7203,7 @@ mod test {
             "cyc".into(),
             &rt,
             None,
+            false,
             ApprovalConversation::default(),
         );
 
@@ -6610,6 +7244,7 @@ mod test {
             "cyc".into(),
             &rt,
             None,
+            false,
             ApprovalConversation::default(),
         );
 
@@ -6652,6 +7287,7 @@ mod test {
             "cyc".into(),
             &rt,
             None,
+            false,
             ApprovalConversation::default(),
         );
 

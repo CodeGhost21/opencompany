@@ -72,6 +72,7 @@ Object.defineProperties(globalThis.HTMLElement.prototype, {
 
 const { WorkflowsView } = await import("@/views/WorkflowsView");
 const { RunHistoryPanel } = await import("@/views/workflows/RunHistoryPanel");
+const { RunFailurePanel } = await import("@/views/workflows/RunFailurePanel");
 const { runFailureFrom } = await import("@/views/workflows/run-failure");
 const { formatDuration, runDuration } = await import("@/views/workflows/run-health");
 
@@ -92,7 +93,7 @@ function fakeClient(post: () => Promise<unknown>): OpenCompanyClient {
     scopeFor: (company: string | null) => `/api/v1/${company ?? "company"}`,
     get: async (path: string) => {
       if (path.endsWith("/workflows")) return [{ id: GRAPH.id, name: GRAPH.name }];
-      if (path.includes("/workflows/runs")) return [];
+      if (path.includes("/workflows/runs")) return { runs: [], hasMore: false };
       return GRAPH;
     },
     post,
@@ -285,8 +286,8 @@ describe("the history row names the node the operator named", () => {
       );
     });
     const row = container.querySelector('[data-testid="workflow-run-row"]');
-    expect(row?.textContent).toContain("This run failed at “Draft the digest”");
-    expect(row?.textContent).not.toContain("failed at “n_3”");
+    expect(row?.textContent).toContain("The “Draft the digest” step failed.");
+    expect(row?.textContent).not.toContain("The “n_3” step failed.");
     // …and says how long it took, which nothing on this surface did before.
     expect(
       container.querySelector('[data-testid="workflow-run-duration"]')?.textContent,
@@ -295,7 +296,13 @@ describe("the history row names the node the operator named", () => {
 });
 
 describe("what the failure panel is built from", () => {
-  const CTX = { startedAtMillis: 1_000, atMillis: 3_400, request: "", dryRun: false };
+  const CTX = {
+    startedAtMillis: 1_000,
+    atMillis: 3_400,
+    request: "",
+    dryRun: false,
+    sawRunStart: false,
+  };
 
   it("keeps the host's code only when the host's own envelope carried it", () => {
     const fromHost = runFailureFrom(new ApiError(409, "engine_failed", "no", true), CTX);
@@ -313,6 +320,45 @@ describe("what the failure panel is built from", () => {
     expect(runFailureFrom("kaboom", CTX).message).toBe("kaboom");
     expect(runFailureFrom(new Error(""), CTX).message).not.toBe("");
     expect(runFailureFrom(new ApiError(500, "x", "", true), CTX).message).toContain("500");
+  });
+});
+
+describe("failure panel follow-up controls", () => {
+  it("opens the durable row, its failed step, and the existing copilot path", async () => {
+    const openHistory = vi.fn();
+    const showStep = vi.fn();
+    const fixWithCopilot = vi.fn();
+    await act(async () => {
+      root.render(
+        createElement(RunFailurePanel, {
+          failure: {
+            message: "the writer agent has no model",
+            fromHost: true,
+            runId: "run-9",
+            sawRunStart: true,
+            startedAtMillis: 1_000,
+            atMillis: 3_400,
+            request: "",
+            dryRun: false,
+          },
+          onClose: () => {},
+          onOpenHistory: openHistory,
+          failedStepName: "Draft the digest",
+          onShowFailedStep: showStep,
+          onFixWithCopilot: fixWithCopilot,
+        }),
+      );
+    });
+
+    await act(async () => {
+      button("Open Run history").click();
+      button("Show “Draft the digest”").click();
+      button("Fix with copilot").click();
+    });
+
+    expect(openHistory).toHaveBeenCalledOnce();
+    expect(showStep).toHaveBeenCalledOnce();
+    expect(fixWithCopilot).toHaveBeenCalledOnce();
   });
 });
 

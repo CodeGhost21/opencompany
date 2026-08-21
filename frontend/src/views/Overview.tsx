@@ -1,4 +1,4 @@
-import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { RefreshCw } from "lucide-react";
 
 import { listPeople, type Person } from "@/api/auth";
@@ -21,6 +21,13 @@ const KnowledgeGraph = lazy(() =>
 interface Props {
   client: OpenCompanyClient;
   company: string | null;
+  /**
+   * The company's real name — `feed.status.name` in the shell, the same value
+   * `HostSwitcher` is handed (issue #1219). Optional: falls back to `company`
+   * (the slug) and then to `buildKnowledgeGraph`'s own placeholder, so the core
+   * node never claims a name this component was not given.
+   */
+  companyName?: string;
 }
 
 /** Everything the graph is drawn from — a snapshot, taken on demand. */
@@ -85,33 +92,76 @@ const EMPTY: Sources = {
  * demand: the staleness is answered out loud instead of by omission, and an
  * operator is never reading an old wheel with no way to notice.
  */
-export function Overview({ client, company }: Props) {
+export function Overview({ client, company, companyName }: Props) {
   const [sources, setSources] = useState<Sources>(EMPTY);
   // Bumped by the refresh control; re-runs the read below and nothing else.
   const [reload, setReload] = useState(0);
   const [loading, setLoading] = useState(true);
   const refresh = useCallback(() => setReload((n) => n + 1), []);
+  // Set when every source below failed at once — a host that cannot be
+  // reached, not a company with nothing in it. `null` the rest of the time,
+  // including mid-load: a stale notice only clears once a new load actually
+  // answers (matches `OrgChartView`'s `error`, which behaves the same way).
+  const [loadError, setLoadError] = useState<string | null>(null);
+  // Mirrors `sources.fetchedAt` outside the closure below, so a load that
+  // fails outright can tell "this company has never once answered" from "this
+  // is a snapshot going stale" without reading `sources` from a stale closure
+  // (the effect does not depend on it).
+  const fetchedAtRef = useRef<number | null>(null);
 
   useEffect(() => {
     let live = true;
     setLoading(true);
     void (async () => {
-      const [tasks, roster, desks, people, memories, flowList] = await Promise.all([
-        listTasks(client, company).catch(() => [] as Task[]),
-        client.listTeam(company).catch(() => null),
+      const results = await Promise.allSettled([
+        listTasks(client, company),
+        client.listTeam(company),
         // Ring 1 (issue #486). Best-effort: see `Sources.desks`.
-        client.listDesks(company).catch(() => [] as DeskDto[]),
+        client.listDesks(company),
         // Only an admin may list people; a member just gets no humans on the
         // graph, which is the right amount of information for them to have.
-        listPeople(client, company).catch(() => [] as Person[]),
+        listPeople(client, company),
         // The company's real durable memory (issue #36). A host without the
         // surface draws no constellation rather than a seeded one — the graph
         // must never claim the company remembers something it doesn't.
-        listMemory(client, company).catch(() => [] as MemoryEntry[]),
+        listMemory(client, company),
         // Ring 2 (issue #601). Summaries only — see the graph reads below.
-        listWorkflows(client, company).catch(() => []),
+        listWorkflows(client, company),
       ]);
       if (!live) return;
+
+      const [tasksResult, rosterResult, desksResult, peopleResult, memoriesResult, flowListResult] =
+        results;
+      const failedCount = results.filter((r) => r.status === "rejected").length;
+
+      // Six independent best-effort reads all failing at once is not six
+      // coincidences (issue #1219) — it is one fact: the host could not be
+      // reached. Drawing that as an empty company, freshly stamped, told an
+      // operator their company had no desks, no teammates, no work and no
+      // tools. So a total failure redraws nothing: the previous snapshot and
+      // its time stay exactly as they were, and the outage is said out loud
+      // instead.
+      if (failedCount === results.length) {
+        setLoadError(
+          fetchedAtRef.current === null
+            ? "Could not reach the company."
+            : "Could not reach the company. Showing the last snapshot.",
+        );
+        setLoading(false);
+        return;
+      }
+      // At least one source answered — the existing partial-degrade behaviour
+      // applies (draw the rings that came back), and any stale outage notice
+      // is retired.
+      setLoadError(null);
+
+      const tasks = tasksResult.status === "fulfilled" ? tasksResult.value : ([] as Task[]);
+      const roster = rosterResult.status === "fulfilled" ? rosterResult.value : null;
+      const desks = desksResult.status === "fulfilled" ? desksResult.value : ([] as DeskDto[]);
+      const people = peopleResult.status === "fulfilled" ? peopleResult.value : ([] as Person[]);
+      const memories =
+        memoriesResult.status === "fulfilled" ? memoriesResult.value : ([] as MemoryEntry[]);
+      const flowList = flowListResult.status === "fulfilled" ? flowListResult.value : [];
 
       // `listWorkflows` answers with `{id,name,description,editable,enabled}`
       // and no nodes or edges, so the stages ring needs one graph read per
@@ -138,6 +188,8 @@ export function Overview({ client, company }: Props) {
       );
       if (!live) return;
 
+      const fetchedAt = Date.now();
+      fetchedAtRef.current = fetchedAt;
       setSources({
         tasks,
         // The host's roster, or nobody. Never a fabricated stand-in: an operator
@@ -148,7 +200,7 @@ export function Overview({ client, company }: Props) {
         people,
         memories,
         workflows,
-        fetchedAt: Date.now(),
+        fetchedAt,
       });
       setLoading(false);
     })();
@@ -178,29 +230,49 @@ export function Overview({ client, company }: Props) {
         adapted.people,
         adapted.tasks,
         adapted.workflows,
+        // The company's real name (issue #1219), falling back to the slug and
+        // then to the model's own placeholder — never an empty string, which
+        // would otherwise beat the default and draw a blank core node.
+        companyName || company || undefined,
       ),
-    [adapted],
+    [adapted, companyName, company],
   );
 
   const memoryGraph = useMemo(() => buildMemoryGraph(sources.memories), [sources.memories]);
 
-  return (
-    // The whole viewport: the shell hides its top bar for this view, so there
-    // is nothing above to subtract.
-    <div
-      className="oc-kg relative h-svh min-h-0 w-full min-w-0 overflow-hidden"
-      // The guided tour's Overview stop anchors here. It used to spotlight the
-      // quick-action row this page had before it became the graph; the graph is
-      // the page now, so the graph is what gets spotlighted.
-      data-tour="overview-graph"
-    >
-      {/* The snapshot line: what the page is, when it was taken, and the way to
-          take another. The graph is not live, and says so rather than leaving an
-          operator to assume a stale wheel is the current company. */}
-      <div className="absolute right-3 top-3 z-10 flex items-center gap-1.5 rounded-md border bg-background/90 px-2 py-1 text-2xs text-muted-foreground shadow-sm backdrop-blur">
+  /**
+   * The snapshot line: what the page is, when it was taken, and the way to
+   * take another. The graph is not live, and says so rather than leaving an
+   * operator to assume a stale wheel is the current company.
+   *
+   * Handed to the graph as a slot rather than positioned here (issue #1307).
+   * This used to be an `absolute right-3 top-3 z-10` corner of its own, which
+   * put it squarely underneath the graph's `z-30` detail rail: opening any
+   * node's card hid the staleness signal, the Refresh control *and* the
+   * outage alert, and left them unclickable behind an opaque panel. Only the
+   * graph's shell knows how much of the right edge the rail is using, so the
+   * shell is what places this.
+   */
+  const statusSlot = (
+    <>
+      {/* Every source failed at once (issue #1219): a host that could not be
+          reached, said out loud, in the same corner that already owns the
+          staleness signal — rather than a graph redrawn empty with no
+          explanation. */}
+      {loadError && (
+        <div
+          role="alert"
+          className="max-w-64 rounded-md border border-destructive/40 bg-destructive/10 px-2 py-1 text-2xs text-destructive shadow-sm backdrop-blur"
+        >
+          {loadError}
+        </div>
+      )}
+      <div className="flex items-center gap-1.5 rounded-md border bg-background/90 px-2 py-1 text-2xs text-muted-foreground shadow-sm backdrop-blur">
         <span className="truncate">
           {sources.fetchedAt === null
-            ? "Loading…"
+            ? loading
+              ? "Loading…"
+              : "No snapshot yet"
             : `Snapshot ${new Date(sources.fetchedAt).toLocaleTimeString([], {
                 hour: "2-digit",
                 minute: "2-digit",
@@ -218,9 +290,38 @@ export function Overview({ client, company }: Props) {
           Refresh
         </button>
       </div>
+    </>
+  );
+
+  return (
+    // Fills whatever the shell gives it. It used to claim `h-svh` — the whole
+    // viewport — which was true while the page ran edge to edge. It sits on the
+    // inset content card now (issue #1178), a box shorter than the viewport by
+    // the frame, and a child insisting on `100svh` inside it is laid out taller
+    // than the box that clips it: the bottom band of the graph, legend included,
+    // would be cropped away. `flex-1 min-h-0` takes the height the card has.
+    <div
+      className="oc-kg relative flex-1 min-h-0 w-full min-w-0 overflow-hidden"
+      // The guided tour's Overview stop anchors here. It used to spotlight the
+      // quick-action row this page had before it became the graph; the graph is
+      // the page now, so the graph is what gets spotlighted.
+      data-tour="overview-graph"
+    >
+      {/* The graph is the page and draws no visible title of its own (issue
+          #1221) — this names it for a screen reader the same way every other
+          view's title does. */}
+      <h1 className="sr-only">Company overview</h1>
       <Suspense
         fallback={
+          // The graph's chunk is still in flight, so there is no shell to slot
+          // the snapshot line into yet — and no detail rail for it to dodge
+          // either. It is drawn here at the same inset the shell will use, so
+          // a cold load still says "Loading…" and the line does not appear to
+          // pop into existence once the physics arrives.
           <div className="grid h-full place-items-center text-sm text-muted-foreground">
+            <div className="absolute right-5 top-5 z-40 flex flex-col items-end gap-1.5">
+              {statusSlot}
+            </div>
             Drawing the graph…
           </div>
         }
@@ -233,6 +334,7 @@ export function Overview({ client, company }: Props) {
           tasks={adapted.tasks}
           memory={memoryGraph}
           toolLabels={adapted.toolLabels}
+          statusSlot={statusSlot}
         />
       </Suspense>
     </div>

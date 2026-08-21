@@ -70,7 +70,7 @@ export interface LedgerSummary {
   title: string;
   purpose: string;
   source: LedgerSource;
-  /** Where its rendered file lives in the workspace, e.g. `derived/GOALS.md`. */
+  /** Where its rendered file lives in the workspace, e.g. `derived/goals.md`. */
   derived: string;
   /**
    * How it is actually written, in a sentence. Rendered in place of a compose
@@ -279,6 +279,100 @@ export function composableFields(ledger: LedgerSummary): LedgerField[] {
   return ledger.fields.filter(
     (field) => field.role !== "id" && field.role !== "status",
   );
+}
+
+/**
+ * The sentinel the status filter stores for "do not filter".
+ *
+ * A `Select` item cannot carry an empty string, so the no-filter choice needs a
+ * value of its own — the same constraint the workflow destination picker met
+ * with `__none__` in issue #813.
+ */
+export const EVERY_STATUS = "all";
+
+/**
+ * What the status filter should *show* for a stored value (issue #1217).
+ *
+ * base-ui renders the raw stored value in a collapsed `Select` unless it is
+ * given explicit text, so without this the trigger read `all` while its own open
+ * list read "Every status", and a chosen board column read `in_progress` while
+ * the columns beside it read "In progress". Exactly the leak `destinationLabel`
+ * exists to stop on the workflows side.
+ *
+ * Prefers the declared `label` over the wire `name`, which is what that field is
+ * for: the board's statuses carry both, and the console deleted its own copy of
+ * that table when the host started sending it. An unrecognized value falls back
+ * to itself rather than to the sentinel — a filter we cannot name is still a
+ * filter, and rendering it as "Every status" would claim the opposite.
+ */
+export function statusFilterLabel(
+  ledger: LedgerSummary | null | undefined,
+  value: string,
+): string {
+  if (value === EVERY_STATUS || value === "") return "Every status";
+  const declared = ledger?.statuses.find((status) => status.name === value);
+  if (!declared) return value;
+  return `${declared.label ?? declared.name}${declared.closed ? " (closed)" : ""}`;
+}
+
+/**
+ * Why this ledger is showing nothing — the filtered reading, or `null` when no
+ * filter is on and "nothing recorded yet" is the honest answer (issue #1217).
+ *
+ * A ledger read is filtered **server-side**, so zero rows back means "no
+ * matches" and "no rows" indistinguishably. The view knows which it is, because
+ * the query and the status are its own state — this is that knowledge written
+ * down once, so the empty state stops telling an operator with 14 rows that
+ * their ledger is empty while the nav beside it counts them.
+ *
+ * Pure, and separate from the component, for the reason `workflowSavedToast` is:
+ * the branch is the whole bug and it should be assertable without a render.
+ */
+export function filteredEmptyNotice(
+  ledger: LedgerSummary | null | undefined,
+  query: string,
+  statusFilter: string,
+): string | null {
+  const searching = query.trim() !== "";
+  const narrowed = statusFilter !== EVERY_STATUS && statusFilter !== "";
+  if (!searching && !narrowed) return null;
+  if (searching && narrowed) {
+    return `No rows match “${query.trim()}” with status ${statusFilterLabel(ledger, statusFilter)}.`;
+  }
+  if (searching) return `No rows match “${query.trim()}”.`;
+  return `No rows with status ${statusFilterLabel(ledger, statusFilter)}.`;
+}
+
+/**
+ * The compose dialog's title (issue #1264).
+ *
+ * The id field is editable in every non-closing dialog — "Record" opens it
+ * empty, "Amend" opens it prefilled but still editable — so whether this says
+ * "Amend" cannot be "is `composing.id` non-empty" (that flips true on the
+ * first keystroke of a row that has never been saved, before it exists). It
+ * has to ask whether the *current* typed id names a row this ledger already
+ * has, checked against whatever is currently loaded (`existingIds`) the same
+ * way `save()` treats the id — trimmed.
+ */
+export function composeDialogTitle(
+  ledger: LedgerSummary,
+  composing: { id: string; closing: boolean },
+  existingIds: ReadonlySet<string>,
+): string {
+  if (composing.closing) return `Close ${composing.id}`;
+  return existingIds.has(composing.id.trim())
+    ? `Amend ${composing.id}`
+    : `New row on ${ledger.title}`;
+}
+
+/** The compose dialog's description — the same "does this id exist" read as the title. */
+export function composeDialogDescription(
+  composing: { id: string },
+  existingIds: ReadonlySet<string>,
+): string {
+  return existingIds.has(composing.id.trim())
+    ? "Only what you change is written; everything else on the row is left alone."
+    : "Give it a short, readable id — it is how anybody names this row later.";
 }
 
 /** Whether this status ends a row's life on this ledger. */

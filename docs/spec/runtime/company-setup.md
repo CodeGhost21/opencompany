@@ -20,8 +20,10 @@ job.
 tour, some tooltips. We already have that in the console.
 
 **Company setup** is this document. It builds someone a business. When it is
-done, there are named agents on the team page — colleagues that did not exist
-ninety seconds earlier.
+done, there are named agents on the Company page — colleagues that did not exist
+ninety seconds earlier. That page is the teammate card grid, which is what
+`#/company` leads with since issue #1141; bare `#/team`, the address the roster
+used to answer on, redirects there.
 
 The tour is not the product. The company is. Setup runs first; the tour, if it
 runs at all, comes after and now has something worth pointing at.
@@ -36,7 +38,7 @@ exactly the work they came here to avoid.
 We want the opposite message: *we already started for you.*
 
 Someone answers three questions, watches their company get built, and lands on a
-team page with five agents on it. Their reaction should be "how did it know
+Company page with five agents on it. Their reaction should be "how did it know
 that?" — followed immediately by wanting to fix the two things we got slightly
 wrong. That second part is not a failure. Someone correcting our guess is
 someone who has already accepted the premise.
@@ -66,7 +68,7 @@ cannot fail that way, which is exactly why it goes first.
 
 - All three questions (yes, including the automation one — see below).
 - The build-out screen, showing agents created one at a time.
-- A real roster on the team page, each agent with a name, a role and a clear
+- A real roster on the Company page, each agent with a name, a role and a clear
   mandate.
 - The answers stored, so Phase 2 never has to ask again.
 
@@ -295,11 +297,12 @@ reach behind a value a model chose from free text — what D7's enum prevents.
 
 ## What the host enforces, rather than asks for
 
-Four guarantees hold whatever a model returns — coverage checked against the
-host's own job list, a tool belt asked for rather than inherited, a copy of the
-reference team refused the name "designed", and a fallback that says which
-fallback it is. Each is a boundary rather than a line in a prompt, and each has
-a test that fails when it stops holding:
+Five guarantees hold whatever a model returns — coverage checked against the
+host's own job list, a tool belt asked for rather than inherited, standing
+instructions the host writes rather than the model, a copy of the reference team
+refused the name "designed", and a fallback that says which fallback it is. Each
+is a boundary rather than a line in a prompt, and each has a test that fails when
+it stops holding:
 [company-setup-guarantees.md](company-setup-guarantees.md).
 
 ## Nobody gets stuck
@@ -320,11 +323,25 @@ For setup it is not fine, because setup *creates things*. Someone who clears
 their browser data or signs in from their phone would run it again and get a
 second team stacked on the first.
 
-**Decision D4: no flag. We ask a question we already know the answer to — does
-this company have any staff yet?** Empty team means setup has not run. A team
-with people on it means it has. This survives a cleared browser, a new laptop,
+**Decision D4: no flag. We ask a question we already know the answer to — has
+anybody staffed this company yet?** Nobody staffed means setup has not run.
+People on the team means it has. This survives a cleared browser, a new laptop,
 and a second person joining the same company, with no stored flag to drift out
 of step with reality.
+
+**"Staffed" is narrower than "has a roster", and the difference is load-bearing.**
+The [global baseline](globals.md) merges a fixed set of teammates into *every*
+company whatever its manifest says, and they cannot be deleted — `DELETE
+…/team/{id}` answers `409` on each. So "is the roster empty?" is false on every
+company this product can serve. Asked that way, as it was until issue #1404, the
+gate never opened anywhere: not on a fresh tenant, not on `companies/e2e_setup`,
+which exists for no other purpose than to reach it.
+
+The question the console asks is therefore *has this company any teammate that
+is not part of the baseline every company gets*. It reads that from the roster
+itself — `GET …/team` carries `global` on each row, the same `Agent::global`
+marker the merge sets — rather than from a list of the baseline's ids copied
+into the console, which would break silently the next time a global is added.
 
 It also happens to be exactly the signal Phase 2 needs, so nothing here has to
 change later.
@@ -340,12 +357,28 @@ against the shipped examples. `companies/e2e_setup` exists for exactly that
 reason: a company that ships with nobody on it, which the end-to-end lane runs
 against.
 
+And the lane has to actually run it. It did not, for as long as the flow was
+broken: `frontend/test/e2e/company-setup.spec.ts` carried a `test.skip` written
+for a host serving the wrong company, no CI job set the variable that would have
+selected the right one, and once the baseline landed the guard fired on every
+run. The console lane was green over a feature that could not open. The spec now
+**asserts** its host instead of skipping, `playwright.config.ts` selects it only
+in a first-run run (`npm run e2e:first-run`, which serves `companies/e2e_setup`
+on a data root of its own), and `Console E2E (first run)` runs it through
+`scripts/ci/assert-e2e-spec-ran.sh` — which fails on a reported count of zero,
+because a lane whose only guarantee is its configuration can be silently
+vacuous.
+
 Two related problems surfaced in the same run, both fixed:
 
 - The Team page fabricated a twelve-agent starter roster whenever the host
   answered with nobody, so "this company has no team yet" rendered directly above
   twelve agents that did not exist on the host. A genuinely empty company now
-  shows an honest empty state.
+  shows an honest empty state. The same sentence had to go for the mirror-image
+  reason once the gate started opening again: the prompt renders above the
+  baseline's teammates, who *do* exist on the host, so it now reads "this company
+  hasn't been set up yet" — true whether the roster below it holds nobody or the
+  baseline's four.
 - The product tour is held not only while the dialog is open but for as long as
   the company is unstaffed. Otherwise skipping setup popped the tour's welcome
   straight over an empty console — the first impression this document exists to
@@ -365,7 +398,7 @@ Two related problems surfaced in the same run, both fixed:
    content, agency and consulting will beat a generated one every time. The long
    tail has to be generated. Where is the line? Curating the top few is also the
    fastest route to a good demo.
-4. **Does the team page say what to do next?** Phase 1 hands someone five
+4. **Does the Company page say what to do next?** Phase 1 hands someone five
    colleagues and no automation. If the page does not suggest "open one and give
    it a brief", the roster risks being admired and then ignored.
 
@@ -393,6 +426,7 @@ most likely to go stale — trust the code over this list.
 | Create an agent | `POST …/team` (`add_member`, `src/server/ops/team.rs`) | exists |
 | Set an agent's role/description | `PATCH …/team/{agent_id}` (`src/server/ops/team_agent.rs`) | exists |
 | Read the roster (first-run check, D4) | `GET …/team` (`list_team`) | exists |
+| Tell baseline teammates from staffed ones | `TeamMemberDto.global` (`list_team`, `team_agent::is_global`) | exists |
 | Desk and agent folders | `ensure_workspace_scaffold`, `ensure_agent_folder`, `ensure_desk_folder` (`src/company/workspace_scaffold.rs`) | exists |
 | Talk to an agent afterwards | existing chat surface | exists |
 | Answers → proposed roster | — | **new** |

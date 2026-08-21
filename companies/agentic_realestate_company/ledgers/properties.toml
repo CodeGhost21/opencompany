@@ -1,0 +1,96 @@
+# What this company owns and what state it is in.
+#
+# Distinct from deals: a deal ends at closing, and the property then generates
+# revenue, problems and obligations for years. The questions asked of it —
+# what needs doing, what is it costing, when does the lease end — are asked
+# continuously and answered nowhere if the record stops at acquisition.
+
+title = "Properties"
+purpose = """
+Every property owned: its condition, what it is producing, what work is \
+outstanding, and its obligations. Read it before quoting a return or promising \
+a tenant anything.\
+"""
+written_by = "`record_entry` to add or update a property, `close_entry` when it is sold"
+checks = ["required-field", "known-status", "closed-needs-reason"]
+
+[[field]]
+name = "id"
+role = "id"
+required = true
+
+[[field]]
+name = "property"
+role = "title"
+required = true
+
+[[field]]
+name = "status"
+role = "status"
+required = true
+
+[[field]]
+name = "occupancy"
+role = "prose"
+description = "Units let, and until when. Lease end dates are the whole schedule of this business."
+
+[[field]]
+name = "condition"
+role = "prose"
+description = "Known state, and what is deteriorating. Deferred maintenance is the cost that arrives all at once."
+
+[[field]]
+name = "outstanding_work"
+role = "prose"
+description = "What needs doing, with anything safety-related first."
+
+[[field]]
+name = "obligations"
+role = "prose"
+description = "Inspections, certificates, insurance, licences — with their dates."
+
+[[field]]
+name = "owner"
+role = "owner"
+
+[[field]]
+name = "reason"
+role = "prose"
+description = "Why it closed — sold, or transferred. Required when it closes."
+
+[[field]]
+name = "refs"
+role = "refs"
+
+[[status]]
+name = "stabilising"
+label = "Stabilising"
+
+[[status]]
+name = "performing"
+
+[[status]]
+name = "underperforming"
+
+[[status]]
+name = "sold"
+closed = true
+needs_reason = true
+
+[[section]]
+heading = "Needs attention"
+blurb = "Underperforming or stabilising. Safety-related work outranks everything on this list."
+statuses = ["underperforming", "stabilising"]
+order = "recent"
+
+[[section]]
+heading = "Performing"
+blurb = "Let and producing. Check the lease end dates — they are this business's schedule."
+statuses = ["performing"]
+order = "recent"
+
+[[section]]
+heading = "Sold"
+blurb = "Disposed of, with the reason and what the hold actually returned."
+statuses = ["sold"]
+cap = 20

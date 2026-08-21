@@ -12,6 +12,7 @@ globals/
   globals.toml      # [tools].default_allow, [skills].always
   agents/*.toml     # one file per global teammate
   workflows/*.toml  # one file per global graph
+  ledgers/*.toml    # one file per baseline ledger
 ```
 
 The code is [`crate::globals`](../../../src/globals/mod.rs), and the shipped
@@ -36,6 +37,7 @@ the other three.
 | Agents | `CompanyManifest::apply_globals` | Appended after the company's own roster; an id the company declares is skipped. |
 | Workflows | `list_workflows_with_globals` / `load_workflow_with_globals` | Seed file, then saved overlay, then the global graph. |
 | Skills | `EffectiveSkills::materialize` | Installed as the bottom layer; a company bundle or `custom_doc` delta of the same slug supersedes it. |
+| Ledgers | `runtime::builder::seed_ledgers` | **Seeded once** into the company's own store at first boot, then owned by the company. A bundle declaration of the same slug replaces the global before either is stored. |
 | Tools | `Tools::default` | `[tools].default_allow` is the belt a company with no `[tools]` section gets. |
 
 ### A company always wins
@@ -46,7 +48,7 @@ nobody's design. To drop a global rather than replace it, the manifest says so:
 
 ```toml
 [globals]
-disable = ["agent:researcher", "workflow:weekly_review", "skill:meeting-brief"]
+disable = ["agent:researcher", "workflow:weekly_review", "skill:meeting-brief", "ledger:risks"]
 ```
 
 Every entry is `<kind>:<id>` with a kind from `globals::DISABLE_KINDS`, and must
@@ -55,6 +57,26 @@ silently does nothing. `skill:` entries reach the effective skill set as
 synthesized disabling deltas (`harness::globals_skill_disables`) so the manifest
 and the console's own toggle speak the same vocabulary; a disable beats an
 enable, so the manifest wins over a console re-enable.
+
+### Ledgers are the one surface that is seeded rather than resolved
+
+Every other surface above is re-resolved on each read, so editing `globals/`
+changes what an existing company gets on its next load. Ledgers cannot work that
+way, because a company **owns its record**: `docs/spec/runtime/ledgers.md` makes
+retiring a ledger a person's call, and a baseline re-applied on every boot would
+undo that call on the next restart. A `ledger:` disable entry therefore governs
+what a *new* company is seeded with, not what an existing one keeps.
+
+Seeding runs only when the company has no declaration at all, and never on a
+rebuild. The honest limit that follows: a person who retires *every* declared
+ledger and then restarts is seeded again. That is visible and reversible, and it
+is a better failure than a baseline that silently re-asserts one ledger somebody
+deliberately dropped.
+
+Each declaration is admitted through `ledger::Registry` before it is stored, so
+the cap and the collision rules apply to the baseline exactly as they do to a
+`define_ledger` call. A refused declaration is a warning in the log, not a boot
+failure — a company must reach the rest of itself when one axis is bad.
 
 ### Why globals load last, and never orchestrate
 
@@ -102,6 +124,15 @@ Every store backend therefore reads through `CompanyManifest::from_stored_toml`
 rather than a bare `toml::from_str`: a company is provisioned once and read
 thereafter, so a baseline applied only where bundles are parsed would reach new
 companies and no existing one.
+
+`Agent::global` also travels to the console, on every `GET …/team` row. That is
+not decoration: because the baseline is merged into every company, "is this
+roster empty?" is false everywhere, and the console's first-run gate asked
+exactly that — so [company setup](company-setup.md) could not open on any
+company, including the fixture built to reach it (issue #1404). The gate now
+asks whether any teammate is *not* from the baseline, which is a question only
+the provenance marker can answer. A console re-deriving it from a copied list of
+global ids would break on the next global added, silently.
 
 ## Adding to the baseline
 

@@ -13,7 +13,8 @@ import { toast } from "sonner";
 
 import { listPeople, me as fetchMe, type Person } from "@/api/auth";
 import type { OpenCompanyClient } from "@/api/client";
-import type { TaskDeliverable } from "@/api/tasks";
+import { deleteTask, type MessageIntent } from "@/api/tasks";
+import type { OpenTurn } from "@/lib/live-reply";
 import { setInboxEnabled } from "@/api/inbox";
 import {
   ApiError,
@@ -22,6 +23,7 @@ import {
   type TeamMemberDto,
   type TurnStep,
   type Verdict,
+  isDetachedChat,
 } from "@/api/types";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -62,6 +64,7 @@ import {
   firstChannel,
   historyReady,
   HISTORY_UNTRACKED,
+  clearTaskCardEverywhere,
   offersDeliverableChoice,
   resolveDmChannelId,
   toggleReaction,
@@ -104,6 +107,29 @@ interface Props {
    */
   onSendStart?: (threadId: string) => void;
   onSendEnd?: (threadId: string) => void;
+  /**
+   * The host accepted the turn and answered `202` instead of the reply
+   * (issue #983). Distinct from `onSendEnd`, which says the turn is *over*:
+   * this one says the POST is over and the turn is not, so the shell keeps the
+   * working row up and stops suppressing the live reply frame.
+   */
+  onSendDetached?: (threadId: string, turnId?: string) => void;
+  /**
+   * The chat POST **threw** rather than answering (issue #1000).
+   *
+   * The third outcome, and distinct from `onSendEnd` in the way that matters:
+   * `onSendEnd` promises the shell that the reply is already on screen, so the
+   * shell may drop the live frame it was holding. A throw promises the
+   * opposite — nothing was rendered, and since #983 the turn usually outlives
+   * the request that started it, so that held frame is the only copy of the
+   * answer anyone is going to get.
+   */
+  onSendFailed?: (threadId: string) => void;
+  /**
+   * Turns accepted but not settled, by host thread id — including ones this
+   * console never POSTed, which is what makes the indicator survive a reload.
+   */
+  openTurns?: Record<string, OpenTurn[]>;
   /**
    * The in-flight tool timeline the shell folds out of the live turn frames,
    * keyed by **host thread id** — so this view has to resolve its channel to a
@@ -177,6 +203,9 @@ export function ChatView({
   hydration = HISTORY_UNTRACKED,
   onSendStart,
   onSendEnd,
+  onSendDetached,
+  onSendFailed,
+  openTurns,
   liveStepsByThread,
   unread,
   onChannelViewed,
@@ -207,6 +236,7 @@ export function ChatView({
   const [desksError, setDesksError] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
   const [openThreadId, setOpenThreadId] = useState<string | null>(null);
+  const [dismissingCardId, setDismissingCardId] = useState<string | null>(null);
   const [membersOpen, setMembersOpen] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
   const [mobilePane, setMobilePane] = useState<"rail" | "chat">("chat");
@@ -472,8 +502,8 @@ export function ChatView({
     ? loadingTeam || !historyReady(hydration, channel.id)
     : false;
   const entries = useMemo(
-    () => (channel ? buildTimeline(messages, channel) : []),
-    [messages, channel],
+    () => (channel ? buildTimeline(messages, channel, members) : []),
+    [messages, channel, members],
   );
 
   /**
@@ -585,6 +615,15 @@ export function ChatView({
   const activeThreadId = active.kind === "channel" ? active.id : active.member?.id;
   const liveSteps = activeThreadId ? liveStepsByThread?.[activeThreadId] : undefined;
   /**
+   * The turn this channel is waiting on, if any (issue #983).
+   *
+   * Sourced from the shell rather than from local `sending`, which is the whole
+   * point: `sending` only knows about a POST *this* component made, so it went
+   * false on every reload and on every walk to another view. An open turn is a
+   * fact about the company, so the indicator survives both.
+   */
+  const openTurn = activeThreadId ? openTurns?.[activeThreadId]?.[0] : undefined;
+  /**
    * The count beside the channel title.
    *
    * A DM is stated as 2 rather than derived: it is a two-person conversation,
@@ -624,7 +663,7 @@ export function ChatView({
    * cannot resolve — the row's own actions are disabled in that window, so this
    * is the belt to that brace.
    */
-  async function send(text: string, deliverable?: TaskDeliverable, parentId?: string) {
+  async function send(text: string, intent?: MessageIntent, parentId?: string) {
     if (sending) return;
     const target = active.id;
     const chatId = activeThreadId;
@@ -636,14 +675,45 @@ export function ChatView({
     // without this the shell injects that echo *and* the awaited reply lands
     // below — two bubbles for one turn.
     if (chatId) onSendStart?.(chatId);
+    // Which of the POST's three outcomes actually happened, decided here and
+    // reported once in the `finally`. Only `"resolved"` means the reply is on
+    // screen; the other two leave a turn running on the host and the stream as
+    // the delivery path, so telling the shell "ended" for either would take the
+    // working row down mid-turn (detached) or throw away the reply it was
+    // holding (failed). See `PendingSyncPosts` for the table.
+    let outcome: "resolved" | "detached" | "failed" = "resolved";
     try {
-      const reply = await client.chat(
+      const answer = await client.chat(
         text,
         company,
         chatId,
         toHostMessageId(parentId),
-        deliverable,
+        intent,
+        // Ask for the turn's id rather than its answer. A host that predates the
+        // field ignores this and answers synchronously, which is why the branch
+        // below reads the response's shape and never this argument.
+        true,
       );
+      // Reconcile the optimistic id first, for BOTH shapes. On the detached one
+      // this is strictly better than what came before: since #983 the message is
+      // journaled at accept time, so its durable id is a fact within
+      // milliseconds instead of after the whole turn — the bubble becomes
+      // replyable and reactable immediately rather than at settle.
+      if (answer.messageId) {
+        setTranscripts((t) => ({
+          ...t,
+          [target]: reconcileIds(t[target] ?? [], local.id, answer.messageId!),
+        }));
+      }
+      if (isDetachedChat(answer)) {
+        outcome = "detached";
+        // Nothing to render: the reply arrives on the stream, and durably in
+        // `chat/history` when the shell sees the turn go terminal. The working
+        // row stays up, driven by the open turn rather than by this POST.
+        if (chatId) onSendDetached?.(chatId, answer.turnId);
+        return;
+      }
+      const reply = answer;
       const replies = reply.responses.length
         ? reply.responses.map((r) =>
             makeMessage("company", r.text, {
@@ -656,21 +726,32 @@ export function ChatView({
           )
         : [makeMessage("system", "(no reply)", { parentId })];
       append(target, ...replies);
-      // Swap the optimistic id for the durable one the host assigned, so this
-      // bubble can be replied to and reacted on straight away — and so anything
-      // that started replying to it mid-flight follows it (`reconcileIds`).
-      if (reply.messageId) {
-        setTranscripts((t) => ({
-          ...t,
-          [target]: reconcileIds(t[target] ?? [], local.id, reply.messageId!),
-        }));
-      }
       onReply?.();
     } catch (err) {
+      outcome = "failed";
+      // Still said, even when the reply arrives on the stream a moment later:
+      // the request did fail, and an operator not told that has no way to know
+      // whether their message was taken at all. The two facts are not in
+      // competition — this line reports the request, the shell renders whatever
+      // the turn goes on to produce.
       const msg = err instanceof ApiError ? err.message : "something went wrong";
       append(target, makeMessage("system", `Couldn't send — ${msg}`, { parentId }));
     } finally {
-      if (chatId) onSendEnd?.(chatId);
+      // A detached turn ends when its row settles, not when this POST resolves.
+      // Calling `onSendEnd` here would clear the live step timeline and take the
+      // working row down while the turn is still going.
+      //
+      // A *failed* POST must not reach `onSendEnd` either, and that one is
+      // easier to get wrong because the send really is over. `onSendEnd` tells
+      // the shell the reply is on screen, which lets it drop the live frame it
+      // was holding — but a throw rendered nothing, and since #983 the turn
+      // carries on regardless, so the frame it holds is the only copy of the
+      // answer. Routing the throw here is the drop this whole change removes,
+      // put back on the one path the feature exists for.
+      if (chatId) {
+        if (outcome === "resolved") onSendEnd?.(chatId);
+        else if (outcome === "failed") onSendFailed?.(chatId);
+      }
       setSending(false);
     }
   }
@@ -709,6 +790,59 @@ export function ChatView({
             : "Couldn't save that reaction.",
       );
     }
+  }
+
+  /**
+   * Delete the board card a line opened, and stop drawing its chip
+   * (issue #984).
+   *
+   * #442 allowed a turn to open a card from an ordinary message on the
+   * grounds that *"a spurious card can be dismissed in one click"*. That click
+   * did not exist here: the chip was a bare link to the card's detail screen,
+   * so clearing a mis-fired card meant leaving the channel, finding the card
+   * on the board, and deleting it there — which is how the board filled up.
+   *
+   * NOT optimistic, unlike `react` directly above, and the asymmetry is the
+   * point. A reaction that rolls back costs nothing; a chip that vanishes
+   * while the card survives tells the operator the board is clean when it is
+   * not, which is the very confusion this issue is about. So: delete on the
+   * host first, clear the chip only on success, and leave it exactly where it
+   * was on a refusal.
+   *
+   * Clears by CARD id, not by the row clicked, and across every channel rather
+   * than the active one — see {@link clearTaskCardEverywhere}. Once the card is
+   * gone every chip naming it is a link to a 404, and they can sit on different
+   * lines and in different channels.
+   */
+  async function dismissCard(taskId: string) {
+    if (dismissingCardId) return;
+    setDismissingCardId(taskId);
+    try {
+      await deleteTask(client, company, taskId);
+      clearCardEverywhere(taskId);
+      toast.success("Card dismissed.");
+    } catch (error) {
+      // A 404 is positive proof the card is gone — most likely deleted from the
+      // board itself, where nothing tells the open chat surface about it. The
+      // chip is then a permanent link to a 404 that no amount of clicking can
+      // remove, so this is a success for the operator's purpose: clear it and
+      // say so. Only a refusal we cannot interpret leaves the chip in place.
+      if (error instanceof ApiError && error.status === 404) {
+        clearCardEverywhere(taskId);
+        toast.success("That card was already gone — chip cleared.");
+      } else {
+        toast.error(
+          error instanceof Error && error.message ? error.message : "Couldn't dismiss that card.",
+        );
+      }
+    } finally {
+      setDismissingCardId(null);
+    }
+  }
+
+  /** Drop the card from every channel — see {@link clearTaskCardEverywhere}. */
+  function clearCardEverywhere(taskId: string) {
+    setTranscripts((t) => clearTaskCardEverywhere(t, taskId));
   }
 
   /**
@@ -807,8 +941,10 @@ export function ChatView({
 
   /**
    * Drop a teammate from the roster through the host when it has a record of
-   * them; a manifest teammate can't be removed (409) and a starter-roster row
-   * has no host record at all, so both fall back to a local-only removal.
+   * them. A blueprint teammate is removable too — the host records a tombstone
+   * rather than rewriting `company.toml` — and the only refusal left is the
+   * company's last teammate (409). A starter-roster row has no host record at
+   * all, so it falls back to a local-only removal.
    */
   async function removeMember(member: TeamMember) {
     if (!fromHost) {
@@ -820,7 +956,12 @@ export function ChatView({
       setMembers((ms) => ms.filter((m) => m.id !== member.id));
     } catch (error) {
       if (error instanceof ApiError && error.status === 409) {
-        toast.error("This teammate is defined in the company manifest and can't be removed here.");
+        // The only 409 this route still answers: a company must keep at
+        // least one teammate. The host's own message says which teammate and
+        // what to do about it, so it is shown rather than restated.
+        toast.error(
+          error.message || "You can't remove your company's last teammate.",
+        );
       } else {
         toast.error(error instanceof Error ? error.message : "Couldn't remove teammate.");
       }
@@ -837,18 +978,25 @@ export function ChatView({
 
   return (
     <div className="flex min-h-0 flex-1">
+      {/* The channel rail and the chat pane share the viewport with the app
+          sidebar. That sidebar is on from `md` (≥768), so a rail that also came
+          in at `md` gave two rails plus content a ~290px pane from 768–1023px —
+          Send fell off the right edge with no scroll to reach it (issue #1383).
+          The rail now waits for `lg` (≥1024); from 768–1023 the pane runs
+          single-column and the "Show channels" toggle in the header (also
+          `lg:hidden`) swaps to the rail, mirroring the sub-`md` mobile flow. */}
       <ChannelRail
         sections={sections}
         activeId={channel.id}
         unread={unread ?? {}}
         onSelect={selectChannel}
-        className={cn("md:flex", mobilePane === "rail" ? "flex" : "hidden")}
+        className={cn("lg:flex", mobilePane === "rail" ? "flex" : "hidden")}
       />
 
       <div
         className={cn(
           "min-w-0 flex-1 flex-col",
-          mobilePane === "chat" ? "flex" : "hidden md:flex",
+          mobilePane === "chat" ? "flex" : "hidden lg:flex",
         )}
       >
         <ChatHeader
@@ -878,10 +1026,15 @@ export function ChatView({
               items={items}
               historyPending={historyPending}
               openThreadId={openThreadId}
-              typing={sending && !openThreadId}
+              // An open turn keeps the row up after the POST has resolved, and
+              // puts it back on a console that reloaded mid-turn (#983).
+              typing={(sending || !!openTurn) && !openThreadId}
+              queued={!!openTurn?.queued}
               liveSteps={openThreadId ? undefined : liveSteps}
               onOpenThread={setOpenThreadId}
               onReact={react}
+              onDismissCard={(taskId) => void dismissCard(taskId)}
+              dismissingCardId={dismissingCardId}
               onAddPeople={() => setMembersOpen(true)}
               now={now}
               askerNames={askerNames}
@@ -905,11 +1058,12 @@ export function ChatView({
             <MessageComposer
               placeholder={`Message ${channelTitle(channel)}`}
               disabled={sending}
-              onSend={(text, deliverable) => void send(text, deliverable)}
-              // Channel *and* DM composers offer "do it once" vs "build me the
-              // workflow" (issues #580, #845) — see `offersDeliverableChoice`,
-              // which owns the rule. Only the thread and copilot composers below
-              // go without.
+              onSend={(text, intent) => void send(text, intent)}
+              // Channel *and* DM composers offer "just chatting" / "do it once" /
+              // "build me the workflow" (issues #580, #845, #1152) — see
+              // `offersDeliverableChoice`, which owns the rule and is unchanged:
+              // the new position inherits the same channel+DM gating. Only the
+              // thread and copilot composers below go without.
               deliverableChoice={offersDeliverableChoice(active.kind)}
             />
           </div>
@@ -917,6 +1071,7 @@ export function ChatView({
           {parent && (
             <ThreadPanel
               channel={channel}
+              members={members}
               parent={parent}
               replies={threadReplies}
               sending={sending}

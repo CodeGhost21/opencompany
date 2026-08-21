@@ -69,6 +69,9 @@ layout first.
 role = "Copywriter"                     # required
 description = "Write ads and campaign copy."
 tier = "reasoning"                      # cognition hint; never selects a model
+harness = "deep"                        # which [[harness]] runs this agent's
+                                        # turns — see harnesses.md. Omitted
+                                        # means the company's default harness.
 tools = ["docs.*", "mcp:notion"]        # grant globs — see tools.md
 delegates_to = ["creative"]             # desks this agent may hand work to
 budget_usd_daily = 5.0                  # per-agent daily cap
@@ -78,8 +81,8 @@ Write for the reader, not the client.
 """
 prompt_files = ["prompts/house-style.md"]   # checked-in, bundle-relative
 context = [                                 # live workspace documents
-    "Brand/Brand voice.md",                 #   read only (the bare-string shorthand)
-    { path = "Agents/copywriter/drafts", access = "write" },  # + workspace_write/workspace_create
+    "brand/brand-voice.md",                 #   read only (the bare-string shorthand)
+    { path = "agents/copywriter/drafts", access = "write" },  # + workspace_write/workspace_create
 ]
 classes = ["evidence"]                      # routing exclusions — see below
 
@@ -90,6 +93,19 @@ ledgers = [                                 # per-agent ledger access (omit for 
 can_declare_ledgers = false                 # may this agent `define_ledger`? default true
 ```
 
+### `tier` versus `harness`
+
+They answer different questions and are deliberately separate fields.
+
+`tier` names a **workload** (`reasoning`, `vision`, …) and is resolved against
+whatever provider the agent's harness turns out to use. `harness` names the
+**engine and the credential**. So an agent keeps its tier when it moves between
+harnesses, and two agents sharing a tier on different harnesses run on different
+models — which is the point of naming more than one.
+
+Naming a harness the company does not declare is a validation error, reported
+against both the agent and the id. Naming none is not: every roster written
+before `[[harness]]` existed binds nobody, and all of them keep working.
 ### `context` write access
 
 A bare string in `context` is read-only — routed into the prompt, nothing
@@ -100,7 +116,7 @@ agent's `workspace_write`/`workspace_create` scope.
 before this existed: `workspace_write`/`workspace_create` reach anywhere in the
 company's tree, as they always could. Declaring **at least one** write entry
 confines this agent's `workspace_write`/`workspace_create` to exactly the paths
-it declared, plus its own `Agents/<id>/` home, which stays writable regardless
+it declared, plus its own `agents/<id>/` home, which stays writable regardless
 — a role narrowed to a real access list must not also lose the ability to
 produce and revise its own work. See `src/harness/workspace_tools.rs` for the
 enforcement and why the pre-existing unconfined default is otherwise
@@ -189,6 +205,40 @@ A `prompt_files` path may not escape `agents/`. The check is on path components,
 before touching the filesystem, rather than by canonicalizing: canonical
 comparison resolves symlinks, and whether a bundle is valid must not depend on
 how the checkout was laid out on the reading machine.
+
+### Seeing the assembled prompt
+
+A brief is the most editable thing in a bundle and used to be the least
+inspectable: reading one as the agent receives it meant running the company and
+reading a provider trace. `opencompany prompt` renders the same composition from
+a manifest alone.
+
+```sh
+./scripts/dump-prompt.sh --company companies/agentic_product_team
+./scripts/dump-prompt.sh --company <dir> --agent bug_triager       # one teammate
+./scripts/dump-prompt.sh --company <dir> --agent bug_triager --raw # bytes only
+./scripts/dump-prompt.sh --company <dir> --out /tmp/prompts        # a file each
+./scripts/dump-prompt.sh --company <dir> --json                    # machine-readable
+```
+
+The report names every section, where its bytes came from (a manifest field, a
+bundle file, a brief function), and the agent's effective grants — a missing
+brief is almost always a missing grant. `--raw` prints the concatenation exactly
+as the harness performs it, which is what makes it diffable against a real
+trace.
+
+**What it cannot render, it names.** Routed `context` bodies need a live
+workspace store, the skill catalogue needs a materialized bundle directory, the
+MCP brief needs a configured registry, and the vendored runtime's safety
+preamble and grounding suffix need a live `PromptContext`. Each appears under
+*Not rendered here* with the reason, so a section missing from the dump is
+visibly missing rather than invisibly absent.
+
+The wrapper exists for the feature flag: the harness owns the tool briefs and
+compiles only under `--features openhuman`, so calling the subcommand from a
+default build produces a shorter prompt that would otherwise look complete.
+Composition itself (`src/company/prompt_dump.rs`) is always compiled — a
+debugging surface that only exists in a feature build is one nobody runs.
 
 ### Budgets
 
@@ -322,6 +372,7 @@ rename can switch off is not a control.
 | --- | --- |
 | Bundle loading, `prompt_files` resolution | `src/company/agent_file.rs` |
 | Prompt composition and clamping | `src/company/prompt.rs` |
+| Rendering a composed prompt back out (`opencompany prompt`) | `src/company/prompt_dump.rs` |
 | Routing table and exclusions | `src/company/context_routing.rs` |
 | Roster type and constants | `src/company/types.rs` |
 | Manifest wiring and validation | `src/company/manifest.rs` |

@@ -93,6 +93,31 @@ pub trait RunTurn: Send + Sync {
         control: &SteerControl,
         run_sink: Option<Arc<RunTraceSink>>,
     ) -> Result<TurnOutcome>;
+
+    /// An un-streamed, un-steered turn — a workflow agent node, which drops its
+    /// steps and shows no operator chat bubble. Its transient frames must not
+    /// reach the console timeline, which is the same reason this method exists
+    /// beside [`run_steered_background`](Self::run_steered_background) rather
+    /// than reusing [`run`](Self::run).
+    ///
+    /// Defaults to [`run`](Self::run) so the sentinel and test doubles need not
+    /// re-declare the same nothing; the streaming harness engines override it
+    /// to suppress the live stream.
+    async fn run_background(
+        &self,
+        company: &CompanyId,
+        agent_id: &str,
+        message: &str,
+    ) -> Result<TurnOutcome> {
+        self.run(company, agent_id, message, None).await
+    }
+
+    /// Warms whatever roster this engine caches before the first turn. The
+    /// default is a no-op; a harness that builds its roster lazily behind a
+    /// pool overrides it so a caller can ensure every lane before dispatch.
+    async fn ensure(&self, _company: &CompanyRecord) -> Result<()> {
+        Ok(())
+    }
 }
 
 // `desk_lead` is the brain-agnostic desk-lead resolver — it moved to
@@ -368,6 +393,22 @@ pub(crate) struct MessageContext {
     /// no escalation wired, an unparseable or slow verdict — leaves it `false`
     /// and behaves exactly as before.
     pub(crate) chatter: bool,
+    /// The **operator** said this message is not a request for work (issue
+    /// #1152) — they sent it under the composer's "Just chatting".
+    ///
+    /// A peer to [`chatter`](Self::chatter), never a reuse of it. That field is
+    /// documented as *the model's* verdict, set only where the lexical layer
+    /// abstained; this is a person's own statement about their own message,
+    /// settled before any model runs, and it holds whatever the triage read —
+    /// including a confident `Track`. Folding this into `chatter` would falsify
+    /// that doc, make the debug line attribute an operator's choice to a model
+    /// that was never asked, and put this change inside the field #984 owns.
+    ///
+    /// Subtractive only, like `chatter`: it stands the deterministic card paths
+    /// down and touches nothing else. The model's own board tools are NOT
+    /// narrowed — see [`open_work_card`](DelegationRunner::open_work_card) for
+    /// why, and what that means the label does and does not promise.
+    pub(crate) not_work: bool,
 }
 
 /// Whether a drain may run the hand-offs it finds, or must drop them.
@@ -506,9 +547,9 @@ pub(crate) struct DelegationRunner<'a> {
     /// turn, and for a dispatch whose run row could not be minted.
     run_sink: Option<Arc<RunTraceSink>>,
     /// What the operator's composer said this message is for, when they chose
-    /// (issue #1035). `None` for every path that is not an operator chat turn,
-    /// and for a message whose sender expressed no preference.
-    requested_deliverable: Option<crate::ports::tasks::TaskDeliverable>,
+    /// (issues #1035, #1152). `None` for every path that is not an operator chat
+    /// turn, and for a message whose sender expressed no preference.
+    requested_intent: Option<crate::ports::types::MessageIntent>,
     /// The cycle's approval queue, read (never written) to tell whether a turn
     /// this runner drove parked an approval (issue #465).
     ///
@@ -564,7 +605,7 @@ impl<'a> DelegationRunner<'a> {
             max_delegations,
             task: None,
             run_sink: None,
-            requested_deliverable: None,
+            requested_intent: None,
             approvals: None,
             workflow_run: None,
             workflow_refs: None,
@@ -613,7 +654,7 @@ impl<'a> DelegationRunner<'a> {
             run_sink: None,
             // A workflow run has no operator message and therefore no composer
             // choice; `None` is the only honest value here.
-            requested_deliverable: None,
+            requested_intent: None,
             approvals: None,
             workflow_run: Some(run),
             workflow_refs: None,
@@ -807,7 +848,7 @@ impl<'a> DelegationRunner<'a> {
     }
 
     /// Carries the operator's own statement of what this message is for
-    /// (issue #1035).
+    /// (issues #1035, #1152).
     ///
     /// A builder rather than a parameter on
     /// [`handle_operator_message`](Self::handle_operator_message) for the same
@@ -815,11 +856,8 @@ impl<'a> DelegationRunner<'a> {
     /// it is optional context about the turn, absent on every path that is not a
     /// person typing into the composer, and threading it as an argument would
     /// make a dozen test call sites restate `None` to say nothing.
-    pub(crate) fn requested(
-        mut self,
-        deliverable: Option<crate::ports::tasks::TaskDeliverable>,
-    ) -> Self {
-        self.requested_deliverable = deliverable;
+    pub(crate) fn requested(mut self, intent: Option<crate::ports::types::MessageIntent>) -> Self {
+        self.requested_intent = intent;
         self
     }
 
@@ -975,8 +1013,8 @@ impl<'a> DelegationRunner<'a> {
         // handler had carded, and stand down the paths that were the only ones
         // left to open one. The two conditions travel together or the signal
         // lies.
-        let workflow_requested = self.requested_deliverable
-            == Some(crate::ports::tasks::TaskDeliverable::Workflow)
+        let workflow_requested = self.requested_intent
+            == Some(crate::ports::types::MessageIntent::Workflow)
             && !crate::company::copilot::is_copilot_thread(chat_id);
         // Issue #463: did the REST chat handler already card this message?
         //
@@ -987,13 +1025,33 @@ impl<'a> DelegationRunner<'a> {
         // message that went down that second road arrived here looking uncarded,
         // and the paths below opened a card beside the one it already had.
         let carded_by_handler = triage.title().is_some() || workflow_requested;
-        // Everything below that could open a card reads these two facts about
-        // the operator's message rather than re-deriving them from text that is
-        // no longer the operator's (issues #463, #267).
+        // Issue #1152: the mirror image of `workflow_requested` — the operator
+        // said this message is not a request for work at all.
+        //
+        // The REST handler honours it by opening no card. This is the other half
+        // of the same promise: the handler is not the only path that cards a
+        // chat message, so a handler-only fix would leave "Just chatting" true on
+        // an unaddressed message and false on a DM to a desk — which is worse
+        // than not shipping the control, because the label would be a promise
+        // the company keeps only sometimes.
+        //
+        // No `is_copilot_thread` term, unlike `workflow_requested` above. That
+        // one reproduces half of the handler's condition because it concludes
+        // "the handler already carded this", and on a copilot thread the handler
+        // deliberately did not. This concludes nothing about the handler — it
+        // reads the operator's own statement, which means the same thing on
+        // every thread.
+        let not_work = self
+            .requested_intent
+            .is_some_and(crate::ports::types::MessageIntent::is_chat);
+        // Everything below that could open a card reads these facts about the
+        // operator's message rather than re-deriving them from text that is no
+        // longer the operator's (issues #463, #267, #1152).
         let ctx = MessageContext {
             carded_by_handler,
             answering,
             chatter,
+            not_work,
         };
         // …and *which* card that is, when it is still on the board. Adopting it
         // is what carries "one message, one card" through the publish drain too:
@@ -1839,17 +1897,29 @@ impl<'a> DelegationRunner<'a> {
     /// that is about to run somebody's turn goes through here first, so there is
     /// no path on which work starts and the board stays empty.
     ///
-    /// Returns `None` — no card, nothing to settle — in exactly five cases:
+    /// Returns `None` — no card, nothing to settle — in exactly six cases:
     ///
     /// * **no task store wired**, the silent no-op every task path on this seam
     ///   takes;
     /// * **already inside a dispatched card** (`for_task`), which is the card;
     ///   opening a second one would double-count one piece of work;
+    /// * **the operator said this is not work** (`not_work`, issue #1152) — they
+    ///   sent the message under "Just chatting";
+    /// * **the model read this as conversation** (`chatter`, issue #984);
     /// * **the chat handler already carded this message** (`carded_by_handler`,
     ///   issue #463) — see [`handle_operator_message`](Self::handle_operator_message);
     /// * **nothing substantial was asked** — see [`is_trackable_work`]; this is
     ///   the carve-out that keeps a trivial question from minting a card;
     /// * the write failed, which propagates rather than returning `None`.
+    ///
+    /// # What `not_work` does NOT do (issue #1152)
+    ///
+    /// It stands down the paths that open a card **by construction**. The
+    /// orchestrator's own `spawn_task` tool is untouched: narrowing the board
+    /// tools would change which delegation-queue claim the turn runs under, and
+    /// "this is not a work request" is not a reason to take the company's tools
+    /// away mid-conversation. So it means the company will not *automatically*
+    /// card the message, not that a card can never appear.
     ///
     /// The write goes through the [`TaskStore`] port rather than
     /// `CompanyRuntime::upsert_task`, so landing the card straight in
@@ -1866,6 +1936,27 @@ impl<'a> DelegationRunner<'a> {
             return Ok(None);
         };
         if self.task.is_some() {
+            return Ok(None);
+        }
+        // Issue #1152: the operator said, on this message, that it is not a
+        // request for work. Nothing below gets a vote.
+        //
+        // **Above the `chatter` check on purpose.** When both are true they
+        // agree, so the order changes no outcome — but it changes what the log
+        // says happened, and the operator is the one who can be asked why. A
+        // line crediting the model for a stand-down a person asked for sends the
+        // next person debugging this to the escalation prompt instead of to the
+        // composer.
+        //
+        // One guard here rather than one per caller: all three card-opening
+        // paths funnel through this method, and #442's lesson is exactly that a
+        // stand-down placed in one caller leaves the others opening cards.
+        if ctx.not_work {
+            tracing::debug!(
+                company = %self.company,
+                assignee = %assignee,
+                "[delegation] not opening a card: the operator sent this message as chat, not work"
+            );
             return Ok(None);
         }
         // Issue #984: the model already read this as conversation, so no card.
@@ -2580,7 +2671,7 @@ impl<'a> DelegationRunner<'a> {
     /// `HarnessBrain::orchestrator`; on an empty roster it is the empty string,
     /// which `orchestrator_id` already tolerates.
     fn orchestrator_id(&self) -> String {
-        orchestrator::orchestrator_id(&self.record.manifest.agents).unwrap_or_default()
+        orchestrator::orchestrator_id(&self.record.effective_agents()).unwrap_or_default()
     }
 
     /// The voice a note this drain appends is recorded under.
@@ -3515,6 +3606,8 @@ members = ["engineer"]
         )
         .expect("valid manifest");
         CompanyRecord {
+            overlay_retired_agents: Vec::new(),
+            overlay_agent_edits: Vec::new(),
             id: CompanyId::new("acme"),
             manifest,
             ledger: Vec::<LedgerEntry>::new(),
@@ -4096,7 +4189,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
         let turns = ScriptedTurns::new(&fx, vec![Turn::reply("on it")]);
         let turn = fx
             .runner(&turns)
-            .requested(Some(crate::ports::tasks::TaskDeliverable::Workflow))
+            .requested(Some(crate::ports::types::MessageIntent::Workflow))
             .handle_operator_message("engineer", residue, Some("eng_desk"))
             .await
             .expect("operator message handled");
@@ -4118,7 +4211,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
     #[tokio::test]
     async fn the_same_message_without_a_composer_choice_still_cards() {
         let residue = "the pricing page copy, before Friday if you can";
-        for choice in [None, Some(crate::ports::tasks::TaskDeliverable::Once)] {
+        for choice in [None, Some(crate::ports::types::MessageIntent::Once)] {
             let fx = Fixture::new();
             let turns = ScriptedTurns::new(&fx, vec![Turn::reply("on it")]);
             fx.runner(&turns)
@@ -4149,7 +4242,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
         let fx = Fixture::new();
         let turns = ScriptedTurns::new(&fx, vec![Turn::reply("on it")]);
         fx.runner(&turns)
-            .requested(Some(crate::ports::tasks::TaskDeliverable::Workflow))
+            .requested(Some(crate::ports::types::MessageIntent::Workflow))
             .handle_operator_message("engineer", residue, Some("workflow-copilot:weekly_report"))
             .await
             .expect("operator message handled");
@@ -4159,6 +4252,86 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
             1,
             "the handler suppresses its override on a copilot thread, so this \
              message has no card yet and the runtime still owes one"
+        );
+    }
+
+    /// **Issue #1152, the direct path.** The operator said this message is not
+    /// work, so the runtime opens no card for it either.
+    ///
+    /// A handler-only fix would pass every REST test and still be wrong here.
+    /// The chat route is not the only thing that cards a chat message: this seam
+    /// opens one *by construction* whenever work is handed to an agent, and
+    /// [`is_trackable_work`]'s default is "everything is work". So "Just
+    /// chatting" would hold on an unaddressed message and fail on a message to a
+    /// desk — a label the company keeps only sometimes, which is worse than not
+    /// shipping the control.
+    ///
+    /// The fixture is the residue `the_same_message_without_a_composer_choice_still_cards`
+    /// drives, and that pairing is what makes this non-vacuous: the same words
+    /// with `None` and with `Once` open exactly one card there, so a run that
+    /// opens none here is the operator's statement doing the work rather than
+    /// the message being unremarkable.
+    #[tokio::test]
+    async fn a_message_the_operator_sent_as_chat_opens_no_direct_card() {
+        let residue = "the pricing page copy, before Friday if you can";
+        assert!(
+            crate::company::task_intent::triage_message_detailed(residue)
+                .triage
+                .title()
+                .is_none(),
+            "fixture must be a message the handler did NOT card on the triage, \
+             or `carded_by_handler` would suppress this path anyway"
+        );
+        assert!(
+            is_trackable_work(residue),
+            "and one the card detector would otherwise track, or this proves nothing"
+        );
+
+        let fx = Fixture::new();
+        let turns = ScriptedTurns::new(&fx, vec![Turn::reply("noted")]);
+        let turn = fx
+            .runner(&turns)
+            .requested(Some(crate::ports::types::MessageIntent::Chat))
+            .handle_operator_message("engineer", residue, Some("eng_desk"))
+            .await
+            .expect("operator message handled");
+
+        assert_eq!(
+            turn.reply, "noted",
+            "the message is still answered — withholding a card is not silence"
+        );
+        assert!(
+            fx.cards().await.is_empty(),
+            "a message the operator sent as chat opens no card"
+        );
+        assert_eq!(turn.spawned_task, None, "and nothing is linked to one");
+    }
+
+    /// **Issue #1152, and it outranks the model too.** A `Work` verdict from the
+    /// triage escalation does not resurrect the card.
+    ///
+    /// The two facts are peers, not a hierarchy the model sits on top of:
+    /// [`MessageContext::chatter`] is the model's reading of words it was shown,
+    /// and `not_work` is the author of those words saying what they meant. Where
+    /// they disagree the person wins. Without this, "Just chatting" would be
+    /// advisory on exactly the companies that wire an escalation — the ones
+    /// paying for a second opinion — and nothing would report the difference.
+    #[tokio::test]
+    async fn a_work_verdict_does_not_override_the_operators_own_statement() {
+        let residue = "the pricing page copy, before Friday if you can";
+        let fx = Fixture::new();
+        let escalation = ScriptedTriage::new(crate::harness::triage::TriageVerdict::Work);
+        let turns = ScriptedTurns::new(&fx, vec![Turn::reply("noted")]);
+        fx.runner(&turns)
+            .with_triage(&escalation)
+            .requested(Some(crate::ports::types::MessageIntent::Chat))
+            .handle_operator_message("engineer", residue, Some("eng_desk"))
+            .await
+            .expect("operator message handled");
+
+        assert!(
+            fx.cards().await.is_empty(),
+            "the operator's own statement outranks a `work` verdict about their words"
         );
     }
 
@@ -5543,6 +5716,81 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
             "a work verdict leaves the hand-off card the abstention would have opened"
         );
         assert_eq!(cards[0].assignee, "engineer");
+    }
+
+    /// **Issue #1152, the second caller.** `open_work_card` has two callers, and
+    /// the direct-path test only drives one. This drives the hand-off: the
+    /// orchestrator queues `delegate_to_desk` on a message the operator sent as
+    /// chat.
+    ///
+    /// The shape mirrors `a_hand_off_of_a_message_the_model_calls_chatter_opens_no_card`
+    /// exactly, because the requirement is the same: **only the card** stands
+    /// down. Saying "I'm just chatting" must not silence the company — the
+    /// hand-off is not refused, the desk lead's turn really runs, and the
+    /// relayed answer still reaches the operator.
+    ///
+    /// The `staged()` assertion is the load-bearing one, and it is what pins the
+    /// scope this deliberately does not take: the turn's board tools are NOT
+    /// narrowed, so a card can still appear if the orchestrator explicitly
+    /// spawns one. "Just chatting" means the company will not *automatically*
+    /// card the message.
+    ///
+    /// Non-vacuous by the same pairing as the chatter test above it:
+    /// `the_same_hand_off_on_a_work_verdict_still_opens_its_card` opens a card
+    /// on these very words with no composer choice.
+    #[tokio::test]
+    async fn a_hand_off_of_a_message_the_operator_sent_as_chat_opens_no_card() {
+        let residue = "the deck looks good to me";
+        assert!(
+            is_trackable_work(residue),
+            "fixture must be one the card detector would otherwise track"
+        );
+        let fx = Fixture::new();
+        let turns = ScriptedTurns::new(
+            &fx,
+            vec![
+                Turn::tooling(
+                    "asking engineering",
+                    vec![handoff("take a look at the deck")],
+                ),
+                Turn::reply("looks fine to me too"),
+                Turn::reply("engineering agrees the deck is fine"),
+            ],
+        );
+        let turn = fx
+            .runner(&turns)
+            .requested(Some(crate::ports::types::MessageIntent::Chat))
+            .handle_operator_message("chief", residue, Some("general"))
+            .await
+            .expect("operator message handled");
+
+        assert_eq!(
+            turns.staged(),
+            vec![orchestrator::Staged::Queued],
+            "a chat intent must NOT refuse the hand-off — it does not gate tools"
+        );
+        let calls = turns.calls();
+        assert_eq!(
+            calls.len(),
+            3,
+            "the orchestrator, the desk lead and the relay all ran: {calls:?}"
+        );
+        assert_eq!(
+            calls[1].0, "engineer",
+            "the desk lead really ran: {calls:?}"
+        );
+        assert_eq!(
+            turn.reply, "engineering agrees the deck is fine",
+            "and the operator still gets the relayed answer"
+        );
+        assert!(
+            fx.cards().await.is_empty(),
+            "but the hand-off card stands down: the operator said this is not work"
+        );
+        assert!(
+            turn.spawned_task.is_none(),
+            "and nothing is linked to a card"
+        );
     }
 
     /// The same hand-off on a message that is NOT a question still opens its

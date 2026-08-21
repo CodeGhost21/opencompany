@@ -16,7 +16,7 @@ import { ToolDetailCard, type DeptLite } from './KnowledgeDetail';
  */
 export function KnowledgeGraphFullscreen({
   deptList, currentTeamId, currentDept,
-  toolWiki, extraDetail, coreOpen = false, onCollapseCore, searchSlot, legendSlot,
+  toolWiki, extraDetail, coreOpen = false, onCollapseCore, searchSlot, legendSlot, statusSlot,
   onNavDept, onBack, children,
 }: {
   deptList: DeptLite[];
@@ -34,6 +34,8 @@ export function KnowledgeGraphFullscreen({
   searchSlot?: React.ReactNode;
   /** compact kind legend, rendered bottom-left */
   legendSlot?: React.ReactNode;
+  /** the snapshot line and its Refresh control, rendered top-right */
+  statusSlot?: React.ReactNode;
   onNavDept: (teamId: string) => void;
   onBack: () => void;
   children: React.ReactNode;
@@ -41,6 +43,32 @@ export function KnowledgeGraphFullscreen({
   const [mounted, setMounted] = useState(false);
   useEffect(() => setMounted(true), []);
   const hasDetail = !!(toolWiki || extraDetail);
+  /**
+   * How the right-edge chrome gets out of the detail rail's way (issue #1307).
+   *
+   * The rail is an absolute overlay on purpose — resizing the canvas under it
+   * reflowed the graph on every open and close, which is the glitch the
+   * comment on the `<aside>` below is about. So the canvas keeps its size and
+   * the two controls that live on the right edge move instead: `right-2` is
+   * inside the 300px rail, and the rail is `z-30`, so without this they are
+   * both covered *and* unclickable rather than merely obscured.
+   *
+   * Above 820px the rail is that 300px column, and the offset is its width
+   * plus the inset the control already had. At or below it the rail is a
+   * bottom sheet (`max-h-[62vh]`, anchored bottom) — the right edge is clear
+   * again, so the offset is reverted and the paddles rise into the band the
+   * sheet leaves instead of staying centred underneath it.
+   */
+  const clearOfRail = hasDetail ? 'right-[316px] max-[820px]:right-2' : 'right-2';
+  /**
+   * Mid-height normally; in the band above the bottom sheet when there is one.
+   *
+   * The sheet is `max-h-[62vh]` anchored to the bottom, so its top edge sits at
+   * 38vh and a paddle centred at 50vh is underneath it. 19vh is the middle of
+   * what is left. Only applies at or below 820px, because that is the only
+   * width where the rail becomes a sheet.
+   */
+  const paddleTop = hasDetail ? 'top-1/2 max-[820px]:top-[19vh]' : 'top-1/2';
   const idx = deptList.findIndex((d) => d.teamId === currentTeamId);
   const step = (dir: number) => {
     if (deptList.length === 0) return;
@@ -80,46 +108,74 @@ export function KnowledgeGraphFullscreen({
         {/* vault search — top-left while the Notes core is open */}
         {searchSlot && <div className="absolute left-5 top-5 z-10">{searchSlot}</div>}
 
-        {/* pillar selector — compact, TOP-LEFT: convenient, not in
-            the graph's way): current pillar + one dot per pillar to jump */}
+        {/* pillar selector — compact, TOP-LEFT: convenient, not in the
+            graph's way. One named chip per desk (issue #1309).
+
+            It used to be three 10px dots at 50% opacity under the words "Pick
+            a pillar", and the names existed only in each dot's `title` — so
+            the control that exists to choose a desk refused to say which desk
+            was which, while the graph named all three in their own colours a
+            few inches away. You had to click a blind dot to learn what it was.
+
+            The chips wrap rather than scroll or truncate the row: a company
+            with ten desks gets three short lines in the corner, which is a
+            legible answer, where a clipped row is not. The colour is the same
+            one the desk's node and label carry, so the chip and the pillar are
+            visibly the same thing. */}
         {!coreOpen && (
-          <div className="absolute left-5 top-5 z-20 flex items-center gap-2.5 rounded-sm-t border border-os-border-strong bg-os-bg/85 px-2.5 py-1.5 backdrop-blur">
-            <div className="flex flex-col">
-              <span
-                className="max-w-[150px] truncate text-xs font-bold leading-tight transition-colors duration-300"
-                style={currentDept ? { color: currentDept.color } : undefined}
-              >
-                {currentDept?.name ?? 'Pick a pillar'}
-              </span>
-              <span className="font-mono text-3xs uppercase tracking-[0.14em] text-os-dim">
-                {idx >= 0 ? `${idx + 1} / ${deptList.length}` : `${deptList.length} pillars`}
-              </span>
-            </div>
-            <div className="flex items-center gap-0.5 border-l border-os-border pl-2">
-              {deptList.map((d) => {
-                const active = d.teamId === currentTeamId;
-                return (
-                  <button
-                    key={d.teamId}
-                    onClick={() => onNavDept(d.teamId)}
-                    title={d.name}
-                    aria-label={d.name}
-                    aria-current={active ? 'true' : undefined}
-                    className="group grid h-6 w-5 place-items-center"
-                  >
-                    <span
-                      className={`rounded-full transition-all duration-200 group-hover:scale-125 ${
-                        active ? 'h-3 w-3' : 'h-2.5 w-2.5 opacity-50 group-hover:opacity-100'
+          <div className="absolute left-5 top-5 z-20 flex max-w-[min(34rem,45vw)] flex-col gap-1 rounded-sm-t border border-os-border-strong bg-os-bg/85 px-2.5 py-1.5 backdrop-blur">
+            <span className="font-mono text-3xs uppercase tracking-[0.14em] text-os-dim">
+              {/* Names the group rather than instructing. "Pick a pillar" was
+                  an imperative with no visible object, and at zero desks it
+                  asked for something the page made impossible. */}
+              {deptList.length > 0 ? 'Pillars' : 'No desks yet'}
+            </span>
+            {deptList.length > 0 && (
+              <div className="flex flex-wrap items-center gap-x-1 gap-y-0.5">
+                {deptList.map((d) => {
+                  const active = d.teamId === currentTeamId;
+                  return (
+                    <button
+                      key={d.teamId}
+                      onClick={() => onNavDept(d.teamId)}
+                      title={`${d.name} — bring this pillar forward`}
+                      aria-current={active ? 'true' : undefined}
+                      className={`flex items-center gap-1.5 rounded-sm-t px-1.5 py-0.5 text-2xs leading-tight transition-colors duration-200 ease-standard hover:bg-os-surface hover:text-os-text ${
+                        active ? 'font-bold' : 'text-os-muted'
                       }`}
-                      style={{
-                        background: active ? d.color : 'var(--text-3)',
-                        boxShadow: active ? `0 0 8px ${d.color}` : undefined,
-                      }}
-                    />
-                  </button>
-                );
-              })}
-            </div>
+                      style={active ? { color: d.color } : undefined}
+                    >
+                      <span
+                        aria-hidden
+                        className={`h-2 w-2 shrink-0 rounded-full transition-all duration-200 ${
+                          active ? '' : 'opacity-60'
+                        }`}
+                        style={{
+                          background: d.color,
+                          boxShadow: active ? `0 0 8px ${d.color}` : undefined,
+                        }}
+                      />
+                      <span className="max-w-[12rem] truncate">{d.name}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* the snapshot line — top-right, clear of the detail rail (issue
+            #1307). `z-40` so it stays above the rail even when the offset
+            above puts it beside rather than behind it, and `top-5`/`right-5`
+            so it sits on the same 20px inset as the pillar selector and the
+            legend rather than the 12px one it used to carry alone. */}
+        {statusSlot && (
+          <div
+            className={`absolute top-5 z-40 flex flex-col items-end gap-1.5 transition-[right] duration-200 ease-standard ${
+              hasDetail ? 'right-[316px] max-[820px]:right-5' : 'right-5'
+            }`}
+          >
+            {statusSlot}
           </div>
         )}
 
@@ -128,14 +184,16 @@ export function KnowledgeGraphFullscreen({
 
         {/* side paddles: slim, hugging the canvas edges at mid-height — you
             turn the wheel from where you're already looking, never the top.
-            The right paddle steps aside when the detail panel is open. */}
+            The right paddle steps aside when the detail panel is open — see
+            `clearOfRail`, which is what finally made that sentence true
+            (issue #1307). */}
         {!coreOpen && (
           <>
             <button
               onClick={() => step(-1)}
               aria-label="Previous department"
               title="Previous pillar (←)"
-              className="absolute left-2 top-1/2 z-20 flex h-32 w-12 -translate-y-1/2 items-center justify-center rounded-sm-t border border-os-border bg-os-bg/70 text-os-muted backdrop-blur transition-colors hover:border-os-border-strong hover:text-os-text"
+              className={`absolute left-2 z-40 flex h-32 w-12 -translate-y-1/2 items-center justify-center rounded-sm-t border border-os-border bg-os-bg/70 text-os-muted backdrop-blur transition-all duration-200 ease-standard hover:border-os-border-strong hover:text-os-text ${paddleTop}`}
             >
               <ChevronLeft className="h-7 w-7" />
             </button>
@@ -143,7 +201,7 @@ export function KnowledgeGraphFullscreen({
               onClick={() => step(1)}
               aria-label="Next department"
               title="Next pillar (→)"
-              className="absolute right-2 top-1/2 z-20 flex h-32 w-12 -translate-y-1/2 items-center justify-center rounded-sm-t border border-os-border bg-os-bg/70 text-os-muted backdrop-blur transition-colors hover:border-os-border-strong hover:text-os-text"
+              className={`absolute z-40 flex h-32 w-12 -translate-y-1/2 items-center justify-center rounded-sm-t border border-os-border bg-os-bg/70 text-os-muted backdrop-blur transition-all duration-200 ease-standard hover:border-os-border-strong hover:text-os-text ${clearOfRail} ${paddleTop}`}
             >
               <ChevronRight className="h-7 w-7" />
             </button>

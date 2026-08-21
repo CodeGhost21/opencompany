@@ -82,6 +82,8 @@ async fn main() -> anyhow::Result<()> {
 
     let manifest: CompanyManifest = toml::from_str(MANIFEST)?;
     let record = CompanyRecord {
+        overlay_retired_agents: Vec::new(),
+        overlay_agent_edits: Vec::new(),
         id: CompanyId::new("demo"),
         manifest,
         ledger: Vec::new(),
@@ -106,6 +108,7 @@ async fn main() -> anyhow::Result<()> {
         ledger_registry: Default::default(),
         provider: Arc::new(HostedProvider::new(cfg)),
         provider_slug: "managed".to_string(),
+        serves: None,
         context: Arc::new(FsContextStore::new(dir.path())),
         store: Arc::new(FsCompanyStore::new(dir.path())),
         meter: Some(meter.clone()),

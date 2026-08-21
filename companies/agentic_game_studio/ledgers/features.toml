@@ -1,0 +1,103 @@
+# Game features: what is being built, what state it is playable in, and what was
+# cut.
+#
+# A game is not a product with a backlog; it is a set of systems that only make
+# sense together, and the decision that matters most is what gets cut. A board
+# records what is being worked on. This records what is *in the game*, what is
+# in but not fun yet, and — the row nobody keeps and everybody needs — what was
+# cut and why, because the same feature gets proposed again every project.
+
+title = "Features"
+purpose = """
+Every feature in this game: what state it is actually playable in, who owns it, \
+and what has been cut. Read it before proposing anything — a cut feature's \
+reason is the cheapest design lesson this studio owns.\
+"""
+written_by = "`record_entry` to add or advance a feature, `close_entry` when it ships or is cut"
+checks = ["required-field", "known-status", "closed-needs-reason"]
+
+[[field]]
+name = "id"
+role = "id"
+required = true
+
+[[field]]
+name = "feature"
+role = "title"
+required = true
+description = "What the player does, not what the system is called internally."
+
+[[field]]
+name = "status"
+role = "status"
+required = true
+
+[[field]]
+name = "pillar"
+role = "prose"
+description = "Which design pillar it serves. A feature serving none is the first candidate for cutting."
+
+[[field]]
+name = "playable"
+role = "prose"
+description = "What actually works right now, honestly. \"In\" and \"fun\" are different states and conflating them is how a game slips."
+
+[[field]]
+name = "owner"
+role = "owner"
+
+[[field]]
+name = "depends_on"
+role = "refs"
+description = "Features this one needs. Games fail at the seams between systems, not inside them."
+
+[[field]]
+name = "reason"
+role = "prose"
+description = "Why it closed — shipped, or cut and why. Required when it closes."
+
+[[field]]
+name = "refs"
+role = "refs"
+
+[[status]]
+name = "proposed"
+
+[[status]]
+name = "prototyping"
+aliases = ["in_but_rough"]
+
+[[status]]
+name = "polished"
+
+[[status]]
+name = "shipped"
+closed = true
+needs_reason = true
+
+[[status]]
+name = "cut"
+closed = true
+needs_reason = true
+
+[[section]]
+heading = "In the build"
+blurb = "Playable now, at whatever quality `playable` honestly says. \"In\" is not \"fun\"."
+statuses = ["prototyping", "polished"]
+order = "recent"
+
+[[section]]
+heading = "In progress"
+blurb = "Proposed or prototyping. Each should name the pillar it serves."
+statuses = ["proposed", "prototyping"]
+order = "recent"
+
+[[section]]
+heading = "Closed"
+blurb = """
+Shipped or cut, each with the reason. The cut rows are the valuable half: the \
+same feature is proposed again every project, and the reason it did not work \
+last time is the cheapest design lesson this studio owns.\
+"""
+statuses = ["shipped", "cut"]
+cap = 20

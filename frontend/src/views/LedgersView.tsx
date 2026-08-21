@@ -44,10 +44,13 @@
 // plan, discussion and attempts this screen does not try to reproduce.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useHashFlag } from "@/hooks/use-hash-flag";
+import { DeclareListWizard } from "@/views/company/DeclareListWizard";
 import {
   AlertTriangle,
-  BookText,
+  Check,
   CheckCircle2,
+  ChevronDown,
   FileText,
   Columns3,
   Loader2,
@@ -66,31 +69,46 @@ import type { ApprovalSummary } from "@/api/types";
 import { CreateTaskDialog } from "@/views/CreateTaskDialog";
 import { LedgerBoard } from "@/views/LedgerBoard";
 import { TaskItem } from "@/views/TaskCard";
-import { BOARD_LEDGER, columnsOf, labelFor } from "@/lib/board-columns";
+import {
+  BOARD_LEDGER,
+  BOARD_WORKING,
+  columnsOf,
+  labelFor,
+} from "@/lib/board-columns";
 import { taskApprovalBlock } from "@/lib/task-approvals";
 import {
   byline,
   composableFields,
-  defineLedger,
+  composeDialogDescription,
+  composeDialogTitle,
   deleteEntry,
+  EVERY_STATUS,
+  filteredEmptyNotice,
   isClosingStatus,
   isWritable,
-  listLedgers,
   readLedger,
   recordEntry,
   renderedLedger,
-  retireLedger,
   statusField,
+  statusFilterLabel,
   statusNeedsReason,
   type LedgerEntry,
   type LedgerRead,
   type LedgerSummary,
 } from "@/api/ledgers";
+import { inlineCode } from "@/lib/inline-code";
 import { Markdown } from "@/components/markdown";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import {
   Dialog,
   DialogContent,
@@ -115,9 +133,27 @@ import { cn } from "@/lib/utils";
 interface Props {
   client: OpenCompanyClient;
   company: string | null;
-  /** The ledger named in `#/ledgers/<slug>`, when the address carries one. */
+  /**
+   * Every list this company holds, read once by `app-shell.tsx`'s
+   * `useLedgerNav` and shared with the sidebar's own rows (issue #1284) —
+   * this screen no longer reads `listLedgers()` on its own.
+   */
+  ledgers: LedgerSummary[];
+  /** Whether `ledgers`'s first read is still in flight. */
+  ledgersLoading: boolean;
+  /** How many more lists this company may declare (`useLedgerNav`). */
+  remaining: number;
+  /** The list named in `#/ledgers/<slug>`, when the address carries one. */
   sub?: string | null;
-  /** Navigates to `#/ledgers/<slug>`, so a ledger survives a refresh. */
+  /**
+   * Navigates to `#/ledgers/<slug>`.
+   *
+   * Only used for the one case this screen still resolves on its own: a bare
+   * `#/ledgers` (a hand-typed or bookmarked address with no slug) lands on the
+   * first list rather than nothing, since there is no in-page picker left to
+   * choose one from (issue #1284 removed it — every list is a sidebar row
+   * now). Absent, this falls back to rendering nothing rather than guessing.
+   */
   onOpenLedger?: (slug: string | null) => void;
   /**
    * Opens a task card's detail screen (`#/tasks/<id>`).
@@ -158,7 +194,44 @@ interface Props {
   now?: number;
   /** Opens the Approvals page filtered to one card (issue #883). */
   onReviewApprovals?: (taskId: string) => void;
+  /**
+   * Re-reads the shared list (`useLedgerNav.refresh`) — called after the
+   * switcher's in-place wizard declares a new one, so it shows up in the
+   * menu (and Manage Lists, which reads the same instance) with no reload.
+   */
+  onListsChanged?: () => Promise<void>;
 }
+
+/**
+ * The reserved `sub` segment for Manage Lists (issue #1284): `#/ledgers/manage`,
+ * checked by `app-shell.tsx` *before* it ever mounts this component, not
+ * inside it — `LedgersView`'s own hooks read and write real list rows keyed
+ * on `sub`, and running that machinery against a slug that names no list
+ * would be all cost and no ledger. See the doc comment on `MANAGE_SEGMENT`'s
+ * use in `app-shell.tsx`.
+ *
+ * Cheaply reserved the same way `CompanyView.DESKS_SEGMENT` is: a company
+ * could in principle declare a list whose slug collides with it, which is why
+ * every caller that derives a slug for a *new* list (`DeclareListWizard`)
+ * excludes this word (and `NEW_SEGMENT` below) from what it will derive —
+ * see `RESERVED_SEGMENTS`.
+ */
+export const MANAGE_SEGMENT = "manage";
+
+/**
+ * The reserved query flag for the in-place declare wizard (issue #1284):
+ * `#/ledgers/<slug>?new`. Unlike `MANAGE_SEGMENT` this never reaches the
+ * router at all — `useHashView`'s segment parsing strips everything from `?`
+ * onward — so it coexists with whichever list is on screen underneath the
+ * wizard rather than replacing it. See `hooks/use-hash-flag.ts`.
+ */
+export const NEW_LIST_FLAG = "new";
+
+/** Slugs a declared list may not take — reserved for routing, not data. */
+export const RESERVED_SEGMENTS: readonly string[] = [
+  MANAGE_SEGMENT,
+  NEW_LIST_FLAG,
+];
 
 /**
  * A stable empty default for `approvals`.
@@ -181,6 +254,9 @@ interface Composing {
 export function LedgersView({
   client,
   company,
+  ledgers,
+  ledgersLoading,
+  remaining,
   sub,
   onOpenLedger,
   onOpenCard,
@@ -188,21 +264,21 @@ export function LedgersView({
   approvals = EMPTY_APPROVALS,
   now,
   onReviewApprovals,
+  onListsChanged,
 }: Props) {
-  const [ledgers, setLedgers] = useState<LedgerSummary[]>([]);
-  const [faults, setFaults] = useState<string[]>([]);
-  const [remaining, setRemaining] = useState(0);
-  const [selected, setSelected] = useState<string | null>(sub ?? null);
+  // The declare wizard, opened in place over whatever list is already on
+  // screen (issue #1284): riding the hash's query suffix rather than plain
+  // `useState` is what makes the browser Back button close it, instead of
+  // bouncing two levels out past both the wizard and Manage Lists.
+  const [declaring, setDeclaring] = useHashFlag(NEW_LIST_FLAG);
   const [read, setRead] = useState<LedgerRead | null>(null);
-  const [loading, setLoading] = useState(true);
   const [reading, setReading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
-  const [statusFilter, setStatusFilter] = useState("all");
+  const [statusFilter, setStatusFilter] = useState(EVERY_STATUS);
   const [composing, setComposing] = useState<Composing | null>(null);
   const [saving, setSaving] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState<LedgerEntry | null>(null);
-  const [declaring, setDeclaring] = useState(false);
   const [rendered, setRendered] = useState<string | null>(null);
   /**
    * Columns or rows.
@@ -237,9 +313,20 @@ export function LedgersView({
   const [tasks, setTasks] = useState<Task[]>([]);
 
   const ledger = useMemo(
-    () => ledgers.find((held) => held.slug === selected) ?? null,
-    [ledgers, selected],
+    () => (sub ? (ledgers.find((held) => held.slug === sub) ?? null) : null),
+    [ledgers, sub],
   );
+
+  // A bare `#/ledgers` (no slug — the nav row's own address, a hand-typed
+  // one, or a bookmark) lands on Tasks, not "whichever list happened to load
+  // first" — Tasks is the hero content this screen defaults to (issue
+  // #1284), and the switcher on the title is what reaches everything else.
+  useEffect(() => {
+    if (!sub && !ledgersLoading && ledgers.length > 0) {
+      const board = ledgers.find((held) => held.slug === BOARD_LEDGER);
+      onOpenLedger?.(board?.slug ?? ledgers[0].slug);
+    }
+  }, [sub, ledgersLoading, ledgers, onOpenLedger]);
 
   /** The task board, as opposed to a ledger a company declared. */
   const isBoard = ledger?.source === "native" && ledger.slug === BOARD_LEDGER;
@@ -249,39 +336,39 @@ export function LedgersView({
     [tasks],
   );
 
+  /**
+   * Ids the compose dialog can currently confirm exist (issue #1264).
+   *
+   * `read.entries` is server-filtered by the search box and status filter, so
+   * this can under-report — a row hidden by the current filter or truncated
+   * past the fetched page reads as "does not exist" here. Accepted: this is a
+   * display-copy fix for the dialog title, not a data-fetching change, and the
+   * common case (a brand-new row's id typed for the first time) never matches
+   * anything anyway.
+   */
+  const existingIds = useMemo(
+    () => new Set((read?.entries ?? []).map((entry) => entry.id)),
+    [read],
+  );
+
   /** The clock the "blocked since" labels measure against (issue #883). */
   const clock = now ?? Date.now();
 
-  const refreshList = useCallback(async () => {
-    if (!company) return;
-    try {
-      const list = await listLedgers(client, company);
-      setLedgers(list.ledgers);
-      setFaults(list.faults ?? []);
-      setRemaining(list.remaining);
-      setError(null);
-      // Land somewhere real: an address naming a ledger that has since been
-      // retired should show the first one rather than an empty screen with no
-      // explanation.
-      setSelected((current) => {
-        if (current && list.ledgers.some((held) => held.slug === current)) {
-          return current;
-        }
-        return list.ledgers[0]?.slug ?? null;
-      });
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setLoading(false);
-    }
-  }, [client, company]);
+  /**
+   * Why this ledger is showing nothing, when a filter is the reason (#1217).
+   * `null` when nothing is filtering, which is the only case where "Nothing
+   * recorded here yet" is a true sentence.
+   */
+  const emptyNotice = filteredEmptyNotice(ledger, query, statusFilter);
 
-  useEffect(() => {
-    void refreshList();
-  }, [refreshList]);
+  /** Put the ledger back to showing everything it holds. */
+  const clearFilters = useCallback(() => {
+    setQuery("");
+    setStatusFilter(EVERY_STATUS);
+  }, []);
 
   /**
-   * Re-reads the open ledger.
+   * Re-reads the open list.
    *
    * `quiet` suppresses the "Reading…" line, and exists for the re-reads the
    * operator did not ask for — the ones an SSE event triggers. Flashing a
@@ -290,15 +377,15 @@ export function LedgersView({
    */
   const refreshRead = useCallback(
     async (quiet = false) => {
-      if (!company || !selected) {
+      if (!company || !sub) {
         setRead(null);
         return;
       }
       if (!quiet) setReading(true);
       try {
-        const next = await readLedger(client, company, selected, {
+        const next = await readLedger(client, company, sub, {
           q: query.trim() || undefined,
-          status: statusFilter === "all" ? undefined : statusFilter,
+          status: statusFilter === EVERY_STATUS ? undefined : statusFilter,
           limit: 100,
         });
         setRead(next);
@@ -309,7 +396,7 @@ export function LedgersView({
         if (!quiet) setReading(false);
       }
     },
-    [client, company, selected, query, statusFilter],
+    [client, company, sub, query, statusFilter],
   );
 
   useEffect(() => {
@@ -358,35 +445,15 @@ export function LedgersView({
     void refreshTasks();
   }, [taskEventTick, refreshRead, refreshTasks]);
 
-  /**
-   * Follow the address when it names a different ledger.
-   *
-   * `selected` seeds from `sub` and used to stop there, so a `#/ledgers/<slug>`
-   * that arrived *after* mount — the Back button, a hand-edited address, a link
-   * from elsewhere in the console — changed the URL and nothing else. That was
-   * survivable while every route into this screen mounted it fresh. It stopped
-   * being survivable when `#/tasks` began rewriting to `#/ledgers/tasks` (issue
-   * #1140): an operator reading `goals` who followed an old board link would
-   * have watched the address change to the board and the screen stay on goals.
-   *
-   * A `sub` of `null` (bare `#/ledgers`) deliberately leaves the selection
-   * alone: it names no ledger, so there is nothing to follow it to.
-   */
-  useEffect(() => {
-    if (sub) setSelected(sub);
-  }, [sub]);
-
-  // The status filter is per ledger, so switching ledgers must clear it —
-  // otherwise the new ledger reads as empty under a filter it does not declare.
+  // The status filter is per list, so switching lists must clear it —
+  // otherwise the new list reads as empty under a filter it does not declare.
+  // `ledger` is derived straight from `sub` (no local "selected" state to
+  // follow it any more — issue #1284 removed the in-page picker that used to
+  // own that), so this keys on `sub` directly.
   useEffect(() => {
     setStatusFilter("all");
     setRendered(null);
-  }, [selected]);
-
-  const openLedger = (slug: string) => {
-    setSelected(slug);
-    onOpenLedger?.(slug);
-  };
+  }, [sub]);
 
   const save = async () => {
     if (!company || !ledger || !composing) return;
@@ -403,7 +470,7 @@ export function LedgersView({
         status: composing.status || undefined,
       });
       setComposing(null);
-      await Promise.all([refreshRead(), refreshList()]);
+      await refreshRead();
       toast.success(`Recorded ${id}.`);
     } catch (e) {
       // The host's refusals are written to be read — an unknown status names
@@ -472,9 +539,14 @@ export function LedgersView({
     try {
       if (ledger.source === "native") {
         await patchTask(client, company, entry.id, { column: status });
-        if (status === "in_progress") {
+        // `working` is the phase word the host resolves to `in_progress`, which
+        // is what dispatches (issue #1512). The stage the card was in — paused,
+        // or never started — comes off the `Task` record rather than off the
+        // row's status, which is now the phase and therefore says nothing about
+        // which of the two happened.
+        if (status === BOARD_WORKING) {
           toast.success(
-            was === "paused"
+            taskById.get(entry.id)?.stage === "paused"
               ? "Resumed — the assignee is working on it."
               : "Dispatched — the assignee is working on it.",
           );
@@ -492,12 +564,36 @@ export function LedgersView({
           status,
         });
       }
-      await Promise.all([refreshRead(), refreshList(), refreshTasks()]);
+      await Promise.all([refreshRead(), refreshTasks()]);
     } catch (e) {
       restage(was);
       const label = labelFor(columnsOf(ledger), status);
       toast.error(`Could not move "${entry.title || entry.id}" to ${label}.`, {
-        description: e instanceof Error ? e.message : "the host refused the move",
+        description:
+          e instanceof Error ? e.message : "the host refused the move",
+      });
+    }
+  };
+
+  /**
+   * Re-dispatch a paused card (issue #1512).
+   *
+   * Not `move`, which is right for a drag and wrong here: a paused card is
+   * already in the `working` phase, so `move` would see the row's status
+   * unchanged and return without doing anything. The gesture is not "put this
+   * in a different column" — it is "run it again", and the write that means
+   * that is the same PATCH a drop into Working sends.
+   */
+  const resume = async (entry: LedgerEntry) => {
+    if (!company || !ledger) return;
+    try {
+      await patchTask(client, company, entry.id, { column: BOARD_WORKING });
+      toast.success("Resumed — the assignee is working on it.");
+      await Promise.all([refreshRead(), refreshTasks()]);
+    } catch (e) {
+      toast.error(`Could not resume "${entry.title || entry.id}".`, {
+        description:
+          e instanceof Error ? e.message : "the host refused the move",
       });
     }
   };
@@ -507,19 +603,8 @@ export function LedgersView({
     try {
       await deleteEntry(client, company, ledger.slug, confirmDelete.id);
       setConfirmDelete(null);
-      await Promise.all([refreshRead(), refreshList()]);
+      await refreshRead();
       toast.success(`Deleted ${confirmDelete.id}.`);
-    } catch (e) {
-      toast.error(e instanceof Error ? e.message : String(e));
-    }
-  };
-
-  const retire = async (slug: string) => {
-    if (!company) return;
-    try {
-      await retireLedger(client, company, slug);
-      await refreshList();
-      toast.success(`Retired ${slug}. Its rows were kept.`);
     } catch (e) {
       toast.error(e instanceof Error ? e.message : String(e));
     }
@@ -537,12 +622,16 @@ export function LedgersView({
   if (!company) {
     return (
       <div className="p-6 text-sm text-muted-foreground">
-        Pick a company to see its ledgers.
+        Pick a company to see its lists.
       </div>
     );
   }
 
-  if (loading) {
+  // Loading covers two different waits — this screen's own row read, and (only
+  // while no `ledger` has resolved yet) the shared list read `app-shell.tsx`
+  // owns — so a fresh `#/ledgers/<slug>` load shows the same skeleton it always
+  // did rather than a flash of "not found" before the list catches up.
+  if ((ledgersLoading && !ledger) || (reading && !read)) {
     return (
       <div className="space-y-3 p-6">
         <Skeleton className="h-8 w-48" />
@@ -553,43 +642,182 @@ export function LedgersView({
 
   return (
     <div className="flex h-full min-h-0 flex-col gap-4 p-6">
-      <header className="flex flex-wrap items-center gap-3">
-        <div className="flex-1 min-w-[16rem]">
-          <h1 className="text-xl font-semibold">Ledgers</h1>
-          <p className="text-sm text-muted-foreground">
-            What this company records and can look up again. Every ledger writes
-            a file into <code>derived/</code> in the workspace, which nothing
-            edits by hand — the rows here are the source.
-          </p>
+      <header className="flex flex-wrap items-start gap-3">
+        <div className="min-w-[16rem] flex-1 space-y-1">
+          {/* The page's own title is the switcher (issue #1284): no new
+              element added, one click to any other list, and the menu
+              includes where you already are rather than only offering
+              somewhere else to go. Still a real `<h1>` — the interactive
+              affordance is the `<button>` inside it, not the heading itself,
+              so a screen reader still announces "heading level 1: Goals"
+              rather than losing the page's landmark structure to a button. */}
+          {/* A flex row, because the trigger inside is a flex button: as
+              ordinary inline content the count badge wrapped to a line of its
+              own and cost back the space this header just saved. */}
+          <h1 className="flex flex-wrap items-center gap-2 text-xl font-semibold">
+            <DropdownMenu>
+              <DropdownMenuTrigger
+                render={
+                  <button
+                    type="button"
+                    data-testid="list-switcher-trigger"
+                    className="group -ml-1 flex items-center gap-1 rounded-md px-1 py-0.5 outline-none hover:bg-accent/50 focus-visible:ring-2 focus-visible:ring-ring"
+                  >
+                    {ledger?.title ?? "Not found"}
+                    <ChevronDown className="size-4 shrink-0 text-muted-foreground transition-transform group-data-[popup-open]:rotate-180" />
+                  </button>
+                }
+              />
+              <DropdownMenuContent
+                align="start"
+                className="max-h-[60vh] w-56 overflow-y-auto"
+              >
+                {ledgers.map((held) => (
+                  <DropdownMenuItem
+                    key={held.slug}
+                    data-testid={`list-switcher-${held.slug}`}
+                    onClick={() => onOpenLedger?.(held.slug)}
+                  >
+                    <Check
+                      className={cn(
+                        "size-4",
+                        held.slug === ledger?.slug
+                          ? "opacity-100"
+                          : "opacity-0",
+                      )}
+                    />
+                    <span className="flex-1 truncate">{held.title}</span>
+                    {/* Always rendered, zero included (issue #1284): a count
+                        that only shows up for a positive number reads as "no
+                        count information" for the zero case, not as "zero" —
+                        the same ambiguity `filteredEmptyNotice` exists to
+                        rule out elsewhere in this file. */}
+                    <span className="text-xs text-muted-foreground">
+                      {held.open}
+                    </span>
+                  </DropdownMenuItem>
+                ))}
+                <DropdownMenuSeparator />
+                <DropdownMenuItem
+                  data-testid="list-switcher-new"
+                  disabled={remaining <= 0}
+                  title={
+                    remaining <= 0
+                      ? "This company is at the list cap. Retire one nothing reads first."
+                      : undefined
+                  }
+                  onClick={() => {
+                    if (remaining > 0) setDeclaring(true);
+                  }}
+                >
+                  <Plus className="size-4" />
+                  New list
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  data-testid="list-switcher-manage"
+                  onClick={() => onOpenLedger?.(MANAGE_SEGMENT)}
+                >
+                  Manage lists
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+            {/* How much is live here, beside the name — the one fact about a
+                list that changes, and the one the switcher already shows for
+                every *other* list while saying nothing about the open one. */}
+            {ledger && (
+              <span
+                title={`${ledger.open} open`}
+                className="rounded-full bg-muted px-2 py-0.5 text-xs font-medium tabular-nums text-muted-foreground"
+              >
+                {ledger.open}
+              </span>
+            )}
+          </h1>
+          {!ledger && (
+            <p className="text-sm text-muted-foreground">
+              This list does not exist, or was retired. Pick another from the
+              title menu.
+            </p>
+          )}
+          {ledger && (
+            // The purpose lives in here now (issue #1349). It is a fixed
+            // sentence about the engine — "this ledger is written through the
+            // board, not with `record_entry`" — written for whoever declares a
+            // list, not for the operator working one, and it was holding two
+            // permanent lines above the board on the console's most-visited
+            // screen. Read once, then never again; a disclosure is what that
+            // shape of text is for.
+            <details className="text-xs text-muted-foreground">
+              <summary className="w-fit cursor-pointer select-none rounded px-1 py-0.5 hover:bg-accent/50 hover:text-foreground">
+                About this list
+              </summary>
+              <div className="mt-1 max-w-prose space-y-1 px-1">
+                <p>{inlineCode(ledger.purpose)}</p>
+                <p>
+                  Renders into <code>{ledger.derived}</code>
+                </p>
+                {!isWritable(ledger) && (
+                  <p className="flex items-start gap-1.5">
+                    <Lock className="mt-0.5 size-3 shrink-0" />
+                    <span>
+                      Rows here are opened elsewhere:{" "}
+                      {inlineCode(ledger.writtenBy)}. You can still move one
+                      between columns — that goes through the board, which is
+                      what makes it start work.
+                    </span>
+                  </p>
+                )}
+              </div>
+            </details>
+          )}
         </div>
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={() =>
-            void refreshList().then(() => {
+        <div className="flex shrink-0 items-center gap-2">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => {
               void refreshRead();
               // The board's cards are decorated from a second read, and this
               // button is the whole manual fallback on a screen with no timer.
               void refreshTasks();
-            })
-          }
-        >
-          <RefreshCw className="mr-2 size-4" />
-          Refresh
-        </Button>
-        <Button
-          size="sm"
-          onClick={() => setDeclaring(true)}
-          disabled={remaining <= 0}
-          title={
-            remaining <= 0
-              ? "This company is at the ledger cap. Retire one nothing reads first."
-              : undefined
-          }
-        >
-          <Plus className="mr-2 size-4" />
-          New ledger
-        </Button>
+            }}
+          >
+            <RefreshCw className="mr-2 size-4" />
+            Refresh
+          </Button>
+          {/* The primary action sits on the title row, not in the filter bar
+              below it (issue #1349). Down there it was the fourth of four
+              buttons in one flat row, at the same weight as a view toggle and
+              a file viewer — three different kinds of control, one of which
+              opens work and two of which change how you are looking at it. The
+              reference puts it here, beside the name and the count, and it is
+              right: this is the row about the list, that one is about the
+              view. */}
+          {ledger &&
+            (isWritable(ledger) ? (
+              <Button
+                size="sm"
+                onClick={() =>
+                  setComposing({
+                    id: "",
+                    fields: {},
+                    status: ledger.statuses[0]?.name ?? "",
+                    closing: false,
+                  })
+                }
+              >
+                <Plus className="mr-2 size-4" />
+                Record
+              </Button>
+            ) : (
+              ledger.slug === BOARD_LEDGER && (
+                <Button size="sm" onClick={() => setCreatingCard(true)}>
+                  <Plus className="mr-2 size-4" />
+                  Add task
+                </Button>
+              )
+            ))}
+        </div>
       </header>
 
       {error && (
@@ -599,81 +827,10 @@ export function LedgersView({
         </Alert>
       )}
 
-      {faults.length > 0 && (
-        <Alert>
-          <AlertTriangle className="size-4" />
-          <AlertDescription>
-            <p className="font-medium">
-              Some declarations could not be loaded:
-            </p>
-            <ul className="mt-1 list-disc pl-4">
-              {faults.map((fault) => (
-                <li key={fault}>{fault}</li>
-              ))}
-            </ul>
-          </AlertDescription>
-        </Alert>
-      )}
-
       <div className="flex min-h-0 flex-1 gap-4">
-        <nav className="w-64 shrink-0 space-y-1 overflow-y-auto">
-          {ledgers.map((held) => (
-            <button
-              key={held.slug}
-              type="button"
-              onClick={() => openLedger(held.slug)}
-              className={cn(
-                "flex w-full flex-col gap-0.5 rounded-md border px-3 py-2 text-left text-sm",
-                held.slug === selected
-                  ? "border-primary bg-accent"
-                  : "border-transparent hover:bg-accent/50",
-              )}
-            >
-              <span className="flex items-center gap-2 font-medium">
-                <BookText className="size-4 shrink-0" />
-                {held.title}
-                {!isWritable(held) && (
-                  <Lock
-                    className="size-3 text-muted-foreground"
-                    aria-label="written elsewhere"
-                  />
-                )}
-              </span>
-              <span className="text-xs text-muted-foreground">
-                {held.open} open · {held.closed} closed
-              </span>
-            </button>
-          ))}
-        </nav>
-
         <section className="flex min-h-0 min-w-0 flex-1 flex-col gap-3">
-          {!ledger ? (
-            <p className="text-sm text-muted-foreground">
-              This company has no ledgers yet.
-            </p>
-          ) : (
+          {!ledger ? null : (
             <>
-              <div className="space-y-1">
-                <h2 className="text-lg font-medium">{ledger.title}</h2>
-                <p className="text-sm text-muted-foreground">
-                  {ledger.purpose}
-                </p>
-                <p className="text-xs text-muted-foreground">
-                  Renders into <code>{ledger.derived}</code>
-                </p>
-              </div>
-
-              {!isWritable(ledger) && (
-                <Alert>
-                  <Lock className="size-4" />
-                  <AlertDescription>
-                    Rows here are opened elsewhere: {ledger.writtenBy}. You can
-                    still move one between columns — that goes through the board,
-                    which is what makes it start work.
-                  </AlertDescription>
-                </Alert>
-              )}
-
               <div className="flex flex-wrap items-center gap-2">
                 <div className="relative min-w-[12rem] flex-1">
                   <Search className="pointer-events-none absolute left-2 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
@@ -686,17 +843,26 @@ export function LedgersView({
                 </div>
                 <Select
                   value={statusFilter}
-                  onValueChange={(value) => setStatusFilter(value ?? "all")}
+                  onValueChange={(value) =>
+                    setStatusFilter(value ?? EVERY_STATUS)
+                  }
                 >
+                  {/* Explicit trigger text, for the reason issue #813 gave the
+                      destination picker its own: base-ui renders the stored
+                      value in the collapsed control unless told otherwise, so
+                      this read `all` while the list under it read "Every
+                      status", and a chosen board column read `in_progress`
+                      beside columns headed "In progress". */}
                   <SelectTrigger className="w-[12rem]">
-                    <SelectValue />
+                    <SelectValue>
+                      {statusFilterLabel(ledger, statusFilter)}
+                    </SelectValue>
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="all">Every status</SelectItem>
+                    <SelectItem value={EVERY_STATUS}>Every status</SelectItem>
                     {ledger.statuses.map((status) => (
                       <SelectItem key={status.name} value={status.name}>
-                        {status.name}
-                        {status.closed ? " (closed)" : ""}
+                        {statusFilterLabel(ledger, status.name)}
                       </SelectItem>
                     ))}
                   </SelectContent>
@@ -718,42 +884,20 @@ export function LedgersView({
                   )}
                   {mode === "board" ? "List" : "Board"}
                 </Button>
-                <Button variant="outline" size="sm" onClick={() => void showRendered()}>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => void showRendered()}
+                >
                   <FileText className="mr-2 size-4" />
                   Rendered file
                 </Button>
-                {isWritable(ledger) ? (
-                  <Button
-                    size="sm"
-                    onClick={() =>
-                      setComposing({
-                        id: "",
-                        fields: {},
-                        status: ledger.statuses[0]?.name ?? "",
-                        closing: false,
-                      })
-                    }
-                  >
-                    <Plus className="mr-2 size-4" />
-                    Record
-                  </Button>
-                ) : (
-                  ledger.slug === BOARD_LEDGER && (
-                    <Button size="sm" onClick={() => setCreatingCard(true)}>
-                      <Plus className="mr-2 size-4" />
-                      Add task
-                    </Button>
-                  )
-                )}
-                {!ledger.builtin && (
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={() => void retire(ledger.slug)}
-                  >
-                    Retire
-                  </Button>
-                )}
+                {/* The primary action moved up to the title row (issue
+                    #1349): this row is the view, that one is the list. */}
+                {/* Retiring a list moved to Manage Lists (issue #1284),
+                    reached from the Company page — the same place it is
+                    declared. This screen is about a list's rows now, never
+                    about whether the list itself continues to exist. */}
               </div>
 
               {reading && (
@@ -763,11 +907,31 @@ export function LedgersView({
                 </p>
               )}
 
-              {read && read.entries.length === 0 && !reading && (
-                <p className="text-sm text-muted-foreground">
-                  Nothing recorded here yet.
-                </p>
-              )}
+              {/* Issue #1217: zero rows back means "no matches" and "no rows"
+                  indistinguishably — the read is filtered server-side. The two
+                  are not the same claim, and saying the stronger one over a
+                  ledger the nav is counting 14 rows for is simply false. */}
+              {read &&
+                read.entries.length === 0 &&
+                !reading &&
+                (emptyNotice ? (
+                  <div
+                    className="flex flex-wrap items-center gap-2 text-sm text-muted-foreground"
+                    data-testid="ledger-filtered-empty"
+                  >
+                    <span>{emptyNotice}</span>
+                    <Button size="sm" variant="outline" onClick={clearFilters}>
+                      Clear filters
+                    </Button>
+                  </div>
+                ) : (
+                  <p
+                    className="text-sm text-muted-foreground"
+                    data-testid="ledger-empty"
+                  >
+                    Nothing recorded here yet.
+                  </p>
+                ))}
 
               {mode === "board" && read ? (
                 <BoardMode
@@ -776,7 +940,9 @@ export function LedgersView({
                   onMove={(entry, status) => void move(entry, status)}
                   // A drop on dead board pixels. Saying so is the whole fix:
                   // silence here is indistinguishable from a frozen app.
-                  onMiss={() => toast.error("Drop the card on a column to move it.")}
+                  onMiss={() =>
+                    toast.error("Drop the card on a column to move it.")
+                  }
                   onOpen={(entry) =>
                     ledger.source === "native" && onOpenCard
                       ? onOpenCard(entry.id)
@@ -789,14 +955,15 @@ export function LedgersView({
                   }
                   // The `Task` behind a native board row, when there is one.
                   // Absent for every declared ledger, whose rows are rows.
-                  taskFor={isBoard ? (entry) => taskById.get(entry.id) : undefined}
+                  taskFor={
+                    isBoard ? (entry) => taskById.get(entry.id) : undefined
+                  }
                   approvals={approvals}
                   now={clock}
-                  // Resume is a move, not a second write path: back into In
-                  // progress is what re-dispatches a paused card, and `move`
-                  // above already owns the optimistic write, the revert and the
-                  // words for both outcomes.
-                  onResume={(entry) => void move(entry, "in_progress")}
+                  // Resume has its own write since #1512: a paused card is
+                  // already in the `working` phase, so routing it through
+                  // `move` would be a no-op the operator could not see fail.
+                  onResume={(entry) => void resume(entry)}
                   onReview={onReviewApprovals}
                 />
               ) : (
@@ -841,12 +1008,34 @@ export function LedgersView({
                 </p>
               )}
 
-              {read?.faults?.map((fault) => (
-                <Alert key={fault}>
+              {/* One row, not one per fault (issue #1347).
+                  
+                  A ledger whose rows are written by agents produces faults in
+                  batches — a required field one pass forgot is missing from
+                  every row that pass wrote — so this was seven full-width
+                  alerts, 364px of the same sentence with a different id in it,
+                  stacked below the board and out-weighing the content they are
+                  about. The count is the whole headline; the ids are what you
+                  open when you go looking. */}
+              {read?.faults && read.faults.length > 0 && (
+                <Alert data-testid="ledger-faults">
                   <AlertTriangle className="size-4" />
-                  <AlertDescription>{fault}</AlertDescription>
+                  <AlertDescription>
+                    <details>
+                      <summary className="w-fit cursor-pointer select-none">
+                        {read.faults.length === 1
+                          ? "1 row could not be read"
+                          : `${read.faults.length} rows could not be read`}
+                      </summary>
+                      <ul className="mt-2 space-y-1">
+                        {read.faults.map((fault) => (
+                          <li key={fault}>{inlineCode(fault)}</li>
+                        ))}
+                      </ul>
+                    </details>
+                  </AlertDescription>
                 </Alert>
-              ))}
+              )}
             </>
           )}
         </section>
@@ -856,6 +1045,7 @@ export function LedgersView({
         <ComposeDialog
           ledger={ledger}
           composing={composing}
+          existingIds={existingIds}
           saving={saving}
           onChange={setComposing}
           onCancel={() => setComposing(null)}
@@ -888,25 +1078,6 @@ export function LedgersView({
         </Dialog>
       )}
 
-      {declaring && (
-        <DeclareDialog
-          remaining={remaining}
-          onCancel={() => setDeclaring(false)}
-          onDeclare={async (declaration) => {
-            if (!company) return;
-            try {
-              const created = await defineLedger(client, company, declaration);
-              setDeclaring(false);
-              await refreshList();
-              openLedger(created.slug);
-              toast.success(`Declared ${created.slug}.`);
-            } catch (e) {
-              toast.error(e instanceof Error ? e.message : String(e));
-            }
-          }}
-        />
-      )}
-
       {ledger && (
         <CreateTaskDialog
           open={creatingCard}
@@ -914,7 +1085,6 @@ export function LedgersView({
           onCreated={() => {
             setCreatingCard(false);
             void refreshRead();
-            void refreshList();
             // …and the `Task` behind the row that just appeared, or the new
             // card renders as a bare ledger row until something else re-reads.
             void refreshTasks();
@@ -924,9 +1094,25 @@ export function LedgersView({
         />
       )}
 
+      {declaring && company && (
+        <DeclareListWizard
+          client={client}
+          company={company}
+          existingSlugs={[...ledgers.map((l) => l.slug), ...RESERVED_SEGMENTS]}
+          remaining={remaining}
+          onCancel={() => setDeclaring(false)}
+          onCreated={async (created) => {
+            setDeclaring(false);
+            await onListsChanged?.();
+            toast.success(`Declared ${created.title}.`);
+            onOpenLedger?.(created.slug);
+          }}
+        />
+      )}
+
       {rendered !== null && ledger && (
         <Dialog open onOpenChange={() => setRendered(null)}>
-          <DialogContent className="max-h-[80vh] max-w-3xl overflow-y-auto">
+          <DialogContent className="max-h-[80vh] sm:max-w-3xl overflow-y-auto">
             <DialogHeader>
               <DialogTitle>{ledger.derived}</DialogTitle>
               <DialogDescription>
@@ -1157,6 +1343,7 @@ function EntryCard({
 function ComposeDialog({
   ledger,
   composing,
+  existingIds,
   saving,
   onChange,
   onCancel,
@@ -1164,6 +1351,7 @@ function ComposeDialog({
 }: {
   ledger: LedgerSummary;
   composing: Composing;
+  existingIds: ReadonlySet<string>;
   saving: boolean;
   onChange: (next: Composing) => void;
   onCancel: () => void;
@@ -1177,19 +1365,13 @@ function ComposeDialog({
 
   return (
     <Dialog open onOpenChange={onCancel}>
-      <DialogContent className="max-h-[85vh] max-w-2xl overflow-y-auto">
+      <DialogContent className="max-h-[85vh] sm:max-w-2xl overflow-y-auto">
         <DialogHeader>
           <DialogTitle>
-            {composing.closing
-              ? `Close ${composing.id}`
-              : composing.id
-                ? `Amend ${composing.id}`
-                : `New row on ${ledger.title}`}
+            {composeDialogTitle(ledger, composing, existingIds)}
           </DialogTitle>
           <DialogDescription>
-            {composing.id
-              ? "Only what you change is written; everything else on the row is left alone."
-              : "Give it a short, readable id — it is how anybody names this row later."}
+            {composeDialogDescription(composing, existingIds)}
           </DialogDescription>
         </DialogHeader>
 
@@ -1234,7 +1416,9 @@ function ComposeDialog({
               <Label htmlFor={`ledger-field-${field.name}`}>
                 {field.name}
                 {field.required && " *"}
-                {field.name === "reason" && needsReason && " — required to close"}
+                {field.name === "reason" &&
+                  needsReason &&
+                  " — required to close"}
               </Label>
               {field.role === "prose" ? (
                 <Textarea
@@ -1299,111 +1483,3 @@ function ComposeDialog({
     </Dialog>
   );
 }
-
-/**
- * Declaring a ledger by hand.
- *
- * A JSON editor rather than a wizard, deliberately: the declaration is small,
- * the field roles matter, and a wizard that produced a subset of what a
- * teammate's `define_ledger` can produce would leave the console unable to
- * express a ledger it can display. The starting document is a working example,
- * because the commonest mistake is not a syntax error — it is a ledger with no
- * closing status, which can never say why anything ended.
- */
-function DeclareDialog({
-  remaining,
-  onCancel,
-  onDeclare,
-}: {
-  remaining: number;
-  onCancel: () => void;
-  onDeclare: (declaration: unknown) => Promise<void>;
-}) {
-  const [text, setText] = useState(TEMPLATE);
-  const [invalid, setInvalid] = useState<string | null>(null);
-
-  const submit = async () => {
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(text);
-    } catch (e) {
-      setInvalid(e instanceof Error ? e.message : String(e));
-      return;
-    }
-    setInvalid(null);
-    await onDeclare(parsed);
-  };
-
-  return (
-    <Dialog open onOpenChange={onCancel}>
-      <DialogContent className="max-h-[85vh] max-w-2xl overflow-y-auto">
-        <DialogHeader>
-          <DialogTitle>Declare a ledger</DialogTitle>
-          <DialogDescription>
-            An axis this company will need to look up again. {remaining} more
-            can be declared. Mark the statuses that end a row{" "}
-            <code>closed</code>, and set <code>needs_reason</code> on those —
-            a row that closes without saying why is worth nothing later.
-          </DialogDescription>
-        </DialogHeader>
-        <Textarea
-          rows={20}
-          className="font-mono text-xs"
-          value={text}
-          onChange={(e) => setText(e.target.value)}
-        />
-        {invalid && (
-          <Alert variant="destructive">
-            <AlertTriangle className="size-4" />
-            <AlertDescription>{invalid}</AlertDescription>
-          </Alert>
-        )}
-        <DialogFooter>
-          <Button variant="ghost" onClick={onCancel}>
-            Cancel
-          </Button>
-          <Button onClick={() => void submit()}>Declare</Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-  );
-}
-
-const TEMPLATE = JSON.stringify(
-  {
-    slug: "customer-promises",
-    title: "Customer promises",
-    purpose:
-      "What we have told a customer we would do, and whether we did it. Read it before promising anything else to the same account.",
-    fields: [
-      { name: "id", role: "id" },
-      { name: "promise", role: "title", required: true },
-      { name: "status", role: "status", required: true },
-      { name: "customer", role: "owner" },
-      { name: "due", role: "date" },
-      { name: "detail", role: "prose" },
-      { name: "reason", role: "prose" },
-    ],
-    statuses: [
-      { name: "open" },
-      { name: "kept", closed: true, needs_reason: true },
-      { name: "broken", closed: true, needs_reason: true },
-    ],
-    sections: [
-      {
-        heading: "Outstanding",
-        blurb: "Promised and not yet met. Most recently updated first.",
-        statuses: ["open"],
-        order: "recent",
-      },
-      {
-        heading: "Settled",
-        blurb: "Kept or broken, each with the reason.",
-        statuses: ["kept", "broken"],
-      },
-    ],
-    checks: ["required-field", "known-status", "closed-needs-reason"],
-  },
-  null,
-  2,
-);

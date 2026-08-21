@@ -30,29 +30,91 @@ import {
 
 const CONTENT_HEIGHT = 4000;
 const VIEWPORT_HEIGHT = 800;
+/**
+ * How tall the *box* is right now (issue #1325).
+ *
+ * Mutable for the same reason `contentHeight` is, one level out: the composer
+ * below this pane grows with the draft and takes its height out of this
+ * scroller's `clientHeight`. The bug that models is entirely about the viewport
+ * shrinking while the content stands still, so the height has to be something a
+ * test can move.
+ */
+let viewportHeight = VIEWPORT_HEIGHT;
+/**
+ * Every live `ResizeObserver` callback, so a test can fire one.
+ *
+ * jsdom performs no layout and ships no `ResizeObserver` at all, so nothing
+ * would ever call these on their own — which is the same reason the geometry
+ * above is stubbed. The suite is asserting *which* anchoring call the component
+ * makes when its box changes, not that a browser would have noticed.
+ */
+let resizeCallbacks: Array<() => void> = [];
+
+class TestResizeObserver {
+  constructor(callback: () => void) {
+    resizeCallbacks.push(callback);
+  }
+  observe() {}
+  unobserve() {}
+  disconnect() {}
+}
+
+/** Shrink the pane by `px` and tell the component, as a browser would. */
+function shrinkViewport(px: number) {
+  viewportHeight -= px;
+  act(() => {
+    for (const fire of resizeCallbacks) fire();
+  });
+}
+/**
+ * How tall the transcript is *right now* (issue #1224).
+ *
+ * A cold load renders this component before the history exists, so the box is
+ * one screen tall and grows to the full transcript a beat later. The bug this
+ * models is entirely about that growth, so the height has to be something a
+ * test can move.
+ */
+let contentHeight = CONTENT_HEIGHT;
+/** The largest `scrollTop` the current transcript allows — i.e. the bottom. */
+const bottom = () => contentHeight - viewportHeight;
 /** Every `scrollTo` the component made, in order. */
 let calls: Array<{ top: number; behavior?: string }> = [];
 let scrollTop = 0;
 let container: HTMLDivElement;
 let root: Root;
+/** jsdom's `ResizeObserver` — there is none — so this puts `undefined` back. */
+let savedResizeObserver: typeof globalThis.ResizeObserver | undefined;
 
 /** What each stubbed property looked like before, so it can be put back. */
 const saved = new Map<string, PropertyDescriptor | undefined>();
 
 const STUBS: Record<string, PropertyDescriptor> = {
-  scrollHeight: { get: () => CONTENT_HEIGHT, configurable: true },
-  clientHeight: { get: () => VIEWPORT_HEIGHT, configurable: true },
+  scrollHeight: { get: () => contentHeight, configurable: true },
+  clientHeight: { get: () => viewportHeight, configurable: true },
   scrollTop: {
     get: () => scrollTop,
+    // Clamped, as a browser clamps it. This is not decoration: issue #1224 is
+    // entirely about `el.scrollTop = el.scrollHeight` landing somewhere other
+    // than the bottom because the box was one screen tall at the time, and an
+    // unclamped stub cannot express that at all — it would record 4000 on an
+    // 800px box and every assertion about "did the anchor work" would pass
+    // whether or not it did.
     set: (v: number) => {
-      scrollTop = v;
+      scrollTop = Math.max(0, Math.min(v, contentHeight - viewportHeight));
     },
     configurable: true,
   },
   scrollTo: {
+    // A smooth scroll is an *animation*: it does not move `scrollTop`
+    // synchronously, it eases toward the offset it captured over the following
+    // frames. Modelling that matters for issue #1224, where the transcript
+    // grows while such an animation is in flight — so the call is recorded and
+    // the position is deliberately left where it was. An instant scroll still
+    // lands immediately, as it does in a browser.
     value: (opts: { top: number; behavior?: string }) => {
       calls.push(opts);
-      scrollTop = opts.top;
+      if (opts.behavior === "smooth") return;
+      scrollTop = Math.max(0, Math.min(opts.top, contentHeight - viewportHeight));
     },
     configurable: true,
     writable: true,
@@ -96,22 +158,25 @@ function items(n: number, ch: Channel): TimelineItem[] {
     text: `line ${i}`,
     at: 1_700_000_000_000 + i * 1_000,
   }));
-  return buildTimelineItems(buildTimeline(messages, ch), []);
+  return buildTimelineItems(buildTimeline(messages, ch, []), []);
 }
 
 // `createElement` rather than JSX because the unit suite's vitest `include` is
 // `*.test.ts` — a `.tsx` file is silently not collected, which reads as a
 // passing suite.
-function render(ch: Channel, rows: TimelineItem[]) {
+function render(ch: Channel, rows: TimelineItem[], historyPending = false) {
   act(() => {
     root.render(
       createElement(MessageTimeline, {
         channel: ch,
         items: rows,
+        historyPending,
         openThreadId: null,
         typing: false,
         onOpenThread: () => {},
         onReact: () => {},
+        onDismissCard: () => {},
+        dismissingCardId: null,
       }),
     );
   });
@@ -129,6 +194,11 @@ beforeEach(() => {
   (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
   calls = [];
   scrollTop = 0;
+  contentHeight = CONTENT_HEIGHT;
+  viewportHeight = VIEWPORT_HEIGHT;
+  resizeCallbacks = [];
+  savedResizeObserver = globalThis.ResizeObserver;
+  (globalThis as unknown as { ResizeObserver: unknown }).ResizeObserver = TestResizeObserver;
   stubGeometry();
   container = document.createElement("div");
   document.body.appendChild(container);
@@ -139,6 +209,9 @@ afterEach(() => {
   act(() => root.unmount());
   container.remove();
   restoreGeometry();
+  // Put the global back rather than leaving a stub behind for whichever file
+  // this worker picks up next — the same rule `restoreGeometry` follows.
+  (globalThis as unknown as { ResizeObserver: unknown }).ResizeObserver = savedResizeObserver;
 });
 
 describe("channel arrival", () => {
@@ -147,7 +220,7 @@ describe("channel arrival", () => {
     render(ch, items(40, ch));
 
     // The jump is a direct `scrollTop` write, not an animated `scrollTo`.
-    expect(scrollTop).toBe(CONTENT_HEIGHT);
+    expect(scrollTop).toBe(bottom());
     expect(calls).toHaveLength(0);
   });
 
@@ -163,7 +236,7 @@ describe("channel arrival", () => {
     const next = channel("product-design");
     render(next, items(40, next));
 
-    expect(scrollTop).toBe(CONTENT_HEIGHT);
+    expect(scrollTop).toBe(bottom());
   });
 });
 
@@ -232,5 +305,230 @@ describe("growth while the channel is open", () => {
     render(ch, items(41, ch));
 
     expect(calls).toEqual([{ top: CONTENT_HEIGHT, behavior: "smooth" }]);
+  });
+});
+
+/**
+ * A cold load: the component mounts before the transcript exists (issue #1224).
+ *
+ * `AppShell` hydrates each channel's history asynchronously, so the first
+ * commit this component sees has no rows and a box one screen tall. The
+ * transcript appears about eighty milliseconds later. Traced in a real browser,
+ * the sequence was:
+ *
+ * ```
+ * t=66   top=0   sh=709   ch=709    empty — history still on the wire
+ * t=79   top=0   sh=750   ch=709    the channel intro; max scrollTop is now 41
+ * t=104  top=4   sh=750   ch=709    a smooth scrollTo is under way, target 41
+ * t=141  top=25  sh=4188  ch=709    history lands. The target is still 41.
+ * t=178  top=41  sh=4188  ch=709    3438px from the bottom, and stuck there.
+ * ```
+ *
+ * The steps below are that trace, in the units this harness works in.
+ */
+describe("a transcript that arrives after mount", () => {
+  /** The box before anything has hydrated: one screen, nothing to scroll. */
+  const EMPTY_HEIGHT = VIEWPORT_HEIGHT;
+  /** The channel intro renders before the transcript and grows the box a little. */
+  const INTRO_HEIGHT = VIEWPORT_HEIGHT + 41;
+
+  /** Mount empty, render the intro, then land the history — the trace above. */
+  function coldLoad(ch: Channel) {
+    contentHeight = EMPTY_HEIGHT;
+    render(ch, [], true);
+    contentHeight = INTRO_HEIGHT;
+    render(ch, items(1, ch), true);
+    contentHeight = CONTENT_HEIGHT;
+    render(ch, items(40, ch), false);
+  }
+
+  it("anchors against the real transcript, not the one-screen box it mounted on", () => {
+    const ch = channel("engineering");
+    coldLoad(ch);
+
+    // Without re-anchoring this is 41 — the offset the pre-hydration box
+    // allowed — which is the top of a 4000px transcript.
+    expect(scrollTop).toBe(bottom());
+  });
+
+  it("starts no animation while the history is still on the wire", () => {
+    const ch = channel("engineering");
+    contentHeight = EMPTY_HEIGHT;
+    render(ch, [], true);
+    calls = [];
+
+    contentHeight = INTRO_HEIGHT;
+    render(ch, items(1, ch), true);
+
+    // `scrollTo` captures a pixel offset, not the idea of "the bottom". Any
+    // animation started here is aimed at 41 and the arriving history cannot
+    // redirect it.
+    expect(calls).toHaveLength(0);
+  });
+
+  it("does not read the arriving transcript as the operator scrolling away", () => {
+    const ch = channel("engineering");
+    coldLoad(ch);
+
+    // In a browser the growth lands mid-animation and the animation's own
+    // frames emit scroll events, which `trackFollowing` cannot tell from a
+    // wheel. This is one of those frames.
+    act(() => {
+      scroller().dispatchEvent(new Event("scroll", { bubbles: true }));
+    });
+    calls = [];
+
+    // A message arrives a moment later. This is the half that made the bug
+    // permanent — the channel went deaf for the rest of the session.
+    render(ch, items(41, ch), false);
+
+    expect(calls).toEqual([{ top: CONTENT_HEIGHT, behavior: "smooth" }]);
+  });
+
+  it("still leaves a reader alone once they have genuinely scrolled up", () => {
+    const ch = channel("engineering");
+    coldLoad(ch);
+
+    scrollTop = 100;
+    act(() => {
+      scroller().dispatchEvent(new Event("scroll", { bubbles: true }));
+    });
+    calls = [];
+
+    render(ch, items(41, ch), false);
+
+    expect(calls).toHaveLength(0);
+    expect(scrollTop).toBe(100);
+  });
+});
+
+/**
+ * Rule 3 — the viewport shrinking underneath (issue #1325).
+ *
+ * Rules 1 and 2 both watch the *content*. Neither watches the *box*, and the
+ * box moves: the composer below this pane grows with the draft and takes its
+ * height out of this scroller's `clientHeight`, while `scrollTop` stands still.
+ * Measured against a running host, a two-line draft slid 96px of transcript up
+ * behind the composer — often the very message being replied to, hidden for
+ * exactly as long as the draft was long.
+ *
+ * The distances below are the whole point, so they are asserted as numbers
+ * rather than as "did it call scrollTo": nothing about this bug is visible in
+ * the *number of calls*, only in where the view ends up relative to a bottom
+ * that has moved.
+ */
+describe("the composer growing under the transcript", () => {
+  it("follows the bottom down when the pane shrinks", () => {
+    const ch = channel("engineering");
+    render(ch, items(40, ch));
+    // Rule 1 has anchored: parked at the bottom of an 800px box.
+    expect(scrollTop).toBe(CONTENT_HEIGHT - VIEWPORT_HEIGHT);
+
+    shrinkViewport(96);
+
+    // The bottom is now 96px further down, and the view is on it — not 96px
+    // above it, which is where it used to be left.
+    expect(scrollTop).toBe(bottom());
+    expect(contentHeight - scrollTop - viewportHeight).toBe(0);
+  });
+
+  it("leaves a reader alone who has scrolled up to read history", () => {
+    // The same gate rule 2 uses. A draft opened while reading back through a
+    // transcript must not yank the viewport to the newest message.
+    const ch = channel("engineering");
+    render(ch, items(40, ch));
+
+    scrollTop = 100;
+    act(() => {
+      scroller().dispatchEvent(new Event("scroll", { bubbles: true }));
+    });
+
+    shrinkViewport(96);
+
+    expect(scrollTop).toBe(100);
+  });
+
+  it("keeps following as the composer grows a line at a time", () => {
+    // The composer does not jump to its full height; it grows a row per
+    // wrapped line, and each one is its own resize. Following once and then
+    // stopping would still hide everything after the first line.
+    const ch = channel("engineering");
+    render(ch, items(40, ch));
+
+    shrinkViewport(32);
+    expect(scrollTop).toBe(bottom());
+    shrinkViewport(32);
+    expect(scrollTop).toBe(bottom());
+    shrinkViewport(32);
+
+    expect(scrollTop).toBe(bottom());
+    expect(contentHeight - scrollTop - viewportHeight).toBe(0);
+  });
+
+  it("does not animate — a glide per keystroke would be a wobble", () => {
+    // Rule 2 animates because a message arriving should travel into view. This
+    // one fires as the composer grows a line at a time, so it must not.
+    const ch = channel("engineering");
+    render(ch, items(40, ch));
+    calls = [];
+
+    shrinkViewport(96);
+
+    // Asserted together on purpose: "no smooth call" is satisfied by doing
+    // nothing at all, so it only means something alongside evidence that the
+    // anchor did move.
+    expect(scrollTop).toBe(bottom());
+    expect(calls.filter((c) => c.behavior === "smooth")).toHaveLength(0);
+  });
+});
+
+/**
+ * Which end short content settles against (issue #1323).
+ *
+ * Separate from the scroll rules above, and deliberately so: `scrollTop` cannot
+ * express this. A pane whose content is shorter than its viewport has no scroll
+ * range at all, so every anchoring call in this file is a no-op there and the
+ * only thing deciding where the block sits is the flex alignment on the inner
+ * wrapper. That is what these assert.
+ *
+ * The bug: an empty channel's intro — a heading, a sentence, and the two action
+ * cards that are the entire point of an empty channel — was bottom-pinned by
+ * `justify-end`, so it rendered crushed against the composer under most of a
+ * screen of dead canvas, with the primary invitation as the last thing the eye
+ * reached.
+ */
+describe("where an empty channel's intro sits", () => {
+  /** The inner wrapper, whose flex alignment is the whole subject here. */
+  function wrapper(): HTMLElement {
+    return scroller().firstElementChild as HTMLElement;
+  }
+
+  it("reads from the top when the channel has answered and is empty", () => {
+    const ch = channel("engineering");
+    render(ch, [], false);
+
+    expect(wrapper().className).toContain("justify-start");
+    expect(wrapper().className).not.toContain("justify-end");
+  });
+
+  it("keeps the bottom anchor once there is a transcript", () => {
+    // A short transcript still belongs above the composer, the way every chat
+    // client puts it. This is the behaviour #1323 must not disturb.
+    const ch = channel("engineering");
+    render(ch, items(3, ch), false);
+
+    expect(wrapper().className).toContain("justify-end");
+    expect(wrapper().className).not.toContain("justify-start");
+  });
+
+  it("keeps the bottom anchor while history is still on the wire", () => {
+    // `loading` renders the skeleton, which fills the space the real rows will.
+    // Flipping to the top here would lift the intro and then drop it back the
+    // moment the transcript landed — the jump the skeleton exists to prevent.
+    const ch = channel("engineering");
+    render(ch, [], true);
+
+    expect(wrapper().className).toContain("justify-end");
+    expect(wrapper().className).not.toContain("justify-start");
   });
 });

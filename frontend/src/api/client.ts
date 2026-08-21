@@ -7,12 +7,18 @@
 //     and calls use `/api/v1/companies/{id}/*`.
 
 import type { ConsoleConfig } from "../config";
-import type { TaskDeliverable } from "./tasks";
+import type { MessageIntent } from "./tasks";
 import { defaultTransport, needsCarriedSession } from "./transport";
 import type { StreamHandlers, Transport, TransportResponse } from "./transport";
 import {
   type AgentDetailDto,
   ApiError,
+  type BoardComment,
+  type BoardDetail,
+  type BoardItem,
+  type BoardPage,
+  type BoardQuery,
+  type BoardVote,
   type ReadMarker,
   type ReadStateResponse,
   type ApiErrorBody,
@@ -21,6 +27,7 @@ import {
   type ApprovalSummary,
   type CapabilityStatusDto,
   type ChatHistoryMessageDto,
+  type ChatPostResult,
   type ChatResponse,
   type CompanyStatus,
   type ConnectionState,
@@ -136,6 +143,26 @@ export class OpenCompanyClient {
   /** Whether a specific company is being operated (vs single-company mode). */
   get isSingleCompany(): boolean {
     return this.defaultCompany === null;
+  }
+
+  /**
+   * Whether this client sends a **platform** bearer.
+   *
+   * Asked by the surfaces that offer `PlatformScope` routes — `suspend` and
+   * `archive` (issue #1401). Those resolve through `resolve_claims`, which
+   * cannot return a human, so a console authenticating as a person through the
+   * session cookie is refused by construction rather than by policy: there is
+   * no credential it could hold, and no setting an operator could change, that
+   * would let the call through. A control for one of them is only honest on a
+   * client that answers `true` here.
+   *
+   * True does not promise the call succeeds — the bearer still has to carry the
+   * `platform` scope, and a tenant token without it gets a `403`. That is a
+   * configuration mistake with a legible answer, which is a different thing
+   * from an unreachable button.
+   */
+  get carriesPlatformBearer(): boolean {
+    return Boolean(this.token);
   }
 
   /** The route prefix for `company`, for callers building their own paths. */
@@ -423,21 +450,50 @@ export class OpenCompanyClient {
      */
     parent?: string | null,
     /**
-     * The once-vs-workflow choice for the card this line opens (issue #580).
-     * Only `"workflow"` reaches the wire: `"once"` (and the default) is sent as
-     * *nothing at all*, so an ordinary message keeps the exact body shape it had
-     * before #580 — the same omitted-field compatibility rule the deliverable
-     * field follows everywhere (see `CreateTask.deliverable`).
+     * What this message is for (issues #580, #845, #1152): `"once"` and
+     * `"workflow"` say what the card it opens produces, `"chat"` says it is not
+     * a request for work and no card should be opened for it.
+     *
+     * Everything except `"once"` reaches the wire; `"once"` and the default are
+     * sent as *nothing at all*. That is what keeps "Do it once" the default: an
+     * unmarked message posts the exact body shape it posted before any of these
+     * controls existed, so the host cannot tell one from a pre-#580 client —
+     * the same omitted-field compatibility rule the deliverable field follows
+     * everywhere (see `CreateTask.deliverable`).
+     *
+     * One key, not two. `"chat"` rides `deliverable` rather than arriving as a
+     * second `intent` field, so a body cannot claim "build me the workflow" and
+     * "just chatting" about the same message.
      */
-    deliverable?: TaskDeliverable,
-  ): Promise<ChatResponse> {
-    const body: { text: string; chat?: string; parent?: string; deliverable?: TaskDeliverable } = {
+    intent?: MessageIntent,
+    /**
+     * Ask for the turn's id instead of its answer (issue #983): the host
+     * journals the message, mints a durable turn row and answers `202` without
+     * holding the request open for a turn whose duration is unbounded.
+     *
+     * Sending this does **not** mean a detached answer came back. A host that
+     * predates the field ignores it and answers the full synchronous `200`, so
+     * the caller must branch on the returned shape via `isDetachedChat` — which
+     * is exactly why this returns a union rather than the detached type.
+     */
+    detach?: boolean,
+  ): Promise<ChatPostResult> {
+    const body: {
+      text: string;
+      chat?: string;
+      parent?: string;
+      deliverable?: MessageIntent;
+      detach?: boolean;
+    } = {
       text,
     };
     if (chat) body.chat = chat;
     if (parent) body.parent = parent;
-    if (deliverable === "workflow") body.deliverable = deliverable;
-    return this.request<ChatResponse>("POST", `${this.scope(company)}/chat`, body);
+    if (intent && intent !== "once") body.deliverable = intent;
+    // Sent only when asked for, so an ordinary post keeps the exact body shape
+    // it had before #983 — the same omitted-field rule `deliverable` follows.
+    if (detach) body.detach = detach;
+    return this.request<ChatPostResult>("POST", `${this.scope(company)}/chat`, body);
   }
 
   /**
@@ -678,6 +734,51 @@ export class OpenCompanyClient {
   }
 
   /**
+   * One page of the shared feedback board.
+   *
+   * Rejects with a 404 `tinyhumans_no_board` on a host with no TinyHumans
+   * credential — there is no board to show, which is a different thing from an
+   * empty one, so the caller hides the surface instead of rendering "nobody has
+   * asked for anything yet".
+   */
+  feedbackBoard(query: BoardQuery = {}, company?: string | null): Promise<BoardPage> {
+    const search = new URLSearchParams();
+    if (query.sort) search.set("sort", query.sort);
+    if (query.kind) search.set("type", query.kind);
+    if (query.status) search.set("status", query.status);
+    if (query.page !== undefined) search.set("page", String(query.page));
+    if (query.limit !== undefined) search.set("limit", String(query.limit));
+    const suffix = search.toString() ? `?${search}` : "";
+    return this.request<BoardPage>("GET", `${this.scope(company)}/feedback/board${suffix}`);
+  }
+
+  /** One board item with its comments. */
+  feedbackBoardItem(id: string, company?: string | null): Promise<BoardDetail> {
+    return this.request<BoardDetail>(
+      "GET",
+      `${this.scope(company)}/feedback/board/${encodeURIComponent(id)}`,
+    );
+  }
+
+  /** Casts (or, with `0`, retracts) this instance's vote. Returns the new row. */
+  voteFeedbackBoard(id: string, value: BoardVote, company?: string | null): Promise<BoardItem> {
+    return this.request<BoardItem>(
+      "POST",
+      `${this.scope(company)}/feedback/board/${encodeURIComponent(id)}/vote`,
+      { value },
+    );
+  }
+
+  /** Comments on a board item. Returns the stored comment. */
+  commentFeedbackBoard(id: string, body: string, company?: string | null): Promise<BoardComment> {
+    return this.request<BoardComment>(
+      "POST",
+      `${this.scope(company)}/feedback/board/${encodeURIComponent(id)}/comments`,
+      { body },
+    );
+  }
+
+  /**
    * The host's runtime spec. Unauthenticated and company-agnostic, so it sits
    * outside `scope()`; the console reads `cycles_available` from it to tell
    * whether this instance is provisioned with a TinyHumans credential.
@@ -734,10 +835,10 @@ export class OpenCompanyClient {
    * null` clears the instructions and `description: undefined` leaves them,
    * which is why the two must not be collapsed on the way in.
    *
-   * The host refuses a manifest teammate with a 409 — its fields live in the
-   * version-controlled `company.toml`, and the console does not rewrite that.
-   * Ask `getAgent` first: its `editable` list is the host's own statement of
-   * which fields this call will accept.
+   * A manifest teammate is editable too: the host stores the change as an
+   * override on the company record and never rewrites `company.toml`. Ask
+   * `getAgent` first — its `editable` list is the host's own statement of which
+   * fields this call will accept, and `tools` is admin-only.
    */
   updateAgent(
     agentId: string,
@@ -792,7 +893,11 @@ export class OpenCompanyClient {
     );
   }
 
-  /** Remove an operator-added teammate. 409s for a manifest teammate (can't be removed here). */
+  /**
+   * Remove a teammate. A blueprint teammate is removed by tombstone rather than
+   * by rewriting `company.toml`, so it works for both kinds; the only refusal is
+   * a `409` on the company's last teammate.
+   */
   removeTeamMember(agentId: string, company?: string | null): Promise<void> {
     return this.request<void>(
       "DELETE",

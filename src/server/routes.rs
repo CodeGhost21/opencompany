@@ -119,6 +119,7 @@ fn router_with_console(state: AppState, console_dir: Option<PathBuf>) -> Router 
         .merge(crate::server::provision::router())
         .merge(crate::server::setup::router())
         .merge(crate::server::feedback::router())
+        .merge(crate::server::feedback_board::router())
         .merge(crate::server::users::router())
         .merge(crate::server::users::admin::router())
         .merge(crate::server::users::devices::router())
@@ -688,8 +689,9 @@ mod tests {
     /// iterates nothing and returns `false` without consulting any runtime, so
     /// this cannot fail for an aggregation bug. The direction that matters —
     /// that the endpoint can report `true` — is covered by
-    /// `is_busy_sees_a_cycle_holding_the_serial_lock` in `company::runtime`,
-    /// which exercises the real signal against a real runtime.
+    /// `is_busy_sees_every_source_of_work` in `company::runtime`, which
+    /// exercises the real signal against a real runtime, and by
+    /// `is_busy_fails_closed_on_a_poisoned_run_supervisor` alongside it.
     #[tokio::test]
     async fn busy_is_false_when_nothing_is_running() {
         let app = router(AppState::new(AppConfig::default()));
@@ -913,6 +915,12 @@ mod tests {
         let body = spec_body(state).await;
         assert_eq!(body["memory"]["backend"], "remote");
         assert_eq!(body["memory"]["driver_id"], "supermemory");
+        // Unprobed here (the probe is `serve`'s boot step, not `bind`'s), and
+        // the field is skipped when absent so old clients see the old shape.
+        assert!(
+            body["memory"]["healthy"].is_null(),
+            "an unprobed engine must not report health"
+        );
         // The mandatory three a hosted adapter advertises, so an operator can
         // see the tree/graph families it does not have.
         let caps = body["memory"]["capabilities"].to_string();
@@ -925,6 +933,36 @@ mod tests {
         assert!(
             !rendered.contains("memory.internal.example"),
             "/spec leaked the memory endpoint: {rendered}"
+        );
+    }
+
+    /// The other half of the health contract on the wire: once the boot probe
+    /// has run, `/spec` serves its answer. The `null` driver's `health()` is
+    /// `Ready` by contract, so this covers the probed-`true` serialization
+    /// deterministically; the unprobed case is asserted `null` above, and the
+    /// mapping of degraded/down/timeout onto the bit is pinned in
+    /// `store::select`.
+    #[cfg(feature = "tinymemory")]
+    #[tokio::test]
+    async fn spec_serves_the_boot_probes_health_answer() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut overlay = crate::store::open_memory_overlay(&crate::store::StorageSettings {
+            memory_backend: crate::store::MemoryBackend::Null,
+            ..Default::default()
+        })
+        .expect("null binds")
+        .expect("null yields an overlay");
+        overlay
+            .refresh_health(std::time::Duration::from_secs(5))
+            .await;
+
+        let state = AppState::new(AppConfig::default())
+            .with_home(dir.path().to_path_buf())
+            .with_memory_overlay(overlay);
+        let body = spec_body(state).await;
+        assert_eq!(
+            body["memory"]["healthy"], true,
+            "probed health must reach /spec"
         );
     }
 }

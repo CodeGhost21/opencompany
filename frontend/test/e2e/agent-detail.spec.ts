@@ -61,7 +61,9 @@ async function dismissOnboarding(page: Page) {
 }
 
 async function goToTeam(page: Page) {
-  await page.goto("/#/team");
+  // The Company page, whose Cards half is the roster (issue #1141). Bare
+  // `#/team` redirects here; this asks for the address that exists.
+  await page.goto("/#/company");
   await dismissOnboarding(page);
   await expect(page.getByTestId("team-card").first()).toBeVisible({ timeout: 30_000 });
 }
@@ -110,13 +112,31 @@ test("a company agent opens from its card and shows what it is", async ({ page }
   // This agent sits on no desk, and says so rather than rendering nothing.
   await expect(page.getByTestId("agent-desks-empty")).toBeVisible();
 
-  // A blueprint teammate is read-only here, and the screen says why instead of
-  // offering an edit that would 409.
-  await expect(page.getByTestId("agent-edit")).toHaveCount(0);
-  await expect(page.getByTestId("agent-readonly-note")).toContainText("company.toml");
+  // `ceo` is a blueprint teammate, and this is the assertion that used to pin
+  // the opposite. The Edit affordance was *present and disabled* (#1141) with a
+  // note saying the edit belonged in `company.toml` — which is advice with no
+  // action behind it for a hosted tenant that has no checkout to edit and no
+  // redeploy to make. A manifest teammate is editable now, through an overlay
+  // layered on the record rather than a rewrite of the blueprint, so the button
+  // is live and the read-only note is gone.
+  await expect(page.getByTestId("agent-edit")).toBeEnabled();
+  await expect(page.getByTestId("agent-readonly-note")).toHaveCount(0);
 
-  // Back returns to the roster.
-  await page.getByRole("button", { name: "Back to team" }).click();
+  // And it is a real editor rather than a live-looking button: clicking opens
+  // the same fields a console-created teammate is edited through, so a manifest
+  // teammate follows one flow and not a second, weaker one.
+  await page.getByTestId("agent-edit").click();
+  await expect(page.getByTestId("agent-field-description")).toBeVisible();
+
+  // What does *not* change: the source still names the blueprint. Editing does
+  // not launder a manifest teammate into an overlay one — the operator can
+  // still see where this teammate came from.
+  await expect(page.getByTestId("agent-source")).toHaveText("Company blueprint");
+
+  // The breadcrumb returns to the Company page (issue #1141, replacing "Back to
+  // team" — this page is linked into from the org chart and the chat pane, and
+  // Back named a page half its arrivals had never seen).
+  await page.getByTestId("agent-breadcrumb-company").click();
   await expect(page.getByTestId("team-card").first()).toBeVisible();
 });
 
@@ -191,7 +211,7 @@ test("an agent defined in the console can be read back and edited", async ({ pag
 
     // …and the roster the operator came from agrees, rather than only the panel
     // they edited in.
-    await page.getByRole("button", { name: "Back to team" }).click();
+    await page.getByTestId("agent-breadcrumb-company").click();
     await expect(card(page, "Spec Runner II")).toBeVisible({ timeout: 30_000 });
   } finally {
     // Leave the company as we found it, whatever happened above.

@@ -1,7 +1,7 @@
 // The workflow creator (issue #69): a plain form editor — not a drag canvas —
 // that builds a `WorkflowGraph` and posts it via `createWorkflow`. Node kinds
 // are the ones the engine executes and the console can author from a form
-// (`CREATABLE_NODE_KINDS`). The five that need kind-specific config —
+// (`NODE_KINDS`). The five that need kind-specific config —
 // `tool_call`, `http_request`, `switch`, `output_parser`, `sub_workflow` —
 // grew their controls in issue #541; each renders `NodeConfigFields`, whose
 // spec table (`@/lib/workflow-node-config`) is the single source of the engine
@@ -17,7 +17,7 @@ import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { History, Loader2, Plus, RotateCcw, Sparkles, Trash2 } from "lucide-react";
 
 import {
-  CREATABLE_NODE_KINDS,
+  NODE_KINDS,
   DESTINATION_KINDS,
   destinationLabel,
   createWorkflow,
@@ -76,8 +76,9 @@ import {
 import { Textarea } from "@/components/ui/textarea";
 
 /** A node row being edited. `key` is a stable React key, independent of the
- * user-editable `id` field (which can be blank or duplicated mid-edit). */
-interface DraftNode {
+ * user-editable `id` field (which can be blank or duplicated mid-edit).
+ * Exported for direct unit testing, same as {@link WiredChannels}. */
+export interface DraftNode {
   key: string;
   id: string;
   kind: string;
@@ -122,6 +123,13 @@ interface DraftNode {
   onError?: string;
   retry?: WorkflowNode["retry"];
   requiresApproval?: boolean;
+  /**
+   * Issue #850. Carried but not authored here: an operator sets it through the
+   * write route, and this dialog must round-trip it rather than drop it — a
+   * lost `repeatable: false` is a repeat guard removed by an unrelated edit,
+   * the same hazard as a dropped `requiresApproval`.
+   */
+  repeatable?: boolean;
 }
 
 /** How long the graph must sit still before the host is asked about it (issue
@@ -383,6 +391,10 @@ export function assembleGraph(draft: GraphDraft): AssembledGraph {
       onError: n.onError,
       retry: n.retry,
       requiresApproval: n.requiresApproval,
+      // Round-trips a node the operator marked as never-repeatable (issue #850):
+      // a dropped `repeatable: false` is a repeat guard removed by an unrelated
+      // edit, the same hazard as a dropped `requiresApproval`.
+      repeatable: n.repeatable,
     });
   }
   return {
@@ -503,11 +515,35 @@ function nodeLabel(node: DraftNode): string {
   return node.name.trim() || node.id.trim() || "this node";
 }
 
-interface DraftEdge {
+export interface DraftEdge {
   key: string;
   from: string;
   to: string;
   label: string;
+}
+
+/**
+ * Add only the missing adjacent edges for the node order shown in the form.
+ * Invalid/duplicate ids leave the explicit graph untouched so this convenience
+ * never manufactures a self-edge or guesses which duplicate row was intended.
+ */
+export function edgesConnectingNodesInOrder(
+  nodes: readonly Pick<DraftNode, "id">[],
+  edges: readonly DraftEdge[],
+): DraftEdge[] {
+  const ids = nodes.map((node) => node.id.trim());
+  if (ids.length < 2 || ids.some((nodeId) => !nodeId) || new Set(ids).size !== ids.length) {
+    return [...edges];
+  }
+  const next = [...edges];
+  for (let index = 0; index < ids.length - 1; index += 1) {
+    const from = ids[index];
+    const to = ids[index + 1];
+    if (!next.some((edge) => edge.from === from && edge.to === to)) {
+      next.push({ key: nextKey(), from, to, label: "" });
+    }
+  }
+  return next;
 }
 
 /** The node fields that validate on blur (issue #261) — the ones with a real
@@ -587,7 +623,7 @@ function nextKey(): string {
  * Anything added to `DraftNode` behind a `node.kind === …` control belongs in
  * this reset.
  */
-function changeKind(kind: string): Partial<DraftNode> {
+export function changeKind(kind: string): Partial<DraftNode> {
   return {
     kind,
     agent: "",
@@ -602,6 +638,16 @@ function changeKind(kind: string): Partial<DraftNode> {
     config: undefined,
     configDraft: blankConfigDraft(kind),
     configExtra: undefined,
+    // `repeatable` is valid on `tool_call`/`http_request` only (issue #850);
+    // the host rejects it on every other kind. This dialog has no control to
+    // author or clear it — it only round-trips a value set through the write
+    // route (see `DraftNode.repeatable`) — so a kind change is the one place
+    // left to reset it, same as `config` above: unconditionally, on ANY kind
+    // change including between the two kinds that could both hold it, so
+    // there is one rule rather than a kind-pair special case. Otherwise
+    // switching away from a call node leaves a value `submit()` still sends,
+    // and the save fails on a field the author can no longer see.
+    repeatable: undefined,
   };
 }
 
@@ -648,6 +694,7 @@ function draftNodes(graph: WorkflowGraph): DraftNode[] {
       onError: n.onError,
       retry: n.retry,
       requiresApproval: n.requiresApproval,
+      repeatable: n.repeatable,
     };
     // A form kind (#541) hydrates its config into per-field strings plus a
     // preserved `extra` bag; a form-less kind keeps the raw overlay in `config`.
@@ -793,6 +840,17 @@ export function WorkflowCreateDialog({
    * refreshed on every render, so the post-await read sees what is on screen now.
    */
   const draftDirtyRef = useRef(false);
+  /**
+   * The current node rows, readable **after** an await (issue #1016).
+   *
+   * `submit()` captures `nodes` from the render that built its closure, but the
+   * operator is invited to keep editing through the in-flight write. When the
+   * host answers with node-scoped `problems`, each one has to be matched against
+   * the rows on screen NOW — a `node_id` the operator renamed since clicking
+   * Save must fall through to the flat banner, not silently miss. Refreshed on
+   * every render below, mirroring `draftDirtyRef`.
+   */
+  const nodesRef = useRef<DraftNode[]>([]);
   /** Per-field problems raised on blur (issue #261), keyed by
    * {@link errorKey}. Separate from `error`, the submit-time banner: this one
    * is inline, scoped to the control that caused it, and never blocks Save on
@@ -1188,7 +1246,34 @@ export function WorkflowCreateDialog({
   }
 
   function updateNode(key: string, fields: Partial<DraftNode>) {
+    // The row's id BEFORE this edit, read off the render snapshot the same way
+    // `removeNode` does. An edge references a node by its id, so a rename has to
+    // carry every edge that pointed at the old id over to the new one (issue
+    // #1016) — otherwise the edge dangles, `validate()` refuses the save, and
+    // the edge Select's option list (fed by the current node ids) drops the
+    // renamed node, leaving the operator nothing to re-point it at.
+    const prevId = nodes.find((n) => n.key === key)?.id;
     setNodes((rows) => rows.map((r) => (r.key === key ? { ...r, ...fields } : r)));
+    const nextId = fields.id;
+    // `""` is a real previous id (the field cleared mid-edit, see below) and
+    // must still be tracked — only a missing row (`prevId === undefined`) or
+    // an edit that didn't touch `id` (`nextId === undefined`) skips the
+    // cascade. Using `prevId &&`/`fields.id` truthiness here previously
+    // dropped the rewrite once `prevId` was `""`, so clearing an id and then
+    // typing a replacement left edges stranded pointing at `""` forever.
+    if (nextId !== undefined && prevId !== undefined && nextId !== prevId) {
+      // Continuously, on every keystroke of the id: the edges track the row's
+      // id so a rename can never orphan them. A transient empty id (the field
+      // cleared mid-edit) cascades to `""`, which is harmless — `validate()`
+      // blocks the save on it and the edges re-follow on the next keystroke.
+      setEdges((rows) =>
+        rows.map((e) => ({
+          ...e,
+          from: e.from === prevId ? nextId : e.from,
+          to: e.to === prevId ? nextId : e.to,
+        })),
+      );
+    }
     clearSubmitError();
     // Clear whatever the edit invalidated. This MUST stay in step with
     // `changeKind`: that reset exists so the draft never holds a value whose
@@ -1300,6 +1385,16 @@ export function WorkflowCreateDialog({
 
   function addEdge() {
     setEdges((rows) => [...rows, { key: nextKey(), from: "", to: "", label: "" }]);
+    clearSubmitError();
+  }
+
+  /**
+   * Connect each visible node to the next one, preserving explicit branches and
+   * labels already authored. Existing pairs count as connected regardless of
+   * label, so pressing the affordance twice never adds duplicate edges.
+   */
+  function connectNodesInOrder() {
+    setEdges((rows) => edgesConnectingNodesInOrder(nodes, rows));
     clearSubmitError();
   }
 
@@ -1478,6 +1573,13 @@ export function WorkflowCreateDialog({
     draftDirtyRef.current = isDraftDirty();
   });
 
+  // Issue #1016: keep the post-await view of the node rows current, so `submit`'s
+  // catch matches the host's `problems` against what is on screen when the answer
+  // lands — not the snapshot its closure captured at click time.
+  useEffect(() => {
+    nodesRef.current = nodes;
+  });
+
   /** Draft a graph from the description and hydrate the form with it (issue
    * #753). The hydrated, editable form IS the review surface — there is no
    * read-only diff — so on success the operator lands in the ordinary create
@@ -1639,6 +1741,55 @@ export function WorkflowCreateDialog({
       }
       onOpenChange(false);
     } catch (e) {
+      // Issue #1016: a `workflow_invalid` refusal carries per-node `problems`.
+      // Land each on the control that caused it so the operator sees the
+      // complaint next to the field, instead of a flat banner that names a node
+      // they then have to hunt for. Anything without an on-screen home — a
+      // graph-level field (`from`/`to`/`workflow_id`), a config key this kind
+      // has no control for, or a node that no longer exists — falls through to
+      // the banner, so nothing the host said is ever silently dropped.
+      if (e instanceof ApiError && e.problems?.length) {
+        const mapped: Record<string, string> = {};
+        const leftovers: string[] = [];
+        for (const p of e.problems) {
+          // Matched against the CURRENT rows (`nodesRef`), not the closure's
+          // snapshot: the operator may have renamed a node during the write, and
+          // a stale `node_id` must fall back to the banner rather than misfile.
+          // `.trim()` on our side because the submit path trims every id before
+          // sending it (see `outNodes.push` above) — the host's `problems`
+          // therefore carry the trimmed id, and comparing it against a raw
+          // draft id with surrounding whitespace would never match.
+          const row = nodesRef.current.find((n) => n.id.trim() === p.node_id);
+          const configKey = p.field?.startsWith("config.")
+            ? p.field.slice("config.".length)
+            : undefined;
+          const onScreen =
+            row !== undefined &&
+            configKey !== undefined &&
+            configFieldSpecs(row.kind).some((s) => s.key === configKey);
+          if (row && onScreen) {
+            mapped[errorKey(row.key, `config:${configKey}`)] = p.message;
+          } else {
+            leftovers.push(row ? `${nodeLabel(row)}: ${p.message}` : p.message);
+          }
+        }
+        // One write, merged over any blur errors (#261) already showing — a
+        // server field-error clears on the next edit of that field or the next
+        // submit, never wiping a legitimate blur error the operator has not
+        // touched.
+        if (Object.keys(mapped).length) {
+          setFieldErrors((prev) => ({ ...prev, ...mapped }));
+        }
+        // Everything that had no field home goes to the banner. If it ALL landed
+        // on a field, the banner still says something non-raw so Create never
+        // reads as a button that did nothing.
+        showError(
+          leftovers.length
+            ? leftovers.join(" ")
+            : "Some fields need attention — see the highlighted nodes below.",
+        );
+        return;
+      }
       showError(
         e instanceof Error
           ? e.message
@@ -1836,7 +1987,16 @@ export function WorkflowCreateDialog({
         <fieldset disabled={submitting} className="contents">
           <div className="grid gap-3 sm:grid-cols-2">
             <div className="grid gap-2">
-              <Label htmlFor={`${formId}-id`}>Id</Label>
+              <Label htmlFor={`${formId}-name`}>Name</Label>
+              <Input
+                id={`${formId}-name`}
+                value={name}
+                onChange={(e) => changeName(e.target.value)}
+                placeholder="e.g. Campaign pipeline"
+              />
+            </div>
+            <div className="grid gap-2">
+              <Label htmlFor={`${formId}-id`}>Workflow ID</Label>
               {/* Read-only in edit mode, not merely rejected on save: the id keys
                   the saved graph, the scheduler and every past run, so the host
                   answers 400 to a rename. Letting an author type a new one and
@@ -1850,21 +2010,11 @@ export function WorkflowCreateDialog({
                 className={editing ? "text-muted-foreground" : undefined}
                 placeholder="e.g. campaign_pipeline"
               />
-              {editing && (
-                <p className="text-2xs leading-snug text-muted-foreground">
-                  A workflow&apos;s id can&apos;t change. It keys the saved graph, its
-                  schedule and its run history.
-                </p>
-              )}
-            </div>
-            <div className="grid gap-2">
-              <Label htmlFor={`${formId}-name`}>Name</Label>
-              <Input
-                id={`${formId}-name`}
-                value={name}
-                onChange={(e) => changeName(e.target.value)}
-                placeholder="e.g. Campaign pipeline"
-              />
+              <p className="text-2xs leading-snug text-muted-foreground">
+                {editing
+                  ? "This permanent machine ID can’t change. It keys the saved graph, its schedule and its run history."
+                  : "Generated from the name. You can change it now; after creation it becomes the permanent machine ID for schedules and run history."}
+              </p>
             </div>
           </div>
           <div className="grid gap-2">
@@ -1930,17 +2080,38 @@ export function WorkflowCreateDialog({
           </div>
 
           <div className="space-y-2">
-            <div className="flex items-center justify-between">
-              <Label>Edges</Label>
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                onClick={addEdge}
-                disabled={nodes.length < 2 || submitting}
-              >
-                <Plus className="size-3.5" /> Add edge
-              </Button>
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <Label>Connections</Label>
+                <p className="text-2xs text-muted-foreground">
+                  Connect a simple sequence automatically, or edit branches explicitly.
+                </p>
+              </div>
+              <div className="flex items-center gap-2">
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={connectNodesInOrder}
+                  disabled={
+                    submitting ||
+                    nodes.length < 2 ||
+                    nodes.some((node) => !node.id.trim()) ||
+                    new Set(nodes.map((node) => node.id.trim())).size !== nodes.length
+                  }
+                >
+                  Connect in order
+                </Button>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={addEdge}
+                  disabled={nodes.length < 2 || submitting}
+                >
+                  <Plus className="size-3.5" /> Add edge
+                </Button>
+              </div>
             </div>
             <div className="space-y-2">
               {edges.map((e) => (
@@ -1960,7 +2131,7 @@ export function WorkflowCreateDialog({
               ))}
               {edges.length === 0 && (
                 <p className="rounded-lg border border-dashed p-3 text-center text-xs text-muted-foreground">
-                  No edges yet — nodes won&apos;t be connected.
+                  No connections yet — connect the steps in order or add an explicit edge.
                 </p>
               )}
             </div>
@@ -2176,7 +2347,11 @@ function NodeRow({
   return (
     <div className="grid gap-2 rounded-lg border p-2 sm:grid-cols-[1fr_1fr_1.4fr_auto] sm:items-start">
       <div className="grid gap-1">
+        <Label htmlFor={`${rowId}-id`} className="text-2xs text-muted-foreground">
+          Node ID
+        </Label>
         <Input
+          id={`${rowId}-id`}
           value={node.id}
           onChange={(e) => onChange({ id: e.target.value })}
           placeholder="node id"
@@ -2186,12 +2361,13 @@ function NodeRow({
             never holds a value whose control is no longer on screen. Without
             this, picking a destination and then changing the kind left the row
             un-submittable with nothing visible to clear. */}
+        <Label className="mt-1 text-2xs text-muted-foreground">Kind</Label>
         <Select value={node.kind} onValueChange={(v) => onChange(changeKind(v ?? ""))}>
           <SelectTrigger className="h-8" aria-label="Node kind">
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
-            {CREATABLE_NODE_KINDS.map((k) => (
+            {NODE_KINDS.map((k) => (
               <SelectItem key={k.value} value={k.value}>
                 {k.label}
               </SelectItem>
@@ -2200,7 +2376,11 @@ function NodeRow({
         </Select>
       </div>
       <div className="grid gap-1">
+        <Label htmlFor={`${rowId}-name`} className="text-2xs text-muted-foreground">
+          Step name
+        </Label>
         <Input
+          id={`${rowId}-name`}
           value={node.name}
           onChange={(e) => onChange({ name: e.target.value })}
           placeholder="display name"
@@ -2208,29 +2388,42 @@ function NodeRow({
         />
         {node.kind === "agent" &&
           (roster.length > 0 ? (
-            <Select value={node.agent} onValueChange={(v) => onChange({ agent: v ?? "" })}>
-              <SelectTrigger className="h-8" aria-label="Teammate">
-                <SelectValue placeholder="Pick a teammate" />
-              </SelectTrigger>
-              <SelectContent>
-                {roster.map((m) => (
-                  <SelectItem key={m.id} value={m.id}>
-                    {m.name ?? m.role}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
+            <>
+              <Label className="mt-1 text-2xs text-muted-foreground">Teammate</Label>
+              <Select value={node.agent} onValueChange={(v) => onChange({ agent: v ?? "" })}>
+                <SelectTrigger className="h-8" aria-label="Teammate">
+                  <SelectValue placeholder="Pick a teammate" />
+                </SelectTrigger>
+                <SelectContent>
+                  {roster.map((m) => (
+                    <SelectItem key={m.id} value={m.id}>
+                      {m.name ?? m.role}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </>
           ) : (
-            <Input
-              value={node.agent}
-              onChange={(e) => onChange({ agent: e.target.value })}
-              placeholder="teammate id"
-              aria-label="Teammate id"
-            />
+            <>
+              <Label htmlFor={`${rowId}-teammate`} className="mt-1 text-2xs text-muted-foreground">
+                Teammate ID
+              </Label>
+              <Input
+                id={`${rowId}-teammate`}
+                value={node.agent}
+                onChange={(e) => onChange({ agent: e.target.value })}
+                placeholder="teammate id"
+                aria-label="Teammate id"
+              />
+            </>
           ))}
       </div>
       <div className="grid gap-1">
+        <Label htmlFor={`${rowId}-summary`} className="text-2xs text-muted-foreground">
+          Summary
+        </Label>
         <Input
+          id={`${rowId}-summary`}
           value={node.summary}
           onChange={(e) => onChange({ summary: e.target.value })}
           placeholder="summary (optional)"

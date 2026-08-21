@@ -325,3 +325,149 @@ OPENCOMPANY_MEMORY_ALLOW_EPHEMERAL=1  # operator asserts /data is durable
 OPENCOMPANY_MONGODB_URI=mongodb://…
 # → boots; engine memory persists under /data/memory/<workspace>/ as usual.
 ```
+
+## Choosing an engine from the console
+
+Engine selection stays **instance-wide** — one engine per host, every company
+on it sharing that engine — but it is no longer environment-only. `config.toml`
+gained a `[memory]` section, and `…/memory/engine` is the surface that writes
+it:
+
+```text
+GET  …/memory/engine        what is bound, what is saved, what may be picked
+POST …/memory/engine/test   probe a candidate without saving it
+PUT  …/memory/engine        save it, bind it, and put it in force
+```
+
+Three properties make this safe to hand an admin, and each is a refusal rather
+than a convention:
+
+- **The environment still wins.** `OPENCOMPANY_MEMORY` set at all makes the
+  file layer inert, the console read-only, and a `PUT` a `409` naming the
+  variable. A hosted tenant's control plane injects those variables, so a
+  console that accepted the edit would write a file, report success, and change
+  nothing at the next boot.
+- **An engine that does not answer is not bound.** The route opens the
+  candidate, probes it, and refuses on a failed probe, leaving the previous
+  overlay in force — the opposite of boot, which binds and warns because a
+  transient vendor outage must not crash-loop a tenant. `?force=true` is the
+  escape hatch.
+- **It applies live, or says which companies it did not reach.** The new
+  overlay is swapped onto the `AppState` and every registered company is
+  rebuilt through `RuntimeRebuilder`; a company that cannot be rebuilt is
+  *named* in `restartRequiredFor` rather than covered by a blanket "restart
+  required". The credential is never read back out — the route reports whether
+  a key is set, never its bytes.
+
+What has **not** changed, and is still a decision rather than a gap: there is
+no per-company and no per-agent selection. Memory is storage, and nothing
+model-shaped may repoint it — this deliberately does not follow the
+per-company `[inference]` model, for the reason recorded at the selection site
+in `src/store/select.rs`. Splitting workloads across engines (traces local,
+facts hosted) remains a possible refinement of *routing*, not of selection.
+
+**Switching still moves no data.** A new engine starts empty; see the runbook
+below, whose migration step is the only thing that moves records.
+
+## Depth: taint, deliberate memory, and what is deliberately not wired
+
+Four determinations from the depth pass (issue #1113), recorded so nobody
+re-derives them:
+
+- **Taint routing is by trigger, at the cycle.** A cycle triggered by
+  `WebhookReceived` or `A2aTaskReceived` — outside content: a channel
+  message, an email, a third-party callback, a remote agent's payload —
+  writes its brain-chosen context puts through the overlay's inbound port,
+  which stamps `ExternalSync`; everything else (`OperatorMessage`,
+  `FeedbackFiled`, `PaymentReceived`, the company's own machinery) stamps
+  `Internal`. Coarse by design — the host cannot see which put quoted the
+  payload, and over-tainting is safe where under-tainting is the leak.
+  `OperatorMessage` turns are deliberately `Internal`: operator speech is the
+  company writing about itself, the same authorship precedent that stamps
+  operator facts `Internal`. Read-side taint *filtering* is a separate,
+  larger change (a `taint` field on `ChunkMeta`/`ChunkHit` and every
+  backend); until it lands, the stamp is honest at the engine and invisible
+  to readers.
+- **Deliberate agent memory is three oc-authored tools** — `memory_store`,
+  `memory_recall`, `memory_forget` — over the company's own `ContextStore`,
+  company and agent captured at build time, never a model-supplied
+  namespace. Forget reaches only the agent's own `agent-memory/<id>/` rows;
+  task outcomes and operator facts are not an agent's to delete. And because
+  chunks are content-addressed with an ADDRESS-level `ContextStore::delete`,
+  a forget whose identical content is indexed under any other label (another
+  agent's byte-identical memory, a task outcome with the same text) refuses
+  rather than deleting theirs too — store a correction instead. The
+  vendored upstream memory tools stay unwired: they resolve their store
+  ambiently, which under multi-tenant-in-one-process is a cross-company
+  leak (`src/harness/built_in/build.rs`, `memory_tools`).
+- **Scratch stays on the overlay, unwired, until its first consumer.**
+  Carrying it into the harness with zero consumers would recreate the dead
+  seam this pass existed to remove.
+- **Hybrid routing (traces local, facts hosted) is deferred, not rejected** —
+  it would sidestep the hosted enumeration-cost cliff without waiting on
+  upstream keyed CRUD, but it is a refinement of *routing* under the P3
+  selection decision, and it waits for real usage data to say which
+  workloads actually hurt.
+
+## Switching engines — the operator runbook
+
+Whether the switch is a console apply or an env flip plus a restart, **the
+switch alone moves no data** — a switched engine starts empty until something
+puts records in it — so the migration below is the step that moves it, and it
+comes first.
+
+0. **Stop the writes.** Pause the workload (or scale the tenant to zero)
+   before migrating: the copy is page-by-page with no dual-write, so anything
+   a live cycle writes to the source *after* its page was exported is lost to
+   the target. The export cursor is also the source driver's own — against a
+   store that keeps changing underneath it, a hosted cursor can skip or repeat
+   rows. A paused company loses nothing: chat still parks, and the whole
+   procedure is one restart long anyway.
+1. **Move the data.** `opencompany memory migrate --to <driver>` copies every
+   record from the env-selected engine (the source — you have not flipped the
+   environment yet, so it still names the old engine) into the target, over
+   the contract's Portability family: namespaces, record kinds and provenance
+   taint round-trip untouched. `--dry-run` counts first; a stopped run prints
+   the `--resume-cursor` to re-enter at (import is idempotent by
+   `(namespace, key)`, so re-running a failed page cannot duplicate — drivers
+   that detect presence report `skipped`, the rest overwrite in place). Hosted targets warn about
+   their enumeration-based write cost. The `store` default and the
+   EngineCortex overlay have no provider seam and are refused by name — for
+   those, `opencompany export` now reads the live engine (base backend plus
+   memory overlay, operator facts included) and is the capture tool.
+
+   Two hosted-deployment cautions. The copy is **engine-level**: every
+   namespace the source credential can see crosses, which is exactly right
+   when each tenant has its own hosted account and credential — and exactly
+   wrong if two tenants ever shared one, so keep hosted memory credentials
+   per-tenant. And pass the target credential through
+   `OPENCOMPANY_MEMORY_TARGET_API_KEY`, not `--to-api-key`: a flag sits in
+   `/proc/<pid>/cmdline`, world-readable for the whole (possibly long) run,
+   which no shell-history hygiene fixes. The flag remains only for
+   compatibility. On completion the command re-counts the **target's own**
+   export as a receipt, so the evidence is the target's answer rather than
+   the migration's own counters.
+2. **Set the variables** for the target engine (the `.env.example` block names
+   all five). A hosted engine needs the build to carry the `tinymemory`
+   feature; `namespace` needs `tinymemory-embedded`. A feature-less build
+   refuses at boot naming the missing feature.
+3. **Restart.** Selection is read once at boot; a running process never
+   re-reads it.
+4. **Verify on `GET /spec`**: `memory.backend` and `memory.driver_id` name
+   what you selected, `memory.capabilities` lists what it negotiated, and
+   `memory.healthy` reports the boot-time reachability probe — `false` means
+   bound-but-unreachable (bad endpoint or credential); absent means "not
+   probed" (the `store` default or the direct engine overlay).
+
+Misconfiguration never falls back: an unknown mode, a missing driver, URL or
+key, or a missing cargo feature is a boot refusal naming the knob to change.
+
+> **`namespace` caveat (2026-08-20):** #1201 (writes corrupted by the PII
+> scrubber redacting Luhn-valid digit runs — most often `at_millis` timestamps
+> — into broken JSON) is fixed in this change's own stack: the scrubber now
+> corroborates before redacting, and two regression nets pin it (the
+> Luhn-timestamp round-trip, and the survival contract in
+> `store::memory::upstream_conformance_test`). One defect remains open —
+> #1238 (a dropped context chunk and reordered traces under the port
+> conformance suite). Until it lands, prefer the incumbent `embedded` engine
+> overlay or a hosted engine for anything real.

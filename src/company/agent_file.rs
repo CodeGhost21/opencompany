@@ -81,6 +81,11 @@ struct AgentFile {
     description: Option<String>,
     #[serde(default)]
     tier: Option<String>,
+    /// Which `[[harness]]` this agent runs on. Cross-checked against the
+    /// company's declared harnesses in `CompanyManifest::validate`, not here —
+    /// this file cannot see them.
+    #[serde(default)]
+    harness: Option<String>,
     #[serde(default)]
     tools: Vec<String>,
     #[serde(default)]
@@ -251,6 +256,7 @@ fn parse_agent_file(
         role,
         description: file.description,
         tier: file.tier,
+        harness: file.harness,
         tools: file.tools,
         delegates_to: file.delegates_to,
         context: file.context,
@@ -500,7 +506,7 @@ delegates_to = ["research"]
 budget_usd_daily = 5.0
 prompt = "Be specific about what would change your mind."
 prompt_files = ["prompts/rubric.md"]
-context = ["GOAL.md", "CLAIMS.md"]
+context = ["GOAL.md", "claims.md"]
 classes = ["judge", "evidence"]
 "#,
             ),
@@ -522,7 +528,7 @@ classes = ["judge", "evidence"]
             Some(
                 &[
                     crate::company::ContextEntry::from("GOAL.md"),
-                    crate::company::ContextEntry::from("CLAIMS.md")
+                    crate::company::ContextEntry::from("claims.md")
                 ][..]
             )
         );

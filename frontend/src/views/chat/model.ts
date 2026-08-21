@@ -2,7 +2,7 @@
 // rules the timeline reads. Everything here is pure — the view owns the state.
 
 import type { ApprovalSummary, DeskDto, Verdict } from "@/api/types";
-import type { ChatMessage, Reaction } from "@/lib/chat";
+import { clearTaskCard, type ChatMessage, type Reaction } from "@/lib/chat";
 import { defaultDesks, type Desk } from "@/lib/desks";
 import { initials as nameInitials, type TeamMember } from "@/lib/team";
 
@@ -159,7 +159,17 @@ export function buildChannels(members: TeamMember[], desks: Desk[] = defaultDesk
     id: dmChannelId(m),
     name: m.name,
     kind: "dm" as const,
-    purpose: m.role,
+    // The teammate's **description**, which is the field parallel to a desk's
+    // `blurb` above — both answer "what is this line for", and neither repeats
+    // what the title already said. This used to read `m.role`, an identity
+    // field in a description slot, and that is precisely what made the header
+    // say the same words twice (issue #1180): `fromDto` falls back
+    // `dto.name?.trim() || dto.role`, so a company that names roles rather than
+    // people has name === role, and the title and the slot after the divider
+    // resolved to one string. The role is still the fallback — for a teammate
+    // the host *did* name it is a real second fact — and {@link channelSubtitle}
+    // is what declines to render even that when it just echoes the title.
+    purpose: m.description.trim() || m.role,
     tone: m.tone,
     member: m,
   }));
@@ -297,6 +307,104 @@ export function channelTitle(channel: Channel): string {
 }
 
 /**
+ * The line that goes *beside* the title — the muted slot after the header's
+ * divider, the rail row's tooltip, the conversation intro's clause — or `null`
+ * when there is nothing to say that the title has not already said.
+ *
+ * `null` rather than the empty string, and a rule rather than a DM special
+ * case. A subtitle exists to add a second fact; one that repeats the first is
+ * not a hierarchy, it is the same word twice with two type styles, and the
+ * honest render of "nothing more to say" is nothing. Issue #1180 is what that
+ * looks like when it ships: every agent in a company that declares roles and no
+ * names read `Backend Engineer │ Backend Engineer` across the top of its DM.
+ *
+ * The comparison is case- and whitespace-insensitive because the duplicate is a
+ * duplicate to a reader either way — a manifest whose description restates the
+ * role in sentence case is the same non-fact as one that restates it verbatim.
+ *
+ * Kind-agnostic on purpose. A DM is where this bites today, but a desk whose
+ * blurb is just its own name is the identical duplicate under `#`, and a rule
+ * that only fires for DMs would let that one through. Channels are otherwise
+ * untouched: a blurb that says something the slug does not — which is every
+ * desk that bothered to write one — comes back exactly as before.
+ */
+export function channelSubtitle(channel: Channel): string | null {
+  const purpose = channel.purpose.trim();
+  if (!purpose) return null;
+  // Collapse runs of internal whitespace too, not just the outer trim — a
+  // manifest description copy-pasted from the role with a doubled space or a
+  // stray newline in the middle is still the same duplicate to a reader, and
+  // the doc comment above promises "whitespace-insensitive" without
+  // qualification.
+  const normalize = (s: string) => s.trim().replace(/\s+/g, " ").toLowerCase();
+  if (normalize(purpose) === normalize(channel.name)) return null;
+  return purpose;
+}
+
+/**
+ * The line under the identity block at the top of an empty transcript.
+ *
+ * Pure, exported and here rather than inline in `MessageTimeline` because it is
+ * four branches of prose over two nullable inputs, and prose defects are
+ * invisible to a type checker. The one this arrived with: the DM branch used to
+ * append a full stop by hand, which was right while the subtitle was a role
+ * (`Backend Engineer`) and produced "…and services.." the moment issue #1180
+ * made it a description that brings its own punctuation. `sentence` is the rule
+ * for that, so every branch goes through it.
+ *
+ * `loading` renders the subtitle alone: both finished sentences are positive
+ * claims that the channel has no history, and neither may be made before the
+ * host has answered (issue #934).
+ */
+export function channelIntroSentence(channel: Channel, loading: boolean): string {
+  const subtitle = channelSubtitle(channel);
+  if (loading) return subtitle ? sentence(subtitle) : "";
+  if (channel.kind === "dm") {
+    // No subtitle drops the clause, not the sentence: where you are is still
+    // worth saying, the tautology after it is not.
+    return subtitle
+      ? `This is the start of your direct message with ${channel.name} — ${sentence(lower(subtitle))}`
+      : `This is the start of your direct message with ${channel.name}.`;
+  }
+  return `This is the very beginning of ${channelTitle(channel)}.${subtitle ? ` ${sentence(subtitle)}` : ""}`;
+}
+
+/** Lowercases the first character only, for a clause continuing a sentence. */
+function lower(s: string): string {
+  return s.charAt(0).toLowerCase() + s.slice(1);
+}
+
+/** Terminates `s` with a full stop unless it already ends in punctuation. */
+function sentence(s: string): string {
+  const t = s.trim();
+  return /[.!?]$/.test(t) ? t : `${t}.`;
+}
+
+/**
+ * The face a DM wears — the `TeammateAvatar` seed for the teammate on the
+ * other end — or `null` for anything that has no face: a channel, and a DM
+ * with no roster entry behind it (both of those wear a glyph instead).
+ *
+ * One function rather than the same props written out at each call site,
+ * because the rail row and the header sit on screen together, and a call site
+ * that seeded its mascot differently from another would draw a *different*
+ * face for the same person a few pixels away — worse than the generic glyph
+ * the header used to show (issue #1170). Deriving both from here is what
+ * makes that drift impossible rather than merely unlikely.
+ *
+ * `avatar` is `channel.member.avatar` — the id-seeded mascot key `fromDto`
+ * already computed onto the roster entry (issue #1185) — rather than
+ * `channel.name`: a teammate's face must survive a rename, and `TeamMember`
+ * already carries the seed that does that. `tone` needs no such rerouting;
+ * `buildChannels` already sets it from `member.tone`, which was id-seeded from
+ * the start.
+ */
+export function dmFace(channel: Channel): { name: string; tone?: string; avatar?: string } | null {
+  if (channel.kind !== "dm" || !channel.member) return null;
+  return { name: channel.name, tone: channel.tone, avatar: channel.member.avatar };
+}
+
+/**
  * Whether this chat target's composer offers "Do it once" / "Build me the
  * workflow" (issues #580, #845).
  *
@@ -335,6 +443,14 @@ export interface Sender {
   name: string;
   kind: SenderKind;
   tone?: string;
+  /**
+   * The id-seeded mascot key (`TeamMember.avatar`), when the sender resolves
+   * to a roster teammate. Undefined for "you"/"system", and for an agent
+   * voice `senderOf` could not match against the roster — `TeammateAvatar`
+   * falls back to seeding on `name` in both of those cases, same as before
+   * issue #1185.
+   */
+  avatar?: string;
 }
 
 /** Channel names the host uses for its own voice rather than a named agent. */
@@ -346,23 +462,40 @@ const COMPANY_VOICE = new Set(["operator", "console", "chat", "owner", ""]);
  * The company side wears the channel's identity unless the reply names a
  * distinct originating channel — then it reads as that agent, which is how a
  * single endpoint produces a multi-voice transcript.
+ *
+ * `members` is the roster, so a named agent's face can be looked up rather
+ * than left to fall back on its title-cased channel slug (issue #1185). The
+ * host's own convention for that slug (`api/types.ts`'s note on `thread`) is
+ * a desk id for a channel reply and a roster agent id for a direct message —
+ * only the latter matches a `TeamMember.id`, so a miss here is expected for a
+ * desk-originated cross-post and simply keeps today's name-seeded fallback,
+ * never a wrong face.
  */
-export function senderOf(m: ChatMessage, channel: Channel): Sender {
+export function senderOf(m: ChatMessage, channel: Channel, members: TeamMember[]): Sender {
   if (m.from === "you") return { key: "you", name: "You", kind: "you" };
   if (m.from === "system") return { key: "system", name: "System", kind: "system" };
 
   const named = m.channel?.trim().toLowerCase() ?? "";
   if (named && !COMPANY_VOICE.has(named)) {
-    return { key: `agent:${named}`, name: titleize(m.channel ?? ""), kind: "agent", tone: named };
+    const agent = members.find((mem) => mem.id === named);
+    return {
+      key: `agent:${named}`,
+      name: titleize(m.channel ?? ""),
+      kind: "agent",
+      tone: named,
+      avatar: agent?.avatar,
+    };
   }
 
   // A desk speaks as itself and wears its own tone; only the main line — the
-  // one channel with no tone of its own — speaks as the company.
+  // one channel with no tone of its own — speaks as the company. A DM's
+  // "channel" is the teammate on the other end, so its avatar is theirs.
   return {
     key: `channel:${channel.id}`,
     name: channel.voice ?? channel.name,
     kind: channel.kind === "dm" || channel.tone ? "agent" : "company",
     tone: channel.tone,
+    avatar: channel.member?.avatar,
   };
 }
 
@@ -386,6 +519,38 @@ export interface TimelineEntry {
   dayLabel?: string;
   /** Replies hanging off this row, oldest first. */
   replies: ChatMessage[];
+  /**
+   * The distinct voices in those replies, in the order they first spoke
+   * (issue #1324).
+   *
+   * Resolved here rather than in the row because resolving a sender needs the
+   * channel and the roster, and neither reaches the renderer. Without it the
+   * summary row could only seed a face on `message.channel` — one value shared
+   * by every reply in a thread — so a three-face pile drew one colour three
+   * times and said nothing at all.
+   *
+   * Deduped by `Sender.key`: a pile is a list of *people*, and someone who
+   * replied four times is still one face.
+   */
+  replySenders: Sender[];
+}
+
+/**
+ * The distinct voices in a run of messages, in first-spoken order.
+ *
+ * Goes through the same {@link senderOf} every rendered row does, so a face in
+ * a thread's summary pile is the same face that thread shows when it is opened.
+ * A system line is dropped: it has no voice to draw, and a pile that counted it
+ * would claim one more participant than the thread has.
+ */
+function distinctSenders(messages: ChatMessage[], channel: Channel, members: TeamMember[]): Sender[] {
+  const byKey = new Map<string, Sender>();
+  for (const m of messages) {
+    if (m.from === "system") continue;
+    const sender = senderOf(m, channel, members);
+    if (!byKey.has(sender.key)) byKey.set(sender.key, sender);
+  }
+  return [...byKey.values()];
 }
 
 /**
@@ -395,7 +560,11 @@ export interface TimelineEntry {
  * carries its own replies and renders a summary row, matching how a threaded
  * chat keeps the main channel readable.
  */
-export function buildTimeline(messages: ChatMessage[], channel: Channel): TimelineEntry[] {
+export function buildTimeline(
+  messages: ChatMessage[],
+  channel: Channel,
+  members: TeamMember[],
+): TimelineEntry[] {
   const replies = new Map<string, ChatMessage[]>();
   for (const m of messages) {
     if (!m.parentId) continue;
@@ -409,7 +578,7 @@ export function buildTimeline(messages: ChatMessage[], channel: Channel): Timeli
 
   for (const m of messages) {
     if (m.parentId) continue;
-    const sender = senderOf(m, channel);
+    const sender = senderOf(m, channel, members);
     const newDay = !prev || !sameDay(prev.message.at, m.at);
     const continuation =
       !newDay &&
@@ -421,12 +590,14 @@ export function buildTimeline(messages: ChatMessage[], channel: Channel): Timeli
       // otherwise sit between two lines that read as one utterance.
       prev.replies.length === 0;
 
+    const own = replies.get(m.id) ?? [];
     const entry: TimelineEntry = {
       message: m,
       sender,
       continuation,
       dayLabel: newDay ? formatDay(m.at) : undefined,
-      replies: replies.get(m.id) ?? [],
+      replies: own,
+      replySenders: distinctSenders(own, channel, members),
     };
     entries.push(entry);
     prev = entry;
@@ -664,4 +835,28 @@ export function reactionChips(reactions: Reaction[] | undefined): ReactionChip[]
     chip.by.push(row.by);
   }
   return chips;
+}
+
+/**
+ * Drop a dismissed card from **every** channel's transcript (issue #984).
+ *
+ * The channel-level counterpart of {@link clearTaskCard}, and it exists for the
+ * same reason one level up. That helper keys on the card rather than the clicked
+ * row because one card can be named by several lines; this one keys on the card
+ * rather than the active channel because those lines can sit in several
+ * *channels* — a dispatch marker lands in the origin thread's channel, not
+ * necessarily the one the operator is looking at. Clearing only the active
+ * channel leaves the rest linking to a card the host no longer has.
+ *
+ * Returns the same object when nothing changed, so React sees no new state.
+ */
+export function clearTaskCardEverywhere(transcripts: Transcripts, taskId: string): Transcripts {
+  let changed = false;
+  const next: Transcripts = {};
+  for (const [channelId, messages] of Object.entries(transcripts)) {
+    const cleared = clearTaskCard(messages, taskId);
+    if (cleared !== messages) changed = true;
+    next[channelId] = cleared;
+  }
+  return changed ? next : transcripts;
 }

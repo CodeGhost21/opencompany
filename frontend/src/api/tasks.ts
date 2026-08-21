@@ -203,6 +203,24 @@ export interface AssigneeCandidate {
  */
 export type TaskDeliverable = "once" | "workflow";
 
+/**
+ * What the operator says one chat **message** is for (issue #1152).
+ *
+ * The two work words mean exactly what they mean on a card. `"chat"` is the
+ * operator saying this message is not a request for work at all — the composer's
+ * "Just chatting" — so no deterministic path opens a card for it.
+ *
+ * Deliberately **not** a widening of `TaskDeliverable`. That type is the card
+ * field, shared by `CreateTask`, `TaskPatch` and `TaskDto`, and a card can never
+ * *be* "not work": widening it would make `"chat"` assignable in every one of
+ * those positions and put the compiler on the wrong side of the invariant. This
+ * is message-scoped, and the host draws the same line (`MessageIntent` beside
+ * `TaskDeliverable` in `src/ports/types.rs`).
+ *
+ * Sent only when it is not the default — see `OpenCompanyClient.chat`.
+ */
+export type MessageIntent = "chat" | TaskDeliverable;
+
 /** A positive source-currency USD amount or an explicit role-redacted state. */
 export interface TaskCost {
   amountUsd?: number;
@@ -233,7 +251,24 @@ export interface Task {
   id: string;
   title: string;
   note?: string;
+  /**
+   * The board's column: `pending`, `working` or `done` (issue #1512).
+   *
+   * Three, not six. The four states that used to sit between To-do and Done —
+   * `planning`, `in_progress`, `paused`, `in_review` — all say the same thing
+   * to a reader of a board, so they are one column now and {@link Task.stage}
+   * carries which of them it actually is.
+   */
   column: string;
+  /**
+   * Which kind of working, on a working card: `planning`, `in_progress`,
+   * `paused` or `in_review`. Absent on a pending or done card.
+   *
+   * Read this — never `column` — for anything genuinely stage-specific: the
+   * Resume button on a paused card, the review link on one waiting for a
+   * verdict. Those reads are what used to force `column` to stay six-valued.
+   */
+  stage?: string;
   priority: string;
   /** The desk/teammate label that owns it (a roster agent id routes a turn). */
   assignee: string;
@@ -280,7 +315,7 @@ export interface Task {
   workflowProposal?: TaskWorkflowProposal;
 }
 
-/** The create body; the host defaults column→`todo`, priority→`medium`. */
+/** The create body; the host defaults column→`pending`, priority→`medium`. */
 export interface CreateTask {
   title: string;
   note?: string;
@@ -291,27 +326,28 @@ export interface CreateTask {
    * The chat thread this card is being opened from (issue #246). Set by the
    * transcript's "Add to board" action; the board's `+` button omits it.
    *
-   * Note what is deliberately NOT sent alongside it: `column`. Entering a
-   * column is what spends money, so the server's intake default decides where a
-   * chat-created card lands and a **human drag** stays the only way to start
+   * Note what is deliberately NOT sent alongside it: `column`. Entering
+   * Working is what spends money, so the server's intake default decides where
+   * a chat-created card lands and a **human drag** stays the only way to start
    * spending on it.
-   *
-   * Since issue #337 there are two such columns, not one. `in_progress`
-   * dispatches an agent turn; `planning` buys one planning pass, which on
-   * success hands the card straight on to `in_progress` without asking again.
-   * So a drag into Planning is informed consent to both, and neither can be
-   * reached from this body.
    */
   originChatId?: string;
   /**
    * The operator's explicit once-vs-workflow choice (issue #580, decision D2a).
-   * Omitting it means `"once"`. A `"workflow"` card lands in To-do like any
-   * other; the builder pass fires only when it is dragged into In Progress.
+   * Omitting it means `"once"`. A `"workflow"` card lands in Pending like any
+   * other; the builder pass fires only when it is dragged into Working.
    */
   deliverable?: TaskDeliverable;
 }
 
-/** A partial update; any omitted field is left as-is. A drag sends `{column}`. */
+/**
+ * A partial update; any omitted field is left as-is.
+ *
+ * A drag sends `{column}` — one of the three phase words. The host resolves it
+ * to the stage a drop actually means, so `working` becomes `in_progress` and
+ * dispatches. There is no way to write a stage from here, and there should not
+ * be: the three states are the vocabulary (issue #1512).
+ */
 export interface PatchTask {
   title?: string;
   note?: string;
@@ -320,8 +356,8 @@ export interface PatchTask {
   assignee?: string;
   /**
    * Flip the once-vs-workflow choice (issue #580). Omitting it leaves the choice
-   * untouched — so an operator can flip a To-do card to `"workflow"` before
-   * dragging it into In Progress.
+   * untouched — so an operator can flip a Pending card to `"workflow"` before
+   * dragging it into Working.
    */
   deliverable?: TaskDeliverable;
 }

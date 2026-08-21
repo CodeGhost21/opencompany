@@ -40,9 +40,9 @@ async fn with_a_ledger(runtime: &CompanyRuntime) -> (String, String) {
     ledgers::define(
         &ledgers::Ledgers::from(runtime),
         &json!({
-            "slug": "risks",
-            "title": "Risks",
-            "derived": "derived/RISKS.md",
+            "slug": "hazards",
+            "title": "Hazards",
+            "derived": "derived/hazards.md",
             "fields": [
                 { "name": "id", "role": "id" },
                 { "name": "risk", "role": "title" },
@@ -62,7 +62,7 @@ async fn with_a_ledger(runtime: &CompanyRuntime) -> (String, String) {
         .clone();
     let file = tree
         .iter()
-        .find(|node| node.name == "RISKS.md")
+        .find(|node| node.name == "hazards.md")
         .expect("file")
         .id
         .clone();
@@ -87,7 +87,7 @@ async fn an_operator_cannot_overwrite_a_derived_file() {
         .await
         .expect_err("refused");
     let message = format!("{error}");
-    assert!(message.contains("risks"), "{message}");
+    assert!(message.contains("hazards"), "{message}");
     assert!(message.contains("record_entry"), "{message}");
 }
 
@@ -227,7 +227,7 @@ async fn the_runtimes_own_derivation_still_writes() {
     let (_folder, file) = with_a_ledger(&runtime).await;
     let ctx = ledgers::Ledgers::from(&runtime);
     let registry = ledgers::registry(&ctx).await.expect("registry");
-    let spec = registry.find("risks").expect("declared");
+    let spec = registry.find("hazards").expect("declared");
 
     ledgers::record(
         &ctx,

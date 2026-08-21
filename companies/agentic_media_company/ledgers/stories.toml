@@ -1,0 +1,110 @@
+# The newsroom's story list: what is being reported, at what stage, and what was
+# killed.
+#
+# A board is the wrong shape for a newsroom. A story is not a unit of work; it is
+# a claim about the world at a particular stage of verification, and the stage —
+# pitched, reported, verified, legalled — determines what may be said about it
+# and to whom. A card in "in progress" says nothing about whether the story is
+# true yet.
+
+title = "Stories"
+purpose = """
+Every story this newsroom is working on: what it claims, what stage of \
+verification it is at, who is reporting it, and why the killed ones were \
+killed. Read it before pitching — the story has often been tried, and the \
+reason it did not run is usually the most useful thing about it.\
+"""
+written_by = "`record_entry` to pitch or advance a story, `close_entry` when it is published or killed"
+checks = ["required-field", "known-status", "closed-needs-reason"]
+
+[[field]]
+name = "id"
+role = "id"
+required = true
+
+[[field]]
+name = "story"
+role = "title"
+required = true
+description = "What the story says, as a claim rather than a topic. \"Water rights\" is a topic."
+
+[[field]]
+name = "status"
+role = "status"
+required = true
+
+[[field]]
+name = "claim"
+role = "prose"
+required = true
+description = "The central assertion, stated so it can be verified or fail."
+
+[[field]]
+name = "owner"
+role = "owner"
+
+[[field]]
+name = "sourcing"
+role = "prose"
+description = "How many independent sources support the central claim, and of what kind."
+
+[[field]]
+name = "response_sought"
+role = "prose"
+description = "Whether anyone named adversely has been asked to respond, and when. A story that has not asked is not ready."
+
+[[field]]
+name = "risk"
+role = "prose"
+description = "Legal or ethical exposure — defamation, privacy, a source who could be identified."
+
+[[field]]
+name = "reason"
+role = "prose"
+description = "Why it closed — published, or killed and why. Required when it closes."
+
+[[field]]
+name = "refs"
+role = "refs"
+
+[[status]]
+name = "pitched"
+
+[[status]]
+name = "reporting"
+aliases = ["verifying"]
+
+[[status]]
+name = "ready"
+
+[[status]]
+name = "published"
+closed = true
+needs_reason = true
+
+[[status]]
+name = "killed"
+closed = true
+needs_reason = true
+
+[[section]]
+heading = "In the pipeline"
+blurb = "Being reported or verified. `verifying` is a real stage and nothing skips it."
+statuses = ["reporting", "ready"]
+order = "recent"
+
+[[section]]
+heading = "Pitched"
+blurb = "Proposed, not commissioned. Each should state a claim, not a topic."
+statuses = ["pitched"]
+order = "recent"
+
+[[section]]
+heading = "Closed"
+blurb = """
+Published or killed, each with the reason. A killed story is the valuable half: \
+"we could not stand it up" is what stops the same story being pitched again \
+next quarter with the same single source.\
+"""
+statuses = ["published", "killed"]
+cap = 20

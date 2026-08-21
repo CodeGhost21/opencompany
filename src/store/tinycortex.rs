@@ -345,16 +345,14 @@ fn score_chunks(chunks: &[StoredChunk], query: &str) -> Vec<ChunkHit> {
 }
 
 /// Extracts a char-boundary-safe window around `pos` of a matched term.
+///
+/// Cuts the window with the same shared helper every other `ContextStore`
+/// backend uses, so identical content snippets identically whichever store
+/// answered. This copy used to *ceil* the start where the shared helper
+/// *floors* it, which dropped the leading character of a non-ASCII window here
+/// and nowhere else — a difference no `.contains(term)` assertion can see.
 fn snippet_around(body: &str, pos: usize, term_len: usize) -> String {
-    let raw_start = pos.saturating_sub(24);
-    let raw_end = (pos + term_len + 24).min(body.len());
-    let start = (raw_start..=pos)
-        .find(|&i| body.is_char_boundary(i))
-        .unwrap_or(pos);
-    let end = (raw_end..=body.len())
-        .find(|&i| body.is_char_boundary(i))
-        .unwrap_or(body.len());
-    body[start..end].to_string()
+    crate::store::text::slice_on_char_boundaries(body, pos.saturating_sub(24)..pos + term_len + 24)
 }
 
 // ---------------------------------------------------------------------------
@@ -464,19 +462,23 @@ impl ContextStore for CortexContextStore {
             })?;
         match range {
             None => Ok(body),
-            Some(r) => {
-                let start = r.start.min(body.len());
-                let end = r.end.min(body.len());
-                if start >= end {
-                    return Ok(String::new());
-                }
-                Ok(body[start..end].to_string())
-            }
+            // Byte offsets from the caller can land mid-codepoint; widen to
+            // the boundary rather than panic the slice (`snippet_around`
+            // already defends the search window the same way).
+            Some(r) => Ok(crate::store::text::slice_on_char_boundaries(&body, r)),
         }
     }
 
     async fn search(&self, id: &CompanyId, query: &str, limit: usize) -> Result<Vec<ChunkHit>> {
         self.client.search_chunks(id.as_ref(), query, limit).await
+    }
+
+    async fn delete(&self, id: &CompanyId, addr: &ChunkAddr) -> Result<bool> {
+        // The operator hard-delete the client already serves; agent-forget and
+        // operator-delete are the same act at this layer.
+        self.client
+            .hard_delete_chunk(id.as_ref(), addr.as_ref())
+            .await
     }
 }
 
@@ -543,6 +545,22 @@ mod test {
         let dir = tempfile::tempdir().unwrap();
         let (_store, _events, _mem, ctx) = stores(dir.path());
         conformance::assert_context_chunk_stamps(ctx).await;
+    }
+
+    // This backend keeps the port's default `peek_many` (the client seam has
+    // no bulk read), so this run also proves the default implementation.
+    #[tokio::test]
+    async fn conformance_context_peek_many() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_store, _events, _mem, ctx) = stores(dir.path());
+        conformance::assert_context_peek_many_answers_positionally(ctx).await;
+    }
+
+    #[tokio::test]
+    async fn conformance_context_multibyte_bodies() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_store, _events, _mem, ctx) = stores(dir.path());
+        conformance::assert_multibyte_bodies_survive_search_and_ranged_peek(ctx).await;
     }
 
     fn company() -> CompanyId {

@@ -231,6 +231,96 @@ pub struct MemoryOverlay {
     pub scratch: Option<Arc<dyn ContextStore>>,
     /// What is bound, for status output.
     pub descriptor: MemoryDescriptor,
+    /// The bound provider, kept solely so [`Self::refresh_health`] can probe
+    /// it once at boot. `None` on the engine-overlay path, which drives the
+    /// in-pod engine directly and has no provider to ask.
+    ///
+    /// Private on purpose: `MemoryCore` is a supertrait of `MemoryProvider`,
+    /// so a public handle here would let anything holding an `AppState` call
+    /// `store("<any namespace>", …)` directly — re-opening exactly the
+    /// raw-namespace door `store::memory`'s module docs promise is closed by
+    /// construction. The ports above are the only data path.
+    #[cfg(feature = "tinymemory")]
+    probe: Option<Arc<dyn tinymemory_api::provider::MemoryProvider>>,
+}
+
+impl MemoryOverlay {
+    /// Bare overlay for wiring tests: the given ports, no facts, no scratch,
+    /// no probe. Lives here because `probe` is private by design (see the
+    /// field doc) — tests outside this module cannot construct the struct.
+    #[cfg(test)]
+    pub(crate) fn test_with_ports(
+        memory: Arc<dyn MemoryStore>,
+        context: Arc<dyn ContextStore>,
+        inbound_context: Option<Arc<dyn ContextStore>>,
+    ) -> Self {
+        Self {
+            memory,
+            context,
+            facts: None,
+            inbound_context,
+            scratch: None,
+            descriptor: MemoryDescriptor {
+                backend: MemoryBackend::Store,
+                driver_id: "test".into(),
+                capabilities: Vec::new(),
+                healthy: None,
+            },
+            #[cfg(feature = "tinymemory")]
+            probe: None,
+        }
+    }
+
+    /// Probes the bound engine once and records the answer on the descriptor,
+    /// so `/spec` can tell an operator "bound but unreachable" before the
+    /// first cycle finds out — until this ran, a hosted engine with a dead
+    /// endpoint or a revoked key bound cleanly and failed days later, on a
+    /// path nobody was watching.
+    ///
+    /// Boot-time only, bounded by `timeout`, and advisory by design: a probe
+    /// failure logs loudly and records `healthy: Some(false)`, it never
+    /// refuses the boot. Configuration errors already refuse at open; a
+    /// transient vendor outage must not crash-loop a tenant that could serve
+    /// everything else. `healthy: None` means "not probed" — the engine
+    /// overlay path, or a build without the provider seam.
+    #[cfg(feature = "tinymemory")]
+    pub async fn refresh_health(&mut self, timeout: std::time::Duration) {
+        let Some(probe) = &self.probe else {
+            return;
+        };
+        let answer = tokio::time::timeout(timeout, probe.health()).await.ok();
+        let healthy = probe_answer_is_healthy(&answer);
+        if !healthy {
+            tracing::warn!(
+                driver_id = %self.descriptor.driver_id,
+                status = ?answer,
+                timeout_secs = timeout.as_secs(),
+                "memory engine bound but its health probe did not answer Ready or Degraded; \
+                 cycles that need memory will fail until the endpoint or credential is fixed"
+            );
+        }
+        self.descriptor.healthy = Some(healthy);
+    }
+
+    /// Without the provider seam there is nothing to probe; `healthy` stays
+    /// `None` ("not probed"), which is the truth.
+    #[cfg(not(feature = "tinymemory"))]
+    pub async fn refresh_health(&mut self, _timeout: std::time::Duration) {}
+}
+
+/// Maps a probe outcome (`None` = timed out) onto the `healthy` bit.
+///
+/// `Ready` AND `Degraded` are healthy: a degraded engine is still serving —
+/// reduced, not absent — and reporting it as down would tell an operator to
+/// fix an endpoint that is answering. Only `Down` and a timeout mean the
+/// first cycle that needs memory will fail.
+#[cfg(feature = "tinymemory")]
+fn probe_answer_is_healthy(answer: &Option<tinymemory_api::health::MemoryHealth>) -> bool {
+    use tinymemory_api::health::MemoryHealth;
+    matches!(
+        answer,
+        Some(MemoryHealth::Ready) | Some(MemoryHealth::Degraded { .. })
+    )
 }
 
 impl std::fmt::Debug for MemoryOverlay {
@@ -256,6 +346,15 @@ pub struct MemoryDescriptor {
     /// The capability families the bound driver negotiated, so an operator can
     /// see what the engine does *not* support before a cycle finds out.
     pub capabilities: Vec<String>,
+    /// Whether the boot-time reachability probe found the engine usable:
+    /// `Ready`, or `Degraded` — reachable and serving, possibly reduced.
+    /// Only `Down` maps to `Some(false)`.
+    ///
+    /// `None` means the engine was never probed — the engine-overlay path,
+    /// which has no provider seam to ask, or a boot path that skipped
+    /// [`MemoryOverlay::refresh_health`]. `Some(false)` is a bound engine
+    /// whose probe failed: still bound, loudly warned, visible on `/spec`.
+    pub healthy: Option<bool>,
 }
 
 /// Durable company → tenant ownership, for shared-database platform mode.
@@ -361,11 +460,16 @@ pub struct StorageSettings {
     /// Which engine to bind for `OPENCOMPANY_MEMORY=remote`
     /// (`OPENCOMPANY_MEMORY_DRIVER`): `supermemory`, `mem0`, `cognee`.
     ///
-    /// Env is the only channel: memory selection is instance-level (one engine
-    /// per boot, like `OPENCOMPANY_STORAGE`), while manifests are per-company —
-    /// a company-scoped knob for an instance-wide choice would be incoherent.
+    /// Instance-level, never per-company: one engine per instance, like
+    /// `OPENCOMPANY_STORAGE`, while manifests are per-company — a
+    /// company-scoped knob for an instance-wide choice would be incoherent.
     /// This deliberately differs from `[inference].provider`, which *is*
     /// per-company and rightly lives in the manifest.
+    ///
+    /// Two channels, in the usual order: the environment, and — when the
+    /// deployment names no engine — the `[memory]` section of `config.toml`,
+    /// which is what lets an operator choose one from the console
+    /// ([`MemorySelection`], [`StorageSettings::with_memory_config`]).
     pub memory_driver: Option<String>,
     pub memory_url: Option<String>,
     /// The hosted engine's credential (`OPENCOMPANY_MEMORY_API_KEY`).
@@ -459,6 +563,106 @@ impl StorageSettings {
             memory_api_key: non_empty("OPENCOMPANY_MEMORY_API_KEY"),
         })
     }
+
+    /// Whether the *deployment* named the memory engine
+    /// (`OPENCOMPANY_MEMORY`), in which case the `[memory]` section of
+    /// `config.toml` is inert and the console renders the engine read-only.
+    ///
+    /// Presence, not value: a control plane that injects `OPENCOMPANY_MEMORY`
+    /// owns the choice whichever engine it names, including `store`.
+    pub fn memory_is_env_owned() -> bool {
+        std::env::var("OPENCOMPANY_MEMORY").is_ok_and(|value| !value.trim().is_empty())
+    }
+
+    /// Layers a `config.toml` `[memory]` section under the environment.
+    ///
+    /// A no-op when [`Self::memory_is_env_owned`] — see [`MemorySection`] for
+    /// why the env layer wins rather than the more recent write.
+    ///
+    /// [`MemorySection`]: crate::app::config::MemorySection
+    pub fn with_memory_config(
+        mut self,
+        section: &crate::app::config::MemorySection,
+    ) -> Result<Self> {
+        if Self::memory_is_env_owned() {
+            return Ok(self);
+        }
+        let selection = MemorySelection::from_section(section)?;
+        self.memory_backend = selection.backend;
+        self.memory_driver = selection.driver;
+        self.memory_url = selection.url;
+        self.memory_api_key = selection.api_key;
+        Ok(self)
+    }
+
+    /// Replaces the memory selection with `selection`, leaving the base
+    /// backend, data dir and durability assertion untouched.
+    ///
+    /// This is what a live engine swap rebinds through
+    /// ([`crate::server::ops::memory_engine`]): the rest of a running
+    /// instance's storage settings must survive a memory change unchanged.
+    pub fn with_memory_selection(mut self, selection: MemorySelection) -> Self {
+        self.memory_backend = selection.backend;
+        self.memory_driver = selection.driver;
+        self.memory_url = selection.url;
+        self.memory_api_key = selection.api_key;
+        self
+    }
+}
+
+/// One instance's memory-engine choice: everything `OPENCOMPANY_MEMORY*`
+/// names, parsed and validated, independent of where it came from (the
+/// environment, `config.toml`, or a console write that has not been persisted
+/// yet).
+#[derive(Clone, Default, PartialEq, Eq)]
+pub struct MemorySelection {
+    pub backend: MemoryBackend,
+    pub driver: Option<String>,
+    pub url: Option<String>,
+    pub api_key: Option<String>,
+}
+
+impl MemorySelection {
+    /// Parses a `config.toml` `[memory]` section.
+    ///
+    /// Blank strings are treated as absent — a TOML key written and then
+    /// emptied means "not set", the same rule `non_empty` applies to the
+    /// environment, and routing on bare presence would send `""` down a path
+    /// that binds nothing.
+    pub fn from_section(section: &crate::app::config::MemorySection) -> Result<Self> {
+        let trimmed = |value: &Option<String>| {
+            value
+                .as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+                .map(str::to_string)
+        };
+        let backend = match trimmed(&section.backend) {
+            Some(raw) => raw.parse()?,
+            None => MemoryBackend::default(),
+        };
+        Ok(Self {
+            backend,
+            driver: trimmed(&section.driver),
+            url: trimmed(&section.url),
+            api_key: trimmed(&section.api_key),
+        })
+    }
+}
+
+/// Renders the credential as `<set>`, never its bytes — the same hand-written
+/// `Debug` [`StorageSettings`] carries, and for the same reason: this type is
+/// reachable from boot logging and from a route's error path, where a bare
+/// `{:?}` is one keystroke away.
+impl std::fmt::Debug for MemorySelection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MemorySelection")
+            .field("backend", &self.backend.as_str())
+            .field("driver", &self.driver)
+            .field("url", &self.url)
+            .field("api_key", &self.api_key.as_ref().map(|_| "<set>"))
+            .finish()
+    }
 }
 
 /// Opens the selected backend once. `Ok(None)` means "use the builder's fs
@@ -473,6 +677,52 @@ pub async fn open_storage(
         StorageKind::Sqlite => open_sqlite(data_dir),
         StorageKind::Mongodb => open_mongodb(settings).await,
     }
+}
+
+/// The bundle-command environment refusals (`export` / `import`), extracted
+/// from the bin's `live_ports` so they execute under this module's tests —
+/// the first cut left them in the binary, where no CI lane runs tests and a
+/// mutation (`if false &&`) went green (the #1279 review's finding).
+///
+/// One deployment per bundle: with a non-default environment an explicit
+/// `--home` is refused rather than mixed in; `null` is refused in both
+/// directions; shared-single-DB tenant mode is refused (bundle ops write no
+/// owner rows). Under the fs+store default every check passes and `--home`
+/// means exactly what it always has.
+pub fn refuse_bundle_env(settings: &StorageSettings, home_was_flagged: bool) -> crate::Result<()> {
+    let live = settings.kind != StorageKind::Fs || settings.memory_backend != MemoryBackend::Store;
+    if settings.memory_backend == MemoryBackend::Null {
+        return Err(crate::error::OpenCompanyError::Config(
+            "OPENCOMPANY_MEMORY=null retains nothing: an export would capture no memory and an \
+             import would discard every record while reporting success. Unset OPENCOMPANY_MEMORY \
+             for bundle operations."
+                .into(),
+        ));
+    }
+    if live && home_was_flagged {
+        return Err(crate::error::OpenCompanyError::Config(format!(
+            "--home names an fs data set, but this environment selects storage `{}` and memory \
+             `{}` — the bundle would mix two deployments. Unset OPENCOMPANY_STORAGE and \
+             OPENCOMPANY_MEMORY* to operate on the fs home, or drop --home to operate on the \
+             live deployment.",
+            settings.kind.as_str(),
+            settings.memory_backend.as_str()
+        )));
+    }
+    if live
+        && settings
+            .tenant_id
+            .as_deref()
+            .is_some_and(|t| !t.trim().is_empty())
+    {
+        return Err(crate::error::OpenCompanyError::Config(
+            "shared-single-DB tenant mode (OPENCOMPANY_TENANT_ID) namespaces company ids and \
+             owner rows at the app layer; bundle operations write neither. Run them without \
+             tenant mode, from the manager path."
+                .into(),
+        ));
+    }
+    Ok(())
 }
 
 /// Opens the memory + context overlay selected by `OPENCOMPANY_MEMORY`.
@@ -577,6 +827,10 @@ fn open_provider(settings: &StorageSettings) -> Result<Option<MemoryOverlay>> {
         }
         return Ok(None);
     };
+    // Kept aside for the boot-time health probe; `bind` consumes its argument
+    // and deliberately exposes no provider accessor (the ports are the only
+    // data path). Clone is an `Arc` bump.
+    let probe = provider.clone();
     let bound = BoundMemory::bind(provider, class)?;
     // Announce the bind: which engine, and — the part an operator cannot infer —
     // the class the *host* assigned it, since that is what decides whether the
@@ -612,7 +866,11 @@ fn open_provider(settings: &StorageSettings) -> Result<Option<MemoryOverlay>> {
                 .into_iter()
                 .map(str::to_string)
                 .collect(),
+            // Not probed yet: binding is offline by design, and the probe is
+            // the caller's boot-time step (`refresh_health`).
+            healthy: None,
         },
+        probe: Some(probe),
     }))
 }
 
@@ -736,7 +994,11 @@ fn open_tinycortex(settings: &StorageSettings) -> Result<Option<MemoryOverlay>> 
             // empty list says "not negotiated", which is the truth; claiming the
             // mandatory three here would be reporting a bind that did not happen.
             capabilities: Vec::new(),
+            // And nothing to probe, for the same reason: `None` = not probed.
+            healthy: None,
         },
+        #[cfg(feature = "tinymemory")]
+        probe: None,
     }))
 }
 
@@ -1070,6 +1332,63 @@ mod test {
             .expect("remote yields an overlay");
         assert_eq!(overlay.descriptor.backend, MemoryBackend::Remote);
         assert_eq!(overlay.descriptor.driver_id, "supermemory");
+        // Binding is offline: nothing has probed yet, and claiming health
+        // before a probe would be the same lie in the other direction.
+        assert_eq!(
+            overlay.descriptor.healthy, None,
+            "bind must not pre-claim health"
+        );
+        assert!(
+            overlay.probe.is_some(),
+            "the provider-seam overlay must carry a probe handle for the boot health check"
+        );
+    }
+
+    #[cfg(feature = "tinymemory")]
+    #[tokio::test]
+    async fn refresh_health_records_the_probe_answer() {
+        // `null` is the one driver whose health is deterministic offline —
+        // its `health()` is `Ready` by contract — so it proves the probe
+        // path end-to-end with no network: probe handle → `refresh_health`
+        // → `descriptor.healthy`, the value `/spec` serves.
+        let settings = StorageSettings {
+            memory_backend: MemoryBackend::Null,
+            ..StorageSettings::default()
+        };
+        let mut overlay = open_memory_overlay(&settings)
+            .expect("null binds")
+            .expect("null yields an overlay");
+        assert_eq!(overlay.descriptor.healthy, None);
+        overlay
+            .refresh_health(std::time::Duration::from_secs(5))
+            .await;
+        assert_eq!(
+            overlay.descriptor.healthy,
+            Some(true),
+            "the probe's answer must land on the descriptor"
+        );
+    }
+
+    /// The whole health vocabulary, pinned per outcome: `Degraded` is still
+    /// serving — reduced, not absent — so it must read healthy; only `Down`
+    /// and a timeout mean the next memory-needing cycle fails.
+    #[cfg(feature = "tinymemory")]
+    #[test]
+    fn probe_mapping_counts_degraded_as_healthy_and_down_or_timeout_as_not() {
+        use tinymemory_api::health::MemoryHealth;
+        assert!(super::probe_answer_is_healthy(&Some(MemoryHealth::Ready)));
+        assert!(super::probe_answer_is_healthy(&Some(
+            MemoryHealth::Degraded {
+                reason: "index rebuilding".into()
+            }
+        )));
+        assert!(!super::probe_answer_is_healthy(&Some(MemoryHealth::Down {
+            reason: "connection refused".into()
+        })));
+        assert!(
+            !super::probe_answer_is_healthy(&None),
+            "a timed-out probe must read unhealthy, not unknown"
+        );
     }
 
     #[cfg(feature = "tinymemory")]
@@ -1502,5 +1821,56 @@ mod test {
             ..Default::default()
         };
         assert!(open_storage(&settings, Path::new("/tmp")).await.is_err());
+    }
+    /// The bundle-command refusals, executed — the #1279 review neutralised
+    /// the bin-resident versions with `if false &&` and nothing went red;
+    /// these are the tests that make that mutation fail.
+    #[test]
+    fn bundle_env_refusals_fire_and_the_fs_default_passes() {
+        // fs+store default: both flag spellings pass — no regression.
+        let default = StorageSettings::default();
+        refuse_bundle_env(&default, false).expect("default env, no flag");
+        refuse_bundle_env(&default, true).expect("default env, explicit --home");
+
+        // null refuses in both directions regardless of the flag.
+        let null = StorageSettings {
+            memory_backend: MemoryBackend::Null,
+            ..StorageSettings::default()
+        };
+        for flagged in [false, true] {
+            let err = refuse_bundle_env(&null, flagged)
+                .expect_err("null must refuse")
+                .to_string();
+            assert!(err.contains("OPENCOMPANY_MEMORY=null"), "{err}");
+        }
+
+        // A live environment refuses an explicit --home (two deployments in
+        // one bundle) but proceeds without the flag.
+        let live = StorageSettings {
+            kind: StorageKind::Mongodb,
+            ..StorageSettings::default()
+        };
+        let err = refuse_bundle_env(&live, true)
+            .expect_err("live env + --home must refuse")
+            .to_string();
+        assert!(err.contains("--home"), "{err}");
+        refuse_bundle_env(&live, false).expect("live env without the flag proceeds");
+
+        // Tenant mode refuses on a live env; whitespace does not count as set.
+        let tenant = StorageSettings {
+            kind: StorageKind::Mongodb,
+            tenant_id: Some("acme".into()),
+            ..StorageSettings::default()
+        };
+        let err = refuse_bundle_env(&tenant, false)
+            .expect_err("tenant mode must refuse")
+            .to_string();
+        assert!(err.contains("OPENCOMPANY_TENANT_ID"), "{err}");
+        let blank_tenant = StorageSettings {
+            kind: StorageKind::Mongodb,
+            tenant_id: Some("  ".into()),
+            ..StorageSettings::default()
+        };
+        refuse_bundle_env(&blank_tenant, false).expect("blank tenant id is unset");
     }
 }

@@ -20,8 +20,12 @@ use tokio::task::JoinHandle;
 use crate::Result;
 use crate::app::config::AuthMode;
 use crate::error::OpenCompanyError;
+use crate::feedback::board::{
+    BoardComment, BoardDetail, BoardItem, BoardPage, BoardQuery, VoteValue,
+};
 use crate::feedback::service::{FeedbackFiler, FeedbackResponse};
 use crate::feedback::store::FeedbackStore;
+use crate::feedback::tinyhumans::TinyHumansClient;
 use crate::feedback::types::{FeedbackInput, FeedbackItem, FeedbackSummary};
 use crate::policy::ManifestApprovalGate;
 use crate::ports::now_millis;
@@ -194,6 +198,10 @@ pub struct CompanyRuntime {
     pub(crate) events: Arc<dyn EventLog>,
     pub(crate) memory: Arc<dyn MemoryStore>,
     pub(crate) context: Arc<dyn ContextStore>,
+    /// The taint-stamping context port for external content (issue #1113);
+    /// resolved at build time — same store as `context` when the engine
+    /// cannot represent taint.
+    pub(crate) inbound_context: Arc<dyn ContextStore>,
     pub(crate) tools: Arc<dyn ToolProvider>,
     pub(crate) channels: Vec<Arc<dyn ChannelAdapter>>,
     pub(crate) economy: Option<Arc<dyn AgentEconomy>>,
@@ -384,6 +392,28 @@ pub struct CompanyRuntime {
     pub(crate) mcp: Option<Arc<crate::harness::mcp::McpRuntime>>,
 }
 
+/// The event the runtime appends when a continuation could not be picked back
+/// up (issue #469, defect 4).
+///
+/// Named so its **author** can be asserted (issue #966). This site writes the
+/// `AgentReply` directly rather than going through `OutboundMessage`, so it does
+/// not get the `agent` field's fallback and has to name the author itself. It
+/// used to store `OPERATOR_CHANNEL`, which made a correct system row
+/// indistinguishable on disk from a reply whose author the pre-#885 defect
+/// overwrote.
+fn continuation_failure_notice(thread: String, parent: Option<EventSeq>) -> CompanyEvent {
+    CompanyEvent::AgentReply {
+        parent,
+        chat_id: thread,
+        agent_id: crate::ports::SYSTEM_AUTHOR.to_string(),
+        text: "Your approval was recorded, but the agent could not pick the work back up. \
+               Nothing was half-done — approving again is safe and will retry it."
+            .to_string(),
+        steps: Vec::new(),
+        task_id: None,
+    }
+}
+
 impl CompanyRuntime {
     /// Assembles a runtime from its ports. Most callers use
     /// [`RuntimeBuilder`](crate::runtime::RuntimeBuilder) instead.
@@ -395,6 +425,7 @@ impl CompanyRuntime {
         events: Arc<dyn EventLog>,
         memory: Arc<dyn MemoryStore>,
         context: Arc<dyn ContextStore>,
+        inbound_context: Arc<dyn ContextStore>,
         tools: Arc<dyn ToolProvider>,
         channels: Vec<Arc<dyn ChannelAdapter>>,
         economy: Option<Arc<dyn AgentEconomy>>,
@@ -421,6 +452,7 @@ impl CompanyRuntime {
             events,
             memory,
             context,
+            inbound_context,
             tools,
             channels,
             economy,
@@ -685,10 +717,18 @@ impl CompanyRuntime {
     ///   otherwise be covered — it is kept for the case where a turn's steerable
     ///   run outlives the cycle that started it.
     ///
-    /// Cheap by construction: a non-blocking `try_lock`, a map emptiness check,
-    /// and one `std::sync::Mutex` acquisition. The platform calls this once per
-    /// idle tenant per reconcile scan against a short timeout, so anything that
-    /// could block would turn a slow company into a stalled sweep.
+    /// Every arm fails closed: the two registries report **busy** on a poisoned
+    /// mutex rather than panicking, because a panic here reaches an axum handler
+    /// with no `CatchPanicLayer` and the manager's reading of a reset connection
+    /// is to park (issues #1133, #1239).
+    ///
+    /// Cheap by construction: a non-blocking `try_lock` and at most two
+    /// `std::sync::Mutex` acquisitions — one for the run supervisor's map (the
+    /// emptiness check *is* a lock) and one for the steer registry. `||`
+    /// short-circuits, so a company already holding its cycle lock takes
+    /// neither. The platform calls this once per idle tenant per reconcile scan
+    /// against a short timeout, so anything that could block would turn a slow
+    /// company into a stalled sweep.
     pub fn is_busy(&self) -> bool {
         self.serial.try_lock().is_err()
             || !self.run_supervisor.is_empty()
@@ -1445,7 +1485,37 @@ impl CompanyRuntime {
         let receipt = CycleRunner::new(self)
             .settle_approval(id, verdict, by, scope)
             .await?;
+        self.retire_if_expired(id, &receipt).await?;
         Ok((receipt.clone(), self.spawn_follow_up(receipt)))
+    }
+
+    /// Finishes the retirement a [`ResolveReceipt::Expired`] owes (issue #1449).
+    ///
+    /// The gate dropped the entry inside its own critical section — that is what
+    /// `Expired` reports — and this is the rest of the transaction:
+    /// [`retire_approval`](Self::retire_approval), the single retirement
+    /// primitive, exactly as the sweeper reaches it. So a deadline that passes
+    /// unnoticed and a deadline that passes one second before the operator
+    /// clicks now leave **the same** durable trail: an `ApprovalExpired` line
+    /// and an `ApprovalResolved { verdict: Deny, by: System }` event, with no
+    /// human's name attached to an approval that did not happen.
+    ///
+    /// It runs **here**, inline, rather than inside the spawned follow-up: the
+    /// detached resolve answers `recorded: true` the moment this returns, and a
+    /// receipt that claims durability while its journal write is still queued on
+    /// another task is the same class of untrue statement as the one being fixed.
+    ///
+    /// A no-op for every other receipt.
+    async fn retire_if_expired(
+        self: &Arc<Self>,
+        id: &ApprovalId,
+        receipt: &ResolveReceipt,
+    ) -> Result<()> {
+        if !receipt.expired() {
+            return Ok(());
+        }
+        self.retire_approval(id, ExpiryReason::Ttl, now_millis())
+            .await
     }
 
     /// How many **other** decisions the turn behind `id` is still blocked on
@@ -1506,6 +1576,7 @@ impl CompanyRuntime {
         let receipt = CycleRunner::new(self)
             .settle_approval_amended(id, amended_payload, by)
             .await?;
+        self.retire_if_expired(id, &receipt).await?;
         Ok((receipt.clone(), self.spawn_follow_up(receipt)))
     }
 
@@ -1535,6 +1606,14 @@ impl CompanyRuntime {
             let event = match receipt {
                 ResolveReceipt::AlreadyResolved => {
                     return Ok(CycleRunner::new(&rt).already_resolved_report());
+                }
+                // Issue #1449: an expiry owes no continuation *from here*.
+                // `retire_approval` — already run inline by `retire_if_expired`
+                // — released the turn itself, banking the expiry as the deny it
+                // is. Running one here too would decide the same approval twice
+                // against the continuation queue.
+                ResolveReceipt::Expired => {
+                    return Ok(CycleRunner::new(&rt).expired_report());
                 }
                 ResolveReceipt::Settled(event) => *event,
             };
@@ -1996,20 +2075,7 @@ impl CompanyRuntime {
         let parent = self.resolvable_parent(conversation.parent, &thread).await;
         if let Err(err) = self
             .events
-            .append(
-                &self.id,
-                CompanyEvent::AgentReply {
-                    parent,
-                    chat_id: thread,
-                    agent_id: crate::runtime::channel::OPERATOR_CHANNEL.to_string(),
-                    text: "Your approval was recorded, but the agent could not pick the work \
-                           back up. Nothing was half-done — approving again is safe and will \
-                           retry it."
-                        .to_string(),
-                    steps: Vec::new(),
-                    task_id: None,
-                },
-            )
+            .append(&self.id, continuation_failure_notice(thread, parent))
             .await
         {
             tracing::warn!(
@@ -2406,6 +2472,41 @@ impl CompanyRuntime {
         self.journal.has_undescribed_history()
     }
 
+    /// The approvals queue as it is right now, in the two shapes a workflow run
+    /// is joined against it by (issue #1189).
+    ///
+    /// One pass over the same parked effects [`pending_approvals`](Self::pending_approvals)
+    /// projects, collecting both keys at once: every live approval id, and every
+    /// live `(run, gate node)` pair. See
+    /// [`LiveApprovals`](crate::ports::workflow_verdict::LiveApprovals) for why
+    /// one key cannot answer for both shapes.
+    ///
+    /// It reads the **raw** effects rather than the projected summaries on
+    /// purpose. `ApprovalSummary::payload` is `display_payload` — redacted and
+    /// node-budget-bounded — so recovering a gate's node id from it would be
+    /// reading a rendering of the fact instead of the fact, and would break
+    /// silently the day the redaction rules change. Building the answer here
+    /// also keeps raw parked effects out of the HTTP layer, which is the whole
+    /// reason the projection exists.
+    ///
+    /// No task-link discrimination is needed for the gate half, unlike
+    /// [`workflow_run_of`]: `gate_node_id` kind-checks `workflow.approve`, a
+    /// kind only `park_pending_gates` ever mints, and on that effect `run_id` is
+    /// always the workflow run that paused.
+    pub fn live_approvals(&self) -> crate::ports::workflow_verdict::LiveApprovals {
+        let mut live = crate::ports::workflow_verdict::LiveApprovals::default();
+        for parked in self.journal.pending() {
+            live.insert_id(parked.id.as_ref());
+            if let (Some(run_id), Some(node_id)) = (
+                parked.effect.run_id.as_deref(),
+                crate::runtime::workflow_resume::gate_node_id(&parked.effect),
+            ) {
+                live.insert_gate(run_id, node_id);
+            }
+        }
+        live
+    }
+
     /// The approvals currently awaiting the operator.
     ///
     /// The single projection point for [`ApprovalSummary`], and therefore the
@@ -2527,6 +2628,70 @@ impl CompanyRuntime {
         let mut items = self.feedback.list().await?;
         items.sort_by_key(|item| std::cmp::Reverse(item.at_millis));
         Ok(items.iter().map(FeedbackSummary::from_item).collect())
+    }
+
+    /// The shared feedback board, one page at a time.
+    ///
+    /// The board is the hub's, not this runtime's: these four methods are a
+    /// proxy that lends the console the instance credential without ever
+    /// putting it in a browser. An instance provisioned with no credential has
+    /// no board — that is a `no_board` refusal, not an empty page, so the
+    /// console can hide the surface instead of rendering "nobody has asked for
+    /// anything yet" to every unprovisioned operator.
+    pub async fn feedback_board(&self, query: BoardQuery) -> Result<BoardPage> {
+        self.hub()?.list_board(query).await
+    }
+
+    /// One board item with its comments.
+    pub async fn feedback_board_item(&self, id: &str) -> Result<BoardDetail> {
+        self.hub()?.board_item(id).await
+    }
+
+    /// Casts (or retracts) this instance's vote on a board item.
+    pub async fn vote_feedback_board(&self, id: &str, value: VoteValue) -> Result<BoardItem> {
+        self.hub()?.vote_board_item(id, value).await
+    }
+
+    /// Comments on a board item as this instance's hub account.
+    pub async fn comment_feedback_board(&self, id: &str, body: &str) -> Result<BoardComment> {
+        self.hub()?.comment_board_item(id, body).await
+    }
+
+    /// The hub client, or the refusal an unprovisioned instance owes the caller.
+    fn hub(&self) -> Result<&dyn TinyHumansClient> {
+        self.filer
+            .tinyhumans
+            .as_deref()
+            .ok_or_else(|| crate::error::OpenCompanyError::TinyHumans {
+                code: "no_board".to_string(),
+                message: "this instance is not connected to a TinyHumans account".to_string(),
+            })
+    }
+
+    /// The company's display name — what the manifest calls it, falling back to
+    /// its id.
+    ///
+    /// Split out of [`Self::status`] for the one caller that needs the name
+    /// *before* anybody has signed in: `GET …/auth/config`, which draws the
+    /// sign-in heading. That route is public, so it must not be handed a status
+    /// snapshot — the pending-approval count alone is a fact about the company's
+    /// work, and the name is the only field on it a stranger may see.
+    ///
+    /// A store failure yields the id rather than an error: the name decorates a
+    /// screen whose real payload is the mode, and a heading is not worth
+    /// refusing to tell the console how this company signs people in.
+    pub async fn display_name(&self) -> String {
+        let named = self
+            .store
+            .load(&self.id)
+            .await
+            .ok()
+            .flatten()
+            .map(|record| record.manifest.company.name);
+        match named {
+            Some(name) if !name.trim().is_empty() => name.trim().to_string(),
+            _ => self.id.to_string(),
+        }
     }
 
     /// A status snapshot, loading the company record for name and lifecycle.
@@ -2806,7 +2971,10 @@ impl std::fmt::Debug for CompanyRuntime {
 
 #[cfg(test)]
 mod tests {
-    use super::{emergency_from_load, task_enters_in_progress, task_enters_planning};
+    use super::{
+        CompanyEvent, continuation_failure_notice, emergency_from_load, task_enters_in_progress,
+        task_enters_planning,
+    };
 
     /// Issue #880: which parked approvals name a workflow run, and which must
     /// not.
@@ -3075,6 +3243,33 @@ mod tests {
             assert!(runtime.is_busy(), "a registered steer run must report busy");
         }
         assert!(!runtime.is_busy(), "the steer guard must clear it on drop");
+    }
+
+    /// A poisoned run supervisor must make `is_busy` report **busy**.
+    ///
+    /// The predicate's advertised invariant is that it fails closed, and #1133
+    /// only delivered that for two of its three sources: `steer.any_inflight`
+    /// was made poison-tolerant, but the `run_supervisor` arm still reached a
+    /// `.expect` through `len`. `GET /healthz/busy` has no `CatchPanicLayer`, so
+    /// that panic reset the connection, the manager read it as "cannot tell",
+    /// and its default is to park — losing the work the endpoint exists to
+    /// protect (issue #1239).
+    ///
+    /// Outside any feature gate on purpose, matching
+    /// `is_busy_sees_every_source_of_work`: the run supervisor is wired on the
+    /// default build, and this must not be a test that only CI's `openhuman`
+    /// lane runs.
+    #[tokio::test]
+    async fn is_busy_fails_closed_on_a_poisoned_run_supervisor() {
+        let (runtime, _record, _home) = runtime_and_record().await;
+        assert!(!runtime.is_busy(), "an idle runtime must not report busy");
+
+        runtime.run_supervisor().poison_for_test();
+
+        assert!(
+            runtime.is_busy(),
+            "a poisoned run supervisor must report busy rather than panic in the handler"
+        );
     }
 
     async fn runtime_and_record() -> (
@@ -3916,6 +4111,34 @@ mod tests {
             rt.resolvable_parent(Some(roots[0]), "desk-ops").await,
             None,
             "and the General desk is not a named one",
+        );
+    }
+
+    /// Issue #966: the failed-continuation report is authored by the runtime.
+    ///
+    /// This site appends the `AgentReply` itself, so it never sees
+    /// `OutboundMessage::agent` or its `channel` fallback — it has to name the
+    /// author, and it used to name `OPERATOR_CHANNEL`. That made a correct
+    /// system row byte-identical on disk to a reply the pre-#885 defect had
+    /// damaged, which is the finding recorded on #966.
+    #[test]
+    fn a_failed_continuation_report_is_authored_by_the_runtime_not_the_operator() {
+        let event = continuation_failure_notice("desk-general".to_string(), None);
+        let CompanyEvent::AgentReply {
+            agent_id, chat_id, ..
+        } = event
+        else {
+            panic!("the notice must stay an AgentReply — the console renders it from that arm");
+        };
+        assert_eq!(agent_id, crate::ports::SYSTEM_AUTHOR);
+        assert_ne!(
+            agent_id,
+            crate::runtime::channel::OPERATOR_CHANNEL,
+            "a notice must not store the author a destination-overwrite produces"
+        );
+        assert_eq!(
+            chat_id, "desk-general",
+            "it still lands in the thread it answers"
         );
     }
 }

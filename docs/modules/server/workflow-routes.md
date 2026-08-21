@@ -147,6 +147,16 @@ rides the create body and the read shape under the same key, and the model
 type is reused verbatim in both directions (`kind` / `target` are single words,
 so there is no camelCase mirror to drift from).
 
+### Paging the run history (issue #1012)
+
+`GET …/workflows/runs` is paged: `?limit=` counts **runs** (not journal rows),
+`hasMore` says whether an older page exists, and `nextBeforeSeq` is the cursor
+to pass back as `?before_seq=`. The page is cut by `seq` and displayed by
+`(atMillis, seq)` — two different keys, because `atMillis` is wall-clock and
+cutting on it loses runs when the clock steps backwards. Clients must **not**
+derive the cursor. Full contract, the partition argument, and the
+version-skew fallback: [run-history-paging.md](run-history-paging.md).
+
 ### Destinations that can never deliver are refused at save (issue #981)
 
 Two of delivery's refusals are decided by facts that hold for *every* run of the
@@ -155,8 +165,17 @@ are refused with a `400` when the workflow is written, not only when it runs:
 
 | Destination | Refused when | Checked in |
 | --- | --- | --- |
-| `channel` | the target is not one this **running company** can deliver to — `CompanyRuntime::deliverable_channel_ids()`, which is also what `GET …/workflows/wired-channels` serves the console's picker, and which never includes `operator` | `reject_undeliverable_channel_destinations`, on both write routes (the deliverable set is a runtime fact, not a record one) |
+| `channel` | the target is not one this **running company** can deliver to — `CompanyRuntime::deliverable_channel_ids()`, which is also what `GET …/workflows/wired-channels` serves the console's picker, and which never includes `operator` | `validate_draft_against_record` in `src/company/workflow_create.rs` (issue #1191), reading the deliverable set the caller passes in. Both write routes pass it; so does the proposal-apply path. The agent tool surfaces pass `None` (no runtime handle) and skip the rule |
 | `email` | this company's `[tools].allow` does not grant `email`, which delivery answers with `Denied` / `EmailNotGranted` before it even looks for a mailbox | `validate_draft_against_record` in `src/company/workflow_create.rs`, beside the `tool_call` grant gate — so the orchestrator's `create_workflow` tool is held to it too |
+
+The `channel` rule lived on the two write routes until issue #1191, which is
+why applying a copilot proposal persisted a graph the editor then refused to
+save back — the apply path is a save that never ran it. It now lives in the
+shared authoring core beside its `email` sibling, inside the `problems`
+accumulator, so the refusal is a `workflow_invalid` naming the node and the
+`destination.target` field rather than a bare `invalid_request` with no
+breakdown. The deliverable set is still a runtime fact: it is threaded in from
+the caller as `Option<&[String]>`, the same way #1046 threads `mail_configured`.
 
 Both are guards, not guarantees. Desks come and go and grants can be revoked, so
 a graph valid at save can be invalid at run, and delivery's own refusal stays the

@@ -8,7 +8,7 @@ fn minimal() -> serde_json::Value {
     json!({
         "slug": "risks",
         "title": "Risks",
-        "derived": "derived/RISKS.md",
+        "derived": "derived/risks.md",
         "fields": [
             { "name": "id", "role": "id" },
             { "name": "risk", "role": "title" },
@@ -32,6 +32,28 @@ fn a_minimal_declaration_parses() {
     // A declaration naming no write path still tells its refused caller what to
     // do, or the write guard has nothing to say.
     assert!(spec.written_by.contains("record_entry"));
+}
+
+/// **`StatusSpec` itself stays snake_case both ways** (issue #1266's
+/// near-miss): it is also what a declared ledger round-trips through in
+/// every store backend, so `needs_reason` in must equal `needs_reason` out
+/// or a save-then-reload silently drops the flag back to `false`. The
+/// console-facing camelCase key lives on a wire-only DTO instead
+/// (`server::ops::ledgers::LedgerStatusDto`), covered by
+/// `ledgers_test.rs`'s `a_status_that_needs_a_reason_carries_camel_case_on_the_wire`.
+#[test]
+fn status_spec_round_trips_needs_reason_through_its_own_serde_unchanged() {
+    let spec = parse(&minimal(), false).expect("declaration still parses with needs_reason");
+    let status = spec.status("closed").expect("the closed status");
+    assert!(status.needs_reason);
+
+    let wire = serde_json::to_value(status).unwrap();
+    assert_eq!(wire["needs_reason"], true);
+    let restored: StatusSpec = serde_json::from_value(wire).unwrap();
+    assert!(
+        restored.needs_reason,
+        "a store round-trip through this type's own serde must not lose the flag"
+    );
 }
 
 #[test]
@@ -119,11 +141,11 @@ fn a_slug_is_a_slug() {
 fn a_derived_path_is_one_flat_file_under_the_derived_folder() {
     let mut document = minimal();
     for bad in [
-        "RISKS.md",
-        "notes/RISKS.md",
-        "derived/nested/RISKS.md",
+        "risks.md",
+        "notes/risks.md",
+        "derived/nested/risks.md",
         "derived/../secrets.md",
-        "derived/RISKS.txt",
+        "derived/risks.txt",
         "derived/",
     ] {
         document["derived"] = json!(bad);
@@ -132,7 +154,7 @@ fn a_derived_path_is_one_flat_file_under_the_derived_folder() {
             "`{bad}` should not be a derived path"
         );
     }
-    document["derived"] = json!("derived/RISKS.md");
+    document["derived"] = json!("derived/risks.md");
     assert!(parse(&document, false).is_ok());
 }
 
@@ -144,11 +166,11 @@ fn an_unnamed_derived_path_is_derived_from_the_slug() {
     let mut document = minimal();
     document["derived"] = json!("");
     let spec = parse(&document, false).expect("valid");
-    assert_eq!(spec.derived, "derived/RISKS.md");
+    assert_eq!(spec.derived, "derived/risks.md");
 
     document["slug"] = json!("customer-promises");
     let spec = parse(&document, false).expect("valid");
-    assert_eq!(spec.derived, "derived/CUSTOMER_PROMISES.md");
+    assert_eq!(spec.derived, "derived/customer-promises.md");
 }
 
 #[test]

@@ -1,0 +1,122 @@
+# The global baseline's risk register. Every company has one, whatever it sells.
+#
+# Not a goal and not a task. A goal is what the company is trying to make
+# happen; a risk is what would stop it, and it is *owned and watched* rather
+# than worked — most rows here should have no card at all until the trigger
+# fires. Filing risks as tasks puts them in To-do, where either somebody works
+# a risk that has not happened or the board reads as a hundred items of work
+# nobody is doing. Filing them in a note makes them invisible to the read that
+# matters, which is the one before committing to something.
+
+title = "Risks"
+purpose = """
+What could stop this company doing what it said it would, who is watching each \
+one, and what would be done if it happened. Read it before committing to a date \
+or a deal; record against a risk when its likelihood changes rather than \
+opening a new row.\
+"""
+written_by = "`record_entry` to raise or re-assess a risk, `close_entry` when it is retired, realised or accepted"
+checks = ["required-field", "known-status", "closed-needs-reason"]
+
+[[field]]
+name = "id"
+role = "id"
+required = true
+
+[[field]]
+name = "risk"
+role = "title"
+required = true
+description = "What could go wrong, stated as the thing that happens rather than the worry about it."
+
+[[field]]
+name = "status"
+role = "status"
+required = true
+
+[[field]]
+name = "owner"
+role = "owner"
+description = "The teammate or desk watching it. A risk nobody owns is a risk nobody notices moving."
+
+[[field]]
+name = "impact"
+role = "prose"
+description = "What it costs if it happens — money, a date, a client, a licence."
+
+[[field]]
+name = "likelihood"
+role = "prose"
+description = "How likely, in a word or two, and why that answer rather than a lower one."
+
+[[field]]
+name = "trigger"
+role = "prose"
+description = "The observable that says this is happening now, so watching it is a check and not a feeling."
+
+[[field]]
+name = "response"
+role = "prose"
+description = "What would actually be done. A risk with no response is a note."
+
+[[field]]
+name = "reason"
+role = "prose"
+description = "Why it closed — retired, realised, or accepted as a cost. Required when it closes."
+
+[[field]]
+name = "refs"
+role = "refs"
+description = "Tasks, decisions or documents that carry the work of mitigating it."
+
+[[status]]
+name = "watching"
+
+[[status]]
+name = "mitigating"
+
+[[status]]
+name = "realised"
+label = "Realised"
+
+[[status]]
+name = "retired"
+closed = true
+needs_reason = true
+aliases = ["accepted"]
+
+[[status]]
+name = "materialised"
+label = "Materialised and settled"
+closed = true
+needs_reason = true
+
+[[section]]
+heading = "Happening now"
+blurb = "Realised, and being dealt with. Anything here outranks anything below it."
+statuses = ["realised"]
+order = "recent"
+
+[[section]]
+heading = "Being mitigated"
+blurb = "Someone is actively reducing these. Record against a row to raise it."
+statuses = ["mitigating"]
+order = "recent"
+
+[[section]]
+heading = "Watched"
+blurb = "Named, owned, and not being worked — each with the trigger that would change that."
+statuses = ["watching"]
+order = "recent"
+
+[[section]]
+heading = "Settled"
+blurb = """
+No longer tracked, or materialised and dealt with — each with the reason, which \
+is where retired (it is gone) and accepted (we are living with it) are told \
+apart. Kept: \
+a risk accepted without a recorded reason is one somebody re-raises next month, \
+and a realised one is the company's only record of what it actually cost.\
+"""
+statuses = ["retired", "materialised"]
+cap = 20

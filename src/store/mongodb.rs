@@ -62,6 +62,7 @@ use crate::ports::types::{
 };
 use crate::ports::users::{InviteRecord, UserRecord};
 use crate::store::content_address;
+use crate::store::text::slice_on_char_boundaries;
 
 fn mongo_err(e: impl std::fmt::Display) -> OpenCompanyError {
     OpenCompanyError::Store(format!("mongodb error: {e}"))
@@ -356,77 +357,114 @@ impl MongoStore {
                 nonunique(doc! {"company_id": 1, "workflow_id": 1, "created_ms": -1}),
             ),
         ];
-        for (name, index) in plans {
-            self.collection(name)
-                .create_index(index)
-                .await
-                .map_err(mongo_err)?;
+        // Every index below is issued CONCURRENTLY rather than one at a time.
+        //
+        // Each `create_index` is a round trip, and against a remote cluster the
+        // round trips are the whole cost: measured on staging (MongoDB Atlas),
+        // boot spent ~3.5s in this function — most of an ~8s cold start — and it
+        // was paid on every single boot to re-create indexes that already
+        // existed.
+        //
+        // Safe to parallelise: index creation is independent per index and
+        // idempotent, there is no ordering between any two of these, and
+        // re-creating an existing index is a server-side no-op. Nothing here
+        // reads what another one writes.
+        //
+        // Bounded rather than unbounded because the driver's connection pool is
+        // finite (10 by default); more in flight than that would queue inside
+        // the pool anyway, while making the burst look less deliberate than it
+        // is.
+        const INDEX_CONCURRENCY: usize = 10;
+
+        let extra: [(&str, IndexModel); 9] = [
+            ("owners", unique(doc! {"company_id": 1})),
+            // Issue #241: the cross-replica arbiter. This unique compound index
+            // is what turns two replicas racing one schedule minute into one
+            // winning `insert_one` and one `E11000` — the case that actually
+            // matters, since hosted replicas share the tenant database.
+            (
+                "schedule_fires",
+                unique(doc! {"company_id": 1, "schedule_id": 1, "scheduled_for": 1}),
+            ),
+            // Issue #596: one durable per-node output snapshot per run. The
+            // unique `(company_id, run_id)` index makes the upsert
+            // last-write-wins per run; the recency index backs the newest-N
+            // prune.
+            ("run_outputs", unique(doc! {"company_id": 1, "run_id": 1})),
+            (
+                "run_outputs",
+                nonunique(doc! {"company_id": 1, "at_ms": -1}),
+            ),
+            // Issue #726: the runtime journal. `(company_id, seq)` is unique
+            // because two records sharing a sequence would order arbitrarily on
+            // replay, and an at-most-once key replayed before the resolution
+            // that consumed it is the failure the journal exists to prevent. The
+            // import receipt is one document per company.
+            (JOURNAL, unique(doc! {"company_id": 1, "seq": 1})),
+            (JOURNAL_IMPORTS, unique(doc! {"company_id": 1})),
+            // Issue #749: durable notifications. The recency index backs the
+            // newest-first feed `NotificationStore::list` returns.
+            (
+                "notifications",
+                nonunique(doc! {"company_id": 1, "created_ms": -1, "id": -1}),
+            ),
+            // Unique per (company_id, id): makes `append` idempotent — a
+            // duplicate id within a company is rejected, matching the sqlite
+            // primary key.
+            ("notifications", unique(doc! {"company_id": 1, "id": 1})),
+            // The per-person read marker is unique on
+            // `(company_id, user_id, notification_id)` so a re-mark is a no-op
+            // `E11000` and read stays a latch.
+            (
+                "notification_reads",
+                unique(doc! {"company_id": 1, "user_id": 1, "notification_id": 1}),
+            ),
+        ];
+
+        // Scoped import: the file deliberately avoids a blanket `StreamExt`,
+        // since `map` would then be ambiguous with `Iterator::map`.
+        use futures::StreamExt as _;
+
+        // Every operation is allowed to finish before any error is reported.
+        //
+        // `try_collect` would short-circuit, which matches what the old
+        // sequential loop did — but only in appearance. Sequentially there was
+        // never an operation in flight to abandon; here a short-circuit drops up
+        // to `INDEX_CONCURRENCY - 1` futures mid-await, and a driver operation
+        // cancelled after its request is sent but before its reply is read
+        // leaves a connection the pool cannot safely reuse. That hazard is new,
+        // introduced by the concurrency, so it is handled here rather than
+        // inherited.
+        //
+        // Letting them all land is also simply better: a transient failure on
+        // one index no longer decides whether the other forty-three exist.
+        let results: Vec<Result<()>> = futures::stream::iter(plans.into_iter().chain(extra))
+            .map(|(name, index)| async move {
+                self.collection(name)
+                    .create_index(index)
+                    .await
+                    .map(|_| ())
+                    .map_err(|err| mongo_err(format!("index on `{name}`: {err}")))
+            })
+            .buffer_unordered(INDEX_CONCURRENCY)
+            .collect()
+            .await;
+
+        let failures: Vec<_> = results
+            .into_iter()
+            .filter_map(std::result::Result::err)
+            .collect();
+        let failed = failures.len();
+        match failures.into_iter().next() {
+            // The count matters: one failing index is a different problem from
+            // every index failing, and the first error alone cannot tell them
+            // apart.
+            Some(first) if failed > 1 => Err(mongo_err(format!(
+                "{failed} indexes failed; first: {first}"
+            ))),
+            Some(first) => Err(first),
+            None => Ok(()),
         }
-        self.collection("owners")
-            .create_index(unique(doc! {"company_id": 1}))
-            .await
-            .map_err(mongo_err)?;
-        // Issue #241: the cross-replica arbiter. This unique compound index is
-        // what turns two replicas racing one schedule minute into one winning
-        // `insert_one` and one `E11000` — the case that actually matters, since
-        // hosted replicas share the tenant database. Created outside the array
-        // above so adding it does not disturb that array's fixed length.
-        self.collection("schedule_fires")
-            .create_index(unique(
-                doc! {"company_id": 1, "schedule_id": 1, "scheduled_for": 1},
-            ))
-            .await
-            .map_err(mongo_err)?;
-        // Issue #596: one durable per-node output snapshot per run. The unique
-        // `(company_id, run_id)` index makes the upsert last-write-wins per run;
-        // the recency index backs the newest-N prune. Created outside the fixed
-        // array above so adding it does not disturb that array's length.
-        self.collection("run_outputs")
-            .create_index(unique(doc! {"company_id": 1, "run_id": 1}))
-            .await
-            .map_err(mongo_err)?;
-        self.collection("run_outputs")
-            .create_index(nonunique(doc! {"company_id": 1, "at_ms": -1}))
-            .await
-            .map_err(mongo_err)?;
-        // Issue #726: the runtime journal. `(company_id, seq)` is unique because
-        // two records sharing a sequence would order arbitrarily on replay, and
-        // an at-most-once key replayed before the resolution that consumed it is
-        // the failure the journal exists to prevent. The import receipt is one
-        // document per company. Created outside the fixed array above so adding
-        // them does not disturb its length.
-        self.collection(JOURNAL)
-            .create_index(unique(doc! {"company_id": 1, "seq": 1}))
-            .await
-            .map_err(mongo_err)?;
-        self.collection(JOURNAL_IMPORTS)
-            .create_index(unique(doc! {"company_id": 1}))
-            .await
-            .map_err(mongo_err)?;
-        // Issue #749: durable notifications. The recency index backs the
-        // newest-first feed `NotificationStore::list` returns; the per-person
-        // read marker is unique on `(company_id, user_id, notification_id)` so a
-        // re-mark is a no-op `E11000` and read stays a latch. Created outside the
-        // fixed array above so adding them does not disturb its length.
-        self.collection("notifications")
-            .create_index(nonunique(
-                doc! {"company_id": 1, "created_ms": -1, "id": -1},
-            ))
-            .await
-            .map_err(mongo_err)?;
-        // Unique per (company_id, id): makes `append` idempotent — a duplicate
-        // id within a company is rejected, matching the sqlite primary key.
-        self.collection("notifications")
-            .create_index(unique(doc! {"company_id": 1, "id": 1}))
-            .await
-            .map_err(mongo_err)?;
-        self.collection("notification_reads")
-            .create_index(unique(
-                doc! {"company_id": 1, "user_id": 1, "notification_id": 1},
-            ))
-            .await
-            .map_err(mongo_err)?;
-        Ok(())
     }
 
     fn collection(&self, name: &str) -> Collection<Document> {
@@ -571,6 +609,8 @@ impl CompanyStore for MongoStore {
             overlay_desks: overlay.desks,
             overlay_workflows: overlay.workflows,
             overlay_budgets: overlay.budgets,
+            overlay_agent_edits: overlay.agent_edits,
+            overlay_retired_agents: overlay.retired_agents,
             overlay_policy: overlay.policy,
             overlay_desk_tools: overlay.desk_tools,
             disabled_workflows: overlay.disabled_workflows,
@@ -949,6 +989,15 @@ impl ContextStore for MongoStore {
         Ok(out)
     }
 
+    async fn delete(&self, id: &CompanyId, addr: &ChunkAddr) -> Result<bool> {
+        let result = self
+            .collection("context_chunks")
+            .delete_one(doc! {"company_id": id.as_ref(), "addr": addr.as_ref()})
+            .await
+            .map_err(mongo_err)?;
+        Ok(result.deleted_count > 0)
+    }
+
     async fn peek(
         &self,
         id: &CompanyId,
@@ -966,15 +1015,40 @@ impl ContextStore for MongoStore {
         let body = get_str(&doc, "body")?;
         match range {
             None => Ok(body),
-            Some(r) => {
-                let start = r.start.min(body.len());
-                let end = r.end.min(body.len());
-                if start >= end {
-                    return Ok(String::new());
+            // Byte offsets from the caller can land mid-codepoint; widen to
+            // the boundary rather than panic the slice.
+            Some(r) => Ok(slice_on_char_boundaries(&body, r)),
+        }
+    }
+
+    async fn peek_many(&self, id: &CompanyId, addrs: &[ChunkAddr]) -> Result<Vec<Option<String>>> {
+        // One `$in` find for the whole batch, instead of the default's
+        // round-trip-per-chunk loop.
+        let wanted: Vec<&str> = addrs.iter().map(|a| a.as_ref()).collect();
+        let mut cursor = self
+            .collection("context_chunks")
+            .find(doc! {"company_id": id.as_ref(), "addr": {"$in": wanted}})
+            .await
+            .map_err(mongo_err)?;
+        let mut by_addr = HashMap::new();
+        while let Some(doc) = cursor.try_next().await.map_err(mongo_err)? {
+            // Per-addr degrade, per the port contract: a document missing its
+            // fields answers `None` for its addr rather than failing the
+            // batch — only the find/cursor itself is batch-level.
+            match (get_str(&doc, "addr"), get_str(&doc, "body")) {
+                (Ok(addr), Ok(body)) => {
+                    by_addr.insert(addr, body);
                 }
-                Ok(body[start..end].to_string())
+                (addr, body) => {
+                    let error = addr.err().or(body.err()).expect("one side failed");
+                    tracing::warn!(%error, "malformed context document skipped in bulk read");
+                }
             }
         }
+        Ok(addrs
+            .iter()
+            .map(|addr| by_addr.get(addr.as_ref()).cloned())
+            .collect())
     }
 
     async fn search(&self, id: &CompanyId, query: &str, limit: usize) -> Result<Vec<ChunkHit>> {
@@ -991,11 +1065,14 @@ impl ContextStore for MongoStore {
             }
             let body = get_str(&doc, "body")?;
             if let Some(pos) = body.find(query) {
-                let start = pos.saturating_sub(24);
-                let end = (pos + query.len() + 24).min(body.len());
+                // The ±24-byte window can land mid-codepoint on a multibyte
+                // body; widen to the boundary rather than panic the slice.
                 hits.push(ChunkHit {
                     addr: ChunkAddr::new(get_str(&doc, "addr")?),
-                    snippet: body[start..end].to_string(),
+                    snippet: slice_on_char_boundaries(
+                        &body,
+                        pos.saturating_sub(24)..pos + query.len() + 24,
+                    ),
                     score: 1.0,
                 });
             }
@@ -3866,7 +3943,7 @@ mod test {
     /// `rename_move` has to `$unset` `folder_path_key`, and a missing unset is
     /// invisible until somebody needs the vacated path again. The moved
     /// document would keep guarding the path it left, so the next publish that
-    /// wanted `Agents/cmo/task-42/` would be refused by an index entry
+    /// wanted `agents/cmo/task-42/` would be refused by an index entry
     /// describing a folder that is no longer there — the permanent outage this
     /// primitive exists to prevent, reintroduced by the fix itself.
     ///
@@ -4062,6 +4139,75 @@ mod test {
             )
         });
         Some(Arc::new(store))
+    }
+
+    /// One failing index must not stop the other forty-three from being created.
+    ///
+    /// `ensure_indexes` runs concurrently, so a short-circuit would drop
+    /// in-flight driver operations mid-await — and an operation cancelled after
+    /// its request is sent but before its reply is read leaves a connection the
+    /// pool cannot safely reuse. That hazard does not exist in a sequential
+    /// loop; it arrived with the concurrency, so it is pinned here.
+    #[tokio::test]
+    async fn every_index_is_attempted_even_when_one_fails() {
+        let Some(store) = store().await else { return };
+
+        // `store()` has already run `ensure_indexes` once, so the assertion has
+        // to be about something this run RE-creates. Drop a known index first;
+        // if the pipeline short-circuits before reaching it, it stays missing.
+        store
+            .collection("notifications")
+            .drop_index("company_id_1_id_1")
+            .await
+            .expect("drop the index whose return proves the run continued");
+
+        // Induce the failure the way MongoDB actually produces one: an existing
+        // index on the same keys with conflicting options. Replacing the unique
+        // `owners` index with a non-unique one makes `ensure_indexes` collide.
+        store
+            .collection("owners")
+            .drop_index("company_id_1")
+            .await
+            .expect("drop owners index");
+        store
+            .collection("owners")
+            .create_index(IndexModel::builder().keys(doc! {"company_id": 1}).build())
+            .await
+            .expect("seed the conflicting index");
+
+        let err = store
+            .ensure_indexes()
+            .await
+            .expect_err("the conflicting index should make this fail");
+        assert!(
+            format!("{err}").contains("owners"),
+            "the error should name the collection that failed: {err}"
+        );
+
+        // The point: the run continued past the failure and recreated the index
+        // dropped above. A short-circuit would leave it absent.
+        let mut names = Vec::new();
+        let mut cursor = store
+            .collection("notifications")
+            .list_indexes()
+            .await
+            .expect("list notifications indexes");
+        while cursor.advance().await.expect("advance") {
+            if let Some(name) = cursor
+                .deserialize_current()
+                .expect("model")
+                .options
+                .and_then(|o| o.name)
+            {
+                names.push(name);
+            }
+        }
+        assert!(
+            names.iter().any(|n| n == "company_id_1_id_1"),
+            "a failure on `owners` must not stop other indexes being created; got {names:?}"
+        );
+
+        drop_db(&store).await;
     }
 
     async fn drop_db(store: &MongoStore) {
@@ -4290,6 +4436,7 @@ mod test {
 
         for id in [&owned, &orphan] {
             let record = CompanyRecord {
+                overlay_retired_agents: Vec::new(),
                 id: id.clone(),
                 manifest: manifest.clone(),
                 ledger: Vec::new(),
@@ -4300,6 +4447,7 @@ mod test {
                 overlay_desks: Vec::new(),
                 overlay_workflows: Vec::new(),
                 overlay_budgets: Vec::new(),
+                overlay_agent_edits: Vec::new(),
                 overlay_policy: None,
                 overlay_desk_tools: Default::default(),
                 disabled_workflows: Vec::new(),
@@ -4365,6 +4513,7 @@ mod test {
 
         for (id, tenant) in [(&id_a, "tenant-a"), (&id_b, "tenant-b")] {
             let record = CompanyRecord {
+                overlay_retired_agents: Vec::new(),
                 id: id.clone(),
                 manifest: manifest.clone(),
                 ledger: Vec::new(),
@@ -4375,6 +4524,7 @@ mod test {
                 overlay_desks: Vec::new(),
                 overlay_workflows: Vec::new(),
                 overlay_budgets: Vec::new(),
+                overlay_agent_edits: Vec::new(),
                 overlay_policy: None,
                 overlay_desk_tools: Default::default(),
                 disabled_workflows: Vec::new(),
@@ -4506,6 +4656,22 @@ mod test {
     async fn conformance_context_chunk_stamps() {
         let Some(s) = store().await else { return };
         conformance::assert_context_chunk_stamps(s.clone()).await;
+        drop_db(&s).await;
+    }
+
+    // Exercises this backend's single-`$in`-find `peek_many` override against
+    // the same positional contract the default implementation gives.
+    #[tokio::test]
+    async fn conformance_context_peek_many() {
+        let Some(s) = store().await else { return };
+        conformance::assert_context_peek_many_answers_positionally(s.clone()).await;
+        drop_db(&s).await;
+    }
+
+    #[tokio::test]
+    async fn conformance_context_multibyte_bodies() {
+        let Some(s) = store().await else { return };
+        conformance::assert_multibyte_bodies_survive_search_and_ranged_peek(s.clone()).await;
         drop_db(&s).await;
     }
 

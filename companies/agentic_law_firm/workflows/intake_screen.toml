@@ -1,0 +1,81 @@
+# Workflow graph: intake_screen
+#
+# Referenced by `[workflows].enabled` in ../company.toml. An inbound request is
+# conflict-checked before anything substantive happens to it, then scoped and
+# either opened as a matter or declined with a reason worth keeping — because a
+# declined matter's reason is usually a conflict, and it is what the next intake
+# needs to find.
+
+id = "intake_screen"
+name = "Intake screen"
+description = "An inbound request is conflict-checked, scoped, and opened or declined."
+
+[[node]]
+id = "inbound"
+kind = "trigger"
+name = "Request arrives"
+summary = "A prospective or existing client asks for something."
+
+[[node]]
+id = "conflicts"
+kind = "agent"
+name = "Run the conflict check"
+summary = "Search every party against the matters ledger, including closed and declined rows."
+agent = "compliance_agent"
+
+[[node]]
+id = "clear"
+kind = "condition"
+name = "Clear to act?"
+summary = "Branch on whether the firm may act at all."
+[node.config]
+field = "=item.conflict_clear"
+
+[[node]]
+id = "scope"
+kind = "agent"
+name = "Scope the matter"
+summary = "State what the firm would do and — as importantly — what it would not."
+agent = "legal_researcher"
+
+[[node]]
+id = "decline"
+kind = "agent"
+name = "Record the decline"
+summary = "Close the matter row with the reason, which is the part worth keeping."
+agent = "compliance_agent"
+
+[[node]]
+id = "review"
+kind = "output"
+name = "Park for the operator"
+summary = "Hand the engagement or the decline to the licensed human."
+[node.destination]
+kind = "channel"
+target = "matter_review"
+
+[[edge]]
+from = "inbound"
+to = "conflicts"
+
+[[edge]]
+from = "conflicts"
+to = "clear"
+
+[[edge]]
+from = "clear"
+to = "scope"
+label = "yes"
+
+[[edge]]
+from = "clear"
+to = "decline"
+label = "no"
+
+[[edge]]
+from = "scope"
+to = "review"
+
+[[edge]]
+from = "decline"
+to = "review"

@@ -17,10 +17,13 @@
 //! With a hosted engine it is worse still: the namespace string is the only
 //! thing separating tenants inside somebody else's database.
 //!
-//! So: [`Namespace`](namespace::Namespace) has no public constructor,
-//! `BoundMemory::bind` requires a `&CompanyId`, and every facade is handed a
-//! namespace that a `CompanyId` produced. There is no `pub fn` in this module
-//! tree that accepts a namespace string.
+//! So: [`Namespace`](namespace::Namespace) has no public constructor, every
+//! port method takes `&CompanyId` and derives its namespace fresh from it
+//! (`Namespace::company_root` is the only way to make one), and there is no
+//! `pub fn` in this module tree that accepts a namespace string. Note the
+//! enforcement lives in the *port signatures and the namespace type*, not in
+//! `bind` — `BoundMemory::bind(provider, class)` itself takes no company,
+//! because one bound engine serves every company this host runs.
 //!
 //! # What else the decorator owns
 //!
@@ -51,8 +54,21 @@
 //! gates. [`bind`](BoundMemory::bind) therefore takes the class as an
 //! argument rather than asking the provider for it.
 
+//!
+//! ## Who may run `migrate`
+//!
+//! [`migrate`](migrate::migrate) is deliberately a **local CLI operation**
+//! (`opencompany memory migrate`), not an HTTP surface: it never binds a
+//! route, so the only principal who can reach it is whoever already runs the
+//! binary on this host and supplies BOTH engines' credentials. That person
+//! owns the data on both ends by definition — an in-app authorization layer
+//! here would gate the operator against themselves. If a remote-triggered
+//! migration surface is ever added, it must carry its own operator-auth and
+//! per-tenant scoping; do not lift this function onto a route as-is.
+
 pub mod driver;
 pub mod facades;
+pub mod migrate;
 mod namespace;
 
 use std::sync::Arc;
@@ -246,3 +262,5 @@ impl BoundMemory {
 
 #[cfg(test)]
 mod test;
+#[cfg(test)]
+mod upstream_conformance_test;

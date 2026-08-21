@@ -28,6 +28,13 @@ POST   /api/v1/companies/{id}/approvals/{aid}  { "verdict": "approve"|"deny", "n
                                                "detach": false }
 POST   /api/v1/companies/{id}/feedback         submit feedback (see feedback-loop/)
 GET    /api/v1/companies/{id}/feedback         past reports (no operator words)
+GET    /api/v1/companies/{id}/feedback/board   the shared board, one page
+                                               ?sort=hot|top|new&type=feature|bug
+                                               &status=open|planned|completed
+                                               &page=1&limit=20
+GET    .../feedback/board/{item}               one board item + its comments
+POST   .../feedback/board/{item}/vote          { "value": 1 | -1 | 0 }
+POST   .../feedback/board/{item}/comments      { "body": "…" }
 GET    /api/v1/companies/{id}/memory/traces    inspect working memory (debug)
 POST   /api/v1/companies/{id}/export           export bundle (tar)
 POST   /api/v1/companies/{id}/pause            pause / resume lifecycle transitions
@@ -35,6 +42,14 @@ POST   /api/v1/companies/{id}/pause            pause / resume lifecycle transiti
 
 Single-company (prosumer) mode aliases everything under `/api/v1/company/...`
 with no `{id}`.
+
+The `/feedback/board/...` routes are a **proxy** of the TinyHumans hub's shared
+board, spent with this instance's credential so a browser never holds one. An
+instance without a credential has no board and every one of them answers
+`404 tinyhumans_no_board` — the console hides the surface rather than rendering
+an empty board. A vote is the *instance's* vote, since every console on a host
+shares its one hub account. See
+[feedback-loop/README.md](../feedback-loop/README.md).
 
 `detach` on the approval resolve chooses what the response waits for. Omitted
 (or `false`) it holds the response open for the agent's follow-up turn and
@@ -71,6 +86,16 @@ with `{ "runId": "…", "detached": true }` before the engine walks a node; the
 run is then followed through the `workflow_run_started` / `workflow_node_finished`
 / `workflow_run_finished` frames it already keys by that `runId`, and read back
 from `GET …/workflows/runs`, whose fold reports `running: true` until it settles.
+
+That read is **paged** (issue #1012): `{ runs, hasMore, nextBeforeSeq }`, where
+`nextBeforeSeq` is the cursor to pass back as `?before_seq=` and is omitted once
+`hasMore` is `false`. The page is cut by `seq` and only then sorted for display
+by `(atMillis, seq)`, so the cursor is the page's *lowest* `seq` rather than its
+last row — clients must send back what the host issued rather than deriving it,
+and a client talking to a host that omits the field falls back to the old
+`runs.at(-1).seq` derivation, never to "no more pages". Why the two keys differ,
+and the partition argument that makes paging lossless under a clock regression:
+[server/run-history-paging.md](../../modules/server/run-history-paging.md).
 
 **Clients must discriminate on the response shape, not on what they sent.** A
 host predating this ignores the unknown `detach` field and answers the full

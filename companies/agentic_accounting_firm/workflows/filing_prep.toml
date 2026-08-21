@@ -1,0 +1,90 @@
+# Workflow graph: filing_prep
+#
+# Referenced by `[workflows].enabled` in ../company.toml. A statutory date
+# approaches, the return is prepared against a *closed* period, and it is parked
+# for a signature — which is the one thing this roster cannot supply.
+
+id = "filing_prep"
+name = "Filing preparation"
+description = "A statutory filing is prepared against a closed period and parked for signature."
+
+[[node]]
+id = "due"
+kind = "trigger"
+name = "Filing due"
+summary = "A date on the filings ledger comes into range."
+
+[[node]]
+id = "period"
+kind = "agent"
+name = "Check the period"
+summary = "Is the period this covers actually closed? A return drawn from an open period is provisional."
+agent = "bookkeeper"
+
+[[node]]
+id = "closed"
+kind = "condition"
+name = "Period closed?"
+summary = "Branch on whether the underlying period is tied out."
+[node.config]
+field = "=item.period_closed"
+
+[[node]]
+id = "reconcile"
+kind = "agent"
+name = "Finish the reconciliation"
+summary = "Tie out what is outstanding and raise anything that does not as an exception."
+agent = "bookkeeper"
+
+[[node]]
+id = "prepare"
+kind = "agent"
+name = "Prepare the return"
+summary = "Draw the return and its supporting schedules from the closed period."
+agent = "tax_preparer"
+
+[[node]]
+id = "check"
+kind = "agent"
+name = "Second pass"
+summary = "Trace a sample end to end, the awkward entries rather than the clean ones."
+agent = "audit_prep"
+
+[[node]]
+id = "sign"
+kind = "output"
+name = "Park for signature"
+summary = "Hand the prepared filing to the person who signs it, with what still needs checking."
+[node.destination]
+kind = "channel"
+target = "close_review"
+
+[[edge]]
+from = "due"
+to = "period"
+
+[[edge]]
+from = "period"
+to = "closed"
+
+[[edge]]
+from = "closed"
+to = "prepare"
+label = "yes"
+
+[[edge]]
+from = "closed"
+to = "reconcile"
+label = "no"
+
+[[edge]]
+from = "reconcile"
+to = "prepare"
+
+[[edge]]
+from = "prepare"
+to = "check"
+
+[[edge]]
+from = "check"
+to = "sign"

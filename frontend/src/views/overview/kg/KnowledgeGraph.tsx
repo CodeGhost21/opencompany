@@ -16,7 +16,7 @@ import { ClipboardList, Info, Milestone, Sparkles, User, UserRound, Users, Workf
 import { DERIVED_NOTICE } from './adapter';
 import { orderGraphDepartments, SELF_ID, toolSlugOf, type KGNode, type KGNodeKind, type KnowledgeGraph as KGData } from './model';
 import { branchPath, branchWidth, cyclicDeltaF, edgeArc, focusWheel, radialRestLayout, responsiveRingR, rotateAbout, shortestAngleDelta, treeLayout, wheelPoint, wheelStageGeom, wheelStageSpot, type RestLayoutResult, type TreeLayoutResult, type TreeNodePos } from './tree-layout';
-import { focusLabelIds, LABEL_PRIORITY, planLabels, type LabelCandidate } from './label-plan';
+import { focusLabelIds, LABEL_PRIORITY, planLabels, type LabelCandidate, type LabelIcon } from './label-plan';
 import { rafThrottle } from './raf-throttle';
 import { buildToolWiki, isMcpSlug, prettifySlug } from './agent-wiki';
 import { cameraRect, lerpRect, memoryNodePos, pickRestTier, R_CORE, type MemoryGraph, type Rect } from './memory-core';
@@ -26,6 +26,7 @@ import {
   AgentHarnessCard, GraphHumanDetailCard, MemoryNoteCard, SopTaskDetailCard,
   type DeptLite,
 } from './KnowledgeDetail';
+import { destinationFor, MEMORY_DESTINATION } from './open-in-console';
 import { KnowledgeGraphFullscreen } from './KnowledgeGraphFullscreen';
 
 const W = 880;
@@ -214,11 +215,24 @@ type SimLink = { source: SimNode | string; target: SimNode | string; kind: strin
  */
 export function KnowledgeGraph({
   graph, agents = [], departments = [], people = [], tasks = [], memory, runsByAgent = {}, toolLabels = {},
+  statusSlot,
   repelDefault = 150, linkDistDefault = 60, centerDefault = 0.32,
 }: {
   graph: KGData; agents?: Agent[]; departments?: Department[]; people?: Person[]; tasks?: SopTask[];
   /** the distilled memory constellation drawn at the core */
   memory?: MemoryGraph;
+  /**
+   * The snapshot line — when this picture was read, and the control that reads
+   * it again — owned by `Overview` and positioned by the shell (issue #1307).
+   *
+   * It is a slot rather than something `Overview` positions itself because the
+   * detail rail is the only thing that knows how much of the right edge is
+   * still visible, and `Overview` cannot see it. Positioned separately, the
+   * chip sat at `right-3` under a `z-30` rail: the staleness signal, the
+   * Refresh control and the outage alert all vanished behind the first card an
+   * operator opened.
+   */
+  statusSlot?: React.ReactNode;
   /** latest run per agent id, for the harness card */
   runsByAgent?: Record<string, AgentRun>;
   /** Tool slug → display name, so a card can name a tool as its source does. */
@@ -1617,6 +1631,10 @@ export function KnowledgeGraph({
       onTool={selectToolSlug}
       onAgent={(id) => selectAgent(`emp:${id}`)}
       onTask={selectedAgentTaskId ? () => selectTask(selectedAgentTaskId) : undefined}
+      // The way out of the graph (issue #1308). Read off the node's own id, so
+      // the link cannot name a different teammate than the card was opened
+      // from.
+      openIn={selectedAgentId ? destinationFor(selectedAgentId) : null}
     />
   ) : null;
 
@@ -1638,6 +1656,7 @@ export function KnowledgeGraph({
       onClose={clearDetail}
       onAssignee={selectedTaskWorker ? () => selectWorker(selectedTaskWorker) : undefined}
       onTool={selectToolSlug}
+      openIn={selectedTaskId ? destinationFor(selectedTaskId) : null}
     />
   ) : null;
 
@@ -1655,6 +1674,7 @@ export function KnowledgeGraph({
       onClose={clearDetail}
       onTask={selectedHumanTaskId ? () => selectTask(selectedHumanTaskId) : undefined}
       onTool={selectToolSlug}
+      openIn={selectedHumanId ? destinationFor(selectedHumanId) : null}
     />
   ) : null;
 
@@ -1664,6 +1684,9 @@ export function KnowledgeGraph({
       note={selectedMemory}
       color={memColor(selectedMemory)}
       onClose={() => setSelectedMemoryId(null)}
+      // A note's surface is the Brain itself — `#/memory` addresses the page,
+      // not one entry — so this is the constant rather than a per-id lookup.
+      openIn={MEMORY_DESTINATION}
     />
   ) : null;
 
@@ -1830,11 +1853,22 @@ export function KnowledgeGraph({
   const selectedOrgId = selectedAgentId ?? selectedHumanId ?? selectedTaskId ?? selectedToolId;
   const focusChildren = focusTree ? focusLabelIds(focusTree.branches, focusId) : null;
   const labelCandidates: LabelCandidate[] = [];
+  // Every circle solid enough to read is a circle solid enough to hide text
+  // (issue #1258), so the declutter gets the icons as obstacles too — not just
+  // the nodes eligible for a label. Tools and SOP tasks are the ones that
+  // matter: numerous, tightly packed, and never named at rest, so they used to
+  // contribute no box at all and a neighbour's label sailed straight over them.
+  // The memory constellation's backdrop disc is deliberately NOT modelled here;
+  // it is a separate, transition-scaled footprint, and feeding a mid-flight
+  // animation into this pass is exactly the flicker the plan measures around.
+  const labelIcons: LabelIcon[] = [];
   for (const n of nodes) {
     const v = visuals.get(n.id)!;
     // a node faded to a whisper has nothing to label, and a label there would
-    // still take a box from a node you can actually see
+    // still take a box from a node you can actually see — the same cut decides
+    // whether its icon is opaque enough to obscure a neighbour's name
     if (v.opacity < 0.3) continue;
+    labelIcons.push({ id: n.id, x: n.x, y: n.y, r: v.r });
     let priority: number | null = null;
     if (hoverId === n.id) priority = LABEL_PRIORITY.hovered;
     else if (selectedOrgId === n.id) priority = LABEL_PRIORITY.selected;
@@ -1861,7 +1895,9 @@ export function KnowledgeGraph({
   // `camK` (state) rather than the live ref: reading it here is what ties the
   // declutter to the zoom, and `camK * W` is the camera width it was published
   // from. x/y come off the ref — they only move every box by a shared vector.
-  const labelSet = planLabels(labelCandidates, { x: camRectRef.current.x, y: camRectRef.current.y, w: camK * W }, W);
+  // a map, not a set: the plan may mirror a label above its node to get it out
+  // from under a neighbour's icon, so it hands back the `dy` to draw it at
+  const labelPlan = planLabels(labelCandidates, { x: camRectRef.current.x, y: camRectRef.current.y, w: camK * W }, W, labelIcons);
 
   // ── the graph itself (reused inline + fullscreen) ───────────────────────────
   const graphInner = (
@@ -2076,7 +2112,7 @@ export function KnowledgeGraph({
           const color = nodeColor(n);
           const { r, opacity: nodeOpacity, dim, hidden } = visuals.get(n.id)!;
           const selected = selectedAgentId === n.id || selectedToolId === n.id || selectedTaskId === n.id || selectedHumanId === n.id;
-          const showLabel = labelSet.has(n.id);
+          const labelDyPlanned = labelPlan.get(n.id);
           const Icon = cat.Icon;
 
           // the company rendered as its memory: the Notes constellation of real
@@ -2272,10 +2308,10 @@ export function KnowledgeGraph({
               <g style={{ color: n.kind === 'self' ? 'var(--bg)' : color }}>
                 <Icon x={-r * 0.62} y={-r * 0.62} width={r * 1.24} height={r * 1.24} strokeWidth={2} />
               </g>
-              {showLabel && (
+              {labelDyPlanned !== undefined && (
                 <text
                   x={0}
-                  y={r + 11 + (labelDy.get(n.id) ?? 0)}
+                  y={labelDyPlanned}
                   textAnchor="middle"
                   fontFamily="var(--font-mono)"
                   fontWeight={n.kind === 'self' || n.kind === 'team' || hoverId === n.id ? 600 : 400}
@@ -2383,6 +2419,7 @@ export function KnowledgeGraph({
         onCollapseCore={clearAll}
         searchSlot={vaultSearchInput}
         legendSlot={compactLegend}
+        statusSlot={statusSlot}
         onNavDept={navDept}
         onBack={clearDetail}
       >

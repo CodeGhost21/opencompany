@@ -24,9 +24,8 @@ use crate::company::steer::{InflightEntry, MAX_REDIRECT_CHARS, SteerAction, Stee
 use crate::company::{WorkflowGraphSpec, create_company_workflow, raw_workflow_from_spec};
 use crate::error::OpenCompanyError;
 use crate::ports::tasks::{
-    BOARD_COLUMNS, COLUMN_DONE, COLUMN_TODO, TaskDeliverable, TaskOutput, TaskOutputAction,
-    TaskOutputSource, TaskOutputWorkflow, TaskRecord, TaskWorkflowProposal, cap_discussion,
-    is_board_column,
+    COLUMN_DONE, COLUMN_TODO, TaskDeliverable, TaskOutput, TaskOutputAction, TaskOutputSource,
+    TaskOutputWorkflow, TaskRecord, TaskWorkflowProposal, cap_discussion, is_board_column,
 };
 use crate::ports::types::CompanyEvent;
 use crate::ports::{generate_id, now_millis};
@@ -87,7 +86,24 @@ pub(crate) struct TaskCard {
     pub(crate) title: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) note: Option<String>,
+    /// Which of the board's three phases this card is in — `pending`,
+    /// `working` or `done` (issue #1512).
+    ///
+    /// The name is unchanged and the meaning is narrower: it used to carry the
+    /// stored stage, so a client saw six words here and had to know which of
+    /// four meant "started". It is the board's column, and the board now has
+    /// three of them.
     pub(crate) column: String,
+    /// Which kind of working, when the card is working: `planning`,
+    /// `in_progress`, `paused` or `in_review` (issue #1512).
+    ///
+    /// Omitted for a pending or done card, because there is only one way to be
+    /// either. This is what the console reads for the affordances that are
+    /// genuinely stage-specific — Resume on a paused card, the review link on
+    /// one waiting for a verdict — which used to be read off `column` and
+    /// therefore forced `column` to stay six-valued.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) stage: Option<String>,
     pub(crate) priority: String,
     pub(crate) assignee: String,
     pub(crate) updated_at: u64,
@@ -174,7 +190,8 @@ impl From<TaskRecord> for TaskCard {
             id: t.id,
             title: t.title,
             note: t.note,
-            column: t.column,
+            column: crate::ledger::board::phase_of(&t.column).to_string(),
+            stage: stage_of(&t.column),
             priority: t.priority,
             assignee: t.assignee,
             updated_at: t.updated_at_millis,
@@ -340,20 +357,42 @@ fn validate_parent(
     Ok(())
 }
 
-/// Rejects a `column` the board does not render (issue #205).
+/// Resolves a written `column` to the stage that is actually stored, rejecting
+/// a word the board does not know (issue #205, issue #1512).
 ///
 /// `column` is a free string on the wire, and nothing checked it: a typo'd
 /// `"in-progress"` was persisted verbatim, so the card disappeared from every
 /// rendered column *and* — since only the exact literal `in_progress`
 /// edge-fires a dispatch — silently never ran. Refusing at the write boundary
-/// is the cheap place to keep the board's six columns the only six.
-fn validate_column(column: &str) -> Result<(), ApiError> {
+/// is the cheap place to keep the board's vocabulary the only vocabulary.
+///
+/// # Two words in, one word stored
+///
+/// Since #1512 the board *reads* as three phases and *stores* six stages, so a
+/// drop sends `working` where it used to send `in_progress`. Both are accepted
+/// and they are not equivalent:
+///
+/// * a **phase** resolves to that phase's [`entry_stage`](crate::ledger::board::BoardPhase::entry_stage)
+///   — `working` becomes `in_progress`, which dispatches. This is what the
+///   console, the tools and any ordinary client send.
+/// * a **stage** is stored verbatim. Nothing in the product needs this any
+///   more, but the runtime's own paths and every stored card speak it, and a
+///   boundary that refused `in_review` would refuse to describe a state the
+///   board can be in.
+///
+/// The error names the phases only. A caller who guessed wrong is a caller who
+/// should be sending one of three words, and listing the six would teach them
+/// the vocabulary this issue exists to stop teaching.
+fn resolve_column(column: &str) -> Result<String, ApiError> {
+    if let Some(stage) = crate::ledger::board::entry_stage(column) {
+        return Ok(stage.to_string());
+    }
     if is_board_column(column) {
-        return Ok(());
+        return Ok(column.to_string());
     }
     Err(ApiError(OpenCompanyError::InvalidRequest(format!(
         "\"{column}\" is not a board column — use one of: {}",
-        BOARD_COLUMNS.join(", ")
+        crate::ledger::board::phase_ids().join(", ")
     ))))
 }
 
@@ -413,8 +452,10 @@ async fn create_task(
     // into To-do, and every lifecycle return now lands here too, carrying its
     // reason on the note. So this default is no longer a choice between two
     // columns; it is simply where not-started work lives.
-    let column = body.column.unwrap_or_else(|| COLUMN_TODO.to_string());
-    validate_column(&column)?;
+    let column = match body.column {
+        Some(column) => resolve_column(&column)?,
+        None => COLUMN_TODO.to_string(),
+    };
     let assignee = resolve_assignee(&company, body.assignee.unwrap_or_default()).await?;
     let record = TaskRecord {
         id: generate_id(),
@@ -489,8 +530,7 @@ async fn patch_task(
     // so returning the `400` from here discards the partial edit rather than
     // persisting half of it.
     if let Some(column) = body.column {
-        validate_column(&column)?;
-        record.column = column;
+        record.column = resolve_column(&column)?;
     }
     if let Some(priority) = body.priority {
         record.priority = priority;
@@ -514,6 +554,27 @@ async fn patch_task(
     Ok(Json(record.into()))
 }
 
+/// `DELETE …/tasks/{task_id}` — remove a card from the board.
+///
+/// # An in-flight card is refused rather than deleted (issue #984)
+///
+/// A running turn holds its card in memory and writes it back when it settles
+/// (`tasks.upsert` on the harness settle path). Deleting the row underneath it
+/// therefore does not remove the card: the settle re-creates it, in
+/// `in_review`/`done`, *after* every console surface has already dropped the
+/// chip naming it — a card nothing can reach, which is precisely the
+/// "board fills with conversation" failure this is meant to fix.
+///
+/// So an in-flight card is a `409` with the steer route named, not a delete.
+///
+/// **Refusing rather than cancel-then-delete is the deliberate choice**, and not
+/// merely the smaller one. A cancel is cooperative: it sets the run's
+/// [`SteerControl`](crate::company::steer::SteerControl) and the turn stops at
+/// its *next iteration boundary*, which may be after the settle write has
+/// already gone out. Cancel-then-delete would therefore reintroduce the same
+/// race it was meant to close, only less often — the worst kind of fix, because
+/// it would pass a test and fail in production. Refusing is the state the
+/// operator can act on: cancel, watch it stop, then delete.
 async fn delete_task(
     company: ScopedCompany,
     Path(TaskPath { task_id }): Path<TaskPath>,
@@ -522,6 +583,23 @@ async fn delete_task(
     // concurrent re-parent's existence check and its write, which would leave
     // the dangling edge `validate_parent` exists to prevent.
     let _serialized = company.runtime.task_writes.lock().await;
+
+    // Checked under the write lock, so a run that registers after this point
+    // cannot slip between the check and the delete.
+    if company
+        .runtime
+        .steer()
+        .list(company.id())
+        .iter()
+        .any(|run| run.task_id.as_deref() == Some(task_id.as_str()))
+    {
+        return Err(ApiError(OpenCompanyError::Conflict(format!(
+            "task {task_id} is running — cancel it first (POST …/tasks/{task_id}/steer \
+             with `action: \"cancel\", confirm: true`), then delete it. Deleting it now \
+             would not remove it: the turn writes the card back when it settles."
+        ))));
+    }
+
     if company
         .runtime
         .tasks()
@@ -547,8 +625,15 @@ async fn delete_task(
 /// [`RawWorkflow`](crate::company::RawWorkflow) from the **stored** `ops` — the
 /// host is the authority, the browser's copy is never trusted — and runs it
 /// through [`create_company_workflow`], which takes the company write lock,
-/// re-validates shape + roster + id/name uniqueness, and (issue #276) lands any
-/// schedule-carrying graph switched off until a person arms it.
+/// re-validates shape + roster + destinations + id/name uniqueness, and (issue
+/// #276) lands any schedule-carrying graph switched off until a person arms it.
+///
+/// "The same validation an editor save runs" is the whole contract here, and
+/// until issue #1191 it was not true: the channel-destination rule lived on the
+/// two write routes rather than in the shared core, so this path — the ONE path
+/// where the operator did not author the graph, the path #836 exists because of
+/// — was the path with no check. A proposal naming a channel nobody wired was
+/// persisted and the card marked Done.
 ///
 /// On success the card is stamped with a [`TaskOutput`] linking the created
 /// workflow to the build attempt (issue #339) and moved to **Done**, and the
@@ -583,12 +668,19 @@ async fn apply_workflow_proposal(
     })?;
     let draft = raw_workflow_from_spec(&spec)?;
 
+    // Issue #1191: the deliverable channel set, read off the SAME runtime the
+    // console's destination picker is served from. Apply is a save, and it used
+    // to be the one save that skipped the channel rule — so a proposal naming a
+    // channel nobody wired was persisted, the card was marked Done, and the
+    // resulting workflow could not be saved again from the editor without first
+    // fixing a destination the operator never chose.
     let file = match create_company_workflow(
         company.id(),
         company.runtime.source_dir(),
         company.runtime.store(),
         Some(company.runtime.events()),
         draft,
+        Some(&company.runtime.deliverable_channel_ids()),
     )
     .await
     {
@@ -683,7 +775,7 @@ async fn reject_workflow_proposal(
     record.note = Some(crate::runtime::advance::append_result(
         record.note.as_deref(),
         crate::runtime::advance::SYSTEM_ATTRIBUTION,
-        "the proposed workflow was rejected — the card is back in To-do",
+        "the proposed workflow was rejected — the card is back in Pending",
     ));
     record.column = COLUMN_TODO.to_string();
     record.updated_at_millis = now_millis();
@@ -865,6 +957,7 @@ impl From<crate::runtime::journal::ExecutedEffect> for IrreversibleEffect {
 pub(crate) struct LineageRef {
     pub(crate) id: String,
     pub(crate) title: String,
+    /// The card's phase, on the same terms as [`TaskCard::column`].
     pub(crate) column: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) cost: Option<CostDisplay>,
@@ -875,10 +968,22 @@ impl LineageRef {
         Self {
             id: t.id.clone(),
             title: t.title.clone(),
-            column: t.column.clone(),
+            column: crate::ledger::board::phase_of(&t.column).to_string(),
             cost,
         }
     }
+}
+
+/// The stage word a card carries, for the cards where it says something.
+///
+/// `None` for pending and done: there is exactly one way to be either, so a
+/// field naming which would be a field naming nothing — and an omitted field
+/// is what tells a client "do not offer a stage-specific control here" without
+/// it needing the phase table to work that out.
+fn stage_of(stored: &str) -> Option<String> {
+    crate::ledger::board::column(stored)
+        .filter(|column| column.phase == crate::ledger::board::PHASE_WORKING)
+        .map(|column| column.id.to_string())
 }
 
 /// A positive USD amount or an explicit role-redacted state. A true zero is
@@ -2565,6 +2670,8 @@ mod steer_redirect_test {
         let id = CompanyId::new("acme");
         FsCompanyStore::new(home.to_path_buf())
             .save(&CompanyRecord {
+                overlay_retired_agents: Vec::new(),
+                overlay_agent_edits: Vec::new(),
                 id: id.clone(),
                 manifest: manifest(),
                 ledger: Vec::new(),
@@ -2623,6 +2730,103 @@ mod steer_redirect_test {
             serde_json::from_slice(&bytes).unwrap_or(Value::Null)
         };
         (status, value)
+    }
+
+    // ── Deleting a card that is running (issue #984) ─────────────────────────
+
+    /// Puts a card on the board so a delete has something to remove.
+    async fn seed_card(state: &AppState, id: &str) {
+        let company = CompanyId::new("acme");
+        let runtime = state.registry().get(&company).unwrap();
+        runtime
+            .tasks()
+            .upsert(
+                &company,
+                &crate::ports::tasks::TaskRecord {
+                    id: id.to_string(),
+                    title: "Draft the launch note".to_string(),
+                    note: None,
+                    column: crate::ports::tasks::COLUMN_IN_PROGRESS.to_string(),
+                    priority: "medium".to_string(),
+                    assignee: String::new(),
+                    updated_at_millis: 1,
+                    origin_chat_id: None,
+                    parent_task_id: None,
+                    output: None,
+                    plan: None,
+                    planning_attempts: Vec::new(),
+                    deliverable: crate::ports::tasks::TaskDeliverable::Once,
+                    workflow_proposal: None,
+                    origin_run_id: None,
+                    origin_workflow_id: None,
+                },
+            )
+            .await
+            .unwrap();
+    }
+
+    async fn delete_card(state: &AppState, id: &str) -> StatusCode {
+        let request = Request::builder()
+            .method("DELETE")
+            .uri(format!("/api/v1/company/tasks/{id}"))
+            .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+            .body(Body::empty())
+            .unwrap();
+        router(state.clone())
+            .oneshot(request)
+            .await
+            .unwrap()
+            .status()
+    }
+
+    async fn board_has(state: &AppState, id: &str) -> bool {
+        let company = CompanyId::new("acme");
+        let runtime = state.registry().get(&company).unwrap();
+        runtime
+            .tasks()
+            .list(&company)
+            .await
+            .unwrap()
+            .iter()
+            .any(|task| task.id == id)
+    }
+
+    /// **A running card cannot be deleted out from under its turn.**
+    ///
+    /// The settle path writes the card back from the harness's in-memory clone,
+    /// so a delete that lands mid-turn does not remove the card — it removes it
+    /// until the turn finishes and then gets it back, in `in_review`/`done`,
+    /// after every chat chip naming it has already gone. That is a card on the
+    /// board that nothing can reach, which is the failure #984 is about.
+    ///
+    /// The card staying on the board is asserted as well as the status: a `409`
+    /// that had already deleted the row would be worse than no check at all.
+    #[tokio::test]
+    async fn deleting_a_running_card_is_refused_and_leaves_it_on_the_board() {
+        let home = tempfile::tempdir().unwrap();
+        let (state, _guard) = state_with_inflight_run(home.path()).await;
+        seed_card(&state, "active").await;
+
+        assert_eq!(delete_card(&state, "active").await, StatusCode::CONFLICT);
+        assert!(
+            board_has(&state, "active").await,
+            "the refusal must not have deleted it anyway"
+        );
+    }
+
+    /// And the refusal is aimed at the running card, not at deletes in general.
+    ///
+    /// Without this, a guard that refused *every* delete would satisfy the test
+    /// above — the board's own delete would be broken and the suite would still
+    /// be green.
+    #[tokio::test]
+    async fn deleting_a_card_that_is_not_running_still_works() {
+        let home = tempfile::tempdir().unwrap();
+        let (state, _guard) = state_with_inflight_run(home.path()).await;
+        seed_card(&state, "idle").await;
+
+        assert_eq!(delete_card(&state, "idle").await, StatusCode::NO_CONTENT);
+        assert!(!board_has(&state, "idle").await);
     }
 
     /// The instruction the run's audit event recorded, if any.

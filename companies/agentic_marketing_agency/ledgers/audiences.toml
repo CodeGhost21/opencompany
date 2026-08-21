@@ -1,0 +1,105 @@
+# Who this agency is talking to, and what is actually known about them.
+#
+# Not a CRM and not a segment list in an ad account. This is the shared
+# understanding a brand strategist, a copywriter and a paid-ads manager are all
+# working from — and when it lives only in each of their heads, the ad, the page
+# and the email each address a slightly different person, which is what makes a
+# campaign feel incoherent without any one piece being wrong.
+
+title = "Audiences"
+purpose = """
+Who this agency's work is aimed at: what they want, what stops them buying, \
+where they are reachable, and what evidence any of that rests on. Read it \
+before writing anything aimed at anyone.\
+"""
+written_by = "`record_entry` to define or revise an audience, `close_entry` when it is retired or merged"
+checks = ["required-field", "known-status", "closed-needs-reason"]
+
+[[field]]
+name = "id"
+role = "id"
+required = true
+
+[[field]]
+name = "audience"
+role = "title"
+required = true
+description = "Who they are, as a person rather than a demographic bracket."
+
+[[field]]
+name = "status"
+role = "status"
+required = true
+
+[[field]]
+name = "wants"
+role = "prose"
+required = true
+description = "What they are actually trying to do. Not what the product does."
+
+[[field]]
+name = "objection"
+role = "prose"
+description = "What stops them. The single most useful field here for a copywriter."
+
+[[field]]
+name = "reachable_at"
+role = "prose"
+description = "Channels and contexts where they will actually see something."
+
+[[field]]
+name = "evidence"
+role = "prose"
+required = true
+description = "What this rests on — interviews, search data, campaign results. An audience with no evidence is a character somebody invented."
+
+[[field]]
+name = "owner"
+role = "owner"
+
+[[field]]
+name = "reason"
+role = "prose"
+description = "Why it closed — merged into another, or shown not to exist. Required when it closes."
+
+[[field]]
+name = "refs"
+role = "refs"
+
+[[status]]
+name = "hypothesised"
+label = "Hypothesised"
+
+[[status]]
+name = "validated"
+
+[[status]]
+name = "merged"
+closed = true
+needs_reason = true
+
+[[status]]
+name = "retired"
+closed = true
+needs_reason = true
+
+[[section]]
+heading = "Validated"
+blurb = "Evidence behind them. Write to these."
+statuses = ["validated"]
+order = "recent"
+
+[[section]]
+heading = "Hypothesised"
+blurb = "Assumed, not shown. Fine to test against; not fine to build a quarter on."
+statuses = ["hypothesised"]
+order = "recent"
+
+[[section]]
+heading = "Closed"
+blurb = """
+Merged or retired, with the reason. A retired audience is kept: "we tried \
+speaking to these people and they were not there" is expensive knowledge.\
+"""
+statuses = ["merged", "retired"]
+cap = 20

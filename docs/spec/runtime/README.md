@@ -29,6 +29,9 @@ Supporting docs:
   - [workspace-layout.md](workspace-layout.md) — the on-disk layout inside the
     data root: the embedded runtime's root, the agent sandboxes, choosing the
     root, and migrating a legacy doubled install
+  - [workspace-names.md](workspace-names.md) — the one naming rule for
+    everything the runtime puts in a workspace (lowercase, dashed), where it is
+    applied, and how a company created before it keeps working
   - [memory-engine.md](memory-engine.md) — the `OPENCOMPANY_MEMORY` overlay and
     why an ephemeral data root refuses to boot
   - [data-root.md](data-root.md) — the root itself: resolution order, ownership,
@@ -46,7 +49,8 @@ Supporting docs:
 - [artifacts.md](artifacts.md) — what makes something a deliverable: the
   explicit-publish rule, `(task, source)` identity, body caps and reference
   bodies, and the single follow-up nudge
-- [manifest.md](manifest.md) — `company.toml` schema
+- [manifest.md](manifest.md) — `company.toml` schema,
+  with [manifest-semantics.md](manifest-semantics.md) for each key's behaviour
 - [globals.md](globals.md) — the global baseline: the agents, workflows, skills
   and starting tool belt every company gets whichever vertical it started from,
   how a company supersedes or disables one, and why provenance is persisted
@@ -123,6 +127,9 @@ Supporting docs:
   `wallet`, or `none` (no sign-in, for the desktop app), and what each changes
 - [hub-console.md](hub-console.md) — one console deployment operating many hosts
   on other origins: the carried session, CORS, and what it costs
+- [connectors.md](connectors.md) — where the runtime runs: the four connectors
+  (this computer, TinyHumans Cloud, a remote gateway, over SSH), why the choice
+  is per host rather than per application, and what each one costs
 - [company-setup.md](company-setup.md) — first-run **company** setup: three
   questions asked once, turned into a real roster of agents. Distinct from
   [setup.md](setup.md), which configures the *instance*

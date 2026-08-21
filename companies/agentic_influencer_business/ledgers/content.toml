@@ -1,0 +1,119 @@
+# The content slate: every piece from idea to published, and how it performed.
+#
+# A creator business runs on a rhythm rather than a backlog. What matters is not
+# what is in progress but what is *scheduled*, what gap is coming, and which of
+# the last twenty pieces worked — and a board answers none of those. The
+# characteristic failure here is a busy production queue and an empty calendar
+# two weeks out.
+
+title = "Content"
+purpose = """
+Every piece of content: what it is, when it publishes, what it is meant to do, \
+and how it performed. Read it before making anything — the calendar, not the \
+inspiration, decides what gets made next.\
+"""
+written_by = "`record_entry` to add or advance a piece, `close_entry` when it publishes or is dropped"
+checks = ["required-field", "known-status", "closed-needs-reason"]
+
+[[field]]
+name = "id"
+role = "id"
+required = true
+
+[[field]]
+name = "piece"
+role = "title"
+required = true
+description = "What the audience would call it."
+
+[[field]]
+name = "status"
+role = "status"
+required = true
+
+[[field]]
+name = "format"
+role = "prose"
+description = "Long video, short, post, stream. Each has a different production cost and a different job."
+
+[[field]]
+name = "publishes"
+role = "date"
+description = "When it goes out. An empty fortnight here is the actual emergency, not a full production queue."
+
+[[field]]
+name = "hook"
+role = "prose"
+description = "Why anyone stops. If it cannot be written in a sentence, it will not survive a thumbnail."
+
+[[field]]
+name = "sponsored"
+role = "prose"
+description = "The deal id if this carries one. A sponsored piece has disclosure obligations the rest do not."
+
+[[field]]
+name = "owner"
+role = "owner"
+
+[[field]]
+name = "performance"
+role = "prose"
+description = "What it actually did, against comparable pieces rather than against hope."
+
+[[field]]
+name = "reason"
+role = "prose"
+description = "Why it closed — published, or dropped and why. Required when it closes."
+
+[[field]]
+name = "refs"
+role = "refs"
+
+[[status]]
+name = "idea"
+
+[[status]]
+name = "in_production"
+label = "In production"
+aliases = ["scripted"]
+
+[[status]]
+name = "scheduled"
+
+[[status]]
+name = "published"
+closed = true
+needs_reason = true
+
+[[status]]
+name = "dropped"
+closed = true
+needs_reason = true
+
+[[section]]
+heading = "Scheduled"
+blurb = "Dated and going out. A thin fortnight here is the emergency, whatever the production queue looks like."
+statuses = ["scheduled"]
+order = "recent"
+
+[[section]]
+heading = "In production"
+blurb = "Being made. Each should already have its hook written."
+statuses = ["in_production"]
+order = "recent"
+
+[[section]]
+heading = "Ideas"
+blurb = "Captured, not committed. Cheap to hold and cheap to drop."
+statuses = ["idea"]
+order = "recent"
+
+[[section]]
+heading = "Published"
+blurb = """
+Out, or dropped, each with the reason and what it did. Compared against similar \
+pieces rather than against hope — a video that underperformed a format is a \
+finding; one that underperformed a wish is not.\
+"""
+statuses = ["published", "dropped"]
+cap = 20

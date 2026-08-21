@@ -65,6 +65,7 @@
 
 import { NODE_CONFIG_FIELDS } from "@/lib/workflow-node-config";
 import type { OpenCompanyClient } from "./client";
+import { isDetachedChat } from "./types";
 import { PROPOSAL_FENCE } from "./workflow-proposal";
 import {
   WORKFLOW_NODE_KINDS,
@@ -502,12 +503,18 @@ export async function askCopilot(
   question: string,
 ): Promise<string[]> {
   const message = composeCopilotMessage(context, question);
-  const reply = await client.chat(
+  const answer = await client.chat(
     message,
     company,
     copilotThreadId(workflowId),
   );
-  return reply.responses.map((r) => r.text);
+  // The copilot does not ask to detach (issue #983): its whole contract is to
+  // return the answer, and it has no stream to watch or transcript row to
+  // re-arm. Narrowed rather than cast — a `202` here would mean the host
+  // detached something nobody asked to detach, and an empty answer is a
+  // truthful "no reply" instead of a crash on a missing field.
+  if (isDetachedChat(answer)) return [];
+  return answer.responses.map((r) => r.text);
 }
 
 /**

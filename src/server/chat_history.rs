@@ -208,6 +208,12 @@ pub struct MessageView {
     /// REST and GraphQL cannot disagree about which messages carry a card
     /// (issue #65's whole point). `None` on operator messages and on every
     /// reply journaled before the field existed.
+    ///
+    /// Also `None` once the card itself is gone, whoever deleted it — see
+    /// [`drop_dead_cards`]. The journal still records that the turn opened a
+    /// card, because it did; this field answers the narrower question the
+    /// renderer actually asks, which is whether there is still a card to link
+    /// to (issue #984).
     pub task_id: Option<String>,
     /// The message this one replies to (issue #364), by that message's own id —
     /// what makes a thread survive a reload rather than living in one browser.
@@ -430,8 +436,8 @@ impl MessageView {
                 task_id, column, ..
             } => MessageView {
                 id,
-                channel: "system".to_string(),
-                author: "system".to_string(),
+                channel: crate::ports::SYSTEM_AUTHOR.to_string(),
+                author: crate::ports::SYSTEM_AUTHOR.to_string(),
                 text: dispatch_marker_text(&column),
                 at_millis,
                 mine: false,
@@ -443,8 +449,8 @@ impl MessageView {
             // `owns` never admits other variants into a history.
             other => MessageView {
                 id,
-                channel: "system".to_string(),
-                author: "system".to_string(),
+                channel: crate::ports::SYSTEM_AUTHOR.to_string(),
+                author: crate::ports::SYSTEM_AUTHOR.to_string(),
                 text: format!("{other:?}"),
                 at_millis,
                 mine: false,
@@ -461,6 +467,22 @@ impl MessageView {
 ///
 /// Reported rather than repaired. See [`channel_attributed_replies`] for why a
 /// repair is not available.
+///
+/// # The figure is not comparable across the #966 cutover
+///
+/// Host-authored notices — the approval-overflow line, the `"Acknowledged."`
+/// fallback, the failed-continuation report — used to journal under the
+/// operator channel, so every one already on disk is counted here as damage.
+/// Since #966 they journal under [`SYSTEM_AUTHOR`](crate::ports::SYSTEM_AUTHOR)
+/// and are not counted, because they are correct rows and inflating this number
+/// with them would make the one figure that has to be trustworthy the least
+/// trustworthy one.
+///
+/// The consequence is a step in the series that nothing on the wire labels: a
+/// company's `affected` can fall without a single row being repaired, purely
+/// because it stopped minting new false positives. Read a decline across that
+/// boundary as "the bleeding stopped", never as "history got better" — no row
+/// counted here has ever become attributable, and none can.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct AttributionAudit {
     /// Every `AgentReply` inspected.
@@ -533,7 +555,15 @@ impl AttributionAudit {
 /// bound; in practice that notice is rare enough not to move it.
 /// Whether a stored `agent_id` names an author we can actually resolve.
 ///
-/// The roster, **plus the confined copilot** (issue #966). `CONFINED_AGENT_ID`
+/// The roster, **plus two ids that are truthful authors without being teammates**.
+///
+/// [`SYSTEM_AUTHOR`](crate::ports::SYSTEM_AUTHOR) (issue #966) is the runtime
+/// speaking for itself — an approval-overflow notice, the `"Acknowledged."`
+/// fallback, a failed-continuation report. Those rows are *correct*, so counting
+/// them as damage would inflate the one figure in #965 that has to be
+/// trustworthy, and would caption a legitimate system message as unattributable.
+///
+/// `CONFINED_AGENT_ID`
 /// is deliberately not a roster id — it names no teammate, carries no manifest
 /// grants and cannot be addressed — but a copilot turn genuinely authored its
 /// reply, so the id is a truthful author rather than a destination that leaked
@@ -546,6 +576,7 @@ impl AttributionAudit {
 /// which rows are unknown.
 pub fn is_known_author(agent_id: &str, record: &CompanyRecord) -> bool {
     agent_id == crate::ports::CONFINED_AGENT_ID
+        || agent_id == crate::ports::SYSTEM_AUTHOR
         || record.resolve_roster_agent_id(agent_id).is_some()
 }
 
@@ -691,7 +722,71 @@ pub async fn history_for_desk(
             message.reactions = reactions.remove(&message.id).unwrap_or_default();
         }
     }
+
+    drop_dead_cards(runtime, &mut messages).await?;
     Ok(messages)
+}
+
+/// Blanks `task_id` on any row naming a card the board no longer has
+/// (issue #984).
+///
+/// # Why this is a projection concern and not a write
+///
+/// The obvious fix — clear `task_id` on the journaled rows when the card is
+/// deleted — is not available, and it is worth saying why so nobody reaches for
+/// it later. `task_id` is not a column on a mutable chat row: it is a field of
+/// the [`CompanyEvent::AgentReply`] that *happened*, and the journal is
+/// append-only. Rewriting it would be editing history to record that a turn
+/// never opened a card, when it did.
+///
+/// So the id stays in the journal and the **projection** stops reporting it once
+/// the card is gone. That is also strictly more correct than a write would have
+/// been:
+///
+/// - It covers a card deleted by **any** path, not just the chat chip — the
+///   board's own `TaskEditDialog` delete leaves exactly the same stale chip, and
+///   always did.
+/// - It covers cards deleted **before** this change, which no write-time fix
+///   could reach.
+/// - It cannot drift: there is one board, read at render time, rather than a
+///   denormalised copy that a missed call site leaves stale.
+///
+/// Without this a dismissal survives only until the next full reload:
+/// `transcripts` is React state and is never serialised, but the console
+/// rehydrates from this projection (`lib/chat.ts`'s `fromHistory`) and merges by
+/// message id, so an empty transcript takes every row back — chip included. The
+/// chip would return pointing at a `404`, which reads as the delete having
+/// failed.
+///
+/// One board read per history, and only when the window actually carries a
+/// card — the same shape as the single roster read above, not a read per
+/// message.
+async fn drop_dead_cards(
+    runtime: &CompanyRuntime,
+    messages: &mut [MessageView],
+) -> Result<(), OpenCompanyError> {
+    if !messages.iter().any(|message| message.task_id.is_some()) {
+        return Ok(());
+    }
+
+    let live: HashSet<String> = runtime
+        .tasks()
+        .list(runtime.id())
+        .await?
+        .into_iter()
+        .map(|task| task.id)
+        .collect();
+
+    for message in messages {
+        if message
+            .task_id
+            .as_deref()
+            .is_some_and(|id| !live.contains(id))
+        {
+            message.task_id = None;
+        }
+    }
+    Ok(())
 }
 
 /// Counts a desk's messages before a cursor without materialising them.
@@ -1246,6 +1341,8 @@ mod test {
             let manifest: crate::company::CompanyManifest =
                 toml::from_str(src).expect("manifest parses");
             CompanyRecord {
+                overlay_retired_agents: Vec::new(),
+                overlay_agent_edits: Vec::new(),
                 id: crate::ports::types::CompanyId::new("acme"),
                 manifest,
                 ledger: Vec::new(),
@@ -1262,6 +1359,58 @@ mod test {
                 template_provenance: None,
                 setup: None,
             }
+        }
+
+        /// Issue #966. The runtime speaking for itself is a *correct* row, not
+        /// damage. Counting it would inflate the blast-radius figure on a company
+        /// doing nothing wrong, and would caption a legitimate system message as
+        /// something nobody can attribute.
+        #[test]
+        fn a_host_authored_notice_is_a_known_author_not_an_affected_row() {
+            let record = record();
+            let mut audit = AttributionAudit::default();
+            audit.fold(
+                &[reply(1, crate::ports::SYSTEM_AUTHOR), reply(2, "engineer")],
+                |agent_id| is_known_author(agent_id, &record),
+            );
+            assert_eq!(audit.replies, 2);
+            assert_eq!(audit.affected, 0);
+        }
+
+        /// Issue #966. The console reaches the centred system pill by comparing
+        /// the projected author against a literal `"system"`
+        /// (`frontend/src/lib/chat.ts`), and `MessageView` projects an
+        /// `AgentReply`'s `agent_id` straight into that field. So the *value* is
+        /// the contract with the console, not merely the constant's identity.
+        ///
+        /// Redefining `SYSTEM_AUTHOR` to anything else keeps every other test
+        /// here green and silently returns these three notices to rendering as
+        /// company bubbles — the exact appearance this change exists to end.
+        /// Two copies of one literal is the same coupling
+        /// `dispatch_marker_text` already carries with that file, and it is
+        /// deliberate for the same reason.
+        #[test]
+        fn the_notice_author_is_the_literal_the_console_keys_on() {
+            assert_eq!(
+                crate::ports::SYSTEM_AUTHOR,
+                "system",
+                "frontend/src/lib/chat.ts renders `author === \"system\"` as the centred pill"
+            );
+        }
+
+        /// The whole point of the reserved id: a notice and a damaged reply used
+        /// to be the same bytes. This pins that they are now different ones, so
+        /// the distinction a marker would rely on actually exists in the data.
+        #[test]
+        fn a_notice_and_an_overwritten_reply_are_no_longer_the_same_author() {
+            let record = record();
+            assert_ne!(
+                crate::ports::SYSTEM_AUTHOR,
+                "operator",
+                "a notice must not share the author a destination-overwrite produces"
+            );
+            assert!(is_known_author(crate::ports::SYSTEM_AUTHOR, &record));
+            assert!(!is_known_author("operator", &record));
         }
 
         /// Issue #966. A copilot turn genuinely authored its reply, so the id it
@@ -1371,5 +1520,200 @@ mod test {
             assert_eq!(audit.replies, 1);
             assert_eq!(audit.affected, 1);
         }
+    }
+}
+
+#[cfg(test)]
+mod dead_card_test {
+    use super::*;
+    use crate::company::CompanyManifest;
+    use crate::ports::tasks::{COLUMN_TODO, TaskDeliverable, TaskRecord};
+    use crate::ports::types::CompanyId;
+    use crate::runtime::RuntimeBuilder;
+    use std::sync::Arc;
+
+    fn manifest() -> CompanyManifest {
+        toml::from_str("[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n")
+            .expect("parse manifest")
+    }
+
+    fn card(id: &str) -> TaskRecord {
+        TaskRecord {
+            id: id.to_string(),
+            title: "Draft the launch note".to_string(),
+            note: None,
+            column: COLUMN_TODO.to_string(),
+            priority: "medium".to_string(),
+            assignee: String::new(),
+            updated_at_millis: 1,
+            origin_chat_id: None,
+            parent_task_id: None,
+            output: None,
+            plan: None,
+            planning_attempts: Vec::new(),
+            deliverable: TaskDeliverable::Once,
+            workflow_proposal: None,
+            origin_run_id: None,
+            origin_workflow_id: None,
+        }
+    }
+
+    /// A reply that opened a card, exactly as the dispatch path journals it.
+    fn reply_naming(task_id: &str) -> CompanyEvent {
+        CompanyEvent::AgentReply {
+            parent: None,
+            task_id: Some(task_id.to_string()),
+            chat_id: MAIN_THREAD_ID.to_string(),
+            agent_id: "ceo".to_string(),
+            text: "Opened a card for that.".to_string(),
+            steps: Vec::new(),
+        }
+    }
+
+    async fn runtime(home: &std::path::Path) -> Arc<CompanyRuntime> {
+        Arc::new(
+            RuntimeBuilder::new(home.to_path_buf(), manifest())
+                .with_id(CompanyId::new("acme"))
+                .build()
+                .await
+                .expect("build a runtime"),
+        )
+    }
+
+    /// The chip survives a reload while the card is still on the board — the
+    /// behaviour issue #246 added and `chat-to-card.spec.ts` pins.
+    ///
+    /// Asserted first so the test below cannot pass by the projection simply
+    /// dropping every `task_id` it sees.
+    #[tokio::test]
+    async fn a_reply_keeps_its_card_while_the_card_exists() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let runtime = runtime(home.path()).await;
+        let id = CompanyId::new("acme");
+
+        runtime
+            .tasks()
+            .upsert(&id, &card("card-1"))
+            .await
+            .expect("seed the board");
+        runtime
+            .events()
+            .append(&id, reply_naming("card-1"))
+            .await
+            .expect("journal the reply");
+
+        let history = history_for_desk(
+            &runtime,
+            MAIN_THREAD_ID,
+            MAIN_THREAD_ID,
+            &Viewer::Operator,
+            None,
+            50,
+        )
+        .await
+        .expect("history");
+
+        assert_eq!(
+            history.iter().filter_map(|m| m.task_id.as_deref()).count(),
+            1,
+            "the chip is projected while the card is on the board: {history:?}"
+        );
+    }
+
+    /// **The reload half of the dismissal (issue #984).**
+    ///
+    /// The journal still records that the turn opened a card — it did, and that
+    /// event is not rewritten. What must not happen is the *projection* handing
+    /// the console an id it can only render as a link to a `404`, which is how a
+    /// completed delete comes back looking like a failed one.
+    ///
+    /// Deleting the card is the only difference from the test above.
+    #[tokio::test]
+    async fn a_reply_loses_its_card_once_the_card_is_deleted() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let runtime = runtime(home.path()).await;
+        let id = CompanyId::new("acme");
+
+        runtime
+            .tasks()
+            .upsert(&id, &card("card-1"))
+            .await
+            .expect("seed the board");
+        runtime
+            .events()
+            .append(&id, reply_naming("card-1"))
+            .await
+            .expect("journal the reply");
+        assert!(
+            runtime
+                .tasks()
+                .delete(&id, "card-1")
+                .await
+                .expect("delete the card"),
+            "the card was there to delete"
+        );
+
+        let history = history_for_desk(
+            &runtime,
+            MAIN_THREAD_ID,
+            MAIN_THREAD_ID,
+            &Viewer::Operator,
+            None,
+            50,
+        )
+        .await
+        .expect("history");
+
+        assert!(
+            !history.is_empty(),
+            "the reply itself still belongs in the transcript — only its card is gone"
+        );
+        assert!(
+            history.iter().all(|m| m.task_id.is_none()),
+            "a rehydrated chip for a deleted card is a link to a 404, which reads \
+             as the delete having failed: {history:?}"
+        );
+    }
+
+    /// The board is read once per history, and not at all when no row carries a
+    /// card — the cost argument for doing this in the projection.
+    ///
+    /// Asserted through behaviour rather than a call count: a transcript with no
+    /// cards comes back unchanged.
+    #[tokio::test]
+    async fn a_transcript_with_no_cards_is_untouched() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let runtime = runtime(home.path()).await;
+        let id = CompanyId::new("acme");
+
+        runtime
+            .events()
+            .append(
+                &id,
+                CompanyEvent::AgentReply {
+                    parent: None,
+                    task_id: None,
+                    chat_id: MAIN_THREAD_ID.to_string(),
+                    agent_id: "ceo".to_string(),
+                    text: "just talking".to_string(),
+                    steps: Vec::new(),
+                },
+            )
+            .await
+            .expect("journal the reply");
+
+        let history = history_for_desk(
+            &runtime,
+            MAIN_THREAD_ID,
+            MAIN_THREAD_ID,
+            &Viewer::Operator,
+            None,
+            50,
+        )
+        .await
+        .expect("history");
+
+        assert_eq!(history.len(), 1, "{history:?}");
+        assert!(history[0].task_id.is_none(), "{history:?}");
     }
 }

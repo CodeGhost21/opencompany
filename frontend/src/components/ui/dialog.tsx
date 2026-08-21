@@ -102,7 +102,18 @@ function DialogFooter({
     <div
       data-slot="dialog-footer"
       className={cn(
-        "sticky bottom-[-1rem] -mx-4 -mb-4 flex flex-col-reverse gap-2 rounded-b-xl border-t bg-muted/50 p-4 sm:flex-row sm:justify-end",
+        // `bg-muted`, not `bg-muted/50`. This footer is `sticky`, so on any
+        // dialog whose body scrolls — the desk creator's roster picker is the
+        // one with thirteen rows in it — the content underneath keeps running
+        // past the bottom of the popup. At 50% opacity that content reads
+        // *through* the footer: teammate names sit legibly behind Cancel and
+        // the submit button, which looks like a rendering fault and makes both
+        // harder to read. A sticky bar has to be opaque to do its job.
+        //
+        // `--muted` still differs from the popup's own `--popover` in both
+        // themes (lighter in light, darker in dark), so the tonal separation
+        // the translucency was reaching for survives the change.
+        "sticky bottom-[-1rem] -mx-4 -mb-4 flex flex-col-reverse gap-2 rounded-b-xl border-t bg-muted p-4 sm:flex-row sm:justify-end",
         className
       )}
       {...props}

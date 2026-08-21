@@ -1,8 +1,7 @@
-// Issue #302: unmounted from the console — hidden, not retired. The host's
-// `/memory` routes, FactStore and tests are unchanged, and agents keep reading
-// and writing memory; only the operator-facing Brain tab is gone. Re-listing
-// "memory" in `app-shell.tsx`'s `View`/`NAV` brings it back. Do not delete it
-// as dead code.
+// Parked by issue #302, re-listed in `app-shell.tsx`'s `NAV` with the
+// memory-engine work: an operator choosing between engines needs somewhere to
+// see which one is bound, what it negotiated, and whether the boot probe
+// reached it — that is the engine panel below the header.
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Brain, Loader2, Plus, Search, Trash2 } from "lucide-react";
 import { toast } from "sonner";
@@ -11,18 +10,22 @@ import {
   CONTEXT_ORIGINS,
   createMemory,
   deleteMemory,
+  documentSlug,
+  forgetDocument,
   KIND_STYLES,
   listMemory,
   MEMORY_KINDS,
   memoryStats,
   ORIGIN_LABELS,
   ORIGIN_STYLES,
+  type MemoryEngineState,
   type MemoryEntry,
   type MemoryKind,
   type MemoryStats,
 } from "@/api/memory";
 import type { OpenCompanyClient } from "@/api/client";
-import type { MemorySpec } from "@/api/types";
+import { DropZone } from "@/views/memory/DropZone";
+import { EngineSection } from "@/views/memory/EngineSection";
 import { Markdown } from "@/components/markdown";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -151,28 +154,14 @@ export function MemoryView({ client, company }: Props) {
     };
   }, [load]);
 
-  // The bound memory engine, from the unauthenticated /spec handshake. Shown
-  // so an operator can see which engine is live and — for a remote driver
-  // serving only the mandatory families — what it does NOT support, before a
-  // cycle discovers it. undefined = host predates the field; render nothing.
-  const [engine, setEngine] = useState<MemorySpec | undefined>(undefined);
-  useEffect(() => {
-    let live = true;
-    // Clear first: on a client swap the old badge would otherwise survive a
-    // failed /spec and name the wrong host.
-    setEngine(undefined);
-    client
-      .spec()
-      .then((spec) => {
-        if (live) setEngine(spec.memory);
-      })
-      .catch(() => {
-        /* spec is best-effort here; the Brain view works without it */
-      });
-    return () => {
-      live = false;
-    };
-  }, [client]);
+  // The bound memory engine, from the engine route rather than `/spec`.
+  //
+  // One source, because the two can now disagree: `/spec`'s snapshot is what
+  // boot bound, and an operator who switches engines from the section below
+  // changes what is bound without restarting. A header badge naming the
+  // previous engine would be the most confusing possible answer to "did my
+  // change take".
+  const [engine, setEngine] = useState<MemoryEngineState | null>(null);
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -192,6 +181,13 @@ export function MemoryView({ client, company }: Props) {
     return counts;
   }, [entries]);
 
+  // The one engine state the *writing* half of this page has to respect: the
+  // null engine takes every write and throws it away, so a live "New memory"
+  // button beside that warning invites work the host will silently drop
+  // (issue #1410). The panel's health dot already refuses to go green here for
+  // the same reason.
+  const discarding = engine?.active === "null";
+
   async function add(fields: { kind: MemoryKind; title: string; body: string }) {
     await createMemory(client, company, fields);
     await load({ silent: true });
@@ -202,7 +198,15 @@ export function MemoryView({ client, company }: Props) {
     // Optimistic: drop the card immediately, then reconcile counts from the host.
     setEntries((all) => all.filter((x) => x.id !== entry.id));
     try {
-      await deleteMemory(client, company, entry.id);
+      if (entry.origin === "document") {
+        // A document is many chunks under one slug, so forgetting it is one
+        // call against the document — deleting the card's own chunk would
+        // leave the rest of the file in memory, which is worse than not
+        // offering a delete at all.
+        await forgetDocument(client, company, documentSlug(entry.source));
+      } else {
+        await deleteMemory(client, company, entry.id);
+      }
       await load({ silent: true });
     } catch (e) {
       // Re-insert only this entry on failure (no whole-list rollback).
@@ -223,27 +227,75 @@ export function MemoryView({ client, company }: Props) {
             </p>
           </div>
           <div className="flex items-center gap-3">
-            {engine && engine.backend !== "store" && (
+            {engine && (
               <span
-                className="rounded-full border px-3 py-1 text-xs text-muted-foreground"
+                className={cn(
+                  "rounded-full border px-3 py-1 text-xs",
+                  // A capability count in the calm register, inches above an
+                  // alert saying every write is discarded, reads as a fact
+                  // about a working engine. Amber, like the dot (issue #1410).
+                  discarding
+                    ? "border-status-blocked/40 text-status-blocked-text"
+                    : "text-muted-foreground",
+                )}
                 title={
-                  engine.capabilities.length
-                    ? `Capability families: ${engine.capabilities.join(", ")}`
-                    : "Capabilities not negotiated"
+                  discarding
+                    ? "This engine discards every write — nothing saved here is retained."
+                    : engine.capabilities.length
+                      ? `Capability families: ${engine.capabilities.join(", ")}`
+                      : "Capabilities not negotiated"
                 }
                 data-testid="memory-engine-badge"
               >
-                engine: {engine.driver_id ?? engine.backend}
+                engine: {engine.active}
                 {engine.capabilities.length > 0 && (
                   <> · {engine.capabilities.length} families</>
                 )}
               </span>
             )}
-            <Button onClick={() => setAddOpen(true)} data-testid="memory-add">
-              <Plus className="size-4" /> New memory
-            </Button>
+            {/*
+              The reason rides on the wrapper, not the button: `Button` carries
+              `disabled:pointer-events-none`, so a `title` on a disabled button
+              never surfaces — the span still takes the hover and shows it.
+            */}
+            <span
+              title={
+                discarding
+                  ? "This engine discards every write — nothing saved here is retained."
+                  : undefined
+              }
+            >
+              <Button
+                onClick={() => setAddOpen(true)}
+                disabled={discarding}
+                // Rendered, not hidden: the operator should see that writing is
+                // the thing this engine cannot do, not find the control missing.
+                data-testid="memory-add"
+              >
+                <Plus className="size-4" /> New memory
+              </Button>
+            </span>
           </div>
         </div>
+
+        <EngineSection
+          client={client}
+          company={company}
+          onApplied={(next) => {
+            setEngine(next);
+            // The new engine's memory is a different set of rows — often an
+            // empty one, since nothing migrates between engines — so the list
+            // has to be re-read rather than left showing the old engine's.
+            void load({ silent: true });
+          }}
+        />
+
+        <DropZone
+          client={client}
+          company={company}
+          discarding={discarding}
+          onIngested={() => void load({ silent: true })}
+        />
 
         {error && (
           <Alert variant="destructive">
@@ -315,7 +367,10 @@ function HealthStrip({
   }
   const tiles: { label: string; value: string }[] = [
     { label: "Total items", value: String(total) },
-    { label: "Teammate memory", value: String(stats?.agentChunks ?? 0) },
+    // `agentChunks` minus the outcomes carved out of it — the two tiles are
+    // peers on screen, so they must be disjoint in fact. See
+    // `teammateMemoryCount` (issue #1402).
+    { label: "Teammate memory", value: String(teammateMemoryCount(stats)) },
     { label: "Task outcomes", value: String(stats?.taskOutcomes ?? 0) },
     // Across every memory source, not just operator facts — teammates write only
     // context chunks, so a facts-only figure left this stat at "—" forever.
@@ -497,4 +552,28 @@ function AddMemoryDialog({
       </DialogContent>
     </Dialog>
   );
+}
+
+/**
+ * How many context chunks are teammate memory rather than task outcomes.
+ *
+ * `/memory/stats` reports a superset and one of its own slices, not two
+ * populations: `agentChunks` counts *every* chunk, and `taskOutcomes` is
+ * carved out of it by label prefix — the backend says so where it computes
+ * them ("the task-outcome prefix narrows to stored outcomes (a subset of the
+ * total)", `src/server/ops/memory.rs`). Rendering both raw put a count and its
+ * own subset side by side as peers, so a company whose every chunk was an
+ * outcome read `Teammate memory 13 / Task outcomes 13` next to `Total items 13`
+ * — thirteen teammate memories that do not exist, and a strip that adds up to
+ * twice the company's memory (issue #1402).
+ *
+ * The cards below have always partitioned these correctly: `context_entries`
+ * sorts each chunk into one of two **disjoint** buckets. This is that same
+ * split, so the strip counts the way the list does.
+ *
+ * Clamped because the two figures are two reads of a live store and can cross
+ * under a concurrent write; a negative tile is a worse lie than a stale one.
+ */
+export function teammateMemoryCount(stats: MemoryStats | null): number {
+  return Math.max(0, (stats?.agentChunks ?? 0) - (stats?.taskOutcomes ?? 0));
 }

@@ -1,7 +1,8 @@
 import { lazy, Suspense, useCallback, useEffect, useState } from "react";
-import type { Step, TourData } from "react-joyride";
+import type { EventData, Step, TourData } from "react-joyride";
 
 import type { View } from "@/components/app-shell";
+import { terminalOutcome } from "./events";
 import { TOUR, waitForTarget } from "./steps";
 import { TourTooltip } from "./TourTooltip";
 import { WelcomeDialog } from "./WelcomeDialog";
@@ -46,11 +47,6 @@ const Joyride = lazy(() => importJoyride().then((m) => ({ default: m.Joyride }))
 export function preloadTour(): void {
   void importJoyride().catch(() => {});
 }
-
-// react-joyride status values as string literals, so we don't statically import
-// the runtime `STATUS` enum (which would defeat the lazy load).
-const STATUS_FINISHED = "finished";
-const STATUS_SKIPPED = "skipped";
 
 const STEPS: Step[] = TOUR.map((s) => ({
   target: s.target,
@@ -207,12 +203,14 @@ export function TourController({
     [setView],
   );
 
-  // End the tour (recording completed vs skipped) when joyride reports it done.
-  const after = useCallback(
-    (data: TourData) => {
-      if (data.status === STATUS_FINISHED || data.status === STATUS_SKIPPED) {
-        finish(data.status === STATUS_SKIPPED);
-      }
+  // End the tour (recording completed vs skipped) when joyride reports the RUN
+  // over — `onEvent` + `EVENTS.TOUR_END`, not the per-step `options.after` hook
+  // this used to be registered as. See `./events` for why that distinction is
+  // issue #1408 and why v3 has no `callback` prop to move it to.
+  const onEvent = useCallback(
+    (data: EventData) => {
+      const outcome = terminalOutcome(data);
+      if (outcome) finish(outcome === "skipped");
     },
     [finish],
   );
@@ -262,13 +260,15 @@ export function TourController({
             // the element it points at, which for a full-bleed anchor is
             // unavoidable and strictly better than being unreachable.
             floatingOptions={{ shiftOptions: { crossAxis: true } }}
+            // Run-level. `options.before` below is per-step and stays there;
+            // the terminal handler must not, which is the whole of #1408.
+            onEvent={onEvent}
             options={{
               zIndex: 1200,
               overlayColor: "rgba(0,0,0,0.45)",
               spotlightPadding: 6,
               arrowSize: 0,
               before,
-              after,
             }}
           />
         </Suspense>

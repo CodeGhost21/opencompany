@@ -112,3 +112,42 @@ export const LIVE_BRAIN_REASON =
   "needs a --features openhuman,tinycortex,mcp host plus an inference backend; " +
   "set PW_LIVE_BRAIN=1 to run. The `Console E2E (live brain)` CI lane does " +
   "(issue #467).";
+
+/**
+ * Whether this run's host serves the **unstaffed first-run fixture**
+ * (`companies/e2e_setup`) rather than the suite's usual harness company.
+ *
+ * Set `PW_FIRST_RUN=1`, or run `npm run e2e:first-run`, which sets it and — when
+ * this config manages the host — points that host at the fixture and at a data
+ * root of its own.
+ *
+ * ## Why this is a separate run and not a skip inside the spec
+ *
+ * First-run setup opens only on a company nobody has staffed, and every company
+ * under `companies/` except this fixture declares a roster of its own. So
+ * `company-setup.spec.ts` cannot pass against the harness company and the
+ * harness company cannot serve the rest of the suite — two hosts, therefore two
+ * runs.
+ *
+ * It used to be one run with a `test.skip` inside the spec, and that is the
+ * shape issue #1404 was half about: the guard read the roster, found the global
+ * baseline on it, and skipped **every time**, so the lane reported green over a
+ * feature that could not open at all. `CLAUDE.md` names this exact pathology for
+ * Rust targets — "builds, runs and reports zero without failing anything".
+ *
+ * The replacement has three parts, and all three are needed:
+ *
+ *   1. {@link playwright.config.ts} selects the first-run spec **only** in a
+ *      first-run run, and every other spec **only** outside one, so neither can
+ *      be pointed at a host it cannot pass against;
+ *   2. the spec asserts its host is the right one instead of skipping, so a
+ *      mispointed run fails loudly on the first line rather than quietly on all
+ *      of them;
+ *   3. `Console E2E (first run)` in CI runs it, through
+ *      `scripts/ci/assert-e2e-spec-ran.sh`, which fails on a reported count of
+ *      zero — a number, because a configuration can look right and be vacuous.
+ */
+export const FIRST_RUN = process.env.PW_FIRST_RUN === "1";
+
+/** The company a first-run run must be serving, relative to the repository root. */
+export const FIRST_RUN_COMPANY = "companies/e2e_setup";

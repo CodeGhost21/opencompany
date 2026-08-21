@@ -411,7 +411,14 @@ pub struct AppState {
     /// not the base store's own memory. Provisioning and boot apply it after
     /// `stores` so a dedicated engine (TinyCortex) backs recall on top of any
     /// base backend. `None` means the base backend's memory is used unchanged.
-    memory_overlay: Option<crate::store::MemoryOverlay>,
+    ///
+    /// Behind a lock because the engine is no longer decided only at boot: the
+    /// console's engine route opens a replacement overlay and swaps it in, then
+    /// rebuilds each registered company so the new ports are actually in force
+    /// (`crate::server::ops::memory_engine`). Same shape, and the same reason,
+    /// as [`Self::auth_mode_override`] — a choice an operator makes while the
+    /// process is running, which telling them to restart for would defeat.
+    memory_overlay: Arc<RwLock<Option<crate::store::MemoryOverlay>>>,
     /// The repo-level shared skill library directory (`skills/`), set on the
     /// serve path. `None` in platform-provisioned mode (no repo checkout), where
     /// the `skillRegistry` query degrades to empty.
@@ -494,6 +501,14 @@ pub struct AppState {
     /// `restartRequired` and the console still says so, which is the honest
     /// answer when a rebuild is genuinely unavailable.
     rebuilder: Option<Arc<dyn crate::runtime::RuntimeRebuilder>>,
+    /// Builds the engine for a `transport = "local"` `acp` harness (issue
+    /// #1245). `None` — every test host, and any embedder that does not wire
+    /// one — leaves every such harness `unavailable`. Only the desktop shell
+    /// has an implementation to give this; it lives at
+    /// [`crate::ports::acp::AcpAgentFactory`], ungated, for the same reason
+    /// [`rebuilder`](Self::rebuilder) above is: the desktop supplies it, this
+    /// crate only defines the seam.
+    acp_agents: Option<Arc<dyn crate::ports::acp::AcpAgentFactory>>,
     /// The boot-only builder inputs recorded per company at registration, so a
     /// rebuild configures the successor exactly as boot configured its
     /// predecessor. See [`BootInputs`](crate::runtime::BootInputs) for why
@@ -525,7 +540,7 @@ impl AppState {
             config_root: None,
             ownership: Arc::new(RwLock::new(HashMap::new())),
             stores: None,
-            memory_overlay: None,
+            memory_overlay: Arc::new(RwLock::new(None)),
             skills_root: None,
             skill_registry: Arc::new(OnceLock::new()),
             instance_id: Arc::new(OnceLock::new()),
@@ -543,6 +558,7 @@ impl AppState {
             #[cfg(feature = "mcp")]
             oauth_pending: Arc::new(std::sync::Mutex::new(HashMap::new())),
             rebuilder: None,
+            acp_agents: None,
             boot_inputs: Arc::new(RwLock::new(HashMap::new())),
         }
     }
@@ -551,6 +567,17 @@ impl AppState {
     pub fn with_rebuilder(mut self, rebuilder: Arc<dyn crate::runtime::RuntimeRebuilder>) -> Self {
         self.rebuilder = Some(rebuilder);
         self
+    }
+
+    /// Wires this host's local-transport ACP agent factory (issue #1245).
+    pub fn with_acp_agents(mut self, factory: Arc<dyn crate::ports::acp::AcpAgentFactory>) -> Self {
+        self.acp_agents = Some(factory);
+        self
+    }
+
+    /// This host's local-transport ACP agent factory, when one is wired.
+    pub fn acp_agents(&self) -> Option<Arc<dyn crate::ports::acp::AcpAgentFactory>> {
+        self.acp_agents.clone()
     }
 
     /// This host's in-place runtime rebuilder, when one is wired.
@@ -654,15 +681,38 @@ impl AppState {
             .get_or_init(|| crate::app::instance::load_or_create(&self.home))
     }
 
-    /// Installs the memory engine overlay selected by `OPENCOMPANY_MEMORY`.
-    pub fn with_memory_overlay(mut self, overlay: crate::store::MemoryOverlay) -> Self {
-        self.memory_overlay = Some(overlay);
+    /// Installs the memory engine overlay selected at boot
+    /// (`OPENCOMPANY_MEMORY`, or `[memory]` in `config.toml`).
+    pub fn with_memory_overlay(self, overlay: crate::store::MemoryOverlay) -> Self {
+        self.set_memory_overlay(Some(overlay));
         self
     }
 
-    /// The memory engine overlay, if one is selected (`OPENCOMPANY_MEMORY`).
-    pub fn memory_overlay(&self) -> Option<&crate::store::MemoryOverlay> {
-        self.memory_overlay.as_ref()
+    /// The bound memory engine overlay, if one is selected.
+    ///
+    /// Returns a clone rather than a borrow: the overlay can be replaced while
+    /// the process runs (see [`Self::set_memory_overlay`]), and every field of
+    /// it is an `Arc`, so the clone costs a handful of refcount bumps and
+    /// cannot observe a half-applied swap.
+    pub fn memory_overlay(&self) -> Option<crate::store::MemoryOverlay> {
+        self.memory_overlay
+            .read()
+            .expect("memory overlay poisoned")
+            .clone()
+    }
+
+    /// Replaces the bound memory engine overlay.
+    ///
+    /// `None` returns memory to the base storage backend's own ports. This
+    /// only changes what a company built *after* it will bind — companies
+    /// already in the registry hold the previous ports on their cached
+    /// runtime, so a caller that wants the swap in force must rebuild them
+    /// ([`crate::runtime::rebuild_company`]).
+    pub fn set_memory_overlay(&self, overlay: Option<crate::store::MemoryOverlay>) {
+        *self
+            .memory_overlay
+            .write()
+            .expect("memory overlay poisoned") = overlay;
     }
 
     /// The repo-level shared skill registry, loaded from `dir` and cached.
@@ -1025,16 +1075,18 @@ impl AppState {
     /// `OPENCOMPANY_MEMORY=store` default — so there is no separate engine to
     /// name and nothing was negotiated.
     fn memory_spec(&self) -> MemorySpec {
-        match &self.memory_overlay {
+        match self.memory_overlay() {
             None => MemorySpec {
                 backend: crate::store::MemoryBackend::Store.as_str(),
                 driver_id: None,
                 capabilities: Vec::new(),
+                healthy: None,
             },
             Some(overlay) => MemorySpec {
                 backend: overlay.descriptor.backend.as_str(),
                 driver_id: Some(overlay.descriptor.driver_id.clone()),
                 capabilities: overlay.descriptor.capabilities.clone(),
+                healthy: overlay.descriptor.healthy,
             },
         }
     }
@@ -1127,6 +1179,19 @@ pub struct MemorySpec {
     /// provider. An operator reads this to see what a hosted engine does *not*
     /// support before a cycle discovers it.
     pub capabilities: Vec<String>,
+    /// Whether the boot-time reachability probe found the engine usable —
+    /// `Ready` or `Degraded` (reachable, possibly reduced); only `Down`
+    /// serializes as `false`.
+    ///
+    /// Absent means "not probed": the base backend serves memory, the in-pod
+    /// engine is driven directly, or this host predates the probe — a client
+    /// must treat absence as unknown, not unhealthy. `false` is a bound
+    /// engine whose probe failed at boot: still bound. A boot-time snapshot,
+    /// not a live gauge — the provider can recover (or fail) after boot
+    /// without this bit moving, so treat `false` as "was unreachable at
+    /// boot", never "the next operation will fail".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub healthy: Option<bool>,
 }
 
 #[cfg(test)]
@@ -1204,6 +1269,10 @@ mod tests {
     }
 
     /// A host with nothing to open is the only one the wizard is for.
+    ///
+    /// The registered-company half of this lives in `server::setup::test`,
+    /// beside the helper that can build a real runtime:
+    /// `spec_reports_setup_complete_once_a_company_is_registered`.
     #[test]
     fn spec_reports_setup_incomplete_for_an_empty_unstamped_host() {
         let spec = AppState::new(AppConfig::default()).spec();
@@ -1213,10 +1282,6 @@ mod tests {
             "no stamp and no companies is exactly the first-run case"
         );
     }
-
-    /// The registered-company half of this lives in `server::setup::test`,
-    /// beside the helper that can build a real runtime:
-    /// `spec_reports_setup_complete_once_a_company_is_registered`.
 
     #[cfg(feature = "mcp")]
     #[test]

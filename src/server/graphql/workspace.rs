@@ -144,7 +144,7 @@ pub struct WorkspaceFileGql {
 pub struct WorkspaceSearchHitGql {
     /// The matching node.
     pub node: FsNodeGql,
-    /// Its logical path, e.g. `Standards/Engineering.md`.
+    /// Its logical path, e.g. `standards/Engineering.md`.
     pub path: String,
     /// `name` or `content`.
     pub matched: String,

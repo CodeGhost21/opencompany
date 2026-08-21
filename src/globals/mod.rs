@@ -38,6 +38,7 @@
 use std::sync::OnceLock;
 
 use crate::company::{Agent, SkillDoc, WorkflowFile};
+use crate::ledger::LedgerSpec;
 
 mod generated {
     include!(concat!(env!("OUT_DIR"), "/embedded_globals.rs"));
@@ -51,7 +52,7 @@ mod test;
 /// Closed, and each variant maps to exactly one surface below. A free-form kind
 /// would let a typo (`agents:researcher`) read as a disable that never fires,
 /// which is the one failure mode an opt-out list must not have.
-pub const DISABLE_KINDS: &[&str] = &["agent", "workflow", "skill"];
+pub const DISABLE_KINDS: &[&str] = &["agent", "workflow", "skill", "ledger"];
 
 /// The parsed `globals/globals.toml`.
 #[derive(Debug, Default, serde::Deserialize)]
@@ -79,6 +80,7 @@ struct GlobalSkills {
 struct Baseline {
     agents: Vec<Agent>,
     workflows: Vec<WorkflowFile>,
+    ledgers: Vec<LedgerSpec>,
     skills: Vec<SkillDoc>,
     default_tool_allow: Vec<String>,
     faults: Vec<String>,
@@ -103,6 +105,7 @@ fn build() -> Baseline {
     Baseline {
         agents: build_agents(&mut faults),
         workflows: build_workflows(&mut faults),
+        ledgers: build_ledgers(&mut faults),
         skills: build_skills(&manifest.skills.always, &mut faults),
         default_tool_allow: manifest.tools.default_allow,
         faults,
@@ -180,6 +183,31 @@ fn build_workflows(faults: &mut Vec<String>) -> Vec<WorkflowFile> {
     out
 }
 
+/// The baseline's own ledgers, parsed with the same fault isolation the roster
+/// gets: one malformed declaration costs itself and nothing beside it.
+///
+/// These are axes every company has whatever it sells — not the built-ins,
+/// which the runtime ships in Rust and no file can shadow, but the ones a
+/// company would otherwise have to think of declaring before it could record
+/// anything on them.
+fn build_ledgers(faults: &mut Vec<String>) -> Vec<LedgerSpec> {
+    let files = generated::EMBEDDED_GLOBAL_LEDGERS;
+    let names = crate::company::ledger_file::embedded_ledger_names(files);
+    let (specs, problems) = crate::company::ledger_file::parse_ledgers(&names, &|rel| {
+        files
+            .iter()
+            .find(|(name, _)| *name == rel)
+            .map(|(_, body)| (*body).to_string())
+            .ok_or(std::io::ErrorKind::NotFound)
+    });
+    faults.extend(
+        problems
+            .into_iter()
+            .map(|problem| format!("a global ledger is malformed: {problem}")),
+    );
+    specs
+}
+
 fn build_skills(always: &[String], faults: &mut Vec<String>) -> Vec<SkillDoc> {
     let mut out = Vec::new();
     for slug in always {
@@ -208,6 +236,16 @@ pub fn agents() -> &'static [Agent] {
 /// The global workflow graphs, in filename order.
 pub fn workflows() -> &'static [WorkflowFile] {
     &baseline().workflows
+}
+
+/// The ledgers every company gets on top of the runtime's built-ins.
+///
+/// Seeded into a company's store at first boot alongside whatever its own
+/// bundle declares, and never re-seeded — retiring one is a person's call, and
+/// a baseline that re-asserted itself on the next restart would take that call
+/// back. See `runtime::builder`.
+pub fn ledgers() -> &'static [LedgerSpec] {
+    &baseline().ledgers
 }
 
 /// The shared-library skills installed in every company.
@@ -257,6 +295,7 @@ pub fn has(key: &str) -> bool {
         "agent" => agents().iter().any(|agent| agent.id == id),
         "workflow" => workflows().iter().any(|workflow| workflow.id == id),
         "skill" => skills().iter().any(|skill| skill.slug == id),
+        "ledger" => ledgers().iter().any(|ledger| ledger.slug == id),
         _ => false,
     }
 }

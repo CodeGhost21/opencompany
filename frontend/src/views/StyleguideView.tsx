@@ -211,6 +211,11 @@ const SURFACE_TOKENS = [
   { name: "accent", cls: "bg-accent" },
   { name: "sidebar", cls: "bg-sidebar" },
   { name: "sidebar-accent", cls: "bg-sidebar-accent" },
+  // The window chrome the whole shell is mounted on (issue #1178). Listed here
+  // because it is the one surface a page never paints for itself — it is only
+  // ever seen around the content card — so the swatch is the only place its
+  // value is legible next to the sheet it frames.
+  { name: "chrome", cls: "bg-chrome" },
 ] as const;
 
 function ColorSection() {

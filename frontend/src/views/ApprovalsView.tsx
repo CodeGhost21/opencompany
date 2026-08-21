@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Check, Loader2, ShieldCheck, X } from "lucide-react";
+import { Check, Loader2, ShieldAlert, ShieldCheck, X } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { toast } from "sonner";
@@ -22,7 +22,13 @@ import {
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import type { CompanyFeed } from "@/hooks/use-company";
-import { approvedByRuntimeLine, approvedLine } from "@/lib/approval-wording";
+import { useStableList } from "@/hooks/use-stable-list";
+import {
+  approvedByRuntimeLine,
+  approvedLine,
+  batchPositions,
+  staleDecisionLine,
+} from "@/lib/approval-wording";
 import { approvalSummary, grantHeadline, timeAgo, toolAction, untilLabel } from "@/lib/language";
 import { approvalsForTask } from "@/lib/task-approvals";
 import { startVisiblePolling } from "@/lib/visible-poll";
@@ -90,6 +96,13 @@ interface Props {
   sub?: string | null;
   onResolved: (systemLine: string) => void;
   onGoToConversation: () => void;
+  /**
+   * Called the instant a decide click starts, before the network call
+   * (issue #1211) — so the shell can mark this approval as "this tab decided
+   * it" before the SSE echo of the resolution has a chance to race ahead of
+   * the awaited response and arrive first.
+   */
+  onDecideStart?: (approvalId: string) => void;
 }
 
 /** The approvals inbox: the few things the company parked for the operator. */
@@ -100,6 +113,7 @@ export function ApprovalsView({
   sub,
   onResolved,
   onGoToConversation,
+  onDecideStart,
 }: Props) {
   // Issue #373: in-flight state is per approval, not a single module-wide slot.
   //
@@ -114,7 +128,7 @@ export function ApprovalsView({
   // an approve and a decline are different promises to the operator ("the agent
   // is doing it" vs "recorded"), and the card says which one it is waiting on.
   const [inFlight, setInFlight] = useState<ReadonlyMap<string, Verdict>>(() => new Map());
-  const { approvals, now } = feed;
+  const { approvals, now, queue } = feed;
   /**
    * The card the queue is narrowed to, or `null` for the whole queue (#883).
    *
@@ -141,6 +155,19 @@ export function ApprovalsView({
     () => (focusTaskId === null ? approvals : approvalsForTask(approvals, focusTaskId)),
     [approvals, focusTaskId],
   );
+  /**
+   * The same rows, but in a pointer-stable order (#1414).
+   *
+   * A poll swaps `visible` wholesale every 5s, and mapping that straight to
+   * cards let the queue reflow under the operator's pointer — a card removed
+   * above the pointer slid the next card's Approve button under an in-flight
+   * click. `useStableList` holds the rendered order (and holds removals) for as
+   * long as the pointer is over the queue or focus is inside it, then
+   * reconciles to the latest poll the moment the operator moves away. Every
+   * branch below reads `rows` rather than `visible` so the count, the empty
+   * state and the list all agree on the one frozen view.
+   */
+  const { items: rows, containerProps: queueHold } = useStableList(visible);
   const askerNames = useAskerNames(client, company, approvals);
   const { grants, granterNames, refreshGrants } = useStandingGrants(client, company);
   /**
@@ -157,15 +184,14 @@ export function ApprovalsView({
    * Counted over what is still pending rather than over the whole batch, so the
    * number shrinks as rows are decided instead of promising a fourth row that
    * has already been signed off.
+   *
+   * Both halves of "N of M" come from one walk of that pending list (#1289): a
+   * per-card `index` as well as the batch `total`, so a two-card turn reads
+   * "1 of 2" then "2 of 2" rather than the hardcoded "1 of 2" twice, and a
+   * focus-narrowed view cannot count the position over a subset and the total
+   * over the whole.
    */
-  const batchTotals = useMemo(() => {
-    const counts = new Map<string, number>();
-    for (const a of approvals) {
-      if (!a.batch) continue;
-      counts.set(a.batch, (counts.get(a.batch) ?? 0) + 1);
-    }
-    return counts;
-  }, [approvals]);
+  const batchPos = useMemo(() => batchPositions(approvals), [approvals]);
 
   const markInFlight = (id: string, verdict: Verdict | null) =>
     setInFlight((prev) => {
@@ -179,6 +205,7 @@ export function ApprovalsView({
     // Per-row guard: only a double-press on THIS card is ignored. The global
     // early return that used to live here made every other card inert too.
     if (inFlight.has(a.id)) return;
+    onDecideStart?.(a.id);
     markInFlight(a.id, verdict);
     const startedAt = Date.now();
     try {
@@ -203,6 +230,32 @@ export function ApprovalsView({
       // so approving one of several releases nothing — and saying otherwise is
       // the one part of this flow that actively misleads.
       const stillAwaiting = "stillAwaiting" in answer ? answer.stillAwaiting : undefined;
+      // Issue #1449, and it comes FIRST because everything below it is written
+      // for a decision that actually happened. The host answers `200` to a click
+      // on a card whose deadline has passed — it has to, nothing failed — and
+      // then default-denies it. Read that way, the wording below was a green
+      // success line over work the host had just refused, and the operator's
+      // only next signal was the work silently not happening.
+      //
+      // `null` means the host said `settled`, or is too old to say. Both keep
+      // the pre-#1449 wording: guessing is the defect, in either direction.
+      const stale = staleDecisionLine(
+        "outcome" in answer ? answer.outcome : undefined,
+        approvalSummary(a),
+      );
+      if (stale) {
+        onResolved(stale);
+        // Neither success nor error, exactly as the #380 timeout line is
+        // neither: the request was answered correctly and the answer is that
+        // there was no decision left to make. Still exactly one toast for this
+        // click (#1211) — the SSE echo for the id is suppressed by
+        // `onDecideStart` above, whichever verdict the host ends up appending.
+        toast.info(stale);
+        // The queue is the reconciliation: this card is gone from the host's
+        // parked set either way, so a refresh drops it.
+        void feed.refresh();
+        return;
+      }
       const line =
         verdict !== "approve"
           ? `Declined: ${approvalSummary(a)}`
@@ -262,6 +315,10 @@ export function ApprovalsView({
   return (
     <div className="flex-1 overflow-y-auto">
       <div className="mx-auto w-full max-w-3xl px-4 py-6">
+        {/* The queue's own count heading below only renders once loaded, so
+            it can't be the page's one `h1` — this stays present through
+            loading, error and empty states alike (issue #1221). */}
+        <h1 className="sr-only">Approvals</h1>
         {/* Issue #883: the filter says so, and offers the way out of itself.
             A narrowed queue that looked identical to the whole one would make a
             decided-elsewhere approval look like it had vanished. */}
@@ -278,7 +335,19 @@ export function ApprovalsView({
             </a>
           </div>
         )}
-        {visible.length === 0 ? (
+        {/* Issue #1229: "nothing parked" and "we could not read what is parked"
+            are different facts, and only one of them is an instruction to stop
+            looking. The queue's own load state decides which is on screen —
+            `approvals` being empty cannot, because it is empty in both cases.
+            A queue that has been read once keeps its rows through a later
+            failure, so this branch is only ever the cold path. */}
+        {queue !== "ready" && approvals.length === 0 ? (
+          queue === "loading" ? (
+            <LoadingApprovals />
+          ) : (
+            <UnreadableApprovals onRetry={() => void feed.refresh()} />
+          )
+        ) : rows.length === 0 ? (
           focusTaskId !== null ? (
             <ClearedForTask />
           ) : (
@@ -288,9 +357,9 @@ export function ApprovalsView({
           <>
             <div className="mb-4 flex items-baseline justify-between">
               <h2 className="text-sm font-medium text-muted-foreground">
-                {visible.length === 1
+                {rows.length === 1
                   ? "1 thing needs your approval"
-                  : `${visible.length} things need your approval`}
+                  : `${rows.length} things need your approval`}
               </h2>
             </div>
             {/* #971: nothing may vanish unannounced. Requests now age out on
@@ -302,15 +371,16 @@ export function ApprovalsView({
               Each one has a deadline. Anything still undecided by then is
               declined on its own, and the work behind it moves on.
             </p>
-            <div className="flex flex-col gap-3">
-              {visible.map((a) => (
+            <div className="flex flex-col gap-3" {...queueHold}>
+              {rows.map((a) => (
                 <ApprovalCard
                   key={a.id}
                   approval={a}
                   now={now}
                   askerNames={askerNames}
                   deciding={inFlight.get(a.id) ?? null}
-                  batchTotal={batchTotals.get(a.batch ?? "") ?? 1}
+                  batchIndex={batchPos.get(a.id)?.index ?? 1}
+                  batchTotal={batchPos.get(a.id)?.total ?? 1}
                   onDecide={(verdict, scope) => void decide(a, verdict, scope)}
                 />
               ))}
@@ -532,11 +602,12 @@ function granterLabel(g: StandingGrant, granterNames: Map<string, string>): stri
  * line simply do not render and what is left is the headline, the amount and
  * the relative time — exactly what shipped before.
  */
-function ApprovalCard({
+export function ApprovalCard({
   approval: a,
   now,
   askerNames,
   deciding,
+  batchIndex,
   batchTotal,
   onDecide,
 }: {
@@ -545,6 +616,12 @@ function ApprovalCard({
   askerNames: Map<string, string>;
   /** The verdict this card is waiting on, or `null` when it is idle (#373). */
   deciding: Verdict | null;
+  /**
+   * This card's 1-based position within its turn's batch — the numerator of
+   * "N of M from the same turn" (#1289). `1` is the default for an approval
+   * with no batch, where the line is not shown at all.
+   */
+  batchIndex: number;
   /**
    * How many rows this turn's batch still has waiting, including this one
    * (#842). `1` — the default for an approval with no batch — says nothing.
@@ -563,43 +640,16 @@ function ApprovalCard({
   return (
     <Card data-approval-id={a.id}>
       <CardContent className="flex flex-col gap-3 py-4">
-        <ApprovalHeadline
-          approval={a}
-          /* Disabled on THIS card's own state only — a decision in flight on
-             another card leaves these live. That is the whole of #373's
-             first cause. */
-          actions={
-            <>
-              <Button
-                variant="outline"
-                size="sm"
-                disabled={deciding !== null}
-                /* A decline never carries a scope — there is nothing to grant,
-                   and the host refuses the pairing anyway. */
-                onClick={() => onDecide("deny", { kind: "once" })}
-              >
-                {deciding === "deny" ? (
-                  <Loader2 className="size-4 animate-spin" />
-                ) : (
-                  <X className="size-4" />
-                )}{" "}
-                Decline
-              </Button>
-              <Button
-                size="sm"
-                disabled={deciding !== null}
-                onClick={() => onDecide("approve", scope)}
-              >
-                {deciding === "approve" ? (
-                  <Loader2 className="size-4 animate-spin" />
-                ) : (
-                  <Check className="size-4" />
-                )}{" "}
-                Approve
-              </Button>
-            </>
-          }
-        />
+        {/* Issue #1406: the headline no longer carries the decide buttons.
+            Approve and Decline used to sit here, level with the title and above
+            everything an operator reads to decide — the payload, and the scope
+            control that changes what Approve even means. On a tall card the
+            scope control was ~200px below the button, or off-screen entirely,
+            so the commit affordance was reachable before the evidence was seen.
+            The buttons now live in a footer row below the scope control, so the
+            card reads what will happen → what it will do → who asked and by
+            when → decide, the order every working consent pattern uses. */}
+        <ApprovalHeadline approval={a} />
 
         {/* Issue #596: for a workflow pre-publish gate, show the VERBATIM content
             the run is about to publish — the draft awaiting sign-off — above the
@@ -634,10 +684,47 @@ function ApprovalCard({
                   // here, on its own, and pointing at the others would imply a
                   // batch decision this page does not offer. The conversation's
                   // card is where one Approve covers all of them (#842).
-                  `1 of ${batchTotal} from the same turn`
+                  `${batchIndex} of ${batchTotal} from the same turn`
                 : undefined
           }
         />
+
+        {/* The decide footer (#1406) — deliberately the LAST thing in the card,
+            after the scope control it depends on. Disabled on THIS card's own
+            state only; a decision in flight on another card leaves these live,
+            which is the whole of #373's first cause. */}
+        <div
+          data-testid="approval-decide"
+          className="flex flex-wrap justify-end gap-2 border-t border-border pt-3"
+        >
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={deciding !== null}
+            /* A decline never carries a scope — there is nothing to grant,
+               and the host refuses the pairing anyway. */
+            onClick={() => onDecide("deny", { kind: "once" })}
+          >
+            {deciding === "deny" ? (
+              <Loader2 className="size-4 animate-spin" />
+            ) : (
+              <X className="size-4" />
+            )}{" "}
+            Decline
+          </Button>
+          <Button
+            size="sm"
+            disabled={deciding !== null}
+            onClick={() => onDecide("approve", scope)}
+          >
+            {deciding === "approve" ? (
+              <Loader2 className="size-4 animate-spin" />
+            ) : (
+              <Check className="size-4" />
+            )}{" "}
+            Approve
+          </Button>
+        </div>
       </CardContent>
     </Card>
   );
@@ -742,6 +829,61 @@ function ClearedForTask() {
           approvals of their own — use <span className="font-medium">Show all</span> to see them.
         </p>
       </div>
+    </div>
+  );
+}
+
+/**
+ * The queue is on the wire (issue #1229).
+ *
+ * A skeleton rather than the word "Loading": this page is a list, and the shape
+ * of the list is the honest placeholder for it. Deliberately *not* the "All
+ * clear" panel — that panel makes a claim, and nothing is known yet.
+ */
+function LoadingApprovals() {
+  return (
+    <div className="space-y-3" aria-busy="true" aria-label="Loading approvals">
+      {Array.from({ length: 3 }).map((_, i) => (
+        <div key={i} className="h-28 animate-pulse rounded-xl border bg-muted/40" />
+      ))}
+    </div>
+  );
+}
+
+/**
+ * The queue could not be read, and never has been (issue #1229).
+ *
+ * The page this replaces said "All clear — nothing is waiting on you" over a
+ * read that failed, beside a sidebar badge that said fourteen things were.
+ * On the one surface whose job is to catch what needs a person, a confident
+ * false negative is the most expensive thing it can say: every parked request
+ * has a deadline after which it is declined on its own.
+ *
+ * So this says what is actually known — nothing — and offers the only useful
+ * next move. `role="alert"` because it is a correction to what the operator
+ * came here to find out.
+ */
+function UnreadableApprovals({ onRetry }: { onRetry: () => void }) {
+  return (
+    <div
+      role="alert"
+      className="mt-16 flex flex-col items-center gap-3 text-center"
+      data-testid="approvals-unreadable"
+    >
+      <div className="flex size-12 items-center justify-center rounded-2xl bg-destructive/10 text-destructive">
+        <ShieldAlert className="size-6" />
+      </div>
+      <div className="space-y-1">
+        <p className="font-medium">Couldn&apos;t read what&apos;s waiting</p>
+        <p className="max-w-sm text-sm text-muted-foreground">
+          The company host didn&apos;t answer. This is not the same as nothing
+          being parked — anything waiting is still waiting, and still on its
+          deadline.
+        </p>
+      </div>
+      <Button variant="outline" size="sm" onClick={onRetry}>
+        Try again
+      </Button>
     </div>
   );
 }

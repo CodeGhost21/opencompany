@@ -657,6 +657,18 @@ async fn conformance_fact_store() {
     conformance::assert_fact_store(engine().facts()).await;
 }
 
+// Exercises the facade's one-enumeration `peek_many` override against the
+// same positional contract the default implementation gives.
+#[tokio::test]
+async fn conformance_context_peek_many() {
+    conformance::assert_context_peek_many_answers_positionally(engine().context()).await;
+}
+
+#[tokio::test]
+async fn conformance_context_multibyte_bodies() {
+    conformance::assert_multibyte_bodies_survive_search_and_ranged_peek(engine().context()).await;
+}
+
 /// The port conformance suite over the REAL `namespace` driver — not the fake.
 ///
 /// Everything above proves the decorator against `FakeEngine`; the driver
@@ -728,6 +740,59 @@ mod namespace_driver_conformance {
     async fn context_chunk_stamps_hold_on_the_namespace_driver() {
         let (store_dir, engine) = real_engine();
         conformance::assert_context_chunk_stamps(engine.context()).await;
+        drop(store_dir);
+    }
+
+    #[tokio::test]
+    async fn context_peek_many_answers_positionally_on_the_namespace_driver() {
+        let (store_dir, engine) = real_engine();
+        conformance::assert_context_peek_many_answers_positionally(engine.context()).await;
+        drop(store_dir);
+    }
+
+    #[tokio::test]
+    async fn multibyte_bodies_survive_search_and_peek_on_the_namespace_driver() {
+        let (store_dir, engine) = real_engine();
+        conformance::assert_multibyte_bodies_survive_search_and_ranged_peek(engine.context()).await;
+        drop(store_dir);
+    }
+
+    /// #1201: the conformance suite failed at random on this driver because
+    /// its write path runs a PII scrubber over the serialized envelope, and a
+    /// 13-digit `at_millis` that happens to pass Luhn (~10% of epoch-millis
+    /// stamps do) was redacted into unparseable JSON — the read side then
+    /// dropped the whole record. Deterministic pin: the middle stamp below is
+    /// the Luhn-valid one from the original failure, so this test fails 100%
+    /// of the time on a driver with that defect, not 10%.
+    #[tokio::test]
+    async fn luhn_valid_timestamps_round_trip_on_the_namespace_driver() {
+        let (store_dir, engine) = real_engine();
+        let memory = engine.memory();
+        let traces = vec![
+            CompressedTrace {
+                cycle_id: "c0".into(),
+                summary: "summary 0".into(),
+                at_millis: 1_787_178_633_770,
+            },
+            CompressedTrace {
+                cycle_id: "c1".into(),
+                summary: "summary 1".into(),
+                at_millis: 1_787_178_633_773,
+            },
+            CompressedTrace {
+                cycle_id: "c2".into(),
+                summary: "summary 2".into(),
+                at_millis: 1_787_178_633_774,
+            },
+        ];
+        for trace in &traces {
+            memory.save_trace(&acme_id(), trace.clone()).await.unwrap();
+        }
+        let read = memory.recent_traces(&acme_id(), usize::MAX).await.unwrap();
+        assert_eq!(
+            read, traces,
+            "every trace round-trips regardless of its timestamp's digits"
+        );
         drop(store_dir);
     }
 }

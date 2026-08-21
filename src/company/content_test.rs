@@ -9,8 +9,8 @@ use std::path::{Path, PathBuf};
 use super::workflow_file::WorkflowNodeKind;
 use super::{
     CompanyManifest, Tools, grants_chargebee_explicit, grants_composio_explicit,
-    grants_media_explicit, grants_paypal_explicit, grants_search_explicit, load_dir_skills,
-    parse_workflow, walk_workspace,
+    grants_media_explicit, grants_paypal_explicit, grants_search_explicit, load_dir_ledgers,
+    load_dir_skills, parse_workflow, walk_workspace,
 };
 use crate::runtime::builder::effective_grants;
 
@@ -102,12 +102,13 @@ fn every_company_skill_and_workspace_parses() {
 /// Whether a template belongs here is therefore a judgement about its charter —
 /// research, editorial, marketing, legal, product engineering — recorded here
 /// because it cannot be derived from content.
-const SEARCH_GRANTED_COMPANIES: [&str; 8] = [
+const SEARCH_GRANTED_COMPANIES: [&str; 9] = [
     "agentic_consultation_firm",
     "agentic_design_studio",
     "agentic_law_firm",
     "agentic_marketing_agency",
     "agentic_media_company",
+    "agentic_product_team",
     "agentic_research_lab",
     "agentic_software_company",
     "signals_opportunity_studio",
@@ -152,7 +153,9 @@ const SEARCH_UNGRANTED_COMPANIES: [&str; 12] = [
 /// and `agentic_research_lab` is excluded for the same reason — its belt is
 /// `["*", "search"]`, dropping `media` and `composio`, because a research lab
 /// has no use for image generation or third-party OAuth side effects and both
-/// are opt-in spend.
+/// are opt-in spend. `agentic_product_team` is excluded on that same
+/// research-lab argument: it produces documents and ledger rows, so it drops
+/// both opt-in namespaces too.
 const FULL_BELT_PLUS_SEARCH: [&str; 6] = [
     "agentic_consultation_firm",
     "agentic_design_studio",
@@ -602,9 +605,9 @@ fn the_marketing_campaign_preset_is_runnable() {
     assert_eq!(node("publish").config["agent_ref"], "copywriter");
 }
 
-/// Every seeded `output` node either names a destination its own manifest can
-/// resolve, or names none at all — and the ones that name none are exactly the
-/// templates that declare no desk (issue #947).
+/// Every seeded `output` node names a destination its own manifest can resolve,
+/// except the research lab, which deliberately proves that workflows can
+/// coordinate without desks (issue #963).
 ///
 /// Two failures this catches, and they are opposite:
 ///
@@ -614,38 +617,17 @@ fn the_marketing_campaign_preset_is_runnable() {
 ///     that manifest does not declare parses fine, ships, and fails at run time
 ///     on a freshly provisioned tenant — which is the class of bug #947 is about,
 ///     one step further along.
-///  2. **A desk-bearing template that quietly loses its destination.** The
-///     allowlist below is the 18 templates that declare no desk and therefore
-///     have nothing to address. It is an allowlist rather than a `!is_empty()`
-///     check so that removing a destination from one of the three that *can*
-///     deliver fails here instead of passing as "well, some have none".
+///  2. **A template that quietly loses its destination.** All shipped
+///     templates except the research lab now declare a desk for their terminal
+///     output. The single exception is named below so removing any other
+///     destination fails rather than passing as "well, some have none".
 ///
-/// The 18 are tracked in #963: they need desks before they can have
-/// destinations, which is a content judgement per company rather than a stanza,
-/// and `agentic_research_lab` declares no desk deliberately.
+/// `agentic_research_lab` explains in its own manifest why it has no desk: its
+/// workflow is the proving ground for collapsing desk coordination into the
+/// graph itself.
 #[test]
 fn every_seeded_output_destination_resolves_against_its_own_manifest() {
-    /// Templates with an `output` node and no desk to deliver it to (#963).
-    const NO_DESK_YET: &[&str] = &[
-        "agentic_accounting_firm",
-        "agentic_consultation_firm",
-        "agentic_customer_support",
-        "agentic_design_studio",
-        "agentic_enterprise_sales",
-        "agentic_game_business",
-        "agentic_game_studio",
-        "agentic_influencer_business",
-        "agentic_law_firm",
-        "agentic_media_company",
-        "agentic_pharma_startup",
-        "agentic_realestate_company",
-        "agentic_recruiting_company",
-        "agentic_research_lab",
-        "agentic_venture_capital",
-        "agentic_venture_studio",
-        "signals_opportunity_studio",
-        "startup_accelerator",
-    ];
+    const DESKLESS_WORKFLOW_TEMPLATE: &str = "agentic_research_lab";
 
     let mut checked = 0;
     let mut with_destination = 0;
@@ -682,17 +664,15 @@ fn every_seeded_output_destination_resolves_against_its_own_manifest() {
                 checked += 1;
                 let Some(destination) = node.destination.as_ref() else {
                     assert!(
-                        NO_DESK_YET.contains(&company.as_str()),
+                        company == DESKLESS_WORKFLOW_TEMPLATE,
                         "{label} has an output node with no destination, so a run of it \
-                         delivers nothing. Give it a destination, or — if this template \
-                         declares no desk to deliver to — add it to `NO_DESK_YET` and to \
-                         issue #963."
+                         delivers nothing. Give it a channel destination backed by a \
+                         manifest desk. The research lab is the only intentional exception."
                     );
                     assert!(
                         desks.is_empty(),
-                        "{label} is listed in `NO_DESK_YET` but its manifest declares \
-                         desks {desks:?}, so it has somewhere to deliver. Give its output \
-                         node a destination and drop it from the list."
+                        "{label} is the deskless-workflow exception but its manifest \
+                         declares desks {desks:?}. Give its output node a destination."
                     );
                     continue;
                 };
@@ -716,12 +696,193 @@ fn every_seeded_output_destination_resolves_against_its_own_manifest() {
         }
     }
 
-    assert_eq!(
-        checked, 21,
-        "the seeded output-node count changed; this test and #963's list describe 21"
+    // The relation, not a hand-maintained total. #963's count was a literal (22
+    // by the time `e2e_harness/long_pipeline.toml` landed), which meant every
+    // added workflow failed this test on arithmetic rather than on anything
+    // about destinations — and the fix was always to bump the number, which is
+    // a guard nobody reads. What the count was actually protecting is stated
+    // directly instead: **exactly one** seeded output node in the whole
+    // repository has no destination, and it is the research lab's.
+    assert!(
+        checked > 0,
+        "no seeded output nodes were checked at all — the walk found nothing"
     );
     assert_eq!(
-        with_destination, 3,
-        "exactly the three desk-bearing templates carry a destination today"
+        with_destination,
+        checked - 1,
+        "every seeded output except the research lab's deliberate deskless workflow \
+         carries a destination"
     );
+}
+
+/// Every shipped bundle's ledger declarations must parse, and the set a company
+/// ends up with — the global baseline plus its own — must fit under the cap.
+///
+/// A declaration that does not parse is not a boot failure (the builder warns
+/// and carries on, because a hand-edited bundle should still reach its console),
+/// which is exactly why it has to fail *here*: a shipped template whose defining
+/// axis silently never appears is the failure this whole surface exists to
+/// prevent, and nothing at run time would say so.
+#[test]
+fn every_company_ledger_declaration_parses_and_fits_under_the_cap() {
+    for company in subdirs(&repo_root().join("companies")) {
+        let declared = load_dir_ledgers(&company)
+            .unwrap_or_else(|err| panic!("{}/ledgers: {err}", company.display()));
+
+        let mut slugs: Vec<String> = crate::globals::ledgers()
+            .iter()
+            .map(|spec| spec.slug.clone())
+            .collect();
+        for spec in &declared {
+            // A company declaration of a baseline slug replaces it rather than
+            // stacking with it — the precedence `seed_ledgers` applies.
+            slugs.retain(|slug| slug != &spec.slug);
+            slugs.push(spec.slug.clone());
+        }
+        assert!(
+            slugs.len() <= crate::ledger::MAX_DECLARED,
+            "{} ends up with {} ledgers, past the {} cap: {slugs:?}",
+            company.display(),
+            slugs.len(),
+            crate::ledger::MAX_DECLARED
+        );
+    }
+}
+
+/// No shipped template declares a ledger with more than five statuses.
+///
+/// The same argument the built-ins were narrowed to three by (issue #1512),
+/// applied to authored content and stopped one notch looser. A template ledger
+/// is a *pipeline* far more often than a built-in is — a candidate, a deal, a
+/// filing genuinely moves through stages — so five leaves room for two or three
+/// real stages plus the outcomes, where three would have forced every template
+/// to throw away either its pipeline or its outcome.
+///
+/// What five does forbid is the sprawl these started at: seven statuses, four of
+/// which an agent had to choose between on every write with nothing to tell them
+/// apart but a blurb. Past five, the extra status is reliably answering a second
+/// question — how is it going, which flavour of over — and that answer belongs
+/// in a field (`progress`, `reason`) where it does not have to be guessed.
+///
+/// Covers the `globals/` baseline as well as `companies/`: the baseline ships
+/// into every company, so a sprawling one there is sprawl nobody opted into.
+///
+/// It fails here rather than at run time because nothing at run time would say
+/// so: a ledger with nine statuses loads, renders and works, and only the
+/// company using it discovers that its agents cannot keep the vocabulary
+/// straight.
+#[test]
+fn no_shipped_template_ledger_declares_more_than_five_statuses() {
+    /// Enough for a short pipeline and its outcomes; not enough for a taxonomy.
+    const MAX_STATUSES: usize = 5;
+
+    let mut checked = 0;
+    let mut check = |origin: String, spec: &crate::ledger::LedgerSpec| {
+        checked += 1;
+        let names: Vec<&str> = spec.statuses.iter().map(|s| s.name.as_str()).collect();
+        assert!(
+            spec.statuses.len() <= MAX_STATUSES,
+            "{origin}/{} declares {} statuses, past the {MAX_STATUSES} ceiling: {names:?}. \
+             Merge the ones that answer a question other than *where does this row stand* \
+             and keep the retired words as `aliases` so stored rows still render.",
+            spec.slug,
+            spec.statuses.len(),
+        );
+    };
+
+    // The baseline first, and it matters more than any single template: these
+    // ship into *every* company, so a sprawling one is sprawl every operator
+    // gets whichever vertical they started from.
+    for spec in crate::globals::ledgers() {
+        check("globals/ledgers".to_string(), spec);
+    }
+    for company in subdirs(&repo_root().join("companies")) {
+        let declared = load_dir_ledgers(&company)
+            .unwrap_or_else(|err| panic!("{}/ledgers: {err}", company.display()));
+        for spec in &declared {
+            check(format!("{}/ledgers", company.display()), spec);
+        }
+    }
+    // A walk that found nothing would pass this silently, which is the one way
+    // a content test can be green and worthless.
+    assert!(checked > 0, "no template ledgers were checked");
+}
+
+/// Every `[[agent]].ledgers` grant must name a ledger that company actually has.
+///
+/// A grant is a *narrowing*: an agent that declares one can see exactly the
+/// slugs it lists and nothing else. So a typo does not fail, it silently hides
+/// a ledger from the teammate that was meant to have it — and an agent granted
+/// only `{ name = "pipelin" }` is an agent with no ledger access at all, with
+/// nothing anywhere saying so. The slug cannot be checked at manifest-load time
+/// (a company-declared ledger may not exist yet, by design), so the shipped
+/// templates are checked here, where every one of their declarations is on disk.
+#[test]
+fn every_ledger_grant_on_a_shipped_template_names_a_ledger_that_company_has() {
+    let (builtins, _) = crate::ledger::builtins();
+    for company in subdirs(&repo_root().join("companies")) {
+        let manifest = CompanyManifest::from_path(&company)
+            .unwrap_or_else(|err| panic!("{}: {err}", company.display()));
+        let declared = load_dir_ledgers(&company)
+            .unwrap_or_else(|err| panic!("{}/ledgers: {err}", company.display()));
+
+        let known: Vec<&str> = builtins
+            .iter()
+            .map(|spec| spec.slug.as_str())
+            .chain(
+                crate::globals::ledgers()
+                    .iter()
+                    .map(|spec| spec.slug.as_str()),
+            )
+            .chain(declared.iter().map(|spec| spec.slug.as_str()))
+            .collect();
+
+        for agent in &manifest.agents {
+            let Some(grants) = &agent.ledgers else {
+                continue;
+            };
+            for grant in grants {
+                assert!(
+                    known
+                        .iter()
+                        .any(|slug| slug.eq_ignore_ascii_case(&grant.name)),
+                    "{}: agent `{}` is granted `{}`, which is not a ledger this company has — \
+                     the real ones are {known:?}",
+                    company.display(),
+                    agent.id,
+                    grant.name
+                );
+            }
+        }
+    }
+}
+
+/// A bundle ledger must close, and closing must demand a reason — the same bar
+/// the baseline is held to in `globals::test`.
+///
+/// A vertical's own axis is the one most likely to be authored as a list that
+/// only grows: a matter list with no `closed` status renders every matter the
+/// firm ever opened, forever, and the cap then hides the live ones behind the
+/// dead ones.
+#[test]
+fn every_company_ledger_can_be_closed_and_says_why() {
+    for company in subdirs(&repo_root().join("companies")) {
+        for spec in load_dir_ledgers(&company).expect("declarations parse") {
+            let closing = spec.closing_statuses();
+            assert!(
+                !closing.is_empty(),
+                "{}: `{}` declares no closing status, so nothing on it can ever be finished",
+                company.display(),
+                spec.slug
+            );
+            for name in closing {
+                assert!(
+                    spec.status(name).expect("a declared status").needs_reason,
+                    "{}: `{}` closes into `{name}` without demanding a reason",
+                    company.display(),
+                    spec.slug
+                );
+            }
+        }
+    }
 }
