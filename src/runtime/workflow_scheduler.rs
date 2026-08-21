@@ -1435,9 +1435,13 @@ to = "done"
     ///
     /// Waiting on the mock's `started` vec is NOT a substitute: it records the
     /// run's start, not its completion, so it proves nothing about the claim.
-    /// This keys on the claim itself, which is the state the guard reads.
+    /// This keys on the claim itself, which is the state the guard reads. Polls
+    /// with real sleeps rather than `yield_now` for the same reason as
+    /// [`wait_on_time`]: the claim is released by a task spawned onto another
+    /// worker thread, and a pure yield spin can exhaust its budget before that
+    /// thread runs.
     async fn drain(scheduler: &WorkflowScheduler) {
-        wait_for(|| !scheduler.is_running_any()).await;
+        wait_on_time(|| !scheduler.is_running_any()).await;
     }
 
     /// The headline: a workflow that exists ONLY as a record overlay (no source
@@ -2607,7 +2611,7 @@ to = "done"
             assert_eq!(scheduler.tick().await, 1, "minute {minute}");
             assert_eq!(scheduler.last_fired.len(), 1, "minute {minute}");
         }
-        wait_for(|| started.lock().unwrap().len() == 10).await;
+        wait_on_time(|| started.lock().unwrap().len() == 10).await;
     }
 
     /// A runner that panics must not strand the in-flight claim. Releasing the
@@ -2987,7 +2991,7 @@ to = "done"
         let mut scheduler = WorkflowScheduler::new(registry.clone(), clock.clone());
 
         assert_eq!(scheduler.tick().await, 1, "only the armed sibling fires");
-        wait_for(|| started.lock().unwrap().len() == 1).await;
+        wait_on_time(|| started.lock().unwrap().len() == 1).await;
         assert_eq!(
             started.lock().unwrap()[0].workflow,
             "standup",

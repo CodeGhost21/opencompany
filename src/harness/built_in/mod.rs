@@ -3028,6 +3028,13 @@ pub(crate) fn build_roster(
     // the delegating-orchestrator persona + tools (issue #53).
     let orchestrator = orchestrator::orchestrator_id(&company.manifest.agents);
 
+    // Issue #1124: the company's per-server read-only MCP declaration, resolved
+    // once and installed on every agent's policy so a server-declared read-only
+    // bridge call does not park under `auto`. Built from the same effective MCP
+    // servers the harness wires tools from, so the gate and the toolbelt cannot
+    // disagree about which server declared what.
+    let mcp_reads = crate::company::mcp::mcp_read_set(&deps.mcp_servers);
+
     let mut roster =
         Vec::with_capacity(company.manifest.agents.len() + company.overlay_agents.len());
 
@@ -3049,7 +3056,10 @@ pub(crate) fn build_roster(
             .with_requests(deps.approval_requests.clone())
             // Issue #243: stamp who the parked effect belongs to, so approving it
             // can hand the grant back to this agent rather than to nobody.
-            .with_agent(manifest_agent.id.clone());
+            .with_agent(manifest_agent.id.clone())
+            // Issue #1124: the per-server read-only MCP declaration, so a
+            // server-declared read-only bridge call does not park under `auto`.
+            .with_mcp_reads(mcp_reads.clone());
         // Issue #304: give the policy something to measure `budget_usd_daily`
         // against. Only wired when the host has a meter — without one the cap
         // arm stays inert and warns once, rather than parking every priced call
@@ -3113,7 +3123,10 @@ pub(crate) fn build_roster(
             .with_requests(deps.approval_requests.clone())
             // An overlay teammate is a real roster agent and re-dispatches the
             // same way a manifest one does (issue #243).
-            .with_agent(manifest_agent.id.clone());
+            .with_agent(manifest_agent.id.clone())
+            // Issue #1124: the same per-server read-only MCP declaration the
+            // manifest agents get — an overlay teammate calls the same servers.
+            .with_mcp_reads(mcp_reads.clone());
         if let Some(meter) = deps.meter.as_ref() {
             agent_policy = agent_policy.with_spend(meter.clone(), company.id.clone());
         }
@@ -4934,6 +4947,7 @@ description = "Builds the product."
                 command: None,
                 allowed_tools: Vec::new(),
                 disallowed_tools: Vec::new(),
+                read_only_tools: Vec::new(),
                 timeout_secs: 30,
                 enabled: true,
                 auth_secret: None,
@@ -6693,6 +6707,7 @@ budget_usd_daily = 0.0
                 description: None,
                 allowed_tools: Vec::new(),
                 disallowed_tools: Vec::new(),
+                read_only_tools: Vec::new(),
                 timeout_secs: 30,
                 enabled: true,
                 source: crate::company::mcp::McpSource::Runtime,

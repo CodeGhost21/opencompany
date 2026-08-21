@@ -144,9 +144,13 @@ test("Zoom Out still reaches below the fit floor (#1261)", async ({ page }) => {
     expect(await zoomOf(page)).toBe(LEGIBLE_FIT_ZOOM);
   }).toPass({ timeout: 10_000 });
 
+  const zoomReadout = page.getByTestId("workflow-zoom-readout");
+  await expect(zoomReadout).toHaveText("75%");
+
   const zoomOut = page.getByRole("button", { name: "Zoom Out" });
   await expect(zoomOut).toBeEnabled();
   for (let i = 0; i < 3; i++) await zoomOut.click();
 
   expect(await zoomOf(page)).toBeLessThan(LEGIBLE_FIT_ZOOM);
+  await expect(zoomReadout).not.toHaveText("75%");
 });

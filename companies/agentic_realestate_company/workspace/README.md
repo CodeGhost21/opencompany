@@ -9,6 +9,8 @@ Start here:
 - [[Acquisition checklist]] — how a listing becomes a purchase
 - [[Buy box]] — what we buy and what we skip
 - [[Maple St duplex]] — the deal in flight
+- [[Underwriting discipline]] — making the optimism visible
+- [[Tenancy obligations]] — the clocks that start at the report
 
 Everything here is a plain `.md` file, so it version-controls cleanly and seeds
 the operator console's Workspace view.

@@ -1,7 +1,7 @@
 # This package deliberately is not a Cargo workspace root. OpenHuman's modular
 # dependencies (TinyBus, TinyMemory, TinyDocs, and TinyWallet) each own nested
 # workspaces, which Cargo cannot resolve beneath another workspace root. The
-# Tauri package under frontend/src-tauri is therefore its own workspace.
+# Tauri package under src-tauri is therefore its own workspace.
 [package]
 name = "opencompany"
 version = "0.1.0"
@@ -24,6 +24,15 @@ autoexamples = false
 name = "live_company_turn"
 path = "examples/live_company_turn.rs"
 required-features = ["openhuman"]
+
+# Server-only end-to-end drive of team orchestration: a company template on the
+# real host, mock inference + MCP credentials, one operator message through a
+# three-agent hand-off chain. Runs on loopback with no real key, so it is an
+# example anyone can run — but it is not built by the default `cargo build`.
+[[example]]
+name = "team_orchestration_e2e"
+path = "examples/team_orchestration_e2e.rs"
+required-features = ["openhuman", "mcp"]
 
 [dependencies]
 # Compiles agent-authored `Page.tsx` (issue: agent-authored dashboard pages)

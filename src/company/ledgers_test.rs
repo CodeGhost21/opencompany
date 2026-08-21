@@ -40,12 +40,12 @@ async fn runtime() -> (CompanyRuntime, tempfile::TempDir) {
     (runtime, home)
 }
 
-fn risks() -> serde_json::Value {
+fn hazards() -> serde_json::Value {
     json!({
-        "slug": "risks",
-        "title": "Risks",
+        "slug": "hazards",
+        "title": "Hazards",
         "purpose": "What could go wrong.",
-        "derived": "derived/RISKS.md",
+        "derived": "derived/HAZARDS.md",
         "fields": [
             { "name": "id", "role": "id" },
             { "name": "risk", "role": "title" },
@@ -81,10 +81,18 @@ fn person() -> LedgerAuthor {
 
 /// A company starts with the three built-ins and nothing else.
 #[tokio::test]
-async fn a_fresh_company_has_the_built_ins() {
+async fn a_fresh_company_has_the_built_ins_and_the_baseline() {
     let (ctx, _runtime, _home) = ledgers().await;
     let registry = registry(&ctx).await.expect("registry");
-    assert_eq!(registry.slugs(), ["tasks", "goals", "decisions"]);
+    // The built-ins first, in registry order, then whatever the global
+    // baseline seeds (`crate::globals::ledgers`) — a company that starts with
+    // nothing to record its risks, promises or learnings on gets one only if
+    // some turn thinks to invent it.
+    let slugs = registry.slugs();
+    assert_eq!(&slugs[..3], ["tasks", "goals", "decisions"]);
+    for global in crate::globals::ledgers() {
+        assert!(slugs.contains(&global.slug), "`{}` is missing", global.slug);
+    }
     assert!(registry.faults().is_empty());
 }
 
@@ -92,8 +100,8 @@ async fn a_fresh_company_has_the_built_ins() {
 #[tokio::test]
 async fn an_agent_may_declare_a_ledger_and_record_into_it() {
     let (ctx, _runtime, _home) = ledgers().await;
-    let spec = define(&ctx, &risks()).await.expect("declared");
-    assert_eq!(spec.slug, "risks");
+    let spec = define(&ctx, &hazards()).await.expect("declared");
+    assert_eq!(spec.slug, "hazards");
 
     let entry = record(
         &ctx,
@@ -108,14 +116,14 @@ async fn an_agent_may_declare_a_ledger_and_record_into_it() {
     assert_eq!(entry.opened_by.kind, crate::ledger::AuthorKind::Agent);
 
     let registry = registry(&ctx).await.expect("registry");
-    assert!(registry.find("risks").is_some());
+    assert!(registry.find("hazards").is_some());
 }
 
 /// Recording twice against one id is an amendment, not a second row.
 #[tokio::test]
 async fn recording_again_amends_the_same_row() {
     let (ctx, _runtime, _home) = ledgers().await;
-    let spec = define(&ctx, &risks()).await.expect("declared");
+    let spec = define(&ctx, &hazards()).await.expect("declared");
     record(&ctx, &spec, &agent(), "r1", fields(&[("risk", "first")]))
         .await
         .expect("recorded");
@@ -133,7 +141,7 @@ async fn recording_again_amends_the_same_row() {
 #[tokio::test]
 async fn closing_without_a_reason_is_refused() {
     let (ctx, _runtime, _home) = ledgers().await;
-    let spec = define(&ctx, &risks()).await.expect("declared");
+    let spec = define(&ctx, &hazards()).await.expect("declared");
     record(&ctx, &spec, &agent(), "r1", fields(&[("risk", "a")]))
         .await
         .expect("recorded");
@@ -158,7 +166,7 @@ async fn closing_without_a_reason_is_refused() {
 #[tokio::test]
 async fn a_reason_already_on_the_row_satisfies_the_close() {
     let (ctx, _runtime, _home) = ledgers().await;
-    let spec = define(&ctx, &risks()).await.expect("declared");
+    let spec = define(&ctx, &hazards()).await.expect("declared");
     record(
         &ctx,
         &spec,
@@ -176,7 +184,7 @@ async fn a_reason_already_on_the_row_satisfies_the_close() {
 #[tokio::test]
 async fn an_undeclared_status_is_refused_and_names_the_real_ones() {
     let (ctx, _runtime, _home) = ledgers().await;
-    let spec = define(&ctx, &risks()).await.expect("declared");
+    let spec = define(&ctx, &hazards()).await.expect("declared");
     let error = record(
         &ctx,
         &spec,
@@ -196,7 +204,7 @@ async fn an_undeclared_status_is_refused_and_names_the_real_ones() {
 #[tokio::test]
 async fn close_refuses_a_status_that_does_not_close() {
     let (ctx, _runtime, _home) = ledgers().await;
-    let spec = define(&ctx, &risks()).await.expect("declared");
+    let spec = define(&ctx, &hazards()).await.expect("declared");
     let error = close(&ctx, &spec, &agent(), "r1", "open", "done")
         .await
         .expect_err("open does not close");
@@ -208,7 +216,7 @@ async fn close_refuses_a_status_that_does_not_close() {
 #[tokio::test]
 async fn only_a_person_may_delete_a_row() {
     let (ctx, _runtime, _home) = ledgers().await;
-    let spec = define(&ctx, &risks()).await.expect("declared");
+    let spec = define(&ctx, &hazards()).await.expect("declared");
     record(&ctx, &spec, &agent(), "r1", fields(&[("risk", "a")]))
         .await
         .expect("recorded");
@@ -248,7 +256,7 @@ async fn only_a_person_may_delete_a_row() {
 #[tokio::test]
 async fn the_runtime_itself_may_not_delete_a_row() {
     let (ctx, _runtime, _home) = ledgers().await;
-    let spec = define(&ctx, &risks()).await.expect("declared");
+    let spec = define(&ctx, &hazards()).await.expect("declared");
     let error = delete_entry(&ctx, &spec, &LedgerAuthor::system("sweep"), "r1")
         .await
         .expect_err("system is not a person");
@@ -258,20 +266,20 @@ async fn the_runtime_itself_may_not_delete_a_row() {
 #[tokio::test]
 async fn only_a_person_may_retire_a_ledger_and_the_rows_survive_it() {
     let (ctx, runtime, _home) = ledgers().await;
-    let spec = define(&ctx, &risks()).await.expect("declared");
+    let spec = define(&ctx, &hazards()).await.expect("declared");
     record(&ctx, &spec, &agent(), "r1", fields(&[("risk", "a")]))
         .await
         .expect("recorded");
 
-    assert!(retire(&ctx, &agent(), "risks", false).await.is_err());
-    retire(&ctx, &person(), "risks", false)
+    assert!(retire(&ctx, &agent(), "hazards", false).await.is_err());
+    retire(&ctx, &person(), "hazards", false)
         .await
         .expect("a person may");
     assert!(
         registry(&ctx)
             .await
             .expect("registry")
-            .find("risks")
+            .find("hazards")
             .is_none()
     );
 
@@ -279,7 +287,7 @@ async fn only_a_person_may_retire_a_ledger_and_the_rows_survive_it() {
     // is a separate, explicit act.
     let events = runtime
         .ledgers()
-        .events(runtime.id(), "risks")
+        .events(runtime.id(), "hazards")
         .await
         .expect("events");
     assert_eq!(events.len(), 1, "the log survives the retirement");
@@ -325,7 +333,7 @@ async fn the_board_is_readable_through_the_ledger_surface_and_not_writable_by_it
 #[tokio::test]
 async fn a_write_publishes_the_derived_file() {
     let (ctx, runtime, _home) = ledgers().await;
-    let spec = define(&ctx, &risks()).await.expect("declared");
+    let spec = define(&ctx, &hazards()).await.expect("declared");
     record(
         &ctx,
         &spec,
@@ -344,7 +352,7 @@ async fn a_write_publishes_the_derived_file() {
     let file = tree
         .iter()
         .find(|node| {
-            node.parent_id.as_deref() == Some(folder.id.as_str()) && node.name == "RISKS.md"
+            node.parent_id.as_deref() == Some(folder.id.as_str()) && node.name == "HAZARDS.md"
         })
         .expect("the ledger's file exists");
     let (_, body) = runtime
@@ -363,9 +371,9 @@ async fn a_write_publishes_the_derived_file() {
 #[tokio::test]
 async fn declaring_a_ledger_publishes_its_empty_file() {
     let (ctx, runtime, _home) = ledgers().await;
-    define(&ctx, &risks()).await.expect("declared");
+    define(&ctx, &hazards()).await.expect("declared");
     let tree = runtime.workspace().tree(runtime.id()).await.expect("tree");
-    assert!(tree.iter().any(|node| node.name == "RISKS.md"));
+    assert!(tree.iter().any(|node| node.name == "HAZARDS.md"));
 }
 
 /// A read that returned twenty rows must be distinguishable from one that
@@ -373,7 +381,7 @@ async fn declaring_a_ledger_publishes_its_empty_file() {
 #[tokio::test]
 async fn a_read_is_bounded_and_says_how_many_matched() {
     let (ctx, _runtime, _home) = ledgers().await;
-    let spec = define(&ctx, &risks()).await.expect("declared");
+    let spec = define(&ctx, &hazards()).await.expect("declared");
     for n in 0..40 {
         record(
             &ctx,
@@ -415,7 +423,7 @@ async fn read2(ctx: &Ledgers, spec: &crate::ledger::LedgerSpec, limit: usize) ->
 #[tokio::test]
 async fn a_read_narrows_by_status_entry_and_text() {
     let (ctx, _runtime, _home) = ledgers().await;
-    let spec = define(&ctx, &risks()).await.expect("declared");
+    let spec = define(&ctx, &hazards()).await.expect("declared");
     record(
         &ctx,
         &spec,
@@ -470,7 +478,7 @@ async fn a_read_narrows_by_status_entry_and_text() {
 #[tokio::test]
 async fn an_unknown_sort_is_refused_rather_than_defaulted() {
     let (ctx, _runtime, _home) = ledgers().await;
-    let spec = define(&ctx, &risks()).await.expect("declared");
+    let spec = define(&ctx, &hazards()).await.expect("declared");
     let error = read(
         &ctx,
         &spec,
@@ -489,7 +497,7 @@ async fn an_unknown_sort_is_refused_rather_than_defaulted() {
 #[tokio::test]
 async fn a_writers_list_is_enforced_at_the_write() {
     let (ctx, _runtime, _home) = ledgers().await;
-    let mut document = risks();
+    let mut document = hazards();
     document["writers"] = json!(["cfo"]);
     let spec = define(&ctx, &document).await.expect("declared");
 
@@ -512,11 +520,13 @@ async fn a_writers_list_is_enforced_at_the_write() {
 #[tokio::test]
 async fn a_declaration_that_collides_is_refused() {
     let (ctx, _runtime, _home) = ledgers().await;
-    define(&ctx, &risks()).await.expect("declared");
-    let error = define(&ctx, &risks()).await.expect_err("already a ledger");
-    assert!(format!("{error}").contains("risks"), "{error}");
+    define(&ctx, &hazards()).await.expect("declared");
+    let error = define(&ctx, &hazards())
+        .await
+        .expect_err("already a ledger");
+    assert!(format!("{error}").contains("hazards"), "{error}");
 
-    let mut shadow = risks();
+    let mut shadow = hazards();
     shadow["slug"] = json!("goals");
     shadow["derived"] = json!("derived/OTHER.md");
     let error = define(&ctx, &shadow).await.expect_err("built in");
@@ -528,7 +538,7 @@ async fn a_declaration_that_collides_is_refused() {
 #[tokio::test]
 async fn an_over_long_value_is_truncated_rather_than_refused() {
     let (ctx, _runtime, _home) = ledgers().await;
-    let spec = define(&ctx, &risks()).await.expect("declared");
+    let spec = define(&ctx, &hazards()).await.expect("declared");
     let entry = record(
         &ctx,
         &spec,
@@ -549,7 +559,7 @@ async fn an_over_long_value_is_truncated_rather_than_refused() {
 #[tokio::test]
 async fn a_blank_value_clears_the_field() {
     let (ctx, _runtime, _home) = ledgers().await;
-    let spec = define(&ctx, &risks()).await.expect("declared");
+    let spec = define(&ctx, &hazards()).await.expect("declared");
     record(&ctx, &spec, &agent(), "r1", fields(&[("risk", "a")]))
         .await
         .expect("recorded");
@@ -564,7 +574,7 @@ async fn a_blank_value_clears_the_field() {
 #[tokio::test]
 async fn the_briefing_names_every_ledger_and_how_to_read_more() {
     let (ctx, _runtime, _home) = ledgers().await;
-    let spec = define(&ctx, &risks()).await.expect("declared");
+    let spec = define(&ctx, &hazards()).await.expect("declared");
     record(
         &ctx,
         &spec,
@@ -577,7 +587,7 @@ async fn the_briefing_names_every_ledger_and_how_to_read_more() {
 
     let registry = registry(&ctx).await.expect("registry");
     let briefing = briefing(&ctx, &registry).await.expect("briefing");
-    for slug in ["tasks", "goals", "decisions", "risks"] {
+    for slug in ["tasks", "goals", "decisions", "hazards"] {
         assert!(briefing.contains(slug), "`{slug}` is missing: {briefing}");
     }
     assert!(briefing.contains("vendor-slip"), "{briefing}");
@@ -587,11 +597,12 @@ async fn the_briefing_names_every_ledger_and_how_to_read_more() {
 #[tokio::test]
 async fn republish_writes_every_ledgers_file() {
     let (ctx, runtime, _home) = ledgers().await;
-    define(&ctx, &risks()).await.expect("declared");
+    define(&ctx, &hazards()).await.expect("declared");
     let written = republish_all(&ctx).await.expect("republished");
-    assert_eq!(written, 4);
+    // Three built-ins, the baseline's own, and the one just declared.
+    assert_eq!(written, 4 + crate::globals::ledgers().len());
     let tree = runtime.workspace().tree(runtime.id()).await.expect("tree");
-    for name in ["TASKS.md", "GOALS.md", "DECISIONS.md", "RISKS.md"] {
+    for name in ["TASKS.md", "GOALS.md", "DECISIONS.md", "HAZARDS.md"] {
         assert!(
             tree.iter().any(|node| node.name == name),
             "`{name}` was not written"

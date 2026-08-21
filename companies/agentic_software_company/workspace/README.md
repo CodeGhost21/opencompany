@@ -9,6 +9,9 @@ Start here:
 - [[Release checklist]] — how a feature ships
 - [[Engineering standards]] — the bar for our work
 - [[Billing v2]] — a feature in flight
+- [[Roadmap]] — what is coming and why in that order
+- [[Incident runbook]] — what to do when production is wrong
+- [[Security standards]] — the bar for anything touching customer data
 
 Everything here is a plain `.md` file, so it version-controls cleanly and seeds
 the operator console's Workspace view.

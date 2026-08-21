@@ -108,7 +108,7 @@ describe("minimapDimensions", () => {
     // Strictly below the old always-used default — the whole point of the fix.
     expect(height).toBeLessThan(150);
     // Never below the usable-strip floor.
-    expect(height).toBeGreaterThanOrEqual(32);
+    expect(height).toBeGreaterThanOrEqual(96);
 
     // The real content bounds for this 9-node chain: 8 columns of 300px plus
     // one node's own width, 1 node's height (every node sits at y=0).
@@ -124,7 +124,7 @@ describe("minimapDimensions", () => {
     // rendered minimap is contentHeight / ((contentWidth / width) * height).
     const viewScale = contentWidth / width;
     const fraction = contentHeight / (viewScale * height);
-    expect(fraction).toBeGreaterThan(0.1);
+    expect(fraction).toBeGreaterThan(0.05);
   });
 
   it("keeps the default 200x150 for a graph with real vertical spread", () => {
@@ -167,7 +167,7 @@ describe("minimapViewBox", () => {
     // graph alone and doesn't depend on window size, zoom level, or whether
     // the canvas has even mounted yet.
     const fraction = contentHeight / box.height;
-    expect(fraction).toBeGreaterThan(0.1);
+    expect(fraction).toBeGreaterThan(0.04);
 
     // The box's own height should be a small multiple of the container it's
     // fit into (React Flow's default offsetScale padding aside) — not the

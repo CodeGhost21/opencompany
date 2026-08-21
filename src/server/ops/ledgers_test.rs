@@ -91,12 +91,12 @@ async fn send(
     (status, value)
 }
 
-fn risks() -> Value {
+fn hazards() -> Value {
     json!({
-        "slug": "risks",
-        "title": "Risks",
+        "slug": "hazards",
+        "title": "Hazards",
         "purpose": "What could go wrong.",
-        "derived": "derived/RISKS.md",
+        "derived": "derived/HAZARDS.md",
         "fields": [
             { "name": "id", "role": "id" },
             { "name": "risk", "role": "title" },
@@ -121,7 +121,14 @@ async fn the_listing_carries_the_built_ins_with_their_shape() {
         .iter()
         .map(|l| l["slug"].as_str().unwrap())
         .collect();
-    assert_eq!(slugs, ["tasks", "goals", "decisions"]);
+    assert_eq!(
+        &slugs[..3],
+        ["tasks", "goals", "decisions"],
+        "the built-ins list first, then the seeded baseline: {slugs:?}"
+    );
+    for global in crate::globals::ledgers() {
+        assert!(slugs.contains(&global.slug.as_str()), "{slugs:?}");
+    }
     // The console needs the shape to render a form; it must not have to guess.
     let goals = &body["ledgers"][1];
     assert!(goals["fields"].as_array().unwrap().len() > 3);
@@ -129,7 +136,11 @@ async fn the_listing_carries_the_built_ins_with_their_shape() {
     // rather than a floor it used to assert in the other direction.
     assert_eq!(goals["statuses"].as_array().unwrap().len(), 3);
     assert_eq!(goals["open"], 0);
-    assert_eq!(body["remaining"], crate::ledger::MAX_DECLARED);
+    assert_eq!(
+        body["remaining"],
+        crate::ledger::MAX_DECLARED - crate::globals::ledgers().len(),
+        "the baseline's own ledgers count against the cap like any other"
+    );
     // The board is listed but marked as written elsewhere, so the console knows
     // not to offer a compose box for it.
     assert_eq!(body["ledgers"][0]["source"], "native");
@@ -145,14 +156,14 @@ async fn the_listing_carries_the_built_ins_with_their_shape() {
 async fn a_ledger_round_trips_under_both_scope_forms() {
     let (state, _home) = state().await;
 
-    let (status, created) = send(&state, "POST", "/api/v1/company/ledgers", Some(risks())).await;
+    let (status, created) = send(&state, "POST", "/api/v1/company/ledgers", Some(hazards())).await;
     assert_eq!(status, StatusCode::CREATED, "{created}");
-    assert_eq!(created["slug"], "risks");
+    assert_eq!(created["slug"], "hazards");
 
     let (status, entry) = send(
         &state,
         "POST",
-        "/api/v1/companies/acme/ledgers/risks/entries",
+        "/api/v1/companies/acme/ledgers/hazards/entries",
         Some(json!({
             "id": "vendor-slip",
             "fields": { "risk": "the vendor misses the date" },
@@ -165,7 +176,7 @@ async fn a_ledger_round_trips_under_both_scope_forms() {
     assert_eq!(entry["closed"], false);
     assert_eq!(entry["title"], "the vendor misses the date");
 
-    let (status, read) = send(&state, "GET", "/api/v1/company/ledgers/risks", None).await;
+    let (status, read) = send(&state, "GET", "/api/v1/company/ledgers/hazards", None).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(read["matched"], 1);
     assert_eq!(read["entries"][0]["id"], "vendor-slip");
@@ -182,7 +193,7 @@ async fn a_ledger_round_trips_under_both_scope_forms() {
 #[tokio::test]
 async fn a_status_that_needs_a_reason_carries_camel_case_on_the_wire() {
     let (state, _home) = state().await;
-    let (status, created) = send(&state, "POST", "/api/v1/company/ledgers", Some(risks())).await;
+    let (status, created) = send(&state, "POST", "/api/v1/company/ledgers", Some(hazards())).await;
     assert_eq!(status, StatusCode::CREATED, "{created}");
 
     let closed_status = created["statuses"]
@@ -204,17 +215,17 @@ async fn a_status_that_needs_a_reason_carries_camel_case_on_the_wire() {
 #[tokio::test]
 async fn the_rendered_view_is_the_derived_file() {
     let (state, _home) = state().await;
-    send(&state, "POST", "/api/v1/company/ledgers", Some(risks())).await;
+    send(&state, "POST", "/api/v1/company/ledgers", Some(hazards())).await;
     send(
         &state,
         "POST",
-        "/api/v1/company/ledgers/risks/entries",
+        "/api/v1/company/ledgers/hazards/entries",
         Some(json!({ "id": "r1", "fields": { "risk": "a thing" }, "status": "open" })),
     )
     .await;
     let request = Request::builder()
         .method("GET")
-        .uri("/api/v1/company/ledgers/risks/rendered")
+        .uri("/api/v1/company/ledgers/hazards/rendered")
         .header("cookie", crate::server::test_support::fixed_cookie("acme"))
         .body(Body::empty())
         .unwrap();
@@ -222,7 +233,7 @@ async fn the_rendered_view_is_the_derived_file() {
     assert_eq!(response.status(), StatusCode::OK);
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let text = String::from_utf8(body.to_vec()).unwrap();
-    assert!(text.contains("# Risks"), "{text}");
+    assert!(text.contains("# Hazards"), "{text}");
     assert!(text.contains("r1"), "{text}");
     assert!(text.contains("Do not edit this file"), "{text}");
 }
@@ -231,11 +242,11 @@ async fn the_rendered_view_is_the_derived_file() {
 #[tokio::test]
 async fn a_signed_in_person_may_delete_a_row() {
     let (state, _home) = state().await;
-    send(&state, "POST", "/api/v1/company/ledgers", Some(risks())).await;
+    send(&state, "POST", "/api/v1/company/ledgers", Some(hazards())).await;
     send(
         &state,
         "POST",
-        "/api/v1/company/ledgers/risks/entries",
+        "/api/v1/company/ledgers/hazards/entries",
         Some(json!({ "id": "r1", "fields": { "risk": "a" } })),
     )
     .await;
@@ -243,20 +254,20 @@ async fn a_signed_in_person_may_delete_a_row() {
     let (status, _) = send(
         &state,
         "DELETE",
-        "/api/v1/company/ledgers/risks/entries/r1",
+        "/api/v1/company/ledgers/hazards/entries/r1",
         None,
     )
     .await;
     assert_eq!(status, StatusCode::NO_CONTENT);
 
-    let (_, read) = send(&state, "GET", "/api/v1/company/ledgers/risks", None).await;
+    let (_, read) = send(&state, "GET", "/api/v1/company/ledgers/hazards", None).await;
     assert_eq!(read["matched"], 0);
 
     // Deleting something that is not there is a 404, not a silent success.
     let (status, _) = send(
         &state,
         "DELETE",
-        "/api/v1/company/ledgers/risks/entries/nothing",
+        "/api/v1/company/ledgers/hazards/entries/nothing",
         None,
     )
     .await;
@@ -266,16 +277,20 @@ async fn a_signed_in_person_may_delete_a_row() {
 #[tokio::test]
 async fn a_person_may_retire_a_declared_ledger_but_not_a_built_in() {
     let (state, _home) = state().await;
-    send(&state, "POST", "/api/v1/company/ledgers", Some(risks())).await;
+    send(&state, "POST", "/api/v1/company/ledgers", Some(hazards())).await;
 
     let (status, body) = send(&state, "DELETE", "/api/v1/company/ledgers/goals", None).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
 
-    let (status, _) = send(&state, "DELETE", "/api/v1/company/ledgers/risks", None).await;
+    let (status, _) = send(&state, "DELETE", "/api/v1/company/ledgers/hazards", None).await;
     assert_eq!(status, StatusCode::NO_CONTENT);
 
     let (_, list) = send(&state, "GET", "/api/v1/company/ledgers", None).await;
-    assert_eq!(list["ledgers"].as_array().unwrap().len(), 3);
+    assert_eq!(
+        list["ledgers"].as_array().unwrap().len(),
+        3 + crate::globals::ledgers().len(),
+        "the three built-ins and the seeded baseline remain"
+    );
 }
 
 /// Refused at the write. The console's compose box is what turns this into a
@@ -283,11 +298,11 @@ async fn a_person_may_retire_a_declared_ledger_but_not_a_built_in() {
 #[tokio::test]
 async fn closing_without_a_reason_is_a_400_that_says_so() {
     let (state, _home) = state().await;
-    send(&state, "POST", "/api/v1/company/ledgers", Some(risks())).await;
+    send(&state, "POST", "/api/v1/company/ledgers", Some(hazards())).await;
     let (status, body) = send(
         &state,
         "POST",
-        "/api/v1/company/ledgers/risks/entries",
+        "/api/v1/company/ledgers/hazards/entries",
         Some(json!({ "id": "r1", "status": "closed" })),
     )
     .await;
@@ -300,7 +315,7 @@ async fn closing_without_a_reason_is_a_400_that_says_so() {
     let (status, _) = send(
         &state,
         "POST",
-        "/api/v1/company/ledgers/risks/entries",
+        "/api/v1/company/ledgers/hazards/entries",
         Some(json!({ "id": "r1", "status": "closed", "reason": "the vendor delivered" })),
     )
     .await;
@@ -336,18 +351,18 @@ async fn an_unknown_slug_answers_with_the_real_ones() {
 #[tokio::test]
 async fn a_read_narrows_by_status_and_search() {
     let (state, _home) = state().await;
-    send(&state, "POST", "/api/v1/company/ledgers", Some(risks())).await;
+    send(&state, "POST", "/api/v1/company/ledgers", Some(hazards())).await;
     send(
         &state,
         "POST",
-        "/api/v1/company/ledgers/risks/entries",
+        "/api/v1/company/ledgers/hazards/entries",
         Some(json!({ "id": "vendor", "fields": { "risk": "supplier slips" }, "status": "open" })),
     )
     .await;
     send(
         &state,
         "POST",
-        "/api/v1/company/ledgers/risks/entries",
+        "/api/v1/company/ledgers/hazards/entries",
         Some(json!({ "id": "hiring", "status": "closed", "reason": "role filled" })),
     )
     .await;
@@ -355,7 +370,7 @@ async fn a_read_narrows_by_status_and_search() {
     let (_, open) = send(
         &state,
         "GET",
-        "/api/v1/company/ledgers/risks?status=open",
+        "/api/v1/company/ledgers/hazards?status=open",
         None,
     )
     .await;
@@ -365,7 +380,7 @@ async fn a_read_narrows_by_status_and_search() {
     let (_, found) = send(
         &state,
         "GET",
-        "/api/v1/company/ledgers/risks?q=SUPPLIER",
+        "/api/v1/company/ledgers/hazards?q=SUPPLIER",
         None,
     )
     .await;
@@ -374,7 +389,7 @@ async fn a_read_narrows_by_status_and_search() {
     let (status, _) = send(
         &state,
         "GET",
-        "/api/v1/company/ledgers/risks?sort=newest",
+        "/api/v1/company/ledgers/hazards?sort=newest",
         None,
     )
     .await;
@@ -390,12 +405,12 @@ async fn a_read_narrows_by_status_and_search() {
 #[tokio::test]
 async fn a_colliding_declaration_is_refused() {
     let (state, _home) = state().await;
-    send(&state, "POST", "/api/v1/company/ledgers", Some(risks())).await;
-    let (status, body) = send(&state, "POST", "/api/v1/company/ledgers", Some(risks())).await;
+    send(&state, "POST", "/api/v1/company/ledgers", Some(hazards())).await;
+    let (status, body) = send(&state, "POST", "/api/v1/company/ledgers", Some(hazards())).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert!(format!("{body}").contains("risks"), "{body}");
+    assert!(format!("{body}").contains("hazards"), "{body}");
 
-    let mut shadow = risks();
+    let mut shadow = hazards();
     shadow["slug"] = json!("tasks");
     let (status, body) = send(&state, "POST", "/api/v1/company/ledgers", Some(shadow)).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
@@ -407,13 +422,13 @@ async fn a_colliding_declaration_is_refused() {
 #[tokio::test]
 async fn the_derived_file_appears_in_the_workspace_and_is_read_only() {
     let (state, _home) = state().await;
-    send(&state, "POST", "/api/v1/company/ledgers", Some(risks())).await;
+    send(&state, "POST", "/api/v1/company/ledgers", Some(hazards())).await;
 
     let (_, tree) = send(&state, "GET", "/api/v1/company/workspace", None).await;
     let nodes = tree.as_array().expect("tree");
     let file = nodes
         .iter()
-        .find(|node| node["name"] == "RISKS.md")
+        .find(|node| node["name"] == "HAZARDS.md")
         .expect("the ledger's file is in the tree");
     let id = file["id"].as_str().unwrap();
 
@@ -425,7 +440,7 @@ async fn the_derived_file_appears_in_the_workspace_and_is_read_only() {
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
-    assert!(format!("{body}").contains("risks"), "{body}");
+    assert!(format!("{body}").contains("hazards"), "{body}");
 }
 
 /// A row's byline names the signed-in person, not their opaque id (issue
@@ -435,12 +450,12 @@ async fn the_derived_file_appears_in_the_workspace_and_is_read_only() {
 #[tokio::test]
 async fn a_row_s_byline_names_the_person_by_email_not_id() {
     let (state, _home) = state().await;
-    send(&state, "POST", "/api/v1/company/ledgers", Some(risks())).await;
+    send(&state, "POST", "/api/v1/company/ledgers", Some(hazards())).await;
 
     let (status, entry) = send(
         &state,
         "POST",
-        "/api/v1/company/ledgers/risks/entries",
+        "/api/v1/company/ledgers/hazards/entries",
         Some(json!({
             "id": "vendor-slip",
             "fields": { "risk": "the vendor misses the date" },
@@ -461,7 +476,7 @@ async fn a_row_s_byline_names_the_person_by_email_not_id() {
     );
     assert_eq!(entry["openedBy"]["label"], "harness-admin@example.test");
 
-    let (status, read) = send(&state, "GET", "/api/v1/company/ledgers/risks", None).await;
+    let (status, read) = send(&state, "GET", "/api/v1/company/ledgers/hazards", None).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
         read["entries"][0]["updatedBy"]["label"],

@@ -35,6 +35,11 @@ pub mod paths;
 /// a dedicated engine on top of that base.
 pub mod select;
 
+/// Char-boundary-safe slicing shared by the context backends' ranged `peek`
+/// and search-snippet windows, so a byte offset landing mid-codepoint widens
+/// to the boundary instead of panicking the slice.
+pub(crate) mod text;
+
 #[cfg(feature = "sqlite")]
 pub mod sqlite;
 

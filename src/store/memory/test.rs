@@ -657,6 +657,18 @@ async fn conformance_fact_store() {
     conformance::assert_fact_store(engine().facts()).await;
 }
 
+// Exercises the facade's one-enumeration `peek_many` override against the
+// same positional contract the default implementation gives.
+#[tokio::test]
+async fn conformance_context_peek_many() {
+    conformance::assert_context_peek_many_answers_positionally(engine().context()).await;
+}
+
+#[tokio::test]
+async fn conformance_context_multibyte_bodies() {
+    conformance::assert_multibyte_bodies_survive_search_and_ranged_peek(engine().context()).await;
+}
+
 /// The port conformance suite over the REAL `namespace` driver — not the fake.
 ///
 /// Everything above proves the decorator against `FakeEngine`; the driver
@@ -728,6 +740,20 @@ mod namespace_driver_conformance {
     async fn context_chunk_stamps_hold_on_the_namespace_driver() {
         let (store_dir, engine) = real_engine();
         conformance::assert_context_chunk_stamps(engine.context()).await;
+        drop(store_dir);
+    }
+
+    #[tokio::test]
+    async fn context_peek_many_answers_positionally_on_the_namespace_driver() {
+        let (store_dir, engine) = real_engine();
+        conformance::assert_context_peek_many_answers_positionally(engine.context()).await;
+        drop(store_dir);
+    }
+
+    #[tokio::test]
+    async fn multibyte_bodies_survive_search_and_peek_on_the_namespace_driver() {
+        let (store_dir, engine) = real_engine();
+        conformance::assert_multibyte_bodies_survive_search_and_ranged_peek(engine.context()).await;
         drop(store_dir);
     }
 

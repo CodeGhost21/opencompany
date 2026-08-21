@@ -11,6 +11,17 @@ export interface WorkflowSummary {
   name: string;
   description?: string;
   /**
+   * The trigger node's 5-field UTC cron. `null` means the current host inspected
+   * the graph and found no schedule; `undefined` means an older host did not
+   * send this summary field, so the console must make no claim either way.
+   */
+  schedule?: string | null;
+  /**
+   * How many steps are in the graph. Absent on hosts predating the widened
+   * summary response; `0` is a real count and must still render.
+   */
+  nodeCount?: number;
+  /**
    * Whether this workflow can be edited or deleted through the API (issue
    * #259). `false` for a graph defined by a file in the company source tree,
    * and for a name-only entry with no saved graph at all — the host refuses
@@ -1329,7 +1340,13 @@ export function previewCron(
   );
 }
 
-export const CREATABLE_NODE_KINDS: { value: string; label: string }[] = [
+/**
+ * Every workflow node kind the host accepts, paired with its operator-facing
+ * label. This is the console's single vocabulary for authoring and display:
+ * consumers that need only the wire values derive them below rather than
+ * maintaining another list that can drift.
+ */
+export const NODE_KINDS: readonly { value: string; label: string }[] = [
   { value: "trigger", label: "Trigger — starts the workflow" },
   { value: "agent", label: "Agent — a teammate performs a step" },
   { value: "condition", label: "Condition — branches on something" },
@@ -1339,32 +1356,32 @@ export const CREATABLE_NODE_KINDS: { value: string; label: string }[] = [
   { value: "tool_call", label: "Tool call — runs a tool by slug" },
   { value: "http_request", label: "HTTP request — calls a URL" },
   { value: "switch", label: "Switch — routes to a labeled branch" },
+  { value: "split_out", label: "Split out — sends each item down the next step" },
   { value: "output_parser", label: "Output parser — coerces to a schema" },
   { value: "sub_workflow", label: "Sub-workflow — runs another workflow" },
 ];
 
 /**
+ * A readable node-kind label, including for a kind introduced by a newer host.
+ * The fallback deliberately humanises separators instead of exposing a raw
+ * snake_case machine token as the primary label.
+ */
+export function nodeKindLabel(kind: string): string {
+  const known = NODE_KINDS.find((candidate) => candidate.value === kind)?.label;
+  if (known) return known.split(" — ", 1)[0];
+
+  const words = kind.trim().replace(/[_-]+/g, " ").replace(/\s+/g, " ");
+  if (!words) return "Unknown node kind";
+  return words.replace(/^\p{L}/u, (letter) => letter.toLocaleUpperCase());
+}
+
+/**
  * Every node kind the host accepts in a saved graph — the OpenCompany authoring
  * contract, mirroring `WORKFLOW_NODE_KINDS` in `src/company/workflow_file.rs`.
  *
- * Broader than {@link CREATABLE_NODE_KINDS} on purpose: the palette omits
- * `split_out` (it has no create control yet), but a graph may legitimately
- * contain one, so a copilot proposal that adds one must not be refused. This is
- * the set the proposal validator checks a proposed `kind` against — a kind the
- * host would reject on write is caught here, before the operator is shown a diff
- * for a step that cannot be applied.
+ * Derived from {@link NODE_KINDS}, so the authoring palette, inspector labels,
+ * and proposal validation cannot disagree about which kinds are allowed.
  */
-export const WORKFLOW_NODE_KINDS: readonly string[] = [
-  "trigger",
-  "agent",
-  "tool_call",
-  "http_request",
-  "condition",
-  "output",
-  "switch",
-  "merge",
-  "split_out",
-  "transform",
-  "output_parser",
-  "sub_workflow",
-];
+export const WORKFLOW_NODE_KINDS: readonly string[] = NODE_KINDS.map(
+  (kind) => kind.value,
+);
