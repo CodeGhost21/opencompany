@@ -56,3 +56,21 @@ export const SKILLS_READ_ONLY_NOTE =
 export function skillReachLabel(enabled: boolean): string {
   return enabled ? "Teammates can read this" : "Hidden from teammates";
 }
+
+/**
+ * The empty-state line the registry tab shows when it has no rows to render
+ * (issue #1467).
+ *
+ * A failed registry read leaves the list empty too, so the naive "this host
+ * serves no shared skill registry" asserted a fact about the host derived from
+ * the very failure the error alert above already reported — two contradicting
+ * claims stacked. When the read failed, `hasError` wins and the line says only
+ * that. The "serves no registry" claim is reserved for a read that *succeeded*
+ * and came back empty; a non-empty registry filtered to nothing by a search is
+ * the third case.
+ */
+export function registryEmptyLabel(hasError: boolean, registryIsEmpty: boolean): string {
+  if (hasError) return "Couldn't reach the registry.";
+  if (registryIsEmpty) return "This host serves no shared skill registry.";
+  return "No skills match that search.";
+}

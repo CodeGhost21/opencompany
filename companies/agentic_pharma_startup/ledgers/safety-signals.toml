@@ -1,0 +1,102 @@
+# Anything suggesting a compound or target could harm somebody.
+#
+# Separated from every other ledger deliberately, and with the strictest rule in
+# this company attached: a safety signal is never closed for being inconvenient,
+# and never softened because a program depends on it. A signal recorded early and
+# followed is a program stopped cheaply. The alternative is what makes drug
+# development dangerous rather than merely expensive.
+
+title = "Safety signals"
+purpose = """
+Every observation suggesting harm: what was seen, where, at what exposure, and \
+what was done about it. Read it before advancing any compound, and record a \
+signal the moment it is seen rather than once it is understood.\
+"""
+written_by = "`record_entry` to raise or update a signal, `close_entry` only when it is explained or the program stops"
+checks = ["required-field", "known-status", "closed-needs-reason"]
+
+[[field]]
+name = "id"
+role = "id"
+required = true
+
+[[field]]
+name = "signal"
+role = "title"
+required = true
+description = "What was observed, described plainly."
+
+[[field]]
+name = "status"
+role = "status"
+required = true
+
+[[field]]
+name = "program"
+role = "refs"
+required = true
+
+[[field]]
+name = "where_seen"
+role = "prose"
+required = true
+description = "Which assay, model or dataset, and at what exposure relative to the intended one."
+
+[[field]]
+name = "severity"
+role = "prose"
+description = "What it would mean in a person, if it translated."
+
+[[field]]
+name = "followed_up"
+role = "prose"
+description = "What was done to understand it. \"Not yet\" is honest and keeps the row open."
+
+[[field]]
+name = "owner"
+role = "owner"
+
+[[field]]
+name = "reason"
+role = "prose"
+description = "Why it closed — explained, mitigated, or the program stopped. Never \"not pursued\". Required when it closes."
+
+[[field]]
+name = "refs"
+role = "refs"
+
+[[status]]
+name = "observed"
+
+[[status]]
+name = "investigating"
+
+[[status]]
+name = "explained"
+closed = true
+needs_reason = true
+
+[[status]]
+name = "program_stopped"
+label = "Program stopped"
+closed = true
+needs_reason = true
+
+[[section]]
+heading = "Open"
+blurb = """
+Observed or under investigation. Nothing advances past a row here without the \
+operator saying so explicitly.\
+"""
+statuses = ["observed", "investigating"]
+order = "recent"
+
+[[section]]
+heading = "Closed"
+blurb = """
+Explained, or the program stopped — each with the reasoning. A signal is never \
+closed for being inconvenient, and a closed row here is read by everyone who \
+touches the compound afterwards.\
+"""
+statuses = ["explained", "program_stopped"]
+cap = 20

@@ -1,0 +1,101 @@
+# Repairs, disputes, arrears and everything else a tenant raises.
+#
+# A ledger rather than a ticket queue for one reason: most of what a tenant
+# raises carries a legal obligation with a clock on it, and a repair request
+# that was answered informally and never recorded is, in a dispute, a repair
+# request that was never made.
+
+title = "Tenant matters"
+purpose = """
+Everything tenants have raised: what was reported, when, what was done, and \
+what is outstanding. Read it before responding to a tenant, and record a \
+request the day it arrives rather than the day it becomes a dispute.\
+"""
+written_by = "`record_entry` to log or update a matter, `close_entry` when it is resolved or withdrawn"
+checks = ["required-field", "known-status", "closed-needs-reason"]
+
+[[field]]
+name = "id"
+role = "id"
+required = true
+
+[[field]]
+name = "matter"
+role = "title"
+required = true
+description = "What the tenant reported, in their words."
+
+[[field]]
+name = "status"
+role = "status"
+required = true
+
+[[field]]
+name = "property"
+role = "refs"
+required = true
+
+[[field]]
+name = "reported_on"
+role = "date"
+required = true
+description = "The date it was raised. The clock on most obligations starts here, not when somebody noticed."
+
+[[field]]
+name = "urgency"
+role = "prose"
+description = "Safety, habitability, or routine. The first two have statutory response times in most places."
+
+[[field]]
+name = "action"
+role = "prose"
+description = "What was done and when, including what the tenant was told."
+
+[[field]]
+name = "owner"
+role = "owner"
+
+[[field]]
+name = "reason"
+role = "prose"
+description = "How it closed — resolved, withdrawn, or escalated to the operator. Required when it closes."
+
+[[status]]
+name = "reported"
+
+[[status]]
+name = "scheduled"
+
+[[status]]
+name = "resolved"
+closed = true
+needs_reason = true
+
+[[status]]
+name = "withdrawn"
+closed = true
+needs_reason = true
+
+[[status]]
+name = "escalated"
+closed = true
+needs_reason = true
+
+[[section]]
+heading = "Open"
+blurb = """
+Reported or scheduled. Anything safety- or habitability-related outranks \
+everything else this company is doing, including a closing.\
+"""
+statuses = ["reported", "scheduled"]
+order = "recent"
+
+[[section]]
+heading = "Closed"
+blurb = """
+Resolved, withdrawn, or escalated — each with what was done and when the tenant \
+was told. This is the record that answers a dispute, and an informal fix that \
+was never written down did not happen.\
+"""
+statuses = ["resolved", "withdrawn", "escalated"]
+cap = 20

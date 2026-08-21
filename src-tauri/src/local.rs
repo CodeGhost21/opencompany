@@ -89,8 +89,6 @@ pub struct LocalInstanceInfo {
     /// connection row on — the address changes every launch.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub instance_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub operator_email: Option<String>,
     pub companies: Vec<String>,
     /// Why it is not running, in the operator's words. Most often the root
     /// being held by another process.
@@ -122,10 +120,6 @@ impl Instance {
                 Some(host) => Some(host.instance_id().to_string()),
                 None => opencompany::app::instance::peek(&root_of(data_dir, &self.entry)),
             },
-            operator_email: self
-                .host
-                .as_ref()
-                .map(|host| host.operator_email().to_string()),
             companies: self
                 .host
                 .as_ref()

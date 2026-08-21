@@ -31,6 +31,7 @@ import {
   type MailSettings,
   saveMailSettings,
   type SmtpSecurity,
+  withoutSmtpPassword,
 } from "@/lib/domain";
 
 interface Props {
@@ -43,13 +44,21 @@ const SECURITY_LABELS: Record<SmtpSecurity, string> = {
   ssl: "SSL / TLS",
 };
 
-/** Custom domain (with DNS records) and SMTP credentials for the company. */
+/**
+ * Custom domain (with DNS records) and SMTP credentials for the company.
+ *
+ * The write-back is deliberately routed through `withoutSmtpPassword` rather
+ * than handing `settings` straight to `saveMailSettings` (issue #1460). The
+ * password stays in this component's state for the life of the page and is
+ * never persisted; everything else on the card is remembered so a half-filled
+ * form survives a reload.
+ */
 export function DomainSettings({ company: _company }: Props) {
   const scope = useLocalScope();
   const [settings, setSettings] = useState<MailSettings>(() => loadMailSettings(scope));
 
   useEffect(() => {
-    saveMailSettings(scope, settings);
+    saveMailSettings(scope, withoutSmtpPassword(settings));
   }, [scope, settings]);
 
   return (
@@ -257,7 +266,11 @@ function SmtpCard({
           <Field label="Username" id="smtp-user">
             <Input id="smtp-user" value={s.username} onChange={(e) => set({ username: e.target.value })} placeholder="apikey" autoComplete="off" />
           </Field>
-          <Field label="Password" id="smtp-pass">
+          <Field
+            label="Password"
+            id="smtp-pass"
+            hint="Held on this page only — never written to browser storage, and cleared when you reload."
+          >
             <Input id="smtp-pass" type="password" value={s.password} onChange={(e) => set({ password: e.target.value })} placeholder="••••••••" autoComplete="off" />
           </Field>
           <Field label="From name" id="smtp-fromname">
@@ -271,8 +284,9 @@ function SmtpCard({
         <Alert>
           <Info className="size-4" />
           <AlertDescription>
-            Saved to this browser as a draft. When the host is connected, credentials are stored in
-            its secret store and used per tenant — never handed to the workload directly.
+            Nothing on this card is sent to the host yet, so filling it in does not configure
+            outbound mail. The password is held on this page only and is gone when you reload;
+            the remaining fields are remembered in this browser as a draft.
           </AlertDescription>
         </Alert>
 
@@ -297,11 +311,23 @@ function SmtpCard({
   );
 }
 
-function Field({ label, id, children }: { label: string; id: string; children: React.ReactNode }) {
+function Field({
+  label,
+  id,
+  hint,
+  children,
+}: {
+  label: string;
+  id: string;
+  /** Rendered under the control. Use it to state what happens to what is typed. */
+  hint?: string;
+  children: React.ReactNode;
+}) {
   return (
     <div className={cn("grid gap-2")}>
       <Label htmlFor={id}>{label}</Label>
       {children}
+      {hint ? <p className="text-xs text-muted-foreground">{hint}</p> : null}
     </div>
   );
 }

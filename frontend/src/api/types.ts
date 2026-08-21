@@ -1197,6 +1197,16 @@ export interface McpServer {
   enabled: boolean;
   allowedTools: string[];
   disallowedTools: string[];
+  /**
+   * Remote tool names the operator has declared **read-only** on this server
+   * (issue #1124). A bridge call to one is priced as an outward read rather than
+   * parked for approval, so it can run unattended under `auto`; every other call
+   * through the server still parks. Independent of {@link McpServer.allowedTools}
+   * / {@link McpServer.disallowedTools} — it says nothing about whether a tool is
+   * exposed, only how a call to it is gated. Carries this row's provenance badge
+   * exactly as the two lists above do.
+   */
+  readOnlyTools: string[];
   timeoutSecs: number;
   /** Whether an outbound credential is stored — never the credential itself. */
   authConfigured: boolean;

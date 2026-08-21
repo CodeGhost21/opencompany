@@ -20,16 +20,87 @@ The cost is that no root `cargo` invocation reaches the desktop, including
 and tests it; without that lane the crate would be compiled by nothing, which is
 [issue #475](https://github.com/tinyhumansai/opencompany/issues/475)'s shape.
 
-There is a second Tauri crate in the tree — `frontend/src-tauri/`, the console's
-wrapper — and it is an independent workspace with its own `Cargo.lock` for the
-same reason this one is separate: OpenHuman's vendored dependencies own nested
-workspaces, which Cargo cannot resolve beneath another workspace root.
+### One Tauri app, because two made the desktop unusable
 
-Which one a `tauri` invocation picks up is decided by the working directory, and
-not the way most people expect: **the CLI searches subfolders of the working
-directory, not ancestors.** From `frontend/` it finds the wrapper; from the
-repository root or from `src-tauri/` it finds this one. That is worth knowing
-before reading a build failure, because the two apps share a `productName`.
+There used to be two. `frontend/src-tauri/` was a second Tauri crate sharing
+this one's `productName`, and which one a `tauri` invocation picked up was
+decided by the working directory in a way most people do not expect: **the CLI
+searches subfolders of the working directory, not ancestors.** From `frontend/`
+it found the wrapper; from the repository root or from `src-tauri/` it finds
+this one.
+
+`tauri:dev` and `tauri:build` are scripts in `frontend/package.json`, and npm
+runs a script from its manifest's own directory — so `npm run tauri:dev`, the
+obvious way to start the desktop app, started the wrapper every time. The
+wrapper registered exactly one command, `desktop_config`, and the console had
+stopped invoking it (see the comment at the top of `frontend/src/main.tsx`):
+every `oc_*` command the console uses to reach a host — `oc_embedded` first —
+was absent from its `generate_handler!`. The window opened, the console
+rendered, and no host ever appeared. The symptom reads as "the server doesn't
+start"; the cause is that the app which starts one was never the app that ran.
+
+Nothing could see it. Both crates compiled, both were tested by the `Desktop`
+lane, and the packaging steps ran from the two directories that find the shell.
+A second app is not a hazard that becomes safe by being currently correct — the
+ambiguity is the hazard — so the wrapper is deleted, `frontend/package.json`
+points `tauri:dev` at `scripts/desktop-dev.sh` and `tauri:build` at
+`src-tauri/`, and `scripts/ci/assert-single-tauri-app.sh` fails the build on
+either a second `tauri.conf.json` or a script that invokes a bare `tauri`.
+
+## What the desktop compiles in
+
+The desktop links the host with an explicit feature set, declared on the
+`opencompany` dependency in `src-tauri/Cargo.toml`:
+
+```toml
+opencompany = { path = "..", default-features = false, features = [
+  "sqlite", "platform-jwt", "oauth", "mcp",
+] }
+```
+
+`mcp` is the one that puts an agent harness in the app. It implies `openhuman`,
+which is what compiles `src/harness/` at all; without it the bundle boots, seeds
+a company, serves the console — and cannot think. The visible symptom was the
+setup wizard's inference test answering *"This build cannot reach a model — the
+agent harness is not compiled in."* for every provider, however good the key.
+
+The belt a desktop agent gets is deliberately the minimal one. The host declares
+`openhuman_core` with `default-features = false, features = ["skills", "mcp",
+"hosting"]`, so what a company can use is **built-in tools, MCP servers and
+skills** — no memory engine, no TokenJuice, no voice or inference stack out of
+the vendored runtime. Features left off, each on purpose:
+
+| Off | Why |
+| --- | --- |
+| `tinycortex`, `tinymemory*` | In-pod memory engines. They carry tinycortex, `tinyagents/sqlite` and a second bundled SQLite into the bundle for a surface the desktop does not offer; the runtime keeps its fs-backed memory stores. |
+| `media`, `composio`, and the other managed backends | Each needs a platform credential the desktop has no way to hold, and each fails closed without one. |
+| `acp` | `src-tauri/src/acp/` is an ACP *client* and compiles without it (see below). Turning it on additionally wires `RuntimeBuilder::with_acp_agents`, which is a separate decision from having a harness. |
+| `mongodb` | A per-tenant cluster is a hosting concern. |
+
+### The `[patch]` table is replicated, not inherited
+
+A `[patch]` section only applies in the workspace root that declares it, and
+this crate is its own workspace. Until `mcp` put `openhuman_core` in the graph
+none of the vendored crates were reachable from here, so the table could be
+omitted. Now it cannot: without it Cargo resolves `tinycortex-api`, `tinyflows`
+and the rest from crates.io — where some do not exist at all — and any that did
+resolve would be a *second* copy whose trait identities would not match the ones
+the host compiled against. `src-tauri/Cargo.toml` therefore carries a replica of
+the host's table with every path prefixed `../`. Keep the two in step.
+
+### Attaching the harness is the library's job
+
+Compiling the harness in is half of it; something has to hand each company a
+pool. That sequence — the pool, plus whichever managed media/search/inference
+backends the environment supplies — lives in `opencompany::app::attach_harness`
+and is called by both `serve` and `desktop::register`. It used to be a private
+function in `src/bin/opencompany.rs`, which is precisely why the desktop path
+built companies with no harness even once the feature was on.
+
+`embedded::start_with` additionally pins the vendored keyring to the instance
+root and installs the product identity before any runtime exists — the same two
+startup calls `serve` makes, and for the same ordering reasons (see
+`src/app/journal.rs` and `src/product.rs`).
 
 ## Packaging is a claim the lane has to make
 
@@ -88,12 +159,20 @@ environment variable naming the app directory, so nothing computed from the
 working directory can be trusted.
 
 Deleting the hook removes the whole class. The cost is that `tauri dev` no longer
-starts Vite for you — run `npm --prefix frontend run dev` alongside it; `devUrl`
-already points at `localhost:5173` — and that packaging a stale console is now
-possible locally, where before it was merely likely. The failure mode is at least
+starts Vite for you, which is what `scripts/desktop-dev.sh` is for: it brings the
+console up on `localhost:5173` — reusing one already there, never killing
+somebody else's — waits until that port answers with the console rather than
+with a stranger's page, and then runs `tauri dev` from `src-tauri/`.
+`npm run tauri:dev` in `frontend/` is that script. Driving `tauri dev` by hand
+instead means running `npm --prefix frontend run dev` alongside it; `devUrl`
+already points at `localhost:5173`. The other cost is that packaging a stale
+console is now possible locally, where before it was merely likely. The failure mode is at least
 legible: Tauri reports `Unable to find your web assets … frontendDist is set to
 "../frontend/dist"` with the absolute path it resolved, rather than an `npm
 ENOENT` for a directory nobody named.
+
+Which kinds of host it can hold, and how an operator picks one, is
+[`connectors.md`](connectors.md).
 
 ## N connections, and no active one
 
@@ -304,6 +383,52 @@ Not started when its root could not be taken — most often because another
 process holds it. The console renders that as a row; the desktop still holds
 remote hosts, which is the point of holding several.
 
+### No sign-in at all
+
+The embedded host sets `auth_mode_override` to `AuthMode::None`
+([sign-in modes](auth-modes.md#none)). A desktop install has no login screen,
+no operator mailbox, and no session: `resolve_principal` answers with the
+company's implicit local owner before it looks for a cookie or a bearer, so the
+console's first request is already authenticated as an `Admin` backed by a real
+`UserRecord` under `local:owner`.
+
+The argument for it is not that the login screen was redundant. It is that
+**there was never a session carrier to bring its result home in.** The magic
+link worked — a loopback host with no mail transport echoes the code in its own
+response, and the console redeemed it — and then the cookie went nowhere:
+
+- The proxy's `reqwest` client is built without a cookie store, so nothing
+  persisted the `Set-Cookie` for the next request.
+- `x-opencompany-session`, the header carrier a paired device uses, is in
+  `RESERVED_HEADERS` and is stripped from anything the webview sends — see
+  [what the proxy will not carry](#what-the-proxy-will-not-carry).
+- `needsCarriedSession()` is false in the desktop whatever the address, so the
+  console does not hold a token either.
+
+What actually let the console through was that every request came from loopback
+anyway, which is `none` mode's premise stated in a slower way. So the ceremony —
+a synthetic `operator@opencompany.local` the operator was told to accept, a link
+the host mailed to nobody, a cookie discarded on arrival — bought nothing that
+the bind was not already providing. `none` deletes it and says what was true.
+
+Set on the **host**, not in the shipped preset manifests: the override reaches
+every company on the data root, including ones an earlier install left there,
+so an existing install migrates by relaunching — and it leaves
+`manifest.users.mode` at its default, which a `[users].admins` entry under
+`mode = "none"` would otherwise make `validate_users` reject.
+
+A default, not a ceiling. `prepare_instance` reports the root's `config.toml`
+`auth_mode` and `none` is only the fallback, so an operator who deliberately
+turns a sign-in on in setup — to share their instance — still has it after a
+relaunch. The setup wizard preselects `none` when it is running in the desktop
+runtime *and* the host offers the mode, which is a preselection and not a lock.
+
+**What this costs:** a device paired to the embedded host from another machine
+stops working. Every step of the pairing succeeds and the resulting token is
+inert from anywhere but this computer; see
+[sign-in modes](auth-modes.md#none) for why, and note that pairing this desktop
+*to a remote host* is unaffected — that is the section below.
+
 ## Several hosts on one machine
 
 The desktop runs a roster of local hosts rather than exactly one, so an
@@ -337,7 +462,7 @@ removes anything, so it is one call rather than a loop of them.
 
 Only **running** instances become connections. A stopped one has no address, so
 a row for it could do nothing but fail its probe forever; it is visible — and
-startable — in the rail's dialog instead.
+startable — on the "Add a host" screen instead.
 
 Reusing the remembered id is what carries the tour state, the last-read channel
 and the mail draft across a relaunch, all of them keyed by connection id. A
@@ -352,6 +477,11 @@ purpose — a host an operator added by hand is labelled by authority
 (`127.0.0.1:8080`), never with that string.
 
 ## Authenticating as a person
+
+**About remote hosts.** The embedded host on this machine has no sign-in to
+authenticate to at all — see [no sign-in at all](#no-sign-in-at-all) — so
+everything below is about the other connections in the switcher: a colleague's
+server, a hosted tenant, anything the desktop is a *client* of.
 
 A desktop cannot hold a session cookie: `SameSite=Lax` means the browser never
 sends one cross-site, and a webview is cross-site with every server. The only

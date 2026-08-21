@@ -9,6 +9,8 @@ Start here:
 - [[LiveOps calendar]] — the rhythm of events and updates
 - [[Monetization principles]] — how we grow revenue fairly
 - [[Summer festival]] — the event in flight
+- [[Change hygiene]] — shipping so the numbers still mean something
+- [[Community voice]] — how this company talks to players
 
 Everything here is a plain `.md` file, so it version-controls cleanly and seeds
 the operator console's Workspace view.

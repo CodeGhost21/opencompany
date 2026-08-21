@@ -9,8 +9,8 @@ use std::path::{Path, PathBuf};
 use super::workflow_file::WorkflowNodeKind;
 use super::{
     CompanyManifest, Tools, grants_chargebee_explicit, grants_composio_explicit,
-    grants_media_explicit, grants_paypal_explicit, grants_search_explicit, load_dir_skills,
-    parse_workflow, walk_workspace,
+    grants_media_explicit, grants_paypal_explicit, grants_search_explicit, load_dir_ledgers,
+    load_dir_skills, parse_workflow, walk_workspace,
 };
 use crate::runtime::builder::effective_grants;
 
@@ -693,17 +693,134 @@ fn every_seeded_output_destination_resolves_against_its_own_manifest() {
         }
     }
 
-    // 22 since #1361 added `e2e_harness/long_pipeline.toml`, a ten-node fixture
-    // whose only job is to be too long for the canvas to fit legibly. It is a
-    // seeded workflow like any other, so its output node is held to the same
-    // destination rule as the twenty #963 enumerated.
-    assert_eq!(
-        checked, 22,
-        "the seeded output-node count changed; this test and #963's list describe 22"
+    // The relation, not a hand-maintained total. #963's count was a literal (22
+    // by the time `e2e_harness/long_pipeline.toml` landed), which meant every
+    // added workflow failed this test on arithmetic rather than on anything
+    // about destinations — and the fix was always to bump the number, which is
+    // a guard nobody reads. What the count was actually protecting is stated
+    // directly instead: **exactly one** seeded output node in the whole
+    // repository has no destination, and it is the research lab's.
+    assert!(
+        checked > 0,
+        "no seeded output nodes were checked at all — the walk found nothing"
     );
     assert_eq!(
-        with_destination, 21,
+        with_destination,
+        checked - 1,
         "every seeded output except the research lab's deliberate deskless workflow \
          carries a destination"
     );
+}
+
+/// Every shipped bundle's ledger declarations must parse, and the set a company
+/// ends up with — the global baseline plus its own — must fit under the cap.
+///
+/// A declaration that does not parse is not a boot failure (the builder warns
+/// and carries on, because a hand-edited bundle should still reach its console),
+/// which is exactly why it has to fail *here*: a shipped template whose defining
+/// axis silently never appears is the failure this whole surface exists to
+/// prevent, and nothing at run time would say so.
+#[test]
+fn every_company_ledger_declaration_parses_and_fits_under_the_cap() {
+    for company in subdirs(&repo_root().join("companies")) {
+        let declared = load_dir_ledgers(&company)
+            .unwrap_or_else(|err| panic!("{}/ledgers: {err}", company.display()));
+
+        let mut slugs: Vec<String> = crate::globals::ledgers()
+            .iter()
+            .map(|spec| spec.slug.clone())
+            .collect();
+        for spec in &declared {
+            // A company declaration of a baseline slug replaces it rather than
+            // stacking with it — the precedence `seed_ledgers` applies.
+            slugs.retain(|slug| slug != &spec.slug);
+            slugs.push(spec.slug.clone());
+        }
+        assert!(
+            slugs.len() <= crate::ledger::MAX_DECLARED,
+            "{} ends up with {} ledgers, past the {} cap: {slugs:?}",
+            company.display(),
+            slugs.len(),
+            crate::ledger::MAX_DECLARED
+        );
+    }
+}
+
+/// Every `[[agent]].ledgers` grant must name a ledger that company actually has.
+///
+/// A grant is a *narrowing*: an agent that declares one can see exactly the
+/// slugs it lists and nothing else. So a typo does not fail, it silently hides
+/// a ledger from the teammate that was meant to have it — and an agent granted
+/// only `{ name = "pipelin" }` is an agent with no ledger access at all, with
+/// nothing anywhere saying so. The slug cannot be checked at manifest-load time
+/// (a company-declared ledger may not exist yet, by design), so the shipped
+/// templates are checked here, where every one of their declarations is on disk.
+#[test]
+fn every_ledger_grant_on_a_shipped_template_names_a_ledger_that_company_has() {
+    let (builtins, _) = crate::ledger::builtins();
+    for company in subdirs(&repo_root().join("companies")) {
+        let manifest = CompanyManifest::from_path(&company)
+            .unwrap_or_else(|err| panic!("{}: {err}", company.display()));
+        let declared = load_dir_ledgers(&company)
+            .unwrap_or_else(|err| panic!("{}/ledgers: {err}", company.display()));
+
+        let known: Vec<&str> = builtins
+            .iter()
+            .map(|spec| spec.slug.as_str())
+            .chain(
+                crate::globals::ledgers()
+                    .iter()
+                    .map(|spec| spec.slug.as_str()),
+            )
+            .chain(declared.iter().map(|spec| spec.slug.as_str()))
+            .collect();
+
+        for agent in &manifest.agents {
+            let Some(grants) = &agent.ledgers else {
+                continue;
+            };
+            for grant in grants {
+                assert!(
+                    known
+                        .iter()
+                        .any(|slug| slug.eq_ignore_ascii_case(&grant.name)),
+                    "{}: agent `{}` is granted `{}`, which is not a ledger this company has — \
+                     the real ones are {known:?}",
+                    company.display(),
+                    agent.id,
+                    grant.name
+                );
+            }
+        }
+    }
+}
+
+/// A bundle ledger must close, and closing must demand a reason — the same bar
+/// the baseline is held to in `globals::test`.
+///
+/// A vertical's own axis is the one most likely to be authored as a list that
+/// only grows: a matter list with no `closed` status renders every matter the
+/// firm ever opened, forever, and the cap then hides the live ones behind the
+/// dead ones.
+#[test]
+fn every_company_ledger_can_be_closed_and_says_why() {
+    for company in subdirs(&repo_root().join("companies")) {
+        for spec in load_dir_ledgers(&company).expect("declarations parse") {
+            let closing = spec.closing_statuses();
+            assert!(
+                !closing.is_empty(),
+                "{}: `{}` declares no closing status, so nothing on it can ever be finished",
+                company.display(),
+                spec.slug
+            );
+            for name in closing {
+                assert!(
+                    spec.status(name).expect("a declared status").needs_reason,
+                    "{}: `{}` closes into `{name}` without demanding a reason",
+                    company.display(),
+                    spec.slug
+                );
+            }
+        }
+    }
 }

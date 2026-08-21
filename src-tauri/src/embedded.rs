@@ -60,16 +60,6 @@ impl EmbeddedHost {
         &self.instance_id
     }
 
-    /// The address this host will sign a person in as.
-    ///
-    /// The console has to be told, because nobody could guess it and the login
-    /// form is otherwise a blank field on a host that admits exactly one
-    /// address. Not a secret: it grants nothing without a code minted by this
-    /// host and returned over loopback.
-    pub fn operator_email(&self) -> &'static str {
-        opencompany::desktop::DESKTOP_OPERATOR_EMAIL
-    }
-
     /// The companies registered at boot, in listing order.
     pub fn companies(&self) -> &[String] {
         &self.companies
@@ -137,6 +127,33 @@ pub async fn start_with(
     // against the same default.
     let instance = opencompany::app::prepare_instance(Some(data_dir)).await?;
 
+    // Both of these must run before any company runtime or agent harness
+    // exists, and this is the last point in the boot where that is still true.
+    //
+    // The keyring pin registers the instance root as the vendored runtime's
+    // credential directory, so an MCP server's token lands beside the journal
+    // rather than at the end of the vendored resolver's own fallback chain
+    // (`$HOME`, then `/tmp` at no log level — issue #451). `main` exports
+    // `OPENHUMAN_WORKSPACE` for the same root, but that only wins if nothing
+    // has touched the keyring yet; registering says it outright.
+    //
+    // The identity tags every request the embedded core makes to the
+    // TinyHumans backend as opencompany's rather than the vendored runtime's
+    // own `openhuman` default (issue #376). Core reads it into a client's
+    // default headers AT CONSTRUCTION, so a later call would not re-tag a
+    // client that already exists.
+    // Unconditional, not `#[cfg]`-guarded: this crate's `opencompany`
+    // dependency enables `mcp` (and so `openhuman`) outright, so a desktop
+    // build without the harness is not a shape that exists. If that dependency
+    // line ever loses the feature, these two lines stop compiling — which is
+    // the failure worth having, since the alternative is a bundle that boots
+    // fine and cannot think.
+    tracing::info!(
+        "{}",
+        opencompany::app::journal::pin_keyring(instance.journal()).summary()
+    );
+    opencompany::product::install_into_embedded_core();
+
     let config = AppConfig {
         bind: "127.0.0.1:0".to_string(),
         // The `[workspace]` section of the root's `config.toml`, resolved by
@@ -146,12 +163,47 @@ pub async fn start_with(
         // compiled-in defaults and silently ignored the operator's config.
         workspace_quota: instance.workspace().quota,
         workspace_git_enabled: instance.workspace().git_enabled,
-        // The standing local admin, and the same seam the hosted control plane
-        // fills with `OPENCOMPANY_ADMIN_EMAIL`. Without an eligible address no
-        // company on this host can be signed into, whoever created it — the
-        // seeded one names the operator in its own manifest, but a company
-        // added later by any other means would name nobody (issue #632).
-        admin_email: Some(opencompany::desktop::DESKTOP_OPERATOR_EMAIL.to_string()),
+        // No sign-in, for every company this host serves.
+        //
+        // A desktop install is one machine and one person: there is nobody to
+        // invite, nobody to tell apart, and no mailbox to send a link to. What
+        // the login screen actually bought was a synthetic
+        // `operator@opencompany.local` the operator was told to accept, a magic
+        // link the host echoed back into its own response because there was no
+        // transport, and a cookie the Tauri proxy then discarded — it holds no
+        // cookie store and strips `x-opencompany-session` as a reserved header.
+        // The console got through on `is_local_only` regardless. `none` deletes
+        // the ceremony and says what was already true.
+        //
+        // Set here, as a **host-wide override**, rather than as
+        // `[users].mode = "none"` in the shipped preset manifests. Two reasons,
+        // and both matter:
+        //
+        // - It reaches every company on this host — the starter preset, one the
+        //   setup wizard designed, and any already on disk from an install that
+        //   predates this. `RuntimeBuilder::with_auth_mode_override` resolves it
+        //   at build and it outranks whatever `[users].mode` a manifest names,
+        //   so an existing install migrates by relaunching.
+        // - `validate_users` flags `[users].admins` under `mode = "none"` as
+        //   granting nothing, and both seeding paths treat a flagged manifest as
+        //   a hard error. The override never rewrites `manifest.users.mode`, so
+        //   there is nothing to flag.
+        //
+        // Safe only because this host binds loopback with no `public_url`, which
+        // is what `is_local_only()` asks and what `desktop::register` refuses a
+        // `none`-mode company without.
+        //
+        // A *default*, though, not a ceiling: the root's `config.toml` wins when
+        // it names a mode, because the setup wizard writes that key and an
+        // operator who deliberately turned a sign-in on — to share their
+        // instance with somebody — must not find it off again at the next
+        // launch. This host builds its config by hand rather than through
+        // `AppConfig::load`, so that layer reaches it only here.
+        auth_mode_override: Some(
+            instance
+                .auth_mode()
+                .unwrap_or(opencompany::app::config::AuthMode::None),
+        ),
         ..AppConfig::default()
     };
     let state = AppState::new(config)
@@ -219,15 +271,28 @@ mod test {
     /// Issue #632, end to end: a packaged install must be enterable with no
     /// terminal, no mail server and no platform credential.
     ///
-    /// Over HTTP rather than against the registry, because every step here is
-    /// one the console actually takes and each has its own way to fail: the
-    /// company has to exist *and* be reachable through the sole-company alias
-    /// the console addresses before it knows any id, the operator has to be
-    /// eligible or no code is minted, and the host has to be local-only or the
-    /// code is withheld from the response. Asserting a company was registered
-    /// would prove none of it.
+    /// It used to be enterable by *signing in*: the shell asked for a magic
+    /// link at a synthetic loopback mailbox, read the code back out of the
+    /// response, and redeemed it for a cookie. That is gone. The desktop runs
+    /// [`AuthMode::None`], where the person at the machine is the principal by
+    /// configuration — so the console's very first request is already
+    /// authenticated and there is no screen in front of it.
+    ///
+    /// The change is worth stating as more than a simplification: the shell had
+    /// no working session carrier for that cookie in the first place. The proxy
+    /// client holds no cookie store, `x-opencompany-session` is stripped as a
+    /// reserved header, and `needsCarriedSession()` is false on desktop — so the
+    /// session the magic link minted was discarded the moment it arrived, and
+    /// what actually let the console through was that every request came from
+    /// loopback anyway.
+    ///
+    /// Over HTTP rather than against the registry, because the point is the
+    /// request the console makes: the company has to exist *and* be reachable
+    /// through the sole-company alias the console addresses before it knows any
+    /// id, and the principal has to resolve with nothing presented. Asserting a
+    /// company was registered would prove neither.
     #[tokio::test]
-    async fn a_fresh_install_can_be_signed_into() {
+    async fn a_fresh_install_opens_with_no_sign_in() {
         let dir = tempfile::tempdir().unwrap();
         let host = start(dir.path().to_path_buf()).await.expect("host starts");
         let base = host.base_url();
@@ -239,60 +304,87 @@ mod test {
             "a fresh root gets exactly one starter company"
         );
 
-        // Where the console starts, and where it used to stop: no session yet.
+        // Where the console starts, and where it used to stop with a 401.
         let listed = http
             .get(format!("{base}/api/v1/companies"))
             .send()
             .await
             .unwrap();
-        assert_eq!(listed.status(), 401);
+        assert_eq!(
+            listed.status(),
+            200,
+            "an unauthenticated loopback request is the owner's, by configuration"
+        );
+        let companies: serde_json::Value = listed.json().await.unwrap();
+        assert_eq!(
+            companies.as_array().map(Vec::len),
+            Some(1),
+            "and it sees the company: {companies}"
+        );
 
-        // The sole-company alias — what the console addresses before it has
-        // discovered any company id.
-        let requested: serde_json::Value = http
-            .post(format!("{base}/api/v1/company/auth/request"))
-            .json(&serde_json::json!({ "email": host.operator_email() }))
+        // Attributed to a real stored record rather than a principal invented
+        // per request — chat, task assignment and the audit trail all key off
+        // `UserRecord::id`. Asked through the sole-company alias, which is what
+        // the console addresses before it has discovered any id.
+        let me: serde_json::Value = http
+            .get(format!("{base}/api/v1/company/auth/me"))
             .send()
             .await
             .unwrap()
             .json()
             .await
             .unwrap();
-        let code = requested["dev_code"]
-            .as_str()
-            .unwrap_or_else(|| {
-                panic!("a loopback host with no mail transport echoes the code: {requested}")
-            })
-            .to_string();
-
-        let verified = http
-            .post(format!("{base}/api/v1/company/auth/verify"))
-            .json(&serde_json::json!({ "code": code }))
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(verified.status(), 200, "the code redeems into a session");
-        let session = verified
-            .headers()
-            .get(reqwest::header::SET_COOKIE)
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.split(';').next())
-            .expect("a session cookie comes back")
-            .to_string();
-
-        // And the call that was refused above now answers.
-        let listed = http
-            .get(format!("{base}/api/v1/companies"))
-            .header(reqwest::header::COOKIE, session)
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(listed.status(), 200);
-        let companies: serde_json::Value = listed.json().await.unwrap();
+        assert_eq!(me["email"], "local:owner", "{me}");
         assert_eq!(
-            companies.as_array().map(Vec::len),
-            Some(1),
-            "the signed-in operator sees their company: {companies}"
+            me["role"], "admin",
+            "the write plane has to work, and there is nobody to outrank: {me}"
+        );
+
+        // And no second way in survives beside it. A host that still answered
+        // `auth/request` would be one where the mode had not actually reached
+        // the company — the seeded manifest names no mode of its own.
+        let requested = http
+            .post(format!("{base}/api/v1/company/auth/request"))
+            .json(&serde_json::json!({ "email": "someone@example.com" }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            requested.status(),
+            409,
+            "a magic link is refused by mode, not answered with a silent 202"
+        );
+    }
+
+    /// A `none`-mode desktop is the **default**, not a ceiling.
+    ///
+    /// The setup wizard offers all three modes on a loopback host, and an
+    /// operator who wants to share their instance with a colleague can pick
+    /// `email` — it writes `auth_mode` to the root's `config.toml` and applies
+    /// it live. But this host builds its `AppConfig` by hand rather than through
+    /// `AppConfig::load`, so a mode forced in the literal above would be a mode
+    /// the file can never win against: the choice would hold until quit and
+    /// silently revert on the next launch, which is precisely the "configuration
+    /// ignored" failure the setup surface exists to prevent.
+    ///
+    /// So the file is read and `none` is what it falls back to.
+    #[tokio::test]
+    async fn a_configured_sign_in_survives_a_relaunch() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("config.toml"), "auth_mode = \"email\"\n").unwrap();
+
+        let host = start(dir.path().to_path_buf()).await.expect("host starts");
+        let requested = reqwest::Client::new()
+            .post(format!("{}/api/v1/company/auth/request", host.base_url()))
+            .json(&serde_json::json!({ "email": "ada@example.com" }))
+            .send()
+            .await
+            .unwrap();
+
+        assert_ne!(
+            requested.status(),
+            409,
+            "409 is `auth_mode` refusing the route by mode — the file said email"
         );
     }
 
