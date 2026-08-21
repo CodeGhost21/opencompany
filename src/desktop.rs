@@ -415,23 +415,21 @@ async fn register(
     // supplies. Without this a desktop company had no harness even in a build
     // that compiled one in, so every turn fell back to the echo brain and the
     // console reported that this build cannot reach a model.
-    let mut builder = crate::app::attach_harness(RuntimeBuilder::new(
-        state.home().to_path_buf(),
-        manifest,
-    ))
-    .with_id(id.clone())
-        // The host-wide sign-in mode (`OPENCOMPANY_AUTH_MODE` / `config.toml`
-        // `auth_mode`), which outranks this manifest's own `[users].mode`.
-        //
-        // `serve`'s `--company` path has always applied it; this one did not,
-        // so a company registered here silently kept its manifest's mode. That
-        // was invisible while only the desktop app reached this code, and stops
-        // being invisible the moment anything else does: the first-run setup
-        // flow writes `auth_mode` and tells the operator to restart, and
-        // without this the restart adopts the company and quietly ignores the
-        // setting they were just told would take effect. `None` — the normal
-        // case — leaves each manifest to name its own mode, as before.
-        .with_auth_mode_override(state.auth_mode_override());
+    let mut builder =
+        crate::app::attach_harness(RuntimeBuilder::new(state.home().to_path_buf(), manifest))
+            .with_id(id.clone())
+            // The host-wide sign-in mode (`OPENCOMPANY_AUTH_MODE` / `config.toml`
+            // `auth_mode`), which outranks this manifest's own `[users].mode`.
+            //
+            // `serve`'s `--company` path has always applied it; this one did not,
+            // so a company registered here silently kept its manifest's mode. That
+            // was invisible while only the desktop app reached this code, and stops
+            // being invisible the moment anything else does: the first-run setup
+            // flow writes `auth_mode` and tells the operator to restart, and
+            // without this the restart adopts the company and quietly ignores the
+            // setting they were just told would take effect. `None` — the normal
+            // case — leaves each manifest to name its own mode, as before.
+            .with_auth_mode_override(state.auth_mode_override());
     if let Some(stores) = state.stores() {
         builder = builder.with_stores(stores);
     }
@@ -481,13 +479,11 @@ pub async fn start_local(home: impl Into<PathBuf>, preset_id: &str) -> Result<De
     .with_cors(CorsConfig {
         allowed_origins: vec![TAURI_WEBVIEW_ORIGIN.to_string()],
     });
-    let runtime = crate::app::attach_harness(RuntimeBuilder::new(
-        state.home().to_path_buf(),
-        manifest,
-    ))
-    .with_id(company_id.clone())
-    .build()
-    .await?;
+    let runtime =
+        crate::app::attach_harness(RuntimeBuilder::new(state.home().to_path_buf(), manifest))
+            .with_id(company_id.clone())
+            .build()
+            .await?;
     state
         .registry()
         .insert(company_id.clone(), std::sync::Arc::new(runtime));
