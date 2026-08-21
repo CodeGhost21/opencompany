@@ -305,7 +305,7 @@ const ECOMMERCE: RosterTemplate = RosterTemplate {
         TemplateAgent {
             name: "Ops",
             role: "Operations Manager",
-            description: "Keeps the rest of the team moving and unblocks them.",
+            description: "Suppliers, stock levels, and what the shop needs to keep selling.",
             focus: AgentFocus::Operations,
         },
         TemplateAgent {
@@ -339,7 +339,7 @@ const CONTENT: RosterTemplate = RosterTemplate {
         TemplateAgent {
             name: "Strategy",
             role: "Content Strategist",
-            description: "Decides what to publish, and when.",
+            description: "Which topics to bet on, and what the week's plan is.",
             focus: AgentFocus::Analysis,
         },
         TemplateAgent {
@@ -351,19 +351,19 @@ const CONTENT: RosterTemplate = RosterTemplate {
         TemplateAgent {
             name: "Editor",
             role: "Editor",
-            description: "Reviews everything before it goes out.",
+            description: "The line edit, the fact-check, and the last read before publishing.",
             focus: AgentFocus::Writing,
         },
         TemplateAgent {
             name: "Social",
             role: "Social Media Manager",
-            description: "Schedules posts and works the comments.",
+            description: "Posting, replies, and the comment threads.",
             focus: AgentFocus::Operations,
         },
         TemplateAgent {
             name: "Analyst",
             role: "Analytics Analyst",
-            description: "Measures what landed and reports back.",
+            description: "Reach, engagement, and which posts earned their slot.",
             focus: AgentFocus::Analysis,
         },
     ],
@@ -393,7 +393,7 @@ const AGENCY: RosterTemplate = RosterTemplate {
         TemplateAgent {
             name: "Creative",
             role: "Creative Director",
-            description: "Holds the concept and the creative bar.",
+            description: "Concepts, art direction, and sign-off on what ships.",
             focus: AgentFocus::Writing,
         },
         TemplateAgent {
@@ -405,13 +405,13 @@ const AGENCY: RosterTemplate = RosterTemplate {
         TemplateAgent {
             name: "Media",
             role: "Paid Media Buyer",
-            description: "Plans and runs paid acquisition.",
+            description: "Channel mix, budgets, and bids.",
             focus: AgentFocus::Operations,
         },
         TemplateAgent {
             name: "Analyst",
             role: "Analytics Analyst",
-            description: "Reports performance back to the client.",
+            description: "Campaign performance, spend efficiency, and the client-facing numbers.",
             focus: AgentFocus::Analysis,
         },
     ],
@@ -441,7 +441,7 @@ const CONSULTING: RosterTemplate = RosterTemplate {
         TemplateAgent {
             name: "Research",
             role: "Research Analyst",
-            description: "Gathers facts, sources, and context.",
+            description: "Market sizing, comparables, and the data room for the engagement in hand.",
             focus: AgentFocus::Research,
         },
         TemplateAgent {
@@ -453,13 +453,13 @@ const CONSULTING: RosterTemplate = RosterTemplate {
         TemplateAgent {
             name: "Decks",
             role: "Deck Builder",
-            description: "Turns findings into something presentable.",
+            description: "Slides, charts, and the story that runs through them.",
             focus: AgentFocus::Writing,
         },
         TemplateAgent {
             name: "Writer",
             role: "Report Writer",
-            description: "Drafts the written deliverable.",
+            description: "The written report — findings, recommendations, appendix.",
             focus: AgentFocus::Writing,
         },
     ],
@@ -490,7 +490,7 @@ const SOFTWARE: RosterTemplate = RosterTemplate {
         TemplateAgent {
             name: "Engineer",
             role: "Software Engineer",
-            description: "Builds and ships the product.",
+            description: "Features, bug fixes, and code review.",
             focus: AgentFocus::Operations,
         },
         TemplateAgent {
@@ -502,13 +502,13 @@ const SOFTWARE: RosterTemplate = RosterTemplate {
         TemplateAgent {
             name: "Design",
             role: "Product Designer",
-            description: "Creates the interface and holds the brand.",
+            description: "The product's screens, flows, and the design system they come from.",
             focus: AgentFocus::Writing,
         },
         TemplateAgent {
             name: "Support",
             role: "Support Specialist",
-            description: "Answers customers and closes the loop.",
+            description: "Tickets, escalations, and the bugs they turn into.",
             focus: AgentFocus::Operations,
         },
     ],
@@ -526,25 +526,25 @@ const GENERIC: RosterTemplate = RosterTemplate {
         TemplateAgent {
             name: "Ops",
             role: "Operations Lead",
-            description: "Keeps work moving and unblocks the team.",
+            description: "Vendors, tools, and the recurring admin nobody else owns.",
             focus: AgentFocus::Operations,
         },
         TemplateAgent {
             name: "Research",
             role: "Researcher",
-            description: "Gathers facts, sources, and context.",
+            description: "Background on customers, competitors, and the market this company sells into.",
             focus: AgentFocus::Research,
         },
         TemplateAgent {
             name: "Writer",
             role: "Writer",
-            description: "Drafts copy, docs, and outbound messages.",
+            description: "Site copy, docs, and whatever this company publishes under its own name.",
             focus: AgentFocus::Writing,
         },
         TemplateAgent {
             name: "Analyst",
             role: "Analyst",
-            description: "Measures performance and reports back.",
+            description: "The numbers, what moved them, and the weekly summary.",
             focus: AgentFocus::Analysis,
         },
         TemplateAgent {
