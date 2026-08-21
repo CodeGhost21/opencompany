@@ -302,7 +302,7 @@ describe("the banner says what Import will do (issue #1472)", () => {
     await render();
     const text = banner()?.textContent ?? "";
 
-    expect(text).toContain("Imported from this browser");
+    expect(text).toContain("imported-from-this-browser");
     expect(text).toContain("removes this browser's copy");
     expect(text).toContain("moves them rather than copying them");
   });

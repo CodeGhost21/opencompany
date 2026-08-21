@@ -220,8 +220,8 @@ fn evidence() -> Evidence {
         composio_reachable: true,
         mcp_servers: HashMap::from([("search".to_string(), true), ("legacy".to_string(), false)]),
         workspace: vec![
-            "Standards/Tone.md".to_string(),
-            "Playbooks/Launch.md".to_string(),
+            "standards/Tone.md".to_string(),
+            "playbooks/Launch.md".to_string(),
         ],
         skills: vec!["writing".to_string()],
         mail_configured: false,
@@ -392,11 +392,11 @@ fn workspace_paths_render_and_terminate() {
         sha256: None,
     };
     let paths = workspace_paths(vec![
-        node("1", "Standards", None, NodeKind::Folder),
-        node("2", "Tone.md", Some("1"), NodeKind::File),
-        node("3", "README.md", None, NodeKind::File),
+        node("1", "standards", None, NodeKind::Folder),
+        node("2", "tone.md", Some("1"), NodeKind::File),
+        node("3", "readme.md", None, NodeKind::File),
     ]);
-    assert_eq!(paths, vec!["README.md", "Standards", "Standards/Tone.md"]);
+    assert_eq!(paths, vec!["readme.md", "standards", "standards/tone.md"]);
 
     // A cycle is not a reachable state, but it must not be an infinite loop.
     let cyclic = workspace_paths(vec![
@@ -553,7 +553,7 @@ fn an_unreachable_inventory_is_unknown_never_missing() {
     let mut e = evidence();
     e.workspace.clear();
     assert_eq!(
-        verify_file(&e, "Standards/Tone.md").0,
+        verify_file(&e, "standards/Tone.md").0,
         PrereqStatus::Unknown
     );
 }
@@ -824,7 +824,7 @@ fn verify_credential_sync(e: &Evidence, name: &str) -> (PrereqStatus, String) {
 fn a_file_matches_on_its_name_or_its_full_path() {
     let e = evidence();
     assert_eq!(
-        verify_file(&e, "Standards/Tone.md").0,
+        verify_file(&e, "standards/Tone.md").0,
         PrereqStatus::Satisfied
     );
     assert_eq!(verify_file(&e, "Tone.md").0, PrereqStatus::Satisfied);

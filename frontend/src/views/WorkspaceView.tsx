@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ChevronDown,
   ChevronRight,
+  ChevronsDownUp,
   EyeOff,
   FilePlus2,
   FileText,
@@ -108,6 +109,7 @@ import {
   folderPathLabel,
   type FsNode,
   hasLegacyLocal,
+  hasOperatorContent,
   isAgentsFolder,
   isDerivedNode,
   isSecretNode,
@@ -185,7 +187,7 @@ const AUTOSAVE_DELAY_MS = 800;
 const SEARCH_DEBOUNCE_MS = 250;
 
 /** The folder created to hold notes rescued from the retired local scratchpad. */
-const IMPORT_FOLDER_NAME = "Imported from this browser";
+const IMPORT_FOLDER_NAME = "imported-from-this-browser";
 
 /**
  * The body of the import receipt, for a scratchpad of `files` notes and
@@ -421,7 +423,7 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  // The roster names the `Agents/` folders resolve against (issue #973). Best
+  // The roster names the `agents/` folders resolve against (issue #973). Best
   // effort and never blocking: a host predating the roster route 404s, and the
   // tree simply falls back to the raw ids it has always shown.
   const [rosterNames, setRosterNames] = useState<RosterNames>(() => new Map());
@@ -553,7 +555,7 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
 
   // Best effort, and deliberately separate from `loadTree`: a host with no
   // roster route (or a request that simply fails) must not stop the workspace
-  // itself from loading — it only means the `Agents/` folders keep showing raw
+  // itself from loading — it only means the `agents/` folders keep showing raw
   // ids, exactly as they did before this issue.
   const loadRoster = useCallback(async () => {
     const mine = ++rosterGen.current;
@@ -1243,7 +1245,7 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
   }
 
   /**
-   * Ask the host which `Agents/<id>/` folders are empty, and show them
+   * Ask the host which `agents/<id>/` folders are empty, and show them
    * (issue #700).
    *
    * A preview, always — the deletion is a second call the operator makes from
@@ -1440,6 +1442,18 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
           <IconBtn label="Upload" onClick={() => uploadRef.current?.click()}>
             <Upload className="size-4" />
           </IconBtn>
+          {/* Expansion persists for the session and a deep tree stays open
+              behind every reveal, so there was no way back to a readable
+              explorer short of collapsing each folder by hand (issue #1382).
+              `setExpanded(new Set())` already existed; nothing invoked it. */}
+          <IconBtn
+            label="Collapse all"
+            disabled={expanded.size === 0}
+            onClick={() => setExpanded(new Set())}
+            data-testid="workspace-collapse-all"
+          >
+            <ChevronsDownUp className="size-4" />
+          </IconBtn>
           {/* The two controls after this line repair the tree rather than adding
               to it, and both can remove folders. Kept visually apart from the
               make-something group so the row is not six identical glyphs with
@@ -1450,9 +1464,13 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
               them. Deliberately a button rather than something boot does: the
               operator's click is the opt-in, and the dialog names every folder
               before any of them goes. */}
+          {/* Nothing to tidy or repair in a tree with nothing in it. A no-op on
+              a live company, where the scaffold guarantees rows — but the
+              controls claimed to apply to a state they cannot act on, which is
+              the same claim the dead explorer branch was making (#1380). */}
           <IconBtn
             label="Tidy empty agent folders"
-            disabled={sweeping}
+            disabled={sweeping || nodes.length === 0}
             onClick={() => void previewSweep()}
             data-testid="workspace-sweep"
           >
@@ -1467,7 +1485,7 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
               rearranges somebody's tree unasked. */}
           <IconBtn
             label="Repair duplicate folders"
-            disabled={repairing}
+            disabled={repairing || nodes.length === 0}
             onClick={() => void previewRepair()}
             data-testid="workspace-repair"
           >
@@ -1551,11 +1569,12 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
                 Try again
               </Button>
             </div>
-          ) : nodes.length === 0 ? (
-            <p className="px-3 py-2 text-xs text-muted-foreground">
-              This workspace is empty. Create a note to start.
-            </p>
           ) : (
+            /* The `nodes.length === 0` branch that used to sit here said "This
+               workspace is empty. Create a note to start." — dead code, since
+               `ensure_workspace_scaffold` lays down `Agents/` and `secrets/` on
+               every boot, and a second message contradicting the note pane's
+               own (issue #1380). The pane owns what an empty workspace says. */
             <Tree
               nodes={nodes}
               parentId={null}
@@ -1714,9 +1733,30 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
                   updatedBy={openFile?.updatedBy ?? openNode.updatedBy}
                 />
               )}
-              <span className="hidden shrink-0 text-xs text-muted-foreground sm:inline">
+              {/* Labelled (issue #1382). A bare "2 days ago" beside the title
+                  read like part of it, and did not say which event it was
+                  timing. */}
+              <span
+                className="hidden shrink-0 text-xs text-muted-foreground sm:inline"
+                data-testid="workspace-updated"
+              >
+                Edited{" "}
                 {formatUpdated(openFile?.updatedAt ?? openNode.updatedAt)}
               </span>
+              {/* The backlink count, always visible (issue #1382). The rail
+                  that lists them is `xl:flex`, so below about 1280px a note
+                  with eleven backlinks and one with none looked identical —
+                  the whole signal disappeared rather than degrading. */}
+              {openFile && openFile.backlinks.length > 0 && (
+                <span
+                  className="hidden shrink-0 items-center gap-1 text-xs text-muted-foreground sm:inline-flex"
+                  data-testid="workspace-backlink-count"
+                  title="Notes that link here"
+                >
+                  <Link2 className="size-3" aria-hidden />
+                  {openFile.backlinks.length}
+                </span>
+              )}
               <SaveStatus state={saveState} />
               {/* A payload has no prose to read or edit, so the mode switch is
                   hidden rather than shown-and-broken (issue #553). The host
@@ -1852,7 +1892,9 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
           />
         ) : (
           <EmptyNote
+            variant={hasOperatorContent(nodes) ? "no-selection" : "first-run"}
             onNew={() => setPrompt({ mode: "file" })}
+            onNewFolder={() => setPrompt({ mode: "folder" })}
             onToggleExplorer={() => setShowExplorer((s) => !s)}
           />
         )}
@@ -2037,7 +2079,7 @@ interface TreeProps {
 }
 
 /**
- * `Agents/`'s children, sorted by display name rather than the lexical id
+ * `agents/`'s children, sorted by display name rather than the lexical id
  * {@link childrenOf} sorts everywhere else (issue #973). The pre-#686 ULID ids
  * all sort before every readable slug under the plain id ordering, which is
  * not an order an operator can read anything into.
@@ -2046,7 +2088,7 @@ function sortRosterFolders(items: FsNode[], names: RosterNames): FsNode[] {
   return [...items].sort((a, b) => {
     if (a.kind !== b.kind) return a.kind === "folder" ? -1 : 1;
     // Only a roster folder's name is an id worth resolving. A direct file
-    // under `Agents/` is unusual but not impossible, and its raw name could
+    // under `agents/` is unusual but not impossible, and its raw name could
     // coincidentally collide with a roster id — that must not reorder it by
     // a display name it was never given one for.
     return a.kind === "folder"
@@ -2133,11 +2175,11 @@ function TreeRow({ node, ...props }: TreeProps & { node: FsNode }) {
   const isFolder = node.kind === "folder";
   const isOpen = expanded.has(node.id);
   const active = node.id === openId;
-  // A direct child of `Agents/` is named by roster id — its real folder path,
+  // A direct child of `agents/` is named by roster id — its real folder path,
   // and the identity every artifact it holds is stamped with — but an operator
   // recognizes the teammate by name, not by that id (issue #973). The id stays
   // the label everywhere else in the tree: it is only ever a roster id one
-  // level below `Agents/`.
+  // level below `agents/`.
   const isRosterFolder = isFolder && isAgentsFolder(nodeById(nodes, node.parentId));
   const displayName = isRosterFolder ? rosterDisplayName(node.name, rosterNames) : node.name;
   /** What this row is actually called on screen. */
@@ -2172,7 +2214,7 @@ function TreeRow({ node, ...props }: TreeProps & { node: FsNode }) {
    * Whether this row is the `derived/` folder or something inside it (#1377).
    *
    * The tree is where a person decides what to open, so it is where "this one
-   * is not yours to edit" has to be readable. Before this, `derived/GOALS.md`
+   * is not yours to edit" has to be readable. Before this, `derived/goals.md`
    * rendered identically to a hand-written note — same icon, same weight, same
    * `…` menu offering Rename and Move — and the only console-authored signal
    * was a chip in the header of a file you had already opened.
@@ -2642,31 +2684,87 @@ function MissingNote({
   );
 }
 
+/**
+ * The pane when no note is open — in its two genuinely different situations
+ * (issues #1380, #1481).
+ *
+ * There used to be one. "No note open / Pick a note from the explorer, or
+ * create one" is right for an operator with sixty notes who has not clicked
+ * one; it is wrong on a fresh company, where the explorer holds three rows the
+ * host scaffolded and the operator has no reason to open any of them. The
+ * explorer meanwhile carried a second, contradicting message — "This workspace
+ * is empty. Create a note to start." — on a `nodes.length === 0` branch that
+ * the boot-time scaffold makes unreachable.
+ *
+ * So the note pane owns the messaging, and the first-run variant finally says
+ * what this tree *is*. That premise — the workspace is shared with the
+ * company's agents, who read what is written here and write back into it —
+ * existed only in code comments in three files, none of them rendered. An
+ * operator could not learn from this screen that anyone but themselves would
+ * ever read it.
+ */
 function EmptyNote({
+  variant,
   onNew,
+  onNewFolder,
   onToggleExplorer,
 }: {
+  variant: "first-run" | "no-selection";
   onNew: () => void;
+  onNewFolder: () => void;
   onToggleExplorer: () => void;
 }) {
+  const firstRun = variant === "first-run";
   return (
-    <div className="flex flex-1 flex-col">
+    <div
+      className="flex flex-1 flex-col"
+      data-testid={`workspace-empty-${variant}`}
+    >
       <div className="flex items-center border-b px-3 py-2 md:hidden">
         <IconBtn label="Toggle explorer" onClick={onToggleExplorer}>
           <PanelLeft className="size-4" />
         </IconBtn>
       </div>
-      <div className="flex flex-1 flex-col items-center justify-center gap-3 text-center">
+      <div className="flex flex-1 flex-col items-center justify-center gap-3 px-6 text-center">
         <FileText className="size-8 text-muted-foreground" />
-        <div className="space-y-1">
-          <p className="font-medium">No note open</p>
-          <p className="text-sm text-muted-foreground">
-            Pick a note from the explorer, or create one.
-          </p>
-        </div>
-        <Button variant="outline" size="sm" onClick={onNew}>
-          <FilePlus2 className="size-4" /> New note
-        </Button>
+        {firstRun ? (
+          <>
+            <div className="max-w-md space-y-2">
+              <p className="font-medium">Your company&rsquo;s shared notes</p>
+              <p className="text-sm text-muted-foreground">
+                Everyone here reads this tree — your teammates and the
+                company&rsquo;s agents alike. What you write is what they work
+                from on their next turn, and the notes they write show up here
+                beside yours.
+              </p>
+              <p className="text-sm text-muted-foreground">
+                A <span className="font-mono text-xs">derived/</span> folder
+                appears on its own once a ledger has rows. Nobody edits that one
+                — it is rewritten from the ledger.
+              </p>
+            </div>
+            <div className="flex flex-wrap justify-center gap-2">
+              <Button variant="outline" size="sm" onClick={onNew}>
+                <FilePlus2 className="size-4" /> New note
+              </Button>
+              <Button variant="outline" size="sm" onClick={onNewFolder}>
+                <FolderPlus className="size-4" /> New folder
+              </Button>
+            </div>
+          </>
+        ) : (
+          <>
+            <div className="space-y-1">
+              <p className="font-medium">No note open</p>
+              <p className="text-sm text-muted-foreground">
+                Pick a note from the explorer, or create one.
+              </p>
+            </div>
+            <Button variant="outline" size="sm" onClick={onNew}>
+              <FilePlus2 className="size-4" /> New note
+            </Button>
+          </>
+        )}
       </div>
     </div>
   );
@@ -3196,8 +3294,8 @@ function SweepDialog({
             {done
               ? count === 0
                 ? "Nothing was removed — every folder had gained something by the time the tidy ran."
-                : `Removed ${count} empty folder${count === 1 ? "" : "s"} from Agents/.`
-              : `${count} folder${count === 1 ? "" : "s"} under Agents/ hold nothing at all. Removing them cannot take anything with them — a folder holding any file, note or subfolder is left alone.`}
+                : `Removed ${count} empty folder${count === 1 ? "" : "s"} from agents/.`
+              : `${count} folder${count === 1 ? "" : "s"} under agents/ hold nothing at all. Removing them cannot take anything with them — a folder holding any file, note or subfolder is left alone.`}
           </DialogDescription>
         </DialogHeader>
         <ul className="max-h-64 space-y-1 overflow-y-auto" data-testid="workspace-sweep-folders">

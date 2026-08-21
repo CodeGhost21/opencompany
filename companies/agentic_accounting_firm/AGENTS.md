@@ -2,7 +2,7 @@
 
 > A firm of agents that keeps the books, runs payroll, prepares taxes and forecasts — with a human signing off on filings.
 
-This file is routed into every teammate's system prompt alongside `METHOD.md`
+This file is routed into every teammate's system prompt alongside `method.md`
 (`context_routing::UNIVERSAL_DOCUMENTS`), so it is the one place a convention
 reaches the whole roster without being repeated in every agent's `context`.
 
@@ -24,8 +24,8 @@ is rarely the thing that fails.
 | `audit_prep` | Audit Preparer | Assemble what an auditor will ask for. |
 | `forecaster` | Forecaster | Model cash and produce forecasts. |
 
-`bookkeeper` is the orchestrator: it holds the routing picture (`BRIEF.md`,
-`CLAIMS.md`, `THREADS.md`) and unrestricted ledger access, so it sets and
+`bookkeeper` is the orchestrator: it holds the routing picture (`brief.md`,
+`claims.md`, `threads.md`) and unrestricted ledger access, so it sets and
 revises goals and decisions rather than a specialist re-deciding them mid-task.
 
 Humans keep **sign-off on filings**; everything else here is the roster's to
@@ -85,19 +85,19 @@ Plus the baseline's `web-research`, `weekly-report` and `meeting-brief`.
 
 ## Workspace layout
 
-- `Standards/`, `Playbooks/`, `Books/` — shared, operator-seeded notes. Read
+- `standards/`, `playbooks/`, `books/` — shared, operator-seeded notes. Read
   them before proposing work that touches an area they cover; edit them on
   purpose, not as a side effect of an unrelated task.
-- `Agents/<your agent id>/` — your own folder, the default home for anything you
+- `agents/<your agent id>/` — your own folder, the default home for anything you
   produce.
 - `derived/` — rendered ledger views. Never hand-write anything here.
 
 ## Write scope
 
 Every specialist but `bookkeeper` declares an explicit `context` confining
-`workspace_write`/`workspace_create` to `Books/Q2 close.md` — this firm's shared
-active-work document — plus its own `Agents/<id>/` home. `Standards/` and
-`Playbooks/` stay out of that grant: governance documents, changed by the
+`workspace_write`/`workspace_create` to `books/q2-close.md` — this firm's shared
+active-work document — plus its own `agents/<id>/` home. `standards/` and
+`playbooks/` stay out of that grant: governance documents, changed by the
 operator or the unconfined orchestrator.
 
 ## The bar

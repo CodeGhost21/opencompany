@@ -1,4 +1,4 @@
-//! Issue #700: remove the empty `Agents/<id>/` folders a pre-#570 company is
+//! Issue #700: remove the empty `agents/<id>/` folders a pre-#570 company is
 //! still carrying, and nothing else.
 //!
 //! Every company provisioned before issue #570 minted one folder per roster
@@ -9,7 +9,7 @@
 //!
 //! * #570 made a member folder mean "this teammate produced something", so on a
 //!   pre-#570 tenant the two populations are indistinguishable by eye.
-//! * #552 publishes deliverables into `Agents/<agent>/<task-id>/`, so an empty
+//! * #552 publishes deliverables into `agents/<agent>/<task-id>/`, so an empty
 //!   folder now reads as "this agent has produced nothing" — a claim, and on
 //!   these tenants an unfounded one.
 //! * #607 made the tree searchable with a bounded result set, so a name-matching
@@ -89,7 +89,7 @@ impl From<&WorkspaceNode> for SweptFolder {
     }
 }
 
-/// Which folders directly under `Agents/` hold nothing at all.
+/// Which folders directly under `agents/` hold nothing at all.
 ///
 /// Pure: it decides from one tree snapshot and touches no store, which is what
 /// lets the shapes that matter — an unaddressable child, a dangling chain — be
@@ -101,7 +101,7 @@ impl From<&WorkspaceNode> for SweptFolder {
 ///    path: the root is resolved with the scaffold's own
 ///    [`find`](crate::company::workspace_scaffold::find), so the sweep and the
 ///    scaffold cannot disagree about which node that root is.
-/// 2. **A folder.** A *file* sitting directly under `Agents/` is somebody's
+/// 2. **A folder.** A *file* sitting directly under `agents/` is somebody's
 ///    note, not a stray container.
 /// 3. **No children, counted structurally.** See the module docs: the count runs
 ///    over every node the store returned, so a child with no renderable path
@@ -110,7 +110,7 @@ impl From<&WorkspaceNode> for SweptFolder {
 /// # Errors
 ///
 /// An ambiguous root — several nodes named `Agents`, or a *file* carrying the
-/// name — is refused rather than guessed at. "Under `Agents/`" has no single
+/// name — is refused rather than guessed at. "Under `agents/`" has no single
 /// answer there, and picking one would delete beneath a root the scaffold itself
 /// refuses to touch. No root at all is not an error: there is simply nothing to
 /// sweep.
@@ -154,7 +154,7 @@ pub(crate) fn empty_agent_folder_candidates(
         .collect())
 }
 
-/// Remove every provably empty `Agents/<id>/` folder in `company`, naming what
+/// Remove every provably empty `agents/<id>/` folder in `company`, naming what
 /// went.
 ///
 /// `dry_run` returns the candidates without touching anything, so the console
@@ -367,12 +367,12 @@ mod tests {
         assert_eq!(swept_names(&removed), vec!["ceo", "cto"]);
         assert_eq!(
             names(&ws, &company).await,
-            vec!["Agents", "README.md", "cmo", "secrets", "task-1"],
+            vec!["agents", "cmo", "readme.md", "secrets", "task-1"],
             "a folder holding anything at all must survive"
         );
     }
 
-    /// A *file* directly under `Agents/` is somebody's note, not a stray
+    /// A *file* directly under `agents/` is somebody's note, not a stray
     /// container — and a file has no children by construction, so a predicate
     /// that forgot to check the kind would take it.
     #[tokio::test]
@@ -385,7 +385,7 @@ mod tests {
         let root = root_id(&ws, &company).await;
         ws.create(
             &company,
-            &file("readme", "README.md", Some(&root)),
+            &file("readme", "readme.md", Some(&root)),
             Some("# who is who"),
         )
         .await
@@ -401,7 +401,7 @@ mod tests {
         assert_eq!(swept_names(&removed), vec!["ceo"]);
         assert_eq!(
             names(&ws, &company).await,
-            vec!["Agents", "README.md", "README.md", "secrets"]
+            vec!["agents", "readme.md", "readme.md", "secrets"]
         );
     }
 
@@ -464,8 +464,8 @@ mod tests {
         );
     }
 
-    /// Acceptance criterion: nothing outside `Agents/` is touched — not an empty
-    /// folder at the workspace root, not one under `Desks/` (issue #645 left
+    /// Acceptance criterion: nothing outside `agents/` is touched — not an empty
+    /// folder at the workspace root, not one under `desks/` (issue #645 left
     /// those alone on the same reasoning), and not a nested empty folder that
     /// happens to sit *below* a member folder.
     #[tokio::test]
@@ -478,7 +478,7 @@ mod tests {
         claim_folder(
             ws.as_ref(),
             &company,
-            "Archive",
+            "archive",
             None,
             WorkspaceOrigin::Operator,
         )
@@ -494,7 +494,7 @@ mod tests {
         claim_folder(
             ws.as_ref(),
             &company,
-            "creative_studio",
+            "creative-studio",
             Some(&desks),
             WorkspaceOrigin::Seed,
         )
@@ -519,19 +519,19 @@ mod tests {
         assert_eq!(
             names(&ws, &company).await,
             vec![
-                "Agents",
-                "Archive",
-                "Desks",
-                "README.md",
+                "agents",
+                "archive",
                 "ceo",
-                "creative_studio",
+                "creative-studio",
+                "desks",
                 "drafts",
+                "readme.md",
                 "secrets"
             ],
         );
     }
 
-    /// No `Agents/` root at all — a company that never booted the scaffold — is
+    /// No `agents/` root at all — a company that never booted the scaffold — is
     /// nothing to sweep rather than an error. The console offers the action
     /// unconditionally, so this is a real request shape, not a defensive branch.
     #[tokio::test]
@@ -556,7 +556,7 @@ mod tests {
     }
 
     /// Fail closed, exactly as the scaffold does: two roots named `Agents` make
-    /// "under `Agents/`" undecidable, so the sweep refuses instead of picking
+    /// "under `agents/`" undecidable, so the sweep refuses instead of picking
     /// one and deleting beneath it.
     ///
     /// Hand-built rather than driven through `FsOps` on purpose: the backend now
@@ -621,11 +621,11 @@ mod tests {
 
         assert_eq!(
             names(&ws, &acme).await,
-            vec!["Agents", "README.md", "secrets"]
+            vec!["agents", "readme.md", "secrets"]
         );
         assert_eq!(
             names(&ws, &other).await,
-            vec!["Agents", "README.md", "ceo", "secrets"]
+            vec!["agents", "ceo", "readme.md", "secrets"]
         );
     }
 
@@ -653,14 +653,14 @@ mod tests {
         ];
 
         // What a path-shaped emptiness check would have measured: the rendered
-        // paths beneath `Agents/ceo`. It sees nothing — that is the bug.
+        // paths beneath `agents/ceo`. It sees nothing — that is the bug.
         let by_id: HashMap<&str, &WorkspaceNode> =
             nodes.iter().map(|n| (n.id.as_str(), n)).collect();
         let beneath = nodes
             .iter()
             .filter(|node| {
                 crate::company::workspace_paths::render_path(node, &by_id)
-                    .is_some_and(|path| path.starts_with("Agents/ceo/"))
+                    .is_some_and(|path| path.starts_with("agents/ceo/"))
             })
             .count();
         assert_eq!(
@@ -760,7 +760,7 @@ mod tests {
     fn a_nested_folder_named_agents_is_not_the_root() {
         let nodes = vec![
             folder("root", AGENTS_ROOT, None),
-            folder("archive", "Archive", None),
+            folder("archive", "archive", None),
             folder("decoy", AGENTS_ROOT, Some("archive")),
             folder("under-decoy", "ceo", Some("decoy")),
         ];

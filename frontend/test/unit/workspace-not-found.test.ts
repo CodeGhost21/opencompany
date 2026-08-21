@@ -127,11 +127,14 @@ describe("a link to a note that is gone says so (issue #1473)", () => {
       back?.click();
     });
 
-    // Now — and only now — the idle state is the honest answer.
+    // Now — and only now — the empty pane is the honest answer. This host has
+    // no operator content, so that pane is the first-run one (issue #1481).
     expect(
       container.querySelector('[data-testid="workspace-missing-note"]'),
     ).toBeNull();
-    expect(container.textContent).toContain("No note open");
+    expect(
+      container.querySelector('[data-testid="workspace-empty-first-run"]'),
+    ).not.toBeNull();
   });
 });
 
@@ -183,8 +186,10 @@ describe("the pane answers on what was asked for, not on tree membership (issue 
     expect(container.textContent).toContain("no longer in this workspace");
   });
 
-  it("shows the idle state when nothing was asked for at all", async () => {
-    await render(host([]));
+  it("shows the empty pane when nothing was asked for at all", async () => {
+    await render(
+      host([{ id: "note-1", name: "Plan.md", kind: "file", updatedAt: 1 }]),
+    );
 
     expect(
       container.querySelector('[data-testid="workspace-missing-note"]'),

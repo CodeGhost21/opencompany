@@ -2,7 +2,7 @@
 
 > A studio of agents that researches, designs identity and interface, illustrates and animates — with a human signing off on creative direction.
 
-This file is routed into every teammate's system prompt alongside `METHOD.md`
+This file is routed into every teammate's system prompt alongside `method.md`
 (`context_routing::UNIVERSAL_DOCUMENTS`), so it is the one place a convention
 reaches the whole roster without being repeated in every agent's `context`.
 
@@ -26,7 +26,7 @@ version being the third one again.
 | `motion_designer` | Motion Designer | Animation and motion graphics. |
 
 `brand_designer` is the orchestrator: it holds the routing picture
-(`BRIEF.md`, `CLAIMS.md`, `THREADS.md`) and unrestricted ledger access.
+(`brief.md`, `claims.md`, `threads.md`) and unrestricted ledger access.
 
 Humans keep **creative direction sign-off**; everything else here is the
 studio's to run.
@@ -82,16 +82,16 @@ Plus the baseline's `web-research`, `weekly-report` and `meeting-brief`.
 
 ## Workspace layout
 
-- `Standards/`, `Playbooks/`, `Projects/` — shared, operator-seeded notes.
-- `Agents/<your agent id>/` — your own folder, the default home for anything you
+- `standards/`, `playbooks/`, `projects/` — shared, operator-seeded notes.
+- `agents/<your agent id>/` — your own folder, the default home for anything you
   produce.
 - `derived/` — rendered ledger views. Never hand-write anything here.
 
 ## Write scope
 
 Every specialist but `brand_designer` declares an explicit `context` confining
-`workspace_write`/`workspace_create` to `Projects/Fintech rebrand.md` — this
-studio's shared active-work document — plus its own `Agents/<id>/` home.
+`workspace_write`/`workspace_create` to `projects/fintech-rebrand.md` — this
+studio's shared active-work document — plus its own `agents/<id>/` home.
 
 ## The bar
 

@@ -25,6 +25,16 @@ export function childrenOf(nodes: FsNode[], parentId: string | null): FsNode[] {
     .filter((x) => x.parentId === parentId)
     .sort((a, b) => {
       if (a.kind !== b.kind) return a.kind === "folder" ? -1 : 1;
+      // `derived/` sorts after the folders a person made (issue #1382). It is
+      // the one folder nobody in the company named or can write to, and sitting
+      // alphabetically among `Campaigns` and `Standards` presented it as a peer
+      // of theirs. Cosmetic and name-based, but the name is the host's and only
+      // one folder has it.
+      const aDerived =
+        a.kind === "folder" && a.name.toLowerCase() === DERIVED_DIR;
+      const bDerived =
+        b.kind === "folder" && b.name.toLowerCase() === DERIVED_DIR;
+      if (aDerived !== bDerived) return aDerived ? 1 : -1;
       return a.name.localeCompare(b.name);
     });
 }
@@ -46,10 +56,38 @@ export function titleOf(node: FsNode): string {
   return node.name.replace(/\.(md|markdown|txt)$/i, "");
 }
 
-/** Resolve an Obsidian-style `[[wiki link]]` target to a file, by title. */
+/**
+ * A title reduced to the workspace naming rule — lowercase, dashed.
+ *
+ * Kept in step with `kebab_name` in `src/company/workspace_names.rs`, which is
+ * what every name the runtime mints now goes through. Only used for *matching*:
+ * nothing is displayed through this.
+ */
+function linkKey(title: string): string {
+  return title
+    .toLowerCase()
+    .replace(/[^a-z0-9.]+/g, "-")
+    .replace(/-*\.-*/g, ".")
+    .replace(/^[-.]+|[-.]+$/g, "");
+}
+
+/**
+ * Resolve an Obsidian-style `[[wiki link]]` target to a file, by title.
+ *
+ * Matched on the normalized title rather than the literal one, so a link
+ * written the way a person says it — `[[Close checklist]]` — still resolves to
+ * the note the runtime stored it as, `close-checklist.md`. Without this the
+ * lowercase-dashed rule would have silently unresolved every existing wiki link
+ * in every seeded company. The exact-title match is tried first so a tree that
+ * has both spellings resolves each to itself.
+ */
 export function fileByTitle(nodes: FsNode[], target: string): FsNode | undefined {
   const want = target.trim().toLowerCase();
-  return nodes.find((x) => x.kind === "file" && titleOf(x).toLowerCase() === want);
+  const exact = nodes.find((x) => x.kind === "file" && titleOf(x).toLowerCase() === want);
+  if (exact) return exact;
+  const key = linkKey(target);
+  if (!key) return undefined;
+  return nodes.find((x) => x.kind === "file" && linkKey(titleOf(x)) === key);
 }
 
 /**
@@ -362,10 +400,10 @@ export function pathOf(nodes: FsNode[], id: string | null): FsNode[] {
  * than what is shown instead of reading a shortened path as the whole truth.
  */
 /**
- * Whether `folder` is the workspace's `Agents/` root — the one folder whose
+ * Whether `folder` is the workspace's `agents/` root (case-insensitive) — the one folder whose
  * direct children are named by roster id rather than anything an operator
  * chose (issue #973). Root-scoped (`parentId === null`) so a note or folder an
- * operator names "Agents" somewhere else in the tree is never mistaken for it.
+ * operator names "agents" somewhere else in the tree is never mistaken for it.
  *
  * Lives here rather than in the view because the tree is no longer the only
  * surface that has to resolve those ids: the Move dialog lists the same folders
@@ -374,7 +412,7 @@ export function pathOf(nodes: FsNode[], id: string | null): FsNode[] {
 export function isAgentsFolder(folder: FsNode | undefined): boolean {
   return (
     folder?.kind === "folder" &&
-    folder.name === "Agents" &&
+    folder.name.toLowerCase() === "agents" &&
     folder.parentId === null
   );
 }
@@ -429,6 +467,67 @@ export function sortedFolders(
   return out;
 }
 
+/**
+ * The root folders the host lays down on every boot, by name.
+ *
+ * Mirrors `SYSTEM_ROOTS` in `src/company/workspace_scaffold.rs`. Kept in step
+ * by name rather than by a wire field, and the risk is the same one
+ * {@link isDerivedNode} documents: if the host scaffolds a third root, this
+ * const has to follow or a fresh company will briefly look as though somebody
+ * has already been working in it.
+ */
+export const SYSTEM_ROOTS = ["agents", "secrets"] as const;
+
+/** The note the host provisions inside `secrets/` on first boot. */
+const SECRETS_README = "readme.md";
+
+/**
+ * Whether anything in this tree was put there by a person (issue #1481).
+ *
+ * `ensure_workspace_scaffold` runs on every boot, so `nodes.length === 0` is
+ * unreachable on a live company and "is this workspace empty?" cannot be asked
+ * that way. What the empty state actually needs to know is different: has
+ * anyone written anything here *yet* — because "pick a note from the explorer"
+ * is the wrong instruction to give someone whose explorer holds three rows they
+ * did not create and have no reason to open.
+ */
+export function hasOperatorContent(nodes: FsNode[]): boolean {
+  const systemRootIds = new Set(
+    nodes
+      .filter(
+        (node) =>
+          node.parentId === null &&
+          node.kind === "folder" &&
+          (SYSTEM_ROOTS as readonly string[]).includes(node.name.toLowerCase()),
+      )
+      .map((node) => node.id),
+  );
+  const agentsRootId = nodes.find((node) => isAgentsFolder(node))?.id ?? null;
+  return nodes.some((node) => {
+    if (systemRootIds.has(node.id)) return false;
+    // The scaffolded README inside `secrets/` is the host's words, not the
+    // operator's — a workspace holding only it has still never been written in.
+    if (
+      node.parentId &&
+      systemRootIds.has(node.parentId) &&
+      node.name.toLowerCase() === SECRETS_README
+    ) {
+      return false;
+    }
+    // A teammate's own `Agents/<roster-id>/` folder is minted by the host and
+    // named by id; nobody chose it. A note filed *inside* one is a person's
+    // work and counts.
+    if (
+      node.kind === "folder" &&
+      agentsRootId !== null &&
+      node.parentId === agentsRootId
+    ) {
+      return false;
+    }
+    return true;
+  });
+}
+
 export type Crumb = FsNode | null;
 
 /**
@@ -442,7 +541,7 @@ export type Crumb = FsNode | null;
  * the middle collapses. That split is the useful one: the root says which part
  * of the company this belongs to, and the last two say what it sits next to.
  * Truncating the string instead — which is what `truncate` on a single span did
- * — ellipsises the *tail*, so every note under `Standards/Engineering/…` renders
+ * — ellipsises the *tail*, so every note under `standards/Engineering/…` renders
  * the identical prefix and the discriminating end is exactly what is thrown away.
  */
 export function breadcrumbOf(nodes: FsNode[], id: string | null, max = 3): Crumb[] {

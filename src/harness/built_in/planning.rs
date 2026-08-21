@@ -1690,7 +1690,7 @@ async fn verify_credential(
 /// Matched on the trailing path segment, case-insensitively.
 ///
 /// Deliberately looser than the tool-facing resolver. A model asked to name a
-/// file writes `Standards/Tone.md` or `Tone.md` or `standards/tone.md` for the
+/// file writes `standards/Tone.md` or `Tone.md` or `standards/tone.md` for the
 /// same note, and a path-shape mismatch that blocked a card would be a
 /// false refusal — the expensive direction here. A same-named file in two
 /// folders can therefore satisfy this check; that only means the pass does not

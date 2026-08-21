@@ -14,8 +14,11 @@ import type { ConnectionState } from "@/api/types";
 import {
   accountSummary,
   buildGridProviders,
+  connectedProviderCount,
   disconnectRouteFor,
+  grantStanding,
   tallyAccounts,
+  tileDelivers,
 } from "@/lib/provider-grid";
 import { CONNECTION_PROVIDERS, type ComposioReach } from "@/lib/connections";
 
@@ -491,5 +494,86 @@ describe("accountSummary", () => {
   it("uses the singular for one of each", () => {
     expect(accountSummary([acct("a", true)])).toBe("1 account connected");
     expect(accountSummary([acct("a", false)])).toBe("1 account, not connected");
+  });
+});
+
+/**
+ * The composio-grant tri-state (issue #1478).
+ *
+ * The bug this pins: `granted` arrives from an unvalidated cast, so `undefined`
+ * is reachable, and two surfaces defaulted it in OPPOSITE directions — one to
+ * "not granted", one to "granted" — so a single render showed both. Routing
+ * every surface through `grantStanding` makes `undefined` read as `"unknown"`
+ * everywhere, so they cannot disagree on the same field.
+ */
+describe("grantStanding", () => {
+  it("maps an explicit boolean to its standing", () => {
+    expect(grantStanding(true)).toBe("granted");
+    expect(grantStanding(false)).toBe("not-granted");
+  });
+
+  it("reads a missing grant as unknown — never as a definite negative", () => {
+    expect(grantStanding(undefined)).toBe("unknown");
+  });
+});
+
+describe("connectedProviderCount", () => {
+  it("counts the connected tiles, so the header and heading share one number", () => {
+    const providers = buildGridProviders(
+      [entry("gmail"), entry("slack"), entry("notion")],
+      [],
+      states(
+        { provider: "gmail", connected: true, via: ["composio"] },
+        { provider: "slack", connected: true, via: ["composio"] },
+      ),
+      OPEN,
+      false,
+    );
+    expect(connectedProviderCount(providers)).toBe(2);
+  });
+});
+
+/**
+ * Whether a connected tile actually delivers its tools (issue #1407).
+ *
+ * A connection is real whether or not the `composio` namespace is granted, but a
+ * green "connected" tile under a banner saying the tools reach nobody is the
+ * contradiction. A not-granted Composio tile is connected-but-not-delivering; an
+ * unchecked grant is NOT demoted (that would render unknown as a definite no).
+ */
+describe("tileDelivers", () => {
+  function gmail(reach: ComposioReach) {
+    return bySlug(
+      buildGridProviders(
+        [entry("gmail")],
+        [],
+        states({ provider: "gmail", connected: true, via: ["composio"] }),
+        reach,
+        false,
+      ),
+      "gmail",
+    );
+  }
+
+  it("delivers when a connected composio tile's grant is present", () => {
+    expect(tileDelivers(gmail(OPEN), true)).toBe(true);
+  });
+
+  it("does NOT deliver when the composio grant is explicitly absent", () => {
+    // The #1407 case: real connection, no grant — connected-but-not-delivering,
+    // so the tile must drop the success colour.
+    expect(tileDelivers(gmail({ ...OPEN, granted: false }), false)).toBe(false);
+  });
+
+  it("keeps delivering when the grant is unknown — unknown is not a denial", () => {
+    expect(tileDelivers(gmail(OPEN), undefined)).toBe(true);
+  });
+
+  it("a disconnected tile never delivers", () => {
+    const disconnected = bySlug(
+      buildGridProviders([entry("slack")], [], states(), OPEN, false),
+      "slack",
+    );
+    expect(tileDelivers(disconnected, true)).toBe(false);
   });
 });

@@ -4132,7 +4132,7 @@ mod test {
     ///
     /// This backend does not reject it, and hosted tenants run this backend — so
     /// the shape is reachable data rather than a thought experiment, and that is
-    /// what this asserts: sqlite stores `q/r.md` under `Agents/ghost/`, and the
+    /// what this asserts: sqlite stores `q/r.md` under `agents/ghost/`, and the
     /// sweep leaves `ghost` alone. It lives here because
     /// `cargo test --features sqlite --lib store::sqlite` is the only lane that
     /// runs it.

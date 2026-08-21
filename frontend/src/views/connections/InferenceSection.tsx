@@ -15,6 +15,8 @@ import {
   type UsageMetering,
 } from "@/api/inference";
 import { ApiError } from "@/api/types";
+import { classifyLoadFailure } from "@/lib/section-load";
+import { SectionUnreachable } from "@/views/connections/SectionUnreachable";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -123,7 +125,7 @@ function presetFor(provider: InferenceProvider): {
   return PROVIDERS[provider].preset;
 }
 
-type Load = "loading" | "ready" | "unavailable";
+type Load = "loading" | "ready" | "unavailable" | "error";
 type TestState =
   | { kind: "idle" }
   | { kind: "loading" }
@@ -175,8 +177,12 @@ export function InferenceSection({
     try {
       setStatus(await getInferenceStatus(client, company));
       setLoad("ready");
-    } catch {
-      setLoad("unavailable");
+    } catch (err) {
+      // A 404 is a host with no inference plane; anything else is a host that
+      // could not answer, and this is the section an operator opens when the
+      // company has stopped working — precisely when a transient error is most
+      // likely and disappearing is least helpful (issue #1470).
+      setLoad(classifyLoadFailure(err));
     }
   }, [client, company]);
 
@@ -376,6 +382,8 @@ export function InferenceSection({
 
       {load === "loading" ? (
         <Skeleton className="h-40 rounded-xl" />
+      ) : load === "error" ? (
+        <SectionUnreachable label="Couldn't read this company's inference settings" />
       ) : (
         <Card>
           <CardContent className="space-y-4 py-4">

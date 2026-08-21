@@ -81,8 +81,8 @@ Write for the reader, not the client.
 """
 prompt_files = ["prompts/house-style.md"]   # checked-in, bundle-relative
 context = [                                 # live workspace documents
-    "Brand/Brand voice.md",                 #   read only (the bare-string shorthand)
-    { path = "Agents/copywriter/drafts", access = "write" },  # + workspace_write/workspace_create
+    "brand/brand-voice.md",                 #   read only (the bare-string shorthand)
+    { path = "agents/copywriter/drafts", access = "write" },  # + workspace_write/workspace_create
 ]
 classes = ["evidence"]                      # routing exclusions — see below
 
@@ -116,7 +116,7 @@ agent's `workspace_write`/`workspace_create` scope.
 before this existed: `workspace_write`/`workspace_create` reach anywhere in the
 company's tree, as they always could. Declaring **at least one** write entry
 confines this agent's `workspace_write`/`workspace_create` to exactly the paths
-it declared, plus its own `Agents/<id>/` home, which stays writable regardless
+it declared, plus its own `agents/<id>/` home, which stays writable regardless
 — a role narrowed to a real access list must not also lose the ability to
 produce and revise its own work. See `src/harness/workspace_tools.rs` for the
 enforcement and why the pre-existing unconfined default is otherwise

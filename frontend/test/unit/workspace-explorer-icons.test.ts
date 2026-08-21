@@ -21,6 +21,7 @@ const HEADER_LABELS = [
   "New file",
   "New folder",
   "Upload",
+  "Collapse all",
   "Tidy empty agent folders",
   "Repair duplicate folders",
 ];
@@ -74,7 +75,7 @@ async function render() {
 }
 
 describe("every explorer icon says what it is (issue #1378)", () => {
-  it("wires each of the six header buttons to a tooltip carrying its label", async () => {
+  it("wires each header button to a tooltip carrying its label", async () => {
     await render();
 
     for (const label of HEADER_LABELS) {
@@ -93,13 +94,19 @@ describe("every explorer icon says what it is (issue #1378)", () => {
     const tidy = buttons.findIndex(
       (b) => b.getAttribute("aria-label") === "Tidy empty agent folders",
     );
-    const upload = buttons.findIndex((b) => b.getAttribute("aria-label") === "Upload");
-    expect(upload).toBeGreaterThanOrEqual(0);
-    expect(tidy).toBe(upload + 1);
+    const collapse = buttons.findIndex(
+      (b) => b.getAttribute("aria-label") === "Collapse all",
+    );
+    expect(collapse).toBeGreaterThanOrEqual(0);
+    // The repair group follows the make-and-view group, whose last member is
+    // Collapse all (added by issue #1382).
+    expect(tidy).toBe(collapse + 1);
 
     // A divider sits between the make-something group and the repair group, so
     // the row is not six identical glyphs with two mines in it.
-    const row = container.querySelector('[aria-label="Upload"]')?.parentElement;
+    const row = container.querySelector(
+      '[aria-label="Collapse all"]',
+    )?.parentElement;
     expect(row?.querySelector("span[aria-hidden].w-px")).not.toBeNull();
   });
 });

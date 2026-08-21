@@ -13,6 +13,12 @@ import type { StreamHandlers, Transport, TransportResponse } from "./transport";
 import {
   type AgentDetailDto,
   ApiError,
+  type BoardComment,
+  type BoardDetail,
+  type BoardItem,
+  type BoardPage,
+  type BoardQuery,
+  type BoardVote,
   type ReadMarker,
   type ReadStateResponse,
   type ApiErrorBody,
@@ -705,6 +711,51 @@ export class OpenCompanyClient {
   /** This company's past reports, newest first. */
   listFeedback(company?: string | null): Promise<FeedbackSummary[]> {
     return this.request<FeedbackSummary[]>("GET", `${this.scope(company)}/feedback`);
+  }
+
+  /**
+   * One page of the shared feedback board.
+   *
+   * Rejects with a 404 `tinyhumans_no_board` on a host with no TinyHumans
+   * credential — there is no board to show, which is a different thing from an
+   * empty one, so the caller hides the surface instead of rendering "nobody has
+   * asked for anything yet".
+   */
+  feedbackBoard(query: BoardQuery = {}, company?: string | null): Promise<BoardPage> {
+    const search = new URLSearchParams();
+    if (query.sort) search.set("sort", query.sort);
+    if (query.kind) search.set("type", query.kind);
+    if (query.status) search.set("status", query.status);
+    if (query.page !== undefined) search.set("page", String(query.page));
+    if (query.limit !== undefined) search.set("limit", String(query.limit));
+    const suffix = search.toString() ? `?${search}` : "";
+    return this.request<BoardPage>("GET", `${this.scope(company)}/feedback/board${suffix}`);
+  }
+
+  /** One board item with its comments. */
+  feedbackBoardItem(id: string, company?: string | null): Promise<BoardDetail> {
+    return this.request<BoardDetail>(
+      "GET",
+      `${this.scope(company)}/feedback/board/${encodeURIComponent(id)}`,
+    );
+  }
+
+  /** Casts (or, with `0`, retracts) this instance's vote. Returns the new row. */
+  voteFeedbackBoard(id: string, value: BoardVote, company?: string | null): Promise<BoardItem> {
+    return this.request<BoardItem>(
+      "POST",
+      `${this.scope(company)}/feedback/board/${encodeURIComponent(id)}/vote`,
+      { value },
+    );
+  }
+
+  /** Comments on a board item. Returns the stored comment. */
+  commentFeedbackBoard(id: string, body: string, company?: string | null): Promise<BoardComment> {
+    return this.request<BoardComment>(
+      "POST",
+      `${this.scope(company)}/feedback/board/${encodeURIComponent(id)}/comments`,
+      { body },
+    );
   }
 
   /**
