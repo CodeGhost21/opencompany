@@ -209,7 +209,7 @@ use crate::company::artifact_mirror::{MirrorOutcome, mirror_node_edit};
 // with `workspace_search` so search can never offer a node this module's
 // `PathIndex` would then refuse to resolve.
 use crate::company::workspace_paths::{render_path, split_logical_path};
-use crate::company::workspace_names::{kebab_name, kebab_path};
+use crate::company::workspace_names::{kebab_name, kebab_name_or, kebab_path};
 use crate::company::workspace_scaffold::{AGENTS_ROOT, is_agent_hidden_path};
 // The one definition of a workspace match, shared with the REST route and the
 // GraphQL resolver so no two surfaces can answer the same query differently.
@@ -458,7 +458,7 @@ impl CompanyWorkspace {
     /// home — a path one level deeper (`Agents/<self>/drafts`) is not the home
     /// either, which is what keeps the one-node-per-call rule intact.
     fn is_own_home(&self, segments: &[&str]) -> bool {
-        matches!(segments, [root, agent] if *root == AGENTS_ROOT && *agent == self.agent_id)
+        matches!(segments, [root, agent] if is_agents_root(root) && self.names_self(agent))
     }
 
     /// Whether `segments` name something **inside** this agent's own home —
@@ -475,7 +475,23 @@ impl CompanyWorkspace {
     /// teammate's home and everything under it answer `false` no matter what a
     /// tool argument says.
     fn is_strictly_inside_own_home(&self, segments: &[&str]) -> bool {
-        segments.len() >= 3 && segments[0] == AGENTS_ROOT && segments[1] == self.agent_id
+        segments.len() >= 3 && is_agents_root(segments[0]) && self.names_self(segments[1])
+    }
+
+    /// Whether one path segment names *this* agent's home folder.
+    ///
+    /// The canonical name is the lowercase-dashed one
+    /// ([`workspace_names`](crate::company::workspace_names)), and a company
+    /// that predates that rule has the folder under the roster id verbatim
+    /// (`page_builder`, not `page-builder`) — so both spellings must answer
+    /// yes or an agent loses access to its own folder across an upgrade.
+    ///
+    /// This cannot widen into a *teammate's* home. Roster ids are snake_case
+    /// (`is_snake_case`), so `-` never occurs in one: normalizing is injective
+    /// over the id alphabet, and no id's canonical form can equal another id's
+    /// verbatim form.
+    fn names_self(&self, segment: &str) -> bool {
+        segment == self.agent_id || segment == kebab_name_or(&self.agent_id, &self.agent_id)
     }
 
     /// Adopt-or-create this agent's own `Agents/<id>/` folder, returning its id.
@@ -496,6 +512,17 @@ impl CompanyWorkspace {
 // ---------------------------------------------------------------------------
 // Path index
 // ---------------------------------------------------------------------------
+
+/// Whether one path segment names the reserved agents root, in any spelling a
+/// company might carry it under.
+///
+/// Case-insensitive for the same reason
+/// [`is_agent_hidden_path`](crate::company::workspace_scaffold::is_agent_hidden_path)
+/// is: the root was `Agents/` before the lowercase-dashed rule, and a company
+/// created then still has it.
+fn is_agents_root(segment: &str) -> bool {
+    segment.eq_ignore_ascii_case(AGENTS_ROOT)
+}
 
 /// A node plus its rendered logical path.
 #[derive(Clone, Debug)]
