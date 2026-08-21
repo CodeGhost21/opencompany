@@ -16,6 +16,10 @@ ledgers = [
     { name = "risks", access = "record" },
     { name = "commitments", access = "read" },
     { name = "learnings", access = "record" },
+    # This newsroom's own axes (`ledgers/`).
+    { name = "stories", access = "record" },
+    { name = "sources", access = "record" },
+    { name = "corrections", access = "record" },
 ]
 
 # Write scope (docs/spec/runtime/agents.md): confined to this company's
