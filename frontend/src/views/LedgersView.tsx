@@ -69,7 +69,12 @@ import type { ApprovalSummary } from "@/api/types";
 import { CreateTaskDialog } from "@/views/CreateTaskDialog";
 import { LedgerBoard } from "@/views/LedgerBoard";
 import { TaskItem } from "@/views/TaskCard";
-import { BOARD_LEDGER, columnsOf, labelFor } from "@/lib/board-columns";
+import {
+  BOARD_LEDGER,
+  BOARD_WORKING,
+  columnsOf,
+  labelFor,
+} from "@/lib/board-columns";
 import { taskApprovalBlock } from "@/lib/task-approvals";
 import {
   byline,
