@@ -462,7 +462,7 @@ removes anything, so it is one call rather than a loop of them.
 
 Only **running** instances become connections. A stopped one has no address, so
 a row for it could do nothing but fail its probe forever; it is visible — and
-startable — in the rail's dialog instead.
+startable — on the "Add a host" screen instead.
 
 Reusing the remembered id is what carries the tour state, the last-read channel
 and the mail draft across a relaunch, all of them keyed by connection id. A
