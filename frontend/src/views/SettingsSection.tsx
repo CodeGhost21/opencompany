@@ -2,7 +2,6 @@ import { lazy, Suspense } from "react";
 import {
   Blocks,
   ChartColumnBig,
-  CreditCard,
   Globe,
   Plug,
   type LucideIcon,
