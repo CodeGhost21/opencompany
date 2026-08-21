@@ -1,7 +1,7 @@
 // The workflow creator (issue #69): a plain form editor — not a drag canvas —
 // that builds a `WorkflowGraph` and posts it via `createWorkflow`. Node kinds
 // are the ones the engine executes and the console can author from a form
-// (`CREATABLE_NODE_KINDS`). The five that need kind-specific config —
+// (`NODE_KINDS`). The five that need kind-specific config —
 // `tool_call`, `http_request`, `switch`, `output_parser`, `sub_workflow` —
 // grew their controls in issue #541; each renders `NodeConfigFields`, whose
 // spec table (`@/lib/workflow-node-config`) is the single source of the engine
@@ -17,7 +17,7 @@ import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { History, Loader2, Plus, RotateCcw, Sparkles, Trash2 } from "lucide-react";
 
 import {
-  CREATABLE_NODE_KINDS,
+  NODE_KINDS,
   DESTINATION_KINDS,
   destinationLabel,
   createWorkflow,
@@ -303,11 +303,35 @@ function nodeLabel(node: DraftNode): string {
   return node.name.trim() || node.id.trim() || "this node";
 }
 
-interface DraftEdge {
+export interface DraftEdge {
   key: string;
   from: string;
   to: string;
   label: string;
+}
+
+/**
+ * Add only the missing adjacent edges for the node order shown in the form.
+ * Invalid/duplicate ids leave the explicit graph untouched so this convenience
+ * never manufactures a self-edge or guesses which duplicate row was intended.
+ */
+export function edgesConnectingNodesInOrder(
+  nodes: readonly Pick<DraftNode, "id">[],
+  edges: readonly DraftEdge[],
+): DraftEdge[] {
+  const ids = nodes.map((node) => node.id.trim());
+  if (ids.length < 2 || ids.some((nodeId) => !nodeId) || new Set(ids).size !== ids.length) {
+    return [...edges];
+  }
+  const next = [...edges];
+  for (let index = 0; index < ids.length - 1; index += 1) {
+    const from = ids[index];
+    const to = ids[index + 1];
+    if (!next.some((edge) => edge.from === from && edge.to === to)) {
+      next.push({ key: nextKey(), from, to, label: "" });
+    }
+  }
+  return next;
 }
 
 /** The node fields that validate on blur (issue #261) — the ones with a real
@@ -1083,6 +1107,16 @@ export function WorkflowCreateDialog({
     clearSubmitError();
   }
 
+  /**
+   * Connect each visible node to the next one, preserving explicit branches and
+   * labels already authored. Existing pairs count as connected regardless of
+   * label, so pressing the affordance twice never adds duplicate edges.
+   */
+  function connectNodesInOrder() {
+    setEdges((rows) => edgesConnectingNodesInOrder(nodes, rows));
+    clearSubmitError();
+  }
+
   function updateEdge(key: string, fields: Partial<DraftEdge>) {
     setEdges((rows) => rows.map((r) => (r.key === key ? { ...r, ...fields } : r)));
     clearSubmitError();
@@ -1727,7 +1761,16 @@ export function WorkflowCreateDialog({
         <fieldset disabled={submitting} className="contents">
           <div className="grid gap-3 sm:grid-cols-2">
             <div className="grid gap-2">
-              <Label htmlFor={`${formId}-id`}>Id</Label>
+              <Label htmlFor={`${formId}-name`}>Name</Label>
+              <Input
+                id={`${formId}-name`}
+                value={name}
+                onChange={(e) => changeName(e.target.value)}
+                placeholder="e.g. Campaign pipeline"
+              />
+            </div>
+            <div className="grid gap-2">
+              <Label htmlFor={`${formId}-id`}>Workflow ID</Label>
               {/* Read-only in edit mode, not merely rejected on save: the id keys
                   the saved graph, the scheduler and every past run, so the host
                   answers 400 to a rename. Letting an author type a new one and
@@ -1741,21 +1784,11 @@ export function WorkflowCreateDialog({
                 className={editing ? "text-muted-foreground" : undefined}
                 placeholder="e.g. campaign_pipeline"
               />
-              {editing && (
-                <p className="text-2xs leading-snug text-muted-foreground">
-                  A workflow&apos;s id can&apos;t change. It keys the saved graph, its
-                  schedule and its run history.
-                </p>
-              )}
-            </div>
-            <div className="grid gap-2">
-              <Label htmlFor={`${formId}-name`}>Name</Label>
-              <Input
-                id={`${formId}-name`}
-                value={name}
-                onChange={(e) => changeName(e.target.value)}
-                placeholder="e.g. Campaign pipeline"
-              />
+              <p className="text-2xs leading-snug text-muted-foreground">
+                {editing
+                  ? "This permanent machine ID can’t change. It keys the saved graph, its schedule and its run history."
+                  : "Generated from the name. You can change it now; after creation it becomes the permanent machine ID for schedules and run history."}
+              </p>
             </div>
           </div>
           <div className="grid gap-2">
@@ -1821,17 +1854,38 @@ export function WorkflowCreateDialog({
           </div>
 
           <div className="space-y-2">
-            <div className="flex items-center justify-between">
-              <Label>Edges</Label>
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                onClick={addEdge}
-                disabled={nodes.length < 2 || submitting}
-              >
-                <Plus className="size-3.5" /> Add edge
-              </Button>
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <Label>Connections</Label>
+                <p className="text-2xs text-muted-foreground">
+                  Connect a simple sequence automatically, or edit branches explicitly.
+                </p>
+              </div>
+              <div className="flex items-center gap-2">
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={connectNodesInOrder}
+                  disabled={
+                    submitting ||
+                    nodes.length < 2 ||
+                    nodes.some((node) => !node.id.trim()) ||
+                    new Set(nodes.map((node) => node.id.trim())).size !== nodes.length
+                  }
+                >
+                  Connect in order
+                </Button>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={addEdge}
+                  disabled={nodes.length < 2 || submitting}
+                >
+                  <Plus className="size-3.5" /> Add edge
+                </Button>
+              </div>
             </div>
             <div className="space-y-2">
               {edges.map((e) => (
@@ -1845,7 +1899,7 @@ export function WorkflowCreateDialog({
               ))}
               {edges.length === 0 && (
                 <p className="rounded-lg border border-dashed p-3 text-center text-xs text-muted-foreground">
-                  No edges yet — nodes won&apos;t be connected.
+                  No connections yet — connect the steps in order or add an explicit edge.
                 </p>
               )}
             </div>
@@ -2028,7 +2082,11 @@ function NodeRow({
   return (
     <div className="grid gap-2 rounded-lg border p-2 sm:grid-cols-[1fr_1fr_1.4fr_auto] sm:items-start">
       <div className="grid gap-1">
+        <Label htmlFor={`${rowId}-id`} className="text-2xs text-muted-foreground">
+          Node ID
+        </Label>
         <Input
+          id={`${rowId}-id`}
           value={node.id}
           onChange={(e) => onChange({ id: e.target.value })}
           placeholder="node id"
@@ -2038,12 +2096,13 @@ function NodeRow({
             never holds a value whose control is no longer on screen. Without
             this, picking a destination and then changing the kind left the row
             un-submittable with nothing visible to clear. */}
+        <Label className="mt-1 text-2xs text-muted-foreground">Kind</Label>
         <Select value={node.kind} onValueChange={(v) => onChange(changeKind(v ?? ""))}>
           <SelectTrigger className="h-8" aria-label="Node kind">
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
-            {CREATABLE_NODE_KINDS.map((k) => (
+            {NODE_KINDS.map((k) => (
               <SelectItem key={k.value} value={k.value}>
                 {k.label}
               </SelectItem>
@@ -2052,7 +2111,11 @@ function NodeRow({
         </Select>
       </div>
       <div className="grid gap-1">
+        <Label htmlFor={`${rowId}-name`} className="text-2xs text-muted-foreground">
+          Step name
+        </Label>
         <Input
+          id={`${rowId}-name`}
           value={node.name}
           onChange={(e) => onChange({ name: e.target.value })}
           placeholder="display name"
@@ -2060,29 +2123,42 @@ function NodeRow({
         />
         {node.kind === "agent" &&
           (roster.length > 0 ? (
-            <Select value={node.agent} onValueChange={(v) => onChange({ agent: v ?? "" })}>
-              <SelectTrigger className="h-8" aria-label="Teammate">
-                <SelectValue placeholder="Pick a teammate" />
-              </SelectTrigger>
-              <SelectContent>
-                {roster.map((m) => (
-                  <SelectItem key={m.id} value={m.id}>
-                    {m.name ?? m.role}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
+            <>
+              <Label className="mt-1 text-2xs text-muted-foreground">Teammate</Label>
+              <Select value={node.agent} onValueChange={(v) => onChange({ agent: v ?? "" })}>
+                <SelectTrigger className="h-8" aria-label="Teammate">
+                  <SelectValue placeholder="Pick a teammate" />
+                </SelectTrigger>
+                <SelectContent>
+                  {roster.map((m) => (
+                    <SelectItem key={m.id} value={m.id}>
+                      {m.name ?? m.role}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </>
           ) : (
-            <Input
-              value={node.agent}
-              onChange={(e) => onChange({ agent: e.target.value })}
-              placeholder="teammate id"
-              aria-label="Teammate id"
-            />
+            <>
+              <Label htmlFor={`${rowId}-teammate`} className="mt-1 text-2xs text-muted-foreground">
+                Teammate ID
+              </Label>
+              <Input
+                id={`${rowId}-teammate`}
+                value={node.agent}
+                onChange={(e) => onChange({ agent: e.target.value })}
+                placeholder="teammate id"
+                aria-label="Teammate id"
+              />
+            </>
           ))}
       </div>
       <div className="grid gap-1">
+        <Label htmlFor={`${rowId}-summary`} className="text-2xs text-muted-foreground">
+          Summary
+        </Label>
         <Input
+          id={`${rowId}-summary`}
           value={node.summary}
           onChange={(e) => onChange({ summary: e.target.value })}
           placeholder="summary (optional)"
