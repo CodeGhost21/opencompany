@@ -22,14 +22,17 @@ import {
 } from "@/api/transport/desktop";
 import { ApiError } from "@/api/types";
 import { AddHostDialog, ConsoleChrome } from "@/components/host-switcher";
+import { ManageHostsPage } from "@/components/manage-hosts";
 import { Button } from "@/components/ui/button";
 import { resolveConfig } from "@/config";
 import {
   addConnection,
   adoptLocalHosts,
   clientFor,
+  editConnection,
   listConnections,
   probe,
+  removeConnection,
   restoreConnections,
   useConnections,
 } from "@/connections/registry";
@@ -526,6 +529,20 @@ function Console() {
           await refreshLocal();
         }
       : undefined,
+    onEditHost: (id, change) => editConnection(id, change),
+    // Selection has to move *with* the removal, in one step. `active` falls
+    // through to the first connection when nothing is selected, so a console
+    // whose host has just been forgotten would otherwise render the removed
+    // row's client for a frame — and in the desktop, where `selected` is
+    // ordinarily null, it would keep rendering whatever came next without ever
+    // recording the choice.
+    onRemoveHost: (id) => {
+      removeConnection(id);
+      const remaining = listConnections();
+      setSelected((current) =>
+        remaining.some((c) => c.id === current) ? current : (remaining[0]?.id ?? null),
+      );
+    },
     onStopLocal: isDesktopRuntime()
       ? async (id) => {
           await stopLocalInstance(id);
@@ -563,6 +580,10 @@ function Console() {
           computer selects it, and that remounts the console. A dialog mounted
           within would take itself off screen at the moment it succeeded. */}
       <AddHostDialog />
+      {/* Beside the console for the same reason, and more so: forgetting the
+          host on screen selects another one, which remounts the console. A page
+          mounted within would unmount itself mid-edit. */}
+      <ManageHostsPage />
     </HostsProvider>
   );
 }

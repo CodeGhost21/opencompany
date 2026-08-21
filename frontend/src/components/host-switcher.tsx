@@ -20,7 +20,16 @@
 // every host, and `data-worst-status` says the same thing to a test. Without it
 // removing the rail would be a net loss for anyone running more than one host.
 
-import { Building2, Check, ChevronsUpDown, Loader2, Play, Plus, Square } from "lucide-react";
+import {
+  Building2,
+  Check,
+  ChevronsUpDown,
+  Loader2,
+  Play,
+  Plus,
+  Settings2,
+  Square,
+} from "lucide-react";
 import { useState } from "react";
 
 import { Button } from "@/components/ui/button";
@@ -330,6 +339,19 @@ export function HostSwitcher({ variant = "sidebar", companyName }: Props) {
         <Plus className="size-4" />
         Add a host
       </DropdownMenuItem>
+      {/* The other half of adding one. Kept out of the rows themselves: a row
+          is a *filter* — clicking it puts that host on screen — and hanging an
+          edit and a delete off the same row makes a menu whose click targets
+          disagree about what a row is for. The page says what each host is,
+          which the menu deliberately does not. */}
+      <DropdownMenuItem
+        data-testid="host-switcher-manage"
+        onClick={() => hosts.setManagingHosts(true)}
+        className="gap-2"
+      >
+        <Settings2 className="size-4" />
+        Manage hosts
+      </DropdownMenuItem>
     </DropdownMenuContent>
   );
 
@@ -525,7 +547,7 @@ export function AddHostDialog() {
 }
 
 /** What each connector is called where an operator has to choose between them. */
-const CONNECTOR_LABELS: Record<ConnectorKind, string> = {
+export const CONNECTOR_LABELS: Record<ConnectorKind, string> = {
   local: "On this computer",
   cloud: "TinyHumans Cloud",
   remote: "Another gateway",

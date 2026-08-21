@@ -677,6 +677,69 @@ export function adoptSession(id: ConnectionId, session: string): void {
   adoptCredential(id, { kind: "session", value: session });
 }
 
+/** What "modify a host" may change about one. See {@link editConnection}. */
+export interface HostEdit {
+  /** What this connection is called in the switcher. Blank keeps the old name. */
+  label?: string;
+  /** Where the host is. Only honoured where {@link hostAddressEditable} is true. */
+  baseUrl?: string;
+}
+
+/**
+ * Whether an operator may retype a connection's address.
+ *
+ * `local` and `ssh` addresses are **assigned by this application**, not typed:
+ * a local host binds an ephemeral port on purpose, and a tunnel's address is a
+ * loopback port this client chose when it opened it. Both are different on
+ * every launch, so an address edited here would be overwritten by the next one
+ * — and in the meantime it would point the console at a port nothing is
+ * serving. Their names stay editable; their addresses belong to whatever is
+ * managing the process.
+ */
+export function hostAddressEditable(connector: Connector): boolean {
+  return connector.kind === "remote" || connector.kind === "cloud";
+}
+
+/**
+ * Renames a connection, or points it at a different address.
+ *
+ * Re-seats rather than patches, because the client bakes `baseUrl` into its
+ * config at construction — see {@link reseat} — and the desktop core keeps its
+ * own copy to resolve proxied requests against. A patched connection would
+ * render the new address beside a client still talking to the old one.
+ *
+ * A move re-probes, and drops everything the last probe concluded: the
+ * identity, the company list and the error all describe the host that *was* at
+ * the old address, and leaving them in place is how a console ends up naming
+ * one host while addressing another.
+ */
+export function editConnection(id: ConnectionId, change: HostEdit): void {
+  const existing = getConnection(id);
+  if (!existing) return;
+  const label = change.label?.trim() || existing.label;
+  const baseUrl =
+    change.baseUrl !== undefined && hostAddressEditable(existing.connector)
+      ? change.baseUrl.trim().replace(/\/$/, "")
+      : existing.baseUrl;
+  const moved = baseUrl !== existing.baseUrl;
+  if (!moved && label === existing.label) return;
+  reseat(id, {
+    ...existing,
+    label,
+    baseUrl,
+    ...(moved
+      ? {
+          status: "connecting" as const,
+          error: undefined,
+          identity: null,
+          companies: [],
+          waking: false,
+        }
+      : {}),
+  });
+  if (moved) void probe(id);
+}
+
 export function removeConnection(id: ConnectionId): void {
   const going = getConnection(id);
   entries = entries.filter((e) => e.connection.id !== id);
