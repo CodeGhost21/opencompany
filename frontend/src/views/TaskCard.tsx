@@ -50,28 +50,50 @@ function priorityStyle(priority: string): string {
 /**
  * What a card's note says, once the runtime's own bookkeeping is out of it.
  *
- * `note` is the card's *running history* — the `tasks` ledger declares it that
- * way — and the host writes its dispatch bookkeeping into the same field:
- * `[system] the dispatch cycle ended without settling this attempt`. A card has
- * room for exactly one secondary line, and spending it on a journal entry is
- * worse than spending it on nothing: three of eight To-do cards on a live board
- * read as errors when the board was perfectly healthy.
+ * `note` is not prose with the occasional machine line in it — **the whole
+ * field is an attributed journal**. `append_result`
+ * (`src/runtime/advance.rs:71`) writes every outcome as `[<who>] <what>` and
+ * joins the blocks with a blank line, never overwriting: *"the note is the
+ * card's history"*. `<who>` is `system` for the host's own paths and the
+ * teammate's id for everything else, so a live board shows both
+ * `[system] the dispatch cycle ended without settling this attempt` and
+ * `[frontend_engineer] __MOCK_LLM__ mock inference backend reply.`
  *
- * Only the *preview* is filtered. The note itself is untouched, and the whole
- * of it — system lines included — is still on the detail screen's timeline,
- * which is where a journal belongs and where somebody looking for one went.
+ * Reading that field as text has three consequences on a card face, which has
+ * room for exactly one secondary line:
  *
- * Returns `null` when nothing human-written is left, so the card renders no
- * line at all rather than an empty one holding space.
+ * 1. **The bookkeeping reads as the work.** Three of eight To-do cards on a
+ *    healthy seeded board reported an error that had not happened.
+ * 2. **The attribution is said twice.** The card already carries the assignee
+ *    as an avatar and a name; `[frontend_engineer]` in the body is the same
+ *    fact again, in the noisiest possible place.
+ * 3. **`line-clamp-2` shows the *oldest* two lines.** The journal is
+ *    append-only, so a clamped note freezes on the first thing that ever
+ *    happened to the card and never moves again — the exact opposite of what a
+ *    running history is for.
+ *
+ * So: split the journal into its blocks, drop the host's own (`[system]`),
+ * take the **most recent** of what is left, and strip its `[<who>]` prefix.
+ * A block with no prefix is a note somebody typed, and is shown as-is.
+ *
+ * Only the *preview* is derived this way. The note itself is untouched, and the
+ * whole of it — system blocks included — is still on the detail screen's
+ * timeline, which is where a journal belongs and where somebody looking for one
+ * went.
+ *
+ * Returns `null` when nothing is left, so the card renders no line at all
+ * rather than an empty one holding space.
  */
 export function notePreview(note: string | undefined): string | null {
   if (!note) return null;
-  const human = note
-    .split("\n")
-    .filter((line) => !line.trimStart().startsWith("[system]"))
-    .join("\n")
-    .trim();
-  return human || null;
+  const blocks = note
+    .split(/\n\s*\n/)
+    .map((block) => block.trim())
+    .filter(Boolean)
+    .filter((block) => !block.startsWith("[system]"));
+  const latest = blocks[blocks.length - 1];
+  if (!latest) return null;
+  return latest.replace(/^\[[^\]\n]*\]\s*/, "").trim() || null;
 }
 
 /**
