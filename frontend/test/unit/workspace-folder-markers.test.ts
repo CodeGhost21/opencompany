@@ -5,6 +5,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { OpenCompanyClient } from "@/api/client";
+import { type FsNode, OPERATOR_ORIGIN } from "@/api/workspace";
 import { ConnectionScopeProvider } from "@/connections/ConnectionContext";
 import { WorkspaceView } from "@/views/WorkspaceView";
 
@@ -31,16 +32,37 @@ import { WorkspaceView } from "@/views/WorkspaceView";
  * rules are asserted against one tree rather than one apiece.
  */
 
-/** A minimal `FsNode` off the wire — only the fields the tree reads. */
-function node(over: { id: string; name: string; kind: "folder" | "file"; parentId?: string }) {
-  return { ...over, updatedAt: 1 };
+/**
+ * A whole `FsNode`, not a partial one.
+ *
+ * The omissions this replaces were survivable rather than correct: `fetchTree`
+ * normalizes a wire node (`parentId ?? null`, `createdBy ?? OPERATOR_ORIGIN`),
+ * and the fixture reaches the view through it, so a missing `parentId` became
+ * `null` and a missing `createdBy` became the operator before `TreeRow` read
+ * either. Spelling them out anyway costs nothing and stops the fixture relying
+ * on a defaulting step that belongs to a different test's subject.
+ */
+function node(over: {
+  id: string;
+  name: string;
+  kind: "folder" | "file";
+  parentId?: string;
+}): FsNode {
+  return {
+    parentId: null,
+    updatedAt: 1,
+    createdBy: OPERATOR_ORIGIN,
+    updatedBy: OPERATOR_ORIGIN,
+    ...over,
+  };
 }
 
-/** A fake host: `get` answers the workspace tree read. */
-function client(tree: ReturnType<typeof node>[]): OpenCompanyClient {
+/** A fake host: `get` answers the tree read, `patch` the rename/move call. */
+function client(tree: FsNode[], patch = vi.fn()): OpenCompanyClient {
   return {
     scopeFor: () => "/api/v1/company/acme",
     get: vi.fn().mockResolvedValue(tree),
+    patch,
   } as unknown as OpenCompanyClient;
 }
 
@@ -75,12 +97,12 @@ afterEach(() => {
   container.remove();
 });
 
-async function render() {
+async function render(patch = vi.fn()) {
   await act(async () => {
     root.render(
       createElement(ConnectionScopeProvider, {
         scope: { connection: "c1", company: "acme" },
-        children: createElement(WorkspaceView, { client: client(TREE), company: "acme" }),
+        children: createElement(WorkspaceView, { client: client(TREE, patch), company: "acme" }),
       }),
     );
   });
@@ -159,5 +181,76 @@ describe("the two marked folders, side by side in one tree", () => {
     await render();
     const items = await menuItemsFor("Playbooks");
     expect(items).toEqual(["Rename", "Move to…", "Delete"]);
+  });
+});
+
+/**
+ * The rename half of the boundary (issue #1465, review).
+ *
+ * The host reads agent visibility off the *first path segment*, and a rename of
+ * a root folder rewrites it for the whole subtree. `PATCH …/workspace/<id>` with
+ * `{"name":"vault"}` answers 200 against a running host — only `derived/` is
+ * guarded on that route — so `secrets/` was one unannounced click from being
+ * agent-readable. The move already stops and asks; this pins that the rename
+ * does too, at the surface rather than only in the pure function.
+ */
+describe("renaming the secrets root", () => {
+  /** Open the row's `…` menu, click Rename, and type `next` into the field. */
+  async function typeRename(rowName: string, next: string) {
+    const trigger = row(rowName).querySelector('[aria-label="Actions"]');
+    await act(async () => {
+      (trigger as HTMLElement).click();
+    });
+    const item = Array.from(document.querySelectorAll('[role="menuitem"]')).find(
+      (el) => el.textContent?.trim() === "Rename",
+    );
+    await act(async () => {
+      (item as HTMLElement).click();
+    });
+    const input = document.querySelector<HTMLInputElement>("#fs-name")!;
+    await act(async () => {
+      // React tracks the last value it wrote, so a bare `input.value =` is
+      // swallowed as "unchanged"; the native setter is how a test types.
+      Object.getOwnPropertyDescriptor(
+        window.HTMLInputElement.prototype,
+        "value",
+      )!.set!.call(input, next);
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    const confirm = Array.from(document.querySelectorAll("button")).find(
+      (b) => b.textContent?.trim() === "Rename",
+    );
+    await act(async () => {
+      (confirm as HTMLButtonElement).click();
+    });
+  }
+
+  it("asks before it renames the boundary away, and does not call the host", async () => {
+    const patch = vi.fn().mockResolvedValue({});
+    await render(patch);
+    await typeRename("secrets", "vault");
+
+    const panel = document.querySelector('[data-testid="workspace-move-audience"]');
+    expect(panel).not.toBeNull();
+    expect(panel?.textContent).toContain("Agents will be able to read this folder.");
+    // The whole point: the rename has not happened yet.
+    expect(patch).not.toHaveBeenCalled();
+
+    const confirm = document.querySelector<HTMLButtonElement>(
+      '[data-testid="workspace-move-audience-confirm"]',
+    );
+    expect(confirm?.textContent).toBe("Rename out of secrets");
+    await act(async () => confirm?.click());
+    expect(patch).toHaveBeenCalledTimes(1);
+  });
+
+  it("renames an ordinary folder on one click, as before", async () => {
+    // The step is added to the renames that change something and to no others.
+    const patch = vi.fn().mockResolvedValue({});
+    await render(patch);
+    await typeRename("Playbooks", "Runbooks");
+
+    expect(document.querySelector('[data-testid="workspace-move-audience"]')).toBeNull();
+    expect(patch).toHaveBeenCalledTimes(1);
   });
 });

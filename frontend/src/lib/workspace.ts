@@ -247,14 +247,20 @@ export function moveAudienceWarning(
   if (wasSecret === willBeSecret) return null;
 
   // A folder move takes every note under it in the same call, so the sentence
-  // has to say so — "this note" would understate a move of thirty.
-  const what = node.kind === "folder" ? "this folder and everything in it" : "this note";
+  // has to say so — "this note" would understate a move of thirty. The title
+  // is the line that gets read, so it says it too: a heading that promises one
+  // note above a paragraph describing a subtree is the wrong half to be vague
+  // in.
+  const folder = node.kind === "folder";
+  const what = folder ? "this folder and everything in it" : "this note";
+  // The title needs the short form — it is a heading, not a sentence.
+  const subject = folder ? "this folder" : "this note";
   const name = titleOf(node);
 
   return willBeSecret
     ? {
         change: "hidden",
-        title: "Agents will no longer be able to read this note.",
+        title: `Agents will no longer be able to read ${subject}.`,
         body:
           `“${name}” moves into ${SECRETS_DIR}/, where ${what} stops being ` +
           "visible to the company's agents — they cannot list, read, search or write it.",
@@ -262,11 +268,77 @@ export function moveAudienceWarning(
       }
     : {
         change: "exposed",
-        title: "Agents will be able to read this note.",
+        title: `Agents will be able to read ${subject}.`,
         body:
           `“${name}” moves out of ${SECRETS_DIR}/, and ${what} becomes part of the ` +
           "shared tree every agent can read and search. Check it holds no credentials first.",
         confirmLabel: "Move out of secrets",
+      };
+}
+
+/**
+ * A **rename** that changes who can read a note, and what to say about it
+ * (issue #1465).
+ *
+ * The hole `moveAudienceWarning` left. The host's rule is `is_agent_hidden_path`
+ * in `src/company/workspace_scaffold.rs` — the *first path segment*, compared to
+ * `secrets` — and a rename of a root folder rewrites that segment for its whole
+ * subtree. Renaming `secrets/` to `vault/` therefore hands every note under it
+ * to every agent in the company, and the host allows it: a `PATCH
+ * …/workspace/<id>` with `{"name":"vault"}` answers `200`, because nothing on
+ * that path is guarded the way `derived/` is by `DerivedGuardWorkspace`.
+ *
+ * Allowing it is defensible — the operator owns `secrets/`, and an operator who
+ * means to retire the folder is entitled to. Doing it in silence is not, and
+ * silence is exactly what the move warning exists to end. So a rename that
+ * crosses the boundary is put through the same panel, in the same words.
+ *
+ * Only a **root** node can cross it. A rename deeper in the tree cannot touch
+ * the first segment — that belongs to an ancestor — so this returns `null` for
+ * every one of them, which is nearly all renames.
+ *
+ * Not reachable by an agent, for the record: agent workspace tools address the
+ * tree through `PathIndex::build_for_agent`, which drops hidden nodes from both
+ * the path and the id map, and the move tool confines destinations to the
+ * agent's own `Agents/<id>/` home. This is an operator-surface rule, and this is
+ * the operator surface.
+ */
+export function renameAudienceWarning(
+  nodes: FsNode[],
+  node: FsNode,
+  nextName: string,
+): MoveAudienceWarning | null {
+  const wasSecret = isSecretNode(nodes, node.id);
+  // A nested node's first segment is its root ancestor's name, which a rename
+  // here does not touch.
+  const willBeSecret =
+    node.parentId === null ? nextName.trim().toLowerCase() === SECRETS_DIR : wasSecret;
+  if (wasSecret === willBeSecret) return null;
+
+  const folder = node.kind === "folder";
+  const what = folder ? "this folder and everything in it" : "this note";
+  const subject = folder ? "this folder" : "this note";
+  const name = titleOf(node);
+  const next = nextName.trim();
+
+  return willBeSecret
+    ? {
+        change: "hidden",
+        title: `Agents will no longer be able to read ${subject}.`,
+        body:
+          `Renaming “${name}” to “${next}” puts it at the top of ${SECRETS_DIR}/, where ` +
+          `${what} stops being visible to the company's agents — they cannot list, read, ` +
+          "search or write it.",
+        confirmLabel: "Rename into secrets",
+      }
+    : {
+        change: "exposed",
+        title: `Agents will be able to read ${subject}.`,
+        body:
+          `${SECRETS_DIR}/ is hidden from agents by its name. Renaming it to “${next}” ends ` +
+          `that: ${what} becomes part of the shared tree every agent can read and search. ` +
+          "Check it holds no credentials first.",
+        confirmLabel: "Rename out of secrets",
       };
 }
 

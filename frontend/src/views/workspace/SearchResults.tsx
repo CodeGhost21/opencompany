@@ -184,6 +184,16 @@ export function SearchResults({ query, hits, total, loading, error, onOpen }: Pr
                     segment it explains. The scan-for-glyphs affordance lives in
                     the tree, which is the surface people browse. */}
                 <span className="mt-0.5 flex items-center gap-1.5 text-2xs text-muted-foreground">
+                  {/* `truncate` is doing two jobs, and the second one is easy
+                      to mistake for missing. It carries `overflow: hidden`,
+                      which makes this flex item a scroll container — and a
+                      scroll container's automatic minimum size is 0, not its
+                      min-content width. So the path already shrinks and
+                      ellipsises rather than shouldering the badge out of a
+                      256px pane; a `min-w-0` beside it would be a no-op.
+                      Measured: with `truncate` the computed floor is `0px` and
+                      the badge overflows by 0; strip `truncate` and the floor
+                      is `auto` and it overflows. Keep them together. */}
                   <span className="truncate">
                     {hit.path}
                     {isBinary(hit) && ` · ${hit.mime} · ${formatBytes(hit.size)}`}

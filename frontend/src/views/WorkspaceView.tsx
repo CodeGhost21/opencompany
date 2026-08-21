@@ -114,6 +114,7 @@ import {
   moveAudienceWarning,
   nodeById,
   readLegacyLocalNodes,
+  renameAudienceWarning,
   SECRETS_LABEL,
   SECRETS_REASON,
   subtreeCounts,
@@ -1697,6 +1698,7 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
       </section>
 
       <NamePrompt
+        nodes={nodes}
         state={prompt}
         onClose={() => setPrompt(null)}
         onSubmit={(name) => {
@@ -2358,20 +2360,59 @@ interface PromptState {
   node?: FsNode;
 }
 
+/**
+ * Name a new node, or rename one — and stop first when the new name is what
+ * decides who can read it (issue #1465).
+ *
+ * `Move to…` was not the only control that crosses the `secrets/` boundary.
+ * The host's rule is the *first path segment*, so renaming the root `secrets/`
+ * folder rewrites that segment for everything under it; the host accepts the
+ * rename (`PATCH …/workspace/<id>` with a new `name` answers 200 — only
+ * `derived/` is guarded there), and until this it did so on one click and a
+ * toast. Same boundary, same consequence, so the same panel and the same words
+ * as {@link MoveDialog}.
+ */
 function NamePrompt({
+  nodes,
   state,
   onClose,
   onSubmit,
 }: {
+  nodes: FsNode[];
   state: PromptState | null;
   onClose: () => void;
   onSubmit: (name: string) => void;
 }) {
   const [name, setName] = useState("");
+  /** The typed name, held back until the audience warning is acknowledged. */
+  const [pending, setPending] = useState<{ name: string; warning: MoveAudienceWarning } | null>(
+    null,
+  );
 
   useEffect(() => {
     setName(state?.mode === "rename" ? (state.node?.name ?? "") : "");
+    // A second Rename must not open onto the previous one's warning.
+    setPending(null);
   }, [state]);
+
+  /**
+   * Submit, unless the name changes the audience — in which case ask first.
+   *
+   * Only a rename can: a *new* node is created empty, so naming one `secrets`
+   * hides nothing that was not already nothing.
+   */
+  function submit(next: string) {
+    if (state?.mode !== "rename" || !state.node) {
+      onSubmit(next);
+      return;
+    }
+    const warning = renameAudienceWarning(nodes, state.node, next);
+    if (!warning) {
+      onSubmit(next);
+      return;
+    }
+    setPending({ name: next, warning });
+  }
 
   const title = state?.mode === "folder" ? "New folder" : state?.mode === "file" ? "New note" : "Rename";
 
@@ -2381,30 +2422,47 @@ function NamePrompt({
         <DialogHeader>
           <DialogTitle>{title}</DialogTitle>
           <DialogDescription>
-            {state?.mode === "file" ? "Notes get a .md extension automatically." : "Give it a name."}
+            {pending
+              ? "This changes who can read it."
+              : state?.mode === "file"
+                ? "Notes get a .md extension automatically."
+                : "Give it a name."}
           </DialogDescription>
         </DialogHeader>
-        <div className="grid gap-2">
-          <Label htmlFor="fs-name">Name</Label>
-          <Input
-            id="fs-name"
-            autoFocus
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && name.trim()) onSubmit(name);
-            }}
-            placeholder={state?.mode === "folder" ? "e.g. Campaigns" : "e.g. Notes"}
+        {pending ? (
+          <MoveAudienceConfirm
+            warning={pending.warning}
+            // Back to the field rather than out of the dialog: the operator who
+            // reads the warning and changes their mind wanted a different name,
+            // not to abandon the rename.
+            onCancel={() => setPending(null)}
+            onConfirm={() => onSubmit(pending.name)}
           />
-        </div>
-        <DialogFooter>
-          <Button variant="ghost" onClick={onClose}>
-            Cancel
-          </Button>
-          <Button disabled={!name.trim()} onClick={() => onSubmit(name)}>
-            {state?.mode === "rename" ? "Rename" : "Create"}
-          </Button>
-        </DialogFooter>
+        ) : (
+          <>
+            <div className="grid gap-2">
+              <Label htmlFor="fs-name">Name</Label>
+              <Input
+                id="fs-name"
+                autoFocus
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && name.trim()) submit(name);
+                }}
+                placeholder={state?.mode === "folder" ? "e.g. Campaigns" : "e.g. Notes"}
+              />
+            </div>
+            <DialogFooter>
+              <Button variant="ghost" onClick={onClose}>
+                Cancel
+              </Button>
+              <Button disabled={!name.trim()} onClick={() => submit(name)}>
+                {state?.mode === "rename" ? "Rename" : "Create"}
+              </Button>
+            </DialogFooter>
+          </>
+        )}
       </DialogContent>
     </Dialog>
   );
