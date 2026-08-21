@@ -426,7 +426,10 @@ mod tests {
         // The cut is on a character boundary for multi-byte text.
         let many = "é".repeat(PROMPT_FILE_BUDGET_CHARS + 100);
         let capped = cap_persona_instructions(&many);
-        assert_eq!(capped.chars().filter(|&c| c != '\n').count() >= PROMPT_FILE_BUDGET_CHARS, true);
+        assert!(
+            capped.starts_with(&"é".repeat(PROMPT_FILE_BUDGET_CHARS)),
+            "multi-byte text is cut whole, never panicking: {capped:?}"
+        );
     }
 
     #[test]
