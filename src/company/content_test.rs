@@ -693,12 +693,16 @@ fn every_seeded_output_destination_resolves_against_its_own_manifest() {
         }
     }
 
+    // 22 since #1361 added `e2e_harness/long_pipeline.toml`, a ten-node fixture
+    // whose only job is to be too long for the canvas to fit legibly. It is a
+    // seeded workflow like any other, so its output node is held to the same
+    // destination rule as the twenty #963 enumerated.
     assert_eq!(
-        checked, 21,
-        "the seeded output-node count changed; this test and #963's list describe 21"
+        checked, 22,
+        "the seeded output-node count changed; this test and #963's list describe 22"
     );
     assert_eq!(
-        with_destination, 20,
+        with_destination, 21,
         "every seeded output except the research lab's deliberate deskless workflow \
          carries a destination"
     );

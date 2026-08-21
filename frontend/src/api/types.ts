@@ -1302,6 +1302,34 @@ export interface CapabilityStatusDto {
    */
   repoGranted?: boolean;
   /**
+   * Publishing (issue #244, panel half #1192): whether the company's grants
+   * confer `publish_artifact` — the only way a file an agent wrote becomes a
+   * deliverable.
+   *
+   * **Unlike every other `*Granted` flag here, a bare `*` DOES confer this.**
+   * Publishing spends nothing and reaches nothing outside the company's own
+   * board, so it rides the ordinary namespace rule rather than the
+   * opt-in-by-name rule the real-money surfaces use. The host derives it from
+   * the same predicate the toolbelt's own gate calls, so the panel cannot
+   * report a capability no agent has.
+   *
+   * `undefined` is an older host that does not send the field, and must not be
+   * rendered as "not granted".
+   */
+  publishGranted?: boolean;
+  /**
+   * Whether the harness carrying `publish_artifact` is compiled into this
+   * build. There is no `publish` Cargo feature — the tool rides the harness
+   * feature, exactly as `searchInBuild` does.
+   *
+   * There is deliberately no third flag beside these two. Media, Composio and
+   * search each carry a credential/config rung because each can be granted and
+   * still wire nothing; publishing has neither a credential nor a store toggle,
+   * so a `artifactStoreConfigured` field could only ever be a hardcoded `true`
+   * — the always-reassuring flag issue #886 was filed about.
+   */
+  publishInBuild?: boolean;
+  /**
    * Whether the agent-side MCP bridge is compiled into this build (issue #567).
    * Not a grant question like the flags above: the `/mcp/servers` management
    * routes ship in every build, so without this an operator can add a server,

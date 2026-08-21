@@ -185,6 +185,53 @@ test("#1141 a card carries the description, the status and the open count", asyn
   await expect(priya.getByTestId("team-card-tasks")).toHaveText("0 open tasks");
 });
 
+test("the status line sits on one baseline across a row, whatever the description", async ({
+  page,
+}) => {
+  await mockApi(page);
+  await page.goto("/#/company");
+  await expect(card(page, "Maya")).toBeVisible({ timeout: 30_000 });
+
+  // The precondition. This proves nothing unless the descriptions really do
+  // wrap to different heights: Maya's sentence takes two lines at a card's
+  // width, Ravi's takes one. If a future fixture flattens them, this fails
+  // here rather than passing vacuously below.
+  const tall = await card(page, "Maya").getByTestId("team-card-description").boundingBox();
+  const short = await card(page, "Ravi").getByTestId("team-card-description").boundingBox();
+  expect(tall!.height).toBeGreaterThan(short!.height);
+
+  // Same grid row, so the cards are the same height — and the one line an
+  // operator scans a roster *for* has to land in the same place on each. It
+  // used to follow the description, which put "Working · 2 open tasks" a line
+  // higher or lower than its neighbour in every row, with dead space below
+  // each card.
+  const ys = await Promise.all(
+    ["Maya", "Ravi", "Priya"].map(async (name) => {
+      const box = await card(page, name).getByTestId("team-card-status").boundingBox();
+      return Math.round(box!.y);
+    }),
+  );
+  expect(ys[1]).toBe(ys[0]);
+  expect(ys[2]).toBe(ys[0]);
+
+  // And it is the *bottom* they share, not an accident of equal content: the
+  // gap under the status line is the card's own padding on every card.
+  const gaps = await Promise.all(
+    ["Maya", "Ravi", "Priya"].map(async (name) => {
+      const c = await card(page, name).boundingBox();
+      const status = await card(page, name).getByTestId("team-card-status").boundingBox();
+      return Math.round(c!.y + c!.height - (status!.y + status!.height));
+    }),
+  );
+  expect(gaps[1]).toBe(gaps[0]);
+  expect(gaps[2]).toBe(gaps[0]);
+  // Padding, not a void. Measured at 32px against a live host — `CardContent`'s
+  // own `py-4` plus the card's. Bounded generously because the exact figure is
+  // the design system's to change; what this test is about is that the three
+  // agree, which they did not before.
+  expect(gaps[0]).toBeLessThan(48);
+});
+
 test("#1193 the chart is a destination with its own address, not a mode", async ({ page }) => {
   await mockApi(page);
   await page.goto("/#/company");

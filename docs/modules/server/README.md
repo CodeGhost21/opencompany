@@ -281,6 +281,11 @@ undelivered report is its own reading rather than a failure, and why it is
 derived on the read rather than journaled (issue #981) — has its own focused
 page: [run-verdict.md](run-verdict.md).
 
+How the run history is **paged** — why the page is cut by `seq` but displayed
+by `(atMillis, seq)`, why the cursor is server-issued rather than derived from
+the last row, and what a console must do when an older host omits it
+(issue #1012) — likewise: [run-history-paging.md](run-history-paging.md).
+
 ### Pausing a workflow, and the disarm rule (issue #276)
 
 The pause switch, what it does **not** stop, why it lives in
