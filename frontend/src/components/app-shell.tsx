@@ -71,7 +71,7 @@ import {
 import { CONNECTION_PROVIDERS } from "@/lib/connections";
 import { defaultDesks, type Desk } from "@/lib/desks";
 import { mergeReadFloors, unreadCount } from "@/lib/unread";
-import { approvedLine } from "@/lib/approval-wording";
+import { approvedLine, staleDecisionLine } from "@/lib/approval-wording";
 import { writeLastChannel } from "@/lib/last-channel";
 import { fromDto, type TeamMember } from "@/lib/team";
 import { agentDmThreads, defaultThreads, threadsFromDesks } from "@/lib/threads";
@@ -1649,6 +1649,33 @@ export function AppShell({
         detach: true,
         scope,
       });
+      // Issue #1449: the same read the Approvals page makes, for the same
+      // reason. This card detaches, so it gets a `ResolveReceipt` — which, until
+      // #1449, had no shape at all for "the host default-denied this because the
+      // deadline had passed". A card sitting in a transcript is exactly where a
+      // request goes stale unnoticed, so this is the surface it happens on most.
+      const stale = staleDecisionLine(answer.outcome);
+      if (stale) {
+        // The witnessed verdict is deliberately NOT the one that was clicked.
+        // `decidedApprovals` feeds the transcript's permanent receipt, and
+        // first write wins — so recording the request here would pin
+        // "Approved — recorded" onto the card forever, which is the same false
+        // claim as the toast, in the one place that never scrolls away.
+        //
+        // An `expired` card may be witnessed, and as a **deny**: the host has
+        // just said it default-denied it, so that is a fact, not a guess. An
+        // `already_resolved` one may not — the host cannot tell which way it
+        // went, so nothing is written and the `approval_resolved` frame (or the
+        // refresh in `finally`) settles the card with the truth.
+        if (answer.outcome === "expired") {
+          setDecidedApprovals((prev) =>
+            prev[approval.id] ? prev : { ...prev, [approval.id]: { verdict: "deny", approval } },
+          );
+        }
+        toast.info(stale);
+        noteInChannel(approval.thread, stale);
+        return;
+      }
       setDecidedApprovals((prev) => ({ ...prev, [approval.id]: { verdict, approval } }));
       toast.success(
         verdict === "approve"
