@@ -478,7 +478,7 @@ mod tests {
         claim_folder(
             ws.as_ref(),
             &company,
-            "Archive",
+            "archive",
             None,
             WorkspaceOrigin::Operator,
         )
