@@ -36,9 +36,24 @@ const DISPOSITION_COPY: Record<FailureDisposition, string> = {
 export function RunFailurePanel({
   failure,
   onClose,
+  onOpenHistory,
+  onFixWithCopilot,
+  fixing,
+  failedStepName,
+  onShowFailedStep,
 }: {
   failure: RunFailure;
   onClose: () => void;
+  /** Opens the durable record when the host supports history. */
+  onOpenHistory?: () => void;
+  /** Reuses the history row's copilot correction for this exact failed run. */
+  onFixWithCopilot?: () => void;
+  /** Keeps this panel's button consistent with the history row while fixing. */
+  fixing?: boolean;
+  /** The graph-authored name of the failed step, when the matching row arrived. */
+  failedStepName?: string | null;
+  /** Opens the failed run on canvas and selects the step that failed. */
+  onShowFailedStep?: () => void;
 }) {
   // How long the operator waited before this came back. The number a failure
   // most needs beside it: a run that died in 200ms was refused, and one that
@@ -118,6 +133,44 @@ export function RunFailurePanel({
         >
           {DISPOSITION_COPY[disposition]}
         </p>
+        {(onOpenHistory || onFixWithCopilot || onShowFailedStep) && (
+          <div className="mt-2 flex flex-wrap gap-2">
+            {onOpenHistory && (
+              <Button
+                size="sm"
+                variant="outline"
+                className="h-6 px-2 text-3xs"
+                onClick={onOpenHistory}
+                data-testid="workflow-run-failure-open-history"
+              >
+                Open Run history
+              </Button>
+            )}
+            {onShowFailedStep && failedStepName && (
+              <Button
+                size="sm"
+                variant="outline"
+                className="h-6 px-2 text-3xs"
+                onClick={onShowFailedStep}
+                data-testid="workflow-run-failure-show-step"
+              >
+                Show “{failedStepName}”
+              </Button>
+            )}
+            {onFixWithCopilot && (
+              <Button
+                size="sm"
+                variant="outline"
+                className="h-6 px-2 text-3xs"
+                disabled={fixing}
+                onClick={onFixWithCopilot}
+                data-testid="workflow-run-failure-fix-with-copilot"
+              >
+                {fixing ? "Fixing…" : "Fix with copilot"}
+              </Button>
+            )}
+          </div>
+        )}
       </div>
     </aside>
   );

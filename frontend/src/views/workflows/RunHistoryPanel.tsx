@@ -5,7 +5,7 @@
 // further out again, to `run-health.ts`, because the workflow cards need the
 // same reading — see that file's header.
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState, type RefObject } from "react";
 
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -218,6 +218,13 @@ export function RunHistoryPanel({
   // button (not just the in-flight one's) while `fixingRunSeq` is set turns
   // that race into "wait your turn".
   const anyFixInFlight = fixingRunSeq != null;
+  const selectedRowRef = useRef<HTMLDivElement>(null);
+  // The failure panel can select a row on behalf of an operator who never
+  // opened History themselves. Keep the selected failure in view without
+  // changing their scroll position when it is already visible.
+  useEffect(() => {
+    selectedRowRef.current?.scrollIntoView?.({ block: "nearest" });
+  }, [selectedRunSeq]);
   // Issue #1007: a clock, ticking only while a row is actually in flight. The
   // elapsed time on a running row is the console's acknowledgement that the
   // click did something, and it is only true if it moves.
@@ -276,6 +283,7 @@ export function RunHistoryPanel({
                 graph={graph}
                 now={now}
                 selected={run.seq === selectedRunSeq}
+                selectedRowRef={run.seq === selectedRunSeq ? selectedRowRef : undefined}
                 onSelect={() => onSelectRun(run)}
                 onFixWithCopilot={onFixWithCopilot}
                 fixing={fixingRunSeq === run.seq}
@@ -315,6 +323,7 @@ function RunHistoryRow({
   graph,
   now,
   selected,
+  selectedRowRef,
   onSelect,
   onFixWithCopilot,
   fixing,
@@ -327,6 +336,7 @@ function RunHistoryRow({
   /** The clock a still-running row counts against (issue #1007). */
   now: number;
   selected: boolean;
+  selectedRowRef?: RefObject<HTMLDivElement>;
   onSelect: () => void;
   /** Correct this run's workflow with the copilot (issue #840, PR-3). */
   onFixWithCopilot?: (run: WorkflowRunOutcome) => void;
@@ -370,6 +380,7 @@ function RunHistoryRow({
   const duration = runDuration(run, now);
   return (
     <div
+      ref={selectedRowRef}
       className={`rounded-lg border bg-background/40 p-2 ${
         selected ? "ring-2 ring-primary/40" : ""
       }`}

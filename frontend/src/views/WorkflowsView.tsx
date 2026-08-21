@@ -91,11 +91,13 @@ import { workflowSavedToast } from "@/lib/workflow-saved-toast";
 // a copilot. See `workflows/graph.ts` for why the fold is pure.
 import {
   elapsedFromRun,
+  failedNodeOf,
   failureLocation,
   foldLiveRun,
   initialRunState,
   layout,
   LEGIBLE_FIT_ZOOM,
+  nodeName,
   statesFromRun,
   windowHasRunStart,
 } from "@/views/workflows/graph";
@@ -1366,6 +1368,8 @@ export function WorkflowsView({
             atMillis: Date.now(),
             request: asked,
             dryRun,
+            runId: ownRunIdRef.current ?? undefined,
+            sawRunStart: sawOwnRunStartRef.current,
           }),
         );
         // A run that failed is journaled too (#228), and is the outcome most
@@ -2183,6 +2187,18 @@ export function WorkflowsView({
     ];
   }, [runs, pendingRun, starting, activeRunId, selectedId]);
 
+  // The failure panel can only promise a node or copilot repair once the
+  // journal has returned the matching durable run. Until then it can still
+  // open History, but never guesses at a row based on time or position.
+  const failureRun = useMemo(
+    () =>
+      runFailure?.runId
+        ? runs.find((run) => run.runId === runFailure.runId) ?? null
+        : null,
+    [runFailure, runs],
+  );
+  const failureNode = failureRun ? failedNodeOf(failureRun) : null;
+
   // `runs` already holds only the selected workflow's runs, newest first — the
   // host filters and orders them. Re-filtering here would be a second source of
   // truth that can only ever disagree with the first.
@@ -2873,6 +2889,28 @@ export function WorkflowsView({
               <RunFailurePanel
                 failure={runFailure}
                 onClose={() => setRunFailure(null)}
+                onOpenHistory={
+                  historySupported
+                    ? () => {
+                        setHistoryOpen(true);
+                        if (failureRun) setOverlayRun(failureRun);
+                      }
+                    : undefined
+                }
+                onFixWithCopilot={
+                  failureRun ? () => void handleFixWithCopilot(failureRun) : undefined
+                }
+                fixing={failureRun ? fixingRunSeq === failureRun.seq : false}
+                failedStepName={failureNode ? nodeName(graph, failureNode) : null}
+                onShowFailedStep={
+                  failureRun && failureNode
+                    ? () => {
+                        setHistoryOpen(true);
+                        setOverlayRun(failureRun);
+                        setSelectedNodeId(failureNode);
+                      }
+                    : undefined
+                }
               />
             ) : null
           }
