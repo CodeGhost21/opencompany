@@ -23,6 +23,9 @@ use std::sync::Mutex as StdMutex;
 use async_trait::async_trait;
 
 use crate::Result;
+use crate::feedback::board::{
+    BoardComment, BoardDetail, BoardItem, BoardPage, BoardQuery, VoteValue,
+};
 use crate::feedback::types::FeedbackCategory;
 
 /// The product discriminator the hub routes on. Feedback from this runtime is
@@ -97,11 +100,26 @@ pub enum IngestOutcome {
     },
 }
 
-/// The TinyHumans backend, scoped to feedback ingestion.
+/// The TinyHumans backend, scoped to feedback: ingestion plus the shared board.
+///
+/// The board half is a straight proxy — this runtime holds no board state, it
+/// only lends the console its credential (see [`crate::feedback::board`]).
 #[async_trait]
 pub trait TinyHumansClient: Send + Sync {
     /// Forwards one report to the hub, recorded as the credential's owner.
     async fn ingest(&self, request: &IngestRequest) -> Result<IngestOutcome>;
+
+    /// One page of the shared board, ordered and filtered per `query`.
+    async fn list_board(&self, query: BoardQuery) -> Result<BoardPage>;
+
+    /// One board item with its comments.
+    async fn board_item(&self, id: &str) -> Result<BoardDetail>;
+
+    /// Casts (or retracts) this credential's vote, returning the updated item.
+    async fn vote_board_item(&self, id: &str, value: VoteValue) -> Result<BoardItem>;
+
+    /// Adds a comment, returning the stored comment.
+    async fn comment_board_item(&self, id: &str, body: &str) -> Result<BoardComment>;
 }
 
 /// An in-memory [`TinyHumansClient`] for offline tests.
