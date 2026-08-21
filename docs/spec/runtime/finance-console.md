@@ -321,8 +321,8 @@ the surface.
 
 What was actually written, against the plan above:
 
-- Host: `src/server/ops/finance.rs`'s own module, 8 tests in the default lane and
-  10 with both features. The `501` case is asserted by a test compiled **only**
+- Host: `src/server/ops/finance.rs`'s own module, 7 tests in the default lane and
+  8 with both features. The `501` case is asserted by a test compiled **only**
   on a build with neither feature, which is the only place that arm exists.
 - Console: `finance-money.test.ts` (18), `finance-health.test.ts` (9),
   `finance-invoicing.test.ts` (6), `finance-company-switch.test.ts` (3).
