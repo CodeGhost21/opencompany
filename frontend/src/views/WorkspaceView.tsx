@@ -2072,6 +2072,34 @@ function TreeRow({ node, ...props }: TreeProps & { node: FsNode }) {
   // level below `Agents/`.
   const isRosterFolder = isFolder && isAgentsFolder(nodeById(nodes, node.parentId));
   const displayName = isRosterFolder ? rosterDisplayName(node.name, rosterNames) : node.name;
+  /** What this row is actually called on screen. */
+  const label = isFolder ? displayName : titleOf(node);
+  /**
+   * Whether the name is being cut off (issue #1459).
+   *
+   * A row is `truncate` inside a fixed 256px pane, indented 12px per level, so
+   * by depth 5 there are about 22 characters of room — and the seeded tree
+   * ellipsises six rows out of the box. There was no tooltip, no wrap, no row
+   * scroll and no resize handle: the only way to read a name was to open a row
+   * you could not identify.
+   *
+   * Measured rather than guessed, so the ordinary short name gets no hover
+   * chrome at all. `title` below is the unconditional fallback — it costs
+   * nothing, works on touch and for assistive tech, and means the fix does not
+   * depend on this measurement having run.
+   */
+  const nameRef = useRef<HTMLSpanElement | null>(null);
+  const [clipped, setClipped] = useState(false);
+  useEffect(() => {
+    const el = nameRef.current;
+    if (!el) return;
+    const measure = () => setClipped(el.scrollWidth > el.clientWidth);
+    measure();
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(measure);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [label]);
   /**
    * Whether this row is the `derived/` folder or something inside it (#1377).
    *
@@ -2141,9 +2169,27 @@ function TreeRow({ node, ...props }: TreeProps & { node: FsNode }) {
           ) : (
             <FileText className="ml-3.5 size-4 shrink-0 text-muted-foreground" />
           )}
-          <span className="truncate" title={isRosterFolder ? node.name : undefined}>
-            {isFolder ? displayName : titleOf(node)}
-          </span>
+          {/* The roster case keeps showing the raw id on `title`, which is
+              how #973 left the folder's real name reachable; every other row
+              now carries its own full name there instead of `undefined`. */}
+          <Tooltip open={clipped ? undefined : false}>
+            <TooltipTrigger
+              render={
+                <span
+                  ref={nameRef}
+                  className="truncate"
+                  title={isRosterFolder ? node.name : label}
+                  data-testid="workspace-tree-name"
+                />
+              }
+            >
+              {label}
+            </TooltipTrigger>
+            <TooltipContent>
+              {label}
+              {isRosterFolder && <span className="block text-3xs opacity-70">{node.name}</span>}
+            </TooltipContent>
+          </Tooltip>
           {/* The glyph is the whole of the tree-side signal: an icon, not a
               badge, because a row in a 256px pane has no width for a phrase and
               the name is the thing being scanned. The label rides along for a
