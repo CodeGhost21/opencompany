@@ -176,7 +176,12 @@ export function HostSwitcher({ variant = "sidebar", companyName }: Props) {
       <span
         data-testid="host-switcher-status"
         className={cn(
-          "absolute -right-0.5 -bottom-0.5 size-2.5 rounded-full ring-2 ring-sidebar",
+          "absolute -right-0.5 -bottom-0.5 size-2.5 rounded-full ring-2",
+          // The ring is a CUT-OUT of the ground, and the two variants stand on
+          // different grounds (issue #1178). In the shell the trigger has no
+          // fill at rest, so half this ring lands on the window chrome; the
+          // standalone console draws its own `bg-sidebar` card behind it.
+          variant === "sidebar" ? "ring-chrome" : "ring-sidebar",
           STATUS_COPY[worst].dot,
         )}
       />

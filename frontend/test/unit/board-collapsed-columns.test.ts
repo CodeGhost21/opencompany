@@ -5,7 +5,13 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import type { TaskColumn } from "@/lib/board-columns";
-import { LedgerBoard } from "@/views/LedgerBoard";
+import {
+  BOARD_GAP,
+  COLUMN_PX,
+  COLUMN_WIDTH,
+  GUTTER_PX,
+  LedgerBoard,
+} from "@/views/LedgerBoard";
 
 /**
  * Issue #1101 — a board whose work is all in later columns reads as empty.
@@ -46,9 +52,35 @@ interface Row {
 /** The board as the issue found it: everything parked in the later columns. */
 function laterColumnsOnly(): Row[] {
   return [
-    ...Array.from({ length: 47 }, (_, n) => ({ id: `p${n}`, status: "paused" })),
-    ...Array.from({ length: 54 }, (_, n) => ({ id: `r${n}`, status: "in_review" })),
+    ...Array.from({ length: 47 }, (_, n) => ({
+      id: `p${n}`,
+      status: "paused",
+    })),
+    ...Array.from({ length: 54 }, (_, n) => ({
+      id: `r${n}`,
+      status: "in_review",
+    })),
   ];
+}
+
+/**
+ * Pins what the board's viewport measures, for the width half of the rule.
+ *
+ * jsdom lays nothing out, so every element reports `clientWidth: 0` — which the
+ * board reads as *nothing is known to fit*, the conservative answer, and is why
+ * every case below that does not touch this still exercises the collapse path
+ * exactly as it did before the width gate existed.
+ */
+function widenViewportTo(px: number) {
+  Object.defineProperty(HTMLElement.prototype, "clientWidth", {
+    configurable: true,
+    get: () => px,
+  });
+}
+
+function restoreViewport() {
+  delete (HTMLElement.prototype as unknown as Record<string, unknown>)
+    .clientWidth;
 }
 
 let container: HTMLDivElement;
@@ -69,7 +101,8 @@ async function render(rows: Row[], extra: { columnHeader?: boolean } = {}) {
         },
         onMiss: () => {},
         columnHeader: extra.columnHeader
-          ? (column) => (column.id === "todo" ? createElement("button", null, "+") : null)
+          ? (column) =>
+              column.id === "todo" ? createElement("button", null, "+") : null
           : undefined,
       }),
     );
@@ -93,15 +126,17 @@ async function fire(target: Element, type: string) {
 
 /** Picks a card up, so the board's `dragId` fallback holds it like a real drag. */
 async function pickUp(id: string) {
-  const card = Array.from(container.querySelectorAll<HTMLElement>("[draggable=true]")).find(
-    (held) => held.textContent === id,
-  );
+  const card = Array.from(
+    container.querySelectorAll<HTMLElement>("[draggable=true]"),
+  ).find((held) => held.textContent === id);
   if (!card) throw new Error(`no card ${id} to pick up`);
   await fire(card, "dragstart");
 }
 
 beforeEach(() => {
-  (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+  (
+    globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }
+  ).IS_REACT_ACT_ENVIRONMENT = true;
   container = document.createElement("div");
   document.body.appendChild(container);
   root = createRoot(container);
@@ -110,6 +145,44 @@ beforeEach(() => {
 afterEach(async () => {
   await act(async () => root.unmount());
   container.remove();
+  restoreViewport();
+});
+
+/**
+ * The width half of the rule (the audit's finding on #1101).
+ *
+ * #1101's premise is a claim about *width* — "the 101 cards you came for are
+ * two columns off the right edge" — but the guard shipped as "some other column
+ * has cards", which is a claim about content. A three-stage list holding one
+ * row satisfied the second and not the first, and rendered as two rails of
+ * rotated text beside eight hundred pixels of empty page.
+ */
+describe("a board with room for every column", () => {
+  it("collapses nothing, however the work is distributed", async () => {
+    // Six columns at the reference geometry, and then some.
+    widenViewportTo(COLUMNS.length * (COLUMN_PX + GUTTER_PX) + 200);
+    await render(laterColumnsOnly());
+
+    for (const held of COLUMNS) expect(isCollapsed(held.id)).toBe(false);
+  });
+
+  it("still collapses once one column too many is declared", async () => {
+    // A viewport that fits five of the six. The board has somewhere off the
+    // right edge to rescue again, so the rails earn their cost.
+    widenViewportTo(5 * (COLUMN_PX + GUTTER_PX));
+    await render(laterColumnsOnly());
+
+    expect(isCollapsed("todo")).toBe(true);
+    expect(isCollapsed("paused")).toBe(false);
+  });
+
+  it("keeps the measured geometry and the painted geometry in step", () => {
+    // `fits` does arithmetic in pixels; the columns are laid out by Tailwind
+    // spacing classes. Nothing else would notice the two drifting apart —
+    // the board would simply start collapsing at the wrong width.
+    expect(COLUMN_WIDTH).toBe(`w-${COLUMN_PX / 4}`);
+    expect(BOARD_GAP).toBe(`gap-${GUTTER_PX / 4}`);
+  });
 });
 
 describe("a board whose work has moved to the later columns", () => {
@@ -222,6 +295,8 @@ describe("pinning a collapsed column open", () => {
   it("offers no fold control on a column that holds work", async () => {
     await render(laterColumnsOnly());
 
-    expect(column("paused").querySelector('button[aria-label="Collapse Paused"]')).toBeNull();
+    expect(
+      column("paused").querySelector('button[aria-label="Collapse Paused"]'),
+    ).toBeNull();
   });
 });

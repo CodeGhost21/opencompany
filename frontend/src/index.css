@@ -96,6 +96,30 @@
     --surface-dark-active: oklch(0.2396 0.019 284.87); /* #1E1E28 */
 
     /*
+     * Window chrome — the surface the whole console is mounted on.
+     *
+     * Deliberately NOT a rung of the ladder above. Those six are *content*
+     * surfaces: the canvas a page is drawn on and the panels that stack over
+     * it. This one sits behind all of them — it is the frame the sidebar
+     * stands on and the margin the content card floats in (issue #1178), and
+     * the ladder has no rung for "further back than the canvas".
+     *
+     * Light needs a value the ladder does not carry. It has to be darker than
+     * the canvas (#F7F7FC) by enough to read as a separate layer, and light
+     * enough that `--ink-light-muted` still clears 4.5:1 on it, since the
+     * sidebar's faintest labels sit here. Rung 2 (#F1F1F8) separates less than
+     * today's white sidebar does; rung 3 (#E8E8F2) drops muted ink to 4.44:1.
+     * #EBEBF4 is between them: 1.11:1 against the card, 4.57:1 for muted ink.
+     *
+     * Dark takes rung 2 as-is and inverts the direction — the canvas is
+     * already the darkest value in the theme, so "further back" cannot mean
+     * darker there. #030405 against #08090B measures 1.03:1, which is not a
+     * layer, it is a rendering artefact. Stepping *up* to #121315 gives
+     * 1.07:1, and the card's hairline and inset highlight carry the rest.
+     */
+    --surface-light-chrome: oklch(0.9427 0.012 286.17); /* #EBEBF4 */
+
+    /*
      * Ink — the five text levels, stated per theme.
      *
      * `primary` and the light `secondary` are the guide's values. The rest are
@@ -212,6 +236,14 @@
 
     --border: var(--surface-light-4);
     --input: var(--surface-light-4);
+
+    /* The window chrome, and the hairline where the content card meets it.
+       One value, painted exactly once — on the shell root — so the sidebar
+       column and the frame around the card are the same continuous surface.
+       Tinting them separately is what puts the seam back. See
+       `components/content-surface.tsx`. */
+    --chrome: var(--surface-light-chrome);
+    --chrome-border: var(--surface-light-4);
     /* Focus is branded. It is the most-seen interactive signal in the app
        and it was grey. */
     --ring: var(--brand-500);
@@ -300,7 +332,12 @@
     --sidebar-foreground: var(--ink-light-primary);
     --sidebar-primary: var(--brand-500);
     --sidebar-primary-foreground: var(--surface-light-1);
-    --sidebar-accent: var(--surface-light-active);
+    /* Brand 100, not the `active` rung. The rung was tuned to read on a white
+       sidebar; the column sits on `--chrome` now (#EBEBF4), and #ECE9FC
+       against that measures 1.02:1 — the selected row simply vanished. Brand
+       100 is the same tint one step deeper: 1.10:1 on the chrome, and
+       `--sidebar-accent-foreground` still measures 6.29:1 on it. */
+    --sidebar-accent: var(--brand-100);
     /* The one place brand ink is spent: the nav row you are standing on. */
     --sidebar-accent-foreground: var(--brand-700);
     --sidebar-border: var(--surface-light-4);
@@ -328,6 +365,22 @@
     /* A brand-tinted glow for the focused/selected state on a raised
        surface. Not a substitute for the focus ring — an addition to it. */
     --shadow-brand: 0 2px 8px -2px color-mix(in oklab, var(--brand-500) 32%, transparent);
+
+    /* A soft brand glow bleeding from a card's lower-left corner, for the
+       standing invitations on an otherwise empty surface — the "create a
+       teammate" / "add people" pair on a channel with no transcript.
+
+       A token rather than a gradient written at the call site because a glow
+       is a *colour*, and a colour that cannot theme is wrong in one of the two
+       modes: the value below is barely there against a light canvas, and the
+       `.dark` counterpart has to work several times harder to lift a card off
+       near-black. One utility, two tunings, no call site that has to know
+       which mode it is in. */
+    --glow-brand-card: radial-gradient(
+        120% 108% at 14% 112%,
+        color-mix(in oklab, var(--brand-500) 13%, transparent) 0%,
+        transparent 62%
+    );
 
     /*
      * Third-party brand colours.
@@ -400,6 +453,13 @@
     --input: var(--surface-dark-active);
     --ring: var(--brand-400);
 
+    /* Rung 2, one step *up* from the canvas — see `--surface-light-chrome`
+       for why the direction inverts here. The hairline takes the active rung
+       rather than rung 4: rung 4 is only 1.04:1 against this ground, and a
+       card edge nobody can see is the seam problem in reverse. */
+    --chrome: var(--surface-dark-2);
+    --chrome-border: var(--surface-dark-active);
+
     --status-idle: var(--ink-dark-muted);
     --status-idle-text: var(--ink-dark-muted);
     --status-idle-soft: oklch(1 0 0 / 6%);
@@ -463,6 +523,13 @@
     --shadow-xl: 0 8px 16px -8px hsl(var(--shadow-color) / 0.55),
         0 24px 56px -12px hsl(var(--shadow-color) / 0.6), inset 0 1px 0 0 oklch(1 0 0 / 7%);
     --shadow-brand: 0 2px 12px -2px color-mix(in oklab, var(--brand-400) 40%, transparent);
+    /* The light value is invisible here — `--brand-400` at roughly twice the
+       mix is what actually separates the card from the canvas. See `:root`. */
+    --glow-brand-card: radial-gradient(
+        120% 108% at 14% 112%,
+        color-mix(in oklab, var(--brand-400) 22%, transparent) 0%,
+        transparent 62%
+    );
 }
 
 /* ============================================================================
@@ -503,6 +570,8 @@
     --color-border: var(--border);
     --color-input: var(--input);
     --color-ring: var(--ring);
+    --color-chrome: var(--chrome);
+    --color-chrome-border: var(--chrome-border);
     --color-surface-icon: var(--surface-icon);
 
     /* The five-level text hierarchy, as `text-ink-*`. Named `ink` rather than
@@ -580,6 +649,11 @@
     --shadow-xl: var(--shadow-xl);
     --shadow-brand: var(--shadow-brand);
 
+    /* `--background-image-*` is the namespace that generates a `bg-*` utility
+       for a gradient, the way `--color-*` does for a flat fill. Gives
+       `bg-glow-brand-card`. */
+    --background-image-glow-brand-card: var(--glow-brand-card);
+
     --radius-sm: calc(var(--radius) * 0.6);
     --radius-md: calc(var(--radius) * 0.8);
     --radius-lg: var(--radius);
@@ -644,6 +718,23 @@
  * large enough that a fast move would read as a jump — a sheet, a dialog,
  * the sidebar collapsing.
  */
+/* ============================================================================
+ * The app frame — how far the content card is inset from the window chrome
+ * (issue #1178).
+ *
+ * One quantity, spent on all four sides by `ContentSurface`, so the frame is
+ * even by construction rather than by four numbers that happen to agree.
+ *
+ * It was briefly a special case on top, aligned to the sidebar's header block
+ * and measured at runtime to stay aligned. That is gone, along with the
+ * measurement that fed it: an even frame is what this needs, and a mechanism
+ * kept for a rule that no longer exists is a thing that rots.
+ * ========================================================================== */
+
+:root {
+    --frame-inset: 0.75rem;
+}
+
 :root {
     --duration-fast: 120ms;
     --duration-base: 180ms;

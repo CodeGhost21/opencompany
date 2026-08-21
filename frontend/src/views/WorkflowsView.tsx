@@ -419,6 +419,27 @@ export function WorkflowsView({
   // newest-page fetch has not yet learned this), and updated by both that
   // effect and `loadOlderRuns` from each fetch's own `hasMore`.
   const [runsHasMore, setRunsHasMore] = useState(false);
+  // Issue #1012 follow-up: the cursor the HOST issued for the page behind the
+  // rows currently held. Not derivable here any more — the host cuts a page by
+  // `seq` and displays it by `(atMillis, seq)`, so the boundary is the page's
+  // lowest `seq` rather than its last row, and a clock regression makes those
+  // two different runs. `undefined` means either "no older page" (`hasMore`
+  // says which) or "host predates the field", which `loadOlderRuns` handles by
+  // falling back to the old derivation rather than by stopping.
+  const [runsNextBeforeSeq, setRunsNextBeforeSeq] = useState<number | undefined>(undefined);
+  // The rows currently held, readable from `loadOlderRuns` without listing
+  // `runs` as one of its dependencies — which would rebuild the callback on
+  // every history refresh and, worse, capture a generation that has already
+  // moved. Only the pre-#1012-host fallback reads it.
+  const runsRef = useRef<WorkflowRunOutcome[]>(runs);
+  runsRef.current = runs;
+  // Which "generation" of the history list is on screen. Bumped at every ENTRY
+  // of the first-page effect below, which replaces `runs` wholesale on all of
+  // its paths — so an older page fetched against the previous list can tell it
+  // is answering a question nobody is asking any more. Identity fields
+  // (company, workflow) cannot see this case: a refresh within one company
+  // changes neither.
+  const historyGenRef = useRef(0);
   // A "Load older" fetch in flight, so the drawer can disable the control and
   // avoid a second click racing the first for the same older page.
   const [loadingOlderRuns, setLoadingOlderRuns] = useState(false);
@@ -1000,16 +1021,22 @@ export function WorkflowsView({
     // no history to ask for, and asking unfiltered is the bug described above.
     // `historySupported` is deliberately left alone — nothing was learned about
     // whether the host serves this route.
+    // Issue #1012 follow-up: bumped at ENTRY, before the early return, because
+    // every path out of this effect replaces the list — including this one.
+    // Any "Load older" response still in flight is now answering a superseded
+    // list and must be dropped rather than appended.
+    historyGenRef.current += 1;
     if (!selectedId) {
       setRuns([]);
       setRunsHasMore(false);
+      setRunsNextBeforeSeq(undefined);
       setRunsFor(null);
       return;
     }
     let live = true;
     (async () => {
       try {
-        const { runs: rows, hasMore } = await listWorkflowRuns(client, company, {
+        const { runs: rows, hasMore, nextBeforeSeq } = await listWorkflowRuns(client, company, {
           workflow: selectedId,
           limit: 50,
         });
@@ -1021,6 +1048,7 @@ export function WorkflowsView({
         // starts back over from this fresh newest page's own answer rather
         // than carrying forward whatever the appended state last said.
         setRunsHasMore(hasMore);
+        setRunsNextBeforeSeq(nextBeforeSeq);
         setRunsFor(selectedId);
         setHistorySupported(true);
         // Issue #371, the no-live-stream fallback. If the run we just POSTed is
@@ -1044,6 +1072,7 @@ export function WorkflowsView({
         console.debug("[WorkflowsView] run history unavailable", e);
         setRuns([]);
         setRunsHasMore(false);
+        setRunsNextBeforeSeq(undefined);
         // Still THIS workflow's answer — "the host has no history for it" — so
         // the pair agrees and the copilot may proceed, told via `runsKnown`
         // that nothing is known about runs rather than that there were none.
@@ -1063,33 +1092,71 @@ export function WorkflowsView({
 
   // Issue #1012: "Load older", the run-history drawer's pagination affordance.
   // APPENDS to `runs` rather than replacing it — unlike the effect above,
-  // which always starts over from the newest page. Paged off the `seq` of the
-  // oldest run currently held, matching the host's `?before_seq=` cursor
-  // semantics (issue #1012's ordering fix made `seq` the field every row's
-  // own display agrees with, which is what makes it a stable paging key).
+  // which always starts over from the newest page.
   const loadOlderRuns = useCallback(() => {
     if (!selectedId || loadingOlderRuns) return;
-    const oldest = runs.at(-1)?.seq;
-    if (oldest === undefined) return;
+    // The boundary comes from the HOST (issue #1012 follow-up). It is the
+    // page's lowest `seq`, which stopped being its last displayed row once the
+    // cut moved to `seq` while the display stayed on `(atMillis, seq)` — under
+    // a clock regression those are two different runs, and paging off the last
+    // row skips the ones in between, permanently.
+    //
+    // The fallback is version skew, and it must be the OLD derivation rather
+    // than "stop here": a host predating the field still cuts its pages in
+    // display order, so its last row genuinely is the boundary. Reading an
+    // absent cursor as "no more pages" would re-ship this fix as a fresh
+    // silent truncation — #1012's own symptom. Gated on `hasMore` so a
+    // finished history never asks for a page behind its last row.
+    const cursor = runsNextBeforeSeq ?? (runsHasMore ? runsRef.current.at(-1)?.seq : undefined);
+    if (cursor === undefined) return;
+    // Everything this response is allowed to land on, captured BEFORE the
+    // await — the same pattern the Resume handler uses for its company guard.
+    const forCompany = companyRef.current;
+    const forWorkflow = selectedId;
+    const forGeneration = historyGenRef.current;
     setLoadingOlderRuns(true);
     (async () => {
       try {
-        const { runs: older, hasMore } = await listWorkflowRuns(client, company, {
+        const { runs: older, hasMore, nextBeforeSeq } = await listWorkflowRuns(client, company, {
           workflow: selectedId,
           limit: 50,
-          beforeSeq: oldest,
+          beforeSeq: cursor,
         });
+        // Three checks, because no two of them are enough.
+        //
+        // * Company: a workflow id is NOT unique across companies —
+        //   `create_company_workflow` checks it only within the requesting
+        //   company — so two companies genuinely share one (a seed workflow
+        //   shipped identically to both is the common case). Company A's older
+        //   page would otherwise append onto company B's history.
+        // * Workflow: the ordinary switch-while-in-flight.
+        // * Generation: the first-page effect can have replaced the list
+        //   without either identity field changing — a run finished, the 2s
+        //   poll ticked, an explicit refresh. Appending an older page onto a
+        //   list that has already started over duplicates rows and corrupts
+        //   the cursor.
+        if (
+          companyRef.current !== forCompany ||
+          selectedIdRef.current !== forWorkflow ||
+          historyGenRef.current !== forGeneration
+        ) {
+          return;
+        }
         setRuns((prev) => [...prev, ...older]);
         setRunsHasMore(hasMore);
+        setRunsNextBeforeSeq(nextBeforeSeq);
       } catch (e) {
         // Same quiet degradation as the newest-page fetch — leave what is
         // already shown in place rather than losing it to a failed page.
         console.debug("[WorkflowsView] loading older run history failed", e);
       } finally {
+        // Deliberately OUTSIDE the guard above. The flag belongs to the click,
+        // not to the list the answer turned out to be for: skipping it on a
+        // superseded response would wedge "Load older" as permanently busy.
         setLoadingOlderRuns(false);
       }
     })();
-  }, [client, company, selectedId, runs, loadingOlderRuns]);
+  }, [client, company, selectedId, runsNextBeforeSeq, runsHasMore, loadingOlderRuns]);
 
   // Issue #303: the run page the index's health readings are folded from.
   //
