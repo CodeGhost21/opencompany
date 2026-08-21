@@ -192,8 +192,8 @@ use crate::harness::orchestrator::DelegationQueue;
 use crate::harness::policy::{ApprovalPolicy, ApprovalRequestQueue};
 use crate::ports::skills_state::{SkillState, SkillStateStore};
 use crate::ports::types::{
-    BudgetOverride, CompanyId, CompanyRecord, OverlayAgent, OverlayDesk, OverlayDeskMember,
-    PolicyOverride, TurnStep,
+    AgentOverride, BudgetOverride, CompanyId, CompanyRecord, OverlayAgent, OverlayDesk,
+    OverlayDeskMember, PolicyOverride, TurnStep,
 };
 use crate::ports::{
     ArtifactStore, CompanyStore, ContextStore, EventLog, FactStore, SecretStore, TaskStore,
@@ -1216,6 +1216,20 @@ pub struct HarnessPool {
     /// A company that never sets an override keeps an empty set and a stable
     /// fingerprint — no rebuild, byte-identical to the pre-#343 behaviour.
     budget_fingerprints: RwLock<HashMap<CompanyId, u64>>,
+    /// Fingerprint of the operator per-agent persona-override set the cached
+    /// roster was built from, keyed by company (issue #1530). Drives persona
+    /// freshness: [`ensure`](Self::ensure) re-resolves the overrides from
+    /// [`HarnessDeps::store`] on every call and rebuilds the roster whenever a
+    /// persona is edited, cleared or reset — so an instructions edit on the
+    /// console Team page reaches the agent's system prompt on the company's
+    /// **next** turn, with no restart and no redeploy. Needed for the same reason
+    /// as [`Self::budget_fingerprints`]: the persona is assembled once per roster,
+    /// not once per call, so without this axis every other fingerprint is stable
+    /// on a persona-only change and the fast path would keep serving the old
+    /// instructions until the process restarted. A company that never edits a
+    /// persona keeps an empty set and a stable fingerprint — no rebuild,
+    /// byte-identical to the pre-#1530 behaviour.
+    override_fingerprints: RwLock<HashMap<CompanyId, u64>>,
     /// Per-company fingerprint of the operator `[policy]` override (issue #562),
     /// so a console tier change rebuilds the roster instead of waiting for a
     /// restart. Without this axis the override persists and is silently ignored:
@@ -1293,6 +1307,7 @@ impl HarnessPool {
             repo_fingerprints: RwLock::new(HashMap::new()),
             skill_fingerprints: RwLock::new(HashMap::new()),
             budget_fingerprints: RwLock::new(HashMap::new()),
+            override_fingerprints: RwLock::new(HashMap::new()),
             policy_fingerprints: RwLock::new(HashMap::new()),
             desk_fingerprints: RwLock::new(HashMap::new()),
             context_fingerprints: RwLock::new(HashMap::new()),
@@ -1382,6 +1397,11 @@ impl HarnessPool {
         let overlay = self.resolve_effective_overlay(company, deps).await;
         let overlay_fp = overlay_fingerprint(&overlay.agents);
         let budget_fp = budget_fingerprint(&overlay.budgets);
+        // Issue #1530: the persona overrides ride the same store read, and go
+        // stale the same way a budget does — the persona is assembled once per
+        // roster, so an edit unseen by any fingerprint would not reach the
+        // system prompt until a restart.
+        let override_fp = override_fingerprint(&overlay.overrides);
         let policy_fp = policy_fingerprint(overlay.policy.as_ref());
         // Desk scoping now decides capability (the middle level of the
         // three-level narrowing), so it joins the staleness check: without this
@@ -1482,6 +1502,7 @@ impl HarnessPool {
             let repo_fingerprints = self.repo_fingerprints.read().await;
             let skill_fingerprints = self.skill_fingerprints.read().await;
             let budget_fingerprints = self.budget_fingerprints.read().await;
+            let override_fingerprints = self.override_fingerprints.read().await;
             let policy_fingerprints = self.policy_fingerprints.read().await;
             let desk_fingerprints = self.desk_fingerprints.read().await;
             let context_fingerprints = self.context_fingerprints.read().await;
@@ -1494,6 +1515,7 @@ impl HarnessPool {
                 && repo_fingerprints.get(&company.id) == Some(&repo_fp)
                 && skill_fingerprints.get(&company.id) == Some(&skill_fp)
                 && budget_fingerprints.get(&company.id) == Some(&budget_fp)
+                && override_fingerprints.get(&company.id) == Some(&override_fp)
                 && policy_fingerprints.get(&company.id) == Some(&policy_fp)
                 && desk_fingerprints.get(&company.id) == Some(&desk_fp)
                 && context_fingerprints.get(&company.id) == Some(&context_fp)
@@ -1538,6 +1560,12 @@ impl HarnessPool {
         // so installing the live set here is what carries a console budget edit
         // into the roster the very next turn runs on.
         fresh_company.overlay_budgets = overlay.budgets;
+        // Issue #1530: same treatment for the persona overrides — `build_roster`
+        // resolves every agent's instructions through
+        // `fresh_company.effective_instructions`, so installing the live set here
+        // is what carries a console persona edit into the roster the next turn
+        // runs on.
+        fresh_company.overlay_agent_overrides = overlay.overrides;
         // The desk axis gets the same treatment, and needs it for the same
         // reason: `build_roster` resolves every teammate's grants through
         // `fresh_company.agent_desk_tools`, so the live desk set, seating and
@@ -1602,6 +1630,10 @@ impl HarnessPool {
             .write()
             .await
             .insert(company.id.clone(), budget_fp);
+        self.override_fingerprints
+            .write()
+            .await
+            .insert(company.id.clone(), override_fp);
         self.policy_fingerprints
             .write()
             .await
@@ -1947,6 +1979,7 @@ impl HarnessPool {
             Ok(Some(record)) => EffectiveOverlay {
                 agents: record.overlay_agents,
                 budgets: record.overlay_budgets,
+                overrides: record.overlay_agent_overrides,
                 policy: record.overlay_policy,
                 desks: record.overlay_desks,
                 desk_members: record.overlay_desk_members,
@@ -1955,6 +1988,7 @@ impl HarnessPool {
             _ => EffectiveOverlay {
                 agents: company.overlay_agents.clone(),
                 budgets: company.overlay_budgets.clone(),
+                overrides: company.overlay_agent_overrides.clone(),
                 policy: company.overlay_policy.clone(),
                 desks: company.overlay_desks.clone(),
                 desk_members: company.overlay_desk_members.clone(),
@@ -2010,6 +2044,19 @@ impl HarnessPool {
     #[cfg(test)]
     pub async fn budget_fingerprint_of(&self, company: &CompanyId) -> Option<u64> {
         self.budget_fingerprints.read().await.get(company).copied()
+    }
+
+    /// The current persona-override fingerprint for a company (test-only), so a
+    /// persona-freshness test can assert the roster was actually rebuilt after a
+    /// console instructions edit rather than inferring it (issue #1530). This is
+    /// the observable that makes "no restart" testable.
+    #[cfg(test)]
+    pub async fn override_fingerprint_of(&self, company: &CompanyId) -> Option<u64> {
+        self.override_fingerprints
+            .read()
+            .await
+            .get(company)
+            .copied()
     }
 
     /// The current billing-connection fingerprint for a company (test-only), so
@@ -2763,6 +2810,7 @@ fn policy_fingerprint(override_: Option<&PolicyOverride>) -> u64 {
 pub(crate) struct EffectiveOverlay {
     pub agents: Vec<OverlayAgent>,
     pub budgets: Vec<BudgetOverride>,
+    pub overrides: Vec<AgentOverride>,
     pub policy: Option<PolicyOverride>,
     pub desks: Vec<OverlayDesk>,
     pub desk_members: Vec<OverlayDeskMember>,
@@ -2884,6 +2932,40 @@ fn budget_fingerprint(overrides: &[BudgetOverride]) -> u64 {
     // Attribution is deliberately NOT hashed: who set the cap and when changes
     // nothing an agent can act on, and folding it in would rebuild the roster
     // (discarding live sessions) every time the same value was re-saved.
+    hasher.finish()
+}
+
+/// A stable fingerprint of a company's operator persona-override set (issue
+/// #1530), used to detect a persona set / changed / cleared / reset between
+/// [`HarnessPool::ensure`] calls. Mirrors [`budget_fingerprint`]'s shape; an
+/// [`AgentOverride`] holds no secret.
+///
+/// **Sorted by `agent_id`** first, for the reason [`budget_fingerprint`]
+/// documents: the write routes push and retain rather than maintain an order, so
+/// an order-sensitive hash would rebuild the roster (dropping live agent
+/// sessions) on a save that changed nothing an agent can observe. The
+/// instructions text is hashed as an `Option` discriminant plus its bytes, so a
+/// stored `Some("")` stays distinct from `None` — the same distinction the
+/// resolver's reset-to-blueprint contract depends on.
+fn override_fingerprint(overrides: &[AgentOverride]) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let mut ordered: Vec<&AgentOverride> = overrides.iter().collect();
+    ordered.sort_by(|a, b| a.agent_id.cmp(&b.agent_id));
+
+    let mut hasher = DefaultHasher::new();
+    ordered.len().hash(&mut hasher);
+    for entry in ordered {
+        entry.agent_id.hash(&mut hasher);
+        match &entry.instructions {
+            Some(text) => {
+                1u8.hash(&mut hasher);
+                text.hash(&mut hasher);
+            }
+            None => 0u8.hash(&mut hasher),
+        }
+    }
     hasher.finish()
 }
 
