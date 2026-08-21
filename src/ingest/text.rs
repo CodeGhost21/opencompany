@@ -61,11 +61,11 @@ pub fn from_html_bytes(bytes: &[u8]) -> Extracted {
 /// pulling a full HTML tree into the default build.
 pub fn from_html(html: &str) -> Extracted {
     let mut out = String::with_capacity(html.len() / 2);
-    let mut rest = html;
     // Drop the two elements whose *content* is code rather than prose. Left in,
     // a page's inline analytics script becomes the first thing recall finds.
+    let mut rest = html.to_string();
     for element in ["script", "style"] {
-        rest = &*Box::leak(strip_element(rest, element).into_boxed_str());
+        rest = strip_element(&rest, element);
     }
     let mut in_tag = false;
     for ch in rest.chars() {
