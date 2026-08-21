@@ -974,7 +974,7 @@ impl Tool for WorkspaceListTool {
          playbooks and product context. USE FOR discovering what company documentation exists \
          before answering anything about company standards, processes or product decisions. \
          Returns each folder and note with its path, id and revision. Pass `prefix` to list one \
-         subtree (e.g. \"Standards\"). NOT for your own scratch files — those are the `file_*` \
+         subtree (e.g. \"standards\"). NOT for your own scratch files — those are the `file_*` \
          tools."
     }
 
@@ -984,7 +984,7 @@ impl Tool for WorkspaceListTool {
             "properties": {
                 "prefix": {
                     "type": "string",
-                    "description": "Optional folder path to list beneath, e.g. \"Standards\" or \"product/Specs\". Omit to list the whole tree."
+                    "description": "Optional folder path to list beneath, e.g. \"standards\" or \"product/specs\". Omit to list the whole tree."
                 }
             },
             "additionalProperties": false
@@ -1357,7 +1357,7 @@ impl Tool for WorkspaceSearchTool {
                 },
                 "prefix": {
                     "type": "string",
-                    "description": "Optional folder path to search beneath, e.g. \"Standards\" or \"product/Specs\". Omit to search the whole tree."
+                    "description": "Optional folder path to search beneath, e.g. \"standards\" or \"product/specs\". Omit to search the whole tree."
                 },
                 "limit": {
                     "type": "integer",
