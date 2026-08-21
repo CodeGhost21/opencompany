@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { hostSwitcherInteractive, worstStatus } from "@/components/host-switcher";
+import { hostSwitcherInteractive, statusCopy, worstStatus } from "@/components/host-switcher";
 import { hostShortcutLabel, HOST_SHORTCUT_LIMIT } from "@/connections/HostsContext";
 import type { Connection, ConnectionStatus } from "@/connections/types";
 
@@ -24,6 +24,7 @@ function host(status: ConnectionStatus, id: string = status): Connection {
     status,
     identity: null,
     companies: [],
+    connector: { kind: "remote" },
   };
 }
 
@@ -49,6 +50,23 @@ describe("worstStatus", () => {
 
   it("does not claim everything is fine while a roster is still settling", () => {
     expect(worstStatus([host("live"), host("connecting")])).toBe("connecting");
+  });
+});
+
+describe("statusCopy", () => {
+  it("says what an ordinary host is doing", () => {
+    expect(statusCopy(host("connecting")).label).toBe("Connecting…");
+    expect(statusCopy(host("down")).label).toBe("Unreachable");
+  });
+
+  it("says a hibernating tenant is being started, not merely contacted", () => {
+    // "Connecting…" for the seconds a cold tenant takes to boot reads as a
+    // hang, and the operator's next move is to go looking for a fault that is
+    // not there.
+    const waking = { ...host("connecting"), waking: true };
+    expect(statusCopy(waking).label).toBe("Waking…");
+    // Same dot: it is a connecting host, and ranks as one on the trigger.
+    expect(statusCopy(waking).dot).toBe(statusCopy(host("connecting")).dot);
   });
 });
 
