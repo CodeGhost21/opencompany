@@ -397,12 +397,10 @@ page rather than a menu of row-level buttons: a switcher row is a *filter*, so
 hanging a rename and a delete off it makes a control whose click targets
 disagree about what a row is for. That menu now opens on **any** host rather
 than only on two (`hostSwitcherMenu`): one host was furniture while the menu held
-nothing but the roster, but it is the only route to this page now, and a browser
-console with exactly one connection — the shape whose host is most likely to
-move — got a nameplate with nothing behind it.
+nothing but the roster, but it is the only route to this page now, and a
+single-connection browser console was getting a nameplate with nothing behind it.
 
-The page does three things, and `editConnection` in `registry.ts` does the first
-two:
+The page does three things; `editConnection` in `registry.ts` does the first two:
 
 - **rename**, which is the only edit a host reached over `ssh` accepts. A
   `local` host is not renamed here at all: its name and its address are
