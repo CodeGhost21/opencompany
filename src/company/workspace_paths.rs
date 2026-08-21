@@ -139,15 +139,15 @@ mod tests {
     #[test]
     fn a_path_is_the_ancestor_chain_joined() {
         let nodes = vec![
-            node("a", "Standards", None),
-            node("b", "Engineering standards.md", Some("a")),
+            node("a", "standards", None),
+            node("b", "engineering-standards.md", Some("a")),
         ];
         let by_id = index(&nodes);
         assert_eq!(
             render_path(&nodes[1], &by_id).as_deref(),
             Some("standards/engineering-standards.md")
         );
-        assert_eq!(render_path(&nodes[0], &by_id).as_deref(), Some("Standards"));
+        assert_eq!(render_path(&nodes[0], &by_id).as_deref(), Some("standards"));
     }
 
     #[test]
@@ -198,11 +198,11 @@ mod tests {
     fn redundant_separators_are_tolerated_but_segments_are_not_invented() {
         assert_eq!(
             split_logical_path("/standards/").unwrap(),
-            vec!["Standards"]
+            vec!["standards"]
         );
         assert_eq!(
-            split_logical_path("standards//Eng.md").unwrap(),
-            vec!["Standards", "Eng.md"]
+            split_logical_path("standards//eng.md").unwrap(),
+            vec!["standards", "eng.md"]
         );
         assert!(split_logical_path("/").unwrap_err().contains("segments"));
     }
