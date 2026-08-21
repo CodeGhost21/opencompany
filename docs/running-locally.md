@@ -16,8 +16,8 @@ deploying the same images somewhere real.
 ## Before you start
 
 OpenCompany is a Rust 2024 crate: one configurable host. Business types are
-data, not code — a `company.toml` manifest plus docs — and the operator console
-is a separate Vite app. See
+data, not code, just a `company.toml` manifest plus docs, and the operator
+console is a separate Vite app. See
 [repository-layout.md](repository-layout.md) for where everything lives.
 
 A **TinyHumans API key** unlocks Medulla, the orchestrator. Without one you can
@@ -40,7 +40,7 @@ cargo build
 # 3. Check a company definition before you launch it
 cargo run --bin opencompany -- check companies/agentic_marketing_agency
 
-# 4. Launch that company — point --company at any folder under companies/
+# 4. Launch that company. Point --company at any folder under companies/
 cargo run --bin opencompany -- serve --company companies/agentic_marketing_agency
 ```
 
@@ -95,7 +95,7 @@ cargo run --bin opencompany -- open-human --dry-run -- status
 
 ## Desktop preview (Tauri)
 
-Calls `cargo tauri` directly with OpenHuman's preflight ported into Rust — CEF
+Calls `cargo tauri` directly with OpenHuman's preflight ported into Rust: CEF
 on macOS, `wry` on Linux and Windows.
 
 ```sh
@@ -108,8 +108,8 @@ cargo run --bin opencompany -- open-human --mode desktop --release  # bundle
 
 To let companies trade with other agents on tiny.place, build with the
 `tinyplace` feature and pass `serve --discoverable` to opt every loaded company
-into going public — registering a `@handle`, publishing an Agent Card, and
-answering inbound A2A `tasks/send` over SIWX + x402.
+into going public, which means registering a `@handle`, publishing an Agent
+Card, and answering inbound A2A `tasks/send` over SIWX + x402.
 
 ```sh
 cargo run --features tinyplace --bin opencompany -- \

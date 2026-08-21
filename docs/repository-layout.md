@@ -1,8 +1,8 @@
 # Repository layout
 
 OpenCompany is a Rust 2024 crate: one configurable host. Business types are
-data, not code — a `company.toml` manifest plus docs — and the operator console
-is a separate Vite app.
+data, not code, just a `company.toml` manifest plus docs, and the operator
+console is a separate Vite app.
 
 ```text
 src/app/                Runtime config and shared state
@@ -45,7 +45,7 @@ vendor/openhuman/vendor/tinyagents/
 
 ## Where to go next
 
-- [`docs/spec/README.md`](spec/README.md) — the architecture reference
-- [`docs/modules/`](modules/) — per-package design docs
-- [`companies/README.md`](../companies/README.md) — the full company catalog
-- [`docs/running-locally.md`](running-locally.md) — builds, Docker, deploys
+- [`docs/spec/README.md`](spec/README.md): the architecture reference
+- [`docs/modules/`](modules/): per-package design docs
+- [`companies/README.md`](../companies/README.md): the full company catalog
+- [`docs/running-locally.md`](running-locally.md): builds, Docker, deploys
