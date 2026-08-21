@@ -70,6 +70,10 @@ export function WalletView({ client, company }: Props) {
   // working in it — and a `useState` here would re-render for a value nothing
   // renders.
   const expandedSeeded = useRef(false);
+  // Monotonic token so a superseded wallet read (one fired for an older date
+  // range or a previous company) cannot overwrite the balance and transaction
+  // data, or the spinner, of a newer one.
+  const runId = useRef(0);
 
   const [balances, setBalances] = useState<Balance[] | null>(null);
   const [transactions, setTransactions] = useState<Transaction[] | null>(null);
@@ -102,6 +106,7 @@ export function WalletView({ client, company }: Props) {
 
   const loadData = useCallback(async () => {
     if (windowProblem(since, until, now)) return;
+    const run = ++runId.current;
     setLoading(true);
     try {
       // Both reads together: they share one credential and one failure, so
@@ -110,10 +115,12 @@ export function WalletView({ client, company }: Props) {
         getBalance(client, company),
         listTransactions(client, company, since, until, 100),
       ]);
+      if (run !== runId.current) return;
       setBalances(wallet);
       setTransactions(txns);
       setDataError(null);
     } catch (err) {
+      if (run !== runId.current) return;
       setBalances(null);
       setTransactions(null);
       setDataError({
@@ -121,7 +128,7 @@ export function WalletView({ client, company }: Props) {
         message: err instanceof Error ? err.message : String(err),
       });
     } finally {
-      setLoading(false);
+      if (run === runId.current) setLoading(false);
     }
   }, [client, company, since, until, now]);
 
