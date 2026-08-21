@@ -1,7 +1,7 @@
 // The workflow creator (issue #69): a plain form editor — not a drag canvas —
 // that builds a `WorkflowGraph` and posts it via `createWorkflow`. Node kinds
 // are the ones the engine executes and the console can author from a form
-// (`CREATABLE_NODE_KINDS`). The five that need kind-specific config —
+// (`NODE_KINDS`). The five that need kind-specific config —
 // `tool_call`, `http_request`, `switch`, `output_parser`, `sub_workflow` —
 // grew their controls in issue #541; each renders `NodeConfigFields`, whose
 // spec table (`@/lib/workflow-node-config`) is the single source of the engine
@@ -17,7 +17,7 @@ import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { History, Loader2, Plus, RotateCcw, Sparkles, Trash2 } from "lucide-react";
 
 import {
-  CREATABLE_NODE_KINDS,
+  NODE_KINDS,
   DESTINATION_KINDS,
   destinationLabel,
   createWorkflow,
@@ -2043,7 +2043,7 @@ function NodeRow({
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
-            {CREATABLE_NODE_KINDS.map((k) => (
+            {NODE_KINDS.map((k) => (
               <SelectItem key={k.value} value={k.value}>
                 {k.label}
               </SelectItem>
