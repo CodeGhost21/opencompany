@@ -7,7 +7,6 @@
 
 import { useEffect, useRef, useState, type RefObject } from "react";
 
-import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import type {
@@ -380,21 +379,43 @@ function RunHistoryRow({
   const failedNode = failedNodeOf(run);
   const errorMessage = run.error ? stripEnginePrefixes(run.error) : null;
   const duration = runDuration(run, now);
+  // Completed, quiet runs are the common case. They need enough separation to
+  // scan but not the full card chrome reserved for a state that asks something
+  // of the operator. Each condition below protects a branch further down this
+  // row, so no detail disappears into a deceptively light treatment.
+  const compact =
+    !run.error &&
+    !run.cancelled &&
+    !isRunning(run) &&
+    !isBlocked(run) &&
+    !isStranded(run) &&
+    run.pendingApprovals.length === 0 &&
+    undeliveredCount(run.deliveries) === 0 &&
+    run.deliveries.length === 0 &&
+    (run.notices?.length ?? 0) === 0;
   return (
     <div
       ref={selectedRowRef}
-      className={`rounded-lg border bg-background/40 p-2 ${
+      className={`${
+        compact
+          ? "border-x-0 border-t-0 rounded-none bg-transparent px-0 py-2"
+          : "rounded-lg border bg-background/40 p-2"
+      } ${run.error ? "border-status-failed/50 bg-status-failed-soft" : ""} ${
         selected ? "ring-2 ring-primary/40" : ""
       }`}
       data-testid="workflow-run-row"
     >
       <div className="mb-1 flex flex-wrap items-center gap-2">
         <span className={`size-1.5 rounded-full ${tone.dot}`} />
-        <Badge variant="outline" className="h-4 px-1.5 text-3xs font-normal">
-          {run.scheduled ? "scheduled" : "manual"}
-        </Badge>
-        <span className="text-2xs text-muted-foreground">
-          {new Date(run.atMillis).toLocaleString()} ·{" "}
+        {run.scheduled && (
+          <Badge variant="outline" className="h-4 px-1.5 text-3xs font-normal">
+            scheduled
+          </Badge>
+        )}
+        <span
+          className="text-2xs text-muted-foreground"
+          title={new Date(run.atMillis).toLocaleString()}
+        >
           {relativeTime(run.atMillis)}
           {/* Issue #1007: how long it took, which nothing on this surface said.
               A run that failed in 200ms was refused before it started; one that
@@ -481,8 +502,8 @@ function RunHistoryRow({
       {run.error ? (
         // The outcome that used to be quietest of all: a run that died left one
         // host-stdout warning and nothing an operator could ever find.
-        <Alert variant="destructive" className="py-2">
-          <AlertDescription className="text-2xs">
+        <>
+          <div className="rounded-md border border-status-failed/50 bg-background/40 p-2">
             {/* Name the node when the trail names one — the engine reports a
                 failing node as an errored step, so this is exact. When it does
                 not (a graph that would not compile, a capability that could not
@@ -496,39 +517,49 @@ function RunHistoryRow({
                 and a graph edited since the run can only give back the id it
                 no longer holds — both of which are the old reading, never a
                 wrong name. */}
-            {failedNode
-              ? `This run failed at “${nodeName(graph, failedNode)}”: `
-              : "This run failed: "}
-            {errorMessage}
-            {/* Issue #840 (PR-3): correct the workflow with the copilot. Offered
-                only on the journaled failed run (keyed by runId) — the one
-                surface that always carries the failure, unlike the sync run
-                result — and only when the parent wired a handler (a brain is
-                available). */}
-            {onFixWithCopilot && run.runId && (
-              <div className="mt-1.5">
-                <Button
-                  size="sm"
-                  variant="outline"
-                  className="h-6 px-2 text-3xs"
-                  disabled={fixing || fixDisabled}
-                  onClick={() => onFixWithCopilot(run)}
-                  data-testid="workflow-run-fix-with-copilot"
+            <p className="text-2xs font-medium text-status-failed-text">
+              {failedNode
+                ? `The “${nodeName(graph, failedNode)}” step failed.`
+                : "This run failed."}
+            </p>
+            <p className="mt-1 text-2xs text-muted-foreground">
+              Review the error details, then correct the workflow and run it again.
+            </p>
+            <details className="mt-1">
+              <summary className="cursor-pointer text-2xs text-muted-foreground">
+                Details
+              </summary>
+              <pre className="mt-1 overflow-auto rounded border bg-muted/40 p-2 font-mono text-2xs leading-snug text-foreground">
+                {errorMessage}
+              </pre>
+            </details>
+          </div>
+          {/* Issue #840 (PR-3): correction is an action, not part of the
+              destructive error framing. Keeping it outside gives the neutral
+              control its ordinary token treatment. */}
+          {onFixWithCopilot && run.runId && (
+            <div className="mt-1.5">
+              <Button
+                size="sm"
+                variant="outline"
+                className="h-6 px-2 text-3xs"
+                disabled={fixing || fixDisabled}
+                onClick={() => onFixWithCopilot(run)}
+                data-testid="workflow-run-fix-with-copilot"
+              >
+                {fixing ? "Fixing…" : "Fix with copilot"}
+              </Button>
+              {fixReason && (
+                <p
+                  className="mt-1 text-2xs text-muted-foreground"
+                  data-testid="workflow-run-fix-not-automatable"
                 >
-                  {fixing ? "Fixing…" : "Fix with copilot"}
-                </Button>
-                {fixReason && (
-                  <p
-                    className="mt-1 text-2xs text-muted-foreground"
-                    data-testid="workflow-run-fix-not-automatable"
-                  >
-                    The copilot couldn't fix this by re-wiring the workflow: {fixReason}
-                  </p>
-                )}
-              </div>
-            )}
-          </AlertDescription>
-        </Alert>
+                  The copilot couldn't fix this by re-wiring the workflow: {fixReason}
+                </p>
+              )}
+            </div>
+          )}
+        </>
       ) : run.cancelled ? (
         // Issue #383, the third terminal reading. Deliberately not a
         // destructive Alert: nothing went wrong, somebody decided they had seen

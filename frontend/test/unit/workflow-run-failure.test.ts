@@ -285,8 +285,8 @@ describe("the history row names the node the operator named", () => {
       );
     });
     const row = container.querySelector('[data-testid="workflow-run-row"]');
-    expect(row?.textContent).toContain("This run failed at “Draft the digest”");
-    expect(row?.textContent).not.toContain("failed at “n_3”");
+    expect(row?.textContent).toContain("The “Draft the digest” step failed.");
+    expect(row?.textContent).not.toContain("The “n_3” step failed.");
     // …and says how long it took, which nothing on this surface did before.
     expect(
       container.querySelector('[data-testid="workflow-run-duration"]')?.textContent,
