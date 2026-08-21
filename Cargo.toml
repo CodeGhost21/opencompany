@@ -1,7 +1,7 @@
 # This package deliberately is not a Cargo workspace root. OpenHuman's modular
 # dependencies (TinyBus, TinyMemory, TinyDocs, and TinyWallet) each own nested
 # workspaces, which Cargo cannot resolve beneath another workspace root. The
-# Tauri package under frontend/src-tauri is therefore its own workspace.
+# Tauri package under src-tauri is therefore its own workspace.
 [package]
 name = "opencompany"
 version = "0.1.0"

@@ -15,6 +15,7 @@ import {
   createLocalInstance,
   embeddedHost,
   localInstances,
+  openSshTunnel,
   startLocalInstance,
   stopLocalInstance,
   type LocalInstance,
@@ -486,8 +487,8 @@ function Console() {
     connections,
     selected: active?.id ?? null,
     onSelect: setSelected,
-    onAdd: (baseUrl) => {
-      const id = addConnection({ baseUrl });
+    onAdd: (baseUrl, connector) => {
+      const id = addConnection({ baseUrl, connector });
       setSelected(id);
       void probe(id);
     },
@@ -507,6 +508,26 @@ function Console() {
             );
             if (opened) setSelected(opened.id);
           }
+        }
+      : undefined,
+    // Only where a process can be started, like the local half above. The
+    // tunnel is opened here rather than left to the first probe so that a
+    // destination `ssh` refuses is reported in the dialog the operator is
+    // standing in front of, instead of becoming a red row they have to go and
+    // read. Every *later* launch does it from `probe`, where the address of a
+    // remembered tunnel is rebuilt.
+    onAddSsh: isDesktopRuntime()
+      ? async (target) => {
+          const tunnel = await openSshTunnel(target);
+          const id = addConnection({
+            baseUrl: tunnel.baseUrl,
+            // The machine's name, not the loopback port: the port is this
+            // launch's and means nothing to the person who typed the other.
+            label: target.destination,
+            connector: { kind: "ssh", target },
+          });
+          setSelected(id);
+          void probe(id);
         }
       : undefined,
     onStartLocal: isDesktopRuntime()
