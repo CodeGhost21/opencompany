@@ -8,6 +8,8 @@
 //!   server to point at.
 //! - **[`local`]** — the roster of those hosts, so one machine can run several
 //!   companies side by side rather than exactly one.
+//! - **[`ssh`]** — tunnels to hosts on *other* machines that are bound to
+//!   loopback there, which is the one connector a browser cannot have.
 //! - **[`keychain`]** — where a paired device's token lives, so the webview
 //!   holds a handle and never the secret.
 //! - **[`commands`]** — the thin Tauri surface over all three.
@@ -22,10 +24,12 @@ pub mod embedded;
 pub mod keychain;
 pub mod local;
 pub mod proxy;
+pub mod ssh;
 
 use std::path::PathBuf;
 
 use crate::local::LocalHosts;
+use crate::ssh::SshTunnels;
 
 /// Process-wide state the commands read.
 pub struct AppHandleState {
@@ -43,6 +47,14 @@ pub struct AppHandleState {
     /// launch. The desktop also talks to *remote* hosts, and a busy root must
     /// not stop it doing that.
     pub local: tokio::sync::Mutex<LocalHosts>,
+    /// Every SSH tunnel this application is holding open.
+    ///
+    /// Beside the local roster rather than inside it: both are processes this
+    /// shell starts and must be able to stop, and neither is a host it can
+    /// merely address. What they are not is the same thing — a tunnel's host
+    /// belongs to somebody else's machine — so pruning one against the other
+    /// would delete it.
+    pub ssh: tokio::sync::Mutex<SshTunnels>,
 }
 
 /// The platform directory this instance keeps its data in.
@@ -124,6 +136,7 @@ pub fn run() {
         .manage(AppHandleState {
             data_dir,
             local: tokio::sync::Mutex::new(local),
+            ssh: tokio::sync::Mutex::new(SshTunnels::default()),
         })
         .invoke_handler(tauri::generate_handler![
             commands::oc_connect,
@@ -140,6 +153,9 @@ pub fn run() {
             commands::oc_stop_local_instance,
             commands::oc_rename_local_instance,
             commands::oc_forget_local_instance,
+            commands::oc_open_ssh_tunnel,
+            commands::oc_close_ssh_tunnel,
+            commands::oc_ssh_tunnels,
         ])
         .run(tauri::generate_context!())
         .expect("run the desktop shell");
