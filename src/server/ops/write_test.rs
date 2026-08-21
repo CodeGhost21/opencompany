@@ -676,14 +676,20 @@ async fn a_chat_created_card_lands_off_the_dispatch_trigger() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
+    // Asserted on `stage`, not on `column`: since issue #1512 the DTO's
+    // `column` is the phase, and `working` covers both the dispatched stage and
+    // three that are not — so a phase assertion could not tell "dispatched"
+    // from "being planned", which is the only thing this test is about.
     assert_ne!(
-        created["column"], COLUMN_IN_PROGRESS,
+        created["stage"], COLUMN_IN_PROGRESS,
         "a chat-created card must never arrive already dispatched"
     );
     assert_eq!(
-        created["column"], COLUMN_TODO,
+        created["column"], crate::ledger::board::PHASE_PENDING,
         "it lands in the board's intake lane, where the human drag is the gate"
     );
+    assert_eq!(created["stage"], serde_json::Value::Null, "{created}");
+    let _ = COLUMN_TODO;
 
     // Issue #301 added a second pre-dispatch column and made To-do the only
     // intake lane, so the spend gate is re-checked across every creation shape
@@ -697,7 +703,7 @@ async fn a_chat_created_card_lands_off_the_dispatch_trigger() {
     ] {
         let (status, created) = send(&state, "POST", "/api/v1/company/tasks", Some(body)).await;
         assert_eq!(status, StatusCode::OK);
-        assert_ne!(created["column"], COLUMN_IN_PROGRESS, "{created}");
+        assert_ne!(created["stage"], COLUMN_IN_PROGRESS, "{created}");
     }
 
     let journal = runtime
