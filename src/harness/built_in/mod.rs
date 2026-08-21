@@ -6723,6 +6723,7 @@ description = "Builds the product."
         let entry = |id: &str, text: Option<&str>| AgentOverride {
             agent_id: id.to_string(),
             instructions: text.map(str::to_string),
+            ..Default::default()
         };
 
         assert_ne!(
@@ -6781,6 +6782,7 @@ description = "Builds the product."
                 Some(text) => vec![AgentOverride {
                     agent_id: "ceo".to_string(),
                     instructions: Some(text.to_string()),
+                    ..Default::default()
                 }],
                 None => Vec::new(),
             };
