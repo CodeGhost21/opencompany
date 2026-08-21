@@ -706,7 +706,7 @@ fn the_scan_ignores_a_checked_out_repository() {
     let before = WorkspaceSnapshot::take(dir.path());
 
     for path in [
-        "repos/acme-widgets-000000000000/readme.md",
+        "repos/acme-widgets-000000000000/README.md",
         "repos/acme-widgets-000000000000/src/lib.rs",
         "repos/acme-widgets-000000000000/.git/config",
         "repos/acme-widgets-000000000000.pr-7.diff",

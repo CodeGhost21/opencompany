@@ -5,14 +5,14 @@ company *actually* runs — what the Operator approves and denies, where
 money goes, what feedback repeats, which teammates idle — and turns
 mismatches into [Change Proposals](proposals.md). It is how a launched
 company keeps tailoring itself to the Operator instead of freezing at its
-Blueprint. Overview and invariants: [readme.md](readme.md).
+Blueprint. Overview and invariants: [README.md](README.md).
 
 The Manager is not a chat persona, not a Roster member, and not a new
 runtime. It is a scheduled cognition job on the
 [`Brain` port](../runtime/ports-cognition.md#brain), and its entire output
 surface is the
 Approvals Inbox — where its suggestions speak in the company's one voice
-([company-brain](../company-brain/readme.md)).
+([company-brain](../company-brain/README.md)).
 
 ## Signals
 
@@ -22,7 +22,7 @@ Each tick, the Manager reads (read-only, through the existing ports):
 | --- | --- | --- |
 | Approval history | `EventLog` | 14 approvals of near-identical sub-$3 spends → propose a standing rule |
 | Denial patterns | `EventLog` | 3 denials of outreach emails → propose tightening tone / adding a checkpoint |
-| Feedback inbox | brain state, [feedback loop](../feedback-loop/readme.md) | repeated "too formal" thumbs-downs → propose a Charter `tone` edit |
+| Feedback inbox | brain state, [feedback loop](../feedback-loop/README.md) | repeated "too formal" thumbs-downs → propose a Charter `tone` edit |
 | Ledger | `CompanyStore` | one teammate consumes 80% of budget for 5% of output → propose rebalancing per-agent caps |
 | Memory traces | `MemoryStore` | recurring task type with no owning teammate → propose a hire; a teammate idle for a month → propose retiring it |
 | Schedule outcomes | `EventLog` | weekly digest always read Monday night → propose moving the cron |
@@ -69,7 +69,7 @@ recorded, reversible:
 
 ## The Manager's fence (normative)
 
-Restating the [section invariants](readme.md) as hard rules enforced by the
+Restating the [section invariants](README.md) as hard rules enforced by the
 runtime — not by prompting — when a proposal is filed:
 
 - MUST NOT raise `[budget].monthly_usd` or any cap above the company

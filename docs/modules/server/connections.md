@@ -1,6 +1,6 @@
 # Connections: hosted providers and releasing legacy native OAuth
 
-Split out of [readme.md](readme.md) when that file reached the 500-line cap.
+Split out of [README.md](README.md) when that file reached the 500-line cap.
 The read plane is `ops::connections_read`; Composio owns every currently
 actionable provider connection.
 

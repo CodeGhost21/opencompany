@@ -1046,7 +1046,7 @@ mod tests {
     /// the class for a remote one.
     #[test]
     fn a_non_intrinsic_tools_output_is_still_collapsed_to_its_class() {
-        let output = "Could not read `standards/engineering-standards.md`: the workspace store \
+        let output = "Could not read `Standards/Engineering standards.md`: the workspace store \
                       failed (store_io).";
         let classified = oh::tools::status::classify(output, false);
 
@@ -1613,7 +1613,7 @@ mod tests {
                 "read_file",
                 true,
                 "…",
-                Some(serde_json::json!({ "path": "docs/spec/readme.md" })),
+                Some(serde_json::json!({ "path": "docs/spec/README.md" })),
                 None,
             ),
             completed(
@@ -1625,7 +1625,7 @@ mod tests {
                 None,
             ),
         ]);
-        assert_eq!(steps[0].detail.as_deref(), Some("path=docs/spec/readme.md"));
+        assert_eq!(steps[0].detail.as_deref(), Some("path=docs/spec/README.md"));
         assert_eq!(steps[1].detail.as_deref(), Some("path=src/lib.rs"));
         assert_ne!(steps[0].detail, steps[1].detail);
     }

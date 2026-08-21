@@ -244,7 +244,7 @@ pub async fn resolve_routed_documents(
     let mut resolved = Vec::with_capacity(wanted.len());
     for path in wanted {
         // Normalise the manifest's spelling the same way the agent tools do, so
-        // `/brand/Voice.md` and `brand/Voice.md` name the same note.
+        // `/Brand/Voice.md` and `Brand/Voice.md` name the same note.
         let key = match super::workspace_paths::split_logical_path(&path) {
             Ok(segments) => segments.join("/"),
             // A traversal-shaped or malformed entry resolves to nothing, exactly
@@ -575,7 +575,7 @@ mod tests {
             .await;
 
             let mut a = agent(None);
-            a.context = Some(vec!["brand/Voice.md".into()]);
+            a.context = Some(vec!["Brand/Voice.md".into()]);
 
             let resolved = resolve_routed_documents(ws.as_ref(), &company, &a)
                 .await
@@ -583,7 +583,7 @@ mod tests {
             assert_eq!(
                 resolved,
                 vec![(
-                    "brand/Voice.md".to_string(),
+                    "Brand/Voice.md".to_string(),
                     "Plain, never loud.".to_string()
                 )]
             );
@@ -597,13 +597,13 @@ mod tests {
             file(&ws, &company, Some(&brand), "Voice.md", "body").await;
 
             let mut a = agent(None);
-            a.context = Some(vec!["/brand/Voice.md".into()]);
+            a.context = Some(vec!["/Brand/Voice.md".into()]);
 
             let resolved = resolve_routed_documents(ws.as_ref(), &company, &a)
                 .await
                 .expect("resolves");
             assert_eq!(resolved.len(), 1, "{resolved:?}");
-            assert_eq!(resolved[0].0, "brand/Voice.md");
+            assert_eq!(resolved[0].0, "Brand/Voice.md");
         }
 
         /// A traversal-shaped entry resolves to nothing rather than erroring, so

@@ -63,7 +63,7 @@ Supporting docs:
 - [planning.md](planning.md) — the board's Planning station: one tool-less model
   call per card, the host-gathered evidence pack, the prerequisite verdict
   taxonomy, and the no-run/no-lock concurrency argument
-- [orchestration/](orchestration/readme.md) — how a many-agent company
+- [orchestration/](orchestration/README.md) — how a many-agent company
   *converges*: per-role context routing, a budgeted shared brief, code-derived
   ledgers, the demand ledger that replaces the board, the attempt loop, the join
   primitive, and containerised code tools. Also the three entities this removes

@@ -121,7 +121,7 @@ delivered an update is invisible downstream.
 ## Harness pool (`src/harness/`, feature `openhuman`)
 
 `src/harness/` embeds `openhuman_core` as a library (see
-[`docs/modules/openhuman/readme.md`](../openhuman/readme.md)). `HarnessPool`
+[`docs/modules/openhuman/README.md`](../openhuman/README.md)). `HarnessPool`
 builds one openhuman `Agent` per manifest `[[agent]]` through `AgentBuilder`
 (`build.rs`), wiring memory (`memory.rs`, an openhuman `Memory` over the
 `ContextStore`), the hosted-Medulla inference provider (`provider.rs`, with a
@@ -185,7 +185,7 @@ an unmanaged root is never inspected, deduplicated, warned about or removed.
 The builder threads that same `WorkspaceStore` handle onto `HarnessDeps`
 (`workspace`), so agents read and write the shared note tree through the tools
 in `harness::workspace_tools` (issues #237, #551) rather than being blind to it.
-Boot also provisions lowercase `secrets/readme.md`; agent workspace tools omit
+Boot also provisions lowercase `secrets/README.md`; agent workspace tools omit
 that whole subtree while console and operator APIs keep ordinary access. It is
 for operator-only workspace notes, not credentials consumed by providers or
 tools, which remain in the dedicated secret/connection stores.

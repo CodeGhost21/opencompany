@@ -740,7 +740,7 @@ pub fn build_agent(
 
     // Company workspace (issues #237, #551) — live read (and optionally
     // create/write) tools over the shared note tree, so an agent can ground an
-    // answer in the company's own `standards/` / `playbooks/` instead of
+    // answer in the company's own `Standards/` / `Playbooks/` instead of
     // guessing, and can put what it produces somewhere the operator and its
     // teammates will actually find it. Two independent gates, deliberately
     // asymmetric:

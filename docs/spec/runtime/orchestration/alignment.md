@@ -11,7 +11,7 @@ The fourth — **context routing**, which decides what each role is told at all 
 is large enough to own a file: [context-routing.md](context-routing.md).
 
 Terms: [glossary](../../glossary.md). Principles:
-[README](readme.md#the-three-principles).
+[README](README.md#the-three-principles).
 
 ---
 

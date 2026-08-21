@@ -3,7 +3,7 @@
 > **Status: aspirational north star.** This document predates the
 > one-person-company specification and describes where OpenCompany is
 > headed, not what it builds today. The normative specs live in the
-> sibling directories under [`docs/spec/`](../readme.md).
+> sibling directories under [`docs/spec/`](../README.md).
 >
 > **Terminology bridge** (AVI term → current spec term, defined in
 > [`glossary.md`](../glossary.md)):

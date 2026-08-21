@@ -1,6 +1,6 @@
 # Feedback Module
 
-The feedback module implements the [feedback loop](../../spec/feedback-loop/readme.md):
+The feedback module implements the [feedback loop](../../spec/feedback-loop/README.md):
 in-product feedback reaches the TinyHumans hub or the public issue tracker, with
 a non-negotiable privacy gate in between.
 

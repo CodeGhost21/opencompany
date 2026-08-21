@@ -9,7 +9,7 @@ Content, not code. Two gaps:
    a real catalog.
 2. Of the 19 company templates under `companies/`, only
    `agentic_marketing_agency` ships the full directory (skills, workflows,
-   workspace). The other 18 have just `company.toml` + `readme.md`, so their
+   workspace). The other 18 have just `company.toml` + `README.md`, so their
    consoles boot empty.
 
 Templates are the productized manifests of
@@ -29,7 +29,7 @@ workstream makes each one feel staffed and ready on first boot.
   roster id) + `[[edge]]`. Every workflow referenced from
   `[workflows].enabled` must exist and validate.
 - `workspace/**`: topic folders of Markdown with `[[wikilinks]]`; a
-  `readme.md` orienting the operator.
+  `README.md` orienting the operator.
 
 All content follows the [glossary](../spec/glossary.md) — prosumer language
 only.
@@ -62,7 +62,7 @@ For each bare company, using `agentic_marketing_agency` as the template:
 Batches (one subagent each, zero file overlap):
 
 1. Professional services: law, accounting, consultation, recruiting.
-2. product/tech: software, design studio, game studio, game business, pharma.
+2. Product/tech: software, design studio, game studio, game business, pharma.
 3. Go-to-market: enterprise sales, customer support, influencer, media.
 4. Capital: VC, venture studio, real estate, accelerator misc
    (`signals_opportunity_studio`, `startup_accelerator`).

@@ -59,7 +59,7 @@ DB-agnosticism applies to memory exactly as to every other store.
 
 **Intended**: each cycle loads recent traces, so decisions and outcomes bias
 future work — the mechanism behind "memory compounds" in the
-[vision](../vision/readme.md). Eviction (`evict` with an `EvictionPolicy`)
+[vision](../vision/README.md). Eviction (`evict` with an `EvictionPolicy`)
 keeps the working window bounded; evicted traces are archived, not deleted,
 until retention policy or the Operator says otherwise.
 

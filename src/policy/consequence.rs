@@ -779,7 +779,7 @@ const DECLARED: &[Declared] = &[
     // fail-OPEN one, an effect that reads as a read. Declaring is the fix the
     // file already prescribes.
     //
-    // Three reads, per openhuman's own `hosting/readme.md`, which labels each
+    // Three reads, per openhuman's own `hosting/README.md`, which labels each
     // of them "Read-only.". They ask the provider what exists and what it did;
     // nothing leaves this company and nothing is spent.
     d(
@@ -1886,7 +1886,7 @@ mod tests {
 
     // ── hosting (issue #1079) ───────────────────────────────────────────────
 
-    /// The three tools openhuman's `hosting/readme.md` labels "Read-only." ask
+    /// The three tools openhuman's `hosting/README.md` labels "Read-only." ask
     /// the provider what exists and what it did. Asking whether a build
     /// finished must not cost an operator an approval.
     #[test]

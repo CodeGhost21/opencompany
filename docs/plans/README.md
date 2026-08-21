@@ -41,7 +41,7 @@ Each workstream spec follows one template: **Scope → Design → Subtasks
 
 ## Relationship to `docs/spec/`
 
-[`docs/spec/`](../spec/readme.md) is the normative **target-design** spec;
+[`docs/spec/`](../spec/README.md) is the normative **target-design** spec;
 `docs/modules/` describes the code as it exists. This folder is the
 **execution plan** that closes the gap, and it adopts the spec's conventions
 (RFC-2119 keywords, ≤500-line files, glossary-first language).

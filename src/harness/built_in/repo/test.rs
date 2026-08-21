@@ -181,8 +181,8 @@ fn fixture_remote(scratch: &Scratch) -> String {
     );
     git_at(&work, &["init", "--quiet", "--initial-branch=main"]);
     identify(&work);
-    std::fs::write(work.join("readme.md"), "# fixture\n").unwrap();
-    git_at(&work, &["add", "readme.md"]);
+    std::fs::write(work.join("README.md"), "# fixture\n").unwrap();
+    git_at(&work, &["add", "README.md"]);
     git_at(&work, &["commit", "--quiet", "-m", "initial"]);
 
     git_at(&work, &["checkout", "--quiet", "-b", "topic"]);
@@ -387,7 +387,7 @@ async fn a_checkout_survives_the_mirror_being_deleted() {
     git_at(&checkout, &["fsck", "--strict"]);
     let log = git_at(&checkout, &["log", "--oneline"]);
     assert!(log.contains("initial"), "history is unreachable: {log}");
-    assert!(checkout.join("readme.md").is_file());
+    assert!(checkout.join("README.md").is_file());
 }
 
 /// No byte under the checkout's `.git/` names the mirror.
@@ -713,7 +713,7 @@ async fn the_boot_sweep_clears_this_companys_checkouts_and_no_others() {
             .join("workspace")
             .join(CHECKOUT_SUBDIR);
         std::fs::create_dir_all(repos.join("fixture")).unwrap();
-        std::fs::write(repos.join("fixture/readme.md"), "cloned\n").unwrap();
+        std::fs::write(repos.join("fixture/README.md"), "cloned\n").unwrap();
         repos
     };
     let ours = seed("acme", "desk");
@@ -862,7 +862,7 @@ async fn a_successful_checkout_reports_a_relative_path_and_records_it() {
         result.text()
     );
     let tree = workspace.join(CHECKOUT_SUBDIR).join(&binding.key);
-    assert!(tree.join("readme.md").is_file(), "no working tree");
+    assert!(tree.join("README.md").is_file(), "no working tree");
     assert_eq!(ledger.paths(), vec![tree.clone()]);
 
     // And the janitor's contract, end to end.

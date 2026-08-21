@@ -367,7 +367,7 @@ mod tests {
         assert_eq!(swept_names(&removed), vec!["ceo", "cto"]);
         assert_eq!(
             names(&ws, &company).await,
-            vec!["Agents", "readme.md", "cmo", "secrets", "task-1"],
+            vec!["Agents", "README.md", "cmo", "secrets", "task-1"],
             "a folder holding anything at all must survive"
         );
     }
@@ -385,7 +385,7 @@ mod tests {
         let root = root_id(&ws, &company).await;
         ws.create(
             &company,
-            &file("readme", "readme.md", Some(&root)),
+            &file("readme", "README.md", Some(&root)),
             Some("# who is who"),
         )
         .await
@@ -401,7 +401,7 @@ mod tests {
         assert_eq!(swept_names(&removed), vec!["ceo"]);
         assert_eq!(
             names(&ws, &company).await,
-            vec!["Agents", "readme.md", "readme.md", "secrets"]
+            vec!["Agents", "README.md", "README.md", "secrets"]
         );
     }
 
@@ -522,7 +522,7 @@ mod tests {
                 "Agents",
                 "Archive",
                 "Desks",
-                "readme.md",
+                "README.md",
                 "ceo",
                 "creative_studio",
                 "drafts",
@@ -621,11 +621,11 @@ mod tests {
 
         assert_eq!(
             names(&ws, &acme).await,
-            vec!["Agents", "readme.md", "secrets"]
+            vec!["Agents", "README.md", "secrets"]
         );
         assert_eq!(
             names(&ws, &other).await,
-            vec!["Agents", "readme.md", "ceo", "secrets"]
+            vec!["Agents", "README.md", "ceo", "secrets"]
         );
     }
 

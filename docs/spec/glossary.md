@@ -63,7 +63,7 @@ Medulla vocabulary is adopted unchanged where it appears; see
 ## Orchestration terms
 
 How a many-agent Company converges. See
-[runtime/orchestration/](runtime/orchestration/readme.md).
+[runtime/orchestration/](runtime/orchestration/README.md).
 
 > **Naming.** **Ledger** unqualified always means the money and usage journal
 > above. The orchestration files below are **derived ledgers** and MUST always
@@ -90,7 +90,7 @@ How a many-agent Company converges. See
 
 ## Legacy / AVI term bridge
 
-The [vision doc](vision/readme.md) predates this spec. Its terms map as:
+The [vision doc](vision/README.md) predates this spec. Its terms map as:
 
 | AVI term | Current term |
 | --- | --- |

@@ -1,7 +1,7 @@
 # OpenCompany design system
 
 The implementation contract for the console's visual layer. The *why* lives in
-[`docs/brand/readme.md`](../brand/readme.md); this directory is the *what*.
+[`docs/brand/README.md`](../brand/README.md); this directory is the *what*.
 
 | Document | Covers |
 | --- | --- |
@@ -159,7 +159,7 @@ Catalogued rather than hidden.
 | Identity colours colliding with status | 6 maps | **Cleared** — [`color.md`](color.md#identity-tones) |
 | Contrast failures in the running app | 3 | **Cleared** — see [Auditing](#auditing-the-running-app) |
 | Geist Mono not installed | — | **Cleared** — [`typography.md`](typography.md#the-mono-face) |
-| No vector logo asset | — | Open — [`../brand/readme.md`](../brand/readme.md#6-logo--marks) |
+| No vector logo asset | — | Open — [`../brand/README.md`](../brand/README.md#6-logo--marks) |
 | Figma kept in step by hand | — | Open — [Keeping it in step](#keeping-it-in-step--by-hand-for-now) |
 | Figma library covers 8 components | — | Open — [The Figma library](#the-figma-library) |
 

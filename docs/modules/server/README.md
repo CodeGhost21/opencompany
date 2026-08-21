@@ -380,5 +380,5 @@ public **https** URL (`AppConfig::public_webhook_base_url`); otherwise
 operator a `http://127.0.0.1:<port>/hooks/…` URL that can never receive a
 delivery. Everywhere else — local and most self-hosted deployments — inbound
 arrives over `getUpdates` long-polling
-([`runtime::telegram_poller`](../runtime/readme.md#background-listeners)) and a
+([`runtime::telegram_poller`](../runtime/README.md#background-listeners)) and a
 bot token is the whole setup: no webhook secret, no `setWebhook`, no public URL.

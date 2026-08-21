@@ -2656,7 +2656,7 @@ impl RuntimeBuilder {
                                 // Issue #237: the SAME workspace handle the
                                 // console's REST/GraphQL surface writes through
                                 // (`ops.workspace`, seeded just above), so an
-                                // operator's edit to `standards/` is what the
+                                // operator's edit to `Standards/` is what the
                                 // next agent turn reads. The tools cache
                                 // nothing, so no rebuild is needed for an edit
                                 // to take effect.
@@ -4806,8 +4806,8 @@ mod test {
         // A company definition dir with a workspace subtree.
         let seed_dir = home.join("def");
         std::fs::create_dir_all(seed_dir.join("workspace/Brand")).unwrap();
-        std::fs::write(seed_dir.join("workspace/readme.md"), "# Root").unwrap();
-        std::fs::write(seed_dir.join("workspace/brand/voice.md"), "# Voice").unwrap();
+        std::fs::write(seed_dir.join("workspace/README.md"), "# Root").unwrap();
+        std::fs::write(seed_dir.join("workspace/Brand/voice.md"), "# Voice").unwrap();
 
         let manifest = parse("[company]\nname=\"Acme\"\n[policy]\nmode=\"full\"\n");
         let id = CompanyId::new("acme");
@@ -4817,8 +4817,8 @@ mod test {
             .build()
             .await
             .unwrap();
-        // Seeded: readme.md, brand/, brand/voice.md — plus runtime scaffold
-        // (`Agents/` and `secrets/readme.md`) which is not what the re-seed
+        // Seeded: README.md, Brand/, Brand/voice.md — plus runtime scaffold
+        // (`Agents/` and `secrets/README.md`) which is not what the re-seed
         // gate is about.
         let seeded = |tree: &[crate::ports::WorkspaceNode]| {
             let secrets = tree
@@ -4840,7 +4840,7 @@ mod test {
             names
         };
         let tree = runtime.workspace().tree(&id).await.unwrap();
-        assert_eq!(seeded(&tree), vec!["Brand", "readme.md", "voice.md"]);
+        assert_eq!(seeded(&tree), vec!["Brand", "README.md", "voice.md"]);
 
         // Operator deletes a node.
         let voice = tree.iter().find(|n| n.name == "voice.md").unwrap();
@@ -4857,14 +4857,14 @@ mod test {
         let tree = runtime.workspace().tree(&id).await.unwrap();
         assert_eq!(
             seeded(&tree),
-            vec!["Brand", "readme.md"],
+            vec!["Brand", "README.md"],
             "workspace re-seeded despite operator deletion"
         );
         // Sanity: the record store still loads.
         assert!(runtime.store().load(&id).await.unwrap().is_some());
     }
 
-    /// Boot lays down `Agents/` and operator-only `secrets/readme.md`. `Desks/`
+    /// Boot lays down `Agents/` and operator-only `secrets/README.md`. `Desks/`
     /// has no producer, so it is minted on first use instead of standing empty.
     ///
     /// The per-agent folder is deliberately absent: it is minted the first time
@@ -4902,7 +4902,7 @@ mod test {
         names.sort_unstable();
         assert_eq!(
             names,
-            vec![AGENTS_ROOT, "readme.md", SECRETS_ROOT],
+            vec![AGENTS_ROOT, "README.md", SECRETS_ROOT],
             "boot provisions the managed roots with no seed dir — no `Desks/`, and no \
              folder for a teammate that has produced nothing"
         );
@@ -4959,7 +4959,7 @@ mod test {
             vec![
                 AGENTS_ROOT,
                 "Desks",
-                "readme.md",
+                "README.md",
                 "creative_studio",
                 SECRETS_ROOT,
             ],
@@ -4987,7 +4987,7 @@ mod test {
         let tree = runtime.workspace().tree(&id).await.unwrap();
         let mut names: Vec<&str> = tree.iter().map(|n| n.name.as_str()).collect();
         names.sort_unstable();
-        assert_eq!(names, vec![AGENTS_ROOT, "readme.md", SECRETS_ROOT]);
+        assert_eq!(names, vec![AGENTS_ROOT, "README.md", SECRETS_ROOT]);
     }
 
     /// Issue #85: the launch path's template provenance is stamped onto the

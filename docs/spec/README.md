@@ -47,18 +47,18 @@ L0  Substrate       api.tinyhumans.ai, openhuman-core, tiny.place, filesystem
 
 ## Reading Paths
 
-- **Product / UX**: [product/](product/readme.md) →
-  [agentic/](agentic/readme.md) →
-  [company-as-agent/](company-as-agent/readme.md) →
-  [feedback-loop/](feedback-loop/readme.md)
-- **Runtime engineering**: [runtime/](runtime/readme.md) →
-  [company-brain/](company-brain/readme.md) →
-  [integrations/](integrations/readme.md)
+- **Product / UX**: [product/](product/README.md) →
+  [agentic/](agentic/README.md) →
+  [company-as-agent/](company-as-agent/README.md) →
+  [feedback-loop/](feedback-loop/README.md)
+- **Runtime engineering**: [runtime/](runtime/README.md) →
+  [company-brain/](company-brain/README.md) →
+  [integrations/](integrations/README.md)
 - **Security**: [security/agent-isolation.md](security/agent-isolation.md) —
   read this before assuming any agent capability is contained
 - **Where this is going**: [roadmap.md](roadmap.md) →
-  [feature audit](feature-audit/readme.md) →
-  [vision/](vision/readme.md)
+  [feature audit](feature-audit/README.md) →
+  [vision/](vision/README.md)
 
 ## Index
 
@@ -66,22 +66,22 @@ L0  Substrate       api.tinyhumans.ai, openhuman-core, tiny.place, filesystem
 | --- | --- |
 | [glossary.md](glossary.md) | Authoritative vocabulary and term bridges |
 | [roadmap.md](roadmap.md) | Stages 0–4, phase mapping, non-goals |
-| [feature-audit/readme.md](feature-audit/readme.md) | Draft feature families to enrich into future implementation specs |
-| [product/readme.md](product/readme.md) | Product thesis, personas, surfaces, one-key promise |
+| [feature-audit/README.md](feature-audit/README.md) | Draft feature families to enrich into future implementation specs |
+| [product/README.md](product/README.md) | Product thesis, personas, surfaces, one-key promise |
 | [product/prosumer.md](product/prosumer.md) | Non-technical operator journey end to end |
 | [product/platform.md](product/platform.md) | Embed mode and hosted multi-tenant mode |
 | [product/templates.md](product/templates.md) | Templates: the productized company manifests |
-| [agentic/readme.md](agentic/readme.md) | The agentic company: design, run, evolve — agents propose, the Operator disposes |
+| [agentic/README.md](agentic/README.md) | The agentic company: design, run, evolve — agents propose, the Operator disposes |
 | [agentic/setup.md](agentic/setup.md) | Agentic setup: the Architect and Blueprints |
 | [agentic/manager.md](agentic/manager.md) | The Manager: continuous-fit loop and its fence |
 | [agentic/proposals.md](agentic/proposals.md) | Change Proposal schema, lifecycle, provenance (normative) |
-| [company-brain/readme.md](company-brain/readme.md) | What the company brain is; the cycle |
+| [company-brain/README.md](company-brain/README.md) | What the company brain is; the cycle |
 | [company-brain/charter.md](company-brain/charter.md) | The company constitution |
 | [company-brain/approvals.md](company-brain/approvals.md) | Checkpoints and the approval model |
 | [company-brain/grants.md](company-brain/grants.md) | Grants and the tool gate: single-use, standing, tiers, precedence |
 | [company-brain/per-call-judgement.md](company-brain/per-call-judgement.md) | Which calls warrant a human, per call (step 7 of the gate) |
 | [company-brain/memory.md](company-brain/memory.md) | Long-term memory and retention |
-| [runtime/readme.md](runtime/readme.md) | Kernel architecture and crate layout |
+| [runtime/README.md](runtime/README.md) | Kernel architecture and crate layout |
 | [runtime/ports.md](runtime/ports.md) | Port trait contracts (normative) — index, assembly, defaults |
 | [runtime/ports-cognition.md](runtime/ports-cognition.md) | `Brain`, `CycleHost`, `ChannelAdapter`, `TurnStep` |
 | [runtime/ports-state.md](runtime/ports-state.md) | `CompanyStore`, `EventLog`, memory/context, secrets, identity |
@@ -98,7 +98,7 @@ L0  Substrate       api.tinyhumans.ai, openhuman-core, tiny.place, filesystem
 | [runtime/ledgers.md](runtime/ledgers.md) | Dynamic ledgers: declared record shapes, the append-only fold, who may delete, the `derived/` folder |
 | [runtime/ledgers-console-ia.md](runtime/ledgers-console-ia.md) | The console surface over ledgers: naming ("ledger" is internal-only), per-list sidebar rows, Manage Lists, the declare wizard |
 | [runtime/pages.md](runtime/pages.md) | Agent-authored internal dashboard pages: the `Pages/<slug>/` convention, the compile-on-write contract, and the two-part isolation model |
-| [runtime/orchestration/readme.md](runtime/orchestration/readme.md) | Making a many-agent company converge: the three collapses, the three principles, phasing |
+| [runtime/orchestration/README.md](runtime/orchestration/README.md) | Making a many-agent company converge: the three collapses, the three principles, phasing |
 | [runtime/orchestration/memory.md](runtime/orchestration/memory.md) | One memory contract: `MemoryProvider` replaces three ports, and the host decorator that keeps tenants apart |
 | [runtime/orchestration/context-routing.md](runtime/orchestration/context-routing.md) | Which workspace documents reach which role's prompt, the load-bearing exclusions, and assembly order |
 | [runtime/orchestration/alignment.md](runtime/orchestration/alignment.md) | The budgeted brief, the derived ledgers, the assertion board |
@@ -115,21 +115,21 @@ L0  Substrate       api.tinyhumans.ai, openhuman-core, tiny.place, filesystem
 | [runtime/offline.md](runtime/offline.md) | Running with no network: the configuration, what is not local, and the CI lane that proves it |
 | [runtime/hub-console.md](runtime/hub-console.md) | One console deployment operating many hosts on other origins |
 | [security/agent-isolation.md](security/agent-isolation.md) | What confines an agent and what does not — enforced controls, the gaps, and the capability that survives every planned control |
-| [company-as-agent/readme.md](company-as-agent/readme.md) | Companies as economy citizens |
+| [company-as-agent/README.md](company-as-agent/README.md) | Companies as economy citizens |
 | [company-as-agent/identity.md](company-as-agent/identity.md) | Wallet, handle, Agent Card |
 | [company-as-agent/commerce.md](company-as-agent/commerce.md) | Selling, hiring, delegated signers, ledger |
-| [integrations/readme.md](integrations/readme.md) | Reuse-first rule, dependency matrix |
+| [integrations/README.md](integrations/README.md) | Reuse-first rule, dependency matrix |
 | [integrations/medulla.md](integrations/medulla.md) | Brain contract and the hosted wire protocol |
 | [integrations/openhuman.md](integrations/openhuman.md) | OpenHuman seams and upstream PR list |
 | [integrations/tinyagents.md](integrations/tinyagents.md) | TinyAgents harness usage |
 | [integrations/tinycortex.md](integrations/tinycortex.md) | TinyCortex expectations behind the memory port |
 | [integrations/tinyplace.md](integrations/tinyplace.md) | tiny.place protocol integration |
-| [feedback-loop/readme.md](feedback-loop/readme.md) | Feedback capture → GitHub issue → release loop |
+| [feedback-loop/README.md](feedback-loop/README.md) | Feedback capture → GitHub issue → release loop |
 | [feedback-loop/privacy.md](feedback-loop/privacy.md) | Redaction rules (normative) |
 | [feedback-loop/triage.md](feedback-loop/triage.md) | Labels, triage, closing the loop |
-| [vision/readme.md](vision/readme.md) | The AVI north star (aspirational) |
-| [../brand/readme.md](../brand/readme.md) | Brand guideline: positioning, voice, colour, form |
-| [../design-system/readme.md](../design-system/readme.md) | Design system: tokens, type, components (normative for the console) |
+| [vision/README.md](vision/README.md) | The AVI north star (aspirational) |
+| [../brand/README.md](../brand/README.md) | Brand guideline: positioning, voice, colour, form |
+| [../design-system/README.md](../design-system/README.md) | Design system: tokens, type, components (normative for the console) |
 
 Module docs under [`docs/modules/`](../modules/) describe the code as it
 exists today; this spec describes the target design. When they disagree, the
@@ -142,7 +142,7 @@ what the console ships *today*, because their source of truth is a stylesheet
 ## Conventions
 
 - Every Markdown file stays at 500 lines or fewer; topics that outgrow a file
-  split into a directory with a `readme.md` entrypoint.
+  split into a directory with a `README.md` entrypoint.
 - MUST / SHOULD / MAY carry their RFC 2119 meanings in normative sections.
 - [glossary.md](glossary.md) is authoritative for vocabulary; docs link terms
   on first use rather than redefining them.

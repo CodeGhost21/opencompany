@@ -156,7 +156,7 @@ export type Crumb = FsNode | null;
  * the middle collapses. That split is the useful one: the root says which part
  * of the company this belongs to, and the last two say what it sits next to.
  * Truncating the string instead — which is what `truncate` on a single span did
- * — ellipsises the *tail*, so every note under `standards/Engineering/…` renders
+ * — ellipsises the *tail*, so every note under `Standards/Engineering/…` renders
  * the identical prefix and the discriminating end is exactly what is thrown away.
  */
 export function breadcrumbOf(nodes: FsNode[], id: string | null, max = 3): Crumb[] {

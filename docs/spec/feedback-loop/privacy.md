@@ -25,7 +25,7 @@ kind or route involved, and error codes.
 - The operator MUST be shown the **exact final issue body** — post-scrub,
   byte-for-byte what will be posted.
 - Nothing is transmitted without explicit confirmation or a standing
-  per-category auto-consent ([readme.md](readme.md)); auto-consent filings
+  per-category auto-consent ([README.md](README.md)); auto-consent filings
   are journaled and the operator can review every filed body after the fact.
 - Scrubbing failures fail **closed**: if a redaction class can't be
   evaluated (e.g. secrets store unreadable), filing is blocked, not risked.

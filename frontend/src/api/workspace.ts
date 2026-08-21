@@ -168,7 +168,7 @@ export async function fetchFile(
  * `parentId` by walking the tree, and a flat hit list has no tree to walk.
  */
 export interface SearchHit extends FsNode {
-  /** The node's logical path, e.g. `standards/Engineering.md`. */
+  /** The node's logical path, e.g. `Standards/Engineering.md`. */
   path: string;
   /** Whether the query matched the node's name or its body. */
   matched: "name" | "content";

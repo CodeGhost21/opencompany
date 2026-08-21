@@ -182,7 +182,7 @@ describe("read() against a host whose surfaces do not answer", () => {
   }
 
   it("emits exactly the 22 checks the docs claim", async () => {
-    // Pins the number in `qa/readme.md` and `qa/MASTER-QA.md` to the code. The
+    // Pins the number in `qa/README.md` and `qa/MASTER-QA.md` to the code. The
     // cache-header check expands to three rows on a host that actually serves a
     // console; here the shell 404s, so it contributes its single SKIP.
     const rows = await runRead();

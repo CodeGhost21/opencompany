@@ -6,7 +6,7 @@
 //! the real HTTP filer [`HttpGitHubClient`] is gated behind the `github`
 //! feature.
 //!
-//! Filing obligations (`docs/spec/feedback-loop/readme.md`):
+//! Filing obligations (`docs/spec/feedback-loop/README.md`):
 //!
 //! * **Dedupe** — search existing issues first; comment instead of duplicating.
 //! * **Rate-limit** — per company, so a noisy company cannot flood the tracker.

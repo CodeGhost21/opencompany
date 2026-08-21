@@ -17,8 +17,8 @@
 //!
 //! * `Agents/` is scaffolding. [`ensure_workspace_scaffold`] lays it down on
 //!   every boot, empty, whether or not the company has a roster — it is part of
-//!   what a workspace *is*, the same way the template-seeded `playbooks/` and
-//!   `standards/` are, and it has a real producer behind it: the persona brief
+//!   what a workspace *is*, the same way the template-seeded `Playbooks/` and
+//!   `Standards/` are, and it has a real producer behind it: the persona brief
 //!   steers every agent to write beneath it, so an operator opening the
 //!   Workspace tab on a brand-new company is being shown where things are about
 //!   to appear rather than a void.
@@ -141,7 +141,7 @@ pub const SECRETS_ROOT: &str = "secrets";
 /// The name of the note provisioned inside [`SECRETS_ROOT`] on first boot.
 ///
 /// Lowercase for the same reason every other minted name is — and matched
-/// case-insensitively by [`find`], so a legacy `readme.md` is adopted rather
+/// case-insensitively by [`find`], so a legacy `README.md` is adopted rather
 /// than joined by a second copy.
 pub const SECRETS_README_NAME: &str = "readme.md";
 
@@ -602,7 +602,7 @@ mod tests {
     }
 
     fn scaffold_paths() -> Vec<&'static str> {
-        vec!["Agents", "secrets", "secrets/readme.md"]
+        vec!["Agents", "secrets", "secrets/README.md"]
     }
 
     /// The scaffold has an empty agent root plus the operator-only secrets
@@ -631,7 +631,7 @@ mod tests {
                 node.name
             );
         }
-        let readme = nodes.iter().find(|node| node.name == "readme.md").unwrap();
+        let readme = nodes.iter().find(|node| node.name == "README.md").unwrap();
         let (_, body) = ws.read(&company, &readme.id).await.unwrap().unwrap();
         assert_eq!(body, SECRETS_README);
     }
@@ -772,7 +772,7 @@ mod tests {
         );
         assert_eq!(
             paths(&nodes),
-            vec!["Agents", "Agents", "secrets", "secrets/readme.md"],
+            vec!["Agents", "Agents", "secrets", "secrets/README.md"],
             "only the unrelated secrets scaffold may be created beside the collision"
         );
     }
@@ -813,7 +813,7 @@ mod tests {
         assert_eq!(first, second, "a second call minted a rival folder");
         assert_eq!(
             tree_paths(&ws, &company).await,
-            vec!["Agents", "Agents/ceo", "secrets", "secrets/readme.md"]
+            vec!["Agents", "Agents/ceo", "secrets", "secrets/README.md"]
         );
         let nodes = ws.tree(&company).await.unwrap();
         let ceo = nodes.iter().find(|n| n.name == "ceo").unwrap();
@@ -837,7 +837,7 @@ mod tests {
 
         assert_eq!(
             tree_paths(&ws, &company).await,
-            vec!["Agents", "Agents/cmo", "secrets", "secrets/readme.md"]
+            vec!["Agents", "Agents/cmo", "secrets", "secrets/README.md"]
         );
     }
 
@@ -1061,7 +1061,7 @@ mod tests {
         let nodes = ws.tree(&company).await.unwrap();
         assert_eq!(
             paths(&nodes),
-            vec!["Agents", "Desks", "secrets", "secrets/readme.md"],
+            vec!["Agents", "Desks", "secrets", "secrets/README.md"],
             "dropping `Desks/` from the scaffold must not delete an existing one"
         );
         let desks = nodes.iter().find(|n| n.name == DESKS_ROOT).unwrap();

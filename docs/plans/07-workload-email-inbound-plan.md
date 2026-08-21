@@ -7,10 +7,10 @@
 > inbound path behaves today see
 > [`docs/spec/runtime/api-write-plane.md`](../spec/runtime/api-write-plane.md)
 > (the `…/inboxes/ingest` route and the `InboxStore` both inbound paths file
-> into) and [`docs/modules/runtime/readme.md`](../modules/runtime/readme.md)
+> into) and [`docs/modules/runtime/README.md`](../modules/runtime/README.md)
 > (`mailbox_poller.rs` under "Background listeners"). The page is retained as
 > the WS7 email train's historical record, per this folder's convention — see
-> the note on retained plans in [readme.md](readme.md).
+> the note on retained plans in [README.md](README.md).
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 

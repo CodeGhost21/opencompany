@@ -48,7 +48,7 @@ All stimuli normalize to `CompanyEvent { source, kind, payload, correlation }`
 (variants in [events.md](events.md)). Per company there is **one serial cycle
 queue** — one cycle at a time, events batched/debounced between cycles;
 distinct companies run concurrently. A cycle
-([company-brain/readme.md](../company-brain/readme.md)):
+([company-brain/README.md](../company-brain/README.md)):
 
 1. Drain pending events for the company.
 2. Load working memory (`MemoryStore::recent_traces`), context index, roster

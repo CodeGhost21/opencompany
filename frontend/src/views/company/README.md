@@ -52,7 +52,7 @@ a real tree instead of trusted from a comment.
 **Not on a desk** (roster teammates staffed nowhere) and **People** (the humans
 who can sign in) are listed alongside the chart. Neither has a position the
 company declares. Placing them under a node would be inventing structure, which
-is the failure `views/overview/readme.md` already documents about its own
+is the failure `views/overview/README.md` already documents about its own
 keyword-derived departments — this surface exists to be the truthful one.
 
 A seat whose id resolves to no roster teammate is a third case, and it is

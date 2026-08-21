@@ -20,7 +20,7 @@ Every feedback issue gets `feedback` plus one from each axis:
 
 `sev/money-lost` issues page maintainers; `area/brain` issues that reproduce
 upstream get mirrored to the owning repo (medulla/backend) with a link, per
-the [reuse-first rule](../integrations/readme.md).
+the [reuse-first rule](../integrations/README.md).
 
 ## Triage flow
 
@@ -47,6 +47,6 @@ auto-consent mode.
 - On release, the bot comments on each fixed issue; the runtime's update
   check surfaces the in-product notice — *"2 things you flagged were fixed
   in v0.4"* — to the specific operators whose feedback items link those
-  issues ([readme.md](readme.md)).
+  issues ([README.md](README.md)).
 - A fix without a linked issue is fine; a `feedback`-labeled issue closed by
   a release without appearing in the notes is a process bug.

@@ -77,7 +77,7 @@ describe("chrome tokens", () => {
 
   it("routes both through a primitive or a rung rather than a literal", () => {
     // Layer 2 names what a colour means and points at layer 1 for the value.
-    // A literal here is the debt `docs/design-system/readme.md` describes: a
+    // A literal here is the debt `docs/design-system/README.md` describes: a
     // colour the system cannot see, retune, or check the contrast of.
     for (const body of [light, dark]) {
       for (const token of ["chrome", "chrome-border"]) {

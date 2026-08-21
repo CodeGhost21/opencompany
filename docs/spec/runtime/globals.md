@@ -15,7 +15,7 @@ globals/
 ```
 
 The code is [`crate::globals`](../../../src/globals/mod.rs), and the shipped
-contents are described in [`globals/readme.md`](../../../globals/readme.md).
+contents are described in [`globals/README.md`](../../../globals/README.md).
 
 ## Embedded, not read from disk
 

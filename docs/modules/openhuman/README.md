@@ -25,7 +25,7 @@ The builder seams are wired to OpenCompany's own ports:
   operator.
 - **Tools / skills** → injected from the company's manifest grants.
 
-See [`docs/modules/runtime/readme.md`](../runtime/readme.md) for `HarnessPool`
+See [`docs/modules/runtime/README.md`](../runtime/README.md) for `HarnessPool`
 and [`docs/spec/integrations/openhuman.md`](../../spec/integrations/openhuman.md)
 for the full integration contract.
 

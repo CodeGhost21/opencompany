@@ -60,5 +60,5 @@ alias.
 - [Your first company](your-first-company.md) — the operator journey, install
   to earnings.
 - [Pricing & your key](pricing.md) — how the brain subscription works.
-- [Developer docs](../developers/readme.md) — build, extend, and deploy the
+- [Developer docs](../developers/README.md) — build, extend, and deploy the
   runtime.

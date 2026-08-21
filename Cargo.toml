@@ -9,7 +9,7 @@ edition = "2024"
 license = "GPL-3.0-only"
 repository = "https://github.com/tinyhumansai/opencompany"
 description = "Company operating system scaffold built on OpenHuman and TinyHumans Rust modules."
-readme = "readme.md"
+readme = "README.md"
 keywords = ["company", "agents", "openhuman", "tinyagents", "axum"]
 categories = ["web-programming", "asynchronous"]
 # Each example is a standalone workspace member crate, not a bare-file example

@@ -194,11 +194,11 @@ To let companies trade with other agents on tiny.place, build with the
 `tinyplace` feature and pass `serve --discoverable` to opt every loaded company
 into going public (register a `@handle`, publish an Agent Card, and answer
 inbound A2A `tasks/send` over SIWX + x402). See
-[`docs/modules/server/readme.md`](docs/modules/server/readme.md) for the full
+[`docs/modules/server/README.md`](docs/modules/server/README.md) for the full
 discovery flow and the `TINYPLACE_API_URL` / `OPENCOMPANY_PUBLIC_URL` settings.
 
 Each company folder holds a `company.toml` (the manifest — the team, the
-output, the human's role) and a `readme.md` describing the business. Edit the
+output, the human's role) and a `README.md` describing the business. Edit the
 manifest to reshape the team; `opencompany check` reports any problems in plain
 language. Adding a new business is a new folder, not a new program.
 
@@ -237,7 +237,7 @@ reload, run `OPENCOMPANY_COMPANY=marketing docker compose up --build` directly.
 The same two images deploy to DigitalOcean (App Platform spec in
 [`.do/app.yaml`](.do/app.yaml)), AWS (Fargate task in
 [`deploy/`](deploy/aws-ecs-task-definition.json)), or any Docker host. See
-[`deploy/readme.md`](deploy/readme.md).
+[`deploy/README.md`](deploy/README.md).
 
 Compile against vendored TinyAgents, or preview an OpenHuman launch:
 
@@ -291,18 +291,18 @@ parsing, validation, and boot), **`ports`** (kernel trait seams),
 loop), **`server`** (Axum router), **`openhuman`** (launcher seams),
 **`tiny`** (vendored TinyAgents status).
 
-See [docs/spec/readme.md](docs/spec/readme.md) for the architecture reference
-and [companies/readme.md](companies/readme.md) for the full company catalog.
+See [docs/spec/README.md](docs/spec/README.md) for the architecture reference
+and [companies/README.md](companies/README.md) for the full company catalog.
 
 ## Documentation
 
-The full docs live in [`gitbooks/`](gitbooks/readme.md): what OpenCompany is,
+The full docs live in [`gitbooks/`](gitbooks/README.md): what OpenCompany is,
 what one person can run, how [Medulla](gitbooks/overview/medulla.md) drives it,
 and the [tiny.place economy](gitbooks/overview/tiny-place.md). Builders should
-start with the [developer section](gitbooks/developers/readme.md) — build,
+start with the [developer section](gitbooks/developers/README.md) — build,
 CLI, architecture, authoring companies, deployment, and configuration.
 
-Checking a release against a deployed tenant is [`qa/`](qa/readme.md): a
+Checking a release against a deployed tenant is [`qa/`](qa/README.md): a
 zero-dependency console script and the checklist that goes with it.
 
 ## Community

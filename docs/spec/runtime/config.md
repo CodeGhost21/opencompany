@@ -14,7 +14,7 @@ runtime to the TinyHumans backend (api.tinyhumans.ai) and from it derive:
 - feedback forwarding: an instance holding a credential sends operator reports
   to the backend hub, recorded on behalf of the credential's **owner**, instead
   of filing its own GitHub issues
-  ([feedback-loop](../feedback-loop/readme.md)).
+  ([feedback-loop](../feedback-loop/README.md)).
 
 **Credential reality vs contract.** Today the backend authenticates
 `/orchestration/v1` with a session JWT (magic-link / OAuth / login-token

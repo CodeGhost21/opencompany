@@ -21,7 +21,7 @@ parked effect is journaled one way and survives a restart with its original id):
   projected call is then held for the operator rather than re-decided (issue
   #172). Re-evaluating it here would `Allow` — and so silently "execute" as a
   no-op — anything in the `Other` group, which is most gated tool calls. See
-  [the OpenHuman module](../openhuman/readme.md#approval-parking).
+  [the OpenHuman module](../openhuman/README.md#approval-parking).
 
 Effects are classified into the checkpoint groups (Spend / Send / Sign /
 Publish / Hire / Identity) with per-group supervised defaults. Parked approvals

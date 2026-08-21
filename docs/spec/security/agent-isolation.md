@@ -101,7 +101,7 @@ wired nor compiled: `sandbox-landlock` is absent from the tenant feature set in
 
 ### 2. Wiring Landlock would not close the exfiltration channel.
 
-From `vendor/openhuman/src/openhuman/sandbox/cwd_jail/readme.md`, verbatim:
+From `vendor/openhuman/src/openhuman/sandbox/cwd_jail/README.md`, verbatim:
 *"Landlock does not gate network at all."* Egress isolation in OpenHuman exists
 only through the Docker sandbox backend's `--network`, which needs
 docker-in-docker and is not available in a tenant pod.

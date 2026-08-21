@@ -295,8 +295,8 @@ fn fixture_remote(scratch: &Scratch) -> String {
     ] {
         git_at(&work, &["config", k, v]);
     }
-    std::fs::write(work.join("readme.md"), "# fixture\n").unwrap();
-    git_at(&work, &["add", "readme.md"]);
+    std::fs::write(work.join("README.md"), "# fixture\n").unwrap();
+    git_at(&work, &["add", "README.md"]);
     git_at(&work, &["commit", "--quiet", "-m", "initial"]);
 
     git_at(&work, &["checkout", "--quiet", "-b", "topic"]);

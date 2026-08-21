@@ -42,7 +42,7 @@ provenance, and approval machinery that already exists.
 | Role | Runs when | Reads | Produces | Spec |
 | --- | --- | --- | --- | --- |
 | **Architect** | onboarding; on demand later ("reshape my company") | operator conversation, Template library | a [Blueprint](setup.md) (pre-launch) or a proposal batch (post-launch) | [setup.md](setup.md) |
-| **Brain + Roster** | every cycle | events, memory, context | work, effects | [company-brain/](../company-brain/readme.md) (unchanged) |
+| **Brain + Roster** | every cycle | events, memory, context | work, effects | [company-brain/](../company-brain/README.md) (unchanged) |
 | **Manager** | scheduled tick (default weekly) | feedback inbox, approval history, ledger, memory traces | [Change Proposals](proposals.md) | [manager.md](manager.md) |
 
 Neither the Architect nor the Manager is a new kind of runtime. Both are

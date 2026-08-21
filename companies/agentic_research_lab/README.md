@@ -6,7 +6,7 @@
 
 Where the other shipped companies model a business, this one models an
 **investigation**. It is also the acceptance test for
-[`docs/spec/runtime/orchestration/`](../../docs/spec/runtime/orchestration/readme.md):
+[`docs/spec/runtime/orchestration/`](../../docs/spec/runtime/orchestration/README.md):
 if a lab converges on a question without an operator babysitting it, that work
 landed.
 
@@ -101,5 +101,5 @@ The roster, the grants, the workflow and the context routing are real and parse
 today. The mechanisms they are built to exercise are specified but not all
 implemented — the `context` key in particular is carried as data and not yet
 consumed, and the workflow expresses one pass rather than a retrying loop. See
-the [orchestration spec](../../docs/spec/runtime/orchestration/readme.md) for
+the [orchestration spec](../../docs/spec/runtime/orchestration/README.md) for
 what lands in which phase.

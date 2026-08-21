@@ -2,7 +2,7 @@
 
 The written source of truth for how OpenCompany looks and sounds. It is
 deliberately short. Everything measurable — exact values, contrast ratios,
-component states — lives in [`docs/design-system/`](../design-system/readme.md),
+component states — lives in [`docs/design-system/`](../design-system/README.md),
 and the values themselves live in `frontend/src/index.css`. This file is about
 *why*, so that a decision the tokens do not cover can still be made correctly.
 
@@ -243,7 +243,7 @@ belong in the product.
 
 ## See also
 
-- [`design-system/readme.md`](../design-system/readme.md) — the implementation contract
+- [`design-system/README.md`](../design-system/README.md) — the implementation contract
 - [`design-system/color.md`](../design-system/color.md) — every value, with measured contrast
 - [`design-system/typography.md`](../design-system/typography.md) — the scale and the migration list
 - [`design-system/components.md`](../design-system/components.md) — anatomy and states per primitive

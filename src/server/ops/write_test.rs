@@ -1335,7 +1335,7 @@ async fn workspace_tree_and_file_reads_reflect_writes() {
 
     // A workspace with nothing seeded into it reads as a real tree, not a 404
     // and not a fixture. It is not *empty*, though: boot scaffolds the reserved
-    // `Agents/` root and operator-only `secrets/readme.md`. The manifest here has an agent and it gets
+    // `Agents/` root and operator-only `secrets/README.md`. The manifest here has an agent and it gets
     // no folder — a member folder is minted on first use, not on joining the
     // roster. `Desks/` is absent for the same reason since issue #645: nothing
     // writes into it, so it is minted on first use rather than scaffolded.
@@ -1343,7 +1343,7 @@ async fn workspace_tree_and_file_reads_reflect_writes() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
         provisioned_names(&tree),
-        vec!["Agents", "readme.md", "secrets"],
+        vec!["Agents", "README.md", "secrets"],
         "a fresh company starts with its system scaffold and nothing else"
     );
     let provisioned = tree.as_array().unwrap().len();
@@ -1552,7 +1552,7 @@ async fn workspace_reads_are_isolated_between_companies() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
         provisioned_names(&tree_b),
-        vec!["Agents", "readme.md", "secrets"]
+        vec!["Agents", "README.md", "secrets"]
     );
 
     // Even naming A's node id explicitly, B's scope does not resolve it.
@@ -1622,7 +1622,7 @@ async fn workspace_search_returns_hits_with_paths_and_excerpts() {
     let hits = results["hits"].as_array().unwrap();
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0]["id"], json!(note_id));
-    assert_eq!(hits[0]["path"], "standards/Support.md");
+    assert_eq!(hits[0]["path"], "Standards/Support.md");
     assert_eq!(hits[0]["matched"], "content");
     assert_eq!(hits[0]["kind"], "file");
     assert_eq!(hits[0]["updatedBy"], json!({"kind": "operator"}));
@@ -1762,7 +1762,7 @@ async fn workspace_sweep_previews_then_removes_only_the_empty_agent_folders() {
         "POST",
         "/api/v1/company/workspace",
         Some(json!({
-            "name": "readme.md",
+            "name": "README.md",
             "kind": "file",
             "parentId": agents_id,
             "content": "# who is who",
@@ -1830,8 +1830,8 @@ async fn workspace_sweep_previews_then_removes_only_the_empty_agent_folders() {
         provisioned_names(&tree),
         vec![
             "Agents".to_string(),
-            "readme.md".to_string(),
-            "readme.md".to_string(),
+            "README.md".to_string(),
+            "README.md".to_string(),
             "cmo".to_string(),
             "launch-brief.md".to_string(),
             "secrets".to_string(),

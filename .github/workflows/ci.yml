@@ -1439,7 +1439,7 @@ jobs:
       # names the token to use instead, so a failure is self-service.
       #
       # Not part of `build`: this is a policy check, and a separate step names
-      # the failure as one. See docs/design-system/readme.md.
+      # the failure as one. See docs/design-system/README.md.
       - run: ./scripts/ci/assert-design-tokens.sh
 
       # The 500-line Markdown cap, asserted rather than trusted (issue #695).
@@ -1488,7 +1488,7 @@ jobs:
 
       # ...and again on the floor `engines.pnpm` declares. pnpm 11 is what a
       # contributor who types `npx pnpm` gets today; 10 is what the manifest
-      # and `frontend/readme.md` promise still works, and a floor nothing
+      # and `frontend/README.md` promise still works, and a floor nothing
       # exercises is a claim rather than a contract — the same gap this change
       # exists to close for Node. It is not hypothetical in the other
       # direction: pnpm 9 does fail, on `pnpm-workspace.yaml`.

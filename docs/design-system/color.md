@@ -60,7 +60,7 @@ is too dense to read as ink on near-black.
 ## Neutrals
 
 Cool-tinted at ~286°, chroma 0.001–0.03. See
-[`../brand/readme.md`](../brand/readme.md#neutrals-carry-the-brand) for why they
+[`../brand/README.md`](../brand/README.md#neutrals-carry-the-brand) for why they
 are not pure grey.
 
 There is no single grey ramp. The brand guide draws light and dark as two

@@ -5,7 +5,7 @@
 # `CLAUDE.md` has asked for this since the repository started — "Keep every
 # Markdown file, including this one, at 500 lines or fewer. When a topic grows
 # past that limit, split it into focused files and link them from the module's
-# readme.md" — and until now nothing checked it. A convention nothing measures
+# README.md" — and until now nothing checked it. A convention nothing measures
 # is a convention that drifts: issue #695 found three files over the cap, one
 # of them at 699 lines, none of which arrived over it in a single commit. They
 # grew a paragraph at a time, and every one of those paragraphs was reasonable.

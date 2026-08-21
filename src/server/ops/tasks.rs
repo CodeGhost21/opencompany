@@ -2158,7 +2158,7 @@ async fn post_discussion(
 ///
 /// It is not an at-rest erasure on the instance that already holds the bytes,
 /// and the route does not pretend to be: rotating a leaked secret is still the
-/// remedy. See `docs/modules/server/readme.md`.
+/// remedy. See `docs/modules/server/README.md`.
 ///
 /// ## Who may
 ///

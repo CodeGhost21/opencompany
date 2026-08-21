@@ -28,7 +28,7 @@
  *   not a record with a page. The console has no address for one, and
  *   inventing a link to the MCP tab would point at a server that may have
  *   nothing to do with the grant — exactly the `grant_matches` guesswork
- *   `views/overview/readme.md` forbids.
+ *   `views/overview/README.md` forbids.
  * - **A workflow stage.** A stage is a node inside a saved graph. The flow has
  *   an address; the node within it does not.
  * - **The company core.** It is the page you are already on.

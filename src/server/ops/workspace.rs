@@ -230,7 +230,7 @@ struct WorkspaceFileBody {
 struct SearchHitBody {
     #[serde(flatten)]
     node: FsNode,
-    /// The node's logical path, e.g. `standards/Engineering.md`.
+    /// The node's logical path, e.g. `Standards/Engineering.md`.
     path: String,
     /// `name` or `content`.
     matched: &'static str,

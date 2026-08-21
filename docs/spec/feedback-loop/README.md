@@ -3,7 +3,7 @@
 The product improves through its users: feedback captured in-product becomes
 **public GitHub issues** on `tinyhumansai/opencompany`, triage clusters them
 into roadmap items, and releases tell the users who spoke up that they were
-heard. This is the [vision's](../vision/readme.md) learning loop, made
+heard. This is the [vision's](../vision/README.md) learning loop, made
 concrete.
 
 Supporting docs: [privacy.md](privacy.md) (normative scrubbing rules),
@@ -33,7 +33,7 @@ itself can invoke when the operator complains mid-conversation.
 A **Feedback Item** snapshots: category, the operator's words, the work item
 it concerns, template name + version, runtime version, and a *redacted*
 context excerpt. Items persist in the company's feedback family
-([company-brain](../company-brain/readme.md)) whether or not they are ever
+([company-brain](../company-brain/README.md)) whether or not they are ever
 filed.
 
 ## Consent modes

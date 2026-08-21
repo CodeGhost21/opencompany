@@ -293,7 +293,7 @@ pub(crate) async fn runner_gap_for(runtime: &CompanyRuntime) -> RunnerGap {
 /// routes nowhere, so the card must not advertise it as the endpoint in use.
 ///
 /// Also `None` off the `openhuman` feature, which is a shipped configuration
-/// (`Dockerfile`'s `FEATURES` arg defaults to empty, and `deploy/readme.md`
+/// (`Dockerfile`'s `FEATURES` arg defaults to empty, and `deploy/README.md`
 /// suggests sets like `medulla tinyplace sqlite`) — but not a gap. Nothing
 /// outside `src/harness/` reads `OPENCOMPANY_INFERENCE_URL`, so in such a build
 /// there is no injected endpoint for the card to misreport: the built-in
