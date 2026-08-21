@@ -40,7 +40,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::Result;
-use crate::app::config::{ConfigFile, WorkspaceConfig};
+use crate::app::config::{AuthMode, ConfigFile, WorkspaceConfig};
 use crate::app::journal::JournalRoot;
 use crate::store::DataLayout;
 use crate::store::lock::HomeLock;
@@ -56,6 +56,7 @@ pub struct EmbeddedInstance {
     home: PathBuf,
     journal: JournalRoot,
     workspace: WorkspaceConfig,
+    auth_mode: Option<AuthMode>,
     _lock: HomeLock,
 }
 
@@ -80,6 +81,24 @@ impl EmbeddedInstance {
     /// silently disregards an operator's `config.toml`.
     pub fn workspace(&self) -> &WorkspaceConfig {
         &self.workspace
+    }
+
+    /// The root's `config.toml` `auth_mode`, if it names one.
+    ///
+    /// Returned for the same reason as [`Self::workspace`] and with more at
+    /// stake. `serve` gets this layer for free through `AppConfig::load`; an
+    /// embedder that builds its `AppConfig` by hand — the desktop shell does —
+    /// gets it only if something hands it over, and without it the host-wide
+    /// sign-in mode is whatever the embedder compiled in. That matters because
+    /// the [first-run setup flow](crate::server::setup) *writes* this key and
+    /// tells the operator it takes effect: a shell that ignored the file would
+    /// honour their choice until they quit and silently discard it after.
+    ///
+    /// `None` means the file named no mode, leaving the decision to the
+    /// embedder — which is not the same as `Some(AuthMode::Email)`, the value
+    /// each company's own `[users].mode` defaults to further down the stack.
+    pub fn auth_mode(&self) -> Option<AuthMode> {
+        self.auth_mode
     }
 
     /// The `(name, value)` an embedder must export **before** starting any
@@ -129,10 +148,20 @@ pub async fn prepare_instance(home: Option<PathBuf>) -> Result<EmbeddedInstance>
     crate::store::migrate::migrate_legacy_nest_announced(&home)?;
     // Read after the migration: an un-migrated install's `config.toml` may
     // still be one level down, and moving it up is what the step above does.
-    let workspace = ConfigFile::load(&home)?
-        .map(|file| file.workspace)
+    let file = ConfigFile::load(&home)?;
+    let workspace = file
+        .as_ref()
+        .map(|file| file.workspace.clone())
         .unwrap_or_default()
         .resolve();
+    // Parsed here rather than by the embedder, so an unparseable value aborts
+    // the boot it was configured for instead of being silently ignored by one
+    // caller and honoured by another. The same refusal `serve` makes.
+    let auth_mode = file
+        .as_ref()
+        .and_then(|file| file.auth_mode.as_deref())
+        .map(str::parse::<AuthMode>)
+        .transpose()?;
     DataLayout::new(&home)
         .ensure(workspace.clear_tmp_on_startup)
         .await?;
@@ -142,6 +171,7 @@ pub async fn prepare_instance(home: Option<PathBuf>) -> Result<EmbeddedInstance>
         home,
         journal,
         workspace,
+        auth_mode,
         _lock: lock,
     })
 }
@@ -158,6 +188,40 @@ async fn prepare_journal(home: &Path) -> Result<JournalRoot> {
 #[cfg(test)]
 mod test {
     use super::*;
+
+    /// An unparseable `auth_mode` aborts the boot rather than being dropped.
+    ///
+    /// The same refusal `serve` makes, and for the same reason: "the sign-in you
+    /// configured is not the one you got" is invisible from a running host. It
+    /// has to be made *here* rather than by each embedder, because an embedder
+    /// that read this field leniently would turn a typo into a silently
+    /// different security posture — on the desktop, into a host with no sign-in
+    /// where the operator asked for one.
+    #[tokio::test]
+    async fn an_unparseable_auth_mode_refuses_to_start() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("config.toml"), "auth_mode = \"emial\"\n").unwrap();
+
+        let error = prepare_instance(Some(dir.path().to_path_buf()))
+            .await
+            .expect_err("a mode nobody can parse must not be ignored");
+        assert!(
+            error.to_string().contains("emial"),
+            "the refusal has to name the value: {error}"
+        );
+    }
+
+    /// A file naming no mode leaves the decision to the embedder, which is not
+    /// the same as naming `email` — that default lives one layer further down,
+    /// on each company's own `[users].mode`.
+    #[tokio::test]
+    async fn an_absent_auth_mode_stays_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let instance = prepare_instance(Some(dir.path().to_path_buf()))
+            .await
+            .unwrap();
+        assert_eq!(instance.auth_mode(), None);
+    }
 
     #[tokio::test]
     async fn a_prepared_root_is_locked_against_a_second_instance() {

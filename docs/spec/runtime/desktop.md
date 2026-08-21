@@ -383,6 +383,52 @@ Not started when its root could not be taken — most often because another
 process holds it. The console renders that as a row; the desktop still holds
 remote hosts, which is the point of holding several.
 
+### No sign-in at all
+
+The embedded host sets `auth_mode_override` to `AuthMode::None`
+([sign-in modes](auth-modes.md#none)). A desktop install has no login screen,
+no operator mailbox, and no session: `resolve_principal` answers with the
+company's implicit local owner before it looks for a cookie or a bearer, so the
+console's first request is already authenticated as an `Admin` backed by a real
+`UserRecord` under `local:owner`.
+
+The argument for it is not that the login screen was redundant. It is that
+**there was never a session carrier to bring its result home in.** The magic
+link worked — a loopback host with no mail transport echoes the code in its own
+response, and the console redeemed it — and then the cookie went nowhere:
+
+- The proxy's `reqwest` client is built without a cookie store, so nothing
+  persisted the `Set-Cookie` for the next request.
+- `x-opencompany-session`, the header carrier a paired device uses, is in
+  `RESERVED_HEADERS` and is stripped from anything the webview sends — see
+  [what the proxy will not carry](#what-the-proxy-will-not-carry).
+- `needsCarriedSession()` is false in the desktop whatever the address, so the
+  console does not hold a token either.
+
+What actually let the console through was that every request came from loopback
+anyway, which is `none` mode's premise stated in a slower way. So the ceremony —
+a synthetic `operator@opencompany.local` the operator was told to accept, a link
+the host mailed to nobody, a cookie discarded on arrival — bought nothing that
+the bind was not already providing. `none` deletes it and says what was true.
+
+Set on the **host**, not in the shipped preset manifests: the override reaches
+every company on the data root, including ones an earlier install left there,
+so an existing install migrates by relaunching — and it leaves
+`manifest.users.mode` at its default, which a `[users].admins` entry under
+`mode = "none"` would otherwise make `validate_users` reject.
+
+A default, not a ceiling. `prepare_instance` reports the root's `config.toml`
+`auth_mode` and `none` is only the fallback, so an operator who deliberately
+turns a sign-in on in setup — to share their instance — still has it after a
+relaunch. The setup wizard preselects `none` when it is running in the desktop
+runtime *and* the host offers the mode, which is a preselection and not a lock.
+
+**What this costs:** a device paired to the embedded host from another machine
+stops working. Every step of the pairing succeeds and the resulting token is
+inert from anywhere but this computer; see
+[sign-in modes](auth-modes.md#none) for why, and note that pairing this desktop
+*to a remote host* is unaffected — that is the section below.
+
 ## Several hosts on one machine
 
 The desktop runs a roster of local hosts rather than exactly one, so an
@@ -431,6 +477,11 @@ purpose — a host an operator added by hand is labelled by authority
 (`127.0.0.1:8080`), never with that string.
 
 ## Authenticating as a person
+
+**About remote hosts.** The embedded host on this machine has no sign-in to
+authenticate to at all — see [no sign-in at all](#no-sign-in-at-all) — so
+everything below is about the other connections in the switcher: a colleague's
+server, a hosted tenant, anything the desktop is a *client* of.
 
 A desktop cannot hold a session cookie: `SameSite=Lax` means the browser never
 sends one cross-site, and a webview is cross-site with every server. The only
