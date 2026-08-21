@@ -11,7 +11,6 @@
 import {
   Blocks,
   ChartColumnBig,
-  CreditCard,
   Globe,
   Laptop,
   Plug,
@@ -30,12 +29,9 @@ export const SETTINGS_PAGES = [
   { id: "devices", label: "Devices", icon: Laptop, hint: "Machines paired to your account" },
   { id: "connections", label: "Connections", icon: Plug, hint: "Third-party accounts" },
   { id: "mcp", label: "MCP Servers", icon: Blocks, hint: "Tool servers and their tools" },
-  // Sits beside Connections rather than inside it: an operator looking for
-  // "where do I put my Chargebee key" searches for billing, not for a
-  // third-party-accounts drawer.
-  { id: "billing", label: "Billing", icon: CreditCard, hint: "Invoicing through Chargebee" },
-  // Beside Billing for the same reason it sits beside Connections: an operator
-  // looking for "where do I put my Vercel token" searches for hosting.
+  // A credential form belongs beside what it unlocks. An operator looking for
+  // "where do I put my Vercel token" searches for hosting, so it sits here
+  // rather than inside a third-party-accounts drawer.
   { id: "hosting", label: "Hosting", icon: Globe, hint: "Where this company's sites go live" },
   // "What this company knows how to do" read as capability the company performs
   // — the implication issue #569 exists to remove, set here *before* the tab
