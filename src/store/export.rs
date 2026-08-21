@@ -33,9 +33,8 @@ use crate::ports::memory::MemoryStore;
 use crate::ports::store::CompanyStore;
 use crate::ports::types::{
     AgentOverride, BudgetOverride, CompanyEvent, CompanyId, CompanyRecord, CompressedTrace,
-    ContextChunk,
-    EventSeq, LedgerEntry, OverlayAgent, OverlayDesk, OverlayDeskMember, OverlayDeskOrder,
-    OverlayWorkflow, PolicyOverride, StoredEvent, TemplateProvenance,
+    ContextChunk, EventSeq, LedgerEntry, OverlayAgent, OverlayDesk, OverlayDeskMember,
+    OverlayDeskOrder, OverlayWorkflow, PolicyOverride, StoredEvent, TemplateProvenance,
 };
 
 /// Canonical bundle file and directory names, matching the fs

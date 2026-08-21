@@ -1327,7 +1327,11 @@ mod tests {
             Some(&member),
         )
         .await;
-        assert_eq!(status, StatusCode::OK, "a member may add with instructions: {created}");
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "a member may add with instructions: {created}"
+        );
         let jamie = created["id"].as_str().unwrap().to_string();
 
         // Read the detail back, so this is the stored override rather than the
@@ -1341,7 +1345,10 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{detail}");
-        assert_eq!(detail["instructions"], "Be terse and data-first.", "{detail}");
+        assert_eq!(
+            detail["instructions"], "Be terse and data-first.",
+            "{detail}"
+        );
         assert_eq!(detail["instructionsOverridden"], true, "{detail}");
     }
 

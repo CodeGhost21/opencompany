@@ -6677,10 +6677,7 @@ description = "Builds the product."
 
         // An unchanged `ensure` is a no-op: the axis is not thrashing the roster.
         pool.ensure(&rec, &deps).await.expect("ensure idempotent");
-        assert_eq!(
-            pool.override_fingerprint_of(&rec.id).await,
-            Some(fp_reset)
-        );
+        assert_eq!(pool.override_fingerprint_of(&rec.id).await, Some(fp_reset));
     }
 
     /// An **overlay** teammate — one added from the console, with no manifest

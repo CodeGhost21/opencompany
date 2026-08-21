@@ -3804,7 +3804,10 @@ impl CompanyRecord {
     /// falls through to `None` unless an override names it — correct, since a
     /// bare overlay agent's persona is only ever what an operator gave it.
     pub fn effective_instructions(&self, agent_id: &str) -> Option<String> {
-        match self.agent_override(agent_id).and_then(|o| o.instructions.clone()) {
+        match self
+            .agent_override(agent_id)
+            .and_then(|o| o.instructions.clone())
+        {
             Some(instructions) => Some(instructions),
             None => self
                 .manifest

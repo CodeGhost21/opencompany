@@ -1579,9 +1579,17 @@ prompt = "Lead decisively."
         let home_dir = home();
         let state = state_with_manifest(home_dir.path(), PERSONA_MANIFEST).await;
 
-        let (status, edited) =
-            patch_agent(&state, "ceo", json!({"instructions": "Answer only in haiku."})).await;
-        assert_eq!(status, StatusCode::OK, "an instructions-only edit is legal: {edited}");
+        let (status, edited) = patch_agent(
+            &state,
+            "ceo",
+            json!({"instructions": "Answer only in haiku."}),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "an instructions-only edit is legal: {edited}"
+        );
         assert_eq!(edited["instructions"], "Answer only in haiku.", "{edited}");
         assert_eq!(edited["instructionsOverridden"], true, "{edited}");
         assert_eq!(
@@ -1647,10 +1655,17 @@ prompt = "Lead decisively."
         let state = state_with_manifest(home_dir.path(), ROSTER).await;
         let jamie = add_overlay(&state, "Jamie", "Growth").await;
 
-        let (status, edited) =
-            patch_agent(&state, &jamie, json!({"instructions": "Be terse and data-first."})).await;
+        let (status, edited) = patch_agent(
+            &state,
+            &jamie,
+            json!({"instructions": "Be terse and data-first."}),
+        )
+        .await;
         assert_eq!(status, StatusCode::OK, "{edited}");
-        assert_eq!(edited["instructions"], "Be terse and data-first.", "{edited}");
+        assert_eq!(
+            edited["instructions"], "Be terse and data-first.",
+            "{edited}"
+        );
         assert_eq!(edited["instructionsOverridden"], true, "{edited}");
         assert!(
             edited["blueprintInstructions"].is_null(),
