@@ -353,20 +353,49 @@ impl FactStore for ProviderFactStore {
 /// - **`list` by label prefix** is a host-side filter, for the same reason.
 pub struct ProviderContextStore {
     bound: Bound,
+    /// Serializes the label-set read-merge-writes (`put`, `delete_label`) on
+    /// the stored envelope (#1300). The contract's `store` is a whole-value
+    /// upsert with no compare-and-set, so two concurrent puts of one body
+    /// under different labels would otherwise both read the same envelope and
+    /// one label would silently lose — the same reasoning as the fs backend's
+    /// per-path lock, and process-local for the same reason it is there: this
+    /// facade is the company's only writer of its partition.
+    label_lock: tokio::sync::Mutex<()>,
 }
 
 impl ProviderContextStore {
     pub(super) fn new(bound: Bound) -> Self {
-        Self { bound }
+        Self {
+            bound,
+            label_lock: tokio::sync::Mutex::new(()),
+        }
     }
 }
 
 /// A stored chunk: the port's [`ContextChunk`] plus the metadata `list` reports.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct StoredChunk {
+    /// The first label to claim this address — kept meaningful on its own so
+    /// an envelope written by (or later read by) a binary from before
+    /// `labels` existed still carries a real claim.
     label: String,
     body: String,
     stored_at_millis: u64,
+    /// Every label claiming this address (#1300); envelopes from before the
+    /// field decode empty, and [`stored_labels`] unions the scalar back in.
+    #[serde(default)]
+    labels: Vec<String>,
+}
+
+/// Every label claiming `chunk`, deduped, scalar (first-stored) label first.
+fn stored_labels(chunk: &StoredChunk) -> Vec<String> {
+    let mut labels = vec![chunk.label.clone()];
+    for label in &chunk.labels {
+        if !labels.iter().any(|have| have == label) {
+            labels.push(label.clone());
+        }
+    }
+    labels
 }
 
 #[async_trait]
@@ -375,12 +404,16 @@ impl ContextStore for ProviderContextStore {
         // The shared content address, so this backend mints the same addr for
         // the same body as fs / sqlite / mongodb do.
         let addr = content_address(&chunk.body);
+        // Under the label lock: the merge below is a read-merge-write over a
+        // plain upsert (#1300).
+        let _guard = self.label_lock.lock().await;
         // Chunks are append-only and never rewritten. `store` is an upsert, so
         // without this check a re-`put` of an identical body would restamp
         // `stored_at_millis` and move the Brain header's "last updated" backwards
         // in meaning — it would start reporting when a chunk was last *re-seen*
         // rather than when it was first written. sqlite and mongodb keep the
-        // first write; match them.
+        // first write; match them. A new label on an existing body is folded
+        // into the envelope's label set instead — one claim per (addr, label).
         if let Some(existing) = self.bound.get::<StoredChunk>(company, &addr).await? {
             // A hit is almost always the same body written twice. It can also be
             // a content-address collision: `content_address` is a 64-bit
@@ -404,10 +437,19 @@ impl ContextStore for ProviderContextStore {
                      address. The first body is kept and this write is dropped, so reads of this \
                      address return the earlier chunk. See crate::store::content_address."
                 );
+                return Ok(ChunkAddr::new(addr));
+            }
+            let labels = stored_labels(&existing);
+            if !labels.iter().any(|have| have == &chunk.label) {
+                let mut updated = existing;
+                updated.labels = labels;
+                updated.labels.push(chunk.label);
+                self.bound.put(company, &addr, &updated, "chunk").await?;
             }
             return Ok(ChunkAddr::new(addr));
         }
         let stored = StoredChunk {
+            labels: vec![chunk.label.clone()],
             label: chunk.label,
             body: chunk.body,
             stored_at_millis: crate::ports::now_millis(),
@@ -420,18 +462,33 @@ impl ContextStore for ProviderContextStore {
         let chunks: Vec<StoredChunk> = self.bound.list(company).await?;
         let mut metas: Vec<ChunkMeta> = chunks
             .into_iter()
-            .filter(|chunk| chunk.label.starts_with(prefix))
-            .map(|chunk| ChunkMeta {
-                addr: ChunkAddr::new(content_address(&chunk.body)),
-                label: chunk.label,
-                len: chunk.body.len(),
-                stored_at_millis: chunk.stored_at_millis,
+            .flat_map(|chunk| {
+                // One meta per label claiming the address (#1300); the stamp
+                // is the address's first write, since the envelope is one
+                // record however many labels claim it.
+                let addr = content_address(&chunk.body);
+                let len = chunk.body.len();
+                let stored_at_millis = chunk.stored_at_millis;
+                stored_labels(&chunk)
+                    .into_iter()
+                    .filter(|label| label.starts_with(prefix))
+                    .map(move |label| ChunkMeta {
+                        addr: ChunkAddr::new(addr.clone()),
+                        label,
+                        len,
+                        stored_at_millis,
+                    })
+                    .collect::<Vec<_>>()
             })
             .collect();
         metas.sort_by(|a, b| {
             a.stored_at_millis
                 .cmp(&b.stored_at_millis)
                 .then_with(|| a.addr.as_ref().cmp(b.addr.as_ref()))
+                // The label completes the order: two labels claiming one
+                // address (#1300) share a stamp and an addr, so without it
+                // their relative order would rest on enumeration order alone.
+                .then_with(|| a.label.cmp(&b.label))
         });
         Ok(metas)
     }
@@ -475,12 +532,64 @@ impl ContextStore for ProviderContextStore {
     }
 
     async fn delete(&self, company: &CompanyId, addr: &ChunkAddr) -> Result<bool> {
+        // Under the label lock so an interleaved `put`'s read-merge-write
+        // cannot resurrect an envelope this is removing.
+        let _guard = self.label_lock.lock().await;
         // The engine keys chunks by their content address (see `put`), so the
-        // port's addr IS the engine key. On an address collision (64-bit
-        // non-cryptographic hash — see `put`'s comment) the single stored body
-        // goes, whichever writer minted it first; that is the same
-        // first-write-wins property every backend already has.
+        // port's addr IS the engine key — the envelope goes with every label
+        // claiming it. On an address collision (64-bit non-cryptographic hash
+        // — see `put`'s comment) the single stored body goes, whichever writer
+        // minted it first; that is the same first-write-wins property every
+        // backend already has.
         self.bound.forget(company, addr.as_ref()).await
+    }
+
+    async fn delete_label(
+        &self,
+        company: &CompanyId,
+        addr: &ChunkAddr,
+        label: &str,
+    ) -> Result<bool> {
+        // Label-scoped (#1300): remove one claim from the envelope's label
+        // set, and forget the envelope exactly when the last claim goes. The
+        // read-merge-write and the reap decision sit under the same lock every
+        // put holds, so a concurrent put of identical content under another
+        // label either lands its claim before this read or re-creates the
+        // envelope after the forget — never loses its claim in between.
+        let _guard = self.label_lock.lock().await;
+        let Some(existing) = self
+            .bound
+            .get::<StoredChunk>(company, addr.as_ref())
+            .await?
+        else {
+            return Ok(false);
+        };
+        let mut labels = stored_labels(&existing);
+        let before = labels.len();
+        labels.retain(|have| have != label);
+        if labels.len() == before {
+            return Ok(false);
+        }
+        if labels.is_empty() {
+            // The claim existed and is gone either way: `forget` answering
+            // false here means another writer (a second process on a remote
+            // driver, outside this process-local lock) reaped the envelope
+            // first, which is the same end state.
+            self.bound.forget(company, addr.as_ref()).await?;
+            return Ok(true);
+        }
+        let updated = StoredChunk {
+            // The scalar stays a real label so an envelope read by a binary
+            // from before `labels` still carries a live claim.
+            label: labels[0].clone(),
+            labels,
+            body: existing.body,
+            stored_at_millis: existing.stored_at_millis,
+        };
+        self.bound
+            .put(company, addr.as_ref(), &updated, "chunk")
+            .await?;
+        Ok(true)
     }
 
     async fn search(
@@ -703,12 +812,14 @@ mod test {
             label: "notes/one".into(),
             body: "the quick brown fox".into(),
             stored_at_millis: 99,
+            labels: vec!["notes/one".into()],
         };
         let entry = entry_in(&context, &encode(&chunk).unwrap());
         let decoded: StoredChunk = decode(&entry, &context).unwrap();
         assert_eq!(decoded.label, chunk.label);
         assert_eq!(decoded.body, chunk.body);
         assert_eq!(decoded.stored_at_millis, chunk.stored_at_millis);
+        assert_eq!(decoded.labels, chunk.labels);
     }
 
     #[test]
@@ -731,6 +842,7 @@ mod test {
             label: "l".into(),
             body: "b".into(),
             stored_at_millis: 1,
+            labels: vec!["l".into()],
         };
         let entry = entry_in(&scratch, &encode(&chunk).unwrap());
         assert!(decode::<StoredChunk>(&entry, &context).is_none());

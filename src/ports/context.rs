@@ -46,14 +46,37 @@ pub trait ContextStore: Send + Sync {
     async fn search(&self, id: &CompanyId, query: &str, limit: usize) -> Result<Vec<ChunkHit>>;
     /// Permanently removes the chunk at `addr`, returning whether it existed.
     ///
-    /// Address-level: chunks are content-addressed, so on backends where one
-    /// address can carry several index entries (fs), the whole address goes —
-    /// every label that pointed at that body. `false` means nothing was there,
-    /// which callers surface honestly rather than treating as an error: a
-    /// forget of something already gone is a no-op, not a fault.
+    /// Address-level: chunks are content-addressed, and one address can carry
+    /// several labels (a byte-identical body stored under each — see
+    /// [`Self::delete_label`] for the semantics that made every backend keep
+    /// them), so the whole address goes — every label that pointed at that
+    /// body. `false` means nothing was there, which callers surface honestly
+    /// rather than treating as an error: a forget of something already gone is
+    /// a no-op, not a fault.
     ///
     /// Required, no default — a defaulted `Ok(false)` would let a backend
     /// silently serve a forget that forgets nothing, the exact dishonesty the
     /// null-engine warnings exist to prevent.
     async fn delete(&self, id: &CompanyId, addr: &ChunkAddr) -> Result<bool>;
+    /// Removes `label`'s claim on the chunk at `addr`, returning whether that
+    /// (addr, label) pairing existed.
+    ///
+    /// Label-scoped where [`Self::delete`] is address-level (issue #1300).
+    /// Chunks are content-addressed, so byte-identical bodies from different
+    /// writers share one address under different labels; every backend keeps
+    /// one index entry per (addr, label) — set semantics, a re-`put` of an
+    /// identical (body, label) adds nothing — and this call removes exactly
+    /// one such entry. The body is reaped when, and only when, the last label
+    /// goes, and that reap is conditional *inside* the backend (a lock, a
+    /// transaction, or a predicated delete): a concurrent `put` of identical
+    /// content under another label can never lose its row to this call, which
+    /// is the check-then-delete race the callers' old snapshot guards carried.
+    ///
+    /// `false` means the pairing was not there (wrong label, or already
+    /// removed) — a no-op for idempotent retries, same as [`Self::delete`].
+    ///
+    /// Required, no default, for [`Self::delete`]'s reason: a defaulted
+    /// `Ok(false)` would let a backend silently serve a forget that forgets
+    /// nothing.
+    async fn delete_label(&self, id: &CompanyId, addr: &ChunkAddr, label: &str) -> Result<bool>;
 }
