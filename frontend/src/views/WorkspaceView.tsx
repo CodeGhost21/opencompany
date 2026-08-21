@@ -163,6 +163,17 @@ const READ_ONLY_TITLE =
   "an edit here would be erased. Change it on the Ledgers page instead.";
 
 /**
+ * What the tree, the search list and the header all call a `derived/` file.
+ *
+ * One phrase in three places on purpose. "Read only" says an edit is unwelcome;
+ * it does not say *why*, and an operator who reads only that has been told a
+ * rule with no reason behind it — which is the kind of rule people work around.
+ * "Written by a ledger" is the reason, and it is short enough to fit in a tree
+ * row's tooltip and a header chip alike.
+ */
+const DERIVED_LABEL = "Written by a ledger";
+
+/**
  * How long the search box waits after the last keystroke before asking the host
  * (issue #607).
  *
@@ -1450,10 +1461,9 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
                   variant="outline"
                   className="ml-auto shrink-0 gap-1 font-normal"
                   data-testid="workspace-read-only"
-                  title={READ_ONLY_TITLE}
                 >
                   <Lock className="size-3" />
-                  Read only
+                  {DERIVED_LABEL}
                 </Badge>
               ) : (
                 <Tabs
@@ -1499,6 +1509,24 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
                   />
                 ) : (
                   <div className="mx-auto max-w-3xl px-6 py-6" data-testid="workspace-note">
+                    {/* The reason, said in the console's own voice and in plain
+                        sight (issue #1377). It used to live in a native `title`
+                        on the chip — a tooltip that waits a second, never
+                        appears on touch, and is never met by anyone who does
+                        not think to hover a passive-looking status label. The
+                        rendered body often explains itself too, but that text
+                        is the ledger's, not ours: a ledger whose template omits
+                        it would leave the operator with two words and no
+                        reason. */}
+                    {readOnlyNote && (
+                      <p
+                        className="mb-6 flex items-start gap-2 rounded-lg border border-border bg-muted/50 px-3 py-2 text-xs text-muted-foreground"
+                        data-testid="workspace-read-only-reason"
+                      >
+                        <Lock className="mt-0.5 size-3.5 shrink-0" />
+                        <span>{READ_ONLY_TITLE}</span>
+                      </p>
+                    )}
                     <NoteMarkdown source={body} nodes={nodes} onWiki={(t) => void onWiki(t)} />
                   </div>
                 )}

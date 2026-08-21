@@ -83,6 +83,25 @@ export function isDerivedNode(nodes: FsNode[], id: string | null): boolean {
   return head.kind === "folder" && head.name.trim().toLowerCase() === DERIVED_DIR;
 }
 
+/**
+ * The same rule as {@link isDerivedNode}, applied to a **path string** rather
+ * than a tree (issue #1377).
+ *
+ * The search hit list has no tree to walk — it is a flat list of results, and
+ * the nodes it names may sit in folders the explorer has never expanded. But
+ * every hit carries its own `path`, so the folder rule can be read straight off
+ * that. Kept beside `isDerivedNode` and written from the same `DERIVED_DIR`
+ * constant, so the two cannot drift into disagreeing about which files a person
+ * may write.
+ *
+ * Leading slashes are tolerated for the same reason `is_derived_path` tolerates
+ * them: the guard must not be steppable around by a formatting difference.
+ */
+export function isDerivedPath(path: string): boolean {
+  const head = path.replace(/^\/+/, "").split("/")[0];
+  return head !== undefined && head.trim().toLowerCase() === DERIVED_DIR;
+}
+
 /** Ancestor folders (root → current), for breadcrumbs. */
 export function pathOf(nodes: FsNode[], id: string | null): FsNode[] {
   const path: FsNode[] = [];
