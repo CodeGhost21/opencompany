@@ -989,7 +989,7 @@ export function LedgersView({
 
       {rendered !== null && ledger && (
         <Dialog open onOpenChange={() => setRendered(null)}>
-          <DialogContent className="max-h-[80vh] max-w-3xl overflow-y-auto">
+          <DialogContent className="max-h-[80vh] sm:max-w-3xl overflow-y-auto">
             <DialogHeader>
               <DialogTitle>{ledger.derived}</DialogTitle>
               <DialogDescription>
@@ -1242,7 +1242,7 @@ function ComposeDialog({
 
   return (
     <Dialog open onOpenChange={onCancel}>
-      <DialogContent className="max-h-[85vh] max-w-2xl overflow-y-auto">
+      <DialogContent className="max-h-[85vh] sm:max-w-2xl overflow-y-auto">
         <DialogHeader>
           <DialogTitle>
             {composeDialogTitle(ledger, composing, existingIds)}
