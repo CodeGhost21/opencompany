@@ -1764,6 +1764,83 @@ jobs:
           path: frontend/test-results/
           retention-days: 7
 
+  # Issue #1404. First-run company setup gets its OWN lane because it needs its
+  # own host: the flow opens only on a company nobody has staffed, and every
+  # company under `companies/` except `companies/e2e_setup` declares a roster of
+  # its own — including `companies/e2e_harness`, which both `Console E2E` lanes
+  # serve. One host cannot satisfy both, so this is a third run rather than a
+  # matrix leg of either. It needs only the DEFAULT binary: nothing here runs an
+  # agent turn, and the design pass falls back to a curated team with no model
+  # reachable (decision D3), which is a path worth exercising in its own right.
+  #
+  # Before this lane existed, `company-setup.spec.ts` was covered by NOTHING. Its
+  # own header said so. It carried a `test.skip` for a host serving the wrong
+  # company, no job ever set the variable that would have un-skipped it, and once
+  # the global baseline began merging four undeletable teammates into every
+  # company the guard fired on every run — so the console lane stayed green while
+  # the entire first-run experience was unreachable in the shipped product. That
+  # is `CLAUDE.md`'s "builds, runs and reports zero without failing anything", in
+  # a browser suite.
+  #
+  # Which is why the step below is a SCRIPT and not `npm run e2e:first-run`.
+  # `assert-e2e-spec-ran.sh` reads the run's own reported count and fails on
+  # zero, the same way `assert-integration-targets-run.sh` does for the Rust
+  # targets. A lane whose only guarantee is its configuration can be silently
+  # vacuous; a lane that asserts a number cannot.
+  console-e2e-first-run:
+    needs: [changes, rust]
+    if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.frontend == 'true'
+    name: Console E2E (first run)
+    runs-on: ubuntu-latest
+    # One spec with two tests, each of which builds a real team. Well inside
+    # this; the cap is a wedged-browser backstop.
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          # No `submodules`: the binary arrives prebuilt from the `rust` job and
+          # nothing here resolves a cargo manifest, same as the lane above.
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: frontend/.nvmrc
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - run: npm ci
+        working-directory: frontend
+
+      - name: Download the host binary
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: opencompany-debug-binary
+          path: target/debug
+
+      # `upload-artifact` does not preserve the executable bit; `host.sh` tests
+      # for `-x` and would answer with a build instruction.
+      - name: Restore the executable bit
+        run: chmod +x target/debug/opencompany
+
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+        working-directory: frontend
+
+      # `PW_FIRST_RUN=1` (set by the npm script this calls) is what makes
+      # `playwright.config.ts` serve `companies/e2e_setup` on a data root of its
+      # own AND select the first-run spec and only it. The script then asserts
+      # the run reported a non-zero count — see its header.
+      - name: Run the first-run lane and assert it executed
+        run: scripts/ci/assert-e2e-spec-ran.sh
+
+      - name: Upload failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: playwright-first-run-failures
+          path: frontend/test-results/
+          retention-days: 7
+
   # The desktop shell.
   #
   # A SEPARATE JOB, and separate for the reason `src-tauri/Cargo.toml` explains

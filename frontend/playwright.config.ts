@@ -6,6 +6,8 @@ import { fileURLToPath } from "node:url";
 import {
   COMPOSIO,
   COMPOSIO_FIXTURE_BIND,
+  FIRST_RUN,
+  FIRST_RUN_COMPANY,
   LIVE_BRAIN,
   MCP_FIXTURE_BIND,
   MOCK_BRAIN_BIND,
@@ -62,6 +64,14 @@ const here = dirname(fileURLToPath(import.meta.url));
  * reconfigure a host it did not launch.
  */
 
+/**
+ * The one spec that needs a host serving a company nobody has staffed
+ * (`companies/e2e_setup`), and which therefore cannot share a host with the
+ * rest of the suite. See `FIRST_RUN` in `test/e2e/capabilities.ts` for why this
+ * is a second run rather than a skip inside the spec — issue #1404.
+ */
+const FIRST_RUN_SPEC = /company-setup\.spec\.ts$/;
+
 const providedBaseURL = process.env.PW_BASE_URL;
 
 /** Whether this config is responsible for the host, as opposed to driving yours. */
@@ -77,7 +87,16 @@ const baseURL = providedBaseURL || "http://127.0.0.1:8080";
  */
 const storageState =
   process.env.PW_STORAGE_STATE ||
-  (managesHost ? resolve(here, "../target/e2e/storage-state.json") : undefined);
+  (managesHost
+    ? resolve(
+        here,
+        // A path of its own for the first-run run: it signs into a different
+        // company on a different data root, so a shared file would hand one run
+        // the other's session — which reads as a mysterious sign-in loop rather
+        // than as the collision it is.
+        FIRST_RUN ? "../target/e2e/first-run-storage-state.json" : "../target/e2e/storage-state.json",
+      )
+    : undefined);
 
 // `global-setup.ts` writes that file but does not create its directory, and
 // `target/e2e/` does not exist on a clean checkout.
@@ -122,10 +141,31 @@ const composioEnv: Record<string, string> = managesComposio
   ? { OPENCOMPANY_COMPOSIO_BACKEND_URL: `http://${COMPOSIO_FIXTURE_BIND}` }
   : {};
 
+/**
+ * What a first-run run tells `test/e2e/host.sh` to serve.
+ *
+ * The company is the whole point: `companies/e2e_setup` declares no `[[agent]]`,
+ * so it is the only company this repository ships that first-run setup can open
+ * on. The data root is separate for the same reason it is wiped — the spec
+ * creates a team, and a second run against a root still holding the first one's
+ * team would find the company already staffed and the gate correctly shut.
+ *
+ * Both are read by `host.sh` itself rather than by the host binary, so they do
+ * not go through `PW_HOST_PASSTHROUGH`.
+ */
+const firstRunEnv: Record<string, string> =
+  managesHost && FIRST_RUN
+    ? {
+        PW_HOST_COMPANY: resolve(here, "..", FIRST_RUN_COMPANY),
+        PW_HOST_DATA_DIR: resolve(here, "../target/e2e/first-run-data"),
+      }
+    : {};
+
 const passthrough = [...Object.keys(inferenceEnv), ...Object.keys(composioEnv)];
 const hostEnv: Record<string, string> = {
   ...inferenceEnv,
   ...composioEnv,
+  ...firstRunEnv,
   ...(passthrough.length > 0 ? { PW_HOST_PASSTHROUGH: passthrough.join(" ") } : {}),
 };
 
@@ -175,6 +215,14 @@ const fixtureServers = [
 
 export default defineConfig({
   testDir: "./test/e2e",
+  // The two runs are disjoint **by selection**, not by a guard inside a spec.
+  // A first-run run drives a host serving an unstaffed company and can only run
+  // the first-run spec; every other run drives the harness company, against
+  // which that spec is unpassable. Expressing it here means neither run can be
+  // pointed at a host it cannot pass against, and — because Playwright exits
+  // non-zero when a selection matches nothing — an empty selection is a
+  // failure rather than a silent zero (issue #1404).
+  ...(FIRST_RUN ? { testMatch: FIRST_RUN_SPEC } : { testIgnore: FIRST_RUN_SPEC }),
   globalSetup: storageState ? "./test/e2e/global-setup.ts" : undefined,
   fullyParallel: false,
   workers: 1,
