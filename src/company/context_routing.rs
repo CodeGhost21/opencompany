@@ -31,7 +31,7 @@ use crate::company::Agent;
 /// currently believes. Universal because a role that does not know the method
 /// cannot follow it, and unlike every other document here it asserts nothing
 /// about the work in progress, so no exclusion can apply to it.
-pub const UNIVERSAL_DOCUMENT: &str = "METHOD.md";
+pub const UNIVERSAL_DOCUMENT: &str = "method.md";
 
 /// The company's per-workspace working agreement, routed to every role
 /// alongside [`UNIVERSAL_DOCUMENT`].
@@ -42,22 +42,22 @@ pub const UNIVERSAL_DOCUMENT: &str = "METHOD.md";
 /// how work is expected to be handed off, conventions a person and every
 /// agent are both bound by. Also asserts nothing about work in progress, so it
 /// is exempt from class exclusions the same way `METHOD.md` is.
-pub const AGENTS_DOC: &str = "AGENTS.md";
+pub const AGENTS_DOC: &str = "agents.md";
 
 /// Every document routed to every role, whatever its tier, classes, or
 /// explicit `context` list — in the order they are placed in the prompt.
 pub const UNIVERSAL_DOCUMENTS: &[&str] = &[UNIVERSAL_DOCUMENT, AGENTS_DOC];
 
 /// The company's summarized picture: what is established, what is ruled out.
-pub const BRIEF: &str = "BRIEF.md";
+pub const BRIEF: &str = "brief.md";
 /// The evidence ledger — what already holds true, with its derivation.
-pub const CLAIMS: &str = "CLAIMS.md";
+pub const CLAIMS: &str = "claims.md";
 /// The open-question tracker the orchestrator routes work from.
-pub const THREADS: &str = "THREADS.md";
+pub const THREADS: &str = "threads.md";
 /// The assertion board: posts are asserted, not established.
-pub const BOARD: &str = "BOARD.md";
+pub const BOARD: &str = "board.md";
 /// Provisional working-out, kept out of any role that judges.
-pub const SCRATCH: &str = "SCRATCH.md";
+pub const SCRATCH: &str = "scratch.md";
 
 /// The documents a role is routed when its manifest declares no `context` key.
 ///
@@ -222,6 +222,21 @@ pub async fn resolve_routed_documents(
             continue;
         }
         if let Some(path) = super::workspace_paths::render_path(node, &by_id) {
+            // Keyed by the normalized path as well as the literal one, because
+            // the two spellings both occur in a real company: the routing names
+            // above are lowercase-dashed like everything else the runtime mints
+            // (`crate::company::workspace_names`), while a company that predates
+            // that rule holds `BRIEF.md`, and a manifest written then still says
+            // `BRIEF.md` in its `context` list. Routing a role its brief must
+            // not depend on which of those it is looking at.
+            //
+            // The literal insert wins a collision: `Brief.md` and `brief.md` in
+            // one tree resolve to themselves, and only the *unmatched* spelling
+            // falls through to the normalized key.
+            let canonical = super::workspace_names::kebab_path(&path);
+            if canonical != path {
+                by_path.entry(canonical).or_insert(node.id.as_str());
+            }
             by_path.insert(path, node.id.as_str());
         }
     }
@@ -237,7 +252,10 @@ pub async fn resolve_routed_documents(
             // manifest line stop a company whose other routing is fine.
             Err(_) => continue,
         };
-        let Some(id) = by_path.get(&key) else {
+        let id = by_path
+            .get(&key)
+            .or_else(|| by_path.get(&super::workspace_names::kebab_path(&key)));
+        let Some(id) = id else {
             continue;
         };
         if let Some((_, body)) = workspace.read(company, id).await? {
