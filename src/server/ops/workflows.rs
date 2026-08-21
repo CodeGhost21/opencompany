@@ -218,6 +218,12 @@ struct WorkflowSummary {
     name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     description: Option<String>,
+    /// The trigger node's 5-field UTC cron, or explicit `null` for a manual
+    /// workflow. Kept present when `None` so a current host can distinguish
+    /// "manual" from an older host that predates this field.
+    schedule: Option<String>,
+    /// Number of nodes in the graph. A body-less manifest entry reports zero.
+    node_count: usize,
     /// Whether `PUT`/`DELETE` on this id will be accepted (issue #259) — see
     /// [`is_editable`]. The console disables its Edit/Delete affordances on a
     /// `false`, so an operator is told *before* clicking rather than by a 409
@@ -236,10 +242,14 @@ struct WorkflowSummary {
 
 impl WorkflowSummary {
     fn new(f: WorkflowFile, editable: bool, enabled: bool) -> Self {
+        let schedule = f.trigger_schedule().map(str::to_owned);
+        let node_count = f.nodes.len();
         Self {
             id: f.id,
             name: f.name,
             description: f.description,
+            schedule,
+            node_count,
             editable,
             enabled,
         }
@@ -508,6 +518,8 @@ async fn list_workflows(company: ScopedCompany) -> Result<Json<Vec<WorkflowSumma
             id: id.clone(),
             name: id,
             description: None,
+            schedule: None,
+            node_count: 0,
             // A manifest-`enabled` id with no body in either source: there is
             // nothing to replace or remove, and the write core says so with a
             // 409. Never editable.
@@ -3521,6 +3533,25 @@ mod tests {
             summaries[0].description.as_deref(),
             Some("A tiny trigger → agent → output graph.")
         );
+        assert_eq!(summaries[0].schedule, None);
+        assert_eq!(summaries[0].node_count, 3);
+
+        let json = serde_json::to_value(&summaries[0]).unwrap();
+        assert_eq!(json["schedule"], serde_json::Value::Null);
+        assert_eq!(json["nodeCount"], 3);
+    }
+
+    #[test]
+    fn scheduled_summary_carries_the_trigger_cron_and_node_count() {
+        let scheduled = DEMO.replace(
+            "name = \"Start\"\n        summary",
+            "name = \"Start\"\n        schedule = \"0 9 * * MON\"\n        summary",
+        );
+        let file = crate::company::parse_workflow(&scheduled).expect("scheduled fixture parses");
+        let json = serde_json::to_value(WorkflowSummary::new(file, false, true)).unwrap();
+
+        assert_eq!(json["schedule"], "0 9 * * MON");
+        assert_eq!(json["nodeCount"], 3);
     }
 
     #[test]
@@ -5535,6 +5566,8 @@ mod tests {
                 .find(|w| w["id"] == "greeter")
                 .expect("listed");
             assert_eq!(row["enabled"], serde_json::json!(false));
+            assert_eq!(row["schedule"], serde_json::Value::Null);
+            assert_eq!(row["nodeCount"], 2);
             assert_eq!(
                 row["editable"],
                 serde_json::json!(true),
@@ -5580,6 +5613,20 @@ mod tests {
 
             // And the graph read agrees, so it is the store's answer rather than
             // something the write path made up on the way out.
+            let listed = router(state.clone())
+                .oneshot(request("GET", "/api/v1/company/workflows", None))
+                .await
+                .unwrap();
+            let body = json_body(listed).await;
+            let row = body
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|workflow| workflow["id"] == "digest")
+                .expect("scheduled workflow is listed");
+            assert_eq!(row["schedule"], "0 9 * * *");
+            assert_eq!(row["nodeCount"], 2);
+
             let read = router(state)
                 .oneshot(request("GET", "/api/v1/company/workflows/digest", None))
                 .await

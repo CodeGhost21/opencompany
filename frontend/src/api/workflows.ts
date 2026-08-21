@@ -11,6 +11,17 @@ export interface WorkflowSummary {
   name: string;
   description?: string;
   /**
+   * The trigger node's 5-field UTC cron. `null` means the current host inspected
+   * the graph and found no schedule; `undefined` means an older host did not
+   * send this summary field, so the console must make no claim either way.
+   */
+  schedule?: string | null;
+  /**
+   * How many steps are in the graph. Absent on hosts predating the widened
+   * summary response; `0` is a real count and must still render.
+   */
+  nodeCount?: number;
+  /**
    * Whether this workflow can be edited or deleted through the API (issue
    * #259). `false` for a graph defined by a file in the company source tree,
    * and for a name-only entry with no saved graph at all — the host refuses
