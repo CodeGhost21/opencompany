@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useRef } from "react";
-import { Bot, UserPlus } from "lucide-react";
+import { Bot, CircleDot, Hash, Lock, UserPlus } from "lucide-react";
 
 import type { ApprovalSummary, GrantScope, TurnStep, Verdict } from "@/api/types";
 import { TeammateAvatar } from "@/components/teammate-avatar";
@@ -9,7 +9,13 @@ import { ApprovalRow } from "./ApprovalRow";
 import { MessageRow } from "./MessageRow";
 import { StepTimeline } from "./StepTimeline";
 import { WorkingIndicator } from "./WorkingIndicator";
-import { channelIntroSentence, channelTitle, type Channel, type TimelineItem } from "./model";
+import {
+  channelIntroSentence,
+  channelTitle,
+  dmFace,
+  type Channel,
+  type TimelineItem,
+} from "./model";
 
 interface Props {
   channel: Channel;
@@ -117,6 +123,14 @@ export function MessageTimeline({
   // the *claim of emptiness* that has to wait.
   const loading = historyPending && items.length === 0;
   /**
+   * The channel has answered and has nothing in it.
+   *
+   * Distinct from `loading`: both have no rows, but only this one is a *claim*
+   * that there are none. It drives the intro's copy, its action cards, and —
+   * since #1323 — which end of the pane the whole block settles against.
+   */
+  const empty = items.length === 0 && !loading;
+  /**
    * Is the view parked at the bottom, and therefore still following?
    *
    * A ref rather than state on purpose: it is read inside effects and written
@@ -188,13 +202,35 @@ export function MessageTimeline({
 
   return (
     <div ref={scroller} onScroll={trackFollowing} className="flex-1 overflow-y-auto">
-      <div className="flex min-h-full flex-col justify-end pb-4">
+      {/*
+       * Which end short content settles against (issue #1323).
+       *
+       * `justify-end` is right for a *transcript* shorter than the viewport:
+       * three messages should sit above the composer the way every chat client
+       * puts them, not float in the middle of the pane. It is wrong for a
+       * channel with no transcript at all, because then the only thing being
+       * bottom-pinned is the intro — a heading, a sentence, and the two action
+       * cards that are the whole point of an empty channel — and they end up
+       * crushed against the composer under most of a screen of dead canvas.
+       * The cards are the primary invitation and they were the last thing the
+       * eye reached.
+       *
+       * So an empty channel reads downward from the top, as the design
+       * reference draws it. `empty` is the same value `ChannelIntro` gets, and
+       * it is lifted here rather than recomputed so the two cannot disagree
+       * about what "empty" means — a channel whose intro claimed emptiness
+       * while the wrapper anchored for content would jump on every load.
+       */}
+      <div className={cn("flex min-h-full flex-col pb-4", empty ? "justify-start" : "justify-end")}>
         {/* `empty` only drives the top padding, and the skeleton fills the
             same space real rows will — so a loading channel is spaced like a
-            full one and the intro does not jump down and back up. */}
+            full one and the intro does not jump down and back up. That is also
+            why `loading` keeps the *bottom* anchor above: flipping to the top
+            while history is in flight would move the intro up and then drop it
+            back down the moment the rows land. */}
         <ChannelIntro
           channel={channel}
-          empty={items.length === 0 && !loading}
+          empty={empty}
           loading={loading}
           onAddPeople={onAddPeople}
         />
@@ -304,13 +340,7 @@ function ChannelIntro({
 }) {
   return (
     <div className={cn("px-4 pb-3", empty ? "pt-16" : "pt-6")}>
-      <TeammateAvatar
-        name={channel.voice ?? channel.name}
-        tone={channel.tone}
-        avatar={channel.member?.avatar}
-        company={channel.kind === "channel" && channel.id === "main"}
-        className="mb-3 size-12 rounded-lg text-base"
-      />
+      <IntroMark channel={channel} />
       <h2 className="text-xl font-semibold tracking-tight">{channelTitle(channel)}</h2>
       {/* Both of these sentences are positive claims that the channel has no
           history — "the start of", "the very beginning of". Neither may render
@@ -328,6 +358,72 @@ function ChannelIntro({
         <ActionCards onAddPeople={onAddPeople} />
       )}
     </div>
+  );
+}
+
+/**
+ * What the intro draws above the channel's name (issue #1327).
+ *
+ * The same rule the header settled in #1170, at the intro's larger size: a DM
+ * has exactly one person on the other end and wears their face; a channel has
+ * nobody behind it and wears its kind.
+ *
+ * Before this, every channel but `main` fell through to `TeammateAvatar` seeded
+ * on the channel *name*, so `#engineering` grew an arbitrary mascot — a face
+ * belonging to no one, at the largest avatar size on the surface, as the first
+ * thing in the pane — while the header eighteen pixels above drew `#` for the
+ * same channel. Two marks for one thing, disagreeing on screen.
+ *
+ * `dmFace` is the shared seed, so the mark here and the rail row and the header
+ * cannot drift about who a DM is with.
+ */
+function IntroMark({ channel }: { channel: Channel }) {
+  // The geometry is fixed across all three branches so the copy beneath never
+  // shifts with the kind of channel being opened.
+  const box = "mb-3 size-12 rounded-lg";
+
+  if (channel.kind === "dm") {
+    const face = dmFace(channel);
+    // A DM with no roster entry has nobody to draw. The header falls back to a
+    // glyph rather than inventing a mascot for a stranger; so does this.
+    return face ? (
+      <TeammateAvatar {...face} className={cn(box, "text-base")} />
+    ) : (
+      <MarkTile icon={CircleDot} className={box} />
+    );
+  }
+
+  // The company's own line keeps the brand mark it has always had.
+  if (channel.id === "main") {
+    return (
+      <TeammateAvatar
+        name={channel.voice ?? channel.name}
+        tone={channel.tone}
+        company
+        className={cn(box, "text-base")}
+      />
+    );
+  }
+
+  return <MarkTile icon={channel.private ? Lock : Hash} className={box} />;
+}
+
+/**
+ * A channel's kind on a tile, matching the treatment `ActionCard` gives its own
+ * icon — `--surface-icon`, the rung the brand guide names for an icon ground —
+ * so the two blocks on an empty channel read as one system rather than two.
+ */
+function MarkTile({ icon: Icon, className }: { icon: typeof Hash; className?: string }) {
+  return (
+    <span
+      className={cn(
+        "flex items-center justify-center bg-surface-icon text-muted-foreground",
+        className,
+      )}
+      aria-hidden
+    >
+      <Icon className="size-5" />
+    </span>
   );
 }
 
@@ -383,8 +479,13 @@ function ActionCard({
       </span>
     </>
   );
+  // `bg-glow-brand-card` is a background *image* and `bg-card` a background
+  // *colour*, so the two compose rather than collide: the glow sits over the
+  // card's fill and under its content, and `hover:bg-accent` still swaps the
+  // fill beneath it. See `--glow-brand-card` in `index.css` for why the tint is
+  // a token.
   const cls =
-    "flex h-33 w-60 flex-col items-start rounded-xl border bg-card p-4 text-left transition-colors hover:bg-accent focus-visible:ring-3 focus-visible:ring-ring/50 focus-visible:outline-none";
+    "flex h-33 w-60 flex-col items-start rounded-xl border bg-card bg-glow-brand-card p-4 text-left transition-colors hover:bg-accent focus-visible:ring-3 focus-visible:ring-ring/50 focus-visible:outline-none";
 
   // A navigation is an anchor and an in-page action is a button, so the card
   // keeps the affordance its behaviour actually has.

@@ -366,6 +366,22 @@
        surface. Not a substitute for the focus ring — an addition to it. */
     --shadow-brand: 0 2px 8px -2px color-mix(in oklab, var(--brand-500) 32%, transparent);
 
+    /* A soft brand glow bleeding from a card's lower-left corner, for the
+       standing invitations on an otherwise empty surface — the "create a
+       teammate" / "add people" pair on a channel with no transcript.
+
+       A token rather than a gradient written at the call site because a glow
+       is a *colour*, and a colour that cannot theme is wrong in one of the two
+       modes: the value below is barely there against a light canvas, and the
+       `.dark` counterpart has to work several times harder to lift a card off
+       near-black. One utility, two tunings, no call site that has to know
+       which mode it is in. */
+    --glow-brand-card: radial-gradient(
+        120% 108% at 14% 112%,
+        color-mix(in oklab, var(--brand-500) 13%, transparent) 0%,
+        transparent 62%
+    );
+
     /*
      * Third-party brand colours.
      *
@@ -507,6 +523,13 @@
     --shadow-xl: 0 8px 16px -8px hsl(var(--shadow-color) / 0.55),
         0 24px 56px -12px hsl(var(--shadow-color) / 0.6), inset 0 1px 0 0 oklch(1 0 0 / 7%);
     --shadow-brand: 0 2px 12px -2px color-mix(in oklab, var(--brand-400) 40%, transparent);
+    /* The light value is invisible here — `--brand-400` at roughly twice the
+       mix is what actually separates the card from the canvas. See `:root`. */
+    --glow-brand-card: radial-gradient(
+        120% 108% at 14% 112%,
+        color-mix(in oklab, var(--brand-400) 22%, transparent) 0%,
+        transparent 62%
+    );
 }
 
 /* ============================================================================
@@ -625,6 +648,11 @@
     --shadow-lg: var(--shadow-lg);
     --shadow-xl: var(--shadow-xl);
     --shadow-brand: var(--shadow-brand);
+
+    /* `--background-image-*` is the namespace that generates a `bg-*` utility
+       for a gradient, the way `--color-*` does for a flat fill. Gives
+       `bg-glow-brand-card`. */
+    --background-image-glow-brand-card: var(--glow-brand-card);
 
     --radius-sm: calc(var(--radius) * 0.6);
     --radius-md: calc(var(--radius) * 0.8);
