@@ -348,9 +348,16 @@ was supplied at all, because leading and trailing spaces can be significant.
 Keeping the stored password costs no read-modify-write. The configuration and
 the password live under separate secret keys, so a passwordless save rewrites
 the configuration and never touches the secret — a rotation arriving at the same
-moment survives instead of being reverted. Credentials written before that split
-still carry the password inside the configuration blob; reads fall back to it,
-and the first passwordless save after the split migrates it to its own key.
+moment survives instead of being reverted, however many processes are writing.
+
+Credentials written before that split still carry the password inside the
+configuration blob; reads fall back to it, and the first passwordless save after
+the split migrates it to its own key. That migration is the one path that must
+read and then write, so `PUT …/smtp` serializes per company for the duration of
+the handler. The lock is in-process, which covers the deployed topology (a
+tenant is a single container); two replicas of one company would reopen the
+window on the legacy path alone, and closing it there would need a conditional
+write that `SecretStore` cannot express today.
 
 `…/credential` is the company's **one** TinyHumans key, presented by every
 surface wired to it (**Composio today**) — see

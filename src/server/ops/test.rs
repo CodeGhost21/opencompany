@@ -760,9 +760,22 @@ struct RotatingSecrets {
     entries: std::sync::Mutex<std::collections::HashMap<String, String>>,
     /// `(password, blob)` to commit just before the next SMTP write, once.
     rotation: std::sync::Mutex<Option<(String, String)>>,
+    /// Milliseconds to stall inside a read of the configuration blob.
+    ///
+    /// Holds the read-modify-write window of the legacy migration open long
+    /// enough for a rotation to try to slip into it. Without this the two
+    /// requests finish too quickly to interleave, and the test would pass just
+    /// as happily with no serialization at all.
+    stall_config_read_ms: std::sync::atomic::AtomicU64,
 }
 
 impl RotatingSecrets {
+    /// Stalls every read of the configuration blob by `ms`.
+    fn stall_config_reads(&self, ms: u64) {
+        self.stall_config_read_ms
+            .store(ms, std::sync::atomic::Ordering::SeqCst);
+    }
+
     /// Arms the one-shot rotation.
     fn arm(&self, password: &str, blob: &str) {
         *self.rotation.lock().unwrap() = Some((password.to_string(), blob.to_string()));
@@ -786,6 +799,12 @@ impl crate::ports::SecretStore for RotatingSecrets {
         key: &str,
     ) -> crate::Result<Option<crate::ports::types::SecretValue>> {
         let seen = self.entries.lock().unwrap().get(key).cloned();
+        let stall = self
+            .stall_config_read_ms
+            .load(std::sync::atomic::Ordering::SeqCst);
+        if key == super::SMTP_KEY && stall > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(stall)).await;
+        }
         Ok(seen.map(SecretValue))
     }
 
@@ -1012,4 +1031,100 @@ async fn a_pre_split_password_survives_a_passwordless_save() {
     let crate::server::ops::mailer::MailCredentials::Smtp(creds) = &presented[0];
     assert_eq!(creds.password, legacy);
     assert_eq!(creds.from_name, "Acme Inc");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_rotation_racing_the_legacy_migration_is_not_lost() {
+    // The one path that still reads and then writes: migrating a pre-split
+    // password out of the config blob. A rotation arriving while that is in
+    // flight must not be overwritten by it, so `put_smtp` serializes per
+    // company. Whichever order the two land in, the rotation is what survives —
+    // it is the later intent in both interleavings the lock permits.
+    //
+    // Run repeatedly: a lock that is missing shows up as an intermittent loss,
+    // so a single pass would be a weak witness.
+    for attempt in 0..8 {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let secrets = Arc::new(RotatingSecrets::default());
+        let state = state_with_secrets(
+            &home,
+            ConnectionsRuntime::new(),
+            Some(secrets.clone() as Arc<dyn crate::ports::SecretStore>),
+        )
+        .await;
+
+        // Seed the pre-split layout: password inside the blob, no password key.
+        let legacy = "legacy-pw";
+        let rotated = "rotated-pw";
+        crate::ports::SecretStore::set(
+            secrets.as_ref(),
+            &CompanyId::new("acme"),
+            super::SMTP_KEY,
+            SecretValue(
+                serde_json::json!({
+                    "host": "smtp.acme.test",
+                    "port": 587,
+                    "security": "starttls",
+                    "username": "mailer",
+                    "password": legacy,
+                    "from_name": "Acme",
+                    "from_email": "ceo@acme.test",
+                })
+                .to_string(),
+            ),
+        )
+        .await
+        .unwrap();
+
+        // Hold the migration's read-modify-write window open so the rotation
+        // has somewhere to land.
+        secrets.stall_config_reads(40);
+
+        let app = router(state);
+        let put = |body: serde_json::Value| {
+            let app = app.clone();
+            async move {
+                app.oneshot(
+                    Request::builder()
+                        .method("PUT")
+                        .uri("/api/v1/company/smtp")
+                        .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+                        .header("content-type", "application/json")
+                        .body(Body::from(body.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+            }
+        };
+
+        // The passwordless save (which must migrate) against the rotation.
+        let migrating = put(serde_json::json!({
+            "host": "smtp.acme.test",
+            "port": 587,
+            "security": "starttls",
+            "username": "mailer",
+            "from_name": "Acme Inc",
+            "from_email": "ceo@acme.test",
+        }));
+        let rotating = put(serde_json::json!({
+            "host": "smtp.acme.test",
+            "port": 587,
+            "security": "starttls",
+            "username": "mailer",
+            "password": rotated,
+            "from_name": "Acme",
+            "from_email": "ceo@acme.test",
+        }));
+        let (a, b) = tokio::join!(migrating, rotating);
+        assert_eq!(a.status(), StatusCode::OK);
+        assert_eq!(b.status(), StatusCode::OK);
+
+        assert_eq!(
+            secrets.stored_password().as_deref(),
+            Some(rotated),
+            "attempt {attempt}: the legacy migration overwrote a concurrent rotation",
+        );
+    }
 }

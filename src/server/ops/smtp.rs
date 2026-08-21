@@ -32,7 +32,7 @@ use crate::AppState;
 use crate::company::runtime::CompanyRuntime;
 use crate::error::OpenCompanyError;
 use crate::ports::inbox::EmailRecord;
-use crate::ports::types::SecretValue;
+use crate::ports::types::{CompanyId, SecretValue};
 use crate::ports::{generate_id, now_millis};
 use crate::server::error::ApiError;
 use crate::server::ops::mailer::{MailCredentials, OutboundEmail};
@@ -294,13 +294,19 @@ struct SmtpConfigBody {
 /// blob and leaves the secret untouched. A rotation landing concurrently is
 /// therefore preserved rather than reverted. The one exception is credentials
 /// written before the split, whose password still sits inside the blob: the
-/// first passwordless save after the split migrates it to its own key, and that
-/// single migration is a genuine read-modify-write. It is no worse than the
-/// behaviour it replaces, and it can only ever happen once per company.
+/// first passwordless save after the split has to read it and write it to its
+/// own key, which is a genuine read-modify-write. That one path is serialized
+/// by [`write_lock`] so a rotation cannot interleave with it.
 async fn put_smtp(
     company: AdminScopedCompany,
     Json(body): Json<SmtpConfigBody>,
 ) -> Result<Json<SmtpStatus>, ApiError> {
+    // Held across the whole handler, so the legacy migration below and any
+    // rotation racing it cannot interleave. The steady-state path needs no lock
+    // — it is raceless by construction — but taking it unconditionally keeps
+    // the ordering rule in one place rather than in each branch.
+    let lock = write_lock(company.runtime.id());
+    let _guard = lock.lock().await;
     match body.password.filter(|password| !password.trim().is_empty()) {
         // A rotation. Write the secret before the configuration blob: the blob
         // is what makes the company read as `configured`, so this order can
@@ -320,6 +326,34 @@ async fn put_smtp(
         from_email: body.from_email,
     };
     store_config(company.runtime, config).await
+}
+
+/// Per-company serialization for `PUT …/smtp`.
+///
+/// The split-key layout already makes the steady-state passwordless save
+/// raceless without any lock, because it writes no password at all. This exists
+/// for the one path that must still read and then write — migrating a pre-split
+/// password out of the configuration blob — where a rotation landing in between
+/// would otherwise be overwritten by the migration.
+///
+/// **In-process only, and deliberately so.** A tenant runs as a single
+/// container ([`docs/spec/runtime/storage.md`]), so one process is the whole
+/// population of concurrent writers in the deployed topology. Two replicas of
+/// one company would reopen the window on the legacy path alone; closing it
+/// there would need a conditional write in
+/// [`SecretStore`](crate::ports::SecretStore), which the port cannot express
+/// today. The steady-state path stays correct under any number of replicas.
+fn write_lock(company: &CompanyId) -> Arc<tokio::sync::Mutex<()>> {
+    static LOCKS: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<CompanyId, Arc<tokio::sync::Mutex<()>>>>,
+    > = std::sync::OnceLock::new();
+    let locks = LOCKS.get_or_init(Default::default);
+    let mut locks = locks.lock().expect("smtp write locks poisoned");
+    Arc::clone(
+        locks
+            .entry(company.clone())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))),
+    )
 }
 
 /// Confirms a password is stored ahead of a passwordless save, and refuses the
