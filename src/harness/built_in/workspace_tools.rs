@@ -4511,7 +4511,11 @@ mod tests {
                 .await
                 .unwrap()
                 .iter()
-                .filter(|n| n.name == "Agents" && n.parent_id.is_none())
+                // Case-insensitively: the reserved root is `agents/`, and a
+                // company that predates the naming rule carries `Agents/`.
+                // Either way there must be exactly one — a rival root under the
+                // other spelling is the failure this test exists to catch.
+                .filter(|n| n.name.eq_ignore_ascii_case(AGENTS_ROOT) && n.parent_id.is_none())
                 .count(),
             1,
         );
