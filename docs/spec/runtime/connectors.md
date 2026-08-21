@@ -388,21 +388,18 @@ because that is where an operator will look next time.
 Adding a host was for a long time the only thing that could be done to one, and
 the missing half is not cosmetic: a host's address changes — a gateway gets a
 domain, a VPS moves, a tenant is renamed — and the only recourse was to forget
-it and add it again. That mints a **new connection id**, and every
-browser-local key is scoped by it, so re-adding a host that merely moved
-silently resets its tour progress, its last-read channel and its drafts.
+it and add it again. That mints a **new connection id**, and every browser-local
+key is scoped by it, so re-adding a host that merely moved silently resets its
+tour progress, its last-read channel and its drafts.
 
 So the switcher offers **"Manage hosts"** beside "Add a host", and it opens a
 page rather than a menu of row-level buttons: a switcher row is a *filter*, so
 hanging a rename and a delete off it makes a control whose click targets
-disagree about what a row is for, with the destructive one where a keyboard
-user lands while switching hosts.
-
-That menu now opens on **any** host rather than only on two (`hostSwitcherMenu`
-in `host-switcher.tsx`). One host was furniture while the menu held nothing but
-the roster; it is the only route to this page now, and a browser console with
-exactly one connection — the shape whose host is most likely to move — was
-getting a nameplate with nothing behind it.
+disagree about what a row is for. That menu now opens on **any** host rather
+than only on two (`hostSwitcherMenu`): one host was furniture while the menu
+held nothing but the roster, but it is the only route to this page now, and a
+browser console with exactly one connection — the shape whose host is most
+likely to move — was getting a nameplate with nothing behind it.
 
 The page does three things, and `editConnection` in `connections/registry.ts` is
 where the first two land:
@@ -414,16 +411,16 @@ where the first two land:
 - **re-address**, offered for `remote` and `cloud` only. `local` and `ssh`
   addresses are assigned by this application — an ephemeral port and a loopback
   port this client chose — so an address typed here would be overwritten by the
-  next launch. A move re-probes and drops the identity, the company list and
-  the error, all of which describe the host that *was* at the old address.
-  A move onto an address another row already holds is refused rather than
-  saved: `canonicalAddress` compares the two, so the same-origin row's `""`,
-  a trailing slash, hostname case and an explicit default port cannot mint a
-  second id for one host;
+  next launch. A move drops the identity, the company list and the error — all
+  of which describe the host that *was* there — and re-probes, discarding any
+  probe still in flight against the old address rather than letting it answer
+  for the new one. A move onto an address another row already holds is refused:
+  `canonicalAddress` compares the two, so the same-origin row's `""`, a
+  trailing slash, hostname case and a default port cannot mint a second id;
 - **forget**, which is `removeConnection`: local to this client, closing an
-  `ssh` tunnel opened for it, and confirmed — because the connection id goes
-  with it, and with the id every scoped key underneath. Not offered for a
-  `local` host, which the instance roster would re-adopt under a fresh id.
+  `ssh` tunnel opened for it, and confirmed — the connection id goes with it,
+  and with it every scoped key underneath. Not offered for a `local` host,
+  which the instance roster would re-adopt under a fresh id.
 
 The **setup wizard is deliberately not** one of these places. It is served by a
 host that is already running, so by the time anyone sees it the question has
