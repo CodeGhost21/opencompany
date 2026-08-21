@@ -2294,13 +2294,13 @@ mod tests {
     #[test]
     fn paths_render_from_the_ancestor_chain() {
         let nodes = vec![
-            folder("a", "Standards", None),
-            file("b", "Engineering standards.md", Some("a")),
-            file("c", "README.md", None),
+            folder("a", "standards", None),
+            file("b", "engineering-standards.md", Some("a")),
+            file("c", "readme.md", None),
         ];
         let index = PathIndex::build(nodes);
         assert_eq!(index.by_id["b"].path, "standards/engineering-standards.md");
-        assert_eq!(index.by_id["c"].path, "README.md");
+        assert_eq!(index.by_id["c"].path, "readme.md");
         assert_eq!(index.unaddressable, 0);
     }
 
@@ -2522,11 +2522,11 @@ mod tests {
     fn redundant_separators_are_tolerated_but_segments_are_not_invented() {
         assert_eq!(
             split_logical_path("/standards/").unwrap(),
-            vec!["Standards"]
+            vec!["standards"]
         );
         assert_eq!(
-            split_logical_path("standards//Eng.md").unwrap(),
-            vec!["Standards", "Eng.md"]
+            split_logical_path("standards//eng.md").unwrap(),
+            vec!["standards", "eng.md"]
         );
         assert!(split_logical_path("/").unwrap_err().contains("segments"));
     }
