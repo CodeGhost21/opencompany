@@ -12,9 +12,10 @@ A card reaches Planning two ways (issue #576):
 1. **The prompt box opens it there.** An actionable message typed by a person
    opens its card directly in Planning, with no drag. This is epic #183's spine
    — prompt in, deliverable out — and it is the common path.
-2. **A person drags it there**, from To-do. This is how a card that was entered
-   by hand, or returned to To-do by a failed pass or a rejected proposal, gets
-   planned.
+2. **A person asks for it**, with the card's *Plan first* control (issue
+   #1512; it was a drag into the Planning column until the board collapsed to
+   three phases). This is how a card that was entered by hand, or returned to
+   Pending by a failed pass or a rejected proposal, gets planned.
 
 Both are the same transition and buy exactly one pass; see
 [the contract table](#the-contract-in-one-table).
@@ -88,7 +89,7 @@ the gesture that causes it is the card's *Plan first* button. What moved is only
 where a person expresses the intent, and a control expresses an *act* better
 than a column expressed a *state* somebody had to drag through.
 
-**A card opened by anything other than a person still lands in To-do**
+**A card opened by anything other than a person still lands in Pending**
 (issue #576). The prompt box is a human surface, but it is not only a human
 surface: the chat route also accepts machine credentials, and an agent whose
 card self-promoted would buy a planning pass, whose pass can open further
@@ -270,7 +271,7 @@ money.
 There is no run row for the boot reaper to find, so a host that dies mid-pass
 would otherwise leave a card in Planning that nothing will ever re-drive — the
 trigger already fired. `runtime::advance::sweep_stranded_planning` reads the
-board directly at boot and returns every Planning card to To-do with the
+board directly at boot and returns every Planning card to Pending with the
 restart reason on its note.
 
 It is sound because Planning is **transient by construction**: every

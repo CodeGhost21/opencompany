@@ -463,7 +463,7 @@ Creation keeps its own dialog (`views/CreateTaskDialog.tsx`) rather than becomin
 a ledger compose form: the board's write path is `POST …/tasks`, and
 `record_entry` is refused for this ledger precisely because entering a column
 fires work. It is offered on the board and nowhere else, and it lands a card in
-To-do — the one column new work may enter.
+Pending — the one column new work may enter.
 
 `#/tasks/<id>` remains the card detail — a timeline, a plan brief, a discussion,
 its attempts, a workflow proposal, the steer controls — none of which has

@@ -52,7 +52,7 @@ the distinction is **provenance, not position**, and every return path already
 stamps its reason onto the card's note (`review_note`'s "reviewed: needs another
 pass — …", the dispatch error text, `[operator] cancelled while in flight`),
 which the board renders on the card. So a task that cannot proceed goes **back
-to To-do with the reason on the card**, never into a stuck state of its own.
+to Pending with the reason on the card**, never into a stuck state of its own.
 
 Nothing about that is silent for stored data: `backlog` is no longer a board
 column, so a card persisted under it would fail `is_board_column` and vanish
