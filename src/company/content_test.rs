@@ -761,6 +761,9 @@ fn every_company_ledger_declaration_parses_and_fits_under_the_cap() {
 /// question — how is it going, which flavour of over — and that answer belongs
 /// in a field (`progress`, `reason`) where it does not have to be guessed.
 ///
+/// Covers the `globals/` baseline as well as `companies/`: the baseline ships
+/// into every company, so a sprawling one there is sprawl nobody opted into.
+///
 /// It fails here rather than at run time because nothing at run time would say
 /// so: a ledger with nine statuses loads, renders and works, and only the
 /// company using it discovers that its agents cannot keep the vocabulary
@@ -771,21 +774,30 @@ fn no_shipped_template_ledger_declares_more_than_five_statuses() {
     const MAX_STATUSES: usize = 5;
 
     let mut checked = 0;
+    let mut check = |origin: String, spec: &crate::ledger::LedgerSpec| {
+        checked += 1;
+        let names: Vec<&str> = spec.statuses.iter().map(|s| s.name.as_str()).collect();
+        assert!(
+            spec.statuses.len() <= MAX_STATUSES,
+            "{origin}/{} declares {} statuses, past the {MAX_STATUSES} ceiling: {names:?}. \
+             Merge the ones that answer a question other than *where does this row stand* \
+             and keep the retired words as `aliases` so stored rows still render.",
+            spec.slug,
+            spec.statuses.len(),
+        );
+    };
+
+    // The baseline first, and it matters more than any single template: these
+    // ship into *every* company, so a sprawling one is sprawl every operator
+    // gets whichever vertical they started from.
+    for spec in crate::globals::ledgers() {
+        check("globals/ledgers".to_string(), spec);
+    }
     for company in subdirs(&repo_root().join("companies")) {
         let declared = load_dir_ledgers(&company)
             .unwrap_or_else(|err| panic!("{}/ledgers: {err}", company.display()));
         for spec in &declared {
-            checked += 1;
-            let names: Vec<&str> = spec.statuses.iter().map(|s| s.name.as_str()).collect();
-            assert!(
-                spec.statuses.len() <= MAX_STATUSES,
-                "{}/ledgers/{} declares {} statuses, past the {MAX_STATUSES} ceiling: {names:?}. \
-                 Merge the ones that answer a question other than *where does this row stand* \
-                 and keep the retired words as `aliases` so stored rows still render.",
-                company.display(),
-                spec.slug,
-                spec.statuses.len(),
-            );
+            check(format!("{}/ledgers", company.display()), spec);
         }
     }
     // A walk that found nothing would pass this silently, which is the one way
