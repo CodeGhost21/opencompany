@@ -38,7 +38,14 @@ import {
 
 import type { OpenCompanyClient } from "@/api/client";
 import { GRANT_DURATIONS, type ApprovalSummary, type GrantScope } from "@/api/types";
-import { approvalAction, money, payloadAge, payloadLines, untilLabel } from "@/lib/language";
+import {
+  approvalAction,
+  approvalDeadline,
+  type DeadlineTone,
+  money,
+  payloadAge,
+  payloadLines,
+} from "@/lib/language";
 import { cn } from "@/lib/utils";
 
 const KIND_ICONS: Record<string, LucideIcon> = {
@@ -128,6 +135,10 @@ export function ApprovalMeta({
   const asker = a.agent ? (askerNames.get(a.agent) ?? a.agent) : null;
   // #1024, computed once: the age, and whether this card should say it loudly.
   const age = payloadAge(a, now);
+  // #1403, likewise: the deadline's words and how loudly to say them. Computed
+  // unconditionally and read only inside the guard below, so a host that
+  // reports no deadline still renders nothing.
+  const deadline = approvalDeadline(a.expires_at_millis ?? 0, now);
 
   return (
     <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
@@ -175,11 +186,21 @@ export function ApprovalMeta({
           `expires_at_millis` means the host does not have deadlines, NOT that
           this card has none, so the console shows nothing rather than
           computing a deadline nothing would enforce: an operator who acted on
-          an invented "in 3h" would be refused. */}
+          an invented "in 3h" would be refused.
+
+          Wording and tone both come from `approvalDeadline` (#1403), so what
+          this says is testable as a string rather than only as rendered output
+          — the same split `payloadAge` above already uses. The tone is not
+          decoration: this line is the only thing on the card that says the
+          decision will be taken *for* the operator if they keep scrolling, and
+          it used to say it in the same grey as everything else. Amber is what
+          the rest of the console already means by "parked until a person acts"
+          (`--status-blocked`), and the passed state borrows the failed token
+          because a deadline that ran out is a terminal no. */}
       {typeof a.expires_at_millis === "number" && (
         <>
           <span aria-hidden>·</span>
-          <span>declined {untilLabel(a.expires_at_millis, now)}</span>
+          <span className={deadlineToneClass(deadline.tone)}>{deadline.text}</span>
         </>
       )}
       {status && (
@@ -190,6 +211,21 @@ export function ApprovalMeta({
       )}
     </div>
   );
+}
+
+/**
+ * How an approval's deadline is typeset, by tone (#1403).
+ *
+ * Weight as well as colour in both loud arms, so the distinction survives
+ * greyscale and the colour-vision deficiencies red/amber is worst for. `normal`
+ * returns nothing at all and inherits the meta line's muted grey, which keeps
+ * the quiet case exactly as it shipped — the emphasis is only worth anything if
+ * most cards do not have it.
+ */
+function deadlineToneClass(tone: DeadlineTone): string | undefined {
+  if (tone === "passed") return "font-medium text-status-failed-text";
+  if (tone === "soon") return "font-medium text-status-blocked-text";
+  return undefined;
 }
 
 /**
