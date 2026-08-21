@@ -1467,6 +1467,75 @@ mod tests {
         assert!(again.is_dir());
     }
 
+    /// The sandbox is named under the workspace naming rule, so a snake_case
+    /// roster id and an underscored company id land on dashed directories —
+    /// the same convention the note tree beside them is kept in.
+    #[test]
+    fn the_sandbox_path_is_lowercase_and_dashed() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let named = agent_workspace(
+            root.path(),
+            &CompanyId::new("Agentic_Law Firm"),
+            "page_builder",
+        );
+
+        assert_eq!(
+            named,
+            root.path()
+                .join("agentic-law-firm")
+                .join("page-builder")
+                .join("workspace")
+        );
+    }
+
+    /// An agent upgraded into the new naming keeps the work it had in flight.
+    ///
+    /// The sandbox is private scratch that nothing outside this process
+    /// addresses, so moving it is invisible — while leaving it behind would
+    /// strand a half-finished file on disk, present and unreachable, with
+    /// nothing reporting it.
+    #[test]
+    fn a_pre_rule_sandbox_is_moved_onto_the_canonical_path() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let company = CompanyId::new("acme");
+
+        let legacy = root.path().join("acme").join("page_builder").join("workspace");
+        std::fs::create_dir_all(&legacy).expect("legacy sandbox");
+        std::fs::write(legacy.join("draft.md"), "half-finished").expect("in-flight work");
+
+        let made = ensure_agent_workspace(root.path(), &company, "page_builder").expect("ensure");
+
+        assert_eq!(made, agent_workspace(root.path(), &company, "page_builder"));
+        assert_eq!(
+            std::fs::read_to_string(made.join("draft.md")).expect("the work came with it"),
+            "half-finished"
+        );
+        assert!(!legacy.exists(), "the legacy path is not left as a twin");
+    }
+
+    /// A sandbox that already exists at the canonical path is never overwritten
+    /// by a stale legacy one — the move is a one-time adoption, not a sync.
+    #[test]
+    fn a_live_sandbox_is_never_replaced_by_a_legacy_one() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let company = CompanyId::new("acme");
+
+        let canonical = ensure_agent_workspace(root.path(), &company, "page_builder").expect("ensure");
+        std::fs::write(canonical.join("current.md"), "live").expect("live work");
+        let legacy = root.path().join("acme").join("page_builder").join("workspace");
+        std::fs::create_dir_all(&legacy).expect("legacy sandbox");
+        std::fs::write(legacy.join("stale.md"), "stale").expect("stale work");
+
+        let again = ensure_agent_workspace(root.path(), &company, "page_builder").expect("ensure");
+
+        assert_eq!(again, canonical);
+        assert_eq!(
+            std::fs::read_to_string(canonical.join("current.md")).expect("still there"),
+            "live"
+        );
+        assert!(!canonical.join("stale.md").exists());
+    }
+
     /// The bug, pinned. With the workspace absent, `validate_parent_path` walks
     /// up past it to an ancestor that really *is* outside the sandbox and
     /// refuses a plainly-inside relative path — the refusal an agent granted
