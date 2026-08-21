@@ -385,19 +385,24 @@ because that is where an operator will look next time.
 
 ### Modifying one afterwards
 
-Adding a host was for a long time the only thing that could be done to one. The
-missing half is not cosmetic: a host's address changes — a gateway gets a domain,
-a VPS moves, a tenant is renamed — and the only recourse was to forget it and add
-it again. That mints a **new connection id**, and every browser-local key is
-scoped by it, so re-adding a host that merely moved silently resets its tour
-progress, its last-read channel and its drafts, with nothing reporting it.
+Adding a host was for a long time the only thing that could be done to one, and
+the missing half is not cosmetic: a host's address changes — a gateway gets a
+domain, a VPS moves, a tenant is renamed — and the only recourse was to forget
+it and add it again. That mints a **new connection id**, and every
+browser-local key is scoped by it, so re-adding a host that merely moved
+silently resets its tour progress, its last-read channel and its drafts.
 
 So the switcher offers **"Manage hosts"** beside "Add a host", and it opens a
-page rather than a menu of row-level buttons. A switcher row is a *filter* —
-clicking it puts that host's console on screen and changes nothing else — and
-hanging a rename and a delete off the same row makes a control whose click
-targets disagree about what a row is for, with the destructive one sitting where
-a keyboard user lands while switching hosts.
+page rather than a menu of row-level buttons: a switcher row is a *filter*, so
+hanging a rename and a delete off it makes a control whose click targets
+disagree about what a row is for, with the destructive one where a keyboard
+user lands while switching hosts.
+
+That menu now opens on **any** host rather than only on two (`hostSwitcherMenu`
+in `host-switcher.tsx`). One host was furniture while the menu held nothing but
+the roster; it is the only route to this page now, and a browser console with
+exactly one connection — the shape whose host is most likely to move — was
+getting a nameplate with nothing behind it.
 
 The page does three things, and `editConnection` in `connections/registry.ts` is
 where the first two land:
@@ -405,18 +410,20 @@ where the first two land:
 - **rename**, which is the only edit a host reached over `ssh` accepts. A
   `local` host is not renamed here at all: its name and its address are
   re-applied from the local instance roster on every refresh, so the page
-  offers it no edit control rather than one whose result would not survive;
+  offers it no edit control rather than one that would not survive;
 - **re-address**, offered for `remote` and `cloud` only. `local` and `ssh`
   addresses are assigned by this application — an ephemeral port and a loopback
   port this client chose — so an address typed here would be overwritten by the
-  next launch and point at nothing until it was. A move re-probes and drops the
-  identity, the company list and the error, all of which describe the host that
-  *was* at the old address;
+  next launch. A move re-probes and drops the identity, the company list and
+  the error, all of which describe the host that *was* at the old address.
+  A move onto an address another row already holds is refused rather than
+  saved: `canonicalAddress` compares the two, so the same-origin row's `""`,
+  a trailing slash, hostname case and an explicit default port cannot mint a
+  second id for one host;
 - **forget**, which is `removeConnection`: local to this client, closing an
-  `ssh` tunnel opened for it, and confirmed — because the connection id goes with
-  it, and with the id every scoped key underneath. A `local` host is not
-  forgettable here at all, because the instance roster would re-adopt it under a
-  fresh id on the next poll; those are managed where they are started.
+  `ssh` tunnel opened for it, and confirmed — because the connection id goes
+  with it, and with the id every scoped key underneath. Not offered for a
+  `local` host, which the instance roster would re-adopt under a fresh id.
 
 The **setup wizard is deliberately not** one of these places. It is served by a
 host that is already running, so by the time anyone sees it the question has
