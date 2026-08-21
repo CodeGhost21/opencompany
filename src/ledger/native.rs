@@ -197,10 +197,10 @@ mod test {
         let registry = Registry::build([]);
         let spec = registry.find("tasks").expect("tasks is built in");
         let entries = entries_from_tasks(&[
-            card("a", COLUMN_TODO),
-            card("b", COLUMN_PAUSED),
-            card("c", COLUMN_IN_REVIEW),
-            card("d", COLUMN_DONE),
+            card("a", COLUMN_TODO, 40),
+            card("b", COLUMN_PAUSED, 30),
+            card("c", COLUMN_IN_REVIEW, 20),
+            card("d", COLUMN_DONE, 10),
         ]);
         let rendered = crate::ledger::engine::render(spec, &entries);
         let headings: Vec<&str> = rendered
