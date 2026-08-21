@@ -22,10 +22,13 @@ import { expect, test, type Browser, type Page } from "@playwright/test";
  * authenticated admin, who never sees this screen.
  */
 
-/** Vertical extents of `main`'s content, in CSS pixels, plus what bounds them. */
+/**
+ * Vertical extents of `main`'s content, in CSS pixels, plus what bounds them.
+ *
+ * Says nothing about readiness — `none` mode renders no "Sign in" heading, so
+ * each caller waits for the thing its own mode puts on screen.
+ */
 async function measure(page: Page) {
-  await expect(page.getByRole("heading", { name: /^Sign in/ })).toBeVisible();
-
   return page.evaluate(() => {
     const main = document.querySelector("main")!;
     const box = main.getBoundingClientRect();
@@ -60,6 +63,7 @@ for (const size of [
   }) => {
     const { context, page } = await signedOut(browser, size);
     try {
+      await expect(page.getByRole("heading", { name: /^Sign in/ })).toBeVisible();
       const box = await measure(page);
 
       // `main` owns every pixel the header left over — the precondition the
@@ -94,14 +98,13 @@ for (const size of [
  * and this one has modes of quite different heights. Each is re-measured rather
  * than assumed: what this pins is that no mode escapes the flex column.
  *
- * The email host is the one a harness can drive end to end; `wallet` and `none`
- * are the same `main` with a different card inside it, and are covered by the
- * geometry above rather than by a host that cannot be stood up here.
+ * This walks the `email` host's own heights; the other two modes are below.
  */
 test("centring holds as the card changes height", async ({ browser }) => {
   const { context, page } = await signedOut(browser, { width: 1440, height: 900 });
   try {
     const centred = async (mode: string) => {
+      await expect(page.getByRole("heading", { name: /^Sign in/ })).toBeVisible();
       const box = await measure(page);
       const contentMid = (box.contentTop + box.contentBottom) / 2;
       const regionMid = (box.headerBottom + box.viewportHeight) / 2;
@@ -123,6 +126,45 @@ test("centring holds as the card changes height", async ({ browser }) => {
     await context.close();
   }
 });
+
+/**
+ * The other two sign-in modes, which are the same `main` with a different card
+ * in it — and which no single host renders, because `auth/config` is what picks
+ * between them and a host answers one way for its whole life.
+ *
+ * So the host's answer is what gets stubbed, not the layout: the console then
+ * builds the real card for that mode, and the geometry is measured exactly as
+ * above. `wallet` here is its no-wallet-installed variant, headless Chromium
+ * having no wallet to find — the shortest card this screen has, and therefore
+ * the one with the most free space to get wrong.
+ */
+for (const mode of ["wallet", "none"] as const) {
+  const marker = mode === "wallet" ? "No wallet found" : "There is no sign-in here";
+
+  test(`the ${mode}-mode card is centred below the header`, async ({ browser }) => {
+    const context = await browser.newContext({
+      storageState: undefined,
+      viewport: { width: 1440, height: 900 },
+    });
+    try {
+      const page = await context.newPage();
+      await page.route("**/auth/config", (route) =>
+        route.fulfill({ json: { mode, passwords: false, magicLink: false } }),
+      );
+      await page.goto("/");
+      await expect(page.getByText(marker)).toBeVisible();
+
+      const box = await measure(page);
+      const contentMid = (box.contentTop + box.contentBottom) / 2;
+      const regionMid = (box.headerBottom + box.viewportHeight) / 2;
+
+      expect(box.mainHeight).toBeCloseTo(box.viewportHeight - box.headerBottom, 0);
+      expect(Math.abs(contentMid - regionMid)).toBeLessThanOrEqual(2);
+    } finally {
+      await context.close();
+    }
+  });
+}
 
 test("a viewport too short for the card scrolls rather than clipping it", async ({ browser }) => {
   // The failure mode centring invites: a flex item centred in a box smaller
