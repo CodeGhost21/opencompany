@@ -86,9 +86,12 @@ type Mode = "link" | "password";
  *
  * `email` because that is what every company did before the mode was
  * configurable, so an older host — which has no `/auth/config` route — renders
- * exactly the screen it always did.
+ * exactly the screen it always did. `magicLink` is assumed to work for the same
+ * reason: a host that has not told us otherwise is one that either mails links
+ * or echoes them, and starting from false would blank the form on every
+ * deployment for the length of one fetch.
  */
-const ASSUMED_CONFIG: AuthConfig = { mode: "email", passwords: true };
+const ASSUMED_CONFIG: AuthConfig = { mode: "email", passwords: true, magicLink: true };
 
 /**
  * The sign-in view: magic link by default, password for anyone who set one.
