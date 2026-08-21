@@ -296,3 +296,38 @@ fn a_declared_ledgers_closing_statuses_demand_a_reason() {
         }
     }
 }
+
+/// Every status the built-ins retired in issue #1512 still resolves, and
+/// resolves to a status that renders. A row recorded last quarter as `at_risk`
+/// or `superseded` is a row somebody wrote; a narrowed vocabulary that dropped
+/// it on the floor would take it out of the rendered file with nothing saying
+/// so — the silent disappearance the derived file exists to prevent, reached
+/// from the declaration's side.
+#[test]
+fn every_retired_status_still_resolves_to_one_that_renders() {
+    let registry = Registry::build([]);
+    for (slug, retired, lands_on) in [
+        ("goals", "proposed", "active"),
+        ("goals", "at_risk", "active"),
+        ("goals", "missed", "dropped"),
+        ("decisions", "superseded", "retired"),
+        ("decisions", "reversed", "retired"),
+    ] {
+        let spec = registry.find(slug).expect("built in");
+        assert_eq!(
+            spec.canonical_status(retired),
+            lands_on,
+            "`{slug}`'s `{retired}` resolves nowhere"
+        );
+        assert!(
+            spec.sections
+                .iter()
+                .any(|section| section.statuses.iter().any(|name| name == lands_on)),
+            "`{slug}`'s `{lands_on}` renders in no section, so `{retired}` still vanishes"
+        );
+        // Healed on read, refused on write: the client learns the surviving
+        // vocabulary once rather than being kept on the retired one.
+        assert!(spec.knows_status(retired), "{slug}/{retired}");
+        assert!(!spec.declares_status(retired), "{slug}/{retired}");
+    }
+}
