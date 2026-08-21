@@ -423,11 +423,11 @@ mod http {
     /// Tolerant on purpose: a field the hub adds, renames or omits must not turn
     /// a whole page of the board into an error page in the console. Only `id` is
     /// structurally required, because without it no row can be voted on.
-    fn board_item(value: &serde_json::Value) -> Result<BoardItem> {
+    fn parse_item(value: &serde_json::Value) -> Result<BoardItem> {
         let text = |key: &str| value.get(key).and_then(|v| v.as_str());
         let count = |key: &str| value.get(key).and_then(|v| v.as_u64()).unwrap_or(0) as u32;
         let id = text("id")
-            .ok_or_else(|| Self_err("decode", "board item without an id"))?
+            .ok_or_else(|| decode_err("board item without an id"))?
             .to_string();
         let upvotes = count("upvoteCount");
         let downvotes = count("downvoteCount");
@@ -465,7 +465,7 @@ mod http {
     }
 
     /// Reads a hub comment out of its camelCase JSON.
-    fn board_comment(value: &serde_json::Value) -> BoardComment {
+    fn parse_comment(value: &serde_json::Value) -> BoardComment {
         let text = |key: &str| value.get(key).and_then(|v| v.as_str());
         BoardComment {
             id: text("id").unwrap_or_default().to_string(),
@@ -476,20 +476,19 @@ mod http {
     }
 
     /// The comments array of a detail payload, skipping anything unreadable.
-    fn board_comments(value: &serde_json::Value) -> Vec<BoardComment> {
+    fn parse_comments(value: &serde_json::Value) -> Vec<BoardComment> {
         value
             .get("comments")
             .and_then(|v| v.as_array())
-            .map(|items| items.iter().map(board_comment).collect())
+            .map(|items| items.iter().map(parse_comment).collect())
             .unwrap_or_default()
     }
 
-    /// The same error shape [`HttpTinyHumansClient::err`] builds, for the
-    /// free functions above.
-    #[allow(non_snake_case)]
-    fn Self_err(context: &str, message: impl std::fmt::Display) -> OpenCompanyError {
+    /// The same error shape [`HttpTinyHumansClient::err`] builds, for the free
+    /// parse functions above.
+    fn decode_err(message: impl std::fmt::Display) -> OpenCompanyError {
         OpenCompanyError::TinyHumans {
-            code: context.to_string(),
+            code: "decode".to_string(),
             message: message.to_string(),
         }
     }
