@@ -464,13 +464,19 @@ async fn edit_agent(
     // A **manifest** teammate is edited through the override layer below rather
     // than refused: a company you have deployed is still yours to change, and
     // the blueprint is never rewritten either way.
-    let is_manifest = record.manifest.agents.iter().any(|a| a.id == agent_id);
-    if !is_manifest && !record.overlay_agents.iter().any(|a| a.id == agent_id) {
+    // Asked through `is_roster_agent`, which is the same union `detail` reads
+    // back through — and, crucially, excludes a teammate the operator has
+    // removed. A retired manifest id still matches `manifest.agents`, so a
+    // narrower check here would store an override for a teammate that is not on
+    // the roster and then answer `404` from `detail`: a failed request that
+    // mutated the record on its way out.
+    if !record.is_roster_agent(&agent_id) {
         return Err(ApiError(OpenCompanyError::CompanyNotFound(format!(
             "teammate {agent_id}"
         )))
         .into_response());
     }
+    let is_manifest = record.manifest.agents.iter().any(|a| a.id == agent_id);
 
     // Authority **after** existence, and this ordering is forced rather than
     // preferred (review of #745).
