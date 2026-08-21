@@ -42,6 +42,7 @@ import {
   residualReason,
   renameMoveNode,
   searchWorkspace,
+  SEARCH_LIMIT,
   sweepEmptyAgentFolders,
   uploadFile,
   writeFile,
@@ -104,8 +105,10 @@ import {
   DERIVED_REASON,
   ensureMdExt,
   fileByTitle,
+  folderPathLabel,
   type FsNode,
   hasLegacyLocal,
+  isAgentsFolder,
   isDerivedNode,
   isSecretNode,
   legacyImportDeclined,
@@ -118,6 +121,7 @@ import {
   renameAudienceWarning,
   SECRETS_LABEL,
   SECRETS_REASON,
+  sortedFolders,
   subtreeCounts,
   subtreeIds,
   titleOf,
@@ -574,7 +578,12 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
       const mine = ++searchGen.current;
       setSearching(true);
       try {
-        const page = await searchWorkspace(client, company, query);
+        // Ask for the host's ceiling, not its default (issue #1457). The route
+        // clamps rather than refusing, so naming no limit was the console
+        // silently capping itself at 20 while the header said "20 of 50".
+        const page = await searchWorkspace(client, company, query, {
+          limit: SEARCH_LIMIT,
+        });
         if (mine !== searchGen.current) return;
         setSearchPage(page);
         setSearchError(null);
@@ -1131,12 +1140,16 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
   // Answers whether the note actually landed, which only the rescue banner
   // reads: it is holding the last copy of some text and must not clear itself
   // on a create that failed.
-  async function createAndOpen(name: string, content?: string): Promise<boolean> {
+  async function createAndOpen(
+    name: string,
+    content?: string,
+    parentId?: string | null,
+  ): Promise<boolean> {
     try {
       const created = await createNode(client, company, {
         name: ensureMdExt(name.trim() || "Untitled"),
         kind: "file",
-        parentId: null,
+        parentId: parentId ?? defaultParentId,
         content: content ?? "",
       });
       setNodes((all) => [...all, created]);
@@ -1164,14 +1177,15 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
     }
   }
 
-  async function createFolder(name: string) {
+  async function createFolder(name: string, parentId?: string | null) {
     try {
       const created = await createNode(client, company, {
         name: name.trim() || "New folder",
         kind: "folder",
-        parentId: null,
+        parentId: parentId ?? defaultParentId,
       });
       setNodes((all) => [...all, created]);
+      if (created.parentId) revealFolder(created.parentId);
     } catch (e) {
       toast.error(message(e, "could not create the folder"));
     }
@@ -1198,6 +1212,15 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
         parentId: destId,
       });
       setNodes((all) => all.map((n) => (n.id === updated.id ? updated : n)));
+      // Name the destination (issue #1381). The receipt for a move that cannot
+      // be undone in one click said only that it happened, so an operator who
+      // picked the wrong row of an unsorted, unpathed list learned nothing from
+      // the confirmation either.
+      toast.success(
+        `Moved “${titleOf(node)}” to ${
+          destId ? folderPathLabel(nodes, destId, rosterNames) : "the workspace root"
+        }.`,
+      );
     } catch (e) {
       toast.error(message(e, "could not move this item"));
     }
@@ -1337,7 +1360,7 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
     if (!files?.length) return;
     for (const file of Array.from(files)) {
       try {
-        const created = await uploadFile(client, company, file, null);
+        const created = await uploadFile(client, company, file, defaultParentId);
         setNodes((all) => [...all, created]);
       } catch (e) {
         toast.error(`${file.name}: ${message(e, "upload failed")}`);
@@ -1347,6 +1370,24 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
 
   const body = draft ?? openFile?.content ?? "";
   const openNode = nodeById(nodes, openId);
+  /**
+   * Where a create with no named destination lands (issue #1477).
+   *
+   * Every create passed `parentId: null`, so an operator standing in
+   * `Standards/Engineering/` made a note and it appeared at the root,
+   * unannounced — and the only way to file it was the Move dialog, which was
+   * itself unusable (#1381). "Where I am" is the open note's folder, or the
+   * folder itself if a folder is what is open; only a genuinely empty selection
+   * falls back to the root.
+   *
+   * Never `derived/`: the host refuses writes there, so inheriting it from an
+   * open ledger file would turn every create into an error toast.
+   */
+  const defaultParentId: string | null = (() => {
+    if (!openNode) return null;
+    const parent = openNode.kind === "folder" ? openNode.id : openNode.parentId;
+    return parent && !isDerivedNode(nodes, parent) ? parent : null;
+  })();
   /**
    * Whether the host will refuse a write to the open note (issue #1222).
    *
@@ -1529,6 +1570,7 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
               onRename={(node) => setPrompt({ mode: "rename", node })}
               onMove={(node) => setMoving(node)}
               onDelete={(node) => setConfirmDelete(node)}
+              onNewHere={(folder, mode) => setPrompt({ mode, parentId: folder.id })}
             />
           )}
         </div>
@@ -1819,16 +1861,19 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
       <NamePrompt
         nodes={nodes}
         state={prompt}
+        rosterNames={rosterNames}
+        defaultParentId={defaultParentId}
         onClose={() => setPrompt(null)}
         onSubmit={(name) => {
-          if (prompt?.mode === "folder") void createFolder(name);
-          else if (prompt?.mode === "file") void createAndOpen(name);
+          if (prompt?.mode === "folder") void createFolder(name, prompt.parentId);
+          else if (prompt?.mode === "file") void createAndOpen(name, undefined, prompt.parentId);
           else if (prompt?.mode === "rename" && prompt.node) void rename(prompt.node, name);
           setPrompt(null);
         }}
       />
       <MoveDialog
         nodes={nodes}
+        rosterNames={rosterNames}
         moving={moving}
         onClose={() => setMoving(null)}
         onMove={(destId) => {
@@ -1987,16 +2032,8 @@ interface TreeProps {
   onRename: (node: FsNode) => void;
   onMove: (node: FsNode) => void;
   onDelete: (node: FsNode) => void;
-}
-
-/**
- * Whether `folder` is the workspace's `Agents/` root — the one folder whose
- * direct children are named by roster id rather than anything an operator
- * chose (issue #973). Root-scoped (`parentId === null`) so a note or folder an
- * operator names "Agents" somewhere else in the tree is never mistaken for it.
- */
-function isAgentsFolder(folder: FsNode | undefined): boolean {
-  return folder?.kind === "folder" && folder.name === "Agents" && folder.parentId === null;
+  /** Create inside this folder (issue #1477). */
+  onNewHere: (folder: FsNode, mode: "file" | "folder") => void;
 }
 
 /**
@@ -2313,6 +2350,21 @@ function TreeRow({ node, ...props }: TreeProps & { node: FsNode }) {
               </DropdownMenuGroup>
             ) : (
               <>
+                {/* The tree is where an operator decides where a note belongs,
+                    and until now it was the one place that could not make one
+                    (issue #1477). The toolbar's New note has no idea which
+                    folder is on screen; this does. */}
+                {isFolder && (
+                  <>
+                    <DropdownMenuItem onClick={() => props.onNewHere(node, "file")}>
+                      New note here
+                    </DropdownMenuItem>
+                    <DropdownMenuItem onClick={() => props.onNewHere(node, "folder")}>
+                      New folder here
+                    </DropdownMenuItem>
+                    <DropdownMenuSeparator />
+                  </>
+                )}
                 <DropdownMenuItem onClick={() => props.onRename(node)}>Rename</DropdownMenuItem>
                 <DropdownMenuItem onClick={() => props.onMove(node)}>Move to…</DropdownMenuItem>
                 <DropdownMenuSeparator />
@@ -2561,9 +2613,7 @@ function MissingNote({
         <div className="flex flex-1 flex-col items-center justify-center gap-3 px-6 text-center">
           <FileX className="size-8 text-muted-foreground" />
           <div className="space-y-1">
-            <p className="font-medium">
-              That note is no longer in this workspace
-            </p>
+            <p className="font-medium">That note is no longer in this workspace</p>
             <p className="max-w-md text-sm text-muted-foreground">
               The link you followed points at a note this company does not have.
             </p>
@@ -2670,6 +2720,14 @@ function IconBtn({
 interface PromptState {
   mode: "folder" | "file" | "rename";
   node?: FsNode;
+  /**
+   * Where a create lands (issue #1477).
+   *
+   * `undefined` means "wherever the view decides"; an explicit value is a
+   * destination the operator named — including `null`, the workspace root,
+   * which is a real answer and not the absence of one.
+   */
+  parentId?: string | null;
 }
 
 /**
@@ -2687,11 +2745,16 @@ interface PromptState {
 function NamePrompt({
   nodes,
   state,
+  rosterNames,
+  defaultParentId,
   onClose,
   onSubmit,
 }: {
   nodes: FsNode[];
   state: PromptState | null;
+  rosterNames: RosterNames;
+  /** Where a create with no named destination will land (issue #1477). */
+  defaultParentId: string | null;
   onClose: () => void;
   onSubmit: (name: string) => void;
 }) {
@@ -2741,6 +2804,23 @@ function NamePrompt({
                 ? "Notes get a .md extension automatically."
                 : "Give it a name."}
           </DialogDescription>
+          {/* Where it will land, before it lands (issue #1477). Every create
+              used to go to the root regardless of what the operator had open,
+              and said so nowhere — the note simply appeared somewhere else. */}
+          {state && state.mode !== "rename" && (
+            <p className="text-xs text-muted-foreground" data-testid="workspace-prompt-dest">
+              Goes in{" "}
+              <span className="font-medium text-foreground">
+                {(() => {
+                  const parent = state.parentId === undefined ? defaultParentId : state.parentId;
+                  return parent
+                    ? folderPathLabel(nodes, parent, rosterNames)
+                    : "the workspace root";
+                })()}
+              </span>
+              .
+            </p>
+          )}
         </DialogHeader>
         {pending ? (
           <MoveAudienceConfirm
@@ -2782,62 +2862,95 @@ function NamePrompt({
 }
 
 /**
- * Pick a destination for a `Move to…`, and say so when the destination changes
- * who can read the note (issue #1465).
+ * Pick where a note or folder goes (issues #1381, #1477, #1465).
  *
- * Every destination but one is a filing decision. Moving into or out of
- * `secrets/` is an audience decision, and it was indistinguishable from the
- * others: one click, a "moved" toast, and a note that either stopped being
- * readable by every agent in the company or started being. So a destination
- * that crosses that line does not commit on the click — it swaps the list for
- * {@link MoveAudienceConfirm}, which names the consequence and asks again.
+ * Four filing defects, each on its own sufficient to mis-file something. The
+ * list showed bare `name`, so two `Drafts` under different parents were
+ * identical rows and a roster folder was a raw ULID. It was in the host's
+ * unspecified `tree()` order, beside a tree that was sorted. It offered
+ * `derived/`, where the host refuses every write (#1222), so picking it could
+ * only ever produce an error toast. And a single click committed the move — no
+ * Move button, no Cancel, no undo, and a success toast that did not name where
+ * the note went.
  *
- * Ordinary destinations still commit on one click, deliberately: this adds a
- * step to the moves that change something and to no others. (Issue #1477 is
- * about the destination list itself — flat, path-less — and is left alone
- * here.)
+ * So: full paths, tree order, `derived/` excluded, and select-then-confirm with
+ * the footer the sibling dialogs already have. A click still *chooses*; it no
+ * longer *commits*.
+ *
+ * On top of that, one destination is not a filing decision at all. Moving into
+ * or out of `secrets/` changes who can read the note, and #1465 made that
+ * legible twice over: the row is marked before it is picked, and pressing Move
+ * hands off to {@link MoveAudienceConfirm} rather than moving — the confirm
+ * step the ordinary destinations spend on a plain Move button is spent naming
+ * the consequence instead.
  */
 function MoveDialog({
   nodes,
+  rosterNames,
   moving,
   onClose,
   onMove,
 }: {
   nodes: FsNode[];
+  rosterNames: RosterNames;
   moving: FsNode | null;
   onClose: () => void;
   onMove: (destId: string | null) => void;
 }) {
-  const blocked = moving ? subtreeIds(nodes, moving.id) : new Set<string>();
-  const folders = nodes.filter((x) => x.kind === "folder" && !blocked.has(x.id));
-  /** The destination picked, held back until the warning is acknowledged. */
+  // `undefined` is "nothing picked yet"; `null` is the workspace root, which is
+  // a real destination and must not read as no answer.
+  const [picked, setPicked] = useState<string | null | undefined>(undefined);
+  const [filter, setFilter] = useState("");
+  /** The destination chosen, held back until its warning is acknowledged. */
   const [pending, setPending] = useState<{
     destId: string | null;
     warning: MoveAudienceWarning;
   } | null>(null);
 
-  // A second `Move to…` must not open onto the previous one's warning.
+  // A second `Move to…` must not open onto the previous one's selection or its
+  // warning.
   useEffect(() => {
-    setPending(null);
+    if (moving) {
+      setPicked(undefined);
+      setFilter("");
+      setPending(null);
+    }
   }, [moving]);
 
-  function pick(destId: string | null) {
-    if (!moving) return;
-    const warning = moveAudienceWarning(nodes, moving, destId);
+  const blocked = new Set<string>(moving ? subtreeIds(nodes, moving.id) : []);
+  for (const node of nodes) if (isDerivedNode(nodes, node.id)) blocked.add(node.id);
+
+  const needle = filter.trim().toLowerCase();
+  const destinations = sortedFolders(nodes, blocked)
+    .map((folder) => ({
+      folder,
+      label: folderPathLabel(nodes, folder.id, rosterNames),
+      audience: moving ? moveAudienceWarning(nodes, moving, folder.id)?.change : undefined,
+    }))
+    .filter(({ label }) => !needle || label.toLowerCase().includes(needle));
+
+  const here = (id: string | null) => moving?.parentId === (id ?? null);
+
+  /** Commit, or hand off to the warning when the audience changes. */
+  function confirm() {
+    if (picked === undefined || !moving) return;
+    const warning = moveAudienceWarning(nodes, moving, picked);
     if (!warning) {
-      onMove(destId);
+      onMove(picked);
       return;
     }
-    setPending({ destId, warning });
+    setPending({ destId: picked, warning });
   }
 
   return (
     <Dialog open={Boolean(moving)} onOpenChange={(o) => !o && onClose()}>
-      <DialogContent className="sm:max-w-sm">
+      <DialogContent className="sm:max-w-md">
         <DialogHeader>
           <DialogTitle>Move “{moving ? titleOf(moving) : ""}”</DialogTitle>
           <DialogDescription>
-            {pending ? "This changes who can read it." : "Pick a destination folder."}
+            {pending
+              ? "This changes who can read it."
+              : "Pick a destination folder, then choose Move. Nothing moves until you do."}
           </DialogDescription>
         </DialogHeader>
         {pending ? (
@@ -2850,27 +2963,58 @@ function MoveDialog({
             onConfirm={() => onMove(pending.destId)}
           />
         ) : (
-          <div className="max-h-72 space-y-1 overflow-y-auto">
-            <DestRow
-              label="Workspace root"
-              disabled={moving?.parentId === null}
-              // Marked from the same predicate that raises the warning, so the
-              // consequence is legible *before* the click as well as after it.
-              // The root is never `secrets/`, so this row only ever marks the
-              // way out.
-              audience={moving ? moveAudienceWarning(nodes, moving, null)?.change : undefined}
-              onClick={() => pick(null)}
+          <>
+            <Input
+              value={filter}
+              onChange={(e) => setFilter(e.target.value)}
+              placeholder="Filter destinations…"
+              aria-label="Filter destinations"
+              data-testid="workspace-move-filter"
+              className="h-8 text-sm"
             />
-            {folders.map((f) => (
-              <DestRow
-                key={f.id}
-                label={f.name}
-                disabled={moving?.parentId === f.id}
-                audience={moving ? moveAudienceWarning(nodes, moving, f.id)?.change : undefined}
-                onClick={() => pick(f.id)}
-              />
-            ))}
-          </div>
+            <div className="max-h-72 space-y-1 overflow-y-auto" data-testid="workspace-move-list">
+              {!needle && (
+                <DestRow
+                  label="Workspace root"
+                  disabled={here(null)}
+                  selected={picked === null}
+                  // Marked from the same predicate that raises the warning, so
+                  // the consequence is legible before the pick as well as
+                  // after it. The root is never `secrets/`, so this row only
+                  // ever marks the way out.
+                  audience={moving ? moveAudienceWarning(nodes, moving, null)?.change : undefined}
+                  onClick={() => setPicked(null)}
+                />
+              )}
+              {destinations.map(({ folder, label, audience }) => (
+                <DestRow
+                  key={folder.id}
+                  label={label}
+                  disabled={here(folder.id)}
+                  selected={picked === folder.id}
+                  audience={audience}
+                  onClick={() => setPicked(folder.id)}
+                />
+              ))}
+              {destinations.length === 0 && (
+                <p className="px-2.5 py-2 text-sm text-muted-foreground">
+                  No folder matches “{filter.trim()}”.
+                </p>
+              )}
+            </div>
+            <DialogFooter>
+              <Button variant="ghost" onClick={onClose}>
+                Cancel
+              </Button>
+              <Button
+                disabled={picked === undefined}
+                onClick={confirm}
+                data-testid="workspace-move-confirm"
+              >
+                Move
+              </Button>
+            </DialogFooter>
+          </>
         )}
       </DialogContent>
     </Dialog>
@@ -3278,20 +3422,28 @@ function DestRow({
   label,
   disabled,
   audience,
+  selected,
   onClick,
 }: {
   label: string;
   disabled?: boolean;
   /** Set when picking this destination changes who can read the note (#1465). */
   audience?: MoveAudienceChange;
+  /** Whether this row is the destination currently chosen (issue #1381). */
+  selected?: boolean;
   onClick: () => void;
 }) {
   return (
     <button
       disabled={disabled}
       onClick={onClick}
-      className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-sm hover:bg-accent disabled:pointer-events-none disabled:opacity-40"
+      aria-pressed={selected}
+      data-testid="workspace-move-dest"
       data-audience-change={audience}
+      className={cn(
+        "flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-sm hover:bg-accent disabled:pointer-events-none disabled:opacity-40",
+        selected && "bg-accent font-medium",
+      )}
     >
       <Folder className="size-4 text-tone-2" />
       <span className="truncate">{label}</span>
