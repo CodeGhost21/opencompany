@@ -951,6 +951,54 @@ mod test {
         );
     }
 
+    /// A sandbox path with a space and a capital in it becomes a tree path
+    /// under the workspace naming rule.
+    ///
+    /// The sandbox is the agent's own scratch and it names files however it
+    /// likes; the tree is what the operator reads, and one document there has
+    /// one spelling. Every interior segment goes through the rule too, not just
+    /// the file, or a deliverable would land in `specs/` beside `Specs/`.
+    #[tokio::test]
+    async fn a_published_path_is_normalized_into_the_tree() {
+        let (_dir, ops, co) = stores();
+        let ws: &dyn WorkspaceStore = ops.as_ref();
+
+        let id = materialize(ws, &co, target("Specs/Launch Plan.md", "# Launch"))
+            .await
+            .expect("materialize")
+            .node_id;
+
+        assert_eq!(
+            path_of(ws, &co, &id).await,
+            format!("{AGENTS_ROOT}/cmo/t-1/specs/launch-plan.md")
+        );
+    }
+
+    /// Two spellings of one sandbox path are one node in the tree, and the
+    /// second publish revises the first rather than opening a rival beside it.
+    ///
+    /// Without this the normalization would be worse than no rule at all: a
+    /// path that resolved differently per publish is exactly the ambiguity the
+    /// mirror refuses everywhere else.
+    #[tokio::test]
+    async fn two_spellings_of_one_path_revise_one_node() {
+        let (_dir, ops, co) = stores();
+        let ws: &dyn WorkspaceStore = ops.as_ref();
+
+        let first = materialize(ws, &co, target("Launch Plan.md", "v1"))
+            .await
+            .expect("first")
+            .node_id;
+        let second = materialize(ws, &co, target("launch-plan.md", "v2"))
+            .await
+            .expect("second")
+            .node_id;
+
+        assert_eq!(first, second, "one deliverable, one node");
+        let (_, body) = ws.read(&co, &second).await.unwrap().expect("the node");
+        assert_eq!(body, "v2");
+    }
+
     /// A **binary** publish lands real bytes in the tree (issue #553).
     ///
     /// This is the payoff of the whole issue: before it, a generated image
