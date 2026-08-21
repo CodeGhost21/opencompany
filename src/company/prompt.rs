@@ -204,6 +204,7 @@ mod tests {
             classes: Vec::new(),
             ledgers: None,
             can_declare_ledgers: true,
+            model: None,
         }
     }
 

@@ -86,7 +86,6 @@ real adapters (issue #1245), not guessed — whichever this build knows for that
 | `agent` | lever |
 |---|---|
 | `claude` | startup env var `ANTHROPIC_MODEL` |
-| `goose` | startup env var `GOOSE_MODEL` |
 | `codex` | no startup env var (`OPENAI_MODEL`, `CODEX_MODEL`, `MODEL` and `OPENAI_DEFAULT_MODEL` all tried, none had any effect) — instead, `session/set_config_option` right after `session/new`, using the `configOptions` entry `codex-acp` itself advertises with `category: "model"` |
 
 The `set_config_option` fallback is not codex-specific in the code — it fires
@@ -152,7 +151,7 @@ expensive way to discover that `[harness.inference]` needs `kind = "built_in"`.
 ```toml
 [harness.acp]
 transport = "local"      # spawn an agent on this machine
-agent     = "claude"     # claude | codex | goose
+agent     = "claude"     # claude | codex
 
 [harness.acp]
 transport = "runner"     # reach one that dialed in

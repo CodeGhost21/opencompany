@@ -3467,6 +3467,8 @@ async fn mcp_reachability_lists_reaching_agents_including_overlay() {
         role: "Assistant".to_string(),
         description: None,
         tools: Vec::new(),
+        model: None,
+        harness: None,
     };
     let state = state_with_manifest_and_overlays(&home, manifest, vec![overlay]).await;
 

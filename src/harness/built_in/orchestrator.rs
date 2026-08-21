@@ -3075,6 +3075,8 @@ impl Tool for AddAgentTool {
             role: role.clone(),
             description,
             tools: tools.clone(),
+            model: None,
+            harness: None,
         };
         record.overlay_agents.push(agent);
         self.store.save(&record).await?;
@@ -4757,6 +4759,7 @@ mod tests {
             classes: Vec::new(),
             ledgers: None,
             can_declare_ledgers: true,
+            model: None,
         }
     }
 
@@ -6334,6 +6337,8 @@ members = ["legal_counsel"]
             role: "Designer".to_string(),
             description: None,
             tools: Vec::new(),
+            model: None,
+            harness: None,
         });
         let store = Arc::new(MemStore::seeded(record)) as Arc<dyn CompanyStore>;
         let tool = DelegateToTeammateTool::new(queue.clone(), company, store);
@@ -6375,6 +6380,8 @@ members = ["legal_counsel"]
                 role: "Designer".to_string(),
                 description: None,
                 tools: Vec::new(),
+                model: None,
+                harness: None,
             });
         }
         let store = Arc::new(MemStore::seeded(record)) as Arc<dyn CompanyStore>;
@@ -6970,6 +6977,8 @@ name = "Morning"
             role: "Researcher".to_string(),
             description: None,
             tools: Vec::new(),
+            model: None,
+            harness: None,
         });
         let store: Arc<dyn CompanyStore> = Arc::new(MemStore::seeded(record));
 
@@ -7016,6 +7025,8 @@ name = "Morning"
             role: "Designer".to_string(),
             description: None,
             tools: Vec::new(),
+            model: None,
+            harness: None,
         });
         let store: Arc<dyn CompanyStore> = Arc::new(MemStore::seeded(record.clone()));
 
