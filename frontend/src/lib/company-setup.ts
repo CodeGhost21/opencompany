@@ -132,29 +132,64 @@ export function draftIsSubmittable(draft: SetupDraft): boolean {
 }
 
 /**
- * Whether this company still has nobody on it.
+ * The teammates this company was actually staffed with — everyone on the roster
+ * bar the global baseline.
  *
- * The literal condition, kept as its own named function because the decision to
- * define first-run this way is a product choice rather than an implementation
- * detail — see {@link shouldOfferSetup}.
+ * ## Why the roster is not the answer on its own (issue #1404)
+ *
+ * The **global baseline** (`docs/spec/runtime/globals.md`) merges a fixed set of
+ * teammates into *every* company at boot, whatever its manifest says, and they
+ * cannot be deleted — `DELETE …/team/{id}` answers `409` on each. So
+ * `roster.length === 0`, which is what this gate used to ask, is false on every
+ * company this product can serve. First-run setup could not open anywhere,
+ * including on `companies/e2e_setup` — a company whose whole reason to exist is
+ * to reach it.
+ *
+ * The fix is not to subtract the four ids the baseline ships today. That is a
+ * copy of a list which is meant to grow, held somewhere the baseline's authors
+ * will never look, and the gate would break silently on the next addition. The
+ * host marks provenance on each row instead (`TeamMemberDto.global`, from the
+ * same `Agent::global` the merge sets), and this reads it.
+ *
+ * A host predating that field sends nothing, and `undefined` is read as "not
+ * baseline". That is the safe direction: it restores the old behaviour — no
+ * offer — rather than offering setup to a company that already has a team.
  */
-export function teamIsEmpty(roster: TeamMemberDto[]): boolean {
-  return roster.length === 0;
+export function staffedTeam(roster: TeamMemberDto[]): TeamMemberDto[] {
+  return roster.filter((member) => member.global !== true);
+}
+
+/**
+ * Whether nobody has staffed this company yet.
+ *
+ * Kept as its own named function because the decision to define first-run this
+ * way is a product choice rather than an implementation detail — see
+ * {@link shouldOfferSetup}. It is deliberately *not* "the roster is empty": see
+ * {@link staffedTeam} for why that question can no longer be asked.
+ */
+export function teamIsUnstaffed(roster: TeamMemberDto[]): boolean {
+  return staffedTeam(roster).length === 0;
 }
 
 /**
  * Whether to open setup unprompted.
  *
- * **An empty team is the signal**, not a stored "has run" flag. A flag in the
- * browser would re-fire after cleared storage or on a second device and build a
+ * **The team is the signal**, not a stored "has run" flag. A flag in the browser
+ * would re-fire after cleared storage or on a second device and build a
  * duplicate team; asking the host who is on the roster cannot drift, because it
  * is the same thing setup changes.
  *
- * The cost of this rule, accepted deliberately: a company whose manifest already
- * names agents — which is every company under `companies/` — never sees the
- * offer, because it was never unstaffed. Those companies came with a team, so
- * there is nothing for setup to do. Reaching it by hand stays possible at
- * `#/setup`, which is also how someone who skipped comes back.
+ * Decision D4 is intact and the question is narrower: not "does this company
+ * have any staff" but "does it have any staff *somebody chose for it*". The
+ * global baseline is what every company has by definition, so it is evidence of
+ * nothing — counting it is what made this gate answer `no` on every company
+ * (issue #1404).
+ *
+ * The cost of this rule, accepted deliberately: a company whose manifest names
+ * agents of its own — which is every company under `companies/` except
+ * `companies/e2e_setup` — never sees the offer, because it was never unstaffed.
+ * Those companies came with a team, so there is nothing for setup to do. The
+ * Team page's in-place prompt is how someone who skipped comes back.
  *
  * `skipped` suppresses only the *unprompted* open. It is browser-local and that
  * is safe precisely because it can only ever hide an offer, never cause a
@@ -167,7 +202,7 @@ export function shouldOfferSetup({
   roster: TeamMemberDto[];
   skipped: boolean;
 }): boolean {
-  return teamIsEmpty(roster) && !skipped;
+  return teamIsUnstaffed(roster) && !skipped;
 }
 
 /**
@@ -175,10 +210,10 @@ export function shouldOfferSetup({
  *
  * The other half of "blocking but skippable": skipping must not be a dead end,
  * so an unstaffed company keeps a visible way back in even after the dialog has
- * been dismissed. Same emptiness test, minus the skip suppression.
+ * been dismissed. Same test, minus the skip suppression.
  */
 export function shouldPromptSetup(roster: TeamMemberDto[]): boolean {
-  return teamIsEmpty(roster);
+  return teamIsUnstaffed(roster);
 }
 
 /** Progress copy for the build-out screen: `Creating your team… 2 of 5`. */
