@@ -51,8 +51,8 @@ why this is not a read/write split: [authority.md](authority.md).
 | `team` | `POST …/team`, `DELETE …/team/{id}`, `PUT …/team/{id}/inbox` (overlay; roster-only in v1) |
 | `mail` | `POST …/inboxes/{key}/read` |
 | `inbox` | `POST …/inboxes/ingest` (HMAC-signed inbound email) |
-| `domain` | `PUT …/domain`, `POST …/domain/verify` |
-| `smtp` | `PUT …/smtp`, `POST …/smtp/test` |
+| `domain` | `GET …/domain` (the stored records and last verify result, or `null`), `PUT …/domain`, `POST …/domain/verify` (the `GET` is a REST twin of the GraphQL `Company.domain` read, #1460) |
+| `smtp` | `GET …/smtp` (non-secret status; never the password), `PUT …/smtp` (the password is a patch — omit it to keep the stored one), `POST …/smtp/test` (the `GET` is a REST twin of the GraphQL `Company.smtp` read, #1460) |
 | `connections` (feature `oauth`) | `POST …/connections/{provider}/start` → dated `410` retirement bridge, `POST …/connections/{provider}/disconnect`, `GET /api/v1/oauth/callback` → dated `410` browser landing page (#838; removal #1023) |
 | `workflows` | `POST …/workflows`, `GET …/workflows`, `GET …/workflows/runs`, `POST …/workflows/cron/preview`, `GET …/workflows/{wid}`, `PUT …/workflows/{wid}`, `DELETE …/workflows/{wid}`, `POST …/workflows/{wid}/run`, `POST …/workflows/runs/{runId}/cancel` |
 
