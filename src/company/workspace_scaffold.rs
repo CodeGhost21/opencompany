@@ -31,7 +31,7 @@
 //!   root and member folder in one call — by [`ensure_desk_folder`], so it
 //!   appears exactly when a desk first has something to put in it.
 //! * `secrets/` is operator-only scaffolding. It is laid down eagerly with a
-//!   `README.md` explaining that agent workspace tools omit the entire subtree.
+//!   `readme.md` explaining that agent workspace tools omit the entire subtree.
 //! * A **member folder** was never scaffolding either; it is a container for
 //!   something. `Agents/<agent-id>/` and `Desks/<desk-id>/` are minted on demand
 //!   — by [`ensure_agent_folder`] / [`ensure_desk_folder`], at the moment that
@@ -188,7 +188,7 @@ pub fn is_agent_hidden_path(path: &str) -> bool {
 ///
 /// What it creates is stamped [`WorkspaceOrigin::Seed`] — scaffolding the
 /// runtime lays down, authored by no operator and no agent. `secrets/` receives
-/// one explanatory `README.md`; member folders beneath `Agents/` remain lazy
+/// one explanatory `readme.md`; member folders beneath `agents/` remain lazy
 /// (see [`ensure_agent_folder`]). `Desks/` is not created here at all, and an
 /// existing one is never even looked at: this walks
 /// [`SYSTEM_ROOTS`] by name, so a legacy company's `Desks/` (from before issue
