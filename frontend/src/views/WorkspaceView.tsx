@@ -105,6 +105,7 @@ import {
   DERIVED_REASON,
   ensureMdExt,
   fileByTitle,
+  folderPathLabel,
   type FsNode,
   hasLegacyLocal,
   isAgentsFolder,
@@ -120,6 +121,7 @@ import {
   renameAudienceWarning,
   SECRETS_LABEL,
   SECRETS_REASON,
+  sortedFolders,
   subtreeCounts,
   subtreeIds,
   titleOf,
@@ -1205,6 +1207,17 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
         parentId: destId,
       });
       setNodes((all) => all.map((n) => (n.id === updated.id ? updated : n)));
+      // Name the destination (issue #1381). The receipt for a move that cannot
+      // be undone in one click said only that it happened, so an operator who
+      // picked the wrong row of an unsorted, unpathed list learned nothing from
+      // the confirmation either.
+      toast.success(
+        `Moved “${titleOf(node)}” to ${
+          destId
+            ? folderPathLabel(nodes, destId, rosterNames)
+            : "the workspace root"
+        }.`,
+      );
     } catch (e) {
       toast.error(message(e, "could not move this item"));
     }
@@ -1836,6 +1849,7 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
       />
       <MoveDialog
         nodes={nodes}
+        rosterNames={rosterNames}
         moving={moving}
         onClose={() => setMoving(null)}
         onMove={(destId) => {
@@ -2768,62 +2782,95 @@ function NamePrompt({
 }
 
 /**
- * Pick a destination for a `Move to…`, and say so when the destination changes
- * who can read the note (issue #1465).
+ * Pick where a note or folder goes (issues #1381, #1477, #1465).
  *
- * Every destination but one is a filing decision. Moving into or out of
- * `secrets/` is an audience decision, and it was indistinguishable from the
- * others: one click, a "moved" toast, and a note that either stopped being
- * readable by every agent in the company or started being. So a destination
- * that crosses that line does not commit on the click — it swaps the list for
- * {@link MoveAudienceConfirm}, which names the consequence and asks again.
+ * Four filing defects, each on its own sufficient to mis-file something. The
+ * list showed bare `name`, so two `Drafts` under different parents were
+ * identical rows and a roster folder was a raw ULID. It was in the host's
+ * unspecified `tree()` order, beside a tree that was sorted. It offered
+ * `derived/`, where the host refuses every write (#1222), so picking it could
+ * only ever produce an error toast. And a single click committed the move — no
+ * Move button, no Cancel, no undo, and a success toast that did not name where
+ * the note went.
  *
- * Ordinary destinations still commit on one click, deliberately: this adds a
- * step to the moves that change something and to no others. (Issue #1477 is
- * about the destination list itself — flat, path-less — and is left alone
- * here.)
+ * So: full paths, tree order, `derived/` excluded, and select-then-confirm with
+ * the footer the sibling dialogs already have. A click still *chooses*; it no
+ * longer *commits*.
+ *
+ * On top of that, one destination is not a filing decision at all. Moving into
+ * or out of `secrets/` changes who can read the note, and #1465 made that
+ * legible twice over: the row is marked before it is picked, and pressing Move
+ * hands off to {@link MoveAudienceConfirm} rather than moving — the confirm
+ * step the ordinary destinations spend on a plain Move button is spent naming
+ * the consequence instead.
  */
 function MoveDialog({
   nodes,
+  rosterNames,
   moving,
   onClose,
   onMove,
 }: {
   nodes: FsNode[];
+  rosterNames: RosterNames;
   moving: FsNode | null;
   onClose: () => void;
   onMove: (destId: string | null) => void;
 }) {
-  const blocked = moving ? subtreeIds(nodes, moving.id) : new Set<string>();
-  const folders = nodes.filter((x) => x.kind === "folder" && !blocked.has(x.id));
-  /** The destination picked, held back until the warning is acknowledged. */
+  // `undefined` is "nothing picked yet"; `null` is the workspace root, which is
+  // a real destination and must not read as no answer.
+  const [picked, setPicked] = useState<string | null | undefined>(undefined);
+  const [filter, setFilter] = useState("");
+  /** The destination chosen, held back until its warning is acknowledged. */
   const [pending, setPending] = useState<{
     destId: string | null;
     warning: MoveAudienceWarning;
   } | null>(null);
 
-  // A second `Move to…` must not open onto the previous one's warning.
+  // A second `Move to…` must not open onto the previous one's selection or its
+  // warning.
   useEffect(() => {
-    setPending(null);
+    if (moving) {
+      setPicked(undefined);
+      setFilter("");
+      setPending(null);
+    }
   }, [moving]);
 
-  function pick(destId: string | null) {
-    if (!moving) return;
-    const warning = moveAudienceWarning(nodes, moving, destId);
+  const blocked = new Set<string>(moving ? subtreeIds(nodes, moving.id) : []);
+  for (const node of nodes) if (isDerivedNode(nodes, node.id)) blocked.add(node.id);
+
+  const needle = filter.trim().toLowerCase();
+  const destinations = sortedFolders(nodes, blocked)
+    .map((folder) => ({
+      folder,
+      label: folderPathLabel(nodes, folder.id, rosterNames),
+      audience: moving ? moveAudienceWarning(nodes, moving, folder.id)?.change : undefined,
+    }))
+    .filter(({ label }) => !needle || label.toLowerCase().includes(needle));
+
+  const here = (id: string | null) => moving?.parentId === (id ?? null);
+
+  /** Commit, or hand off to the warning when the audience changes. */
+  function confirm() {
+    if (picked === undefined || !moving) return;
+    const warning = moveAudienceWarning(nodes, moving, picked);
     if (!warning) {
-      onMove(destId);
+      onMove(picked);
       return;
     }
-    setPending({ destId, warning });
+    setPending({ destId: picked, warning });
   }
 
   return (
     <Dialog open={Boolean(moving)} onOpenChange={(o) => !o && onClose()}>
-      <DialogContent className="sm:max-w-sm">
+      <DialogContent className="sm:max-w-md">
         <DialogHeader>
           <DialogTitle>Move “{moving ? titleOf(moving) : ""}”</DialogTitle>
           <DialogDescription>
-            {pending ? "This changes who can read it." : "Pick a destination folder."}
+            {pending
+              ? "This changes who can read it."
+              : "Pick a destination folder, then choose Move. Nothing moves until you do."}
           </DialogDescription>
         </DialogHeader>
         {pending ? (
@@ -2836,27 +2883,58 @@ function MoveDialog({
             onConfirm={() => onMove(pending.destId)}
           />
         ) : (
-          <div className="max-h-72 space-y-1 overflow-y-auto">
-            <DestRow
-              label="Workspace root"
-              disabled={moving?.parentId === null}
-              // Marked from the same predicate that raises the warning, so the
-              // consequence is legible *before* the click as well as after it.
-              // The root is never `secrets/`, so this row only ever marks the
-              // way out.
-              audience={moving ? moveAudienceWarning(nodes, moving, null)?.change : undefined}
-              onClick={() => pick(null)}
+          <>
+            <Input
+              value={filter}
+              onChange={(e) => setFilter(e.target.value)}
+              placeholder="Filter destinations…"
+              aria-label="Filter destinations"
+              data-testid="workspace-move-filter"
+              className="h-8 text-sm"
             />
-            {folders.map((f) => (
-              <DestRow
-                key={f.id}
-                label={f.name}
-                disabled={moving?.parentId === f.id}
-                audience={moving ? moveAudienceWarning(nodes, moving, f.id)?.change : undefined}
-                onClick={() => pick(f.id)}
-              />
-            ))}
-          </div>
+            <div className="max-h-72 space-y-1 overflow-y-auto" data-testid="workspace-move-list">
+              {!needle && (
+                <DestRow
+                  label="Workspace root"
+                  disabled={here(null)}
+                  selected={picked === null}
+                  // Marked from the same predicate that raises the warning, so
+                  // the consequence is legible before the pick as well as
+                  // after it. The root is never `secrets/`, so this row only
+                  // ever marks the way out.
+                  audience={moving ? moveAudienceWarning(nodes, moving, null)?.change : undefined}
+                  onClick={() => setPicked(null)}
+                />
+              )}
+              {destinations.map(({ folder, label, audience }) => (
+                <DestRow
+                  key={folder.id}
+                  label={label}
+                  disabled={here(folder.id)}
+                  selected={picked === folder.id}
+                  audience={audience}
+                  onClick={() => setPicked(folder.id)}
+                />
+              ))}
+              {destinations.length === 0 && (
+                <p className="px-2.5 py-2 text-sm text-muted-foreground">
+                  No folder matches “{filter.trim()}”.
+                </p>
+              )}
+            </div>
+            <DialogFooter>
+              <Button variant="ghost" onClick={onClose}>
+                Cancel
+              </Button>
+              <Button
+                disabled={picked === undefined}
+                onClick={confirm}
+                data-testid="workspace-move-confirm"
+              >
+                Move
+              </Button>
+            </DialogFooter>
+          </>
         )}
       </DialogContent>
     </Dialog>
@@ -3253,20 +3331,28 @@ function DestRow({
   label,
   disabled,
   audience,
+  selected,
   onClick,
 }: {
   label: string;
   disabled?: boolean;
   /** Set when picking this destination changes who can read the note (#1465). */
   audience?: MoveAudienceChange;
+  /** Whether this row is the destination currently chosen (issue #1381). */
+  selected?: boolean;
   onClick: () => void;
 }) {
   return (
     <button
       disabled={disabled}
       onClick={onClick}
-      className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-sm hover:bg-accent disabled:pointer-events-none disabled:opacity-40"
+      aria-pressed={selected}
+      data-testid="workspace-move-dest"
       data-audience-change={audience}
+      className={cn(
+        "flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-sm hover:bg-accent disabled:pointer-events-none disabled:opacity-40",
+        selected && "bg-accent font-medium",
+      )}
     >
       <Folder className="size-4 text-tone-2" />
       <span className="truncate">{label}</span>
