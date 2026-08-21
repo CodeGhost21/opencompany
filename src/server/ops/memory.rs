@@ -29,7 +29,7 @@ use serde::{Deserialize, Serialize};
 use crate::AppState;
 use crate::error::OpenCompanyError;
 use crate::ports::facts::{FactKind, FactRecord};
-use crate::ports::types::{CompanyEvent, ContextChunk};
+use crate::ports::types::{ChunkAddr, ChunkMeta, CompanyEvent, ContextChunk};
 use crate::ports::{generate_id, now_millis};
 use crate::server::error::ApiError;
 use crate::server::ops::{ScopedCompany, scoped};
@@ -337,43 +337,73 @@ async fn list_facts(
         // the reads so a huge context store can't unbound this request.
         let mirror_prefix = format!("{OPERATOR_FACT_PREFIX}/");
         let metas = company.runtime.context.list(company.id(), "").await?;
-        let mut chunks = Vec::new();
-        for meta in metas
-            .into_iter()
-            .filter(|m| !m.label.starts_with(&mirror_prefix))
-            .take(MAX_CONTEXT_ENTRIES)
+        let metas = capped_newest_first(metas, &mirror_prefix, MAX_CONTEXT_ENTRIES);
+        // One bulk read for every surviving body. A body that cannot be read
+        // degrades that row to empty rather than failing the whole list, but
+        // log it so a real storage fault surfaces instead of silently
+        // rendering blank cards.
+        let addrs: Vec<ChunkAddr> = metas.iter().map(|m| m.addr.clone()).collect();
+        let bodies = match company
+            .runtime
+            .context
+            .peek_many(company.id(), &addrs)
+            .await
         {
-            // A peek failure degrades one row to an empty body rather than
-            // failing the whole list, but log it so a real storage fault
-            // surfaces instead of silently rendering blank cards.
-            let body = match company
-                .runtime
-                .context
-                .peek(company.id(), &meta.addr, None)
-                .await
-            {
-                Ok(body) => body,
-                Err(err) => {
+            Ok(bodies) => bodies,
+            Err(err) => {
+                tracing::warn!(
+                    company = %company.id(),
+                    error = %err,
+                    "bulk context read failed; rendering empty bodies"
+                );
+                vec![None; metas.len()]
+            }
+        };
+        let chunks = metas
+            .into_iter()
+            .zip(bodies)
+            .map(|(meta, body)| {
+                let body = body.unwrap_or_else(|| {
                     tracing::warn!(
                         company = %company.id(),
                         addr = %meta.addr,
-                        error = %err,
                         "failed to peek context chunk; rendering empty body"
                     );
                     String::new()
+                });
+                RawChunk {
+                    addr: meta.addr.to_string(),
+                    label: meta.label,
+                    body,
+                    stored_at_millis: meta.stored_at_millis,
                 }
-            };
-            chunks.push(RawChunk {
-                addr: meta.addr.to_string(),
-                label: meta.label,
-                body,
-                stored_at_millis: meta.stored_at_millis,
-            });
-        }
+            })
+            .collect();
         entries.extend(context_entries(chunks, query.as_deref()));
     }
 
     Ok(Json(entries))
+}
+
+/// Drops the operator-fact mirrors, then keeps the newest `cap` chunks.
+///
+/// Every backend lists oldest-first, so capping the head would pin the Brain
+/// view to the oldest `cap` chunks forever — once a company crossed the cap, a
+/// new memory could never appear again. Sort newest-first BEFORE capping; the
+/// addr tie-break keeps the order total, so chunks stamped in the same
+/// millisecond cannot swap places between calls.
+fn capped_newest_first(metas: Vec<ChunkMeta>, mirror_prefix: &str, cap: usize) -> Vec<ChunkMeta> {
+    let mut metas: Vec<ChunkMeta> = metas
+        .into_iter()
+        .filter(|m| !m.label.starts_with(mirror_prefix))
+        .collect();
+    metas.sort_by(|a, b| {
+        b.stored_at_millis
+            .cmp(&a.stored_at_millis)
+            .then_with(|| a.addr.as_ref().cmp(b.addr.as_ref()))
+    });
+    metas.truncate(cap);
+    metas
 }
 
 /// `GET /memory/stats` — counts across the fact store and the agents' context
@@ -756,6 +786,274 @@ mod combined_list_tests {
         let ctx = context_entries(vec![chunk("task-outcome/a", "   ")], None);
         assert_eq!(ctx[0].title, "Task outcome");
         assert_eq!(ctx[0].body, "");
+    }
+
+    fn meta(addr: &str, label: &str, stored_at_millis: u64) -> ChunkMeta {
+        ChunkMeta {
+            addr: ChunkAddr::new(addr),
+            label: label.to_string(),
+            len: 0,
+            stored_at_millis,
+        }
+    }
+
+    /// #1488: backends list oldest-first, so capping before sorting pinned the
+    /// Brain view to the oldest chunks forever — the cap must keep the newest.
+    #[test]
+    fn the_cap_keeps_the_newest_chunks_not_the_oldest() {
+        let metas = vec![
+            meta("a1", "agent-1/one", 100),
+            meta("a2", "agent-1/two", 200),
+            meta("a3", "agent-1/three", 300),
+            meta("a4", "agent-1/four", 400),
+        ];
+        let capped = capped_newest_first(metas, "operator-fact/", 2);
+        let stamps: Vec<u64> = capped.iter().map(|m| m.stored_at_millis).collect();
+        assert_eq!(
+            stamps,
+            vec![400, 300],
+            "the newest chunks survive the cap, newest first; the oldest fall off"
+        );
+    }
+
+    #[test]
+    fn the_cap_drops_mirrors_first_and_breaks_stamp_ties_by_addr() {
+        // The mirror must not consume a cap slot even as the newest chunk, and
+        // equal stamps must order deterministically (by addr) between calls.
+        let metas = vec![
+            meta("b", "agent-1/two", 500),
+            meta("m", "operator-fact/f1", 900),
+            meta("a", "agent-1/one", 500),
+        ];
+        let capped = capped_newest_first(metas, "operator-fact/", 2);
+        let addrs: Vec<&str> = capped.iter().map(|m| m.addr.as_ref()).collect();
+        assert_eq!(addrs, vec!["a", "b"]);
+    }
+}
+
+#[cfg(test)]
+mod route_tests {
+    use std::collections::HashMap;
+    use std::ops::Range;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use async_trait::async_trait;
+    use axum::body::{Body, to_bytes};
+    use axum::http::{Request, StatusCode};
+    use serde_json::Value;
+    use tower::ServiceExt;
+
+    use super::MAX_CONTEXT_ENTRIES;
+    use crate::company::CompanyManifest;
+    use crate::ports::context::ContextStore;
+    use crate::ports::types::{
+        ChunkAddr, ChunkHit, ChunkMeta, CompanyId, CompanyRecord, ContextChunk,
+    };
+    use crate::runtime::RuntimeBuilder;
+    use crate::server::router;
+    use crate::store::FsCompanyStore;
+    use crate::{AppConfig, AppState};
+
+    /// A scripted [`ContextStore`]: `list` answers a fixed meta set (oldest
+    /// first, as every real backend lists), and reads are counted so a test
+    /// can pin HOW the route fetched bodies, not only what it rendered.
+    struct ScriptedContext {
+        metas: Vec<ChunkMeta>,
+        bodies: HashMap<String, String>,
+        single_peeks: AtomicUsize,
+        bulk_peeks: AtomicUsize,
+    }
+
+    impl ScriptedContext {
+        /// `total` chunks stamped `1..=total`, listed oldest-first.
+        fn with_chunks(total: usize) -> Arc<Self> {
+            let mut metas = Vec::new();
+            let mut bodies = HashMap::new();
+            for i in 1..=total {
+                let addr = format!("addr-{i:04}");
+                metas.push(ChunkMeta {
+                    addr: ChunkAddr::new(addr.clone()),
+                    label: format!("agent-1/note-{i}"),
+                    len: 0,
+                    stored_at_millis: i as u64,
+                });
+                bodies.insert(addr, format!("note {i}"));
+            }
+            Arc::new(Self {
+                metas,
+                bodies,
+                single_peeks: AtomicUsize::new(0),
+                bulk_peeks: AtomicUsize::new(0),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl ContextStore for ScriptedContext {
+        async fn put(&self, _id: &CompanyId, chunk: ContextChunk) -> crate::Result<ChunkAddr> {
+            // Nothing in these read-only tests writes context; answer with a
+            // derived addr rather than failing an incidental write.
+            Ok(ChunkAddr::new(format!("scripted/{}", chunk.label)))
+        }
+
+        async fn list(&self, _id: &CompanyId, prefix: &str) -> crate::Result<Vec<ChunkMeta>> {
+            Ok(self
+                .metas
+                .iter()
+                .filter(|m| m.label.starts_with(prefix))
+                .cloned()
+                .collect())
+        }
+
+        async fn peek(
+            &self,
+            _id: &CompanyId,
+            addr: &ChunkAddr,
+            _range: Option<Range<usize>>,
+        ) -> crate::Result<String> {
+            self.single_peeks.fetch_add(1, Ordering::SeqCst);
+            self.bodies.get(addr.as_ref()).cloned().ok_or_else(|| {
+                crate::error::OpenCompanyError::Store(format!(
+                    "context chunk not found: {}",
+                    addr.as_ref()
+                ))
+            })
+        }
+
+        async fn peek_many(
+            &self,
+            _id: &CompanyId,
+            addrs: &[ChunkAddr],
+        ) -> crate::Result<Vec<Option<String>>> {
+            self.bulk_peeks.fetch_add(1, Ordering::SeqCst);
+            Ok(addrs
+                .iter()
+                .map(|addr| self.bodies.get(addr.as_ref()).cloned())
+                .collect())
+        }
+
+        async fn search(
+            &self,
+            _id: &CompanyId,
+            _query: &str,
+            _limit: usize,
+        ) -> crate::Result<Vec<ChunkHit>> {
+            Ok(Vec::new())
+        }
+
+        async fn delete(&self, _id: &CompanyId, _addr: &ChunkAddr) -> crate::Result<bool> {
+            Ok(false)
+        }
+    }
+
+    /// An [`AppState`] whose company runtime reads context from `context`,
+    /// with everything else on fresh fs stores under `home`.
+    async fn state_over(home: &std::path::Path, context: Arc<ScriptedContext>) -> AppState {
+        use crate::ports::CompanyStore;
+        let manifest: CompanyManifest =
+            toml::from_str("[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n").unwrap();
+        let store = FsCompanyStore::new(home.to_path_buf());
+        let id = CompanyId::new("acme");
+        store
+            .save(&CompanyRecord {
+                id: id.clone(),
+                manifest: manifest.clone(),
+                ledger: Vec::new(),
+                lifecycle: "running".to_string(),
+                overlay_agents: Vec::new(),
+                overlay_desk_members: Vec::new(),
+                overlay_desk_order: Vec::new(),
+                overlay_desks: Vec::new(),
+                overlay_workflows: Vec::new(),
+                overlay_budgets: Vec::new(),
+                overlay_policy: None,
+                overlay_desk_tools: Default::default(),
+                disabled_workflows: Vec::new(),
+                template_provenance: None,
+                setup: None,
+            })
+            .await
+            .unwrap();
+        let runtime = RuntimeBuilder::new(home.to_path_buf(), manifest)
+            .with_id(id.clone())
+            .with_context(context)
+            .build()
+            .await
+            .unwrap();
+        let state = AppState::new(AppConfig::default());
+        state.registry().insert(id, Arc::new(runtime));
+        crate::server::test_support::seed_fixed_admin(&state, "acme").await;
+        state
+    }
+
+    async fn get_memory(state: &AppState) -> (StatusCode, Value) {
+        let request = Request::builder()
+            .method("GET")
+            .uri("/api/v1/company/memory")
+            .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+            .body(Body::empty())
+            .unwrap();
+        let response = router(state.clone()).oneshot(request).await.unwrap();
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        (status, value)
+    }
+
+    /// #1488: with more chunks than the cap, the list must keep the NEWEST
+    /// `MAX_CONTEXT_ENTRIES`, newest first. Before the fix the route took the
+    /// head of the backend's oldest-first list, so a company past the cap
+    /// never saw a new memory again.
+    #[tokio::test]
+    async fn the_brain_list_keeps_the_newest_chunks_once_over_the_cap() {
+        let home = tempfile::tempdir().unwrap();
+        let total = MAX_CONTEXT_ENTRIES + 2;
+        let state = state_over(home.path(), ScriptedContext::with_chunks(total)).await;
+
+        let (status, rows) = get_memory(&state).await;
+        assert_eq!(status, StatusCode::OK);
+        let rows = rows.as_array().expect("a JSON array");
+        assert_eq!(rows.len(), MAX_CONTEXT_ENTRIES);
+        let stamps: Vec<u64> = rows
+            .iter()
+            .map(|row| row["updatedAt"].as_u64().unwrap())
+            .collect();
+        assert_eq!(stamps[0], total as u64, "the newest chunk heads the list");
+        assert!(
+            stamps.windows(2).all(|pair| pair[0] >= pair[1]),
+            "context rows render newest-first"
+        );
+        assert!(
+            stamps.iter().all(|stamp| *stamp > 2),
+            "the oldest chunks fell off the cap, not the newest"
+        );
+    }
+
+    /// The other half of #1488: bodies arrive through ONE bulk `peek_many`,
+    /// not a peek-per-chunk loop.
+    #[tokio::test]
+    async fn the_brain_list_reads_bodies_in_one_bulk_peek() {
+        let home = tempfile::tempdir().unwrap();
+        let context = ScriptedContext::with_chunks(3);
+        let state = state_over(home.path(), context.clone()).await;
+
+        let (status, rows) = get_memory(&state).await;
+        assert_eq!(status, StatusCode::OK);
+        let rows = rows.as_array().expect("a JSON array");
+        assert_eq!(rows.len(), 3);
+        // The bodies really flowed through the bulk read (newest first).
+        assert_eq!(rows[0]["title"], "note 3");
+        assert_eq!(
+            context.bulk_peeks.load(Ordering::SeqCst),
+            1,
+            "one bulk read"
+        );
+        assert_eq!(
+            context.single_peeks.load(Ordering::SeqCst),
+            0,
+            "the per-chunk peek loop is gone"
+        );
     }
 }
 

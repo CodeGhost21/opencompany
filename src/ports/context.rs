@@ -22,6 +22,22 @@ pub trait ContextStore: Send + Sync {
         addr: &ChunkAddr,
         range: Option<Range<usize>>,
     ) -> Result<String>;
+    /// Reads many chunk bodies at once: one entry per requested addr, in
+    /// request order, `None` where nothing is stored (or a single read fails).
+    ///
+    /// `Err` is reserved for batch-level failures (connection, statement,
+    /// enumeration); a chunk that is missing, or whose single read or decode
+    /// fails, answers `None` so one bad row cannot fail a bulk read the
+    /// caller degrades per-row anyway. The default loops [`Self::peek`] —
+    /// exactly the call-site loop it replaces — and backends override it where
+    /// one round trip can answer the whole batch.
+    async fn peek_many(&self, id: &CompanyId, addrs: &[ChunkAddr]) -> Result<Vec<Option<String>>> {
+        let mut bodies = Vec::with_capacity(addrs.len());
+        for addr in addrs {
+            bodies.push(self.peek(id, addr, None).await.ok());
+        }
+        Ok(bodies)
+    }
     /// Searches chunks for `query`, returning up to `limit` hits.
     async fn search(&self, id: &CompanyId, query: &str, limit: usize) -> Result<Vec<ChunkHit>>;
     /// Permanently removes the chunk at `addr`, returning whether it existed.

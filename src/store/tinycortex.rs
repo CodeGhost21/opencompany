@@ -464,14 +464,10 @@ impl ContextStore for CortexContextStore {
             })?;
         match range {
             None => Ok(body),
-            Some(r) => {
-                let start = r.start.min(body.len());
-                let end = r.end.min(body.len());
-                if start >= end {
-                    return Ok(String::new());
-                }
-                Ok(body[start..end].to_string())
-            }
+            // Byte offsets from the caller can land mid-codepoint; widen to
+            // the boundary rather than panic the slice (`snippet_around`
+            // already defends the search window the same way).
+            Some(r) => Ok(crate::store::text::slice_on_char_boundaries(&body, r)),
         }
     }
 
@@ -551,6 +547,22 @@ mod test {
         let dir = tempfile::tempdir().unwrap();
         let (_store, _events, _mem, ctx) = stores(dir.path());
         conformance::assert_context_chunk_stamps(ctx).await;
+    }
+
+    // This backend keeps the port's default `peek_many` (the client seam has
+    // no bulk read), so this run also proves the default implementation.
+    #[tokio::test]
+    async fn conformance_context_peek_many() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_store, _events, _mem, ctx) = stores(dir.path());
+        conformance::assert_context_peek_many_answers_positionally(ctx).await;
+    }
+
+    #[tokio::test]
+    async fn conformance_context_multibyte_bodies() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_store, _events, _mem, ctx) = stores(dir.path());
+        conformance::assert_multibyte_bodies_survive_search_and_ranged_peek(ctx).await;
     }
 
     fn company() -> CompanyId {
