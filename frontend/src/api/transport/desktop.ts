@@ -41,15 +41,6 @@ export interface EmbeddedInfo {
    * behaviour rather than to a connection keyed on `undefined`.
    */
   instanceId?: string;
-  /**
-   * The address this host will sign a person in as (#632).
-   *
-   * A desktop install has one standing admin and no mail transport, so nobody
-   * could guess what to type and every other address gets the same silent
-   * acknowledgement. Optional for the same reason as `instanceId`: an older
-   * shell does not send it, and a blank sign-in form is the honest degrade.
-   */
-  operatorEmail?: string;
 }
 
 /**
@@ -201,7 +192,6 @@ export interface LocalInstance {
    * on. The address is not: it is a fresh ephemeral port every launch.
    */
   instanceId?: string;
-  operatorEmail?: string;
   companies?: string[];
   /** Why it is not running. Usually another process holding its data root. */
   error?: string;

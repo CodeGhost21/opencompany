@@ -19,7 +19,7 @@ Terms: [glossary](../../glossary.md). Principles:
 
 ### What it is
 
-`BRIEF.md` is the one document nearly every reasoning role is routed. It carries
+`brief.md` is the one document nearly every reasoning role is routed. It carries
 what the company has established, what it has ruled out, what the numbers look
 like, and what it holds from durable memory that this run has not itself
 re-derived.
@@ -60,7 +60,7 @@ An unreadable brief — a missing file, or one that fails to parse as UTF-8 —
 measures as empty rather than erroring. This is a deliberate, narrow exception
 to the [routed-document hard-error rule](context-routing.md#failure-handling) above: every other
 routed document is authored by a person or an agent, so a corrupt one signals
-a bug worth surfacing loudly. `BRIEF.md` is instead **wholly machine-derived
+a bug worth surfacing loudly. `brief.md` is instead **wholly machine-derived
 and machine-consumed** — no prompt is ever written around its absence the way
 a role's prompt is written around a named workspace document — so a corrupt
 brief is evidence of a curator bug, not of missing context a role expected.
@@ -97,8 +97,8 @@ cadence, which is documentation about code that no longer exists.
 A derived ledger is a Markdown file **written by code, never by an agent**,
 re-derived whole from a directory of source items on every relevant write. An
 item's *source* is either a dedicated file (one file per item — this is how
-`THREADS.md` is sourced) or a fenced block embedded in a workspace note that
-may hold several items (this is how `CLAIMS.md` is sourced, from ` ```claim `
+`threads.md` is sourced) or a fenced block embedded in a workspace note that
+may hold several items (this is how `claims.md` is sourced, from ` ```claim `
 blocks in any note). Either way, the ledger addresses one item at a time by
 scanning its sources for the fenced-block or whole-file unit, never by
 treating a source file itself as the unit of retrieval.
@@ -121,7 +121,7 @@ Four properties follow, and all four are the point:
 Two ledgers. Not the sibling's ten — the rest are proof-shaped and specific to
 mathematics.
 
-#### `CLAIMS.md` — the evidence ledger
+#### `claims.md` — the evidence ledger
 
 Derived from fenced ` ```claim ` blocks in any note under the company workspace.
 
@@ -146,7 +146,7 @@ A block missing its `id` or `statement` MUST be **reported, not dropped**. A
 claim silently discarded leaves the note reading as though it recorded
 something.
 
-#### `THREADS.md` — the direction ledger
+#### `threads.md` — the direction ledger
 
 Derived from ` ```thread ` blocks, one file per thread: `question`, `status`,
 `rests-on`, `blocked-by`, `next`.

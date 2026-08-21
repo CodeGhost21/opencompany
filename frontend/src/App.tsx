@@ -21,22 +21,28 @@ import {
   type LocalInstance,
 } from "@/api/transport/desktop";
 import { ApiError } from "@/api/types";
-import { AddHostDialog, ConsoleChrome } from "@/components/host-switcher";
+import { ConsoleChrome } from "@/components/host-switcher";
+import { ManageHostsPage } from "@/components/manage-hosts";
 import { Button } from "@/components/ui/button";
 import { resolveConfig } from "@/config";
 import {
   addConnection,
   adoptLocalHosts,
   clientFor,
+  editConnection,
   listConnections,
   probe,
+  removeConnection,
   restoreConnections,
   useConnections,
 } from "@/connections/registry";
 import { HostsProvider, useHosts, type HostsValue } from "@/connections/HostsContext";
 import { firstHostCopy } from "@/connections/first-host";
 import type { ConnectionId } from "@/connections/types";
+import { useHostAddress, useHostRoute } from "@/hooks/use-host-route";
 import { ConnectionConsole } from "@/views/ConnectionConsole";
+import { AddHostPage } from "@/views/setup/AddHostPage";
+import { cn } from "@/lib/utils";
 
 /**
  * Reads `?company=&code=` off a magic-link landing.
@@ -87,14 +93,31 @@ function readHubError(): boolean {
  *
  * The code is a single-use credential, so it must not linger in the URL, the
  * history, or a `Referer` header once we hold it.
+ *
+ * `company` is deliberately kept, for the same reason `clearHubResultFromUrl`
+ * keeps it: it is not a credential, and it is what scopes the console. This
+ * once deleted it too — harmless back when the console was one implicit host,
+ * and a silent state reset once connections arrived. `restoreConnections` is
+ * told which same-origin console this load is (`isThisConsole`, added for
+ * #1167), and on a stripped URL that is `defaultCompany === null` — so the
+ * profile the link had just written is skipped, and `addConnection` mints a
+ * *second* id for the one host. Every key named after that id starts over: the
+ * tour, unread counts, the last-visited channel, the mail draft. The reported
+ * symptom was a welcome tour that came back after being skipped; see #1306.
+ *
+ * The hash is preserved: it is the router's, not ours, and a magic link may
+ * carry a deep link to land on.
  */
-function clearMagicLinkFromUrl(): void {
+export function clearMagicLinkFromUrl(): void {
   const params = new URLSearchParams(window.location.search);
   if (!params.has("code")) return;
   params.delete("code");
-  params.delete("company");
   const query = params.toString();
-  window.history.replaceState({}, "", window.location.pathname + (query ? `?${query}` : ""));
+  window.history.replaceState(
+    {},
+    "",
+    window.location.pathname + (query ? `?${query}` : "") + window.location.hash,
+  );
 }
 
 /**
@@ -107,15 +130,23 @@ function clearMagicLinkFromUrl(): void {
  *
  * `company` is deliberately kept. It is not a credential, and dropping it would
  * un-scope the console on a reload of a multi-company host.
+ *
+ * The hash is preserved for the same reason it is in `clearMagicLinkFromUrl`:
+ * it belongs to the router, and rewriting the URL without it would bounce a
+ * deep link back to the default view.
  */
-function clearHubResultFromUrl(): void {
+export function clearHubResultFromUrl(): void {
   const params = new URLSearchParams(window.location.search);
   if (params.get("key") !== "auth") return;
   params.delete("token");
   params.delete("error");
   params.delete("key");
   const query = params.toString();
-  window.history.replaceState({}, "", window.location.pathname + (query ? `?${query}` : ""));
+  window.history.replaceState(
+    {},
+    "",
+    window.location.pathname + (query ? `?${query}` : "") + window.location.hash,
+  );
 }
 
 /**
@@ -248,7 +279,6 @@ function Console() {
     resolved: !isDesktopRuntime(),
     id: null,
     instances: [],
-    operatorEmails: {},
   }));
 
   /**
@@ -269,12 +299,7 @@ function Console() {
       // Adopted once. A second call would re-run the prune against a set it has
       // already reconciled, for a value this one already has.
       const id = host ? adoptLocalHosts([host])[0] : null;
-      setEmbedded({
-        resolved: true,
-        id,
-        instances: [],
-        operatorEmails: id && host?.operatorEmail ? { [id]: host.operatorEmail } : {},
-      });
+      setEmbedded({ resolved: true, id, instances: [] });
       return;
     }
 
@@ -299,11 +324,6 @@ function Console() {
         .map((instance) => instance.instanceId)
         .filter((id): id is string => id !== undefined),
     );
-    const operatorEmails: Record<ConnectionId, string> = {};
-    running.forEach((instance, index) => {
-      if (instance.operatorEmail) operatorEmails[ids[index]] = instance.operatorEmail;
-    });
-
     setEmbedded({
       resolved: true,
       // The first running instance, which is the one rooted at the data dir on
@@ -311,7 +331,6 @@ function Console() {
       // opens on when nothing else is selected.
       id: ids[0] ?? null,
       instances,
-      operatorEmails,
     });
   }, []);
 
@@ -340,8 +359,14 @@ function Console() {
    * no bootstrap connection to seed this with. What is on screen then is
    * decided by `active` below, not by leaving this pointing at a host that does
    * not exist.
+   *
+   * Local, but no longer *only* local: it is seeded from and mirrored into the
+   * address, so a switch is a history entry Back can undo and the bar names the
+   * host being looked at. That is issue #1358, and `use-host-route.ts` is the
+   * whole of it. The registry is still untouched — every connection stays
+   * registered and probed regardless of what the address says.
    */
-  const [selected, setSelected] = useState<ConnectionId | null>(bootstrapId);
+  const { selected, selectHost, resettleHost } = useHostRoute(bootstrapId);
 
   // A pure read, so StrictMode's double render is harmless.
   const magicLink = useMemo(() => readMagicLink(), []);
@@ -447,14 +472,6 @@ function Console() {
     }
   }, [auth.ready, connectionIds]);
 
-  if (!auth.ready) {
-    return (
-      <FullScreen>
-        <Waiting>Signing in…</Waiting>
-      </FullScreen>
-    );
-  }
-
   /**
    * Which connection is rendered, in the order these questions get answers.
    *
@@ -479,6 +496,24 @@ function Console() {
     (embedded.resolved ? connections[0] : undefined);
   const client = active ? clientFor(active.id) : undefined;
 
+  /**
+   * The address names the host on screen, and only while there is a choice.
+   *
+   * One host is unambiguous, so its console keeps clean addresses; the scope
+   * appears with the second. Declared here, above the sign-in gate, because it
+   * is a hook and that gate returns early — and `active` is a pure derivation,
+   * so resolving it first costs nothing.
+   */
+  useHostAddress(active?.id ?? null, connectionIds, connections.length > 1);
+
+  if (!auth.ready) {
+    return (
+      <FullScreen>
+        <Waiting>Signing in…</Waiting>
+      </FullScreen>
+    );
+  }
+
   // Everything the switcher needs, assembled once and carried down by context.
   //
   // Context rather than props because the switcher now lives in the sidebar
@@ -488,10 +523,15 @@ function Console() {
   const hosts: HostsValue = {
     connections,
     selected: active?.id ?? null,
-    onSelect: setSelected,
+    // A navigation, not a mode change: `selectHost` pushes a history entry, so
+    // Back returns to the host that was on screen. `active?.id` rather than
+    // `selected` is what the entry being left gets stamped with — the desktop
+    // leaves `selected` null until someone chooses, and a stamp of `null` would
+    // leave that entry naming nobody.
+    onSelect: (id) => selectHost(id, active?.id ?? null),
     onAdd: (baseUrl, connector) => {
       const id = addConnection({ baseUrl, connector });
-      setSelected(id);
+      selectHost(id, active?.id ?? null);
       void probe(id);
     },
     localInstances: embedded.instances,
@@ -508,7 +548,7 @@ function Console() {
             const opened = listConnections().find(
               (c) => c.identity?.instanceId === created.instanceId,
             );
-            if (opened) setSelected(opened.id);
+            if (opened) selectHost(opened.id, active?.id ?? null);
           }
         }
       : undefined,
@@ -528,7 +568,7 @@ function Console() {
             label: target.destination,
             connector: { kind: "ssh", target },
           });
-          setSelected(id);
+          selectHost(id, active?.id ?? null);
           void probe(id);
         }
       : undefined,
@@ -538,6 +578,25 @@ function Console() {
           await refreshLocal();
         }
       : undefined,
+    onEditHost: (id, change) => editConnection(id, change),
+    // Selection has to move *with* the removal, in one step. `active` falls
+    // through to the first connection when nothing is selected, so a console
+    // whose host has just been forgotten would otherwise render the removed
+    // row's client for a frame — and in the desktop, where `selected` is
+    // ordinarily null, it would keep rendering whatever came next without ever
+    // recording the choice.
+    //
+    // `resettleHost`, not `selectHost`: a host that has been forgotten is not
+    // somewhere Back should be able to return to, and the entry would name a
+    // connection this client no longer holds. `useHostAddress` takes the dead
+    // id out of the bar for the same reason.
+    onRemoveHost: (id) => {
+      removeConnection(id);
+      const remaining = listConnections();
+      resettleHost(
+        remaining.some((c) => c.id === selected) ? selected : (remaining[0]?.id ?? null),
+      );
+    },
     onStopLocal: isDesktopRuntime()
       ? async (id) => {
           await stopLocalInstance(id);
@@ -549,7 +608,7 @@ function Console() {
 
   return (
     <HostsProvider value={hosts}>
-      <div className="min-h-svh">
+      <ConsoleOrAddHost>
         {active && client ? (
           // Keyed by connection: switching hosts remounts rather than
           // reconciling, so no view can carry one host's in-flight state into
@@ -561,10 +620,6 @@ function Console() {
             defaultCompany={active.defaultCompany}
             notice={active.id === bootstrapId ? auth.notice : undefined}
             forceLogin={active.id === bootstrapId && auth.failed === true}
-            // Only ever the embedded host's own operator. Offering it on a
-            // remote connection would put a local address in front of someone
-            // signing in to a server that has never heard of it.
-            suggestedEmail={embedded.operatorEmails[active.id]}
           />
         ) : (
           // The switcher rides along, because an operator whose local host is
@@ -574,12 +629,39 @@ function Console() {
             <NoConnection starting={!embedded.resolved} desktop={isDesktopRuntime()} />
           </ConsoleChrome>
         )}
-      </div>
-      {/* Beside the console rather than inside it: creating a host on this
-          computer selects it, and that remounts the console. A dialog mounted
-          within would take itself off screen at the moment it succeeded. */}
-      <AddHostDialog />
+      </ConsoleOrAddHost>
+      {/* Beside the console for the same reason, and more so: forgetting the
+          host on screen selects another one, which remounts the console. A page
+          mounted within would unmount itself mid-edit. */}
+      <ManageHostsPage />
     </HostsProvider>
+  );
+}
+
+/**
+ * The console, and the add-host screen that stands in front of it.
+ *
+ * Adding a host is a screen of the onboarding flow rather than a dialog over
+ * the console (`views/setup/AddHostPage.tsx`), so it needs somewhere to be
+ * drawn that is *outside* the console: creating a host on this computer selects
+ * it, and that remounts the console. Drawn within, the screen would take itself
+ * off screen at the moment it succeeded.
+ *
+ * The console is **hidden, not unmounted**, while it is up. The console owns
+ * this host's streams and its boot, and someone who opens the chooser and
+ * changes their mind should come back to the page they left rather than to
+ * "Connecting…".
+ *
+ * A component of its own only because the flag lives in `HostsContext`, which
+ * `App` provides and therefore cannot read.
+ */
+function ConsoleOrAddHost({ children }: { children: React.ReactNode }) {
+  const { addingHost } = useHosts();
+  return (
+    <>
+      <div className={cn("min-h-svh", addingHost && "hidden")}>{children}</div>
+      {addingHost ? <AddHostPage /> : null}
+    </>
   );
 }
 
@@ -596,19 +678,10 @@ interface EmbeddedState {
    * Every local instance the core knows about, running or not.
    *
    * The stopped ones are here and nowhere else: they have no address, so they
-   * cannot be connections. The switcher's "Add a host" dialog is where they
+   * cannot be connections. The switcher's "Add a host" screen is where they
    * are startable.
    */
   instances: LocalInstance[];
-  /**
-   * The address each local connection signs a person in as (#632), by
-   * connection id.
-   *
-   * Per connection rather than one field, because with a roster there are
-   * several — and offering one host's operator address on another host's login
-   * form is how a person signs in to the wrong company.
-   */
-  operatorEmails: Record<ConnectionId, string>;
 }
 
 function FullScreen({ children }: { children: React.ReactNode }) {

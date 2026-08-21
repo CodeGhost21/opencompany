@@ -13,7 +13,7 @@
 //! GET    …/workspace/search?q=…       which notes mention a phrase
 //! POST   …/workspace                  create a folder/file (JSON body)
 //! POST   …/workspace/upload           upload a file of any kind (multipart)
-//! POST   …/workspace/sweep-empty-agent-folders?dry_run=  tidy `Agents/` strays
+//! POST   …/workspace/sweep-empty-agent-folders?dry_run=  tidy `agents/` strays
 //! POST   …/workspace/merge-duplicate-folders?dry_run=    repair a raced tree
 //! PUT    …/workspace/file/{nodeId}    overwrite file content
 //! PATCH  …/workspace/{nodeId}         rename / move
@@ -65,6 +65,7 @@ use serde::{Deserialize, Serialize};
 use crate::AppState;
 use crate::company::artifact_mirror::{MirrorOutcome, mirror_node_edit};
 use crate::company::workspace_links::file_with_backlinks;
+use crate::company::workspace_names::kebab_name_or;
 use crate::company::workspace_repair::{
     MergedFolder, RepairPlan, Residual, merge_duplicate_folders as merge_workspace_duplicates,
 };
@@ -230,7 +231,7 @@ struct WorkspaceFileBody {
 struct SearchHitBody {
     #[serde(flatten)]
     node: FsNode,
-    /// The node's logical path, e.g. `Standards/Engineering.md`.
+    /// The node's logical path, e.g. `standards/Engineering.md`.
     path: String,
     /// `name` or `content`.
     matched: &'static str,
@@ -781,6 +782,12 @@ async fn upload(
         .unwrap_or(&name)
         .trim()
         .to_string();
+    // Named under the workspace rule before anything else looks at it, so the
+    // mime, the size check and the stored node all speak about one name — and
+    // an uploaded `Q3 Report.pdf` sits in the tree as `q3-report.pdf`, beside
+    // everything else. The response carries the stored node, so the console
+    // shows what it actually got rather than what was sent.
+    let name = kebab_name_or(&name, &name);
     let mime = resolve_mime(&name, declared.as_deref());
 
     // Issue #665: a file uploaded as a file is bounded as a file, whatever its
@@ -891,7 +898,12 @@ async fn create_node(
 ) -> Result<Json<FsNode>, ApiError> {
     let node = WorkspaceNode {
         id: generate_id(),
-        name: body.name,
+        // One naming rule for the tree, whoever is writing
+        // ([`crate::company::workspace_names`]). The console is the operator
+        // and the operator is not confined here — this is not a restriction on
+        // what they may create, only on how it is spelled, and the response
+        // returns the node so the console renders the stored name.
+        name: kebab_name_or(&body.name, &body.name),
         kind: body.kind,
         parent_id: body.parent_id,
         updated_at_millis: crate::ports::now_millis(),
@@ -1004,13 +1016,16 @@ async fn rename_move(
     Path(NodePath { node_id }): Path<NodePath>,
     Json(body): Json<RenameMove>,
 ) -> Result<Json<FsNode>, ApiError> {
+    // As in `create_node`: a rename lands under the naming rule, so renaming
+    // cannot walk a node back out of the convention the tree is kept in.
+    let renamed = body.name.as_ref().map(|name| kebab_name_or(name, name));
     let node = company
         .runtime
         .workspace()
         .rename_move(
             company.id(),
             &node_id,
-            body.name.as_deref(),
+            renamed.as_deref(),
             body.parent_id.as_ref().map(Option::as_deref),
         )
         .await?;
@@ -1045,7 +1060,7 @@ async fn delete_node(
 }
 
 /// `POST …/workspace/sweep-empty-agent-folders` — remove the empty
-/// `Agents/<id>/` folders a pre-#570 company still carries (issue #700).
+/// `agents/<id>/` folders a pre-#570 company still carries (issue #700).
 ///
 /// Operator-triggered rather than automatic, and this route is the surface that
 /// makes that possible. The affected population is hosted tenants whose operator

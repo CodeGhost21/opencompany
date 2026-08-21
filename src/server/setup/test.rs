@@ -16,6 +16,9 @@ use crate::company::CompanyManifest;
 use crate::ports::CompanyStore;
 use crate::ports::types::{CompanyId, CompanyRecord};
 use crate::runtime::RuntimeBuilder;
+use crate::server::ops::ConnectionsRuntime;
+use crate::server::ops::mailer::{MailCredentials, RecordingMailSender};
+use crate::server::ops::smtp::{SmtpCredentials, SmtpSecurity};
 use crate::server::router;
 use crate::{AppConfig, AppState};
 
@@ -39,6 +42,23 @@ fn fresh_state(home: &std::path::Path) -> AppState {
     .with_home(home.to_path_buf())
 }
 
+/// A loopback host with a mail transport wired — the shape where a magic link
+/// is genuinely mailed rather than handed back in the response.
+fn state_with_mail(home: &std::path::Path) -> AppState {
+    let connections = ConnectionsRuntime::new()
+        .with_mail(Arc::new(RecordingMailSender::new()))
+        .with_mail_credentials(MailCredentials::Smtp(SmtpCredentials {
+            host: "smtp.test".into(),
+            port: 587,
+            security: SmtpSecurity::Starttls,
+            username: "u".into(),
+            password: "p".into(),
+            from_name: "Acme".into(),
+            from_email: "noreply@acme.test".into(),
+        }));
+    fresh_state(home).with_connections(connections)
+}
+
 /// A routable host, where the anonymous gate must never open.
 fn routable_state(home: &std::path::Path) -> AppState {
     AppState::new(AppConfig {
@@ -54,6 +74,8 @@ async fn with_company(state: &AppState, home: &std::path::Path) -> CompanyId {
     let id = CompanyId::new("acme");
     store
         .save(&CompanyRecord {
+            overlay_retired_agents: Vec::new(),
+            overlay_agent_edits: Vec::new(),
             id: id.clone(),
             manifest: manifest(),
             ledger: Vec::new(),
@@ -98,6 +120,25 @@ async fn get_setup(state: AppState) -> (StatusCode, serde_json::Value) {
         .unwrap();
     let status = response.status();
     (status, body_json(response).await)
+}
+
+/// Reads the payload with an admin session, for the routable host — where the
+/// anonymous gate is (correctly) shut and there is no other way in.
+async fn get_setup_as_admin(state: AppState) -> serde_json::Value {
+    let cookie =
+        crate::server::test_support::seed_session(&state, "acme", crate::ports::UserRole::Admin)
+            .await;
+    let response = router(state)
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/setup")
+                .header("cookie", cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    body_json(response).await
 }
 
 async fn post_setup(state: AppState, body: serde_json::Value) -> (StatusCode, serde_json::Value) {
@@ -233,6 +274,78 @@ async fn none_is_offered_only_on_a_loopback_host() {
             .unwrap()
             .contains(&serde_json::json!("none")),
         "a routable host must not offer an unauthenticated console: {dto}"
+    );
+}
+
+/// A laptop with no SMTP is not a broken host — it is the one shape where the
+/// honest hand-off is a link the operator opens themselves. The wizard has to
+/// be able to tell that apart from a host where a magic link simply goes
+/// nowhere, and only the payload can say which it is on.
+#[tokio::test]
+async fn mail_on_a_loopback_host_with_no_transport_reports_the_code_echo() {
+    let home_dir = home();
+    let (_, dto) = get_setup(fresh_state(home_dir.path())).await;
+
+    assert_eq!(dto["mail"]["wired"], false, "nothing is configured: {dto}");
+    assert_eq!(
+        dto["mail"]["echoes_code"], true,
+        "a loopback host hands the code back in the response: {dto}"
+    );
+}
+
+/// The dead end. A routable host with no transport can neither mail a link nor
+/// echo one, so a wizard that offered the link form here would be offering a
+/// sign-in that arrives nowhere.
+#[tokio::test]
+async fn mail_on_a_routable_host_with_no_transport_reports_neither() {
+    let home_dir = home();
+    let state = routable_state(home_dir.path());
+    with_company(&state, home_dir.path()).await;
+    let dto = get_setup_as_admin(state).await;
+
+    assert_eq!(dto["mail"]["wired"], false, "{dto}");
+    assert_eq!(
+        dto["mail"]["echoes_code"], false,
+        "a routable host must not be described as echoing codes: {dto}"
+    );
+}
+
+/// With a transport wired the link is a real send, and the echo stops — the
+/// same either/or the login route itself branches on.
+#[tokio::test]
+async fn mail_with_a_transport_wired_reports_a_real_send() {
+    let home_dir = home();
+    let (_, dto) = get_setup(state_with_mail(home_dir.path())).await;
+
+    assert_eq!(dto["mail"]["wired"], true, "{dto}");
+    assert_eq!(
+        dto["mail"]["echoes_code"], false,
+        "a wired transport is delivered to, never echoed: {dto}"
+    );
+}
+
+/// `auth_modes` says which modes are *legal*, not which are convenient today.
+/// A host with no SMTP still runs `email` mode perfectly well over hub OAuth
+/// and passwords, so withholding the mode here would take away a working
+/// sign-in on the strength of a transport it does not need. `mail` is the field
+/// that says what the mailbox path can do; this one must stay a policy answer.
+#[tokio::test]
+async fn email_is_still_offered_on_a_host_that_cannot_mail() {
+    let home_dir = home();
+    let state = routable_state(home_dir.path());
+    with_company(&state, home_dir.path()).await;
+    let dto = get_setup_as_admin(state).await;
+
+    assert_eq!(
+        dto["mail"]["wired"], false,
+        "this host is the one that cannot mail: {dto}"
+    );
+    assert!(
+        dto["auth_modes"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("email")),
+        "email mode does not depend on a transport: {dto}"
     );
 }
 

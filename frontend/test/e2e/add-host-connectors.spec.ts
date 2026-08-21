@@ -199,10 +199,58 @@ test("a desktop offers all four places a runtime can run", async ({ page, baseUR
   expect(await offeredConnectors(page)).toEqual(["local", "cloud", "remote", "ssh"]);
 });
 
+/**
+ * The chooser is a screen of the onboarding flow, not a popup over the console
+ * ([#1531](https://github.com/tinyhumansai/opencompany/issues/1531)).
+ *
+ * It was a `Dialog`, and the dialog is 24rem wide: four connector tabs clipped
+ * their own labels inside it. Asserting the *symptom* — every tab strip fitting
+ * the box it is drawn in — rather than the absence of a `role=dialog`, because
+ * the width is what a person reports and a future card that is too narrow again
+ * should fail here.
+ */
+test("the chooser is a screen, and its tabs fit the card they are drawn in", async ({
+  page,
+  baseURL,
+}) => {
+  await installDesktopShell(page, seed(baseURL ?? ""), {});
+  await page.goto("/");
+  await openTheChooser(page);
+
+  const card = page.getByTestId("add-host");
+  await expect(card).toBeVisible();
+  // Its title stays put rather than scrolling away to make room for the form,
+  // which is the other half of what the dialog could not do.
+  await expect(card.getByRole("heading", { name: "Add a host" })).toBeVisible();
+
+  const strip = card.locator("[data-slot=tabs-list]").first();
+  const stripBox = await strip.boundingBox();
+  expect(stripBox, "the tab strip should have a box").not.toBeNull();
+  for (const kind of ["local", "cloud", "remote", "ssh"]) {
+    const tab = page.getByTestId(`add-host-${kind}`);
+    const box = await tab.boundingBox();
+    expect(box, `${kind} should have a box`).not.toBeNull();
+    expect(box!.x, `${kind} starts inside the strip`).toBeGreaterThanOrEqual(stripBox!.x - 1);
+    expect(
+      box!.x + box!.width,
+      `${kind} ends inside the strip`,
+    ).toBeLessThanOrEqual(stripBox!.x + stripBox!.width + 1);
+  }
+
+  // And there is a way back, to the console that was there before — which is
+  // still the console it was, rather than a re-booted one: a screen that
+  // unmounted it would replay "Connecting…" here.
+  await page.getByTestId("add-host-back").click();
+  await expect(card).toHaveCount(0);
+  await expect(switcher(page)).toHaveAttribute("data-host-count", "1");
+});
+
 test("a browser is offered only the two connectors it can honour", async ({ page }) => {
-  // A hub, because an ordinary single-host browser console draws a nameplate
-  // rather than a menu — there is nothing to switch between — and "Add a host"
-  // lives in that menu. A hub is the browser shape that genuinely holds N.
+  // A hub, because it is the browser shape that genuinely holds N hosts, and
+  // the connector list is about adding the *next* one. A single-host console
+  // opens the same menu (`hostSwitcherMenu`), but only because it has a host
+  // to manage — this spec is about the choice, so it drives the shape the
+  // choice belongs to.
   await page.goto("/?hub");
   await openTheChooser(page);
 

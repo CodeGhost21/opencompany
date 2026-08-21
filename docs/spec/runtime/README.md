@@ -29,6 +29,9 @@ Supporting docs:
   - [workspace-layout.md](workspace-layout.md) — the on-disk layout inside the
     data root: the embedded runtime's root, the agent sandboxes, choosing the
     root, and migrating a legacy doubled install
+  - [workspace-names.md](workspace-names.md) — the one naming rule for
+    everything the runtime puts in a workspace (lowercase, dashed), where it is
+    applied, and how a company created before it keeps working
   - [memory-engine.md](memory-engine.md) — the `OPENCOMPANY_MEMORY` overlay and
     why an ephemeral data root refuses to boot
   - [data-root.md](data-root.md) — the root itself: resolution order, ownership,

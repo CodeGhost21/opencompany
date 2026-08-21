@@ -114,7 +114,7 @@ pub struct SearchHit {
     /// The matching node, carrying its id, kind, both origins and — for a binary
     /// node — its `mime` / `size` / `sha256`.
     pub node: WorkspaceNode,
-    /// The node's rendered logical path, e.g. `Standards/Engineering.md`.
+    /// The node's rendered logical path, e.g. `standards/Engineering.md`.
     pub path: String,
     /// Whether the name or the body matched.
     pub matched: MatchKind,
@@ -164,7 +164,7 @@ pub fn clamp_limit(limit: NonZeroUsize) -> usize {
 /// Search one company's workspace.
 ///
 /// `prefix` scopes the search to a subtree by logical path (`Standards`,
-/// `Product/Specs`); `None` searches the whole tree. It is validated with the
+/// `product/Specs`); `None` searches the whole tree. It is validated with the
 /// same [`split_logical_path`] the agent tools use, so a traversal-shaped scope
 /// is refused rather than normalised.
 ///

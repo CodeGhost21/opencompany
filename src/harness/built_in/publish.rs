@@ -1216,6 +1216,10 @@ pub fn publish_brief() -> String {
          duplicate. The tool tells you where the file landed — say that, and nothing more \
          confident than that. If it returns an error, the file was NOT delivered and you must not \
          report it as though it was.\n\
+         Name the files you write in lowercase with dashes — `launch-plan.md`, not `Launch \
+         Plan.md`. That is the convention for the whole workspace, and publishing normalizes the \
+         name anyway, so a file named that way arrives under the name you gave it instead of one \
+         you have to look up.\n\
          Publish only the finished thing somebody asked for. Scratch files, notes to yourself, \
          logs and build output are not deliverables, and plenty of work — a question answered, a \
          check run, a decision made — produces no file at all. Having nothing to publish is a \

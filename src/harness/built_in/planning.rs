@@ -835,9 +835,8 @@ async fn gather_evidence(
     // agent: an overlay's own `tools` list (issue #661 / L5), or the standard
     // company-wide grant when it is empty, exactly as an omitted manifest `tools`
     // line means.
-    let mut teammates: Vec<TeammateBrief> = record
-        .manifest
-        .agents
+    let live_roster = record.effective_agents();
+    let mut teammates: Vec<TeammateBrief> = live_roster
         .iter()
         .map(|a| TeammateBrief {
             id: a.id.clone(),
@@ -852,6 +851,7 @@ async fn gather_evidence(
             .overlay_agents
             .iter()
             .filter(|overlay| !record.manifest.agents.iter().any(|a| a.id == overlay.id))
+            .filter(|overlay| !record.is_retired(&overlay.id))
             .map(|overlay| TeammateBrief {
                 id: overlay.id.clone(),
                 role: overlay.role.clone(),
@@ -1690,7 +1690,7 @@ async fn verify_credential(
 /// Matched on the trailing path segment, case-insensitively.
 ///
 /// Deliberately looser than the tool-facing resolver. A model asked to name a
-/// file writes `Standards/Tone.md` or `Tone.md` or `standards/tone.md` for the
+/// file writes `standards/Tone.md` or `Tone.md` or `standards/tone.md` for the
 /// same note, and a path-shape mismatch that blocked a card would be a
 /// false refusal — the expensive direction here. A same-named file in two
 /// folders can therefore satisfy this check; that only means the pass does not
@@ -1899,6 +1899,9 @@ enum Provenance {
 }
 
 fn provenance_of(evidence: &Evidence, id: &str) -> Option<Provenance> {
+    if evidence.record.is_retired(id) {
+        return None;
+    }
     if let Some(agent) = evidence.record.manifest.agents.iter().find(|a| a.id == id) {
         return Some(if agent.global {
             Provenance::Baseline

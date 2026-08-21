@@ -38,6 +38,7 @@ pub mod chat_history;
 pub mod cors;
 mod error;
 pub mod feedback;
+pub mod feedback_board;
 pub mod graphql;
 pub mod hooks;
 pub mod hooks_chargebee;

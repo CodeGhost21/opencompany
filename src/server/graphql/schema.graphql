@@ -1271,7 +1271,7 @@ type WorkspaceSearchHit {
 	"""
 	node: FsNode!
 	"""
-	Its logical path, e.g. `Standards/Engineering.md`.
+	Its logical path, e.g. `standards/Engineering.md`.
 	"""
 	path: String!
 	"""

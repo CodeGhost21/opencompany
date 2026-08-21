@@ -18,7 +18,7 @@ const FOLDER_REV: u64 = 1_000;
 
 /// A live workspace shaped like the one the lifecycle tools were written for:
 /// the boot scaffold, this agent's own home holding a note and an empty folder,
-/// a teammate's home holding a note, plus `Standards/` and a root `README.md`
+/// a teammate's home holding a note, plus `standards/` and a root `README.md`
 /// to have something outside the agent's reach.
 ///
 /// Carries an **artifact store** alongside the workspace store, because
@@ -41,7 +41,7 @@ async fn own_home(company: &str) -> Home {
     let id = CompanyId::new(company);
 
     store
-        .create(&id, &folder("f-standards", "Standards", None), None)
+        .create(&id, &folder("f-standards", "standards", None), None)
         .await
         .expect("folder");
     store
@@ -53,7 +53,7 @@ async fn own_home(company: &str) -> Home {
         .await
         .expect("note");
     store
-        .create(&id, &file("n-readme", "README.md", None), Some("# Root"))
+        .create(&id, &file("n-readme", "readme.md", None), Some("# Root"))
         .await
         .expect("readme");
     ensure_workspace_scaffold(store.as_ref(), &id)
@@ -207,12 +207,12 @@ async fn deleting_your_own_note_removes_it_and_names_the_loss_as_permanent() {
 
     let out = home
         .deleter()
-        .execute(json!({ "path": "Agents/ceo/Draft.md", "expected_updated_at": NOTE_REV }))
+        .execute(json!({ "path": "agents/ceo/Draft.md", "expected_updated_at": NOTE_REV }))
         .await
         .unwrap();
     assert!(!out.is_error, "{}", text(&out));
     let message = text(&out);
-    assert!(message.contains("Agents/ceo/Draft.md"), "{message}");
+    assert!(message.contains("agents/ceo/Draft.md"), "{message}");
     assert!(
         message.contains("permanent"),
         "a directly-created note's deletion is final and must say so: {message}"
@@ -228,7 +228,7 @@ async fn an_empty_folder_of_your_own_can_be_deleted() {
 
     let out = home
         .deleter()
-        .execute(json!({ "path": "Agents/ceo/archive", "expected_updated_at": FOLDER_REV }))
+        .execute(json!({ "path": "agents/ceo/archive", "expected_updated_at": FOLDER_REV }))
         .await
         .unwrap();
     assert!(!out.is_error, "{}", text(&out));
@@ -282,7 +282,7 @@ async fn a_binary_node_in_your_own_folder_deletes_with_its_payload() {
 
     let out = home
         .deleter()
-        .execute(json!({ "path": "Agents/ceo/chart.png", "expected_updated_at": NOTE_REV }))
+        .execute(json!({ "path": "agents/ceo/chart.png", "expected_updated_at": NOTE_REV }))
         .await
         .unwrap();
     assert!(!out.is_error, "{}", text(&out));
@@ -309,7 +309,7 @@ async fn a_note_outside_your_own_folder_is_refused_and_left_alone() {
     let out = home
         .deleter()
         .execute(json!({
-            "path": "Standards/Engineering standards.md",
+            "path": "standards/engineering-standards.md",
             "expected_updated_at": NOTE_REV,
         }))
         .await
@@ -356,7 +356,7 @@ async fn a_teammates_home_and_its_contents_are_refused() {
     let home = own_home("acme").await;
     let tool = home.deleter();
 
-    for path in ["Agents/cmo", "Agents/cmo/Plan.md", "Agents"] {
+    for path in ["agents/cmo", "agents/cmo/Plan.md", "Agents"] {
         let out = tool
             .execute(json!({ "path": path, "expected_updated_at": NOTE_REV }))
             .await
@@ -382,7 +382,7 @@ async fn your_own_home_folder_gets_its_own_refusal() {
 
     let out = home
         .deleter()
-        .execute(json!({ "path": "Agents/ceo", "expected_updated_at": FOLDER_REV }))
+        .execute(json!({ "path": "agents/ceo", "expected_updated_at": FOLDER_REV }))
         .await
         .unwrap();
     assert!(out.is_error, "{}", text(&out));
@@ -417,7 +417,7 @@ async fn a_folder_that_still_holds_anything_is_refused_and_deletes_nothing() {
 
     let out = home
         .deleter()
-        .execute(json!({ "path": "Agents/ceo/archive", "expected_updated_at": FOLDER_REV }))
+        .execute(json!({ "path": "agents/ceo/archive", "expected_updated_at": FOLDER_REV }))
         .await
         .unwrap();
     assert!(out.is_error, "{}", text(&out));
@@ -444,7 +444,7 @@ async fn a_delete_without_a_revision_is_refused() {
 
     let out = home
         .deleter()
-        .execute(json!({ "path": "Agents/ceo/Draft.md" }))
+        .execute(json!({ "path": "agents/ceo/Draft.md" }))
         .await
         .unwrap();
     assert!(out.is_error, "{}", text(&out));
@@ -460,7 +460,7 @@ async fn a_stale_revision_is_refused_and_names_the_current_one() {
 
     let out = home
         .deleter()
-        .execute(json!({ "path": "Agents/ceo/Draft.md", "expected_updated_at": 1 }))
+        .execute(json!({ "path": "agents/ceo/Draft.md", "expected_updated_at": 1 }))
         .await
         .unwrap();
     assert!(out.is_error, "{}", text(&out));
@@ -482,7 +482,7 @@ async fn a_revision_is_accepted_as_a_number_or_a_string() {
         let out = home
             .deleter()
             .execute(json!({
-                "path": "Agents/ceo/Draft.md",
+                "path": "agents/ceo/Draft.md",
                 "expected_updated_at": revision,
             }))
             .await
@@ -495,7 +495,7 @@ async fn a_revision_is_accepted_as_a_number_or_a_string() {
     let home = own_home("acme").await;
     let out = home
         .deleter()
-        .execute(json!({ "path": "Agents/ceo/Draft.md", "expected_updated_at": "latest" }))
+        .execute(json!({ "path": "agents/ceo/Draft.md", "expected_updated_at": "latest" }))
         .await
         .unwrap();
     assert!(out.is_error, "{}", text(&out));
@@ -539,13 +539,13 @@ async fn renaming_your_own_note_keeps_its_body_id_and_authorship() {
 
     let out = home
         .renamer()
-        .execute(json!({ "path": "Agents/ceo/Draft.md", "new_name": "Q3 launch brief.md" }))
+        .execute(json!({ "path": "agents/ceo/Draft.md", "new_name": "Q3 launch brief.md" }))
         .await
         .unwrap();
     assert!(!out.is_error, "{}", text(&out));
     let message = text(&out);
     assert!(
-        message.contains("Agents/ceo/Q3 launch brief.md"),
+        message.contains("agents/ceo/q3-launch-brief.md"),
         "{message}"
     );
     assert!(
@@ -554,7 +554,7 @@ async fn renaming_your_own_note_keeps_its_body_id_and_authorship() {
     );
 
     let (node, body) = home.read("n-draft").await;
-    assert_eq!(node.name, "Q3 launch brief.md");
+    assert_eq!(node.name, "q3-launch-brief.md");
     assert_eq!(body, "# Draft");
     assert_eq!(node.created_by, agent_origin());
     assert_eq!(node.updated_by, agent_origin());
@@ -568,7 +568,7 @@ async fn a_note_can_be_moved_into_and_back_out_of_a_subfolder_of_your_own() {
     let tool = home.renamer();
 
     let out = tool
-        .execute(json!({ "path": "Agents/ceo/Draft.md", "new_parent": "Agents/ceo/archive" }))
+        .execute(json!({ "path": "agents/ceo/Draft.md", "new_parent": "agents/ceo/archive" }))
         .await
         .unwrap();
     assert!(!out.is_error, "{}", text(&out));
@@ -580,7 +580,7 @@ async fn a_note_can_be_moved_into_and_back_out_of_a_subfolder_of_your_own() {
     // …and back up into the home itself, which is a legal *destination* even
     // though it is never a legal target for a delete or a rename.
     let out = tool
-        .execute(json!({ "id": "n-draft", "new_parent": "Agents/ceo" }))
+        .execute(json!({ "id": "n-draft", "new_parent": "agents/ceo" }))
         .await
         .unwrap();
     assert!(!out.is_error, "{}", text(&out));
@@ -598,15 +598,15 @@ async fn a_name_and_a_parent_can_change_in_one_call() {
     let out = home
         .renamer()
         .execute(json!({
-            "path": "Agents/ceo/Draft.md",
+            "path": "agents/ceo/Draft.md",
             "new_name": "superseded.md",
-            "new_parent": "Agents/ceo/archive",
+            "new_parent": "agents/ceo/archive",
         }))
         .await
         .unwrap();
     assert!(!out.is_error, "{}", text(&out));
     assert!(
-        text(&out).contains("Agents/ceo/archive/superseded.md"),
+        text(&out).contains("agents/ceo/archive/superseded.md"),
         "{}",
         text(&out)
     );
@@ -635,8 +635,8 @@ async fn a_folder_cannot_be_moved_into_its_own_subfolder() {
     let out = home
         .renamer()
         .execute(json!({
-            "path": "Agents/ceo/archive",
-            "new_parent": "Agents/ceo/archive/deep",
+            "path": "agents/ceo/archive",
+            "new_parent": "agents/ceo/archive/deep",
         }))
         .await
         .unwrap();
@@ -650,7 +650,7 @@ async fn a_folder_cannot_be_moved_into_its_own_subfolder() {
     // By id, into itself — the same guard at the end of the ancestry walk.
     let out = home
         .renamer()
-        .execute(json!({ "id": "f-archive", "new_parent": "Agents/ceo/archive" }))
+        .execute(json!({ "id": "f-archive", "new_parent": "agents/ceo/archive" }))
         .await
         .unwrap();
     assert!(out.is_error, "{}", text(&out));
@@ -671,7 +671,7 @@ async fn a_binary_node_can_be_renamed_and_keeps_its_payload() {
 
     let out = home
         .renamer()
-        .execute(json!({ "path": "Agents/ceo/chart.png", "new_name": "q3-chart.png" }))
+        .execute(json!({ "path": "agents/ceo/chart.png", "new_name": "q3-chart.png" }))
         .await
         .unwrap();
     assert!(!out.is_error, "{}", text(&out));
@@ -693,11 +693,11 @@ async fn renaming_anything_outside_your_own_folder_is_refused() {
     let tool = home.renamer();
 
     for args in [
-        json!({ "path": "Standards/Engineering standards.md", "new_name": "mine.md" }),
+        json!({ "path": "standards/engineering-standards.md", "new_name": "mine.md" }),
         json!({ "id": "n-eng", "new_name": "mine.md" }),
-        json!({ "path": "Agents/cmo/Plan.md", "new_name": "mine.md" }),
-        json!({ "id": "n-mate", "new_parent": "Agents/ceo" }),
-        json!({ "path": "README.md", "new_name": "mine.md" }),
+        json!({ "path": "agents/cmo/Plan.md", "new_name": "mine.md" }),
+        json!({ "id": "n-mate", "new_parent": "agents/ceo" }),
+        json!({ "path": "readme.md", "new_name": "mine.md" }),
     ] {
         let out = tool.execute(args.clone()).await.unwrap();
         assert!(out.is_error, "{args} was allowed: {}", text(&out));
@@ -719,7 +719,7 @@ async fn your_own_home_folder_cannot_be_renamed() {
 
     let out = home
         .renamer()
-        .execute(json!({ "path": "Agents/ceo", "new_name": "chief-exec" }))
+        .execute(json!({ "path": "agents/ceo", "new_name": "chief-exec" }))
         .await
         .unwrap();
     assert!(out.is_error, "{}", text(&out));
@@ -741,7 +741,7 @@ async fn moving_to_the_workspace_root_is_refused_with_the_scope_reason() {
 
     for root in ["", "/", "  ", "//"] {
         let out = tool
-            .execute(json!({ "path": "Agents/ceo/Draft.md", "new_parent": root }))
+            .execute(json!({ "path": "agents/ceo/Draft.md", "new_parent": root }))
             .await
             .unwrap();
         assert!(out.is_error, "`{root}` was allowed: {}", text(&out));
@@ -766,9 +766,9 @@ async fn moving_your_own_note_out_of_your_folder_is_refused() {
     let home = own_home("acme").await;
     let tool = home.renamer();
 
-    for parent in ["Standards", "Agents", "Agents/cmo"] {
+    for parent in ["standards", "agents", "agents/cmo"] {
         let out = tool
-            .execute(json!({ "path": "Agents/ceo/Draft.md", "new_parent": parent }))
+            .execute(json!({ "path": "agents/ceo/Draft.md", "new_parent": parent }))
             .await
             .unwrap();
         assert!(out.is_error, "`{parent}` was allowed: {}", text(&out));
@@ -794,7 +794,7 @@ async fn a_new_name_that_is_not_a_single_segment_is_refused() {
 
     for name in ["..", ".", "a/b", "a\\b", "sub/dir/note.md"] {
         let out = tool
-            .execute(json!({ "path": "Agents/ceo/Draft.md", "new_name": name }))
+            .execute(json!({ "path": "agents/ceo/Draft.md", "new_name": name }))
             .await
             .unwrap();
         assert!(out.is_error, "`{name}` was allowed: {}", text(&out));
@@ -818,7 +818,7 @@ async fn a_rename_onto_an_occupied_path_is_refused_and_changes_nothing() {
 
     let out = home
         .renamer()
-        .execute(json!({ "path": "Agents/ceo/Draft.md", "new_name": "Notes.md" }))
+        .execute(json!({ "path": "agents/ceo/Draft.md", "new_name": "Notes.md" }))
         .await
         .unwrap();
     assert!(out.is_error, "{}", text(&out));
@@ -840,8 +840,8 @@ async fn a_rename_that_changes_nothing_says_so() {
     let tool = home.renamer();
 
     for args in [
-        json!({ "path": "Agents/ceo/Draft.md", "new_name": "Draft.md" }),
-        json!({ "path": "Agents/ceo/Draft.md", "new_parent": "Agents/ceo" }),
+        json!({ "path": "agents/ceo/Draft.md", "new_name": "Draft.md" }),
+        json!({ "path": "agents/ceo/Draft.md", "new_parent": "agents/ceo" }),
     ] {
         let out = tool.execute(args.clone()).await.unwrap();
         assert!(out.is_error, "{args}: {}", text(&out));
@@ -859,7 +859,7 @@ async fn a_destination_that_is_missing_or_is_a_note_is_refused_with_what_to_do()
     let tool = home.renamer();
 
     let out = tool
-        .execute(json!({ "path": "Agents/ceo/Draft.md", "new_parent": "Agents/ceo/nope" }))
+        .execute(json!({ "path": "agents/ceo/Draft.md", "new_parent": "agents/ceo/nope" }))
         .await
         .unwrap();
     assert!(out.is_error, "{}", text(&out));
@@ -873,7 +873,7 @@ async fn a_destination_that_is_missing_or_is_a_note_is_refused_with_what_to_do()
     home.add_own(file("n-other", "Notes.md", None), "notes")
         .await;
     let out = tool
-        .execute(json!({ "path": "Agents/ceo/Draft.md", "new_parent": "Agents/ceo/Notes.md" }))
+        .execute(json!({ "path": "agents/ceo/Draft.md", "new_parent": "agents/ceo/Notes.md" }))
         .await
         .unwrap();
     assert!(out.is_error, "{}", text(&out));
@@ -890,7 +890,7 @@ async fn a_rename_needs_at_least_one_of_new_name_and_new_parent() {
 
     let out = home
         .renamer()
-        .execute(json!({ "path": "Agents/ceo/Draft.md" }))
+        .execute(json!({ "path": "agents/ceo/Draft.md" }))
         .await
         .unwrap();
     assert!(out.is_error, "{}", text(&out));

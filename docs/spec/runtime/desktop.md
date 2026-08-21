@@ -47,6 +47,61 @@ points `tauri:dev` at `scripts/desktop-dev.sh` and `tauri:build` at
 `src-tauri/`, and `scripts/ci/assert-single-tauri-app.sh` fails the build on
 either a second `tauri.conf.json` or a script that invokes a bare `tauri`.
 
+## What the desktop compiles in
+
+The desktop links the host with an explicit feature set, declared on the
+`opencompany` dependency in `src-tauri/Cargo.toml`:
+
+```toml
+opencompany = { path = "..", default-features = false, features = [
+  "sqlite", "platform-jwt", "oauth", "mcp",
+] }
+```
+
+`mcp` is the one that puts an agent harness in the app. It implies `openhuman`,
+which is what compiles `src/harness/` at all; without it the bundle boots, seeds
+a company, serves the console — and cannot think. The visible symptom was the
+setup wizard's inference test answering *"This build cannot reach a model — the
+agent harness is not compiled in."* for every provider, however good the key.
+
+The belt a desktop agent gets is deliberately the minimal one. The host declares
+`openhuman_core` with `default-features = false, features = ["skills", "mcp",
+"hosting"]`, so what a company can use is **built-in tools, MCP servers and
+skills** — no memory engine, no TokenJuice, no voice or inference stack out of
+the vendored runtime. Features left off, each on purpose:
+
+| Off | Why |
+| --- | --- |
+| `tinycortex`, `tinymemory*` | In-pod memory engines. They carry tinycortex, `tinyagents/sqlite` and a second bundled SQLite into the bundle for a surface the desktop does not offer; the runtime keeps its fs-backed memory stores. |
+| `media`, `composio`, and the other managed backends | Each needs a platform credential the desktop has no way to hold, and each fails closed without one. |
+| `acp` | `src-tauri/src/acp/` is an ACP *client* and compiles without it (see below). Turning it on additionally wires `RuntimeBuilder::with_acp_agents`, which is a separate decision from having a harness. |
+| `mongodb` | A per-tenant cluster is a hosting concern. |
+
+### The `[patch]` table is replicated, not inherited
+
+A `[patch]` section only applies in the workspace root that declares it, and
+this crate is its own workspace. Until `mcp` put `openhuman_core` in the graph
+none of the vendored crates were reachable from here, so the table could be
+omitted. Now it cannot: without it Cargo resolves `tinycortex-api`, `tinyflows`
+and the rest from crates.io — where some do not exist at all — and any that did
+resolve would be a *second* copy whose trait identities would not match the ones
+the host compiled against. `src-tauri/Cargo.toml` therefore carries a replica of
+the host's table with every path prefixed `../`. Keep the two in step.
+
+### Attaching the harness is the library's job
+
+Compiling the harness in is half of it; something has to hand each company a
+pool. That sequence — the pool, plus whichever managed media/search/inference
+backends the environment supplies — lives in `opencompany::app::attach_harness`
+and is called by both `serve` and `desktop::register`. It used to be a private
+function in `src/bin/opencompany.rs`, which is precisely why the desktop path
+built companies with no harness even once the feature was on.
+
+`embedded::start_with` additionally pins the vendored keyring to the instance
+root and installs the product identity before any runtime exists — the same two
+startup calls `serve` makes, and for the same ordering reasons (see
+`src/app/journal.rs` and `src/product.rs`).
+
 ## Packaging is a claim the lane has to make
 
 Compiling and packaging are different claims. `cargo fmt`, `cargo clippy` and
@@ -328,91 +383,64 @@ Not started when its root could not be taken — most often because another
 process holds it. The console renders that as a row; the desktop still holds
 remote hosts, which is the point of holding several.
 
+### No sign-in at all
+
+The embedded host sets `auth_mode_override` to `AuthMode::None`
+([sign-in modes](auth-modes.md#none)). A desktop install has no login screen,
+no operator mailbox, and no session: `resolve_principal` answers with the
+company's implicit local owner before it looks for a cookie or a bearer, so the
+console's first request is already authenticated as an `Admin` backed by a real
+`UserRecord` under `local:owner`.
+
+The argument for it is not that the login screen was redundant. It is that
+**there was never a session carrier to bring its result home in.** The magic
+link worked — a loopback host with no mail transport echoes the code in its own
+response, and the console redeemed it — and then the cookie went nowhere:
+
+- The proxy's `reqwest` client is built without a cookie store, so nothing
+  persisted the `Set-Cookie` for the next request.
+- `x-opencompany-session`, the header carrier a paired device uses, is in
+  `RESERVED_HEADERS` and is stripped from anything the webview sends — see
+  [what the proxy will not carry](#what-the-proxy-will-not-carry).
+- `needsCarriedSession()` is false in the desktop whatever the address, so the
+  console does not hold a token either.
+
+What actually let the console through was that every request came from loopback
+anyway, which is `none` mode's premise stated in a slower way. So the ceremony —
+a synthetic `operator@opencompany.local` the operator was told to accept, a link
+the host mailed to nobody, a cookie discarded on arrival — bought nothing that
+the bind was not already providing. `none` deletes it and says what was true.
+
+Set on the **host**, not in the shipped preset manifests: the override reaches
+every company on the data root, including ones an earlier install left there,
+so an existing install migrates by relaunching — and it leaves
+`manifest.users.mode` at its default, which a `[users].admins` entry under
+`mode = "none"` would otherwise make `validate_users` reject.
+
+A default, not a ceiling. `prepare_instance` reports the root's `config.toml`
+`auth_mode` and `none` is only the fallback, so an operator who deliberately
+turns a sign-in on in setup — to share their instance — still has it after a
+relaunch. The setup wizard preselects `none` when it is running in the desktop
+runtime *and* the host offers the mode, which is a preselection and not a lock.
+
+**What this costs:** a device paired to the embedded host from another machine
+stops working. Every step of the pairing succeeds and the resulting token is
+inert from anywhere but this computer; see
+[sign-in modes](auth-modes.md#none) for why, and note that pairing this desktop
+*to a remote host* is unaffected — that is the section below.
+
 ## Several hosts on one machine
 
-The desktop runs a roster of local hosts rather than exactly one, so an
-operator can keep two companies side by side on one machine. How the roster is
-stored, which empty root gets a starter company and which gets the first-run
-wizard, and how to run the shell in development are in
-[`desktop-instances.md`](desktop-instances.md).
-
-### One row, however many launches
-
-The ephemeral port is not free: it means the embedded host's *address* is
-different on every launch, and `addConnection` recognises a host by address. So
-each launch read as a first meeting — a new connection id, a new row, and the
-previous launch's row left behind pointing at a closed port. They persist, so
-they accumulated, and they all carry the same label; the sidebar filled with
-indistinguishable "This computer" entries, all but one broken (issue #615).
-
-Every local host therefore reports `instance_id`, read from the data root
-(see [`instance.rs`](../../../src/app/instance.rs)) rather than derived from the
-address, and the console registers them through `adoptLocalHosts` rather than
-`addConnection`. That function matches each running instance on its identity,
-re-points the remembered connection at the new port, and drops the profiles no
-running instance claimed.
-
-It takes the whole set in one call for a reason the single-host version could
-not survive. `adoptEmbeddedHost` dropped *any other* embedded profile as last
-launch's ghost — and with a roster, another embedded profile is ordinarily the
-operator's second company. The prune has to see every live instance before it
-removes anything, so it is one call rather than a loop of them.
-`adoptEmbeddedHost` remains as the one-host wrapper for the degrade above.
-
-Only **running** instances become connections. A stopped one has no address, so
-a row for it could do nothing but fail its probe forever; it is visible — and
-startable — in the rail's dialog instead.
-
-Reusing the remembered id is what carries the tour state, the last-read channel
-and the mail draft across a relaunch, all of them keyed by connection id. A
-*different* `instance_id` — a second data root — is deliberately not adopted:
-that is a different host, and merging its local state is the failure the
-`(connection, company)` namespace exists to prevent.
-
-Profiles written before the identity was reported carry neither it nor an
-`origin` marker, so `embeddedProfiles` recognises them by the signature the bug
-left: this client's own label for its host, at a loopback address. Narrow on
-purpose — a host an operator added by hand is labelled by authority
-(`127.0.0.1:8080`), never with that string.
+Moved to [desktop-hosts.md](desktop-hosts.md): how the roster of local hosts
+is stored and reconciled, and why instance_id rather than address is the
+identity rule.
 
 ## Authenticating as a person
 
-A desktop cannot hold a session cookie: `SameSite=Lax` means the browser never
-sends one cross-site, and a webview is cross-site with every server. The only
-other header credential was the platform bearer, which maps to `actor: None` —
-every write anonymous in the journal.
-
-So a session has a second carrier and a way to get one. Both are documented in
-[`users.md`](users.md) → "Two carriers, one session" and "Device pairing".
-
-The token lives in the OS keychain (`src-tauri/src/keychain.rs`), and the
-console never sees it. `oc_connect` takes no device material: the core resolves
-a paired session by connection id. Pairing runs entirely in Rust —
-`oc_pair_device` performs the claim, writes the result to the keychain, and
-answers with the company, device id and expiry — so the token exists for one
-HTTP response that the webview is not on the path of. That is the difference
-between a design where the webview *should not* hold the credential and one
-where it *cannot*. The claim itself is a plain `claim()` rather than command
-logic, so the rules on it can be tested without starting a GUI — see "Where a
-credential may travel" for the one it enforces.
-
-The console's `Credential { kind: "device", ref }` is therefore a record that
-this machine is paired, not something the core is told. `ref` is the host's
-device id, useful when deciding what to revoke from the host's device list.
-
-Backend selection, the test store, and the Linux session-keyring caveat (a
-pairing there does not survive a logout) are documented in the module.
+Moved to [desktop-hosts.md](desktop-hosts.md): device credentials, backend
+selection, and the Linux session-keyring caveat.
 
 ## ACP
 
-`src-tauri/src/acp/` is the client half: it spawns a locally-installed harness
-over stdio and serves the `fs/read_text_file` and `fs/write_text_file` methods
-the agent calls back with. Path confinement is enforced in Rust, below the UI —
-the console renders the permission prompt but must never be the thing that
-enforces the answer. A renderer decides what a person sees; it must not decide
-what a model can reach.
-
-The server half (`src/server/acp/`, `src/harness/acp_run_turn.rs`) is behind the
-`acp` feature and **not yet mounted on any router**. `/acp` is a reserved prefix
-either way, so a build without it answers a protocol probe with a 404 rather
-than the console shell with a `200`.
+Moved to [desktop-hosts.md](desktop-hosts.md): the stdio harness client and
+the reserved /acp prefix.

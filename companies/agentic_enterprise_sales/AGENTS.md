@@ -2,7 +2,7 @@
 
 > A sales organization of agents that generates and qualifies pipeline, personalizes outreach, writes proposals and contracts, and keeps the CRM honest — with a human closing strategic accounts.
 
-This file is routed into every teammate's system prompt alongside `METHOD.md`
+This file is routed into every teammate's system prompt alongside `method.md`
 (`context_routing::UNIVERSAL_DOCUMENTS`), so it is the one place a convention
 reaches the whole roster without being repeated in every agent's `context`.
 
@@ -25,11 +25,22 @@ personalized. This agreement exists mostly to prevent that.
 | `follow_up_agent` | Follow-up Agent | Deal desk | Nurture and follow up on pipeline. |
 | `crm_updater` | CRM Updater | — | Keep CRM records accurate and current. |
 
-`lead_gen` is the orchestrator: it holds the routing picture (`BRIEF.md`,
-`CLAIMS.md`, `THREADS.md`) and unrestricted ledger access.
+`lead_gen` is the orchestrator: it holds the routing picture (`brief.md`,
+`claims.md`, `threads.md`) and unrestricted ledger access.
 
 Humans keep **closing strategic accounts**; everything up to the close is the
 roster's to run.
+
+## Where the role rules live
+
+Each teammate's `.toml` carries wiring only — tier, ledger grants, routed
+context, delegation. The working rules live in `agents/prompts/<id>.md`, named by
+that file's `prompt_files` entry and loaded into the prompt as **Your brief**
+(see `docs/spec/runtime/agents.md`). Edit the brief to change how a role works;
+edit the `.toml` to change what it may touch.
+
+Print what any teammate's prompt assembles into with
+`./scripts/dump-prompt.sh --company companies/<name> --agent <id>`.
 
 ## The desk
 
@@ -83,16 +94,16 @@ Plus the baseline's `web-research`, `weekly-report` and `meeting-brief`.
 
 ## Workspace layout
 
-- `Standards/`, `Playbooks/`, `Accounts/` — shared, operator-seeded notes.
-- `Agents/<your agent id>/` — your own folder, the default home for anything you
+- `standards/`, `playbooks/`, `accounts/` — shared, operator-seeded notes.
+- `agents/<your agent id>/` — your own folder, the default home for anything you
   produce.
 - `derived/` — rendered ledger views. Never hand-write anything here.
 
 ## Write scope
 
 Every specialist but `lead_gen` declares an explicit `context` confining
-`workspace_write`/`workspace_create` to `Accounts/Globex expansion.md` — this
-company's shared active-work document — plus its own `Agents/<id>/` home.
+`workspace_write`/`workspace_create` to `accounts/globex-expansion.md` — this
+company's shared active-work document — plus its own `agents/<id>/` home.
 
 ## The bar
 

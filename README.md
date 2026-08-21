@@ -1,5 +1,8 @@
 <p align="center">
-  <img src="gitbooks/.gitbook/assets/opencompany-hero.gif" alt="OpenCompany: run an entire company with a headcount of one" />
+  <picture>
+    <source srcset="gitbooks/.gitbook/assets/opencompany-hero.gif" type="image/gif" />
+    <img src="gitbooks/.gitbook/assets/opencompany-hero.png" alt="OpenCompany: run an entire company with a headcount of one" />
+  </picture>
 </p>
 
 <h1 align="center">OpenCompany</h1>
@@ -94,6 +97,7 @@ and about fifteen minutes.
 ```sh
 git clone --recurse-submodules https://github.com/tinyhumansai/opencompany.git
 cd opencompany
+export TINYHUMANS_API_KEY="th-..."   # grab yours at tinyhumans.ai
 ./scripts/launch-demo.sh marketing up
 ```
 

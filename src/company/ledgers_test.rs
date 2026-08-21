@@ -45,7 +45,7 @@ fn hazards() -> serde_json::Value {
         "slug": "hazards",
         "title": "Hazards",
         "purpose": "What could go wrong.",
-        "derived": "derived/HAZARDS.md",
+        "derived": "derived/hazards.md",
         "fields": [
             { "name": "id", "role": "id" },
             { "name": "risk", "role": "title" },
@@ -352,7 +352,7 @@ async fn a_write_publishes_the_derived_file() {
     let file = tree
         .iter()
         .find(|node| {
-            node.parent_id.as_deref() == Some(folder.id.as_str()) && node.name == "HAZARDS.md"
+            node.parent_id.as_deref() == Some(folder.id.as_str()) && node.name == "hazards.md"
         })
         .expect("the ledger's file exists");
     let (_, body) = runtime
@@ -373,7 +373,7 @@ async fn declaring_a_ledger_publishes_its_empty_file() {
     let (ctx, runtime, _home) = ledgers().await;
     define(&ctx, &hazards()).await.expect("declared");
     let tree = runtime.workspace().tree(runtime.id()).await.expect("tree");
-    assert!(tree.iter().any(|node| node.name == "HAZARDS.md"));
+    assert!(tree.iter().any(|node| node.name == "hazards.md"));
 }
 
 /// A read that returned twenty rows must be distinguishable from one that
@@ -528,7 +528,7 @@ async fn a_declaration_that_collides_is_refused() {
 
     let mut shadow = hazards();
     shadow["slug"] = json!("goals");
-    shadow["derived"] = json!("derived/OTHER.md");
+    shadow["derived"] = json!("derived/other.md");
     let error = define(&ctx, &shadow).await.expect_err("built in");
     assert!(format!("{error}").contains("built-in"), "{error}");
 }
@@ -602,7 +602,7 @@ async fn republish_writes_every_ledgers_file() {
     // Three built-ins, the baseline's own, and the one just declared.
     assert_eq!(written, 4 + crate::globals::ledgers().len());
     let tree = runtime.workspace().tree(runtime.id()).await.expect("tree");
-    for name in ["TASKS.md", "GOALS.md", "DECISIONS.md", "HAZARDS.md"] {
+    for name in ["tasks.md", "goals.md", "decisions.md", "hazards.md"] {
         assert!(
             tree.iter().any(|node| node.name == name),
             "`{name}` was not written"

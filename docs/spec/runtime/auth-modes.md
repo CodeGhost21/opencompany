@@ -71,12 +71,21 @@ company definition does: a hosting platform, which must be able to guarantee a
 mode across every tenant whatever a tenant wrote, and any host that must pin a
 mode independent of a per-company manifest.
 
-The packaged desktop app is not on this list today: it still signs its operator
-in over the `email` path with a synthetic, loopback-only mailbox
-(`DESKTOP_OPERATOR_EMAIL`, see `docs/spec/runtime/desktop.md`), which predates
-this change and is out of scope for it. `none` mode is a natural fit for that
-use case — a single local user with no invite flow to run — but migrating the
-desktop app onto it is separate work, tracked on its own.
+The **packaged desktop app is the canonical layer-1 user.** It sets
+`auth_mode_override` to `AuthMode::None` on its own `AppConfig`
+(`src-tauri/src/embedded.rs`), which is what makes a desktop install a host
+with no login screen at all. It sets it there rather than writing
+`[users].mode = "none"` into the shipped preset manifests, and the difference
+is not stylistic: the override reaches *every* company on the data root,
+including ones left by an install that predates it — so an existing install
+migrates by relaunching — and it leaves `manifest.users.mode` alone, which
+matters because `validate_users` flags a manifest carrying `[users].admins`
+under `none` and both seeding paths treat a flagged manifest as a hard error.
+
+It is a **default, not a ceiling**: the root's `config.toml` still wins when it
+names a mode, so an operator who chooses `email` in setup — to share their
+instance with somebody — keeps that choice across a relaunch. See
+[the desktop client](desktop.md#no-sign-in-at-all).
 
 An unparseable value **aborts boot**. "The sign-in you configured is not the one
 you got" is invisible from a running host.
@@ -193,7 +202,7 @@ wallet.
 
 ## `none`
 
-For the packaged desktop app: a loopback host, one person, no accounts.
+What the packaged desktop app runs: a loopback host, one person, no accounts.
 
 It does not merely hide the login screen. There is no sign-in and **no way to add
 a second person** — every route that would invite, re-role, suspend or
@@ -215,6 +224,26 @@ request: chat attribution, task assignment and the audit trail all key off
 first of them that looked the user up. It is the one place a user is created
 without anyone proving anything, and it can be, because the mode's premise is
 that whoever reaches this host is its owner.
+
+**A remotely paired device cannot be used against a `none`-mode host, and this
+is a real capability the desktop gave up to get here.** The flow does not fail
+where anyone would notice it: the person at the machine is the local owner, so
+they can mint a pairing code, and `claim` finds `local:owner` by identity and
+redeems it into a genuine device `SessionRecord`. Only the *use* fails, and only
+from the one place the credential was minted to be used. Two independent
+refusals stand in the way and either alone is enough — `authenticate_session`
+returns `None` for any session on a company with no login (the rule that stops a
+session outliving a mode flip), and `resolve_principal` asks `local_owner`
+first, so a remote device's non-loopback peer answers `GatesRefused` and the
+request is refused outright rather than degrading to the session path at all.
+
+That is accepted rather than worked around. Pairing a phone to a laptop's
+company is a second person on a second machine, which is exactly the premise
+`none` trades away in exchange for having no accounts; a desktop that wants it
+should choose `email` in setup, which is why that choice is a preselection and
+not a lock. `none_mode_pairs_a_device_that_cannot_then_be_used_remotely` in
+`src/server/users/mode_test.rs` pins the whole shape, minting included, so the
+trap is documented as behaviour rather than as prose.
 
 **Three independent gates, not one, keep `none` from being reachable from
 somewhere its operator did not intend.** A company with no sign-in on a host
@@ -263,7 +292,8 @@ a replacement for it.
 
 ## What the console is told
 
-`GET …/auth/config` → `{"mode": "email"|"wallet"|"none", "passwords": bool}`.
+`GET …/auth/config` →
+`{"mode": "email"|"wallet"|"none", "name": string, "passwords": bool, "magicLink": bool}`.
 
 Unauthenticated by construction, like every other login route: the console asks
 before anyone has a credential, because it cannot choose a screen otherwise. It
@@ -271,6 +301,23 @@ must branch on this rather than on which routes fail — a wallet company and a
 misconfigured email company both refuse `auth/request`, and only one of them
 should be offered a wallet button. A console that cannot reach this route assumes
 `email`, which is what every host predating it does.
+
+`name` is what the company calls itself — the manifest's display name, falling
+back to the company id, never empty. It is here because the sign-in screen is
+where a person confirms *what* they are handing a credential to, and every other
+route that reports the name is behind the very sign-in being drawn. On the
+hosted platform each tenant is a separate company on its own URL, so the host
+knows this for certain; publishing it discloses no membership, exactly as the
+mode does not. A console talking to a host that omits it draws the bare
+"Sign in" it drew before the field existed.
+
+`magicLink` is whether a link asked for here reaches anybody: a wired mail
+transport, or a loopback host that hands the code back in the response. It is
+false on a routable host with no transport, and the console must say so instead
+of drawing the form — `auth/request` answers `sent: true` there exactly as it
+does on a host that delivered, deliberately, so nothing about the response
+itself tells the person their link went nowhere. A host predating the field is
+assumed `true`, matching the `email` default above.
 
 ## Related
 

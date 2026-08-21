@@ -34,6 +34,8 @@ async fn state() -> (AppState, tempfile::TempDir) {
     let id = CompanyId::new("acme");
     store
         .save(&CompanyRecord {
+            overlay_retired_agents: Vec::new(),
+            overlay_agent_edits: Vec::new(),
             id: id.clone(),
             manifest: manifest(),
             ledger: Vec::new(),
@@ -96,7 +98,7 @@ fn hazards() -> Value {
         "slug": "hazards",
         "title": "Hazards",
         "purpose": "What could go wrong.",
-        "derived": "derived/HAZARDS.md",
+        "derived": "derived/hazards.md",
         "fields": [
             { "name": "id", "role": "id" },
             { "name": "risk", "role": "title" },
@@ -132,7 +134,9 @@ async fn the_listing_carries_the_built_ins_with_their_shape() {
     // The console needs the shape to render a form; it must not have to guess.
     let goals = &body["ledgers"][1];
     assert!(goals["fields"].as_array().unwrap().len() > 3);
-    assert!(goals["statuses"].as_array().unwrap().len() > 3);
+    // Three, on every ledger, since issue #1512 — so this asserts the ceiling
+    // rather than a floor it used to assert in the other direction.
+    assert_eq!(goals["statuses"].as_array().unwrap().len(), 3);
     assert_eq!(goals["open"], 0);
     assert_eq!(
         body["remaining"],
@@ -426,7 +430,7 @@ async fn the_derived_file_appears_in_the_workspace_and_is_read_only() {
     let nodes = tree.as_array().expect("tree");
     let file = nodes
         .iter()
-        .find(|node| node["name"] == "HAZARDS.md")
+        .find(|node| node["name"] == "hazards.md")
         .expect("the ledger's file is in the tree");
     let id = file["id"].as_str().unwrap();
 
