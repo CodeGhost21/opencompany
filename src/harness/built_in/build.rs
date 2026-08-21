@@ -890,10 +890,12 @@ pub fn build_agent(
         || !skill_deltas.is_empty()
         || !crate::globals::skills().is_empty()
     {
+        // Named through the same helper as the sandbox beside it, so the two
+        // siblings cannot end up under different spellings of one agent.
         let skill_ws = deps
             .workspace_root
-            .join(company.as_ref())
-            .join(&manifest_agent.id)
+            .join(sandbox_segment(company.as_ref()))
+            .join(sandbox_segment(&manifest_agent.id))
             .join("skill-catalog");
         // Best-effort, not fatal. This ran only for a company with a skills
         // source or an operator delta until the global baseline made it run for
@@ -1210,7 +1212,27 @@ pub(crate) fn grants_cover(grants: &[String], namespace: &str) -> bool {
 /// Naming only — this never touches the disk. Anything that needs the directory
 /// to *exist* goes through [`ensure_agent_workspace`].
 pub fn agent_workspace(root: &Path, company: &CompanyId, agent_id: &str) -> PathBuf {
-    root.join(company.as_ref()).join(agent_id).join("workspace")
+    root.join(sandbox_segment(company.as_ref()))
+        .join(sandbox_segment(agent_id))
+        .join("workspace")
+}
+
+/// One directory name in the sandbox tree, under the workspace naming rule.
+///
+/// The sandbox is the other half of "the agent's workspace", and it carried the
+/// company id and the roster id verbatim — so a company browsing its own data
+/// directory found `agentic_law_firm/page_builder/` next to a note tree whose
+/// every name is lowercase and dashed. One rule for both
+/// ([`crate::company::workspace_names`]) is the point.
+///
+/// Two ids cannot collide into one sandbox by being normalized. Roster ids are
+/// snake_case (`company::manifest::is_snake_case`), so `-` never occurs in one
+/// and the mapping is injective over that alphabet. A company id is not
+/// validated that tightly, but it already shares a slug with its bundle
+/// directory (`store::paths`), so two ids that normalize alike were sharing
+/// their company data long before they shared a sandbox.
+fn sandbox_segment(raw: &str) -> String {
+    crate::company::workspace_names::kebab_name_or(raw, raw)
 }
 
 /// One agent's shell audit sink directory, resolved from the instance data root:
@@ -1272,8 +1294,56 @@ pub fn ensure_agent_workspace(
     agent_id: &str,
 ) -> std::io::Result<PathBuf> {
     let workspace = agent_workspace(root, company, agent_id);
+    adopt_legacy_sandbox(root, company, agent_id, &workspace);
     std::fs::create_dir_all(&workspace)?;
     Ok(workspace)
+}
+
+/// Move a pre-lowercase-dashed sandbox onto its canonical path, once.
+///
+/// The tree used to be named by the company and roster ids verbatim
+/// (`agentic_law_firm/page_builder/`), and an agent upgraded into the new
+/// naming would otherwise start in an empty directory with its half-finished
+/// work still on disk under the old name — present, unreachable, and reported
+/// by nothing.
+///
+/// This is a *rename*, unlike the workspace tree, where the equivalent
+/// migration is refused and offered as an operator action instead. The two are
+/// different things: this directory is the agent's private scratch, addressed
+/// only by [`agent_workspace`] within this process, with no ids, no links and
+/// no console pointing into it. Nothing outside can notice the move.
+///
+/// Best-effort and silent-on-conflict by construction: it acts only when the
+/// canonical path does not exist and the legacy one is a directory, so it
+/// cannot overwrite a live sandbox, and a failed rename simply leaves the
+/// agent with a fresh empty one rather than failing the turn.
+fn adopt_legacy_sandbox(root: &Path, company: &CompanyId, agent_id: &str, canonical: &Path) {
+    let legacy = root.join(company.as_ref()).join(agent_id).join("workspace");
+    if legacy == canonical || canonical.exists() || !legacy.is_dir() {
+        return;
+    }
+    let Some(parent) = canonical.parent() else {
+        return;
+    };
+    if std::fs::create_dir_all(parent).is_err() {
+        return;
+    }
+    match std::fs::rename(&legacy, canonical) {
+        Ok(()) => tracing::info!(
+            company = %company,
+            agent = %agent_id,
+            from = %legacy.display(),
+            to = %canonical.display(),
+            "[harness] moved the agent sandbox onto its lowercase-dashed path"
+        ),
+        Err(error) => tracing::warn!(
+            company = %company,
+            agent = %agent_id,
+            %error,
+            from = %legacy.display(),
+            "[harness] could not move the legacy agent sandbox; starting from an empty one"
+        ),
+    }
 }
 
 /// A [`SecurityPolicy`] that sandboxes an agent's file tools to `workspace` and
