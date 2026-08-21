@@ -13,6 +13,12 @@ import type { StreamHandlers, Transport, TransportResponse } from "./transport";
 import {
   type AgentDetailDto,
   ApiError,
+  type BoardComment,
+  type BoardDetail,
+  type BoardItem,
+  type BoardPage,
+  type BoardQuery,
+  type BoardVote,
   type ReadMarker,
   type ReadStateResponse,
   type ApiErrorBody,
