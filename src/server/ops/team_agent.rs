@@ -1656,13 +1656,21 @@ prompt = "Lead decisively."
         assert_eq!(reread["instructions"], "Answer only in haiku.", "{reread}");
         assert_eq!(reread["instructionsOverridden"], true, "{reread}");
 
-        // The conditional 409 did NOT open the gate for a native field: a role
-        // edit on the same manifest teammate is still refused.
-        let (status, refusal) = patch_agent(&state, "ceo", json!({"role": "Chief Vibes"})).await;
+        // Merged behavior (main's agent-edit surface): a manifest teammate's
+        // native fields are editable through the same override layer — a role
+        // edit returns 200 and lands as an overlay, `company.toml` untouched —
+        // and it composes with the instructions override set above.
+        let (status, edited_role) =
+            patch_agent(&state, "ceo", json!({"role": "Chief Vibes"})).await;
+        assert_eq!(status, StatusCode::OK, "{edited_role}");
+        assert_eq!(edited_role["role"], "Chief Vibes", "{edited_role}");
         assert_eq!(
-            status,
-            StatusCode::CONFLICT,
-            "a manifest-native field stays read-only: {refusal}"
+            edited_role["source"], "manifest",
+            "still a blueprint teammate: {edited_role}"
+        );
+        assert_eq!(
+            edited_role["instructions"], "Answer only in haiku.",
+            "the role edit leaves the instructions override intact: {edited_role}"
         );
     }
 
