@@ -168,42 +168,11 @@ Adding a phase or a stage is one edit. The labels are pinned in Rust by
 `the_labels_are_the_ones_every_surface_renders` — an assertion that was
 impossible to write while the console kept a copy.
 
-### Why three, and not six
-
-Six lifecycle states is the right number for the runtime and the wrong number
-for a reader. The board asked every agent and every operator to hold a six-word
-vocabulary in which four of the words mean some shade of *a teammate has started
-this*, told apart by which machine is currently owed something — a distinction
-the runtime needs and nobody else does. What that bought was agents filing cards
-`in_review` when they meant paused, filing work as `planning` because a plan
-existed, and reading a rendered board they could not summarise.
-
-So the four middle stages are one column now:
-
-| phase | stages it covers | closed |
-| --- | --- | --- |
-| `pending` | `todo` | no |
-| `working` | `planning`, `in_progress`, `paused`, `in_review` | no |
-| `done` | `done` | yes |
-
-Nothing is lost. The stage rides on the row — a `stage` field in
-`derived/TASKS.md`, `Task.stage` on the wire, a badge beside the status on the
-card — so *waiting on your verdict* is still visible where it matters, as a
-property of a working card rather than as a fourth pile to file it into. The
-console reads the stage for everything genuinely stage-specific: Resume on a
-paused card, the review link on one waiting for a verdict.
-
-**Writes take a phase.** A drop sends `working`, and the write boundary resolves
-it to that phase's `entry_stage` — `in_progress`, which dispatches. Stage words
-are still accepted (the runtime's own paths speak them, and so does every stored
-card) but the refusal names only the three, because a caller who guessed wrong
-should be learning the small vocabulary rather than the large one.
-
-**Planning is an act, not a column.** Dragging a card into Planning was the one
-console route to a planning pass, and three columns has no drop target for it.
-It is a *Plan first* control on the card instead, which is where an act belonged
-rather than a state. It writes the `planning` stage and spends exactly what the
-drag spent.
+The phases exist because six lifecycle states is the right number for the
+runtime and the wrong number for a reader; the four middle stages are one column
+now, and the stage rides on the row instead. The full argument, the mapping
+table and what a write takes are in
+[ledger-statuses.md](./ledger-statuses.md).
 
 **The ids stay leaf constants.** `COLUMN_IN_PROGRESS` and its siblings remain
 plain `&str` consts on the port, and the table refers to them: entering
