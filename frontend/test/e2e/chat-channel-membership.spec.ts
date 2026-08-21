@@ -57,7 +57,7 @@ const DESKS = [
 type DesksMode = "ok" | "404" | "500" | "slow";
 
 /** Every chat POST the console made, so the send path can be asserted on. */
-const sentChats: { text: string; chat?: string }[] = [];
+const sentChats: { text: string; chat?: string; detach?: boolean }[] = [];
 
 /**
  * Stub the operator API.
@@ -100,7 +100,7 @@ async function mockApi(page: Page, mode: () => DesksMode) {
 
     if (path.endsWith("/team")) return json(ROSTER);
     if (path.endsWith("/chat")) {
-      const body = route.request().postDataJSON() as { text: string; chat?: string };
+      const body = route.request().postDataJSON() as { text: string; chat?: string; detach?: boolean };
       sentChats.push(body);
       return json({ responses: [{ text: `echo: ${body.text}`, channel: body.chat }] });
     }
@@ -327,6 +327,9 @@ test("the send path and the thread id it addresses are undisturbed", async ({ pa
   await page.getByPlaceholder("Message #content").press("Enter");
   await expect(page.getByText("echo: ping")).toBeVisible({ timeout: 30_000 });
   // A desk's channel id doubles as its host thread id; none of the above may
-  // change what the composer addresses.
-  expect(sentChats.at(-1)).toEqual({ text: "ping", chat: "content" });
+  // change what the composer addresses. `detach: true` rides along on every
+  // send since issue #983 (the console always asks for the accept-and-poll
+  // shape now), which is orthogonal to what this test guards — the identity
+  // of `chat` — so it is asserted for rather than making the match partial.
+  expect(sentChats.at(-1)).toEqual({ text: "ping", chat: "content", detach: true });
 });

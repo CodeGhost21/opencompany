@@ -469,6 +469,7 @@ impl<'a> CycleRunner<'a> {
             // never pruned, and a cycle needs the link for at most the couple of
             // `ApprovalResolved` ids in its own batch.
             cycle_task_id(&request.events, |id| self.rt.journal.approval_task(id)),
+            cycle_is_external(&request.events),
             // Issue #379: and which conversation, on the same terms — read off
             // the same trigger events, from the same retained origins. Issue
             // #435 widened this to the channel *and* the thread within it, in
@@ -1874,6 +1875,28 @@ fn short_thread_digest(thread: &str) -> String {
 /// [`TaskLink::Unlinked`](crate::runtime::journal::TaskLink::Unlinked): honest,
 /// and deliberately *not* a fall-back to the run window, which would put the
 /// approval right back on whichever card was running.
+/// Whether a cycle's trigger batch contains content that arrived from
+/// OUTSIDE — a `WebhookReceived` (a channel message, an email, a third-party
+/// callback). Operator speech (`OperatorMessage`), dispatches, schedule fires
+/// and payment notifications are the company's own machinery: Internal, per
+/// the operator-facts authorship precedent. Named and pure so the boundary is
+/// testable — see `CycleHostImpl::external_trigger` for what rides on it.
+///
+/// `A2aTaskReceived` sits WITH `WebhookReceived`: it is a remote agent's raw
+/// payload (the operator surface calls both "raw third-party payloads", and
+/// the A2A route promptguard-sanitizes it for exactly that reason) — the #68
+/// sibling review's M1 caught it missing here. `FeedbackFiled` is a
+/// deliberate Internal: feedback is filed through the company's own console
+/// by its own people — operator authorship, not outside content.
+fn cycle_is_external(events: &[CompanyEvent]) -> bool {
+    events.iter().any(|event| {
+        matches!(
+            event,
+            CompanyEvent::WebhookReceived { .. } | CompanyEvent::A2aTaskReceived { .. }
+        )
+    })
+}
+
 fn cycle_task_id(
     events: &[CompanyEvent],
     approval_task: impl Fn(&ApprovalId) -> Option<Option<TaskLink>>,
@@ -2249,6 +2272,17 @@ struct CycleHostImpl<'a> {
     /// agrees on a channel but not on a thread within it — which degrades to
     /// exactly the pre-#435 behaviour of answering in the channel.
     thread_parent: Option<EventSeq>,
+    /// Whether this cycle was triggered by content that arrived from OUTSIDE —
+    /// a `WebhookReceived` (a channel message, an email, a third-party
+    /// callback) or an `A2aTaskReceived` (a remote agent's payload) in its
+    /// trigger batch. Computed once, like `task_id`. A brain-chosen
+    /// `ContextOp::Put` in such a cycle can be (and on the medulla path
+    /// routinely is) the raw inbound payload echoed back, so the write goes
+    /// through the taint-stamping inbound port instead of the internal one
+    /// (issue #1113). Coarse by design: the host cannot see which put quoted
+    /// the payload, so every put of an externally-triggered cycle carries the
+    /// external stamp — over-tainting is safe, under-tainting is the leak.
+    external_trigger: bool,
 }
 
 impl<'a> CycleHostImpl<'a> {
@@ -2257,6 +2291,7 @@ impl<'a> CycleHostImpl<'a> {
         cycle_id: String,
         rt: &'a CompanyRuntime,
         task_id: Option<String>,
+        external_trigger: bool,
         conversation: ApprovalConversation,
     ) -> Self {
         Self {
@@ -2267,6 +2302,7 @@ impl<'a> CycleHostImpl<'a> {
             executed: StdMutex::new(Vec::new()),
             parked: StdMutex::new(Vec::new()),
             task_id,
+            external_trigger,
             thread_id: conversation.thread,
             thread_parent: conversation.parent,
         }
@@ -2677,9 +2713,16 @@ impl CycleHost for CycleHostImpl<'_> {
 
     async fn context_op(&self, op: ContextOp) -> Result<ContextOpResult> {
         match op {
-            ContextOp::Put(chunk) => Ok(ContextOpResult::Addr(
-                self.rt.context.put(&self.company, chunk).await?,
-            )),
+            ContextOp::Put(chunk) => Ok(ContextOpResult::Addr({
+                // External-triggered cycles write through the taint-stamping
+                // port; see `external_trigger` on this struct.
+                let port = if self.external_trigger {
+                    &self.rt.inbound_context
+                } else {
+                    &self.rt.context
+                };
+                port.put(&self.company, chunk).await?
+            })),
             ContextOp::List { prefix } => Ok(ContextOpResult::Metas(
                 self.rt.context.list(&self.company, &prefix).await?,
             )),
@@ -3587,6 +3630,10 @@ mod test {
 
         async fn search(&self, id: &CompanyId, query: &str, limit: usize) -> Result<Vec<ChunkHit>> {
             self.inner.search(id, query, limit).await
+        }
+
+        async fn delete(&self, id: &CompanyId, addr: &ChunkAddr) -> Result<bool> {
+            self.inner.delete(id, addr).await
         }
     }
 
@@ -5412,6 +5459,246 @@ mod test {
         assert!(recipient_is_established(&rt, "X@EXT.COM").await);
     }
 
+    /// Issue #1113: the trigger boundary, named event by event. Outside
+    /// content — a webhook here, an A2A task in the sibling test — makes a
+    /// cycle external; the company's own machinery — operator speech,
+    /// payments, dispatches, schedule fires — stays Internal, per the
+    /// operator-facts authorship precedent.
+    #[test]
+    fn outside_content_makes_a_cycle_external_and_own_machinery_does_not() {
+        use crate::ports::types::Actor;
+        let webhook = CompanyEvent::WebhookReceived {
+            channel: "telegram".into(),
+            body: serde_json::json!({"text": "raw payload"}),
+        };
+        let operator = CompanyEvent::OperatorMessage {
+            text: "please do the thing".into(),
+            by: Option::<Actor>::None,
+            chat: None,
+            parent: None,
+            deliverable: None,
+        };
+        // The company's own machinery stays Internal, event by event: a
+        // payment landing is the company's ledger speaking, not third-party
+        // prose riding an open boundary.
+        let payment = CompanyEvent::PaymentReceived {
+            amount_usd: 10.0,
+            memo: "invoice".into(),
+        };
+        assert!(cycle_is_external(&[webhook]));
+        assert!(!cycle_is_external(&[operator]));
+        assert!(!cycle_is_external(&[payment]));
+        assert!(!cycle_is_external(&[]));
+    }
+
+    /// The #68 sibling review's M1: an A2A task is a remote agent's payload —
+    /// third-party content, external. Mixed batches over-taint (any(), not
+    /// all()): the safe direction, asserted in both orderings.
+    #[test]
+    fn a2a_tasks_are_external_and_mixed_batches_over_taint() {
+        use crate::ports::types::Actor;
+        let a2a = || CompanyEvent::A2aTaskReceived {
+            from: "remote-agent".into(),
+            task: serde_json::json!({"text": "do the thing"}),
+        };
+        let operator = || CompanyEvent::OperatorMessage {
+            text: "hi".into(),
+            by: Option::<Actor>::None,
+            chat: None,
+            parent: None,
+            deliverable: None,
+        };
+        assert!(cycle_is_external(&[a2a()]));
+        assert!(cycle_is_external(&[operator(), a2a()]));
+        assert!(cycle_is_external(&[a2a(), operator()]));
+    }
+
+    /// The routing the flag drives: an externally-triggered cycle's
+    /// `ContextOp::Put` lands on the inbound (taint-stamping) port, an
+    /// ordinary cycle's on the plain context port — proven with two disjoint
+    /// stores, so a write to the wrong one is a visible row, not a guess.
+    #[tokio::test]
+    async fn external_cycles_put_through_the_inbound_port() {
+        use crate::ports::ContextStore;
+        use crate::store::FsContextStore;
+
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
+        let plain_dir = tempfile::tempdir().unwrap();
+        let inbound_dir = tempfile::tempdir().unwrap();
+        let plain: Arc<dyn ContextStore> =
+            Arc::new(FsContextStore::new(plain_dir.path().to_path_buf()));
+        let inbound: Arc<dyn ContextStore> =
+            Arc::new(FsContextStore::new(inbound_dir.path().to_path_buf()));
+        let rt = RuntimeBuilder::new(home, manifest("full"))
+            .with_context(plain.clone())
+            .with_inbound_context(inbound.clone())
+            .build()
+            .await
+            .unwrap();
+
+        for (external, cycle) in [(false, "cyc-int"), (true, "cyc-ext")] {
+            let host = CycleHostImpl::new(
+                rt.id().clone(),
+                cycle.into(),
+                &rt,
+                None,
+                external,
+                ApprovalConversation::default(),
+            );
+            host.context_op(ContextOp::Put(crate::ports::types::ContextChunk {
+                label: format!("probe/{cycle}"),
+                body: format!("body {cycle}"),
+            }))
+            .await
+            .unwrap();
+        }
+
+        let company = rt.id().clone();
+        let plain_rows = plain.list(&company, "probe/").await.unwrap();
+        let inbound_rows = inbound.list(&company, "probe/").await.unwrap();
+        assert_eq!(
+            plain_rows
+                .iter()
+                .map(|m| m.label.as_str())
+                .collect::<Vec<_>>(),
+            ["probe/cyc-int"],
+            "the ordinary cycle writes the plain port, and only it"
+        );
+        assert_eq!(
+            inbound_rows
+                .iter()
+                .map(|m| m.label.as_str())
+                .collect::<Vec<_>>(),
+            ["probe/cyc-ext"],
+            "the external cycle writes the inbound port, and only it"
+        );
+    }
+
+    /// The same routing guarantee through `with_memory_overlay`: the overlay
+    /// carries the inbound port, and dropping it in the builder was the break
+    /// that once left the whole firewall dead (issue #1113). An external
+    /// cycle on an overlay-built runtime must still write the taint-stamping
+    /// store.
+    #[tokio::test]
+    async fn overlay_built_runtimes_route_external_puts_through_the_inbound_port() {
+        use crate::ports::ContextStore;
+        use crate::store::{FsContextStore, FsMemoryStore, MemoryOverlay};
+
+        let home_dir = tmp_home();
+        let plain_dir = tempfile::tempdir().unwrap();
+        let inbound_dir = tempfile::tempdir().unwrap();
+        let plain: Arc<dyn ContextStore> =
+            Arc::new(FsContextStore::new(plain_dir.path().to_path_buf()));
+        let inbound: Arc<dyn ContextStore> =
+            Arc::new(FsContextStore::new(inbound_dir.path().to_path_buf()));
+        let memory_dir = tempfile::tempdir().unwrap();
+        let overlay = MemoryOverlay::test_with_ports(
+            Arc::new(FsMemoryStore::new(memory_dir.path().to_path_buf())),
+            plain.clone(),
+            Some(inbound.clone()),
+        );
+        let rt = RuntimeBuilder::new(home_dir.path().to_path_buf(), manifest("full"))
+            .with_memory_overlay(&overlay)
+            .build()
+            .await
+            .unwrap();
+
+        let host = CycleHostImpl::new(
+            rt.id().clone(),
+            "cyc-overlay-ext".into(),
+            &rt,
+            None,
+            true,
+            ApprovalConversation::default(),
+        );
+        host.context_op(ContextOp::Put(crate::ports::types::ContextChunk {
+            label: "probe/overlay".into(),
+            body: "external body".into(),
+        }))
+        .await
+        .unwrap();
+
+        let company = rt.id().clone();
+        assert_eq!(
+            inbound
+                .list(&company, "probe/")
+                .await
+                .unwrap()
+                .iter()
+                .map(|m| m.label.as_str())
+                .collect::<Vec<_>>(),
+            ["probe/overlay"],
+            "the overlay's inbound port receives the external cycle's put"
+        );
+        assert!(
+            plain.list(&company, "probe/").await.unwrap().is_empty(),
+            "the plain port must not see the external put"
+        );
+    }
+
+    /// And through `RuntimeHandover`: a successor runtime adopts the
+    /// predecessor's inbound port, so an external cycle after a live swap
+    /// still writes taint-stamped. A handover that dropped the port would
+    /// silently revert every post-swap external put to internal trust.
+    #[tokio::test]
+    async fn handover_preserves_the_inbound_port_for_external_puts() {
+        use crate::ports::ContextStore;
+        use crate::store::FsContextStore;
+
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
+        let plain_dir = tempfile::tempdir().unwrap();
+        let inbound_dir = tempfile::tempdir().unwrap();
+        let plain: Arc<dyn ContextStore> =
+            Arc::new(FsContextStore::new(plain_dir.path().to_path_buf()));
+        let inbound: Arc<dyn ContextStore> =
+            Arc::new(FsContextStore::new(inbound_dir.path().to_path_buf()));
+        let first = RuntimeBuilder::new(home.clone(), manifest("full"))
+            .with_context(plain.clone())
+            .with_inbound_context(inbound.clone())
+            .build()
+            .await
+            .unwrap();
+        let successor = RuntimeBuilder::new(home, manifest("full"))
+            .with_handover(first.handover())
+            .build()
+            .await
+            .unwrap();
+
+        let host = CycleHostImpl::new(
+            successor.id().clone(),
+            "cyc-swap-ext".into(),
+            &successor,
+            None,
+            true,
+            ApprovalConversation::default(),
+        );
+        host.context_op(ContextOp::Put(crate::ports::types::ContextChunk {
+            label: "probe/swap".into(),
+            body: "external body".into(),
+        }))
+        .await
+        .unwrap();
+
+        let company = successor.id().clone();
+        assert_eq!(
+            inbound
+                .list(&company, "probe/")
+                .await
+                .unwrap()
+                .iter()
+                .map(|m| m.label.as_str())
+                .collect::<Vec<_>>(),
+            ["probe/swap"],
+            "the successor's external cycle writes the inherited inbound port"
+        );
+        assert!(
+            plain.list(&company, "probe/").await.unwrap().is_empty(),
+            "the successor's plain port must not see the external put"
+        );
+    }
+
     #[tokio::test]
     async fn send_email_without_mail_returns_clean_error() {
         let home_dir = tmp_home();
@@ -5426,6 +5713,7 @@ mod test {
             "cyc-nomail".into(),
             &rt,
             None,
+            false,
             ApprovalConversation::default(),
         );
 
@@ -5455,6 +5743,7 @@ mod test {
             "cyc-bad".into(),
             &rt,
             None,
+            false,
             ApprovalConversation::default(),
         );
 
@@ -5484,6 +5773,7 @@ mod test {
             "cyc-park".into(),
             &rt,
             None,
+            false,
             ApprovalConversation::default(),
         );
 
@@ -5515,6 +5805,7 @@ mod test {
             "cyc-task".into(),
             &rt,
             Some("t-42".to_string()),
+            false,
             ApprovalConversation::default(),
         );
 
@@ -5568,6 +5859,7 @@ mod test {
             "cyc-chat".into(),
             &rt,
             None,
+            false,
             ApprovalConversation::default(),
         );
 
@@ -5605,6 +5897,7 @@ mod test {
             "cyc-thread".into(),
             &rt,
             None,
+            false,
             ApprovalConversation {
                 thread: Some("desk-finance".to_string()),
                 parent: None,
@@ -5666,6 +5959,7 @@ mod test {
             "cyc-none".into(),
             &rt,
             None,
+            false,
             ApprovalConversation::default(),
         );
 
@@ -5738,6 +6032,7 @@ mod test {
             "cyc-research".into(),
             &rt,
             None,
+            false,
             ApprovalConversation {
                 thread: Some("desk-marketing".to_string()),
                 parent: None,
@@ -5764,6 +6059,7 @@ mod test {
             "cyc-later".into(),
             &rt,
             None,
+            false,
             ApprovalConversation {
                 thread: Some("desk-marketing".to_string()),
                 parent: None,
@@ -6420,6 +6716,7 @@ mod test {
             "cyc-send".into(),
             &rt,
             None,
+            false,
             ApprovalConversation::default(),
         );
 
@@ -6490,6 +6787,7 @@ mod test {
             "cyc-deep".into(),
             &rt,
             None,
+            false,
             ApprovalConversation::default(),
         );
         let res = host
@@ -6582,6 +6880,7 @@ mod test {
             "cyc".into(),
             &rt,
             None,
+            false,
             ApprovalConversation::default(),
         );
 
@@ -6622,6 +6921,7 @@ mod test {
             "cyc".into(),
             &rt,
             None,
+            false,
             ApprovalConversation::default(),
         );
 
@@ -6664,6 +6964,7 @@ mod test {
             "cyc".into(),
             &rt,
             None,
+            false,
             ApprovalConversation::default(),
         );
 
