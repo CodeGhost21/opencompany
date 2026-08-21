@@ -167,6 +167,11 @@ the two board predicates the adapter needs. Theme tokens live under `.oc-kg`
 in `src/index.css`.
 
 The graph is the whole page, so its chrome stays minimal: a pillar selector, a
-kind legend, the side paddles, and the detail card. The docked directory index
+kind legend, the side paddles, and the detail card. The selector names every
+desk rather than numbering them (issue #1309) — it used to draw one anonymous
+dot per desk under the words "Pick a pillar", so the control that exists to
+choose a desk said which was which only on hover, and said nothing at all to a
+touch device. The chips wrap rather than scroll or clip; each carries the
+colour its pillar's node and label already carry. The docked directory index
 and the entity/function/action lenses were removed — with nothing else on the
 page competing for attention, they covered more of the graph than they earned.

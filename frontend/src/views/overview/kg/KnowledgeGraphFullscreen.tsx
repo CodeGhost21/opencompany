@@ -108,46 +108,59 @@ export function KnowledgeGraphFullscreen({
         {/* vault search — top-left while the Notes core is open */}
         {searchSlot && <div className="absolute left-5 top-5 z-10">{searchSlot}</div>}
 
-        {/* pillar selector — compact, TOP-LEFT: convenient, not in
-            the graph's way): current pillar + one dot per pillar to jump */}
+        {/* pillar selector — compact, TOP-LEFT: convenient, not in the
+            graph's way. One named chip per desk (issue #1309).
+
+            It used to be three 10px dots at 50% opacity under the words "Pick
+            a pillar", and the names existed only in each dot's `title` — so
+            the control that exists to choose a desk refused to say which desk
+            was which, while the graph named all three in their own colours a
+            few inches away. You had to click a blind dot to learn what it was.
+
+            The chips wrap rather than scroll or truncate the row: a company
+            with ten desks gets three short lines in the corner, which is a
+            legible answer, where a clipped row is not. The colour is the same
+            one the desk's node and label carry, so the chip and the pillar are
+            visibly the same thing. */}
         {!coreOpen && (
-          <div className="absolute left-5 top-5 z-20 flex items-center gap-2.5 rounded-sm-t border border-os-border-strong bg-os-bg/85 px-2.5 py-1.5 backdrop-blur">
-            <div className="flex flex-col">
-              <span
-                className="max-w-[150px] truncate text-xs font-bold leading-tight transition-colors duration-300"
-                style={currentDept ? { color: currentDept.color } : undefined}
-              >
-                {currentDept?.name ?? 'Pick a pillar'}
-              </span>
-              <span className="font-mono text-3xs uppercase tracking-[0.14em] text-os-dim">
-                {idx >= 0 ? `${idx + 1} / ${deptList.length}` : `${deptList.length} pillars`}
-              </span>
-            </div>
-            <div className="flex items-center gap-0.5 border-l border-os-border pl-2">
-              {deptList.map((d) => {
-                const active = d.teamId === currentTeamId;
-                return (
-                  <button
-                    key={d.teamId}
-                    onClick={() => onNavDept(d.teamId)}
-                    title={d.name}
-                    aria-label={d.name}
-                    aria-current={active ? 'true' : undefined}
-                    className="group grid h-6 w-5 place-items-center"
-                  >
-                    <span
-                      className={`rounded-full transition-all duration-200 group-hover:scale-125 ${
-                        active ? 'h-3 w-3' : 'h-2.5 w-2.5 opacity-50 group-hover:opacity-100'
+          <div className="absolute left-5 top-5 z-20 flex max-w-[min(34rem,45vw)] flex-col gap-1 rounded-sm-t border border-os-border-strong bg-os-bg/85 px-2.5 py-1.5 backdrop-blur">
+            <span className="font-mono text-3xs uppercase tracking-[0.14em] text-os-dim">
+              {/* Names the group rather than instructing. "Pick a pillar" was
+                  an imperative with no visible object, and at zero desks it
+                  asked for something the page made impossible. */}
+              {deptList.length > 0 ? 'Pillars' : 'No desks yet'}
+            </span>
+            {deptList.length > 0 && (
+              <div className="flex flex-wrap items-center gap-x-1 gap-y-0.5">
+                {deptList.map((d) => {
+                  const active = d.teamId === currentTeamId;
+                  return (
+                    <button
+                      key={d.teamId}
+                      onClick={() => onNavDept(d.teamId)}
+                      title={`${d.name} — bring this pillar forward`}
+                      aria-current={active ? 'true' : undefined}
+                      className={`flex items-center gap-1.5 rounded-sm-t px-1.5 py-0.5 text-2xs leading-tight transition-colors duration-200 ease-standard hover:bg-os-surface hover:text-os-text ${
+                        active ? 'font-bold' : 'text-os-muted'
                       }`}
-                      style={{
-                        background: active ? d.color : 'var(--text-3)',
-                        boxShadow: active ? `0 0 8px ${d.color}` : undefined,
-                      }}
-                    />
-                  </button>
-                );
-              })}
-            </div>
+                      style={active ? { color: d.color } : undefined}
+                    >
+                      <span
+                        aria-hidden
+                        className={`h-2 w-2 shrink-0 rounded-full transition-all duration-200 ${
+                          active ? '' : 'opacity-60'
+                        }`}
+                        style={{
+                          background: d.color,
+                          boxShadow: active ? `0 0 8px ${d.color}` : undefined,
+                        }}
+                      />
+                      <span className="max-w-[12rem] truncate">{d.name}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
           </div>
         )}
 
