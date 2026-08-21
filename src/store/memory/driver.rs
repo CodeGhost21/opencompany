@@ -336,8 +336,10 @@ fn admit(driver_id: &str, expected: DriverClass) -> Result<DriverClass> {
     // a reserved id's class is the one thing the registry's own rule permits
     // ("may repeat, never override"), and the host-side line keeps the
     // reservation visible where the driver is routed rather than only inside
-    // the vendor. Reserved unconditionally — with the `tinymemory-embedded`
-    // feature off, nothing reaches this function with that id.
+    // the vendor. Reserved unconditionally: with `tinymemory-embedded`
+    // disabled this function still runs for the id — admission comes first —
+    // and the feature-off `namespace_provider` fallback then rejects the
+    // bind, which is the fail-closed half of the pair.
     let registry =
         DriverRegistry::builtin().with_reserved(NAMESPACE_DRIVER_ID, DriverClass::Embedded);
     // Trust is asserted by the host for a driver the host itself selected from

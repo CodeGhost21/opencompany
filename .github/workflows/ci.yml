@@ -867,7 +867,13 @@ jobs:
       # is the failure.
       - name: Assert no duplicated tinymemory crates
         run: |
-          if cargo tree --locked -e normal --features openhuman,tinycortex,tinymemory-embedded -d | grep -E "^tinymemory"; then
+          # Two separate failures, checked separately: a broken resolve must
+          # fail loudly, not read as "no duplicates" through an empty pipe.
+          if ! report="$(cargo tree --locked -e normal --features openhuman,tinycortex,tinymemory-embedded -d)"; then
+            echo "::error::cargo tree failed to resolve the graph"
+            exit 1
+          fi
+          if grep -E "^tinymemory" <<< "$report"; then
             echo "::error::duplicated tinymemory-* package in the resolve graph"
             exit 1
           fi
