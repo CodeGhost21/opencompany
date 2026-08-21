@@ -175,8 +175,19 @@ describe("what a model-override edit sends (issue #1245)", () => {
   });
 });
 
-const laptop: HarnessDto = { id: "laptop", kind: "acp", default: false, agent: "claude", transport: "local" };
-const main: HarnessDto = { id: "main", kind: "built_in", default: true };
+// `detected: false` on both: these stand for entries the company declared in
+// its manifest, which is what an edit is validated against. A detected row is
+// one the host synthesized from `ACP_AGENTS`, and it is covered separately in
+// `harness-join.test.ts`.
+const laptop: HarnessDto = {
+  id: "laptop",
+  kind: "acp",
+  default: false,
+  detected: false,
+  agent: "claude",
+  transport: "local",
+};
+const main: HarnessDto = { id: "main", kind: "built_in", default: true, detected: false };
 
 describe("what a harness-binding edit sends (issue #1245's harness-picker follow-up)", () => {
   it("sends nothing when the draft did not change", () => {
@@ -217,7 +228,14 @@ describe("how a harness reads in the picker", () => {
 
   it("says remote for a runner-transport ACP harness", () => {
     expect(
-      harnessOptionLabel({ id: "shared", kind: "acp", default: false, agent: "codex", transport: "runner" }),
+      harnessOptionLabel({
+        id: "shared",
+        kind: "acp",
+        default: false,
+        detected: false,
+        agent: "codex",
+        transport: "runner",
+      }),
     ).toBe("codex (remote) — shared");
   });
 

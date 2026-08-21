@@ -134,7 +134,9 @@ describe("the checking state, before a handshake has settled it", () => {
 
     expect(settled.find((r) => r.id === "claude")?.readiness).toEqual({ state: "ready" });
     expect(settled.find((r) => r.id === "codex")?.readiness).toEqual({ state: "checking" });
-    expect(rows[0].readiness).toEqual({ state: "checking" }, "the input is not mutated");
+    // The input is not mutated — `withReadiness` returns a new list, which is
+    // what lets a stale probe be dropped rather than applied.
+    expect(rows[0].readiness).toEqual({ state: "checking" });
   });
 
   it("drops an answer for a row the current list no longer has", () => {
