@@ -97,11 +97,13 @@ const column = (page: Page, index: number) => board(page).getByTestId("board-col
 /**
  * Opens every column that has collapsed itself to a rail (issue #1101).
  *
- * An empty column is now ~40px wide, and every geometry claim in this file is
- * about the board at its full six-column width: whether the last one is a
- * whole drop target, and whether a drag held against the edge can scroll to
- * reach it. A board of five rails and one column does not overflow at all, so
- * without this the edge-scroll assertion would pass by never being tested.
+ * The board shows the three phases of a ledger (Pending / Working / Done) and
+ * collapses an empty phase to a ~40px rail. The edge-scroll geometry claims in
+ * this file need the board wider than its pane — a board of two rails and one
+ * column does not overflow at all — so this puts the board back to its full
+ * three-phase width before measuring, which is also the state a person
+ * reaches by clicking a rail open. Without it the edge-scroll assertion would
+ * pass by never being tested.
  *
  * Clicking a rail pins it open, which is the operator's own control — so this
  * puts the board in a state a person can reach, rather than defeating the
@@ -109,7 +111,7 @@ const column = (page: Page, index: number) => board(page).getByTestId("board-col
  */
 async function expandAll(page: Page) {
   const rails = board(page).locator("button[aria-label^='Expand ']");
-  // Bounded: each click removes one rail, and the board has six columns.
+  // Bounded: each click removes one rail, and the board has three phases.
   for (let attempt = 0; attempt < 8; attempt += 1) {
     if ((await rails.count()) === 0) return;
     await rails.first().click();
@@ -205,6 +207,12 @@ test("a card drags from Working to Done, and the board scrolls to get there", as
 }) => {
   const title = `e2e in-review to done ${Date.now()}`;
   const { id, card } = await seedInReview(page, request, title);
+
+  // Three phases of ~260px no longer overflow the default 1280px window, so
+  // the board cannot scroll and the park below lands on zero. Narrow the
+  // window so the board genuinely overflows: the sidebar stays expanded above
+  // `md` (768px), and the park needs ~260px of overflow to land mid-range.
+  await page.setViewportSize({ width: 800, height: 720 });
 
   // Park the board so Working is on screen and Done is not. This is the
   // operator's actual starting position, and the case the gesture could not
