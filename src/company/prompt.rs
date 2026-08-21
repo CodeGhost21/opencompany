@@ -190,6 +190,20 @@ pub fn clamp(text: &str, budget: usize) -> String {
     kept
 }
 
+/// Caps operator-authored persona instructions to the prompt budget.
+///
+/// `instructions` written through the team/agent edit surfaces are injected,
+/// verbatim, into every turn of the teammate's system prompt via
+/// [`persona_prompt`]. Unlike `bundle_section`/`context_section`, that injection
+/// point applied no budget of its own — the persona grew without ceiling as an
+/// operator pasted more text, inflating every dispatch. Capping here, at the
+/// write boundary (mirroring [`crate::ports::tasks::cap_discussion`]), keeps the
+/// stored override bounded without refusing an operator's edit; the leading,
+/// most-important portion is preserved and a cut is marked.
+pub fn cap_persona_instructions(text: &str) -> String {
+    clamp(text, PROMPT_FILE_BUDGET_CHARS)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
