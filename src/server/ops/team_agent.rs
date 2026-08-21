@@ -614,7 +614,7 @@ async fn edit_agent(
     // never see a stale row.
     if let Some(instructions) = body.instructions {
         match instructions
-            .map(|text| text.trim().to_string())
+            .map(|text| crate::company::prompt::cap_persona_instructions(text.trim()))
             .filter(|text| !text.is_empty())
         {
             Some(text) => record.upsert_agent_override(AgentOverride {

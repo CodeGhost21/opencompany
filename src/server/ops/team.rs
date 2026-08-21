@@ -497,11 +497,12 @@ async fn add_member(
         .instructions
         .as_deref()
         .map(str::trim)
+        .map(crate::company::prompt::cap_persona_instructions)
         .filter(|text| !text.is_empty())
     {
         record.upsert_agent_override(AgentOverride {
             agent_id: agent.id.clone(),
-            instructions: Some(instructions.to_string()),
+            instructions: Some(instructions),
             ..Default::default()
         });
     }
