@@ -9,6 +9,7 @@ use tower::ServiceExt;
 
 use super::*;
 use crate::company::CompanyManifest;
+use crate::ports::store::CompanyStore;
 use crate::ports::types::{CompanyId, CompanyRecord};
 use crate::runtime::RuntimeBuilder;
 use crate::server::router;
