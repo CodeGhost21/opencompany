@@ -44,6 +44,9 @@ let container: HTMLDivElement;
 let root: Root;
 
 beforeEach(() => {
+  // React only suppresses its "not configured to support act(...)" warning when
+  // this flag is set; every other render suite here sets it the same way.
+  (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
   container = document.createElement("div");
   document.body.appendChild(container);
   act(() => {
