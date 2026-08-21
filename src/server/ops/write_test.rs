@@ -5635,7 +5635,7 @@ async fn task_export_serves_a_readable_document_and_alters_nothing() {
     let html = String::from_utf8(bytes.to_vec()).expect("the document is utf-8");
     assert!(html.starts_with("<!doctype html>"));
     assert!(html.contains("Launch post"));
-    assert!(html.contains("<dd>In review</dd>"));
+    assert!(html.contains("<dd>Working — In review</dd>"));
     assert!(html.contains("First draft is up."));
 
     let after_board = runtime.tasks().list(&company).await.unwrap();
