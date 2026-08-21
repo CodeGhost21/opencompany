@@ -190,3 +190,55 @@ mod test {
         assert_eq!(entries.open_count(spec), 2);
     }
 }
+
+#[cfg(test)]
+mod render_shape_test {
+    use super::*;
+    use crate::ledger::registry::Registry;
+    use crate::ports::tasks::{
+        COLUMN_DONE, COLUMN_IN_REVIEW, COLUMN_PAUSED, COLUMN_TODO, TaskDeliverable, TaskRecord,
+    };
+
+    fn card(id: &str, column: &str) -> TaskRecord {
+        TaskRecord {
+            id: id.to_string(),
+            title: format!("card {id}"),
+            note: None,
+            column: column.to_string(),
+            priority: "medium".to_string(),
+            assignee: "ops".to_string(),
+            updated_at_millis: 10,
+            origin_chat_id: None,
+            parent_task_id: None,
+            output: None,
+            plan: None,
+            planning_attempts: Vec::new(),
+            deliverable: TaskDeliverable::Once,
+            workflow_proposal: None,
+            origin_run_id: None,
+            origin_workflow_id: None,
+        }
+    }
+
+    /// The file an agent actually reads: three headings, and a working card that
+    /// still says what it is waiting on (issue #1512).
+    #[test]
+    fn the_rendered_board_has_three_headings_and_keeps_the_stage_on_the_row() {
+        let registry = Registry::build([]);
+        let spec = registry.find("tasks").expect("tasks is built in");
+        let entries = entries_from_tasks(&[
+            card("a", COLUMN_TODO),
+            card("b", COLUMN_PAUSED),
+            card("c", COLUMN_IN_REVIEW),
+            card("d", COLUMN_DONE),
+        ]);
+        let rendered = crate::ledger::engine::render(spec, &entries);
+        let headings: Vec<&str> = rendered
+            .lines()
+            .filter(|line| line.starts_with("## "))
+            .collect();
+        assert_eq!(headings, ["## Pending", "## Working", "## Done"], "{rendered}");
+        assert!(rendered.contains("In review"), "{rendered}");
+        assert!(rendered.contains("Paused"), "{rendered}");
+    }
+}
