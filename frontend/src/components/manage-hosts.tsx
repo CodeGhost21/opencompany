@@ -71,6 +71,43 @@ export function addressLabel(connection: Connection): string {
 }
 
 /**
+ * One address written the one way, so two spellings of one host compare equal.
+ *
+ * Duplicate detection is the whole reason this exists, and a raw string
+ * comparison gets it wrong in four ways that all produce the same wrong
+ * outcome — two rows for one host, one console offered twice under two
+ * connection ids, and every browser-local key split across them:
+ *
+ * - **the same-origin bootstrap row stores `""`** (see {@link addressLabel}),
+ *   so typing that origin's explicit url reads as a different host;
+ * - **a trailing slash**, of which only one was trimmed, so `…//` slipped past;
+ * - **hostname case**, which DNS does not distinguish and `URL` normalises;
+ * - **an explicit default port**, so `https://acme.example:443` and
+ *   `https://acme.example` read as two hosts.
+ *
+ * The path is kept — a host served under a prefix is a different host — but
+ * its trailing slash is not, because `URL` mints one for a bare authority.
+ * A value that will not parse is returned trimmed and de-slashed rather than
+ * thrown away: {@link validAddress} is what refuses it, and refusing it there
+ * gives the operator the error that names the field.
+ */
+export function canonicalAddress(value: string): string {
+  const trimmed = value.trim();
+  // Same-origin, which is what this console is already talking to.
+  if (!trimmed) return canonicalAddress(window.location.origin);
+  try {
+    const url = new URL(trimmed);
+    const path = url.pathname.replace(/\/$/, "");
+    // `URL` already lowercases the protocol and the hostname and drops the
+    // port when it is that protocol's default, so `origin` is the normalised
+    // authority — no separate default-port table to keep in step.
+    return `${url.origin}${path}`;
+  } catch {
+    return trimmed.replace(/\/+$/, "");
+  }
+}
+
+/**
  * Whether `value` is an address this console could actually talk to.
  *
  * Deliberately stricter than the field being non-empty: an address saved with
@@ -270,16 +307,18 @@ function EditHost({ connection, onDone }: { connection: Connection; onDone: () =
   const [saving, setSaving] = useState(false);
   const addressable = hostAddressEditable(connection.connector);
 
-  const moved = addressable && baseUrl.trim().replace(/\/$/, "") !== connection.baseUrl;
+  // Canonical on both sides (see `canonicalAddress`): retyping the row's own
+  // address in a different but equivalent spelling is not a move, and must not
+  // re-seat a live client to say nothing.
+  const typed = canonicalAddress(baseUrl);
+  const moved = addressable && typed !== canonicalAddress(connection.baseUrl);
   // A second row at an address another connection already holds is two rows for
   // one host: the same profile, one id each, and a switcher that offers the
   // same console twice.
   const taken =
     moved &&
     hosts.connections.some(
-      (other) =>
-        other.id !== connection.id &&
-        other.baseUrl === baseUrl.trim().replace(/\/$/, ""),
+      (other) => other.id !== connection.id && canonicalAddress(other.baseUrl) === typed,
     );
   const badAddress = moved && !validAddress(baseUrl);
   const unchanged = !moved && label.trim() === connection.label;
