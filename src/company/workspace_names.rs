@@ -32,11 +32,27 @@
 //! To nodes that already exist. Renaming a tenant's tree on boot is the thing
 //! issues #570, #645, #700 and #759 each refused to do — an operator must not
 //! find their workspace rearranged by an upgrade they did not ask for, and a
-//! rename breaks every `[[wikilink]]` pointing at the old name. Existing trees
-//! keep their names and stay reachable: the root lookup adopts a legacy
-//! `Agents/` case-insensitively, and
-//! [`workspace_repair`](super::workspace_repair) offers the rename as an
-//! operator-triggered, dry-runnable pass.
+//! rename breaks every reference somebody has kept to the old name.
+//!
+//! Existing trees therefore keep their names, and every reader is widened to
+//! reach them instead:
+//!
+//! * [`workspace_scaffold::find`](super::workspace_scaffold::find) matches a
+//!   name case-insensitively, so a legacy `Agents/` root is *adopted* rather
+//!   than joined by a lowercase twin — which would split one agent's home in
+//!   two. The agent-folder minter additionally adopts the roster id spelled
+//!   verbatim (`page_builder` before `page-builder`).
+//! * The agent tools' path index carries a normalized key beside the literal
+//!   one, so `playbooks/close-checklist.md` and `Playbooks/Close checklist.md`
+//!   name the same note whichever one is typed.
+//! * Context routing, the page tools and the pages route match the same way,
+//!   for the same reason.
+//!
+//! So an old tree keeps working, a new one is uniform, and a mixed one resolves
+//! either spelling. Converting an existing tree in place is deliberately left
+//! as an operator action, and there is no such action yet: it belongs beside the
+//! [`workspace_repair`](super::workspace_repair) pass, whose dry-run-then-apply
+//! shape it needs, rather than in this rule.
 
 /// The name a node gets when its raw name normalizes to nothing at all — an
 /// emoji, a run of punctuation, an empty string.
