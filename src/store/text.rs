@@ -15,8 +15,13 @@ use std::ops::Range;
 ///
 /// Widening is outward on both ends (floor the start, ceil the end), so the
 /// requested bytes are always contained in the answer. An inverted or empty
-/// range yields the empty string rather than a panic.
+/// range yields the empty string rather than a panic — including a zero-length
+/// range landing mid-codepoint, which the widening alone would have grown into
+/// a whole character (asking for no bytes must never answer with one).
 pub(crate) fn slice_on_char_boundaries(body: &str, range: Range<usize>) -> String {
+    if range.start >= range.end {
+        return String::new();
+    }
     let start = floor_boundary(body, range.start.min(body.len()));
     let end = ceil_boundary(body, range.end.min(body.len()));
     if start >= end {
@@ -62,6 +67,11 @@ mod test {
         assert_eq!(slice_on_char_boundaries(body, 0..999), body);
         // An inverted range yields nothing, not a panic.
         assert_eq!(slice_on_char_boundaries(body, 3..1), "");
+        // A zero-length range asks for no bytes and gets none, even where the
+        // outward widening would otherwise have grown it into a whole "é".
+        assert_eq!(slice_on_char_boundaries(body, 2..2), "");
+        assert_eq!(slice_on_char_boundaries(body, 0..0), "");
+        assert_eq!(slice_on_char_boundaries(body, 99..99), "");
     }
 
     #[test]

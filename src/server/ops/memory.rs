@@ -175,18 +175,26 @@ fn split_title_body(body: &str) -> (String, String) {
     (truncate_chars(first, CONTEXT_TITLE_MAX), rest.to_string())
 }
 
-/// Turns peeked context chunks into read-only [`MemoryEntry`]s, ordered agent
-/// memory first then task outcomes. Drops operator-fact mirrors (they are
-/// already represented by their FactStore row — never double-list them) and
-/// applies `query` (case-insensitive substring over the chunk body) so the
-/// list's free-text search reaches context rows too, matching fact search.
+/// Turns peeked context chunks into read-only [`MemoryEntry`]s, newest first
+/// across both origins. Drops operator-fact mirrors (they are already
+/// represented by their FactStore row — never double-list them) and applies
+/// `query` (case-insensitive substring over the chunk body) so the list's
+/// free-text search reaches context rows too, matching fact search.
+///
+/// Ordering is by stamp, never by origin. Bucketing agent memories ahead of
+/// task outcomes put *every* outcome behind *every* memory whatever their
+/// stamps, so the newest memory in the company could render last — the #1488
+/// symptom reached by a second route, and past the cap the sort in
+/// [`capped_newest_first`] was the only thing keeping it out of the list at
+/// all. The console filters by origin client-side, so the grouping bought
+/// nothing. The `id` tie-break carries the addr, so chunks sharing a
+/// millisecond keep a total, call-stable order, as the cap's sort does.
 fn context_entries(chunks: Vec<RawChunk>, query: Option<&str>) -> Vec<MemoryEntry> {
     let needle = query.map(|q| q.to_lowercase());
     let mirror_prefix = format!("{OPERATOR_FACT_PREFIX}/");
     let outcome_prefix = format!("{OUTCOME_LABEL_PREFIX}/");
 
-    let mut agent_memory = Vec::new();
-    let mut task_outcomes = Vec::new();
+    let mut entries: Vec<MemoryEntry> = Vec::new();
 
     for chunk in chunks {
         // The operator-fact mirror is the same knowledge as its FactStore row;
@@ -200,14 +208,10 @@ fn context_entries(chunks: Vec<RawChunk>, query: Option<&str>) -> Vec<MemoryEntr
             continue;
         }
 
-        let (origin, source, bucket): (MemoryOrigin, String, &mut Vec<MemoryEntry>) =
+        let (origin, source): (MemoryOrigin, String) =
             if let Some(agent) = chunk.label.strip_prefix(&outcome_prefix) {
                 let who = if agent.is_empty() { "an agent" } else { agent };
-                (
-                    MemoryOrigin::TaskOutcome,
-                    who.to_string(),
-                    &mut task_outcomes,
-                )
+                (MemoryOrigin::TaskOutcome, who.to_string())
             } else {
                 // Deliberate memories live one segment deeper —
                 // `agent-memory/<agent>/<slug>` — so the naive first-segment
@@ -220,7 +224,6 @@ fn context_entries(chunks: Vec<RawChunk>, query: Option<&str>) -> Vec<MemoryEntr
                 (
                     MemoryOrigin::AgentMemory,
                     who.unwrap_or("an agent").to_string(),
-                    &mut agent_memory,
                 )
             };
 
@@ -232,7 +235,7 @@ fn context_entries(chunks: Vec<RawChunk>, query: Option<&str>) -> Vec<MemoryEntr
             };
         }
 
-        bucket.push(MemoryEntry {
+        entries.push(MemoryEntry {
             // Prefix so a context row's id can never collide with a fact id
             // (delete targets fact ids only; this keeps React keys unique too).
             id: format!("ctx:{}", chunk.addr),
@@ -248,8 +251,15 @@ fn context_entries(chunks: Vec<RawChunk>, query: Option<&str>) -> Vec<MemoryEntr
         });
     }
 
-    agent_memory.extend(task_outcomes);
-    agent_memory
+    // The cap upstream sorted metas; re-sort here because the query filter and
+    // the mirror drop above both reshape the set, and because a caller that
+    // hands us chunks in any other order still gets newest-first.
+    entries.sort_by(|a, b| {
+        b.updated_at
+            .cmp(&a.updated_at)
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    entries
 }
 
 /// The create-fact body.
@@ -306,12 +316,14 @@ struct MemoryStats {
 }
 
 /// `GET /memory` — everything the company remembers, so the console lists what
-/// the Brain header counts. Three sources, in this order:
+/// the Brain header counts. Two sources, in this order:
 ///
 /// 1. **Operator facts** (FactStore) — newest-first, editable/deletable.
-/// 2. **Agent memory** (ContextStore chunks that are neither task outcomes nor
-///    operator-fact mirrors) — read-only.
-/// 3. **Task outcomes** (ContextStore `task-outcome/*`) — read-only.
+/// 2. **Context rows** (ContextStore chunks that are not operator-fact
+///    mirrors) — read-only, newest-first, agent memories and task outcomes
+///    interleaved by stamp rather than grouped by origin, so the newest
+///    memory in the company always heads the context half. The console's
+///    type filter separates the two origins client-side.
 ///
 /// `?query=` (case-insensitive substring over title + body) filters all three.
 /// `?kind=` is a *fact* taxonomy filter, so when it is set the context sources
@@ -338,7 +350,10 @@ async fn list_facts(
         let mirror_prefix = format!("{OPERATOR_FACT_PREFIX}/");
         let metas = company.runtime.context.list(company.id(), "").await?;
         let metas = capped_newest_first(metas, &mirror_prefix, MAX_CONTEXT_ENTRIES);
-        // One bulk read for every surviving body. A body that cannot be read
+        // One batched read for every surviving body — how few round trips
+        // that really is, is the backend's business (see `peek_many`); what
+        // matters here is that the route no longer peeks per chunk. A body
+        // that cannot be read
         // degrades that row to empty rather than failing the whole list, but
         // log it so a real storage fault surfaces instead of silently
         // rendering blank cards.
@@ -636,6 +651,18 @@ mod combined_list_tests {
         }
     }
 
+    /// A chunk whose address is set explicitly, for the stamp-tie tie-break
+    /// (`chunk_at` derives the addr from the label, so two chunks with
+    /// different labels can never share one).
+    fn chunk_at_addr(addr: &str, label: &str, body: &str, stored_at_millis: u64) -> RawChunk {
+        RawChunk {
+            addr: addr.to_string(),
+            label: label.to_string(),
+            body: body.to_string(),
+            stored_at_millis,
+        }
+    }
+
     fn fact(id: &str, kind: FactKind, title: &str) -> FactRecord {
         FactRecord {
             id: id.to_string(),
@@ -738,8 +765,47 @@ mod combined_list_tests {
             ],
             None,
         );
-        assert_eq!(entries[0].updated_at, 2_000);
-        assert_eq!(entries[1].updated_at, 3_000);
+        // Newest first, so the fresher task outcome heads the pair.
+        assert_eq!(entries[0].updated_at, 3_000);
+        assert_eq!(entries[1].updated_at, 2_000);
+    }
+
+    /// The route used to bucket rows by origin and concatenate — agent
+    /// memories, then task outcomes — which pushed EVERY outcome behind EVERY
+    /// memory whatever their stamps. A company whose newest memory is a task
+    /// outcome saw it render last: the #1488 symptom by a second route.
+    #[test]
+    fn context_rows_interleave_the_two_origins_by_stamp() {
+        let entries = context_entries(
+            vec![
+                chunk_at("task-outcome/agent-1", "newest outcome", 900),
+                chunk_at("agent-memory/agent-1/five", "middle memory", 500),
+                chunk_at("agent-memory/agent-1/one", "oldest memory", 100),
+            ],
+            None,
+        );
+        let stamps: Vec<u64> = entries.iter().map(|e| e.updated_at).collect();
+        assert_eq!(
+            stamps,
+            vec![900, 500, 100],
+            "context rows order by stamp across origins, not by origin"
+        );
+        assert!(matches!(entries[0].origin, MemoryOrigin::TaskOutcome));
+    }
+
+    #[test]
+    fn context_rows_break_stamp_ties_by_addr_like_the_cap() {
+        // Same tie-break as `capped_newest_first`, so chunks sharing a
+        // millisecond cannot swap places between two calls.
+        let entries = context_entries(
+            vec![
+                chunk_at_addr("z", "agent-1/z", "zulu", 500),
+                chunk_at_addr("a", "task-outcome/agent-1", "alpha", 500),
+            ],
+            None,
+        );
+        let ids: Vec<&str> = entries.iter().map(|e| e.id.as_str()).collect();
+        assert_eq!(ids, vec!["ctx:a", "ctx:z"]);
     }
 
     #[test]
@@ -866,15 +932,25 @@ mod route_tests {
     }
 
     impl ScriptedContext {
-        /// `total` chunks stamped `1..=total`, listed oldest-first.
+        /// `total` chunks stamped `1..=total`, listed oldest-first, with the
+        /// two context origins interleaved: even stamps are task outcomes,
+        /// odd ones agent memories. The mix is load-bearing — with a
+        /// single-origin fixture the route's own bucketing hid a cross-origin
+        /// ordering bug from every newest-first assertion below (the newest
+        /// chunk here, `total`, is deliberately a task outcome).
         fn with_chunks(total: usize) -> Arc<Self> {
             let mut metas = Vec::new();
             let mut bodies = HashMap::new();
             for i in 1..=total {
                 let addr = format!("addr-{i:04}");
+                let label = if i % 2 == 0 {
+                    "task-outcome/agent-1".to_string()
+                } else {
+                    format!("agent-1/note-{i}")
+                };
                 metas.push(ChunkMeta {
                     addr: ChunkAddr::new(addr.clone()),
-                    label: format!("agent-1/note-{i}"),
+                    label,
                     len: 0,
                     stored_at_millis: i as u64,
                 });
@@ -1020,6 +1096,11 @@ mod route_tests {
             .map(|row| row["updatedAt"].as_u64().unwrap())
             .collect();
         assert_eq!(stamps[0], total as u64, "the newest chunk heads the list");
+        assert_eq!(
+            rows[0]["origin"], "task-outcome",
+            "the newest chunk heads the list whatever its origin — grouping \
+             outcomes behind memories put it last"
+        );
         assert!(
             stamps.windows(2).all(|pair| pair[0] >= pair[1]),
             "context rows render newest-first"

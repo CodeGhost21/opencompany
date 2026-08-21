@@ -2198,10 +2198,46 @@ mod test {
         .await;
     }
 
+    /// The deterministic half of the atomicity guarantee: a re-`put` publishes
+    /// a *new* file over the old name, so the blob's inode changes. A plain
+    /// truncating write — the shape that let a reader see a prefix — keeps the
+    /// same inode and fails this every run, where the racing test below only
+    /// reddens when the reader happens to land inside the truncate window.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_re_put_publishes_a_new_blob_instead_of_truncating_in_place() {
+        use std::os::unix::fs::MetadataExt;
+
+        let root_dir = tmp_root();
+        let store = FsContextStore::new(root_dir.path().to_path_buf());
+        let id = CompanyId::new("alpha");
+        let chunk = ContextChunk {
+            label: "agent/atomic".to_string(),
+            body: "the same body, published twice".to_string(),
+        };
+        let addr = store.put(&id, chunk.clone()).await.unwrap();
+        let blob_path = Bundle::new(root_dir.path().to_path_buf(), &id).context_blob(addr.as_ref());
+        let before = tokio::fs::metadata(&blob_path).await.unwrap().ino();
+
+        store.put(&id, chunk).await.unwrap();
+
+        let after = tokio::fs::metadata(&blob_path).await.unwrap().ino();
+        assert_ne!(
+            before, after,
+            "the blob was rewritten in place; a concurrent reader can see the \
+             truncate window"
+        );
+    }
+
     /// A re-`put` of an already-indexed blob must never expose a torn body: the
     /// blob is republished via tmp-then-rename, so a racing `peek` sees the
     /// old bytes or the new bytes in full — with a plain truncating write it
     /// could read an empty or partial file for the whole write window.
+    ///
+    /// Racing, so its redness is probabilistic (the reader must land inside the
+    /// write window); the inode test above is the every-run proof. This one
+    /// guards what the inode cannot: that the bytes a racing reader *does* get
+    /// are always a whole body.
     #[tokio::test]
     async fn a_concurrent_peek_never_sees_a_torn_blob_rewrite() {
         let root_dir = tmp_root();
