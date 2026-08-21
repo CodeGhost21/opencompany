@@ -1966,7 +1966,19 @@ impl Tool for WorkspaceCreateTool {
         }
 
         let (parent_segments, name) = segments.split_at(segments.len() - 1);
-        let name = name[0];
+        // The host owns the name, not the model (the issue #580 rule for
+        // workflow ids, applied to the tree everyone reads): whatever the agent
+        // typed becomes lowercase and dashed, so one document has one spelling
+        // and no path in the workspace needs quoting. The reply below echoes
+        // the path it actually landed at, which is the whole contract — an
+        // agent that reads it back is told where to look.
+        let name = kebab_name(name[0]);
+        let normalized = parent_segments
+            .iter()
+            .copied()
+            .chain(std::iter::once(name.as_str()))
+            .collect::<Vec<_>>()
+            .join("/");
 
         let index = match self.workspace.index().await {
             Ok(index) => index,
@@ -1983,7 +1995,7 @@ impl Tool for WorkspaceCreateTool {
         // path ambiguous for **every** agent from then on, and the reserved
         // `Agents` root is exactly the path an agent must not be able to
         // shadow with a rival of its own.
-        if let Some(existing) = index.by_path.get(&normalized) {
+        if let Some(existing) = index.lookup(&normalized) {
             let what = match existing.first().map(|e| e.node.kind) {
                 Some(NodeKind::Folder) => "a folder",
                 _ => "a note",
@@ -2014,7 +2026,7 @@ impl Tool for WorkspaceCreateTool {
             None
         } else {
             let parent_path = parent_segments.join("/");
-            match index.by_path.get(&parent_path).map(Vec::as_slice) {
+            match index.lookup(&parent_path).map(Vec::as_slice) {
                 Some([entry]) if entry.node.kind == NodeKind::Folder => Some(entry.node.id.clone()),
                 Some([entry]) => {
                     return Ok(ToolResult::error(format!(
@@ -2060,7 +2072,7 @@ impl Tool for WorkspaceCreateTool {
         let origin = self.workspace.origin();
         let node = WorkspaceNode {
             id: crate::ports::generate_id(),
-            name: name.to_string(),
+            name: name.clone(),
             kind,
             parent_id,
             updated_at_millis: crate::ports::now_millis(),
