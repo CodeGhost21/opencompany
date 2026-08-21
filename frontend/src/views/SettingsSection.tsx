@@ -50,7 +50,7 @@ export function SettingsSection({ client, company, feed, sub, onNavigate, onFlag
     <div className="flex min-h-0 flex-1">
       <nav
         aria-label="Settings"
-        className="hidden w-60 shrink-0 flex-col gap-0.5 overflow-y-auto border-r p-3 sm:flex"
+        className="hidden w-60 shrink-0 flex-col gap-0.5 overflow-y-auto border-r p-3 lg:flex"
       >
         <h2 className="px-2 pb-2 pt-1 text-xs font-medium text-muted-foreground">Settings</h2>
         {SETTINGS_PAGES.map((item) => (
@@ -73,10 +73,14 @@ export function SettingsSection({ client, company, feed, sub, onNavigate, onFlag
         ))}
       </nav>
 
-      {/* On a narrow screen the rail collapses to a scrolling row of chips, so
-          the sub-pages stay reachable without a second drawer. */}
+      {/* Below `lg` the rail collapses to a scrolling row of chips, so the
+          sub-pages stay reachable without a second drawer. The breakpoint is
+          `lg`, not `sm`: from 768–1023px the app sidebar is still on, and a
+          second `w-60` rail here would squeeze the settings pane below the
+          width its widest card (SMTP) needs, clipping it on both sides
+          (issue #1383). */}
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-        <div className="flex gap-1 overflow-x-auto border-b p-2 sm:hidden">
+        <div className="flex gap-1 overflow-x-auto border-b p-2 lg:hidden">
           {SETTINGS_PAGES.map((item) => (
             <button
               key={item.id}
