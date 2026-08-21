@@ -138,6 +138,13 @@ pub const PAGE_COMPILED_MIME: &str = "application/javascript";
 /// editable in the console.
 pub const SECRETS_ROOT: &str = "secrets";
 
+/// The name of the note provisioned inside [`SECRETS_ROOT`] on first boot.
+///
+/// Lowercase for the same reason every other minted name is — and matched
+/// case-insensitively by [`find`], so a legacy `README.md` is adopted rather
+/// than joined by a second copy.
+pub const SECRETS_README_NAME: &str = "readme.md";
+
 /// The note provisioned inside [`SECRETS_ROOT`] on first boot.
 pub const SECRETS_README: &str = "# Workspace secrets\n\nStore private operator notes and secret values in this folder. Everything under `secrets/` is hidden from agent workspace tools, including listing, reading, searching, and writing. Operators can still browse and edit these notes in the Workspace view.\n\nDo not treat this folder as an application credential store: use the Connections and inference settings for credentials that OpenCompany must inject into tools or providers.\n";
 
@@ -236,22 +243,22 @@ pub async fn ensure_workspace_scaffold(
         Found::Collision(why) => {
             tracing::warn!(
                 company = %company,
-                "[workspace] {why}; not provisioning `{SECRETS_ROOT}/README.md`"
+                "[workspace] {why}; not provisioning `{SECRETS_ROOT}/{SECRETS_README_NAME}`"
             );
             None
         }
         Found::Free => None,
     };
     if let Some(root_id) = secret_root {
-        match find(&nodes, Some(root_id.as_str()), "README.md") {
+        match find(&nodes, Some(root_id.as_str()), SECRETS_README_NAME) {
             Found::Folder(_) | Found::Collision(_) => tracing::warn!(
                 company = %company,
-                "[workspace] `{SECRETS_ROOT}/README.md` is not one unambiguous note; leaving it untouched"
+                "[workspace] `{SECRETS_ROOT}/{SECRETS_README_NAME}` is not one unambiguous note; leaving it untouched"
             ),
             Found::Free => {
                 let readme = WorkspaceNode {
                     id: generate_id(),
-                    name: "README.md".to_string(),
+                    name: SECRETS_README_NAME.to_string(),
                     kind: NodeKind::File,
                     parent_id: Some(root_id),
                     updated_at_millis: now_millis(),
@@ -265,7 +272,7 @@ pub async fn ensure_workspace_scaffold(
                     tracing::warn!(
                         company = %company,
                         %error,
-                        "[workspace] could not create `{SECRETS_ROOT}/README.md`; will retry on the next boot"
+                        "[workspace] could not create `{SECRETS_ROOT}/{SECRETS_README_NAME}`; will retry on the next boot"
                     );
                 }
             }
