@@ -21,6 +21,17 @@ This file is routed into every teammate's system prompt alongside `METHOD.md` (`
 
 Humans keep **occasional appearance or ai avatar**; everything else here is the roster's to run.
 
+## Where the role rules live
+
+Each teammate's `.toml` carries wiring only — tier, ledger grants, routed
+context, delegation. The working rules live in `agents/prompts/<id>.md`, named by
+that file's `prompt_files` entry and loaded into the prompt as **Your brief**
+(see `docs/spec/runtime/agents.md`). Edit the brief to change how a role works;
+edit the `.toml` to change what it may touch.
+
+Print what any teammate's prompt assembles into with
+`./scripts/dump-prompt.sh --company companies/<name> --agent <id>`.
+
 ## Workspace layout
 
 - `Standards/`, `Product/`, `Playbooks/` — shared, operator-seeded notes. Read them before proposing work that touches an area they cover; edit them on purpose, not as a side effect of an unrelated task.
