@@ -60,33 +60,97 @@ use crate::ports::tasks::{
     COLUMN_DONE, COLUMN_IN_PROGRESS, COLUMN_IN_REVIEW, COLUMN_PAUSED, COLUMN_PLANNING, COLUMN_TODO,
 };
 
-/// One column of the board, and everything any surface needs to render it.
+/// One **stage** of the board: a lifecycle state the runtime can be in the
+/// middle of, and everything any surface needs in order to name it.
+///
+/// The type keeps its name because every caller's `column` field does. What
+/// changed in #1512 is what a stage *is for*: it is the runtime's state, not
+/// the board's column. The column a reader sees is this stage's
+/// [`phase`](BoardColumn::phase).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BoardColumn {
     /// The wire word a card stores and the dispatch edge matches on.
     pub id: &'static str,
-    /// What a person reads. Never derived from the id: `in_review` humanises to
-    /// "In review" by luck and `todo` does not.
+    /// What a person reads when the stage itself is shown — on the card's
+    /// badge, in an exported record, in a detail view. Never derived from the
+    /// id: `in_review` humanises to "In review" by luck and `todo` does not.
+    pub label: &'static str,
+    /// Which of the three [`PHASES`] a card in this stage is filed under.
+    ///
+    /// This is the whole of the collapse. `planning`, `in_progress`, `paused`
+    /// and `in_review` all name work that has started and has not finished, so
+    /// all four are [`PHASE_WORKING`]; the differences between them are the
+    /// runtime's business and stay on the card.
+    pub phase: &'static str,
+}
+
+/// One **phase**: a column of the board as everything that reads it sees one.
+///
+/// Three, and the set is closed. A phase answers the only question a reader of
+/// a board actually asks — *has this started, and is it finished* — and adding
+/// a fourth would mean answering a second question in the same place, which is
+/// the mistake the six-column board made four times over.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BoardPhase {
+    /// The wire word the `tasks` ledger declares as a status, the console
+    /// renders as a column, and a drop writes back.
+    pub id: &'static str,
+    /// What a person reads.
     pub label: &'static str,
     /// Whether a card here is finished.
     ///
-    /// Exactly one column is, and it is not a presentation detail: it decides
+    /// Exactly one phase is, and it is not a presentation detail: it decides
     /// which cards an index files as archive and which the ledger counts as
     /// outstanding. A card in review or paused is **stopped, not finished** —
-    /// calling either closed would make "what is still open" answer wrong.
+    /// which is why both are [`PHASE_WORKING`] and neither is closed.
     pub closed: bool,
-    /// The heading this column's cards render under in `derived/TASKS.md`.
-    ///
-    /// Several columns share one heading on purpose: a reader opening the file
-    /// wants *in flight* and *waiting on a person*, not six lists of one. The
-    /// board itself still shows a column per id — the grouping is the file's,
-    /// not the board's.
-    pub section: &'static str,
-    /// The sentence under that heading, taken from the first column in it.
+    /// The sentence under this phase's heading in `derived/TASKS.md`.
     pub blurb: &'static str,
+    /// The stage a card enters when something drops it into this phase.
+    ///
+    /// The translation the write boundary performs, declared here rather than
+    /// at the boundary so there is one answer to *what does dropping a card in
+    /// Working actually do* — it dispatches, because [`COLUMN_IN_PROGRESS`] is
+    /// what `working` resolves to.
+    pub entry_stage: &'static str,
 }
 
-/// Every column, in board order.
+/// Nothing has started yet.
+pub const PHASE_PENDING: &str = "pending";
+/// Started, not finished — whoever or whatever it is currently waiting on.
+pub const PHASE_WORKING: &str = "working";
+/// Finished, by a person's verdict.
+pub const PHASE_DONE: &str = "done";
+
+/// Every phase, in board order.
+pub const PHASES: [BoardPhase; 3] = [
+    BoardPhase {
+        id: PHASE_PENDING,
+        label: "Pending",
+        closed: false,
+        blurb: "Waiting for a person to say the work should start — entered by hand, or returned \
+                by a pass that could not finish. Most recently added or returned first.",
+        entry_stage: COLUMN_TODO,
+    },
+    BoardPhase {
+        id: PHASE_WORKING,
+        label: "Working",
+        closed: false,
+        blurb: "Started and not finished: being planned, being worked, or stopped waiting on a \
+                person. Each card says which on its own line.",
+        entry_stage: COLUMN_IN_PROGRESS,
+    },
+    BoardPhase {
+        id: PHASE_DONE,
+        label: "Done",
+        closed: true,
+        blurb: "The most recently finished. Kept, because a company that cannot see what it \
+                already did repeats it.",
+        entry_stage: COLUMN_DONE,
+    },
+];
+
+/// Every stage, in lifecycle order.
 ///
 /// The order is the reading order and the drag order, and it is asserted
 /// against a literal in [`crate::ports::tasks`] so a reorder is a deliberate
@@ -95,48 +159,32 @@ pub const COLUMNS: [BoardColumn; 6] = [
     BoardColumn {
         id: COLUMN_TODO,
         label: "To-do",
-        closed: false,
-        section: "Not started",
-        blurb: "Waiting for a person to say the work should start — entered by hand, or returned \
-                by a pass that could not finish. Most recently added or returned first.",
+        phase: PHASE_PENDING,
     },
     BoardColumn {
         id: COLUMN_PLANNING,
         label: "Planning",
-        closed: false,
-        section: "In flight",
-        blurb: "Work a teammate is on, or that a planning pass is turning into a brief.",
+        phase: PHASE_WORKING,
     },
     BoardColumn {
         id: COLUMN_IN_PROGRESS,
         label: "In progress",
-        closed: false,
-        section: "In flight",
-        blurb: "Work a teammate is on, or that a planning pass is turning into a brief.",
+        phase: PHASE_WORKING,
     },
     BoardColumn {
         id: COLUMN_PAUSED,
         label: "Paused",
-        closed: false,
-        section: "Waiting on a person",
-        blurb: "Stopped, not finished. Each of these needs somebody to decide something before it \
-                can move.",
+        phase: PHASE_WORKING,
     },
     BoardColumn {
         id: COLUMN_IN_REVIEW,
         label: "In review",
-        closed: false,
-        section: "Waiting on a person",
-        blurb: "Stopped, not finished. Each of these needs somebody to decide something before it \
-                can move.",
+        phase: PHASE_WORKING,
     },
     BoardColumn {
         id: COLUMN_DONE,
         label: "Done",
-        closed: true,
-        section: "Recently done",
-        blurb: "The most recently finished. Kept, because a company that cannot see what it \
-                already did repeats it.",
+        phase: PHASE_DONE,
     },
 ];
 
