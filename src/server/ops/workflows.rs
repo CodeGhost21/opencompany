@@ -542,7 +542,7 @@ async fn get_workflow(
     let (overlays, disabled, globals_disable) = workflow_state(&company).await?;
     let file = load_workflow_with_globals(source_dir, &overlays, &globals_disable, &wid)
         .map_err(ApiError)?
-        .ok_or_else(|| ApiError(OpenCompanyError::CompanyNotFound(format!("workflow {wid}"))))?;
+        .ok_or_else(|| ApiError(OpenCompanyError::NotFound(format!("workflow {wid}"))))?;
     // Issue #259: the version token rides out with the graph, so the console
     // gets it for free on the same read it renders from — there is no second
     // round trip for a caller to skip and thereby lose the concurrency guard.
@@ -985,7 +985,7 @@ async fn set_workflow_enabled(
     let source_dir = company.runtime.source_dir();
     let file = load_workflow_with_globals(source_dir, &overlays, &globals_disable, &wid)
         .map_err(ApiError)?
-        .ok_or_else(|| ApiError(OpenCompanyError::CompanyNotFound(format!("workflow {wid}"))))?;
+        .ok_or_else(|| ApiError(OpenCompanyError::NotFound(format!("workflow {wid}"))))?;
     let editable = is_editable(source_dir, &overlays, &wid);
     let version = editable
         .then(|| overlay_toml(&overlays, &wid).map(workflow_version))
@@ -1407,7 +1407,7 @@ async fn run_workflow(
     // `wid` becomes a filename — reject anything that could escape `workflows/`.
     if !safe_wid(&wid) {
         return Err(
-            ApiError(OpenCompanyError::CompanyNotFound(format!("workflow {wid}"))).into_response(),
+            ApiError(OpenCompanyError::NotFound(format!("workflow {wid}"))).into_response(),
         );
     }
 
@@ -1424,7 +1424,7 @@ async fn run_workflow(
     )
     .map_err(|e| ApiError(e).into_response())?
     .ok_or_else(|| {
-        ApiError(OpenCompanyError::CompanyNotFound(format!("workflow {wid}"))).into_response()
+        ApiError(OpenCompanyError::NotFound(format!("workflow {wid}"))).into_response()
     })?;
 
     let body = body.map(|Json(b)| b).unwrap_or_default();
@@ -2024,7 +2024,7 @@ async fn fix_from_run(
     // escape `workflows/`.
     if !safe_wid(&wid) {
         return Err(
-            ApiError(OpenCompanyError::CompanyNotFound(format!("workflow {wid}"))).into_response(),
+            ApiError(OpenCompanyError::NotFound(format!("workflow {wid}"))).into_response(),
         );
     }
 
@@ -2067,7 +2067,7 @@ async fn fix_from_run(
     )
     .map_err(|e| ApiError(e).into_response())?
     .ok_or_else(|| {
-        ApiError(OpenCompanyError::CompanyNotFound(format!("workflow {wid}"))).into_response()
+        ApiError(OpenCompanyError::NotFound(format!("workflow {wid}"))).into_response()
     })?;
     // `workflow_spec_from_graph` below has no `on_error`/`retry`/`repeatable`
     // field on `WorkflowNodeSpec` (the builder never authors them — see its
@@ -5605,6 +5605,25 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        }
+
+        /// A missing workflow is a missing nested resource, not a missing
+        /// company. Both variants are 404, so the envelope code pins the
+        /// distinction that operators and clients actually consume.
+        #[tokio::test]
+        async fn reading_an_unknown_workflow_reports_resource_not_found() {
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let (state, _store, _id) = hosted_state(&home).await;
+
+            let response = router(state)
+                .oneshot(request("GET", "/api/v1/company/workflows/ghost", None))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
+            let body = json_body(response).await;
+            assert_eq!(body["code"], "not_found", "{body}");
+            assert_eq!(body["error"], "not found: workflow ghost", "{body}");
         }
 
         /// A **global-only** workflow — no seed file, no overlay body, just the
