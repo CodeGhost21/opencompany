@@ -83,10 +83,10 @@ closed = true
 needs_reason = true
 
 [[status]]
-name = "lost"
+name = "not_bought"
 closed = true
 needs_reason = true
-aliases = ["passed"]
+aliases = ["passed", "lost"]
 
 [[section]]
 heading = "Under contract"
@@ -107,5 +107,5 @@ Bought, passed, or lost — each with the reason. The passed rows are the buy bo
 made concrete, and the lost ones say what this company is actually willing to \
 pay versus what it says it is.\
 """
-statuses = ["closed_won", "lost"]
+statuses = ["closed_won", "not_bought"]
 cap = 20
