@@ -173,7 +173,7 @@ export async function fetchFile(
  * `parentId` by walking the tree, and a flat hit list has no tree to walk.
  */
 export interface SearchHit extends FsNode {
-  /** The node's logical path, e.g. `Standards/Engineering.md`. */
+  /** The node's logical path, e.g. `standards/Engineering.md`. */
   path: string;
   /** Whether the query matched the node's name or its body. */
   matched: "name" | "content";
@@ -404,7 +404,7 @@ interface SweepResult {
 }
 
 /**
- * Remove the empty `Agents/<id>/` folders a pre-#570 company still carries
+ * Remove the empty `agents/<id>/` folders a pre-#570 company still carries
  * (issue #700), or — with `dryRun` — find out which ones those are without
  * touching anything.
  *

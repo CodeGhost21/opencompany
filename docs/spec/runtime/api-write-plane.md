@@ -35,7 +35,7 @@ POST   …/workspace                          create a folder/file (or upload)
 PUT    …/workspace/file/{nodeId}             write file content
 PATCH  …/workspace/{nodeId}                  rename / move
 DELETE …/workspace/{nodeId}                  delete a node
-POST   …/workspace/sweep-empty-agent-folders?dry_run=  tidy `Agents/` strays (#700)
+POST   …/workspace/sweep-empty-agent-folders?dry_run=  tidy `agents/` strays (#700)
 POST   …/workspace/merge-duplicate-folders?dry_run=    repair a raced tree (#759)
 POST   …/skills                             add a custom skill
 GET    …/skills/registry                     browse the shared skill library
@@ -45,8 +45,8 @@ PUT    …/skills/{slug}                       enable / disable a skill
 POST   …/team                               add an operator-overlay teammate
 GET    …/tools/catalog                       everything this company can grant
 GET    …/team/{agentId}                      one agent in full (tier, tools, desks)
-PATCH  …/team/{agentId}                      edit an overlay teammate
-DELETE …/team/{agentId}                      remove an overlay teammate
+PATCH  …/team/{agentId}                      edit a teammate
+DELETE …/team/{agentId}                      remove a teammate
 PUT    …/team/{agentId}/inbox                toggle a teammate's inbox
 PUT    …/team/{agentId}/budget               set / change / remove a daily cap
 DELETE …/team/{agentId}/budget               reset the cap to the manifest default
@@ -103,14 +103,14 @@ only: a text read of a payload is empty by the port's definition, and its bytes
 are never scanned or excerpted.
 
 `POST …/workspace/sweep-empty-agent-folders` (#700) removes the empty
-`Agents/<id>/` folders a pre-#570 company still carries. Operator-triggered
+`agents/<id>/` folders a pre-#570 company still carries. Operator-triggered
 rather than automatic — the affected tenants are hosted, so a subcommand would
 be unreachable for the operators who need it, and a boot sweep would change a
 tree on an upgrade nobody asked for. `?dry_run=true` answers
 `{"wouldRemove":[{id,name}…]}` and touches nothing, so the console can name
 every folder on a confirm dialog; the real call answers `{"removed":[…]}`, and
 which field carries the list is what actually happened. A node qualifies only
-when it is a direct child of the `Agents` root **by id**, is a folder, and has
+when it is a direct child of the `agents` root **by id**, is a folder, and has
 **no children counted structurally** — over every node in the tree, before any
 path is rendered, because a folder whose only child carries a path separator
 reads as empty to anything path-shaped while the recursive delete would still
@@ -163,16 +163,16 @@ stamps `operator`; agent writes stamp `agent{id}` from the agent's roster id,
 which is fixed at agent-build time and never taken from tool arguments. Agents
 reach the same tree through `workspace_list` / `workspace_search` /
 `workspace_read` / `workspace_create` / `workspace_write`, and a created note has its default home
-in the reserved `Agents/<agent-id>/` folder (#551) — a convention the persona
+in the reserved `agents/<agent-id>/` folder (#551) — a convention the persona
 brief steers toward, not a boundary the routes enforce. `workspace_rename` and
 `workspace_delete` (#671) are the exception: those two *are* bounded to
-`Agents/<agent-id>/`, checked on the resolved node so an `id` argument refuses
+`agents/<agent-id>/`, checked on the resolved node so an `id` argument refuses
 exactly as its path would. Neither restamps authorship; a delete leaves any
 artifact version that pointed at the node with a dangling `workspaceNodeId`,
 which is the same state the `DELETE` route above produces and is read-guarded
 before reuse. Boot scaffolds the
-`Agents/` root empty; an individual `Agents/<agent-id>/` is minted the first
-time that agent writes into it, and the `Desks/` root is minted whole the first
+`agents/` root empty; an individual `agents/<agent-id>/` is minted the first
+time that agent writes into it, and the `desks/` root is minted whole the first
 time a desk produces something (#645) — so a tree read on a fresh company shows
 exactly one root and no member folders.
 
@@ -188,11 +188,11 @@ id from the display name** (issue #686): "Dana Designer" becomes
 on a hand-authored `[[agent]].id`. They used to mint an opaque
 `{millis}-{counter}` id, which #570/#552/#607 render as a workspace folder and
 in search-hit paths — so half a company's tree read as
-`Agents/019fad5ada20-000000000003/` beside `Agents/backend_engineer/`.
+`agents/019fad5ada20-000000000003/` beside `agents/backend_engineer/`.
 
 - **Collisions suffix, they do not refuse.** A slug already held by a manifest
   agent, another teammate, a desk id or name, or a reserved word (`operator`,
-  `Agents`, `Desks`) becomes `<slug>_2`, `_3`, … Duplicate display names have
+  `agents`, `desks`) becomes `<slug>_2`, `_3`, … Duplicate display names have
   always been accepted here, and an unsuffixed collision with a *manifest* id is
   worse than a refusal: the roster build skips it, so the teammate would persist
   and never materialise.
@@ -200,7 +200,7 @@ in search-hit paths — so half a company's tree read as
   and leaves the id alone; a name-keyed id would orphan its workspace folder,
   budget row, desk memberships and inbox on every correction.
 - **Removal frees the slug**, so re-adding the same name takes the id back and
-  **adopts the old `Agents/<slug>/` folder** — the intended remedy for a typo'd
+  **adopts the old `agents/<slug>/` folder** — the intended remedy for a typo'd
   name, and not a way to get a clean slate.
 
 Teammates carrying generated ids are **not migrated**: rewriting them would
@@ -247,26 +247,56 @@ write. See [runtime/tools.md](tools.md).
 a company that tags nobody still names its orchestrator.
 
 `global` marks the teammates the [global baseline](globals.md) merged in — the
-ones every company has whichever vertical it started from, and the ones
-`DELETE …/team/{agentId}` refuses. It is sent on every row because a client
+ones every company has whichever vertical it started from. It is sent on every
+row because a client
 cannot otherwise tell a company somebody staffed from one nobody has: the
 baseline is on every roster, so `length === 0` is a question with one answer.
 The console's first-run gate turns on it
 ([company-setup.md](company-setup.md)); before the field existed that gate could
 never open.
 
-`PATCH …/team/{agentId}` edits an **overlay** teammate's `name`, `role` and
-`description`. It is a patch: an omitted key is left alone, and `"description":
-null` clears it — the two must stay apart or every partial save would erase an
-agent's instructions. A blank `name`/`role` is `400`, an unknown teammate `404`,
-and a **manifest** teammate is `409`: its fields live in the version-controlled
-`company.toml`, and the console does not rewrite the blueprint. The one thing
-that *is* changeable on such a teammate is its daily budget, and that works
-because #343 modelled it as an override rather than as a rewrite. Every detail
-response carries an `editable` list naming the fields this route will accept, so
-a client renders read-only from the host's answer instead of re-deriving the
-rule. `tier` and `tools` are read-only for both kinds: there is no override
-layer for either, and adding one is a policy decision rather than a form field.
+`PATCH …/team/{agentId}` edits a teammate's `name`, `role`, `description` and
+`tools`. It is a patch: an omitted key is left alone, and `"description": null`
+clears it — the two must stay apart or every partial save would erase an agent's
+instructions. A blank `name`/`role` is `400` and an unknown teammate `404`.
+
+A **manifest** teammate is edited here too, and this is the one thing the route
+does differently: instead of rewriting `company.toml`, the host stores the change
+as an `overlay_agent_edits` entry on the company record and resolves it through
+`CompanyRecord::effective_agent`, the same call `build_roster` makes. So the
+blueprint keeps stating what the company launched with, the overlay states what
+the operator has since decided, and the console card and the running teammate
+cannot disagree. The merge is per field, so a field nobody edited still tracks
+the blueprint across a rebuild. This is what makes a *deployed* company's roster
+— including the global-baseline agents every company gets — changeable at all: a
+hosted tenant has no `company.toml` to edit and no redeploy to make. The edit
+reaches the next turn rather than the next restart, because it moves the pool's
+overlay fingerprint (`overlay_fingerprint`, see
+[ports-state.md](ports-state.md)).
+
+Every detail response carries an `editable` list naming the fields this route
+will accept, so a client renders read-only from the host's answer instead of
+re-deriving the rule. `tools` is admin-only for both kinds — an empty list means
+"the company's standard grant", so a `tools` edit is a potential *widening* —
+and `tier` is read-only for both: it has no override layer, and adding one is a
+policy decision rather than a form field.
+
+`DELETE …/team/{agentId}` removes a teammate. An overlay teammate is deleted
+outright — the record is the only thing that declares it. A **manifest**
+teammate is removed by recording a tombstone in `overlay_retired_agents`, for
+the reason an edit is an overlay: `company.toml` and the baseline merged into it
+are re-read on every rebuild, so a teammate deleted by rewriting the roster
+would simply come back. `CompanyRecord::effective_agents` filters the tombstoned
+ids out, which is what takes the teammate off the roster, off its desks, out of
+the delegation targets and out of the harness build — rather than merely off the
+Team page. If it was the orchestrator, the role moves to the next teammate that
+is actually there.
+
+Either way the teammate's operator-added desk seats, its edit overlay and its
+budget override go with it; a blueprint desk seat is left in the manifest and
+filtered at read time. The **one refusal** is the company's last teammate
+(`409`): an empty roster has no orchestrator, nobody to answer a message and no
+way back from the console.
 
 The two **budget** routes (issue #343) are how a teammate's `budget_usd_daily`
 becomes changeable without a redeploy. Both are **admin-only** — a member gets

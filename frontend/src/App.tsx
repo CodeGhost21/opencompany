@@ -22,14 +22,17 @@ import {
 } from "@/api/transport/desktop";
 import { ApiError } from "@/api/types";
 import { ConsoleChrome } from "@/components/host-switcher";
+import { ManageHostsPage } from "@/components/manage-hosts";
 import { Button } from "@/components/ui/button";
 import { resolveConfig } from "@/config";
 import {
   addConnection,
   adoptLocalHosts,
   clientFor,
+  editConnection,
   listConnections,
   probe,
+  removeConnection,
   restoreConnections,
   useConnections,
 } from "@/connections/registry";
@@ -89,14 +92,31 @@ function readHubError(): boolean {
  *
  * The code is a single-use credential, so it must not linger in the URL, the
  * history, or a `Referer` header once we hold it.
+ *
+ * `company` is deliberately kept, for the same reason `clearHubResultFromUrl`
+ * keeps it: it is not a credential, and it is what scopes the console. This
+ * once deleted it too — harmless back when the console was one implicit host,
+ * and a silent state reset once connections arrived. `restoreConnections` is
+ * told which same-origin console this load is (`isThisConsole`, added for
+ * #1167), and on a stripped URL that is `defaultCompany === null` — so the
+ * profile the link had just written is skipped, and `addConnection` mints a
+ * *second* id for the one host. Every key named after that id starts over: the
+ * tour, unread counts, the last-visited channel, the mail draft. The reported
+ * symptom was a welcome tour that came back after being skipped; see #1306.
+ *
+ * The hash is preserved: it is the router's, not ours, and a magic link may
+ * carry a deep link to land on.
  */
-function clearMagicLinkFromUrl(): void {
+export function clearMagicLinkFromUrl(): void {
   const params = new URLSearchParams(window.location.search);
   if (!params.has("code")) return;
   params.delete("code");
-  params.delete("company");
   const query = params.toString();
-  window.history.replaceState({}, "", window.location.pathname + (query ? `?${query}` : ""));
+  window.history.replaceState(
+    {},
+    "",
+    window.location.pathname + (query ? `?${query}` : "") + window.location.hash,
+  );
 }
 
 /**
@@ -109,15 +129,23 @@ function clearMagicLinkFromUrl(): void {
  *
  * `company` is deliberately kept. It is not a credential, and dropping it would
  * un-scope the console on a reload of a multi-company host.
+ *
+ * The hash is preserved for the same reason it is in `clearMagicLinkFromUrl`:
+ * it belongs to the router, and rewriting the URL without it would bounce a
+ * deep link back to the default view.
  */
-function clearHubResultFromUrl(): void {
+export function clearHubResultFromUrl(): void {
   const params = new URLSearchParams(window.location.search);
   if (params.get("key") !== "auth") return;
   params.delete("token");
   params.delete("error");
   params.delete("key");
   const query = params.toString();
-  window.history.replaceState({}, "", window.location.pathname + (query ? `?${query}` : ""));
+  window.history.replaceState(
+    {},
+    "",
+    window.location.pathname + (query ? `?${query}` : "") + window.location.hash,
+  );
 }
 
 /**
@@ -528,6 +556,20 @@ function Console() {
           await refreshLocal();
         }
       : undefined,
+    onEditHost: (id, change) => editConnection(id, change),
+    // Selection has to move *with* the removal, in one step. `active` falls
+    // through to the first connection when nothing is selected, so a console
+    // whose host has just been forgotten would otherwise render the removed
+    // row's client for a frame — and in the desktop, where `selected` is
+    // ordinarily null, it would keep rendering whatever came next without ever
+    // recording the choice.
+    onRemoveHost: (id) => {
+      removeConnection(id);
+      const remaining = listConnections();
+      setSelected((current) =>
+        remaining.some((c) => c.id === current) ? current : (remaining[0]?.id ?? null),
+      );
+    },
     onStopLocal: isDesktopRuntime()
       ? async (id) => {
           await stopLocalInstance(id);
@@ -561,6 +603,10 @@ function Console() {
           </ConsoleChrome>
         )}
       </ConsoleOrAddHost>
+      {/* Beside the console for the same reason, and more so: forgetting the
+          host on screen selects another one, which remounts the console. A page
+          mounted within would unmount itself mid-edit. */}
+      <ManageHostsPage />
     </HostsProvider>
   );
 }

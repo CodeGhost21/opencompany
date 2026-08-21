@@ -92,10 +92,18 @@ workload or committed.
 | GET | `…/{id}/approvals` | parked approvals |
 | POST | `…/{id}/approvals/{approvalId}` | `{verdict, note?}` → follow-up reply |
 | POST | `…/{id}/feedback` | scrub-then-preview feedback |
-| POST | `…/{id}/{pause\|resume\|suspend\|archive}` | lifecycle control |
+| POST | `…/{id}/{pause\|resume}` | lifecycle control (company-scoped) |
+| POST | `…/{id}/{suspend\|archive}` | lifecycle control (**platform-scoped**) |
 
 These back Overview, Conversation (send/reply), Approvals, Feedback, Settings
-(connection + lifecycle). Everything below is now **delivered** too — the
+(connection + lifecycle). The two scopes are not interchangeable, and the
+Settings lifecycle card renders accordingly: `suspend` and `archive` resolve
+through `resolve_claims`, which cannot return a human, so a console
+authenticating with a session cookie can never reach them — it offers them only
+when it carries a platform bearer, and otherwise says so in the page rather than
+failing after the confirmation (issue #1401). `resume` is company-scoped but the
+handler refuses a non-platform caller on a `suspended` company, so that button is
+withheld there too. Everything below is now **delivered** too — the
 sections document the surface, its read (GraphQL) and its writes (REST).
 
 ---
@@ -253,6 +261,21 @@ it. Responses mirror the TypeScript models in `src/lib/*` and `src/api/types.ts`
   native-route metadata rather than a list, and `src/lib/provider-grid.ts` merges
   the three into the rows `ProvidersSection` renders. `ComposioSection` keeps
   only the credential layer.
+
+### Devices (Settings) — `src/views/DevicesView.tsx`, `src/api/devices.ts`
+- The machines paired to the signed-in user: mint a pairing code, list paired
+  devices, revoke one.
+- **Source:** ✅ real — `GET/POST …/devices` and `DELETE …/devices/{id}`. The
+  routes shipped with device pairing and had no caller in the console for a
+  release, while the desktop's prompt pointed people here (issue #1476).
+- **Never `…/devices/claim`.** Redemption happens on the machine being enrolled,
+  through the Tauri bridge, so the session token goes host → OS keychain without
+  passing through a webview. A console that called it would hold the credential
+  the design says it cannot.
+- The sub-page table lives in `src/views/settings-pages.ts` rather than in
+  `SettingsSection.tsx`, so prose that sends someone to a sub-page (the desktop
+  pairing prompt) can name one without importing the section back through
+  itself — and cannot name one that does not exist.
 
 ### Domain & Email (Settings) — `src/components/domain-settings.tsx`, `src/lib/domain.ts`
 - Custom domain with generated DNS records (verification TXT, CNAME, DKIM, SPF)

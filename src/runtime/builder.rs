@@ -1307,7 +1307,7 @@ impl RuntimeBuilder {
         //
         // NOT gated on `seed_dir`, deliberately: a platform-provisioned tenant
         // carries no bundle, and the *global* ledgers are part of what a company
-        // is, exactly like the `Agents/`/`Desks/` roots below.
+        // is, exactly like the `agents/`/`desks/` roots below.
         //
         // Gated on the store holding no declaration at all rather than on each
         // slug's absence, so retiring a seeded ledger sticks. The honest limit:
@@ -1319,8 +1319,8 @@ impl RuntimeBuilder {
             seed_ledgers(&ops, &id, self.seed_dir.as_deref()).await?;
         }
 
-        // Issue #551: lay down the workspace's system roots — `Agents/` and
-        // `Desks/` — beside the template-seeded top-level folders, so anything
+        // Issue #551: lay down the workspace's system roots — `agents/` and
+        // `desks/` — beside the template-seeded top-level folders, so anything
         // an agent or a desk produces has a named home both the operator and
         // the other agents can navigate to. The roots only; the folder for a
         // given agent or desk is minted the first time that agent or desk
@@ -1932,6 +1932,25 @@ impl RuntimeBuilder {
             .as_ref()
             .map(|r| r.overlay_agents.clone())
             .unwrap_or_default();
+        // The roster edits and removals an operator has made from the console.
+        // Carried across the rebuild for the reason the overlay model exists at
+        // all: neither is written back to `company.toml`, so the seed manifest
+        // this rebuild starts from still declares the teammate under its
+        // original name and still declares the one that was removed. Left out,
+        // the `store.save` at the end of this function overwrites both with an
+        // empty list — and that save runs on every boot and every
+        // `rebuild_company` (an inference-settings change, a harness pool swap,
+        // a restart), so a console rename would revert and a removed teammate
+        // would walk back onto the roster. The same reasoning as
+        // `overlay_budgets` below, and the same failure mode.
+        let overlay_agent_edits = existing
+            .as_ref()
+            .map(|r| r.overlay_agent_edits.clone())
+            .unwrap_or_default();
+        let overlay_retired_agents = existing
+            .as_ref()
+            .map(|r| r.overlay_retired_agents.clone())
+            .unwrap_or_default();
         let overlay_desk_members = existing
             .as_ref()
             .map(|r| r.overlay_desk_members.clone())
@@ -1956,6 +1975,8 @@ impl RuntimeBuilder {
         // removed there would linger as one. The overlay halves are already
         // lifted out of `existing` above, so this loses nothing.
         let desk_record = CompanyRecord {
+            overlay_retired_agents: Vec::new(),
+            overlay_agent_edits: Vec::new(),
             id: id.clone(),
             manifest: self.manifest.clone(),
             ledger: Vec::new(),
@@ -2677,7 +2698,7 @@ impl RuntimeBuilder {
                                 // Issue #237: the SAME workspace handle the
                                 // console's REST/GraphQL surface writes through
                                 // (`ops.workspace`, seeded just above), so an
-                                // operator's edit to `Standards/` is what the
+                                // operator's edit to `standards/` is what the
                                 // next agent turn reads. The tools cache
                                 // nothing, so no rebuild is needed for an edit
                                 // to take effect.
@@ -2697,6 +2718,15 @@ impl RuntimeBuilder {
                             };
                             workflow_harness_deps = Some(deps.clone());
                             let record = CompanyRecord {
+                                // Seeded from the store like every other
+                                // operator overlay below. The brain resolves
+                                // its roster through `effective_agents`, so a
+                                // record built with these empty hands it a
+                                // roster where a removed teammate is back and
+                                // a renamed one still answers to the name the
+                                // blueprint gave it.
+                                overlay_retired_agents: overlay_retired_agents.clone(),
+                                overlay_agent_edits: overlay_agent_edits.clone(),
                                 id: id.clone(),
                                 manifest: self.manifest.clone(),
                                 ledger: Vec::new(),
@@ -2928,6 +2958,8 @@ impl RuntimeBuilder {
         // revoking it in version control.
         store
             .save(&CompanyRecord {
+                overlay_retired_agents,
+                overlay_agent_edits,
                 id: id.clone(),
                 manifest: self.manifest.clone(),
                 ledger,
@@ -4888,9 +4920,9 @@ mod test {
         let home = home_dir.path().to_path_buf();
         // A company definition dir with a workspace subtree.
         let seed_dir = home.join("def");
-        std::fs::create_dir_all(seed_dir.join("workspace/Brand")).unwrap();
-        std::fs::write(seed_dir.join("workspace/README.md"), "# Root").unwrap();
-        std::fs::write(seed_dir.join("workspace/Brand/voice.md"), "# Voice").unwrap();
+        std::fs::create_dir_all(seed_dir.join("workspace/brand")).unwrap();
+        std::fs::write(seed_dir.join("workspace/readme.md"), "# Root").unwrap();
+        std::fs::write(seed_dir.join("workspace/brand/voice.md"), "# Voice").unwrap();
 
         let manifest = parse("[company]\nname=\"Acme\"\n[policy]\nmode=\"full\"\n");
         let id = CompanyId::new("acme");
@@ -4900,22 +4932,29 @@ mod test {
             .build()
             .await
             .unwrap();
-        // Seeded: README.md, Brand/, Brand/voice.md — plus runtime scaffold
-        // (`Agents/` and `secrets/README.md`) which is not what the re-seed
-        // gate is about.
+        // Seeded: readme.md, brand/, brand/voice.md — plus runtime scaffold
+        // (the system roots and the explanatory note under each root that
+        // carries one), which is not what the re-seed gate is about. The
+        // explanatory notes are excluded by their *parent*, not by name: they
+        // are all called `readme.md`, and so is the seeded one this asserts on.
         let seeded = |tree: &[crate::ports::WorkspaceNode]| {
-            let secrets = tree
+            let scaffold_roots: Vec<&str> = tree
                 .iter()
-                .find(|node| {
+                .filter(|node| {
                     node.parent_id.is_none()
-                        && node.name == crate::company::workspace_scaffold::SECRETS_ROOT
+                        && crate::company::workspace_scaffold::SYSTEM_ROOTS
+                            .contains(&node.name.as_str())
                 })
-                .map(|node| node.id.as_str());
+                .map(|node| node.id.as_str())
+                .collect();
             let mut names: Vec<String> = tree
                 .iter()
                 .filter(|node| {
                     !crate::company::workspace_scaffold::SYSTEM_ROOTS.contains(&node.name.as_str())
-                        && node.parent_id.as_deref() != secrets
+                        && !node
+                            .parent_id
+                            .as_deref()
+                            .is_some_and(|parent| scaffold_roots.contains(&parent))
                 })
                 .map(|node| node.name.clone())
                 .collect();
@@ -4923,7 +4962,7 @@ mod test {
             names
         };
         let tree = runtime.workspace().tree(&id).await.unwrap();
-        assert_eq!(seeded(&tree), vec!["Brand", "README.md", "voice.md"]);
+        assert_eq!(seeded(&tree), vec!["brand", "readme.md", "voice.md"]);
 
         // Operator deletes a node.
         let voice = tree.iter().find(|n| n.name == "voice.md").unwrap();
@@ -4940,7 +4979,7 @@ mod test {
         let tree = runtime.workspace().tree(&id).await.unwrap();
         assert_eq!(
             seeded(&tree),
-            vec!["Brand", "README.md"],
+            vec!["brand", "readme.md"],
             "workspace re-seeded despite operator deletion"
         );
         // Sanity: the record store still loads.
@@ -5138,7 +5177,7 @@ needs_reason = true
             .await
             .expect("republished");
         let tree = runtime.workspace().tree(&id).await.unwrap();
-        for name in ["MATTERS.md", "DEADLINES.md", "POSITIONS.md"] {
+        for name in ["matters.md", "deadlines.md", "positions.md"] {
             assert!(
                 tree.iter().any(|node| node.name == name),
                 "`{name}` was not rendered"
@@ -5146,7 +5185,7 @@ needs_reason = true
         }
     }
 
-    /// Boot lays down `Agents/` and operator-only `secrets/README.md`. `Desks/`
+    /// Boot lays down `agents/` and operator-only `secrets/readme.md`. `desks/`
     /// has no producer, so it is minted on first use instead of standing empty.
     ///
     /// The per-agent folder is deliberately absent: it is minted the first time
@@ -5159,7 +5198,7 @@ needs_reason = true
     /// an existing company picks the root up.
     #[tokio::test]
     async fn boot_provisions_the_system_roots_and_nothing_inside_them() {
-        use crate::company::workspace_scaffold::{AGENTS_ROOT, SECRETS_ROOT};
+        use crate::company::workspace_scaffold::{AGENTS_ROOT, ARTIFACTS_ROOT, SECRETS_ROOT};
         use crate::ports::workspace::{NodeKind, WorkspaceOrigin};
 
         let home_dir = tmp_home("oc-agents-");
@@ -5184,8 +5223,14 @@ needs_reason = true
         names.sort_unstable();
         assert_eq!(
             names,
-            vec![AGENTS_ROOT, "README.md", SECRETS_ROOT],
-            "boot provisions the managed roots with no seed dir — no `Desks/`, and no \
+            vec![
+                AGENTS_ROOT,
+                ARTIFACTS_ROOT,
+                "readme.md",
+                "readme.md",
+                SECRETS_ROOT
+            ],
+            "boot provisions the managed roots with no seed dir — no `desks/`, and no \
              folder for a teammate that has produced nothing"
         );
         for node in &tree {
@@ -5195,7 +5240,7 @@ needs_reason = true
             tree.iter()
                 .filter(|node| node.parent_id.is_none() && node.kind == NodeKind::Folder)
                 .count(),
-            2
+            crate::company::workspace_scaffold::SYSTEM_ROOTS.len(),
         );
 
         // An existing, non-empty workspace: an `is_empty` gate would have
@@ -5205,7 +5250,7 @@ needs_reason = true
         // With one managed root, deleting it would leave the tree empty and
         // stop pinning that. A lazily-minted desk folder stands in for the
         // content a real company would have — and doubles as the #645 check
-        // that boot neither re-manages, duplicates nor disturbs a `Desks/` that
+        // that boot neither re-manages, duplicates nor disturbs a `desks/` that
         // already exists.
         crate::company::workspace_scaffold::ensure_desk_folder(
             runtime.workspace().as_ref(),
@@ -5240,12 +5285,14 @@ needs_reason = true
             names,
             vec![
                 AGENTS_ROOT,
-                "Desks",
-                "README.md",
-                "creative_studio",
+                ARTIFACTS_ROOT,
+                "creative-studio",
+                "desks",
+                "readme.md",
+                "readme.md",
                 SECRETS_ROOT,
             ],
-            "the deleted root was re-provisioned, and the unmanaged `Desks/` left as it stood"
+            "the deleted root was re-provisioned, and the unmanaged `desks/` left as it stood"
         );
     }
 
@@ -5253,7 +5300,7 @@ needs_reason = true
     /// roster: a company with no agents at all still gets it.
     #[tokio::test]
     async fn boot_provisions_the_roots_for_a_company_with_no_agents() {
-        use crate::company::workspace_scaffold::{AGENTS_ROOT, SECRETS_ROOT};
+        use crate::company::workspace_scaffold::{AGENTS_ROOT, ARTIFACTS_ROOT, SECRETS_ROOT};
 
         let home_dir = tmp_home("oc-noagents-");
         let id = CompanyId::new("acme");
@@ -5269,7 +5316,16 @@ needs_reason = true
         let tree = runtime.workspace().tree(&id).await.unwrap();
         let mut names: Vec<&str> = tree.iter().map(|n| n.name.as_str()).collect();
         names.sort_unstable();
-        assert_eq!(names, vec![AGENTS_ROOT, "README.md", SECRETS_ROOT]);
+        assert_eq!(
+            names,
+            vec![
+                AGENTS_ROOT,
+                ARTIFACTS_ROOT,
+                "readme.md",
+                "readme.md",
+                SECRETS_ROOT
+            ]
+        );
     }
 
     /// Issue #85: the launch path's template provenance is stamped onto the
@@ -5993,6 +6049,8 @@ needs_reason = true
         let id = CompanyId::new("acme");
         FsCompanyStore::new(dir.path())
             .save(&CompanyRecord {
+                overlay_retired_agents: Vec::new(),
+                overlay_agent_edits: Vec::new(),
                 id: id.clone(),
                 manifest: manifest.clone(),
                 ledger: Vec::new(),
@@ -6165,6 +6223,8 @@ needs_reason = true
         let id = CompanyId::new("acme");
         FsCompanyStore::new(dir.path())
             .save(&CompanyRecord {
+                overlay_retired_agents: Vec::new(),
+                overlay_agent_edits: Vec::new(),
                 id: id.clone(),
                 manifest: persisted,
                 ledger: Vec::new(),
@@ -6386,6 +6446,102 @@ needs_reason = true
         );
     }
 
+    /// The same defect one field over, and the one that would have made this
+    /// PR's whole promise false: a console rename and a console removal must
+    /// survive a rebuild.
+    ///
+    /// Neither is written back to `company.toml` — that is the point of the
+    /// overlay model — so the seed manifest a rebuild starts from still names
+    /// the teammate as it launched and still declares the one that was removed.
+    /// `build()` ends in an unconditional `store.save`, and while that save
+    /// wrote `Vec::new()` for these two fields every restart, every harness
+    /// pool swap and every inference-settings change quietly reverted the
+    /// rename and walked the removed teammate back onto the roster. An operator
+    /// on a hosted tenant has no file to edit and no redeploy to make, so
+    /// "it comes back on the next restart" is the whole feature failing.
+    ///
+    /// Asserted through `effective_agents` rather than the raw overlay vectors,
+    /// because that is the roster everything downstream actually reads.
+    #[tokio::test]
+    async fn a_rebuild_keeps_a_console_rename_and_a_console_removal() {
+        use crate::ports::types::AgentOverride;
+        use crate::store::FsCompanyStore;
+
+        let home_dir = tmp_home("oc-roster-rebuild-");
+        let home = home_dir.path().to_path_buf();
+        let id = CompanyId::new("roster-co");
+        let manifest = parse(
+            r#"
+            [company]
+            name = "Roster Co"
+
+            [[agent]]
+            id = "ceo"
+            role = "Chief Executive"
+
+            [[agent]]
+            id = "cto"
+            role = "Chief Technologist"
+            "#,
+        );
+
+        // First build materializes the record.
+        RuntimeBuilder::new(home.clone(), manifest.clone())
+            .with_id(id.clone())
+            .build()
+            .await
+            .unwrap();
+
+        // The console writes: rename one blueprint teammate, remove another.
+        let store = FsCompanyStore::new(home.clone());
+        let mut record = store.load(&id).await.unwrap().unwrap();
+        record.overlay_agent_edits.push(AgentOverride {
+            agent_id: "ceo".to_string(),
+            name: None,
+            role: Some("Managing Director".to_string()),
+            description: None,
+            tools: None,
+        });
+        record.retire_agent("cto");
+        store.save(&record).await.unwrap();
+
+        // Rebuild, exactly as a restart does.
+        RuntimeBuilder::new(home.clone(), manifest)
+            .with_id(id.clone())
+            .build()
+            .await
+            .unwrap();
+
+        let rebuilt = store.load(&id).await.unwrap().unwrap();
+        let roster = rebuilt.effective_agents();
+        let ceo = roster
+            .iter()
+            .find(|agent| agent.id == "ceo")
+            .expect("the renamed teammate is still on the roster");
+        assert_eq!(
+            ceo.role, "Managing Director",
+            "the rebuild reverted a console rename — `overlay_agent_edits` was not carried \
+             forward; roster: {roster:?}"
+        );
+        assert!(
+            !roster.iter().any(|agent| agent.id == "cto"),
+            "the rebuild resurrected a removed teammate — `overlay_retired_agents` was not \
+             carried forward; roster: {roster:?}"
+        );
+
+        // And the blueprint really does still declare both, which is exactly why
+        // carrying the overlay is the only thing that can have produced the two
+        // assertions above.
+        assert!(
+            rebuilt
+                .manifest
+                .agents
+                .iter()
+                .any(|agent| agent.id == "cto"),
+            "the manifest no longer declares the removed teammate, so this test proves nothing"
+        );
+    }
+
     /// Spawns an in-process OpenAI-compatible stub that answers every
     /// chat-completion with `marker`, so a harness turn can run without a real
     /// inference backend. Mirrors the provider-test helper of the same name.
@@ -6464,6 +6620,8 @@ needs_reason = true
         let store = FsCompanyStore::new(home.clone());
         store
             .save(&CompanyRecord {
+                overlay_retired_agents: Vec::new(),
+                overlay_agent_edits: Vec::new(),
                 id: id.clone(),
                 manifest: manifest.clone(),
                 ledger: Vec::new(),
@@ -6582,6 +6740,8 @@ needs_reason = true
         let store = FsCompanyStore::new(home.clone());
         store
             .save(&CompanyRecord {
+                overlay_retired_agents: Vec::new(),
+                overlay_agent_edits: Vec::new(),
                 id: id.clone(),
                 manifest: manifest.clone(),
                 ledger: Vec::new(),
@@ -6718,6 +6878,8 @@ needs_reason = true
         let store = FsCompanyStore::new(home.clone());
         store
             .save(&CompanyRecord {
+                overlay_retired_agents: Vec::new(),
+                overlay_agent_edits: Vec::new(),
                 id: id.clone(),
                 manifest: manifest.clone(),
                 ledger: Vec::new(),

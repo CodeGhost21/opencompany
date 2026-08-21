@@ -2,7 +2,7 @@
 
 > A full-service agency of agents producing creative, copy, SEO, paid, email, and landing pages — with a human reviewing campaigns before they ship.
 
-This file is routed into every teammate's system prompt alongside `METHOD.md`
+This file is routed into every teammate's system prompt alongside `method.md`
 (`context_routing::UNIVERSAL_DOCUMENTS`), so it is the one place a convention
 reaches the whole roster without being repeated in every agent's `context`.
 
@@ -28,12 +28,23 @@ that is the specific failure this working agreement exists to prevent.
 | `email_marketer` | Email Marketer | Growth | Design and send lifecycle email. |
 
 `creative_director` is the orchestrator: it holds the routing picture
-(`BRIEF.md`, `CLAIMS.md`, `THREADS.md`) and unrestricted ledger access, so it
+(`brief.md`, `claims.md`, `threads.md`) and unrestricted ledger access, so it
 sets and revises goals and decisions rather than a specialist re-deciding them
 mid-task.
 
 Humans keep **campaign review and sign-off**; everything else here is the
 roster's to run.
+
+## Where the role rules live
+
+Each teammate's `.toml` carries wiring only — tier, ledger grants, routed
+context, delegation. The working rules live in `agents/prompts/<id>.md`, named by
+that file's `prompt_files` entry and loaded into the prompt as **Your brief**
+(see `docs/spec/runtime/agents.md`). Edit the brief to change how a role works;
+edit the `.toml` to change what it may touch.
+
+Print what any teammate's prompt assembles into with
+`./scripts/dump-prompt.sh --company companies/<name> --agent <id>`.
 
 ## Desks
 
@@ -92,10 +103,10 @@ Plus the baseline's `web-research`, `weekly-report` and `meeting-brief`.
 
 ## Workspace layout
 
-- `Brand/`, `Campaigns/`, `Playbooks/` — shared, operator-seeded notes. Read
+- `brand/`, `campaigns/`, `playbooks/` — shared, operator-seeded notes. Read
   them before proposing work that touches an area they cover; edit them on
   purpose, not as a side effect of an unrelated task.
-- `Agents/<your agent id>/` — your own folder, the default home for anything you
+- `agents/<your agent id>/` — your own folder, the default home for anything you
   produce. Always writable, whatever your `context` write scope says.
 - `derived/` — rendered ledger views. Never hand-write anything here.
 
