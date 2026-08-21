@@ -290,6 +290,56 @@ export interface ChatResponse {
    * reacted to" rather than guessing an id.
    */
   messageId?: string;
+  /**
+   * The durable turn row this message opened (issue #983) — pollable at
+   * `GET {scope}/runs/{turnId}`. Additive: absent on a host that predates the
+   * field, which the console reads as "this turn cannot be watched", falling
+   * back to re-reading history.
+   */
+  turnId?: string;
+}
+
+/**
+ * The answer to a **detached** chat post (issue #983): the turn has been
+ * accepted, journaled and given an id, and that is all it claims. The reply
+ * arrives afterwards on the event stream's `agent_reply` frame, and durably in
+ * `chat/history`.
+ *
+ * `detached` is a constant `true` and exists to be *present*: a newer console
+ * pointed at a host that predates the field sends `detach`, the host ignores it,
+ * and the full synchronous body comes back. So the console can only tell the two
+ * apart by what arrived — never by what it asked for.
+ */
+export interface DetachedChatResponse {
+  /**
+   * The turn's durable row, to poll. Optional for the same reason
+   * `ChatResponse.turnId` is: a run store that refused a row does not get to
+   * refuse the turn, so a detached turn can exist unwatched.
+   */
+  turnId?: string;
+  /**
+   * The durable id of the operator's own message. Never optional here — since
+   * #983 the append happens at accept time, so it is already a fact when this
+   * body is written. That is what lets the console reconcile its optimistic
+   * bubble immediately instead of waiting for the turn to settle.
+   */
+  messageId: string;
+  detached: true;
+}
+
+/** What `POST {scope}/chat` can answer with — settled, or accepted (#983). */
+export type ChatPostResult = ChatResponse | DetachedChatResponse;
+
+/**
+ * Which shape came back, decided on the **response**, never on the request.
+ *
+ * Reads `detached` as a presence check rather than trusting `detach` was
+ * honoured: an older host silently ignores the field and answers synchronously,
+ * and a console that assumed otherwise would sit waiting for a reply it was
+ * already holding.
+ */
+export function isDetachedChat(answer: ChatPostResult): answer is DetachedChatResponse {
+  return (answer as DetachedChatResponse).detached === true;
 }
 
 /** One parked approval from `/approvals`. */
@@ -594,8 +644,9 @@ export interface MemorySpec {
   /**
    * Whether the boot-time reachability probe found the engine usable — ready
    * or degraded (reachable, possibly reduced); only a down engine is `false`.
-   * Absent = not probed (base store, direct engine, or an older host) — treat
-   * as unknown, not unhealthy.
+   * A boot-time snapshot, not a live gauge: the provider can recover or fail
+   * after boot without this moving. Absent = not probed (base store, direct
+   * engine, or an older host) — treat as unknown, not unhealthy.
    */
   healthy?: boolean;
 }
@@ -1216,6 +1267,34 @@ export interface CapabilityStatusDto {
    * send the field, and must not be rendered as "not granted".
    */
   repoGranted?: boolean;
+  /**
+   * Publishing (issue #244, panel half #1192): whether the company's grants
+   * confer `publish_artifact` — the only way a file an agent wrote becomes a
+   * deliverable.
+   *
+   * **Unlike every other `*Granted` flag here, a bare `*` DOES confer this.**
+   * Publishing spends nothing and reaches nothing outside the company's own
+   * board, so it rides the ordinary namespace rule rather than the
+   * opt-in-by-name rule the real-money surfaces use. The host derives it from
+   * the same predicate the toolbelt's own gate calls, so the panel cannot
+   * report a capability no agent has.
+   *
+   * `undefined` is an older host that does not send the field, and must not be
+   * rendered as "not granted".
+   */
+  publishGranted?: boolean;
+  /**
+   * Whether the harness carrying `publish_artifact` is compiled into this
+   * build. There is no `publish` Cargo feature — the tool rides the harness
+   * feature, exactly as `searchInBuild` does.
+   *
+   * There is deliberately no third flag beside these two. Media, Composio and
+   * search each carry a credential/config rung because each can be granted and
+   * still wire nothing; publishing has neither a credential nor a store toggle,
+   * so a `artifactStoreConfigured` field could only ever be a hardcoded `true`
+   * — the always-reassuring flag issue #886 was filed about.
+   */
+  publishInBuild?: boolean;
   /**
    * Whether the agent-side MCP bridge is compiled into this build (issue #567).
    * Not a grant question like the flags above: the `/mcp/servers` management

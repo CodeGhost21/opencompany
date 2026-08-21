@@ -453,6 +453,15 @@ impl ContextStore for ProviderContextStore {
         Ok(slice_on_char_boundaries(&chunk.body, range))
     }
 
+    async fn delete(&self, company: &CompanyId, addr: &ChunkAddr) -> Result<bool> {
+        // The engine keys chunks by their content address (see `put`), so the
+        // port's addr IS the engine key. On an address collision (64-bit
+        // non-cryptographic hash — see `put`'s comment) the single stored body
+        // goes, whichever writer minted it first; that is the same
+        // first-write-wins property every backend already has.
+        self.bound.forget(company, addr.as_ref()).await
+    }
+
     async fn search(
         &self,
         company: &CompanyId,

@@ -213,6 +213,7 @@ const TOOL_LABELS: Readonly<Record<string, string>> = {
   repo_checkout: "Check out one of the company's repositories",
   repo_pr: "Fetch a pull request from one of the company's repositories",
   memory_store: "Save something to its memory",
+  memory_forget: "Discard one of its own saved memories",
   memory_recall: "Look something up in its memory",
   web_fetch: "Fetch a web page",
   query_company: "Look up something about the company",
@@ -683,6 +684,72 @@ export function untilLabel(atMillis: number, now: number): string {
   const hours = Math.round(mins / 60);
   if (hours < 24) return `in ${hours}h`;
   return `in ${Math.round(hours / 24)}d`;
+}
+
+/**
+ * How loudly an approval's deadline should be said (issue #1403).
+ *
+ * `normal` is the muted footnote every other fact in the meta line gets.
+ * `soon` is the last hour, where the deadline stops being background and
+ * becomes the reason to act now. `passed` is after it, where there is nothing
+ * left to count down to.
+ */
+export type DeadlineTone = "normal" | "soon" | "passed";
+
+/**
+ * An approval's own deadline, in words an operator can act on (issue #1403).
+ *
+ * The line this replaces was `declined ${untilLabel(...)}` — three defects in
+ * one span, all of them on the surface where a misread is most expensive:
+ *
+ * 1. **"declined in 4m" is a past participle**, sitting two words after a
+ *    genuinely past-tense "Composed 5h ago", in the same muted grey. Scanned
+ *    rather than parsed — which is how a fourteen-row queue is read — it says
+ *    *this one was declined*, and the operator moves on while the request
+ *    quietly ages out. The page's preamble already had the right words for it
+ *    ("declined on its own"); the card did not use them.
+ * 2. **It rounded to "declined in 0m"** for the last half-minute *and* for a
+ *    deadline already gone, so the two states an operator most needs to tell
+ *    apart printed the same string.
+ * 3. **It had no tone**, so four minutes on a $4,280 payment rendered exactly
+ *    like twenty-three hours on an internal no-op.
+ *
+ * ## Why this floors where {@link untilLabel} rounds
+ *
+ * Deliberate, and the difference is the whole reason this is not `untilLabel`
+ * with different words. Rounding *up* overstates how long is left: a request
+ * with ninety seconds on it would read "in 2m". For a standing permission that
+ * is harmless — the row describes something ending, and either direction is a
+ * fair summary. For a deadline the operator is racing it is not: the only safe
+ * rounding error is the one that makes them act sooner. So this floors, and the
+ * sub-minute bucket is spelled out rather than shown as "0m".
+ *
+ * The two therefore *can* disagree by a bucket while sharing a screen — the
+ * grant rows below the queue still call `untilLabel`. They describe different
+ * objects (when a permission you granted lapses, versus when a request you have
+ * not answered answers itself), so one number is not a second opinion about the
+ * other.
+ *
+ * Pure and string-returning so the wording is testable without a DOM; the
+ * caller maps {@link DeadlineTone} to type weight and colour.
+ */
+export function approvalDeadline(
+  expiresAtMillis: number,
+  now: number,
+): { text: string; tone: DeadlineTone } {
+  const left = expiresAtMillis - now;
+  // At or past it. Said as a state rather than as a countdown, because there is
+  // nothing left to count — and never as "0m", which is the string this exists
+  // to delete. The host sweeps expired approvals once a minute, so a card can
+  // legitimately sit here for a moment before it leaves the queue; that moment
+  // is exactly when the operator most needs the card to explain itself.
+  if (left <= 0) return { text: "Past its deadline — declining itself", tone: "passed" };
+  if (left < 60_000) return { text: "Declines itself in under a minute", tone: "soon" };
+  const mins = Math.floor(left / 60_000);
+  if (mins < 60) return { text: `Declines itself in ${mins}m`, tone: "soon" };
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return { text: `Declines itself in ${hours}h`, tone: "normal" };
+  return { text: `Declines itself in ${Math.floor(hours / 24)}d`, tone: "normal" };
 }
 
 /**

@@ -51,6 +51,11 @@ mod gated_tool_turn_test;
 /// their own suites is blind to.
 #[cfg(test)]
 mod parallel_gate_fanout_test;
+/// Issue #1192: a node whose `publish_artifact` was refused for want of a
+/// destination says so on the run, instead of the refusal reaching the operator
+/// only as whatever prose the model wrote about it.
+#[cfg(test)]
+mod publish_refusal_notice_test;
 /// Issue #846: a continuation replays the outward calls its lineage already
 /// made, instead of making them a second time.
 pub mod replay;
