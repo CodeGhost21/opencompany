@@ -2079,23 +2079,6 @@ interface TreeProps {
 }
 
 /**
- * Whether `folder` is the workspace's `agents/` root — the one folder whose
- * direct children are named by roster id rather than anything an operator
- * chose (issue #973). Root-scoped (`parentId === null`) so a note or folder an
- * operator names "agents" somewhere else in the tree is never mistaken for it.
- *
- * Case-insensitive on the name: the root is `agents/` under the workspace
- * naming rule, and a company created before that rule still carries `Agents/`.
- */
-function isAgentsFolder(folder: FsNode | undefined): boolean {
-  return (
-    folder?.kind === "folder" &&
-    folder.name.toLowerCase() === "agents" &&
-    folder.parentId === null
-  );
-}
-
-/**
  * `agents/`'s children, sorted by display name rather than the lexical id
  * {@link childrenOf} sorts everywhere else (issue #973). The pre-#686 ULID ids
  * all sort before every readable slug under the plain id ordering, which is

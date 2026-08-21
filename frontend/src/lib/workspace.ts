@@ -400,10 +400,10 @@ export function pathOf(nodes: FsNode[], id: string | null): FsNode[] {
  * than what is shown instead of reading a shortened path as the whole truth.
  */
 /**
- * Whether `folder` is the workspace's `Agents/` root — the one folder whose
+ * Whether `folder` is the workspace's `agents/` root (case-insensitive) — the one folder whose
  * direct children are named by roster id rather than anything an operator
  * chose (issue #973). Root-scoped (`parentId === null`) so a note or folder an
- * operator names "Agents" somewhere else in the tree is never mistaken for it.
+ * operator names "agents" somewhere else in the tree is never mistaken for it.
  *
  * Lives here rather than in the view because the tree is no longer the only
  * surface that has to resolve those ids: the Move dialog lists the same folders
@@ -412,7 +412,7 @@ export function pathOf(nodes: FsNode[], id: string | null): FsNode[] {
 export function isAgentsFolder(folder: FsNode | undefined): boolean {
   return (
     folder?.kind === "folder" &&
-    folder.name === "Agents" &&
+    folder.name.toLowerCase() === "agents" &&
     folder.parentId === null
   );
 }
