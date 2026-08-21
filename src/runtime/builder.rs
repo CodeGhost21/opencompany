@@ -1932,6 +1932,25 @@ impl RuntimeBuilder {
             .as_ref()
             .map(|r| r.overlay_agents.clone())
             .unwrap_or_default();
+        // The roster edits and removals an operator has made from the console.
+        // Carried across the rebuild for the reason the overlay model exists at
+        // all: neither is written back to `company.toml`, so the seed manifest
+        // this rebuild starts from still declares the teammate under its
+        // original name and still declares the one that was removed. Left out,
+        // the `store.save` at the end of this function overwrites both with an
+        // empty list — and that save runs on every boot and every
+        // `rebuild_company` (an inference-settings change, a harness pool swap,
+        // a restart), so a console rename would revert and a removed teammate
+        // would walk back onto the roster. The same reasoning as
+        // `overlay_budgets` below, and the same failure mode.
+        let overlay_agent_edits = existing
+            .as_ref()
+            .map(|r| r.overlay_agent_edits.clone())
+            .unwrap_or_default();
+        let overlay_retired_agents = existing
+            .as_ref()
+            .map(|r| r.overlay_retired_agents.clone())
+            .unwrap_or_default();
         let overlay_desk_members = existing
             .as_ref()
             .map(|r| r.overlay_desk_members.clone())
@@ -2699,12 +2718,15 @@ impl RuntimeBuilder {
                             };
                             workflow_harness_deps = Some(deps.clone());
                             let record = CompanyRecord {
-                                overlay_retired_agents: Vec::new(),
-                                // Matches every other construction site in this
-                                // file: an agent edit is an operator overlay the
-                                // brain re-reads from the store, not something
-                                // boot seeds.
-                                overlay_agent_edits: Vec::new(),
+                                // Seeded from the store like every other
+                                // operator overlay below. The brain resolves
+                                // its roster through `effective_agents`, so a
+                                // record built with these empty hands it a
+                                // roster where a removed teammate is back and
+                                // a renamed one still answers to the name the
+                                // blueprint gave it.
+                                overlay_retired_agents: overlay_retired_agents.clone(),
+                                overlay_agent_edits: overlay_agent_edits.clone(),
                                 id: id.clone(),
                                 manifest: self.manifest.clone(),
                                 ledger: Vec::new(),
@@ -2936,8 +2958,8 @@ impl RuntimeBuilder {
         // revoking it in version control.
         store
             .save(&CompanyRecord {
-                overlay_retired_agents: Vec::new(),
-                overlay_agent_edits: Vec::new(),
+                overlay_retired_agents,
+                overlay_agent_edits,
                 id: id.clone(),
                 manifest: self.manifest.clone(),
                 ledger,
