@@ -23,6 +23,7 @@ import {
   CheckCircle2,
   ChevronDown,
   ChevronRight,
+  ClipboardList,
   Clock,
   CornerDownRight,
   CornerUpLeft,
