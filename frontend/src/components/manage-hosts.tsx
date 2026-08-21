@@ -45,10 +45,11 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { CONNECTOR_LABELS, statusCopy } from "@/components/host-switcher";
+import { statusCopy } from "@/components/host-switcher";
 import { useHosts } from "@/connections/HostsContext";
 import { hostAddressEditable } from "@/connections/registry";
 import type { Connection } from "@/connections/types";
+import { CONNECTOR_LABELS } from "@/connections/types";
 import { cn } from "@/lib/utils";
 
 /**
