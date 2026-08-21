@@ -538,14 +538,12 @@ pub async fn run_workflow_build_pass(
             return;
         }
     };
-    if let Err(err) =
-        courtesy_validate_draft(
-            &draft,
-            &evidence.record,
-            evidence.source_dir.as_deref(),
-            Some(&evidence.wired_channels),
-        )
-    {
+    if let Err(err) = courtesy_validate_draft(
+        &draft,
+        &evidence.record,
+        evidence.source_dir.as_deref(),
+        Some(&evidence.wired_channels),
+    ) {
         settle_to_todo(
             &runtime,
             &task_id,
