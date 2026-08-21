@@ -1281,14 +1281,19 @@ impl ContextStore for FsContextStore {
         bundle.ensure_dirs().await?;
         let addr = content_address(&chunk.body);
 
+        // Blob write INSIDE the index lock: `delete` removes blob and index
+        // rows under this lock, and a same-address put racing it from another
+        // task (fact mirroring runs outside the cycle serial) could otherwise
+        // interleave as write-blob / delete-both / append-index — an index
+        // row pointing at a missing blob, where peek fails while list still
+        // answers.
+        let index_path = bundle.context_index_jsonl();
+        let lock = path_lock(&index_path);
+        let _guard = lock.lock().await;
         let blob_path = bundle.context_blob(&addr);
         tokio::fs::write(&blob_path, &chunk.body)
             .await
             .map_err(|e| io_err(&blob_path, e))?;
-
-        let index_path = bundle.context_index_jsonl();
-        let lock = path_lock(&index_path);
-        let _guard = lock.lock().await;
         let entry = IndexEntry {
             addr: addr.clone(),
             label: chunk.label,
@@ -1334,6 +1339,37 @@ impl ContextStore for FsContextStore {
                 Ok(body[start..end].to_string())
             }
         }
+    }
+
+    async fn delete(&self, id: &CompanyId, addr: &ChunkAddr) -> Result<bool> {
+        let bundle = self.bundle(id);
+        let index_path = bundle.context_index_jsonl();
+        let lock = path_lock(&index_path);
+        let _guard = lock.lock().await;
+        // Strict read on purpose: this is a read-modify-write, and
+        // `read_jsonl_lenient` is forbidden to rewriters — a damaged line must
+        // abort the rewrite, not be laundered out of the file for good.
+        let index = read_jsonl::<IndexEntry>(&index_path).await?;
+        let before = index.len();
+        let kept: Vec<IndexEntry> = index
+            .into_iter()
+            .filter(|e| e.addr != addr.as_ref())
+            .collect();
+        if kept.len() == before {
+            return Ok(false);
+        }
+        crate::store::fs_ops::rewrite_jsonl(&index_path, &kept).await?;
+        // The blob is shared by every index entry bearing this address (put
+        // appends an entry per write, all pointing at one content-addressed
+        // file). The filter above removed all of them, so the blob is
+        // unreferenced and goes too.
+        let blob_path = bundle.context_blob(addr.as_ref());
+        match tokio::fs::remove_file(&blob_path).await {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(io_err(&blob_path, e)),
+        }
+        Ok(true)
     }
 
     async fn search(&self, id: &CompanyId, query: &str, limit: usize) -> Result<Vec<ChunkHit>> {
@@ -2626,5 +2662,43 @@ mod test {
         );
         // Company B cannot see company A's secret.
         assert_eq!(secrets.get(&b, "github_token").await.unwrap(), None);
+    }
+    /// The put/delete race the index lock exists for: a same-address write
+    /// and delete interleaving as write-blob / delete-both / append-index
+    /// would leave an index row whose blob is gone — list answers, peek
+    /// fails. With the blob write under the lock, every surviving index row
+    /// must have a readable blob, whichever order the race resolved.
+    #[tokio::test]
+    async fn concurrent_same_address_put_and_delete_stay_coherent() {
+        use crate::ports::ContextStore;
+        let dir = tempfile::tempdir().unwrap();
+        let store = std::sync::Arc::new(FsContextStore::new(dir.path().to_path_buf()));
+        let id = CompanyId::new("race-co");
+        let chunk = || ContextChunk {
+            label: "race/probe".into(),
+            body: "identical body".into(),
+        };
+        let addr = store.put(&id, chunk()).await.unwrap();
+
+        for _ in 0..20 {
+            let s1 = store.clone();
+            let s2 = store.clone();
+            let id1 = id.clone();
+            let id2 = id.clone();
+            let a = addr.clone();
+            let put = tokio::spawn(async move { s1.put(&id1, chunk()).await });
+            let del = tokio::spawn(async move { s2.delete(&id2, &a).await });
+            put.await.unwrap().unwrap();
+            del.await.unwrap().unwrap();
+
+            // Whatever interleaving happened: every listed row peeks.
+            for meta in store.list(&id, "").await.unwrap() {
+                store.peek(&id, &meta.addr, None).await.unwrap_or_else(|e| {
+                    panic!("index row {} has no readable blob: {e}", meta.label)
+                });
+            }
+            // Reset to a known present state for the next round.
+            store.put(&id, chunk()).await.unwrap();
+        }
     }
 }

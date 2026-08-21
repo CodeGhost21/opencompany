@@ -130,8 +130,10 @@ Layer 2. These are what components use.
 | `--secondary` | rung `3` | rung `active` | Secondary button fill |
 | `--surface-icon` | rung `3` | rung `3` | Ground behind an icon circle |
 | `--accent` | rung `active` | rung `active` | Hover/rest tint under rows |
-| `--sidebar` | rung `1` | rung `1` | Nav column |
-| `--sidebar-accent` | rung `active` | rung `active` | Active nav row background |
+| `--sidebar` | rung `1` | rung `1` | Mobile nav sheet, standalone switcher |
+| `--sidebar-accent` | `brand-100` | rung `active` | Active nav row background |
+| `--chrome` | `#EBEBF4` | rung `2` | The window chrome |
+| `--chrome-border` | rung `4` | rung `active` | Where the content card meets it |
 | `--border` | rung `4` | rung `4` | The hairline |
 | `--input` | rung `4` | rung `active` | Field borders, stronger rules |
 | `--ring` | `brand-500` | `brand-400` | Focus |
@@ -147,6 +149,46 @@ them legible: every ground a border lands on sits clear of rung 4 in lightness.
 That constraint is why the dark popover is rung 3 rather than rung 4 — a
 surface painted the same rung as the stroke renders its own edge invisible,
 which is what the translucent value used to prevent.
+
+### The chrome, and why it is not a rung (issue #1178)
+
+The console's shell is two layers. `--chrome` is the window frame: the surface
+the sidebar column stands on and the margin the routed page's card floats in.
+It is painted exactly **once**, on the shell root, and both regions are that one
+surface showing through — the sidebar paints no fill of its own, and there is no
+divider between the panes. Tinting each pane separately lands them on different
+values and re-draws the seam the layout exists to remove.
+
+It is deliberately not a rung of the surface ladder. Those six are *content*
+surfaces — the canvas a page is drawn on and the panels stacked over it — and
+this one sits behind all of them. Light needs a value the ladder does not
+carry: darker than the canvas by enough to read as a layer, light enough that
+`--ink-muted` still clears 4.5:1, since the sidebar's faintest labels sit on it.
+Rung 2 separates less than the white sidebar it replaced; rung 3 drops muted ink
+to 4.44:1. `#EBEBF4` is between them — **1.11:1** against the card, **4.57:1**
+for muted ink.
+
+Dark takes rung 2 and inverts the direction. The canvas is already the darkest
+value in the theme, so "further back" cannot mean darker: `#030405` against
+`#08090B` measures 1.03:1, which is not a layer, it is a rendering artefact.
+`#121315` gives **1.07:1**, and the card's `--chrome-border` hairline (1.13:1
+against the chrome, 1.21:1 against the card) and the dark `shadow-sm` inset
+highlight carry the rest.
+
+**`--sidebar-accent` moved for the same reason.** The `active` rung was tuned to
+read on a white sidebar; against `--chrome` it measures 1.02:1 and the selected
+nav row simply vanished. `brand-100` is the same tint one step deeper — 1.10:1
+on the chrome, with `--sidebar-accent-foreground` at 6.29:1 on it. `--sidebar`
+itself still names rung 1, and two surfaces still paint it: the mobile nav
+sheet, which is an overlay dragged over the page rather than a pane of the
+shell, and the standalone host switcher, which draws its own card on a console
+that has no shell at all.
+
+**Anything that cuts a hole in the chrome must ask for the chrome.** A `ring-2`
+around a status dot is a cut-out of the ground behind it, not a decoration. The
+two in the shell — `SidebarMenuDot`'s attention dot on the collapsed rail and
+the host switcher's status dot — take `ring-chrome`, because that is what is
+actually behind them now. `ring-sidebar` there paints a halo.
 
 **`--accent-foreground` stays neutral.** 40 call sites pair `bg-accent` with
 `text-accent-foreground`; brand text on every hover would make the console

@@ -194,6 +194,10 @@ pub struct CompanyRuntime {
     pub(crate) events: Arc<dyn EventLog>,
     pub(crate) memory: Arc<dyn MemoryStore>,
     pub(crate) context: Arc<dyn ContextStore>,
+    /// The taint-stamping context port for external content (issue #1113);
+    /// resolved at build time — same store as `context` when the engine
+    /// cannot represent taint.
+    pub(crate) inbound_context: Arc<dyn ContextStore>,
     pub(crate) tools: Arc<dyn ToolProvider>,
     pub(crate) channels: Vec<Arc<dyn ChannelAdapter>>,
     pub(crate) economy: Option<Arc<dyn AgentEconomy>>,
@@ -417,6 +421,7 @@ impl CompanyRuntime {
         events: Arc<dyn EventLog>,
         memory: Arc<dyn MemoryStore>,
         context: Arc<dyn ContextStore>,
+        inbound_context: Arc<dyn ContextStore>,
         tools: Arc<dyn ToolProvider>,
         channels: Vec<Arc<dyn ChannelAdapter>>,
         economy: Option<Arc<dyn AgentEconomy>>,
@@ -443,6 +448,7 @@ impl CompanyRuntime {
             events,
             memory,
             context,
+            inbound_context,
             tools,
             channels,
             economy,
