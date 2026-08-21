@@ -192,7 +192,7 @@ in search-hit paths — so half a company's tree read as
 
 - **Collisions suffix, they do not refuse.** A slug already held by a manifest
   agent, another teammate, a desk id or name, or a reserved word (`operator`,
-  `Agents`, `Desks`) becomes `<slug>_2`, `_3`, … Duplicate display names have
+  `agents`, `desks`) becomes `<slug>_2`, `_3`, … Duplicate display names have
   always been accepted here, and an unsuffixed collision with a *manifest* id is
   worse than a refusal: the roster build skips it, so the teammate would persist
   and never materialise.
@@ -200,7 +200,7 @@ in search-hit paths — so half a company's tree read as
   and leaves the id alone; a name-keyed id would orphan its workspace folder,
   budget row, desk memberships and inbox on every correction.
 - **Removal frees the slug**, so re-adding the same name takes the id back and
-  **adopts the old `Agents/<slug>/` folder** — the intended remedy for a typo'd
+  **adopts the old `agents/<slug>/` folder** — the intended remedy for a typo'd
   name, and not a way to get a clean slate.
 
 Teammates carrying generated ids are **not migrated**: rewriting them would
