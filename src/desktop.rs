@@ -408,20 +408,26 @@ async fn register(
     manifest: CompanyManifest,
     provenance: Option<crate::ports::types::TemplateProvenance>,
 ) -> Result<()> {
-    let mut builder = RuntimeBuilder::new(state.home().to_path_buf(), manifest)
-        .with_id(id.clone())
-        // The host-wide sign-in mode (`OPENCOMPANY_AUTH_MODE` / `config.toml`
-        // `auth_mode`), which outranks this manifest's own `[users].mode`.
-        //
-        // `serve`'s `--company` path has always applied it; this one did not,
-        // so a company registered here silently kept its manifest's mode. That
-        // was invisible while only the desktop app reached this code, and stops
-        // being invisible the moment anything else does: the first-run setup
-        // flow writes `auth_mode` and tells the operator to restart, and
-        // without this the restart adopts the company and quietly ignores the
-        // setting they were just told would take effect. `None` — the normal
-        // case — leaves each manifest to name its own mode, as before.
-        .with_auth_mode_override(state.auth_mode_override());
+    // The embedded agent harness, on the same terms `serve` attaches it: the
+    // pool unconditionally, plus whichever managed backends the environment
+    // supplies. Without this a desktop company had no harness even in a build
+    // that compiled one in, so every turn fell back to the echo brain and the
+    // console reported that this build cannot reach a model.
+    let mut builder =
+        crate::app::attach_harness(RuntimeBuilder::new(state.home().to_path_buf(), manifest))
+            .with_id(id.clone())
+            // The host-wide sign-in mode (`OPENCOMPANY_AUTH_MODE` / `config.toml`
+            // `auth_mode`), which outranks this manifest's own `[users].mode`.
+            //
+            // `serve`'s `--company` path has always applied it; this one did not,
+            // so a company registered here silently kept its manifest's mode. That
+            // was invisible while only the desktop app reached this code, and stops
+            // being invisible the moment anything else does: the first-run setup
+            // flow writes `auth_mode` and tells the operator to restart, and
+            // without this the restart adopts the company and quietly ignores the
+            // setting they were just told would take effect. `None` — the normal
+            // case — leaves each manifest to name its own mode, as before.
+            .with_auth_mode_override(state.auth_mode_override());
     if let Some(stores) = state.stores() {
         builder = builder.with_stores(stores);
     }
@@ -480,11 +486,12 @@ pub async fn start_local(home: impl Into<PathBuf>, preset_id: &str) -> Result<De
     .with_cors(CorsConfig {
         allowed_origins: vec![TAURI_WEBVIEW_ORIGIN.to_string()],
     });
-    let runtime = RuntimeBuilder::new(state.home().to_path_buf(), manifest)
-        .with_id(company_id.clone())
-        .with_auth_mode_override(state.auth_mode_override())
-        .build()
-        .await?;
+    let runtime =
+        crate::app::attach_harness(RuntimeBuilder::new(state.home().to_path_buf(), manifest))
+            .with_id(company_id.clone())
+            .with_auth_mode_override(state.auth_mode_override())
+            .build()
+            .await?;
     state
         .registry()
         .insert(company_id.clone(), std::sync::Arc::new(runtime));
@@ -669,6 +676,37 @@ mod tests {
             .unwrap();
         assert!(runtime.config().api_url.starts_with("http://127.0.0.1:"));
         assert_eq!(runtime.config().company, "agentic-marketing-agency");
+    }
+
+    /// A desktop company must come up with an agent harness attached.
+    ///
+    /// The gap this pins was two-part and each half was silent on its own. The
+    /// desktop shell shipped without the `openhuman` feature, so `src/harness/`
+    /// was not compiled at all and the console's inference test answered "This
+    /// build cannot reach a model — the agent harness is not compiled in"; and
+    /// `register` — the only path a desktop company is built through — never
+    /// called `with_harness`, so even a build that *did* compile one in would
+    /// have handed every company the echo brain instead.
+    ///
+    /// Gated on the feature because there is nothing to attach without it, and
+    /// asserted here rather than on `attach` itself because the seam that broke
+    /// is this registration path, not the helper.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn a_seeded_company_has_a_harness() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = state_over(directory.path());
+
+        bootstrap_companies(&state, DEFAULT_PRESET_ID)
+            .await
+            .expect("a fresh root bootstraps");
+
+        let runtime = state.registry().sole().expect("the company is registered");
+        assert!(
+            runtime.harness().is_some(),
+            "a desktop company was built without a harness pool, so every turn \
+             falls back to the echo brain",
+        );
     }
 
     /// A state over `home`, as an embedded host builds one.
