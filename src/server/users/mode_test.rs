@@ -221,6 +221,55 @@ async fn auth_config_publishes_the_mode_to_an_anonymous_caller() {
     }
 }
 
+/// The sign-in screen is the one place a person confirms *what* they are
+/// signing in to before handing over a credential, and on the hosted platform
+/// every tenant is a separate company on its own URL. The console cannot ask
+/// anything else for the name — every other route that reports it is behind the
+/// very sign-in being drawn — so it has to come back here (issue #1334).
+#[tokio::test]
+async fn auth_config_names_the_company_to_an_anonymous_caller() {
+    for mode in [AuthMode::Email, AuthMode::Wallet, AuthMode::None] {
+        let dir = home();
+        let state = state_in_mode(dir.path(), mode, None).await;
+        let response = router(state)
+            .oneshot(get("/api/v1/company/auth/config"))
+            .await
+            .unwrap();
+        let body = body_json(response).await;
+        // The manifest's display name, not the id it is stored under — the
+        // fixture spells them differently ("Acme" vs `acme`) precisely so a
+        // fallback to the id cannot pass this.
+        assert_eq!(
+            body["name"], "Acme",
+            "every mode draws a heading, so every mode needs the name: {body}"
+        );
+    }
+}
+
+/// A company whose record has gone missing still has to render a heading. The
+/// id is what every other surface calls it in that case — `status` makes the
+/// same substitution — and a name is never worth failing this route over.
+#[tokio::test]
+async fn auth_config_falls_back_to_the_company_id_when_the_record_is_unnamed() {
+    let dir = home();
+    let state = state_in_mode(dir.path(), AuthMode::Email, None).await;
+    let id = CompanyId::new("acme");
+    let store = crate::store::FsCompanyStore::new(dir.path().to_path_buf());
+    let mut record = store.load(&id).await.unwrap().expect("the fixture record");
+    record.manifest.company.name = "   ".to_string();
+    store.save(&record).await.unwrap();
+
+    let response = router(state)
+        .oneshot(get("/api/v1/company/auth/config"))
+        .await
+        .unwrap();
+    let body = body_json(response).await;
+    assert_eq!(
+        body["name"], "acme",
+        "a blank name is not a heading; the id is: {body}"
+    );
+}
+
 /// A routable host with no transport cannot deliver a magic link and will not
 /// echo the code either, so the form is a dead end. The console has to be told
 /// that in the payload — from the outside a link request there answers `sent`
