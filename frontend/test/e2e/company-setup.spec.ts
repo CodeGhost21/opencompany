@@ -79,10 +79,23 @@ function staffed(roster: RosterRow[]): RosterRow[] {
 
 /**
  * Removes every operator-added teammate, so a re-run starts from a first run
- * again. A manifest or baseline teammate 409s and is left alone.
+ * again.
+ *
+ * It deletes **only** the staffed rows, and that is load-bearing rather than
+ * tidy. This used to fire a DELETE at every row and lean on the host to refuse
+ * the ones it did not own: a manifest or baseline teammate answered `409` and
+ * was left where it was. Both are removable now, and the roster's one remaining
+ * refusal is its *last* teammate — a company with nobody on it has no
+ * orchestrator and no way back. Deleting the whole roster therefore leaves one
+ * survivor, and because the baseline is listed first, the survivor is a staffed
+ * teammate the previous test created — exactly the row the guard below is
+ * looking for. The lane failed with a leftover `Accountant` in front of it.
+ *
+ * Aiming at the staffed rows leaves the baseline in place, so the last-teammate
+ * refusal is never reached and every delete lands.
  */
 async function unstaffCompany(request: APIRequestContext) {
-  for (const member of await hostRoster(request)) {
+  for (const member of staffed(await hostRoster(request))) {
     if (member.id) {
       await request.delete(`${COMPANY_SCOPE}/team/${member.id}`).catch(() => undefined);
     }
