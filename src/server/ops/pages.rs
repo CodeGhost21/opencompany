@@ -137,10 +137,15 @@ async fn all_pages(
     company: &CompanyId,
 ) -> crate::Result<Vec<(String, PageBundle)>> {
     let nodes = store.tree(company).await?;
-    let Some(pages_root) = nodes
-        .iter()
-        .find(|n| n.parent_id.is_none() && n.kind == NodeKind::Folder && n.name == PAGES_ROOT)
-    else {
+    // Case-insensitive, matching `harness::pages_tools`: the root and the
+    // compiled node were `Pages/` and `Page.compiled.mjs` before the workspace's
+    // lowercase-dashed rule, and this route serves exactly what those tools
+    // wrote — including in a company created under the old spelling.
+    let Some(pages_root) = nodes.iter().find(|n| {
+        n.parent_id.is_none()
+            && n.kind == NodeKind::Folder
+            && n.name.eq_ignore_ascii_case(PAGES_ROOT)
+    }) else {
         return Ok(Vec::new());
     };
     let mut out = Vec::new();
@@ -155,9 +160,9 @@ async fn all_pages(
             .iter()
             .filter(|n| n.parent_id.as_deref() == Some(folder.id.as_str()))
         {
-            if child.name == PAGE_MANIFEST_NAME {
+            if child.name.eq_ignore_ascii_case(PAGE_MANIFEST_NAME) {
                 bundle.manifest = Some(child.clone());
-            } else if child.name == PAGE_COMPILED_NAME {
+            } else if child.name.eq_ignore_ascii_case(PAGE_COMPILED_NAME) {
                 bundle.compiled = Some(child.clone());
             }
         }
