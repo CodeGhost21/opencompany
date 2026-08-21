@@ -222,69 +222,11 @@ there forever with nothing to say why.
 finished, and calling either closed would make "what is still outstanding"
 answer wrong.
 
-## Three statuses, everywhere
+## How many statuses a ledger may declare
 
-Every built-in ledger declares exactly three statuses, and
-`no_built_in_ledger_declares_more_than_three_statuses` is what keeps it that
-way. The board is the loudest case, but it was not the only one: `goals`
-declared six and `decisions` four, and both were narrowed for the same reason.
-
-| ledger | statuses | what went, and why |
-| --- | --- | --- |
-| `tasks` | `pending`, `working`, `done` | four stages that all meant "started, not finished" |
-| `goals` | `active`, `met`, `dropped` | `proposed` (a goal nobody committed to is a chat message), `at_risk` (that is what `progress` says, and nothing ever moved a goal back out of it), and the `met`/`missed` split (both are "this is over"; which one is the first clause of the required reason) |
-| `decisions` | `proposed`, `accepted`, `retired` | `superseded` and `reversed` — one status wearing two words, told apart only by the reason both already require |
-
-The rule behind all three: a status answers *where does this row stand*. Every
-fourth status was answering a second question in the same place — how is it
-going, who is owed something, which flavour of over — and asking a writer to
-encode two answers in one word buys a coin-flip, not information. The second
-answer goes in a field: `progress` on a goal, `reason` on a closed row, `stage`
-on a working card.
-
-**Retired words heal on read.** A row stored as `at_risk` or `superseded` is a
-row somebody wrote, and a spec that simply stopped declaring the word would
-report it as a fault *and* leave it out of the rendered file, since sections
-select by status. So each surviving status names the words it adopted
-(`StatusSpec::aliases`), `Entry::status` resolves through them, and the row
-renders and counts under the survivor. A **write** of a retired word is still
-refused — the same reads-heal/writes-fail asymmetry `LEGACY_COLUMN_BACKLOG`
-already makes for a stored card, and for the same reason: a client should learn
-the surviving vocabulary once rather than be kept quietly on the old one.
-
-### Five for authored ledgers
-
-The shipped templates get one notch looser, and a test holds them there
-(`no_shipped_template_ledger_declares_more_than_five_statuses`, over both
-`globals/ledgers/` and `companies/*/ledgers/`). A template ledger is a
-*pipeline* far more often than a built-in is — a candidate, a deal, a filing
-genuinely moves through stages — and three would have forced each one to throw
-away either its pipeline or its outcomes.
-
-Five leaves room for both. What it forbids is the sprawl these started at: seven
-statuses, four of which an agent had to choose between on every write with
-nothing to tell them apart but a blurb. Past five, the extra status is reliably
-answering a second question — how is it going, which flavour of over — and that
-answer belongs in a field, where it does not have to be guessed:
-
-| what was merged | where the distinction went |
-| --- | --- |
-| `at_risk` into the active status (commitments, engagements) | the row's own progress line — a status saying how something is *going* is one nothing ever moves back out of |
-| `stalled`, `on_hold`, `paused` into the working status | same |
-| a third closed outcome into a second (`extended`+`not_required` → `not_filed`, `passed`+`lost` → `not_bought`) | `reason`, which is required on close and is what a closed row is read for |
-| adjacent pipeline stages (`hit_finding`+`lead_optimization` → `discovery`) | nothing — they were one stage under two names |
-
-Where a file argued for a distinction it had, that argument won: `deals` in
-enterprise sales keeps `no_decision` separate from `lost`, because its own blurb
-says collapsing them hides that the competitor was inertia, so its **pipeline**
-compressed instead.
-
-Every retired word is an alias on the status that adopted it, so no stored row
-moves or disappears.
-
-A ledger a company declares at run time is not capped — the wizard's presets are
-three, and the argument above is an argument, not a mechanism. What is
-guaranteed is that nothing OpenCompany ships asks a reader to hold more.
+Three for everything the runtime ships, five for the authored templates, and
+every retired word kept as an alias so no stored row disappears. See
+[ledger-statuses.md](./ledger-statuses.md).
 
 ## What a declaration cannot do
 
