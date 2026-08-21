@@ -727,6 +727,26 @@ export interface TeamMemberDto {
   /** When that cap was set (epoch millis). Paired with `budgetSetBy`. */
   budgetSetAtMillis?: number;
   /**
+   * Whether this teammate came from the **global baseline** — the agents,
+   * workflows and skills every company gets whichever vertical it started from
+   * (`docs/spec/runtime/globals.md`) — rather than from this company's own
+   * roster or from an operator.
+   *
+   * Provenance, and the field first-run setup is gated on (issue #1404). The
+   * baseline is merged into every company whatever its manifest says, so
+   * `roster.length === 0` is never true and the gate that used it could never
+   * open — including on `companies/e2e_setup`, the fixture that exists solely
+   * to reach that flow. Read this rather than testing ids against a hard-coded
+   * list of baseline agents, which re-breaks the moment the baseline changes.
+   *
+   * **Optional on the type, not on the wire**: a host predating the field omits
+   * it, and `undefined` means "this host cannot say". The setup gate reads that
+   * as *not* baseline, which is the conservative answer — counting an unknown
+   * row as baseline would offer setup to a company that already has a team and
+   * stack a second one on it.
+   */
+  global?: boolean;
+  /**
    * The declared cognition-tier hint (`[[agent]].tier`) verbatim, from the same
    * host-side helper that answers `GET .../team/{agentId}` (issue #643).
    *
