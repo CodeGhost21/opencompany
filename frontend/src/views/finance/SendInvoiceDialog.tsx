@@ -42,6 +42,22 @@ function looksLive(site: string | null): boolean {
 }
 
 /**
+ * The due-days field, parsed once.
+ *
+ * Returns `undefined` for an empty field (Chargebee's site default) and the
+ * integer for a valid input; `null` marks malformed input — not a number, a
+ * decimal, a negative, or an integer too large for the wire — which must not
+ * silently become "no due date" or a rejected body.
+ */
+function parseDueDays(raw: string): number | null | undefined {
+  const trimmed = raw.trim();
+  if (trimmed === "") return undefined;
+  const value = Number(trimmed);
+  if (!Number.isInteger(value) || value < 0 || !Number.isSafeInteger(value)) return null;
+  return value;
+}
+
+/**
  * Raise an invoice against a real customer.
  *
  * The only destructive thing in the Finance section, and there is no route that
@@ -96,10 +112,16 @@ export function SendInvoiceDialog({
 
   const minor = toMinorUnits(amount, currency);
   const live = looksLive(site);
-  const ready = email.trim() !== "" && description.trim() !== "" && minor !== null && minor > 0;
+  const due = parseDueDays(dueDays);
+  const ready =
+    email.trim() !== "" &&
+    description.trim() !== "" &&
+    minor !== null &&
+    minor > 0 &&
+    due !== null;
 
   async function onSubmit() {
-    if (minor === null || minor <= 0) return;
+    if (minor === null || minor <= 0 || due === null) return;
     setBusy(true);
     try {
       const invoice = await sendInvoice(client, company, {
@@ -107,7 +129,7 @@ export function SendInvoiceDialog({
         customer_name: name.trim() || undefined,
         currency_code: currency.trim().toUpperCase(),
         line_items: [{ description: description.trim(), amount_in_minor_units: minor }],
-        due_days: dueDays.trim() ? Number(dueDays.trim()) : undefined,
+        due_days: due,
         idempotency_key: idempotencyKey,
       });
       if (invoice.replayed_earlier_invoice) {
