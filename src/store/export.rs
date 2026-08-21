@@ -1636,6 +1636,15 @@ mod test {
             id = "cto"
             role = "Tech"
             budget_usd_daily = 9.0
+
+            # Carries no budget override, and exists so the retirement fixture
+            # below can remove a teammate without leaving a cap behind for one
+            # that is no longer on the roster — a pairing the product never
+            # produces, since `remove_member` drops the override with the
+            # teammate.
+            [[agent]]
+            id = "ops"
+            role = "Operations"
         "#,
         )
         .expect("parse manifest")
@@ -1733,7 +1742,14 @@ mod test {
             // And a tombstone, for the sharper version of the same loss: the
             // blueprint still declares this teammate, so a bundle that dropped
             // the field would restore somebody the operator had removed.
-            overlay_retired_agents: vec!["cto".to_string()],
+            //
+            // `ops` rather than one of the capped pair on purpose. Removing a
+            // teammate drops its budget override with it, so a record holding
+            // both a tombstone and a cap for the same id is a state no write
+            // path can reach — a fixture that carried one would be asserting
+            // that the bundle faithfully preserves something the product never
+            // writes.
+            overlay_retired_agents: vec!["ops".to_string()],
             template_provenance: None,
             setup: None,
         })
@@ -1771,8 +1787,14 @@ mod test {
             "the bundle round-trip restored the blueprint's role over the operator's edit"
         );
         assert!(
-            dst_record.effective_agent("cto").is_none(),
+            dst_record.effective_agent("ops").is_none(),
             "the bundle round-trip restored a teammate the operator had removed"
+        );
+        // The capped pair is still on the roster, so the budget assertions below
+        // are read through teammates that actually exist.
+        assert!(
+            dst_record.effective_agent("cto").is_some(),
+            "cto was retired by accident"
         );
         // Issue #562: the console-set tier survives export→import, attribution
         // included. Without this the seeded fixture proves nothing — a bundle
