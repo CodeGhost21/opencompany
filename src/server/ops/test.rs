@@ -1150,3 +1150,77 @@ fn debugging_the_stored_config_does_not_print_a_legacy_password() {
     // Still useful for diagnosis.
     assert!(rendered.contains("smtp.acme.test"), "{rendered}");
 }
+
+#[tokio::test]
+async fn an_all_whitespace_password_counts_as_omitted() {
+    // The other edge of "trim only decides whether one was supplied". A body
+    // carrying `"   "` is a save that names no password, so it keeps the stored
+    // one rather than replacing a working credential with blanks. Pinned because
+    // `api-write-plane.md` states it as the contract.
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let secrets = Arc::new(RotatingSecrets::default());
+    let sender = Arc::new(RecordingMailSender::new());
+    let state = state_with_secrets(
+        &home,
+        ConnectionsRuntime::new().with_mail(sender.clone()),
+        Some(secrets.clone() as Arc<dyn crate::ports::SecretStore>),
+    )
+    .await;
+    let app = router(state);
+
+    let stored = "stored-pw";
+    let save = |password: serde_json::Value, from_name: &str| {
+        let app = app.clone();
+        let body = serde_json::json!({
+            "host": "smtp.acme.test",
+            "port": 587,
+            "security": "starttls",
+            "username": "mailer",
+            "password": password,
+            "from_name": from_name,
+            "from_email": "ceo@acme.test",
+        });
+        async move {
+            app.oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/v1/company/smtp")
+                    .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+        }
+    };
+
+    assert_eq!(
+        save(serde_json::json!(stored), "Acme").await.status(),
+        StatusCode::OK
+    );
+    // Whitespace only: treated as omitted, so the stored password stands.
+    assert_eq!(
+        save(serde_json::json!("   "), "Acme Inc").await.status(),
+        StatusCode::OK
+    );
+    assert_eq!(secrets.stored_password().as_deref(), Some(stored));
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/company/smtp/test")
+                .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let presented = sender.presented();
+    let crate::server::ops::mailer::MailCredentials::Smtp(creds) = &presented[0];
+    assert_eq!(creds.password, stored);
+    assert_eq!(creds.from_name, "Acme Inc");
+}

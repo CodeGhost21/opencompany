@@ -351,8 +351,12 @@ neither carries credential material: the SMTP password is absent from
 stored one, so a form can offer "stored — leave blank to keep" instead of
 charging a credential re-entry for a from-name fix. A body carrying one behaves
 exactly as before, and one that supplies neither with nothing stored is `400`.
-The supplied password is stored byte for byte; trimming decides only whether one
-was supplied at all, because leading and trailing spaces can be significant.
+A supplied password is stored **byte for byte** — leading and trailing
+whitespace is preserved, because it can be significant to the remote server.
+Trimming decides only *whether* one was supplied: a value that is empty or
+entirely whitespace counts as omitted and keeps the stored password, so an
+all-whitespace password cannot be set through this route. Any value with a
+non-whitespace character in it is stored exactly as sent.
 
 Keeping the stored password costs no read-modify-write. The configuration and
 the password live under separate secret keys, so a passwordless save rewrites
