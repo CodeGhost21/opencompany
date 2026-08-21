@@ -9,6 +9,8 @@ Start here:
 - [[Venture playbook]] — how an idea becomes a launched venture
 - [[Studio standards]] — the bar every venture holds to
 - [[Local services marketplace]] — the venture in flight
+- [[Killing well]] — the discipline a studio actually is
+- [[Reuse before building]] — the studio's economic argument
 
 Everything here is a plain `.md` file, so it version-controls cleanly and seeds
 the operator console's Workspace view.

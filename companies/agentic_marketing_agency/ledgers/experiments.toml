@@ -1,0 +1,110 @@
+# Tests run and what they said.
+#
+# Separate from `campaigns` because an experiment is judged differently: a
+# campaign is judged on whether it worked, an experiment on whether the result
+# is *believable*. Recording them together loses the sample size, the duration
+# and the honest "inconclusive", and an agency that cannot say inconclusive will
+# report a winner every time.
+
+title = "Experiments"
+purpose = """
+Every test this agency has run — subject lines, landing pages, audiences, \
+creative — with what it measured, how long it ran, and what it actually \
+concluded. Read it before testing anything; most ideas here have been tried.\
+"""
+written_by = "`record_entry` to open or update a test, `close_entry` when it concludes"
+checks = ["required-field", "known-status", "closed-needs-reason"]
+
+[[field]]
+name = "id"
+role = "id"
+required = true
+
+[[field]]
+name = "hypothesis"
+role = "title"
+required = true
+description = "What you expect to happen and why, stated before the test runs."
+
+[[field]]
+name = "status"
+role = "status"
+required = true
+
+[[field]]
+name = "variants"
+role = "prose"
+required = true
+description = "What is being compared. Two things, ideally; more than three and nothing will be conclusive."
+
+[[field]]
+name = "metric"
+role = "prose"
+required = true
+description = "The single number that decides it, fixed before launch."
+
+[[field]]
+name = "sample"
+role = "prose"
+description = "How much traffic or how many sends, and how long. The two facts that decide whether the result means anything."
+
+[[field]]
+name = "result"
+role = "prose"
+description = "What the numbers were. Both arms, not just the winner."
+
+[[field]]
+name = "owner"
+role = "owner"
+
+[[field]]
+name = "reason"
+role = "prose"
+description = "The conclusion — won, lost, or inconclusive and why. Required when it closes."
+
+[[field]]
+name = "refs"
+role = "refs"
+description = "The campaign it ran inside, and the assets."
+
+[[status]]
+name = "designed"
+
+[[status]]
+name = "running"
+
+[[status]]
+name = "won"
+closed = true
+needs_reason = true
+
+[[status]]
+name = "lost"
+closed = true
+needs_reason = true
+
+[[status]]
+name = "inconclusive"
+closed = true
+needs_reason = true
+
+[[section]]
+heading = "Running"
+blurb = "In flight. Do not read a running test's numbers as a result — that is how every test wins."
+statuses = ["running"]
+order = "recent"
+
+[[section]]
+heading = "Designed"
+blurb = "Specified, not started. Each should already name its metric and its sample."
+statuses = ["designed"]
+order = "recent"
+
+[[section]]
+heading = "Concluded"
+blurb = """
+Won, lost, or inconclusive. `inconclusive` is the honest and commonest outcome, \
+and an agency that never records one is an agency reporting noise as insight.\
+"""
+statuses = ["won", "lost", "inconclusive"]
+cap = 20

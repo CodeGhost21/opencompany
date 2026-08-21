@@ -1,0 +1,89 @@
+# The weekly briefs themselves, and what the operator did with each.
+#
+# The one feedback loop this studio has. A weekly brief that nobody records the
+# outcome of is a weekly brief that cannot get better: the studio never learns
+# which kind of opportunity the operator actually acts on, and keeps producing
+# the kind that reads well.
+
+title = "Briefs"
+purpose = """
+Every weekly brief: what it contained, what the operator did with it, and what \
+that says about what is worth surfacing. Read the last few before assembling a \
+new one.\
+"""
+written_by = "`record_entry` to assemble or update a brief, `close_entry` when the operator has acted on it"
+checks = ["required-field", "known-status", "closed-needs-reason"]
+
+[[field]]
+name = "id"
+role = "id"
+required = true
+description = "The week, as a date."
+
+[[field]]
+name = "brief"
+role = "title"
+required = true
+description = "The week's headline finding, in one line."
+
+[[field]]
+name = "status"
+role = "status"
+required = true
+
+[[field]]
+name = "contained"
+role = "refs"
+required = true
+description = "The opportunity ids ranked in it."
+
+[[field]]
+name = "delivered_on"
+role = "date"
+
+[[field]]
+name = "operator_action"
+role = "prose"
+description = "What was actually done — pursued, parked, ignored. \"Ignored\" is the most informative value here and the least likely to be written."
+
+[[field]]
+name = "owner"
+role = "owner"
+
+[[field]]
+name = "reason"
+role = "prose"
+description = "How it closed — acted on, or superseded by the next week. Required when it closes."
+
+[[status]]
+name = "assembling"
+
+[[status]]
+name = "delivered"
+
+[[status]]
+name = "acted_on"
+label = "Acted on"
+closed = true
+needs_reason = true
+
+[[status]]
+name = "superseded"
+closed = true
+needs_reason = true
+
+[[section]]
+heading = "Current"
+blurb = "Assembling or delivered and awaiting a decision."
+statuses = ["assembling", "delivered"]
+order = "recent"
+
+[[section]]
+heading = "Past briefs"
+blurb = """
+Acted on or superseded, each with what the operator actually did. This is the \
+studio's only feedback loop: without it, it keeps surfacing the kind of \
+opportunity that reads well rather than the kind that gets pursued.\
+"""
+statuses = ["acted_on", "superseded"]
+cap = 20

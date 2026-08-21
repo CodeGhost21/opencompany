@@ -264,6 +264,12 @@ pub struct McpServerDecl {
     pub allowed_tools: Vec<String>,
     /// Deny-list of remote tool names (takes precedence).
     pub disallowed_tools: Vec<String>,
+    /// Remote tool names the operator declares **read-only** on this server
+    /// (issue #1124). Merged through [`effective_mcp_servers`] and editable
+    /// through the runtime-override layer exactly as the two lists above are, so
+    /// an operator expresses it without hand-editing the manifest. A call to a
+    /// tool named here does not park under `auto`; every other bridge call does.
+    pub read_only_tools: Vec<String>,
     /// Per-request timeout in seconds.
     pub timeout_secs: u64,
     /// Whether this server is exposed to agents.
@@ -282,6 +288,7 @@ impl McpServerDecl {
             description: server.description.clone(),
             allowed_tools: normalize_tools(&server.allowed_tools),
             disallowed_tools: normalize_tools(&server.disallowed_tools),
+            read_only_tools: normalize_tools(&server.read_only_tools),
             timeout_secs: server.timeout_secs,
             enabled: server.enabled,
             source,
@@ -356,6 +363,23 @@ pub fn effective_mcp_servers(
     }
 
     out
+}
+
+/// Flattens a company's effective MCP servers into the `(server, tool)`
+/// read-only set the approval gate consults (issue #1124).
+///
+/// Keyed by the server's `name` — the slug the `mcp_call_tool` bridge names its
+/// server under — paired with each `read_only_tools` entry. The gate looks a
+/// live call's `(server, tool)` pair up here; an undeclared pair is simply
+/// absent, which is the gated answer. A disabled server contributes nothing: it
+/// hands out no tool, so a call through it could not have been made.
+pub fn mcp_read_set(servers: &[McpServerDecl]) -> crate::policy::McpReadSet {
+    crate::policy::McpReadSet::from_pairs(servers.iter().filter(|s| s.enabled).flat_map(|server| {
+        server
+            .read_only_tools
+            .iter()
+            .map(move |tool| (server.name.clone(), tool.clone()))
+    }))
 }
 
 /// Loads the runtime server index from the secret store. A missing/empty key
@@ -939,6 +963,7 @@ mod tests {
             command: None,
             allowed_tools: Vec::new(),
             disallowed_tools: Vec::new(),
+            read_only_tools: Vec::new(),
             timeout_secs: 30,
             enabled: true,
             auth_secret: None,

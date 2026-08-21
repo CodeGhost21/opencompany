@@ -1,0 +1,102 @@
+# What interviews actually established, one row per interview.
+#
+# Separate from the candidate row because an interview is an *observation* with a
+# method and an interviewer, and collapsing several into a single verdict on the
+# candidate loses the two things that make a hiring decision defensible: who saw
+# what, and whether they agreed. It also loses the one signal worth most —
+# interviewers who disagree sharply are usually measuring different things.
+
+title = "Scorecards"
+purpose = """
+Every interview: what was probed, what was observed, and what the interviewer \
+concluded. Read the earlier scorecards before interviewing — asking the same \
+question a third time wastes the candidate's slot and learns nothing new.\
+"""
+written_by = "`record_entry` to record or amend a scorecard, `close_entry` when the loop closes"
+checks = ["required-field", "known-status", "closed-needs-reason"]
+
+[[field]]
+name = "id"
+role = "id"
+required = true
+
+[[field]]
+name = "interview"
+role = "title"
+required = true
+description = "Candidate, stage and interviewer."
+
+[[field]]
+name = "status"
+role = "status"
+required = true
+
+[[field]]
+name = "candidate"
+role = "refs"
+required = true
+
+[[field]]
+name = "probed"
+role = "prose"
+required = true
+description = "Which must-have this interview was meant to test. An interview testing nothing in particular tests likeability."
+
+[[field]]
+name = "observed"
+role = "prose"
+required = true
+description = "What the candidate actually did or said. Quotes and specifics, not adjectives."
+
+[[field]]
+name = "verdict"
+role = "prose"
+description = "The interviewer's conclusion on the thing they were testing — not on the hire."
+
+[[field]]
+name = "owner"
+role = "owner"
+
+[[field]]
+name = "reason"
+role = "prose"
+description = "How it closed — folded into the decision, or withdrawn. Required when it closes."
+
+[[status]]
+name = "scheduled"
+
+[[status]]
+name = "recorded"
+
+[[status]]
+name = "counted"
+closed = true
+needs_reason = true
+
+[[status]]
+name = "withdrawn"
+closed = true
+needs_reason = true
+
+[[section]]
+heading = "Recorded"
+blurb = "Done, with observations. Read these before adding another interview to the loop."
+statuses = ["recorded"]
+order = "recent"
+
+[[section]]
+heading = "Scheduled"
+blurb = "Booked. Each should already name which must-have it will test."
+statuses = ["scheduled"]
+order = "recent"
+
+[[section]]
+heading = "Closed"
+blurb = """
+Folded into a decision, or withdrawn. Sharp disagreement between scorecards is \
+the most informative thing in this ledger — it usually means two interviewers \
+measured different things, which is a process problem rather than a candidate \
+one.\
+"""
+statuses = ["counted", "withdrawn"]
+cap = 20

@@ -350,6 +350,33 @@ Ship the system `ssh`. The failure mode of the in-process client is "we
 accepted a host key the operator's own config would have refused", and that is
 not a trade to make for a Windows dependency that ships in the OS today.
 
+## Where the choice is offered
+
+Two places, and only one of them is a dialog.
+
+**"Add a host"** is the ordinary one: four tabs, `local` and `ssh` present only
+where a process can be started. It is reached from the switcher, which means it
+is reached by someone who already has a console on screen.
+
+**The first-host screen** is the one that matters more, and it used to be a
+dead end. A console holding no connection at all rendered "the host on this
+computer didn't start … or add a host from the switcher above" — a sentence
+that names a control instead of being one, and that describes the wrong
+situation entirely on a hub, whose own origin serves assets and nothing else
+(`hub-console.md`). A hub nobody has added a host to yet holds zero connections
+and always did: nothing went wrong, and telling somebody on their first run
+that a host failed to start is how a working state reads as a fault.
+
+So `firstHostCopy` splits the two — "No host to show" and what to do about it
+for a desktop, "No company connected yet" and what the choice *is* for a hub —
+and both carry a button that opens the chooser. The switcher stays above it,
+because that is where an operator will look next time.
+
+The **setup wizard is deliberately not** one of these places. It is served by a
+host that is already running, so by the time anyone sees it the question has
+been answered; a connector step there would be a decision that cannot be acted
+on.
+
 ## Cross-cutting
 
 ### CORS is not the desktop's problem, and is everyone else's
@@ -404,7 +431,8 @@ Landed:
 - `cloud`'s waking behaviour — the retry loop, the window, and the row that
   says so;
 - `ssh` end to end: the supervised tunnel roster in `src-tauri/src/ssh.rs` over
-  the system `ssh`, opened from the dialog and re-opened by every probe.
+  the system `ssh`, opened from the dialog and re-opened by every probe;
+- the first-host screen offering the choice rather than describing it.
 
 Not yet:
 

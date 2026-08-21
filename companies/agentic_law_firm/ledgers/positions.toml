@@ -1,0 +1,115 @@
+# The firm's settled legal positions: what it has concluded the law is, on
+# questions it will be asked again.
+#
+# Not `decisions` — a decision is a choice this company made and is bound by; a
+# position is a reading of external law that binds nobody and can be overturned
+# by a court next month. Recording them together loses the thing that matters
+# most about a position, which is how sure the firm is and what would change it.
+
+title = "Positions"
+purpose = """
+What this firm has concluded the law is on the questions it keeps being asked, \
+how confident it is, and what would change the answer. Read it before \
+researching anything — the cheapest research is the research already done.\
+"""
+written_by = "`record_entry` to state or revise a position, `close_entry` when it is superseded or overturned"
+writers = ["legal_researcher", "compliance_agent", "contract_drafter"]
+checks = ["required-field", "known-status", "closed-needs-reason"]
+
+[[field]]
+name = "id"
+role = "id"
+required = true
+
+[[field]]
+name = "question"
+role = "title"
+required = true
+description = "The question this answers, phrased as somebody would actually ask it."
+
+[[field]]
+name = "status"
+role = "status"
+required = true
+
+[[field]]
+name = "position"
+role = "prose"
+required = true
+description = "The firm's answer, stated plainly before it is qualified."
+
+[[field]]
+name = "authority"
+role = "prose"
+required = true
+description = "The statute, case or regulation it rests on. A position with no authority is an opinion with a citation style."
+
+[[field]]
+name = "confidence"
+role = "prose"
+description = "Settled, arguable, or untested — and what a court has actually said."
+
+[[field]]
+name = "jurisdiction"
+role = "prose"
+description = "Where it holds. A position that does not say is a position somebody will apply where it does not."
+
+[[field]]
+name = "would_change_it"
+role = "prose"
+description = "The ruling, amendment or fact pattern that would overturn this."
+
+[[field]]
+name = "owner"
+role = "owner"
+
+[[field]]
+name = "reason"
+role = "prose"
+description = "Why it closed — superseded, overturned, or withdrawn. Required when it closes."
+
+[[field]]
+name = "refs"
+role = "refs"
+
+[[status]]
+name = "draft"
+
+[[status]]
+name = "settled"
+
+[[status]]
+name = "under_review"
+label = "Under review"
+
+[[status]]
+name = "superseded"
+closed = true
+needs_reason = true
+
+[[status]]
+name = "overturned"
+closed = true
+needs_reason = true
+
+[[section]]
+heading = "Settled"
+blurb = "The firm's current answers. Do not re-derive these; revise them if something changed."
+statuses = ["settled"]
+order = "recent"
+
+[[section]]
+heading = "Draft and under review"
+blurb = "Reached but not relied on yet, or being re-examined because something moved."
+statuses = ["draft", "under_review"]
+order = "recent"
+
+[[section]]
+heading = "No longer good law"
+blurb = """
+Superseded or overturned, with the reason and what replaced it. Kept: an \
+overturned position is precisely the one somebody re-derives from the same \
+now-bad authority.\
+"""
+statuses = ["superseded", "overturned"]
+cap = 20

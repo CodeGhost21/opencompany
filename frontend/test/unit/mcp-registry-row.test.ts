@@ -44,6 +44,7 @@ function row(over: Partial<McpServer> & { source: McpSource }): McpServer {
     enabled: true,
     allowedTools: [],
     disallowedTools: [],
+    readOnlyTools: [],
     timeoutSecs: 30,
     authConfigured: false,
     ...over,

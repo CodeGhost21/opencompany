@@ -1,0 +1,100 @@
+# Raw observations, before anybody has decided what they mean.
+#
+# The studio's whole method rests on keeping this separate from interpretation.
+# A signal recorded as "SMBs need better invoicing" has already been interpreted,
+# and interpreted signals cluster into whatever the interpreter already believed.
+# A signal recorded as what somebody actually said, where, and when, can be
+# clustered honestly — and re-clustered when the frame turns out to be wrong.
+
+title = "Signals"
+purpose = """
+Raw observations gathered from the web and elsewhere: what was actually said or \
+seen, where, and when. Read it before ranking anything; write to it without \
+deciding what it means.\
+"""
+written_by = "`record_entry` to log or annotate a signal, `close_entry` when it is folded into an opportunity or discarded"
+checks = ["required-field", "known-status", "closed-needs-reason"]
+
+[[field]]
+name = "id"
+role = "id"
+required = true
+
+[[field]]
+name = "signal"
+role = "title"
+required = true
+description = "What was observed, quoted or described plainly. Not what it implies."
+
+[[field]]
+name = "status"
+role = "status"
+required = true
+
+[[field]]
+name = "source"
+role = "refs"
+required = true
+description = "Where it came from, as something somebody could re-open."
+
+[[field]]
+name = "observed_on"
+role = "date"
+description = "When. A three-year-old complaint and last week's are different signals."
+
+[[field]]
+name = "who"
+role = "prose"
+description = "Who said or did it, and what they do. A complaint from somebody who would never buy is still a signal, about something else."
+
+[[field]]
+name = "cluster"
+role = "refs"
+description = "The pain cluster it was folded into, once it has been. Empty until then, deliberately."
+
+[[field]]
+name = "owner"
+role = "owner"
+
+[[field]]
+name = "reason"
+role = "prose"
+description = "Why it closed — clustered, or discarded as noise. Required when it closes."
+
+[[status]]
+name = "raw"
+
+[[status]]
+name = "corroborated"
+
+[[status]]
+name = "clustered"
+closed = true
+needs_reason = true
+
+[[status]]
+name = "discarded"
+closed = true
+needs_reason = true
+
+[[section]]
+heading = "Corroborated"
+blurb = "Seen from more than one source. These carry weight in a cluster; single observations do not."
+statuses = ["corroborated"]
+order = "recent"
+
+[[section]]
+heading = "Raw"
+blurb = "Logged, uninterpreted. Resist the urge to summarise these into what they mean."
+statuses = ["raw"]
+order = "recent"
+
+[[section]]
+heading = "Closed"
+blurb = """
+Clustered or discarded, with the reason. Discarded signals are kept because the \
+same observation arrives again and \"we looked at this and it was one person\" \
+is worth knowing the second time.\
+"""
+statuses = ["clustered", "discarded"]
+cap = 20

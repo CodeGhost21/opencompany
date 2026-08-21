@@ -218,6 +218,14 @@ jobs:
             frontend:
               - '.github/workflows/ci.yml'
               - 'frontend/**'
+              # The repository-wide policy checks ride this job, so a change to
+              # one of them has to select it. Without this line the guards are
+              # the one thing their own diff cannot run: a PR touching only
+              # `scripts/ci/**` skipped `Console` entirely, and a guard that
+              # asserts nothing merges green. That is how the broken
+              # `assert-single-tauri-app.sh` got in. `rust` already lists this
+              # path; `frontend` is where the scripts actually execute.
+              - 'scripts/ci/**'
             desktop:
               - '.github/workflows/ci.yml'
               - 'src-tauri/**'

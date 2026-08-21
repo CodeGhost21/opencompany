@@ -1,0 +1,105 @@
+# Accounting periods and how each close went.
+#
+# A close is not a task and not a project: it is a period that is either open,
+# closed, or reopened — and "reopened" is a fact with consequences, because
+# every report drawn from that period before it reopened is now wrong. Nothing
+# else this firm keeps can express that.
+
+title = "Closes"
+purpose = """
+Every accounting period this firm closes: what is reconciled, what is \
+outstanding, when it closed and whether it had to be reopened. Read it before \
+drawing any figure from a period — an open or reopened period is not a source \
+of truth.\
+"""
+written_by = "`record_entry` to open or advance a close, `close_entry` when the period is closed or abandoned"
+checks = ["required-field", "known-status", "closed-needs-reason"]
+
+[[field]]
+name = "id"
+role = "id"
+required = true
+description = "The period, as the books name it — `2026-07`, `FY2026-Q2`."
+
+[[field]]
+name = "close"
+role = "title"
+required = true
+description = "The entity and the period, in one line."
+
+[[field]]
+name = "status"
+role = "status"
+required = true
+
+[[field]]
+name = "owner"
+role = "owner"
+
+[[field]]
+name = "reconciled"
+role = "prose"
+description = "Which accounts are tied out. Bank, receivables, payables, payroll — named, not summarised."
+
+[[field]]
+name = "outstanding"
+role = "prose"
+description = "What is not yet reconciled, and what it is waiting on."
+
+[[field]]
+name = "closed_on"
+role = "date"
+
+[[field]]
+name = "reopened"
+role = "prose"
+description = "If it was reopened: when, why, and what reports drawn before then are now wrong."
+
+[[field]]
+name = "reason"
+role = "prose"
+description = "How it ended. Required when it closes."
+
+[[field]]
+name = "refs"
+role = "refs"
+
+[[status]]
+name = "open"
+
+[[status]]
+name = "reconciling"
+
+[[status]]
+name = "review"
+label = "In review"
+
+[[status]]
+name = "closed"
+closed = true
+needs_reason = true
+
+[[status]]
+name = "reopened"
+
+[[section]]
+heading = "In flight"
+blurb = "Open, reconciling, or in review. Figures drawn from these are provisional and must say so."
+statuses = ["open", "reconciling", "review"]
+order = "recent"
+
+[[section]]
+heading = "Reopened"
+blurb = """
+Closed and then reopened. Every report drawn from one of these before it \
+reopened is wrong until re-checked — which is the whole reason this status \
+exists rather than quietly moving the row back to `open`.\
+"""
+statuses = ["reopened"]
+order = "recent"
+
+[[section]]
+heading = "Closed"
+blurb = "Tied out and signed off, with the date."
+statuses = ["closed"]
+cap = 20
