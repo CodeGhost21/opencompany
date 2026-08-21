@@ -87,7 +87,24 @@ pub(crate) struct TaskCard {
     pub(crate) title: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) note: Option<String>,
+    /// Which of the board's three phases this card is in — `pending`,
+    /// `working` or `done` (issue #1512).
+    ///
+    /// The name is unchanged and the meaning is narrower: it used to carry the
+    /// stored stage, so a client saw six words here and had to know which of
+    /// four meant "started". It is the board's column, and the board now has
+    /// three of them.
     pub(crate) column: String,
+    /// Which kind of working, when the card is working: `planning`,
+    /// `in_progress`, `paused` or `in_review` (issue #1512).
+    ///
+    /// Omitted for a pending or done card, because there is only one way to be
+    /// either. This is what the console reads for the affordances that are
+    /// genuinely stage-specific — Resume on a paused card, the review link on
+    /// one waiting for a verdict — which used to be read off `column` and
+    /// therefore forced `column` to stay six-valued.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) stage: Option<String>,
     pub(crate) priority: String,
     pub(crate) assignee: String,
     pub(crate) updated_at: u64,
@@ -174,7 +191,8 @@ impl From<TaskRecord> for TaskCard {
             id: t.id,
             title: t.title,
             note: t.note,
-            column: t.column,
+            column: crate::ledger::board::phase_of(&t.column).to_string(),
+            stage: stage_of(&t.column),
             priority: t.priority,
             assignee: t.assignee,
             updated_at: t.updated_at_millis,
@@ -940,6 +958,7 @@ impl From<crate::runtime::journal::ExecutedEffect> for IrreversibleEffect {
 pub(crate) struct LineageRef {
     pub(crate) id: String,
     pub(crate) title: String,
+    /// The card's phase, on the same terms as [`TaskCard::column`].
     pub(crate) column: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) cost: Option<CostDisplay>,
@@ -950,10 +969,22 @@ impl LineageRef {
         Self {
             id: t.id.clone(),
             title: t.title.clone(),
-            column: t.column.clone(),
+            column: crate::ledger::board::phase_of(&t.column).to_string(),
             cost,
         }
     }
+}
+
+/// The stage word a card carries, for the cards where it says something.
+///
+/// `None` for pending and done: there is exactly one way to be either, so a
+/// field naming which would be a field naming nothing — and an omitted field
+/// is what tells a client "do not offer a stage-specific control here" without
+/// it needing the phase table to work that out.
+fn stage_of(stored: &str) -> Option<String> {
+    crate::ledger::board::column(stored)
+        .filter(|column| column.phase == crate::ledger::board::PHASE_WORKING)
+        .map(|column| column.id.to_string())
 }
 
 /// A positive USD amount or an explicit role-redacted state. A true zero is
