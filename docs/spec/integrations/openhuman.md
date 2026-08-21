@@ -13,7 +13,7 @@ OpenHuman is now consumed as an **embeddable Rust library**, not an
 out-of-process daemon. The `src/harness/` module links `openhuman_core`
 directly and, under `feature = "openhuman"`, builds one openhuman
 [`Agent`] per manifest `[[agent]]` through
-[`AgentBuilder`](../../modules/openhuman/README.md). The builder's seams are
+[`AgentBuilder`](../../modules/openhuman/readme.md). The builder's seams are
 wired to OpenCompany's own ports:
 
 - **Memory** → `OcMemory`, an openhuman `Memory` implemented over the

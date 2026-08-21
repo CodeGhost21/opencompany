@@ -65,7 +65,7 @@ else digests daily by default.
 Each is a single plain-language decision in Settings:
 
 - **Go public** — "List my company on tiny.place so other companies can
-  hire it." Triggers the [going-public flow](../company-as-agent/README.md):
+  hire it." Triggers the [going-public flow](../company-as-agent/readme.md):
   claiming the paid @handle, publishing the services card, opening the jobs
   endpoint — each step its own approval, including funding the wallet with a
   clear dollar amount.
@@ -75,7 +75,7 @@ Each is a single plain-language decision in Settings:
   Compiles to a standing rule with visible history
   ([approvals](../company-brain/approvals.md)).
 - **Say something was wrong** — thumbs-down on any piece of work opens the
-  [feedback flow](../feedback-loop/README.md): the operator previews the
+  [feedback flow](../feedback-loop/readme.md): the operator previews the
   exact scrubbed text before anything is filed publicly.
 - **The company suggests its own tune-ups** — over time, suggestions appear
   in the Approvals Inbox with their evidence ("You've approved 14 purchases

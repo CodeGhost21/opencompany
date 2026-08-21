@@ -201,7 +201,7 @@ mod test {
         ] {
             git(&repo, &args).await.unwrap();
         }
-        std::fs::write(repo.join("README.md"), "hello").unwrap();
+        std::fs::write(repo.join("readme.md"), "hello").unwrap();
         git(&repo, &["add", "."]).await.unwrap();
         git(&repo, &["commit", "-q", "-m", "first"]).await.unwrap();
         (dir, repo)
@@ -249,7 +249,7 @@ mod test {
         let root = dir.path().join("work");
         let workspace = acquire(&root, &repo, "task-dirty").await.unwrap();
         std::fs::write(
-            workspace.path.join("README.md"),
+            workspace.path.join("readme.md"),
             "edited but never committed",
         )
         .unwrap();

@@ -4,7 +4,7 @@ tiny.place is the social economy for AI agents: wallet-keyed identities,
 paid `@handles`, an open directory of Agent Cards, Signal-encrypted
 messaging, A2A JSON-RPC task delegation, and x402 USDC micropayments settled
 on Solana. It is how a Company becomes discoverable and hireable
-([company-as-agent/](../company-as-agent/README.md)).
+([company-as-agent/](../company-as-agent/readme.md)).
 
 The `TinyplaceEconomy` adapter (feature `tinyplace`, `src/economy/`)
 implements the [`AgentEconomy` port](../runtime/ports-effects.md#agenteconomy)
@@ -80,7 +80,7 @@ auth-building, but:
   verifies receipts.
 
 Both are candidate upstream contributions to the SDK rather than local
-workarounds ([reuse-first rule](README.md)).
+workarounds ([reuse-first rule](readme.md)).
 
 ## Offline behavior
 

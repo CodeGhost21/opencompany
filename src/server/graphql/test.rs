@@ -1213,7 +1213,7 @@ async fn empty_surfaces_resolve_to_empty_lists() {
         .map(|node| node["name"].as_str().unwrap())
         .collect();
     names.sort_unstable();
-    assert_eq!(names, vec!["Agents", "README.md", "maya", "secrets"]);
+    assert_eq!(names, vec!["Agents", "readme.md", "maya", "secrets"]);
     let root = tree
         .iter()
         .find(|node| node["name"] == serde_json::json!("Agents"))
@@ -1968,7 +1968,7 @@ async fn workspace_search_resolves_hits_with_paths_and_totals() {
     assert_eq!(results["total"], 1, "{value}");
     let hits = results["hits"].as_array().unwrap();
     assert_eq!(hits.len(), 1);
-    assert_eq!(hits[0]["path"], "Standards/Support.md");
+    assert_eq!(hits[0]["path"], "standards/Support.md");
     assert_eq!(hits[0]["matched"], "content");
     assert_eq!(hits[0]["node"]["id"], "n-support");
     assert_eq!(hits[0]["node"]["kind"], "file");

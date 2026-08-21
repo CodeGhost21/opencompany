@@ -19,7 +19,7 @@
 # This script is what stops them coming back, because a grep is cheaper than
 # the argument.
 #
-# See docs/design-system/README.md.
+# See docs/design-system/readme.md.
 set -uo pipefail
 
 cd "$(dirname "$0")/../.." || exit 1

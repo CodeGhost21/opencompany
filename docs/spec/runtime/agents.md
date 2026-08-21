@@ -81,7 +81,7 @@ Write for the reader, not the client.
 """
 prompt_files = ["prompts/house-style.md"]   # checked-in, bundle-relative
 context = [                                 # live workspace documents
-    "Brand/Brand voice.md",                 #   read only (the bare-string shorthand)
+    "brand/brand-voice.md",                 #   read only (the bare-string shorthand)
     { path = "Agents/copywriter/drafts", access = "write" },  # + workspace_write/workspace_create
 ]
 classes = ["evidence"]                      # routing exclusions — see below

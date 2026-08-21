@@ -18,11 +18,11 @@ under `src/`. Public module surfaces live in source module directories:
 
 The command-line entrypoint lives in `src/bin/opencompany.rs`. Business types
 are data-only definitions under `companies/` (a `company.toml` manifest plus a
-`README.md` — not Cargo crates), loaded at runtime via `opencompany serve
+`readme.md` — not Cargo crates), loaded at runtime via `opencompany serve
 --company companies/<name>`. What every company has regardless of which of
 those it started from is authored beside them in `globals/`. The operator
 console is a Vite/React app under `frontend/`. Design notes and module specifications live in `docs/`, with
-`docs/spec/README.md` as the top-level architecture reference and
+`docs/spec/readme.md` as the top-level architecture reference and
 `docs/modules/` holding per-surface design docs.
 The vendored runtime source is the `vendor/openhuman/` Git submodule. TinyAgents
 is inherited from OpenHuman at `vendor/openhuman/vendor/tinyagents/`.
@@ -120,14 +120,14 @@ intentionally untested edge case in the PR description.
 
 ## Documentation Expectations
 
-Keep `README.md`, `docs/spec/README.md`, and module docs in `docs/modules/`
+Keep `readme.md`, `docs/spec/readme.md`, and module docs in `docs/modules/`
 aligned with code changes. Prefer concrete examples over vague descriptions,
 especially for Axum routes, OpenHuman launcher behavior, and `tiny*` feature
 integration.
 
 Keep every Markdown file, including this one, at 500 lines or fewer. When a
 topic grows past that limit, split it into focused files and link them from the
-module's `README.md`.
+module's `readme.md`.
 
 ## Running under the platform harness (hosted mode)
 

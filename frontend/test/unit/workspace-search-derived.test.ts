@@ -55,7 +55,7 @@ const HITS: SearchHit[] = [
   hit({ id: "goals", name: "GOALS.md", path: "derived/GOALS.md" }),
   // A seeded hand-written note: same `Seeded` origin, and it keeps the badge —
   // for this one the word is true.
-  hit({ id: "release", name: "Release checklist.md", path: "Playbooks/Release checklist.md" }),
+  hit({ id: "release", name: "Release checklist.md", path: "playbooks/release-checklist.md" }),
 ];
 
 function renderHits(hits: SearchHit[]) {

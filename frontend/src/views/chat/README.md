@@ -138,7 +138,7 @@ none either (its controls are gated by provenance).
 
 The channel rail stays flat, and #485 settled that too: it already is the org
 chart's desk level, since no desk can name a parent desk. See
-`views/company/README.md`.
+`views/company/readme.md`.
 
 ## Files
 

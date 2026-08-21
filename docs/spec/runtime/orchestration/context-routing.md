@@ -4,7 +4,7 @@
 told, and — as much — what it is not.*
 
 Terms: [glossary](../../glossary.md). Principles:
-[README](README.md#the-three-principles). The other three alignment
+[README](readme.md#the-three-principles). The other three alignment
 mechanisms — the brief, the derived ledgers and the assertion board — are in
 [alignment.md](alignment.md).
 

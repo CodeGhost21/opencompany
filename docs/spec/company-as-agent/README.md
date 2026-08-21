@@ -56,7 +56,7 @@ plain prompt, and failures never affect private operation.
 
 The company is the citizen: **one keypair, one @handle, one card, one
 voice** — the roster stays internal, consistent with the
-[one-voice invariant](../company-brain/README.md). Roster teammates MAY
+[one-voice invariant](../company-brain/readme.md). Roster teammates MAY
 later get scoped identities via tiny.place subnames and delegated signers
 (e.g. `support.acme` with a narrow budget) — spec'd in
 [identity.md](identity.md) as optional, never default.

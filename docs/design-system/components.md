@@ -86,7 +86,7 @@ For a condition affecting the whole surface, in place, that the operator has
 not just caused. Something they *did* just cause is a toast (Sonner) instead.
 
 Title states what happened; description says what to do next. Both follow the
-error rules in [`../brand/README.md`](../brand/README.md#2-voice) — explain and
+error rules in [`../brand/readme.md`](../brand/readme.md#2-voice) — explain and
 instruct, never apologise.
 
 ---
@@ -288,7 +288,7 @@ permanently: no transition and no state change to notice.
    with the right imports.
 3. **Express every colour, size and radius as a token.** If a value has no
    token, add it to layer 2 of `index.css` — see
-   [`README.md`](README.md#the-one-rule).
+   [`readme.md`](readme.md#the-one-rule).
 4. **Add it to `#/styleguide`** with every variant and state, including
    disabled and invalid. A state absent from the styleguide is a state nobody
    will notice breaking.

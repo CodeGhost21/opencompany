@@ -77,7 +77,7 @@ env:
   # bundled rusqlite (the C compiler the slim image lacks), and its `namespace`
   # store on a mongodb tenant is refused by the ephemeral-/data guard anyway.
   # Self-hosters wanting the embedded contract driver compile it via
-  # OPENCOMPANY_FEATURES (deploy/README.md).
+  # OPENCOMPANY_FEATURES (deploy/readme.md).
   TENANT_FEATURES: mongodb,openhuman,openhuman-rpc,tinyplace,github,smtp,dns,tinyhumans,webhooks,platform-jwt,export,mcp,media,composio,imap,telegram,medulla,tinycortex,sidecar,chargebee,paypal,tinymemory
 
 jobs:

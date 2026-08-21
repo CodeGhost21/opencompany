@@ -48,7 +48,7 @@ fn store() -> (tempfile::TempDir, Arc<dyn WorkspaceStore>) {
     (dir, ops)
 }
 
-/// `Standards/` with two notes, plus a root README.
+/// `standards/` with two notes, plus a root README.
 async fn seeded() -> (tempfile::TempDir, Arc<dyn WorkspaceStore>, CompanyId) {
     let (dir, ops) = store();
     let id = CompanyId::new("acme");
@@ -71,7 +71,7 @@ async fn seeded() -> (tempfile::TempDir, Arc<dyn WorkspaceStore>, CompanyId) {
     .unwrap();
     ops.create(
         &id,
-        &file("n-readme", "README.md", None, 1_000),
+        &file("n-readme", "readme.md", None, 1_000),
         Some("# Acme\nNothing to see."),
     )
     .await
@@ -102,12 +102,12 @@ async fn a_query_matches_both_names_and_bodies() {
     let (_dir, ops, id) = seeded().await;
 
     let by_name = search(&ops, &id, "playbook").await;
-    assert_eq!(paths(&by_name), vec!["Standards/Support playbook.md"]);
+    assert_eq!(paths(&by_name), vec!["standards/Support playbook.md"]);
     assert_eq!(by_name.hits[0].matched, MatchKind::Name);
     assert_eq!(by_name.hits[0].excerpt, None, "a name match has no excerpt");
 
     let by_content = search(&ops, &id, "refund").await;
-    assert_eq!(paths(&by_content), vec!["Standards/Support playbook.md"]);
+    assert_eq!(paths(&by_content), vec!["standards/Support playbook.md"]);
     assert_eq!(by_content.hits[0].matched, MatchKind::Content);
     assert!(
         by_content.hits[0]
@@ -465,7 +465,7 @@ async fn a_prefix_scopes_the_search_to_one_subtree() {
         paths(&scoped)
     );
     assert!(
-        !paths(&scoped).contains(&"README.md"),
+        !paths(&scoped).contains(&"readme.md"),
         "the root note is outside the scope: {:?}",
         paths(&scoped)
     );
@@ -488,7 +488,7 @@ async fn a_prefix_scopes_the_search_to_one_subtree() {
 #[tokio::test]
 async fn a_traversal_shaped_prefix_is_refused() {
     let (_dir, ops, id) = seeded().await;
-    for prefix in ["../etc", "Standards/../..", "C:\\Windows", "."] {
+    for prefix in ["../etc", "standards/../..", "C:\\Windows", "."] {
         let err = search_workspace(ops.as_ref(), &id, "e", Some(prefix), limit(20))
             .await
             .expect_err("must refuse {prefix}");

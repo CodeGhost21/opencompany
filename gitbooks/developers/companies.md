@@ -16,7 +16,7 @@ Each folder follows the same shape:
 | Part | File | Content |
 | --- | --- | --- |
 | Manifest | `company.toml` | The roster of agents, their responsibilities, the output, and the moments reserved for the human — the machine-readable definition the host loads. |
-| Story | `README.md` | What the company does and produces, in plain language, including **what the human keeps.** |
+| Story | `readme.md` | What the company does and produces, in plain language, including **what the human keeps.** |
 
 The behavior lives entirely in the host and the vendored runtimes; each
 definition just configures it. The operator console is a separate,

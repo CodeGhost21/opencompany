@@ -38,6 +38,6 @@ we deployed work for the operator", which no in-repo test can reach: a stale
 `index.html`, an unwired delivery channel and a missing credential are all
 failures of the deployment rather than of the code.
 
-That pass lives in [`qa/`](qa/README.md) — a console script (`qa/oc-qa.js`) and
+That pass lives in [`qa/`](qa/readme.md) — a console script (`qa/oc-qa.js`) and
 a checklist (`qa/MASTER-QA.md`). Roll the tenant to the commit under test
 first; a tenant on an older image reports bugs `main` has already fixed.

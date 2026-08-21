@@ -165,7 +165,7 @@ ledger keeps them separate rather than choosing between them:
   before accepting.
 
 An agent MUST NOT be able to move a demand to `accepted`, including its own.
-*Agents propose; the Operator disposes* ([agentic/](../../agentic/README.md)) is
+*Agents propose; the Operator disposes* ([agentic/](../../agentic/readme.md)) is
 unchanged by this section.
 
 ## The column projection

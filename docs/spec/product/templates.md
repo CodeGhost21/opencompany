@@ -11,7 +11,7 @@ A template is a directory containing:
 | Part | File | Content |
 | --- | --- | --- |
 | Manifest | `company.toml` | company metadata, roster, default policy/budget/place tables ([runtime/manifest.md](../runtime/manifest.md)) |
-| Story | `README.md` | what the company produces, the team, **what you keep** (human role) |
+| Story | `readme.md` | what the company produces, the team, **what you keep** (human role) |
 | Charter defaults | in-manifest | mission/tone/never-do seeds the interview can override |
 | Skill catalog | `[place].skills` | what the company could sell if taken public (ships `discoverable = false`) |
 | Checkpoint list | `[policy]` | which effects always require the operator |

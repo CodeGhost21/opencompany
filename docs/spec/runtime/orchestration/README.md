@@ -105,7 +105,7 @@ Ordered by dependency, not by value. Each phase is independently shippable.
 | P3 — the attempt loop | [loop.md](loop.md) | P2 (an attempt is against a demand) |
 | P4 — await, directives, desks-as-workflows | [delegation.md](delegation.md) | P3 |
 | P5 — containerised tools | [sandbox.md](sandbox.md) | nothing |
-| P6 — the research template | [../../../../companies/agentic_research_lab/README.md](../../../../companies/agentic_research_lab/README.md) | all of the above |
+| P6 — the research template | [../../../../companies/agentic_research_lab/readme.md](../../../../companies/agentic_research_lab/readme.md) | all of the above |
 
 P4 is where the desk collapse lands, because it needs the join primitive: a desk
 hand-off returns a reply *into the caller's turn*, and a workflow run currently
@@ -134,5 +134,5 @@ nobody can print is a routing table nobody reviews.
   [alignment.md](alignment.md) are the domain-general ones.
 - **Replacing the operator.** Every mechanism here changes how agents converge,
   not who decides. *Agents propose; the Operator disposes*
-  ([agentic/](../../agentic/README.md)) is unchanged — see the
+  ([agentic/](../../agentic/readme.md)) is unchanged — see the
   [answered-versus-accepted split](demand-ledger.md#answered-is-not-accepted).

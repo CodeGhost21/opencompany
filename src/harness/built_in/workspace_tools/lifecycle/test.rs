@@ -18,7 +18,7 @@ const FOLDER_REV: u64 = 1_000;
 
 /// A live workspace shaped like the one the lifecycle tools were written for:
 /// the boot scaffold, this agent's own home holding a note and an empty folder,
-/// a teammate's home holding a note, plus `Standards/` and a root `README.md`
+/// a teammate's home holding a note, plus `standards/` and a root `readme.md`
 /// to have something outside the agent's reach.
 ///
 /// Carries an **artifact store** alongside the workspace store, because
@@ -53,7 +53,7 @@ async fn own_home(company: &str) -> Home {
         .await
         .expect("note");
     store
-        .create(&id, &file("n-readme", "README.md", None), Some("# Root"))
+        .create(&id, &file("n-readme", "readme.md", None), Some("# Root"))
         .await
         .expect("readme");
     ensure_workspace_scaffold(store.as_ref(), &id)
@@ -309,7 +309,7 @@ async fn a_note_outside_your_own_folder_is_refused_and_left_alone() {
     let out = home
         .deleter()
         .execute(json!({
-            "path": "Standards/Engineering standards.md",
+            "path": "standards/engineering-standards.md",
             "expected_updated_at": NOTE_REV,
         }))
         .await
@@ -693,11 +693,11 @@ async fn renaming_anything_outside_your_own_folder_is_refused() {
     let tool = home.renamer();
 
     for args in [
-        json!({ "path": "Standards/Engineering standards.md", "new_name": "mine.md" }),
+        json!({ "path": "standards/engineering-standards.md", "new_name": "mine.md" }),
         json!({ "id": "n-eng", "new_name": "mine.md" }),
         json!({ "path": "Agents/cmo/Plan.md", "new_name": "mine.md" }),
         json!({ "id": "n-mate", "new_parent": "Agents/ceo" }),
-        json!({ "path": "README.md", "new_name": "mine.md" }),
+        json!({ "path": "readme.md", "new_name": "mine.md" }),
     ] {
         let out = tool.execute(args.clone()).await.unwrap();
         assert!(out.is_error, "{args} was allowed: {}", text(&out));

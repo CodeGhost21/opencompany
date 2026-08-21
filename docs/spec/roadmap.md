@@ -28,7 +28,7 @@ An Operator boots a real company from a manifest and works with it daily.
   credential ([runtime/config.md](runtime/config.md)).
 - **Phase 3 — Tools, channels, approvals via OpenHuman.** `ApprovalGate`
   mapped to OpenHuman policy tiers; cron schedules; the
-  [feedback loop](feedback-loop/README.md) files its first GitHub issues.
+  [feedback loop](feedback-loop/readme.md) files its first GitHub issues.
   **Delivered by a revised route:** rather than `ToolProvider`/`ChannelAdapter`
   over JSON-RPC to `openhuman-core serve`, the harness embeds `openhuman_core`
   as a **library** (`AgentBuilder`) — one openhuman `Agent` per manifest
@@ -58,7 +58,7 @@ The product improves itself and companies remember.
   `ContextStore` implementations; `SidecarBrain`; feedback triage agent;
   Signals and the Opportunity Engine arrive as a venture-studio Template, not
   kernel code.
-- **Phase 7 — Agentic setup + Manager.** The [agentic company](agentic/README.md):
+- **Phase 7 — Agentic setup + Manager.** The [agentic company](agentic/readme.md):
   the Architect's Blueprint flow generalizes the onboarding interview (its
   conversational core can ship as early as Phase 2, since it only needs the
   hosted brain); the Manager tick and the Change Proposal pipeline land on
@@ -67,12 +67,12 @@ The product improves itself and companies remember.
 
 ## Stage 4 — Venture Factory
 
-The [AVI vision](vision/README.md): autonomous opportunity discovery, venture
+The [AVI vision](vision/readme.md): autonomous opportunity discovery, venture
 spawning, compounding knowledge graph. Horizon, not commitment.
 
 ## Delivered by the console/API train (WS1–WS8)
 
-The implementation train tracked in [`docs/plans/`](../plans/README.md) landed
+The implementation train tracked in [`docs/plans/`](../plans/readme.md) landed
 the console-facing surfaces of **Stage 1** plus the platform-mode reads/writes
 that Phases 3/4/5 anticipated. What is now real:
 

@@ -337,7 +337,7 @@ backends.
   `SYSTEM_ROOTS` — `Agents` and lowercase `secrets` — from one seam:
   `RuntimeBuilder::build` (boot). It takes no roster (a company with no agents
   still gets them), so an existing company picks them up on its next boot.
-  `Agents/` stays empty; `secrets/README.md` explains that every agent workspace
+  `Agents/` stays empty; `secrets/readme.md` explains that every agent workspace
   tool omits or refuses this subtree while operator APIs retain normal access.
   Idempotent.
 * `ensure_agent_folder` / `ensure_desk_folder` adopt-or-create

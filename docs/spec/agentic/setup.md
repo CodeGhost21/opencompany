@@ -5,7 +5,7 @@ the Operator: a Roster sized to their actual business, checkpoints matched
 to their risk tolerance, schedules matched to their rhythm. It replaces
 "pick one of 18 templates" as the *only* path while keeping templates as
 priors and as the offline fallback. Overview and invariants:
-[README.md](README.md).
+[readme.md](readme.md).
 
 ## Position in the lifecycle
 

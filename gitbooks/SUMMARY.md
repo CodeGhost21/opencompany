@@ -1,6 +1,6 @@
 # Table of contents
 
-* [Welcome to OpenCompany](README.md)
+* [Welcome to OpenCompany](readme.md)
 
 ## Overview
 
@@ -18,7 +18,7 @@
 
 ## For developers
 
-* [Developer overview](developers/README.md)
+* [Developer overview](developers/readme.md)
 * [Build & run locally](developers/quickstart.md)
 * [Architecture](developers/architecture.md)
 * [CLI reference](developers/cli.md)

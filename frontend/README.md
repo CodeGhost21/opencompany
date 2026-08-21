@@ -22,8 +22,8 @@ and survives a refresh.
 
 | View | What it does |
 |---|---|
-| **Overview** | The company's knowledge graph, full-bleed — see [`src/views/overview/README.md`](src/views/overview/README.md) |
-| **Chat** | A channel-and-DM workspace: channel rail, threaded timeline, composer, thread panel, and the roster in a side pane — see [`src/views/chat/README.md`](src/views/chat/README.md) |
+| **Overview** | The company's knowledge graph, full-bleed — see [`src/views/overview/readme.md`](src/views/overview/readme.md) |
+| **Chat** | A channel-and-DM workspace: channel rail, threaded timeline, composer, thread panel, and the roster in a side pane — see [`src/views/chat/readme.md`](src/views/chat/readme.md) |
 | **Tasks** | A built-in Kanban board (drag cards between columns) |
 | **Approvals** | The inbox of things parked for your decision, with approve/decline |
 | **Workflows** | A read-only [React Flow](https://reactflow.dev) canvas of how work is routed (lazy-loaded) |
@@ -95,11 +95,11 @@ Written reference, in order of usefulness:
 
 | Doc | Answers |
 | --- | --- |
-| [`docs/design-system/README.md`](../docs/design-system/README.md) | The layer rule, anti-patterns, how to change a token |
+| [`docs/design-system/readme.md`](../docs/design-system/readme.md) | The layer rule, anti-patterns, how to change a token |
 | [`docs/design-system/color.md`](../docs/design-system/color.md) | Every colour, its role, its measured contrast |
 | [`docs/design-system/typography.md`](../docs/design-system/typography.md) | The scale, the mono policy, the migration list |
 | [`docs/design-system/components.md`](../docs/design-system/components.md) | Anatomy and required states per primitive |
-| [`docs/brand/README.md`](../docs/brand/README.md) | Why these choices — positioning, voice, form |
+| [`docs/brand/readme.md`](../docs/brand/readme.md) | Why these choices — positioning, voice, form |
 
 > Two rules save the most time. **Never write an arbitrary value**
 > (`text-[11px]`, `bg-[#5865f2]`) — the scale has a name for it, or the system

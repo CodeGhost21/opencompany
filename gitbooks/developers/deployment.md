@@ -38,7 +38,7 @@ The same two images deploy to:
 
 - **DigitalOcean** — App Platform spec in `.do/app.yaml`.
 - **AWS** — Fargate task in `deploy/aws-ecs-task-definition.json`.
-- **Any Docker host** — see `deploy/README.md`.
+- **Any Docker host** — see `deploy/readme.md`.
 
 ## Going public on tiny.place
 

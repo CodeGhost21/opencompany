@@ -162,7 +162,7 @@ Two deliberate looseness choices, both erring toward *not blocking*, because a
 false refusal is the expensive way to be wrong here:
 
 - **`file` matches on the trailing segment**, case-insensitively. A model writes
-  `Standards/Tone.md` or `Tone.md` for the same note; a path-shape mismatch that
+  `standards/Tone.md` or `Tone.md` for the same note; a path-shape mismatch that
   blocked a card would be a false refusal. Two same-named files in different
   folders can therefore satisfy the check.
 - **`permission` reads the manifest only** — the tool allow-list, the agent's

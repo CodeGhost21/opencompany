@@ -9,7 +9,7 @@ Every folder follows the same shape:
 - `company.toml` — the manifest: the roster of agents, their responsibilities,
   the output, and the moments reserved for the human (the machine-readable
   definition the host loads).
-- `README.md` — what the company does, in plain language.
+- `readme.md` — what the company does, in plain language.
 
 Adding a business is a new folder, not a new crate. The behavior lives entirely
 in the host and the vendored runtimes; each definition just configures it.

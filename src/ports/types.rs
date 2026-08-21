@@ -1046,7 +1046,7 @@ pub enum CompanyEvent {
     /// Operator-authored only in v1. Nothing dispatches an agent turn off the
     /// back of it and no agent reads it: posting is a durable note on the card,
     /// not a delegation surface. That is a product decision rather than a
-    /// technical limit — see `docs/modules/server/README.md` — and the wire
+    /// technical limit — see `docs/modules/server/readme.md` — and the wire
     /// projections here reflect it: the text is deliberately never forwarded to
     /// the inference sidecar or the SSE stream.
     ///
@@ -1109,7 +1109,7 @@ pub enum CompanyEvent {
     ///
     /// Scoped deliberately to the discussion. `OperatorMessage` has the same
     /// shape of problem and is **not** covered here; see
-    /// `docs/modules/server/README.md` for why that is a separate decision
+    /// `docs/modules/server/readme.md` for why that is a separate decision
     /// rather than an oversight.
     ///
     /// Additive: old logs never carry it, and its presence doesn't change how

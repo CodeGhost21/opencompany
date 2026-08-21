@@ -1,7 +1,7 @@
 # Master QA — the release parity pass
 
 What a release check consists of, in one pass. Run it against a tenant **rolled
-to the commit under test** (see [`README.md`](README.md) — this is not optional;
+to the commit under test** (see [`readme.md`](readme.md) — this is not optional;
 a stale tenant reports bugs `main` has already fixed).
 
 Three parts, in this order:

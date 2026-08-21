@@ -181,7 +181,7 @@ each page under the 500-line cap.
   **empty**: `supervised` already parks every money / publish / filing effect
   through that taxonomy, so the conservative default is the mode, not the
   list.
-- **`[place]`** drives the [going-public flow](../company-as-agent/README.md).
+- **`[place]`** drives the [going-public flow](../company-as-agent/readme.md).
   `skills` feed Agent Card generation; prices are decimal strings (USDC).
 - **`[budget].monthly_usd`** is a hard ceiling enforced by the kernel across
   inference usage and x402 spend; reaching it pauses the company with an
@@ -264,7 +264,7 @@ each page under the 500-line cap.
     (active / paused at cap 0 / awaiting credential / not granted / not in this
     build).
   - **`workspace`** (issues #237, #551, #671) grants the company's shared note tree —
-    the `Standards/` / `Playbooks/` / `Product/` documents seeded from
+    the `standards/` / `playbooks/` / `product/` documents seeded from
     `companies/<name>/workspace/**`, plus whatever the operator and the agents
     have written since. It is **split**, unlike every other namespace: *reads*
     (`workspace_list`, `workspace_search`, `workspace_read`) follow the
@@ -313,7 +313,7 @@ each page under the 500-line cap.
 
     Agent writes are broad: an agent may create or edit ordinary shared content
     anywhere in its company's tree. The reserved lowercase `secrets/` subtree
-    is the exception: boot creates it with an explanatory `README.md`, and
+    is the exception: boot creates it with an explanatory `readme.md`, and
     agent workspace list/read/search/write/create tools omit or refuse the
     entire subtree while operator workspace APIs retain full access. This is a
     model-visibility boundary, not the application credential store; provider
@@ -322,7 +322,7 @@ each page under the 500-line cap.
     protect nothing. What keeps the tree navigable instead is steering plus
     attribution — the persona brief names the agent's own reserved folder
     `Agents/<agent-id>/` (minted the first time that agent puts something in it;
-    boot scaffolds the empty `Agents/` root plus `secrets/README.md`, and since
+    boot scaffolds the empty `Agents/` root plus `secrets/readme.md`, and since
     issue #645 `Desks/` is minted on first use rather than scaffolded) as the default
     home for what it produces and marks shared
     guidance as something to edit only on purpose, and every node records who

@@ -2527,7 +2527,7 @@ mod test {
         )
         .await
         .unwrap();
-        let disk = root.join("companies/acme/workspace/Brand/voice.md");
+        let disk = root.join("companies/acme/workspace/brand/voice.md");
         assert_eq!(tokio::fs::read_to_string(&disk).await.unwrap(), "# Voice");
 
         // A rename physically relocates the subtree.
