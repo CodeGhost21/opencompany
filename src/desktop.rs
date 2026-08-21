@@ -673,15 +673,39 @@ mod tests {
         crate::store::FsCompanyStore::new(home.to_path_buf())
     }
 
-    /// Issue #632: a fresh install must end up somewhere a person can sign in.
+    /// A state shaped like the packaged desktop: loopback, and `none` host-wide.
     ///
-    /// Both halves matter. A company nobody is eligible for is the same dead end
-    /// as no company at all — the login form renders, the 202 comes back, and no
-    /// code is ever minted.
+    /// The override is what the shipped shell sets (`src-tauri/src/embedded.rs`),
+    /// and it is set *there* rather than in the preset manifests deliberately —
+    /// `[users].mode = "none"` beside a `[users].admins` entry is a manifest
+    /// `validate_users` flags, and both seeding paths treat a flagged manifest as
+    /// a hard error. The override never rewrites the manifest, so nothing is
+    /// flagged.
+    fn desktop_state_over(home: &std::path::Path) -> AppState {
+        AppState::new(AppConfig {
+            auth_mode_override: Some(crate::app::config::AuthMode::None),
+            ..AppConfig::default()
+        })
+        .with_home(home.to_path_buf())
+    }
+
+    /// Issue #632: a fresh install must end up somewhere its owner can work.
+    ///
+    /// The answer changed shape rather than going away. The seeded company used
+    /// to name a synthetic mailbox in `[users].admins`, because `eligibility`
+    /// admits nobody a manifest has not named and a company nobody is eligible
+    /// for is the same dead end as no company at all. The desktop now runs
+    /// [`AuthMode::None`](crate::app::config::AuthMode::None), where there is no
+    /// eligibility question to answer: the person at the machine *is* the
+    /// principal. A bootstrap roster would grant nothing to nobody.
+    ///
+    /// So the assertion moved rather than relaxed — an empty `[users].admins` is
+    /// now the correct state, and the thing that must hold is the mode the
+    /// company is actually built in.
     #[tokio::test]
-    async fn a_first_run_seeds_a_company_the_local_operator_can_enter() {
+    async fn a_first_run_seeds_a_company_its_owner_needs_no_account_for() {
         let directory = tempfile::tempdir().unwrap();
-        let state = state_over(directory.path());
+        let state = desktop_state_over(directory.path());
 
         let ids = bootstrap_companies(&state, DEFAULT_PRESET_ID)
             .await
@@ -692,6 +716,11 @@ mod tests {
             .registry()
             .sole()
             .expect("the seeded company is registered, not merely written");
+        assert_eq!(
+            runtime.auth_mode(),
+            crate::app::config::AuthMode::None,
+            "the host-wide mode is what a desktop company is built in"
+        );
         let record = runtime
             .store()
             .load(runtime.id())
@@ -699,13 +728,10 @@ mod tests {
             .unwrap()
             .expect("the seeded company persists");
         assert!(
-            record
-                .manifest
-                .users
-                .admins
-                .iter()
-                .any(|email| email == DESKTOP_OPERATOR_EMAIL),
-            "the seeded company must name somebody eligible: {:?}",
+            record.manifest.users.admins.is_empty(),
+            "a `none`-mode company has no bootstrap roster to name, and naming \
+             one here would put `[users].admins` under a mode that grants it \
+             nothing: {:?}",
             record.manifest.users.admins
         );
         assert_eq!(
