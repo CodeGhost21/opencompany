@@ -6422,6 +6422,102 @@ needs_reason = true
         );
     }
 
+    /// The same defect one field over, and the one that would have made this
+    /// PR's whole promise false: a console rename and a console removal must
+    /// survive a rebuild.
+    ///
+    /// Neither is written back to `company.toml` — that is the point of the
+    /// overlay model — so the seed manifest a rebuild starts from still names
+    /// the teammate as it launched and still declares the one that was removed.
+    /// `build()` ends in an unconditional `store.save`, and while that save
+    /// wrote `Vec::new()` for these two fields every restart, every harness
+    /// pool swap and every inference-settings change quietly reverted the
+    /// rename and walked the removed teammate back onto the roster. An operator
+    /// on a hosted tenant has no file to edit and no redeploy to make, so
+    /// "it comes back on the next restart" is the whole feature failing.
+    ///
+    /// Asserted through `effective_agents` rather than the raw overlay vectors,
+    /// because that is the roster everything downstream actually reads.
+    #[tokio::test]
+    async fn a_rebuild_keeps_a_console_rename_and_a_console_removal() {
+        use crate::ports::types::AgentOverride;
+        use crate::store::FsCompanyStore;
+
+        let home_dir = tmp_home("oc-roster-rebuild-");
+        let home = home_dir.path().to_path_buf();
+        let id = CompanyId::new("roster-co");
+        let manifest = parse(
+            r#"
+            [company]
+            name = "Roster Co"
+
+            [[agent]]
+            id = "ceo"
+            role = "Chief Executive"
+
+            [[agent]]
+            id = "cto"
+            role = "Chief Technologist"
+            "#,
+        );
+
+        // First build materializes the record.
+        RuntimeBuilder::new(home.clone(), manifest.clone())
+            .with_id(id.clone())
+            .build()
+            .await
+            .unwrap();
+
+        // The console writes: rename one blueprint teammate, remove another.
+        let store = FsCompanyStore::new(home.clone());
+        let mut record = store.load(&id).await.unwrap().unwrap();
+        record.overlay_agent_edits.push(AgentOverride {
+            agent_id: "ceo".to_string(),
+            name: None,
+            role: Some("Managing Director".to_string()),
+            description: None,
+            tools: None,
+        });
+        record.retire_agent("cto");
+        store.save(&record).await.unwrap();
+
+        // Rebuild, exactly as a restart does.
+        RuntimeBuilder::new(home.clone(), manifest)
+            .with_id(id.clone())
+            .build()
+            .await
+            .unwrap();
+
+        let rebuilt = store.load(&id).await.unwrap().unwrap();
+        let roster = rebuilt.effective_agents();
+        let ceo = roster
+            .iter()
+            .find(|agent| agent.id == "ceo")
+            .expect("the renamed teammate is still on the roster");
+        assert_eq!(
+            ceo.role, "Managing Director",
+            "the rebuild reverted a console rename — `overlay_agent_edits` was not carried \
+             forward; roster: {roster:?}"
+        );
+        assert!(
+            !roster.iter().any(|agent| agent.id == "cto"),
+            "the rebuild resurrected a removed teammate — `overlay_retired_agents` was not \
+             carried forward; roster: {roster:?}"
+        );
+
+        // And the blueprint really does still declare both, which is exactly why
+        // carrying the overlay is the only thing that can have produced the two
+        // assertions above.
+        assert!(
+            rebuilt
+                .manifest
+                .agents
+                .iter()
+                .any(|agent| agent.id == "cto"),
+            "the manifest no longer declares the removed teammate, so this test proves nothing"
+        );
+    }
+
     /// Spawns an in-process OpenAI-compatible stub that answers every
     /// chat-completion with `marker`, so a harness turn can run without a real
     /// inference backend. Mirrors the provider-test helper of the same name.
