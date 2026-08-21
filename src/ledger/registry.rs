@@ -162,7 +162,8 @@ fn goals() -> Value {
             { "name": "id", "role": "id", "required": true },
             { "name": "goal", "role": "title", "required": true,
               "description": "The outcome, stated so somebody could tell whether it happened." },
-            { "name": "status", "role": "status", "required": true },
+            { "name": "status", "role": "status", "required": true,
+              "description": "active, met or dropped." },
             { "name": "measure", "role": "prose",
               "description": "How anybody would know this is met. A goal with no measure is a \
                               mood." },
@@ -177,40 +178,33 @@ fn goals() -> Value {
             { "name": "refs", "role": "refs",
               "description": "Task ids, artifacts or links that carry the work." }
         ],
+        // Three, like every ledger here (issue #1512). What went: `proposed`
+        // (a goal nobody has committed to is a chat message, and filing it here
+        // made the Active section the minority of the file), `at_risk` (a
+        // status that says how a goal is going, which is what `progress` is
+        // for — and a goal moved there stayed there, because nothing moves it
+        // back), and the `met`/`missed` split (both are "this is over"; which
+        // one it was is the first clause of the reason, which is required).
         "statuses": [
-            { "name": "proposed" },
             { "name": "active" },
-            { "name": "at_risk" },
             { "name": "met", "closed": true, "needs_reason": true },
-            { "name": "missed", "closed": true, "needs_reason": true },
             { "name": "dropped", "closed": true, "needs_reason": true }
         ],
         "sections": [
             {
                 "heading": "Active",
                 "blurb": "Being worked toward now. Most recently updated first — record against a \
-                          goal to raise it.",
+                          goal to raise it. If one is slipping, say so in `progress` rather than \
+                          looking for a status that means it.",
                 "statuses": ["active"],
                 "order": "recent"
             },
             {
-                "heading": "At risk",
-                "blurb": "Named as slipping. Each of these should say what would put it back on \
-                          track.",
-                "statuses": ["at_risk"],
-                "order": "recent"
-            },
-            {
-                "heading": "Proposed",
-                "blurb": "Suggested, not committed to.",
-                "statuses": ["proposed"],
-                "order": "recent"
-            },
-            {
                 "heading": "Settled",
-                "blurb": "Met, missed or dropped, each with the reason. Kept: a goal abandoned \
-                          without a recorded reason is one somebody proposes again next quarter.",
-                "statuses": ["met", "missed", "dropped"],
+                "blurb": "Over, each with the reason — which is where met, missed and abandoned \
+                          are told apart. Kept: a goal dropped without a recorded reason is one \
+                          somebody proposes again next quarter.",
+                "statuses": ["met", "dropped"],
                 "cap": 20
             }
         ],
@@ -239,7 +233,8 @@ fn decisions() -> Value {
             { "name": "id", "role": "id", "required": true },
             { "name": "decision", "role": "title", "required": true,
               "description": "What was decided, in one line." },
-            { "name": "status", "role": "status", "required": true },
+            { "name": "status", "role": "status", "required": true,
+              "description": "proposed, accepted or retired." },
             { "name": "context", "role": "prose",
               "description": "The question this answers, and what forced it." },
             { "name": "rationale", "role": "prose",
@@ -250,14 +245,19 @@ fn decisions() -> Value {
               "description": "Who made the call." },
             { "name": "decided_on", "role": "date" },
             { "name": "reason", "role": "prose",
-              "description": "Why it was superseded or reversed. Required when it closes." },
+              "description": "Why it was retired — replaced by what, or reversed on what \
+                              evidence. Required when it closes." },
             { "name": "refs", "role": "refs" }
         ],
+        // Three (issue #1512). `superseded` and `reversed` were one status
+        // wearing two words: both mean *this is no longer the answer*, both
+        // require a reason, and the reason is the only place the difference was
+        // ever legible — "replaced by D-14" versus "we were wrong". Asking a
+        // writer to also encode it in the status bought a coin-flip.
         "statuses": [
             { "name": "proposed" },
             { "name": "accepted" },
-            { "name": "superseded", "closed": true, "needs_reason": true },
-            { "name": "reversed", "closed": true, "needs_reason": true }
+            { "name": "retired", "closed": true, "needs_reason": true }
         ],
         "sections": [
             {
@@ -274,10 +274,10 @@ fn decisions() -> Value {
             },
             {
                 "heading": "No longer in force",
-                "blurb": "Superseded or reversed, each with the reason. Kept rather than deleted: \
-                          a decision that was reversed is exactly the one somebody will otherwise \
-                          make again.",
-                "statuses": ["superseded", "reversed"],
+                "blurb": "Retired, each with the reason — say whether it was replaced or reversed, \
+                          and by what. Kept rather than deleted: a decision that was reversed is \
+                          exactly the one somebody will otherwise make again.",
+                "statuses": ["retired"],
                 "cap": 20
             }
         ],
