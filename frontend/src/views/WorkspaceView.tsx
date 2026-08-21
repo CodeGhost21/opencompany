@@ -5,6 +5,7 @@ import {
   EyeOff,
   FilePlus2,
   FileText,
+  FileX,
   Folder,
   FolderOpen,
   FolderPlus,
@@ -1788,6 +1789,25 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
               </aside>
             </div>
           </>
+        ) : openId && !openNode ? (
+          /* The pane used to answer on tree membership rather than on what was
+             asked for (issue #1473). Everything — header, error, skeleton —
+             lived inside the `openNode` branch, so a `#/workspace/<id>` link to
+             a note that had since been deleted skipped the whole thing and fell
+             through to "No note open / Pick a note from the explorer", blaming
+             the reader for a link they had just followed. The 404 that was
+             fetched, parsed and stored was never rendered at all, and the same
+             fall-through swallowed the initial load of a deep-linked id. */
+          <MissingNote
+            loading={loading}
+            error={fileError}
+            onClear={() => {
+              setOpenId(null);
+              setFileError(null);
+            }}
+            onNew={() => setPrompt({ mode: "file" })}
+            onToggleExplorer={() => setShowExplorer((s) => !s)}
+          />
         ) : (
           <EmptyNote
             onNew={() => setPrompt({ mode: "file" })}
@@ -2083,6 +2103,34 @@ function TreeRow({ node, ...props }: TreeProps & { node: FsNode }) {
   // level below `Agents/`.
   const isRosterFolder = isFolder && isAgentsFolder(nodeById(nodes, node.parentId));
   const displayName = isRosterFolder ? rosterDisplayName(node.name, rosterNames) : node.name;
+  /** What this row is actually called on screen. */
+  const label = isFolder ? displayName : titleOf(node);
+  /**
+   * Whether the name is being cut off (issue #1459).
+   *
+   * A row is `truncate` inside a fixed 256px pane, indented 12px per level, so
+   * by depth 5 there are about 22 characters of room — and the seeded tree
+   * ellipsises six rows out of the box. There was no tooltip, no wrap, no row
+   * scroll and no resize handle: the only way to read a name was to open a row
+   * you could not identify.
+   *
+   * Measured rather than guessed, so the ordinary short name gets no hover
+   * chrome at all. `title` below is the unconditional fallback — it costs
+   * nothing, works on touch and for assistive tech, and means the fix does not
+   * depend on this measurement having run.
+   */
+  const nameRef = useRef<HTMLSpanElement | null>(null);
+  const [clipped, setClipped] = useState(false);
+  useEffect(() => {
+    const el = nameRef.current;
+    if (!el) return;
+    const measure = () => setClipped(el.scrollWidth > el.clientWidth);
+    measure();
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(measure);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [label]);
   /**
    * Whether this row is the `derived/` folder or something inside it (#1377).
    *
@@ -2152,9 +2200,27 @@ function TreeRow({ node, ...props }: TreeProps & { node: FsNode }) {
           ) : (
             <FileText className="ml-3.5 size-4 shrink-0 text-muted-foreground" />
           )}
-          <span className="truncate" title={isRosterFolder ? node.name : undefined}>
-            {isFolder ? displayName : titleOf(node)}
-          </span>
+          {/* The roster case keeps showing the raw id on `title`, which is
+              how #973 left the folder's real name reachable; every other row
+              now carries its own full name there instead of `undefined`. */}
+          <Tooltip open={clipped ? undefined : false}>
+            <TooltipTrigger
+              render={
+                <span
+                  ref={nameRef}
+                  className="truncate"
+                  title={isRosterFolder ? node.name : label}
+                  data-testid="workspace-tree-name"
+                />
+              }
+            >
+              {label}
+            </TooltipTrigger>
+            <TooltipContent>
+              {label}
+              {isRosterFolder && <span className="block text-3xs opacity-70">{node.name}</span>}
+            </TooltipContent>
+          </Tooltip>
           {/* The glyph is the whole of the tree-side signal: an icon, not a
               badge, because a row in a 256px pane has no width for a phrase and
               the name is the thing being scanned. The label rides along for a
@@ -2441,6 +2507,87 @@ function NoteMarkdown({
       >
         {rewritten}
       </ReactMarkdown>
+    </div>
+  );
+}
+
+/**
+ * The pane for an id that is not in the tree (issue #1473).
+ *
+ * Three states an idle "No note open" used to swallow whole: the tree is still
+ * arriving, the read came back with an error, or the read is done and the note
+ * genuinely is not there. All three follow from `openId` — something *was*
+ * asked for — which is the distinction the old branch could not make, because
+ * it keyed on whether the node was in the tree.
+ *
+ * The copy says nothing about *why* the note is gone. A link can go stale
+ * because the note was deleted, because it was in another company, or because
+ * the tree read failed — and this pane cannot tell those apart. Naming a cause
+ * it does not know would be worse than the fall-through it replaces.
+ */
+function MissingNote({
+  loading,
+  error,
+  onClear,
+  onNew,
+  onToggleExplorer,
+}: {
+  loading: boolean;
+  error: string | null;
+  onClear: () => void;
+  onNew: () => void;
+  onToggleExplorer: () => void;
+}) {
+  return (
+    <div className="flex flex-1 flex-col" data-testid="workspace-missing-note">
+      <div className="flex items-center border-b px-3 py-2 md:hidden">
+        <IconBtn label="Toggle explorer" onClick={onToggleExplorer}>
+          <PanelLeft className="size-4" />
+        </IconBtn>
+      </div>
+      {loading ? (
+        // The skeleton was trapped inside the `openNode` branch, so a
+        // deep-linked id showed the idle empty state for the whole of the tree
+        // read and then changed its mind.
+        <div
+          className="mx-auto w-full max-w-3xl space-y-3 px-6 py-6"
+          data-testid="workspace-missing-loading"
+        >
+          <Skeleton className="h-6 w-1/3" />
+          <Skeleton className="h-4 w-full" />
+          <Skeleton className="h-4 w-5/6" />
+        </div>
+      ) : (
+        <div className="flex flex-1 flex-col items-center justify-center gap-3 px-6 text-center">
+          <FileX className="size-8 text-muted-foreground" />
+          <div className="space-y-1">
+            <p className="font-medium">
+              That note is no longer in this workspace
+            </p>
+            <p className="max-w-md text-sm text-muted-foreground">
+              The link you followed points at a note this company does not have.
+            </p>
+            {/* The stored read error, finally rendered. It is the host's own
+                sentence about this id and it was being thrown away. */}
+            {error && (
+              <p
+                className="max-w-md text-sm text-muted-foreground"
+                data-testid="workspace-missing-error"
+              >
+                {error}
+              </p>
+            )}
+          </div>
+          <div className="flex flex-wrap justify-center gap-2">
+            <Button variant="outline" size="sm" onClick={onClear}>
+              Back to the explorer
+            </Button>
+            <Button variant="outline" size="sm" onClick={onNew}>
+              <FilePlus2 className="size-4" /> New note
+            </Button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
