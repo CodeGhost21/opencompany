@@ -88,6 +88,11 @@ import { rosterDisplayName, rosterNameMap, type RosterNames } from "@/lib/roster
 import { fromDto } from "@/lib/team";
 import { cn } from "@/lib/utils";
 import {
+  createSaveBuffer,
+  createUnloadGuard,
+  type SaveBuffer,
+} from "@/lib/workspace-save-buffer";
+import {
   applyRepair,
   childrenOf,
   clearLegacyLocal,
@@ -631,9 +636,14 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
 
   /* ---- the editor's dirty buffer ---- */
 
-  // The pending save, held in a ref so the debounce timer and the unmount
+  // The unsaved-text buffer, held in a ref so the debounce timer and the unmount
   // cleanup both see the latest value without re-subscribing on every keystroke.
-  const pending = useRef<{ id: string; content: string } | null>(null);
+  // It owns the two ordering rules the editor cannot get wrong — what counts as
+  // unsaved, and which write gets to speak — and both are unit-tested away from
+  // React in `lib/workspace-save-buffer.ts`.
+  const bufferRef = useRef<SaveBuffer | null>(null);
+  if (!bufferRef.current) bufferRef.current = createSaveBuffer();
+  const buffer = bufferRef.current;
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const flush = useCallback(async () => {
@@ -641,49 +651,47 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
       clearTimeout(timer.current);
       timer.current = null;
     }
-    const job = pending.current;
-    if (!job) return;
-    pending.current = null;
-    setSaveState("saving");
-    try {
-      const ack = await writeFile(client, company, job.id, job.content);
-      setSaveState("saved");
-      // Patch the authoritative stamp onto both the open file and the tree row,
-      // so "last updated" is the host's answer and not a guess. `updatedBy`
-      // rides along: this route stamps the operator server-side, and leaving
-      // the stale value would keep showing "edited by <agent>" on a note the
-      // operator has just rewritten, until the next refetch.
-      setOpenFile((f) =>
-        f && f.id === job.id
-          ? { ...f, content: job.content, updatedAt: ack.updatedAt, updatedBy: OPERATOR_ORIGIN }
-          : f,
-      );
-      setNodes((all) =>
-        all.map((n) =>
-          n.id === job.id ? { ...n, updatedAt: ack.updatedAt, updatedBy: OPERATOR_ORIGIN } : n,
-        ),
-      );
-    } catch (e) {
-      // Keep the buffer: the operator's text is never dropped because a save
-      // failed. A 404 means the note is gone on the host, which needs a decision
-      // rather than a retry, so say so explicitly.
-      //
-      // Only restore when nothing newer arrived. The operator can keep typing
-      // during the await above, and that typing writes a fresher job into
-      // `pending.current` — overwriting it with the job we just failed to save
-      // would silently discard every keystroke made while the request was in
-      // flight, which is the exact loss this buffer exists to prevent.
-      if (!pending.current) pending.current = job;
-      setSaveState("error");
-      if (isNotFound(e)) {
-        toast.error("This note no longer exists on the host.", {
-          description: "Someone deleted it. Your text is still here — save it as a new note.",
-        });
-      } else {
-        toast.error(message(e, "could not save this note"));
-      }
-    }
-  }, [client, company]);
+    // The buffer decides whether there is anything to send and whether the
+    // answer is still the newest word; a superseded write lands on none of
+    // these callbacks, so it can neither claim "Saved" over text the host has
+    // never seen nor overwrite an honest "Unsaved" with its own failure.
+    await buffer.flush({
+      write: (job) => writeFile(client, company, job.id, job.content),
+      onSaving: () => setSaveState("saving"),
+      onSaved: (job, ack) => {
+        setSaveState("saved");
+        // Patch the authoritative stamp onto both the open file and the tree
+        // row, so "last updated" is the host's answer and not a guess.
+        // `updatedBy` rides along: this route stamps the operator server-side,
+        // and leaving the stale value would keep showing "edited by <agent>" on
+        // a note the operator has just rewritten, until the next refetch.
+        setOpenFile((f) =>
+          f && f.id === job.id
+            ? { ...f, content: job.content, updatedAt: ack.updatedAt, updatedBy: OPERATOR_ORIGIN }
+            : f,
+        );
+        setNodes((all) =>
+          all.map((n) =>
+            n.id === job.id ? { ...n, updatedAt: ack.updatedAt, updatedBy: OPERATOR_ORIGIN } : n,
+          ),
+        );
+      },
+      onFailed: (_job, e) => {
+        // The buffer has already kept the text — the operator's words are never
+        // dropped because a save failed, and the next edit retries them. A 404
+        // means the note is gone on the host, which needs a decision rather than
+        // a retry, so say so explicitly.
+        setSaveState("error");
+        if (isNotFound(e)) {
+          toast.error("This note no longer exists on the host.", {
+            description: "Someone deleted it. Your text is still here — save it as a new note.",
+          });
+        } else {
+          toast.error(message(e, "could not save this note"));
+        }
+      },
+    });
+  }, [buffer, client, company]);
 
   // Always flush through the newest closure, including from cleanup callbacks
   // that captured an older one.
@@ -703,25 +711,25 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
   // above covers every navigation React knows about, which is why switching
   // notes was already safe. A reload, a tab close or a link out of the console
   // is not one of those: the debounce timer dies with the document and the
-  // typing goes with it, silently. `preventDefault` is the whole modern API —
-  // the browser writes its own wording — and it fires only while there is
-  // genuinely something buffered, so an operator who is merely reading is
-  // never asked.
+  // typing goes with it, silently — and so does the request, because the
+  // browser cancels an in-flight `PUT` on unload. The guard therefore asks the
+  // buffer, which counts a write in flight as unsaved just as it counts a job
+  // waiting on the debounce; checking a pending ref alone would leave the whole
+  // round trip unguarded.
   useEffect(() => {
-    const guard = (event: BeforeUnloadEvent) => {
-      if (!pending.current) return;
-      event.preventDefault();
-    };
+    const guard = createUnloadGuard(buffer);
     window.addEventListener("beforeunload", guard);
     return () => window.removeEventListener("beforeunload", guard);
-  }, []);
+  }, [buffer]);
 
   function onEdit(id: string, content: string) {
     setDraft(content);
     // `dirty`, not `idle`: from this keystroke until the host acknowledges the
     // write, the only copy of these words is in this tab (issue #1372).
     setSaveState("dirty");
-    pending.current = { id, content };
+    // Also invalidates any write already in flight: its answer is about text
+    // this keystroke has just superseded, so it no longer gets to set the state.
+    buffer.stage({ id, content });
     if (timer.current) clearTimeout(timer.current);
     timer.current = setTimeout(() => void flushRef.current(), AUTOSAVE_DELAY_MS);
   }
@@ -830,10 +838,10 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
     }
     // Preferred over the plan's answer because it is a ref and therefore
     // current: the operator can keep typing during the tree refetch above, and
-    // those keystrokes reach `pending` while the plan was computed from the
+    // those keystrokes reach the buffer while the plan was computed from the
     // `draft` of the render the frame arrived in.
-    const job = pending.current;
-    pending.current = null;
+    const job = buffer.peek();
+    buffer.clear();
     const keep = job?.content ?? rescue;
     if (keep !== null) {
       const gone = nodeById(nodes, openId);
@@ -1100,7 +1108,7 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
       await deleteNodeApi(client, company, node.id);
       setNodes((all) => all.filter((n) => !removed.has(n.id)));
       if (openId && removed.has(openId)) {
-        pending.current = null;
+        buffer.clear();
         setOpenId(null);
         setOpenFile(null);
         setDraft(null);
