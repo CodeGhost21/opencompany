@@ -40,7 +40,7 @@ import { FIRST_RUN_COMPANY } from "./capabilities";
  * ```
  *
  * It was written for a host serving the wrong company. What it actually did,
- * once the global baseline began merging four undeletable teammates into
+ * once the global baseline began merging four teammates of its own into
  * **every** company, was fire on every run — including the right one. So the
  * lane went green while first-run setup could not open anywhere in the shipped
  * product, and nothing said a word. That is `CLAUDE.md`'s "builds, runs and
