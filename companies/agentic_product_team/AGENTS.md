@@ -50,8 +50,9 @@ edit the `.toml` to change what it may touch.
 
 ## Ledgers
 
-The three built-ins — `tasks`, `goals`, `decisions` — plus what the team
-declares while it runs. Two are expected:
+The baseline every company gets, plus the two this template declares of its
+own in `ledgers/` — shipped rather than invented mid-run, because a product team
+with no bug queue and no competitor register is short the axes it exists for:
 
 - `bugs` — the triaged queue: severity, reach, area, repro, and the reason a
   closed row closed.

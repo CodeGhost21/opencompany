@@ -12,8 +12,8 @@ recorded in the `decisions` ledger.
 **Bet.** If severity means the same thing every week, the top of the backlog
 stops being re-argued and the team can plan a quarter.
 
-**Sequence.** [[Bug triage policy]] adopted → the `bugs` ledger declared and
-backfilled from the open reports → first weekly pass reported.
+**Sequence.** [[Bug triage policy]] adopted → the `bugs` ledger backfilled
+from the open reports → first weekly pass reported.
 
 **Depends on.** Nothing. Deliberately first: everything else is planned against
 this queue.

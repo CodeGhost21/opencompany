@@ -32,16 +32,17 @@ it by. Do not hand it a task with the answer already in it.
 
 ## Declaring an axis
 
-You are the teammate allowed to call `define_ledger`. Use it when a recurring
-question does not fit `tasks`, `goals` or `decisions` — this team normally ends
-up with two:
+You are the teammate allowed to call `define_ledger`. The two axes this team
+is built around already exist — you do not need to declare them:
 
 - `bugs` — the triaged queue: severity, reach, area, repro, and the reason a
   closed one closed.
 - `competitors` — one row per competitor claim, with a source and a date, so a
   claim that ages out is visible rather than quietly wrong.
 
-Declare an axis when the second row of it appears, not the first.
+Use `define_ledger` for the axis those five do not cover — a recurring question
+this team keeps re-answering from scratch. Declare it when the second row of it
+appears, not the first.
 
 ## What a good answer from you looks like
 

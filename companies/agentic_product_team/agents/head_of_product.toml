@@ -8,8 +8,9 @@ tier = "orchestrator"
 
 # Unrestricted ledger access: no `ledgers` grant is declared, because the
 # routing picture is this role's whole job. It is also the one teammate allowed
-# to mint a new axis — the team discovers the axes it needs while it is running
-# (a `bugs` queue, a `competitors` register), and a declaration that required an
+# to mint a *new* axis — the two this team is built around (`bugs`,
+# `competitors`) ship declared in `ledgers/`, but a company discovers the rest
+# of the axes it needs while it is running, and a declaration that required an
 # operator would be discovered and then not made.
 can_declare_ledgers = true
 
