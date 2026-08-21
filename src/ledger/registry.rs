@@ -115,7 +115,7 @@ fn tasks() -> Value {
                     what is finished. Cards dispatch when they enter Working, so this ledger is \
                     written through the board — not with `record_entry`.",
         "source": "native",
-        "derived": format!("{DERIVED_DIR}/TASKS.md"),
+        "derived": format!("{DERIVED_DIR}/tasks.md"),
         "writtenBy": "the board — `spawn_task` to open a card, `assign_task` to hand it over, or \
                       the console's board itself. `record_entry` does not write it, because \
                       entering a phase fires real work",
@@ -157,7 +157,7 @@ fn goals() -> Value {
                     each one stands. Read it before opening work nobody asked for; record against \
                     a goal when work moves it.",
         "source": "events",
-        "derived": format!("{DERIVED_DIR}/GOALS.md"),
+        "derived": format!("{DERIVED_DIR}/goals.md"),
         "fields": [
             { "name": "id", "role": "id", "required": true },
             { "name": "goal", "role": "title", "required": true,
@@ -229,7 +229,7 @@ fn decisions() -> Value {
                     before re-opening a question — re-litigating something already settled is the \
                     cheapest mistake available, and the reason beside it is what prevents it.",
         "source": "events",
-        "derived": format!("{DERIVED_DIR}/DECISIONS.md"),
+        "derived": format!("{DERIVED_DIR}/decisions.md"),
         "fields": [
             { "name": "id", "role": "id", "required": true },
             { "name": "decision", "role": "title", "required": true,

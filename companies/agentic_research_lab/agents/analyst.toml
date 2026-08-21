@@ -1,7 +1,7 @@
 role = "Analyst"
 description = "Compute, model, and check numbers against the claims on record."
 # Gets the code index so the second program does not rebuild the first.
-context = ["GOAL.md", "BRIEF.md", "CLAIMS.md", "INDEX.md"]
+context = ["GOAL.md", "brief.md", "claims.md", "INDEX.md"]
 
 # Visibility/read-record scope (docs/spec/runtime/ledgers.md): this specialist
 # manages its own work on the board and sees, but does not redefine, company

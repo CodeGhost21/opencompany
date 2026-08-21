@@ -42,7 +42,7 @@
 //!   **explicit** `workspace` / `workspace.write` grant — a bare `*` does not
 //!   confer them. `workspace_write` and `workspace_delete` are each guarded by
 //!   a required compare-and-swap revision token, and the lifecycle pair reaches
-//!   only `Agents/<agent id>/`. Unlike the file tools these are scoped by the
+//!   only `agents/<agent id>/`. Unlike the file tools these are scoped by the
 //!   store, not the filesystem: every call resolves through one company-scoped
 //!   `tree()` read, so no host path is ever built from agent input.
 //! * **Delegation authority is orchestrator-only; delegation itself is
@@ -740,7 +740,7 @@ pub fn build_agent(
 
     // Company workspace (issues #237, #551) — live read (and optionally
     // create/write) tools over the shared note tree, so an agent can ground an
-    // answer in the company's own `Standards/` / `Playbooks/` instead of
+    // answer in the company's own `standards/` / `playbooks/` instead of
     // guessing, and can put what it produces somewhere the operator and its
     // teammates will actually find it. Two independent gates, deliberately
     // asymmetric:
@@ -773,7 +773,7 @@ pub fn build_agent(
     // (`policy::consequence`); and authorship, since every node records who
     // created it and who last wrote it (#326).
     //
-    // Rename and delete additionally reach only `Agents/<agent id>/`. Read that
+    // Rename and delete additionally reach only `agents/<agent id>/`. Read that
     // as a division of labour, not as a security boundary: the same grant
     // already confers unconfined overwrite, which is the broader power. See the
     // `workspace_tools::lifecycle` module docs.
@@ -805,7 +805,7 @@ pub fn build_agent(
         tools.extend(workspace_tools);
     }
 
-    // Agent-authored internal dashboard pages (`Pages/<slug>/` in the same
+    // Agent-authored internal dashboard pages (`pages/<slug>/` in the same
     // workspace store). Unlike workspace reads vs. writes above, there is no
     // two-tier gate here: per the design, `pages` rides the default `"*"`
     // grant whole, so a single `grants_cover` check on `pages` is enough —
@@ -890,10 +890,12 @@ pub fn build_agent(
         || !skill_deltas.is_empty()
         || !crate::globals::skills().is_empty()
     {
+        // Named through the same helper as the sandbox beside it, so the two
+        // siblings cannot end up under different spellings of one agent.
         let skill_ws = deps
             .workspace_root
-            .join(company.as_ref())
-            .join(&manifest_agent.id)
+            .join(sandbox_segment(company.as_ref()))
+            .join(sandbox_segment(&manifest_agent.id))
             .join("skill-catalog");
         // Best-effort, not fatal. This ran only for a company with a skills
         // source or an operator delta until the global baseline made it run for
@@ -1210,7 +1212,27 @@ pub(crate) fn grants_cover(grants: &[String], namespace: &str) -> bool {
 /// Naming only — this never touches the disk. Anything that needs the directory
 /// to *exist* goes through [`ensure_agent_workspace`].
 pub fn agent_workspace(root: &Path, company: &CompanyId, agent_id: &str) -> PathBuf {
-    root.join(company.as_ref()).join(agent_id).join("workspace")
+    root.join(sandbox_segment(company.as_ref()))
+        .join(sandbox_segment(agent_id))
+        .join("workspace")
+}
+
+/// One directory name in the sandbox tree, under the workspace naming rule.
+///
+/// The sandbox is the other half of "the agent's workspace", and it carried the
+/// company id and the roster id verbatim — so a company browsing its own data
+/// directory found `agentic_law_firm/page_builder/` next to a note tree whose
+/// every name is lowercase and dashed. One rule for both
+/// ([`crate::company::workspace_names`]) is the point.
+///
+/// Two ids cannot collide into one sandbox by being normalized. Roster ids are
+/// snake_case (`company::manifest::is_snake_case`), so `-` never occurs in one
+/// and the mapping is injective over that alphabet. A company id is not
+/// validated that tightly, but it already shares a slug with its bundle
+/// directory (`store::paths`), so two ids that normalize alike were sharing
+/// their company data long before they shared a sandbox.
+fn sandbox_segment(raw: &str) -> String {
+    crate::company::workspace_names::kebab_name_or(raw, raw)
 }
 
 /// One agent's shell audit sink directory, resolved from the instance data root:
@@ -1272,8 +1294,56 @@ pub fn ensure_agent_workspace(
     agent_id: &str,
 ) -> std::io::Result<PathBuf> {
     let workspace = agent_workspace(root, company, agent_id);
+    adopt_legacy_sandbox(root, company, agent_id, &workspace);
     std::fs::create_dir_all(&workspace)?;
     Ok(workspace)
+}
+
+/// Move a pre-lowercase-dashed sandbox onto its canonical path, once.
+///
+/// The tree used to be named by the company and roster ids verbatim
+/// (`agentic_law_firm/page_builder/`), and an agent upgraded into the new
+/// naming would otherwise start in an empty directory with its half-finished
+/// work still on disk under the old name — present, unreachable, and reported
+/// by nothing.
+///
+/// This is a *rename*, unlike the workspace tree, where the equivalent
+/// migration is refused and offered as an operator action instead. The two are
+/// different things: this directory is the agent's private scratch, addressed
+/// only by [`agent_workspace`] within this process, with no ids, no links and
+/// no console pointing into it. Nothing outside can notice the move.
+///
+/// Best-effort and silent-on-conflict by construction: it acts only when the
+/// canonical path does not exist and the legacy one is a directory, so it
+/// cannot overwrite a live sandbox, and a failed rename simply leaves the
+/// agent with a fresh empty one rather than failing the turn.
+fn adopt_legacy_sandbox(root: &Path, company: &CompanyId, agent_id: &str, canonical: &Path) {
+    let legacy = root.join(company.as_ref()).join(agent_id).join("workspace");
+    if legacy == canonical || canonical.exists() || !legacy.is_dir() {
+        return;
+    }
+    let Some(parent) = canonical.parent() else {
+        return;
+    };
+    if std::fs::create_dir_all(parent).is_err() {
+        return;
+    }
+    match std::fs::rename(&legacy, canonical) {
+        Ok(()) => tracing::info!(
+            company = %company,
+            agent = %agent_id,
+            from = %legacy.display(),
+            to = %canonical.display(),
+            "[harness] moved the agent sandbox onto its lowercase-dashed path"
+        ),
+        Err(error) => tracing::warn!(
+            company = %company,
+            agent = %agent_id,
+            %error,
+            from = %legacy.display(),
+            "[harness] could not move the legacy agent sandbox; starting from an empty one"
+        ),
+    }
 }
 
 /// A [`SecurityPolicy`] that sandboxes an agent's file tools to `workspace` and
@@ -1395,6 +1465,84 @@ mod tests {
         let again = ensure_agent_workspace(root.path(), &company, "ceo").expect("second ensure");
         assert_eq!(again, made);
         assert!(again.is_dir());
+    }
+
+    /// The sandbox is named under the workspace naming rule, so a snake_case
+    /// roster id and an underscored company id land on dashed directories —
+    /// the same convention the note tree beside them is kept in.
+    #[test]
+    fn the_sandbox_path_is_lowercase_and_dashed() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let named = agent_workspace(
+            root.path(),
+            &CompanyId::new("Agentic_Law Firm"),
+            "page_builder",
+        );
+
+        assert_eq!(
+            named,
+            root.path()
+                .join("agentic-law-firm")
+                .join("page-builder")
+                .join("workspace")
+        );
+    }
+
+    /// An agent upgraded into the new naming keeps the work it had in flight.
+    ///
+    /// The sandbox is private scratch that nothing outside this process
+    /// addresses, so moving it is invisible — while leaving it behind would
+    /// strand a half-finished file on disk, present and unreachable, with
+    /// nothing reporting it.
+    #[test]
+    fn a_pre_rule_sandbox_is_moved_onto_the_canonical_path() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let company = CompanyId::new("acme");
+
+        let legacy = root
+            .path()
+            .join("acme")
+            .join("page_builder")
+            .join("workspace");
+        std::fs::create_dir_all(&legacy).expect("legacy sandbox");
+        std::fs::write(legacy.join("draft.md"), "half-finished").expect("in-flight work");
+
+        let made = ensure_agent_workspace(root.path(), &company, "page_builder").expect("ensure");
+
+        assert_eq!(made, agent_workspace(root.path(), &company, "page_builder"));
+        assert_eq!(
+            std::fs::read_to_string(made.join("draft.md")).expect("the work came with it"),
+            "half-finished"
+        );
+        assert!(!legacy.exists(), "the legacy path is not left as a twin");
+    }
+
+    /// A sandbox that already exists at the canonical path is never overwritten
+    /// by a stale legacy one — the move is a one-time adoption, not a sync.
+    #[test]
+    fn a_live_sandbox_is_never_replaced_by_a_legacy_one() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let company = CompanyId::new("acme");
+
+        let canonical =
+            ensure_agent_workspace(root.path(), &company, "page_builder").expect("ensure");
+        std::fs::write(canonical.join("current.md"), "live").expect("live work");
+        let legacy = root
+            .path()
+            .join("acme")
+            .join("page_builder")
+            .join("workspace");
+        std::fs::create_dir_all(&legacy).expect("legacy sandbox");
+        std::fs::write(legacy.join("stale.md"), "stale").expect("stale work");
+
+        let again = ensure_agent_workspace(root.path(), &company, "page_builder").expect("ensure");
+
+        assert_eq!(again, canonical);
+        assert_eq!(
+            std::fs::read_to_string(canonical.join("current.md")).expect("still there"),
+            "live"
+        );
+        assert!(!canonical.join("stale.md").exists());
     }
 
     /// The bug, pinned. With the workspace absent, `validate_parent_path` walks
