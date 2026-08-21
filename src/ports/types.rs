@@ -5275,10 +5275,7 @@ mod test {
         assert_eq!(record.mint_agent_id("Agents"), "agents_2");
         assert_eq!(record.mint_agent_id("desks"), "desks_2");
         assert_eq!(record.mint_agent_id("System"), "system_2");
-        assert_eq!(
-            RESERVED_AGENT_IDS,
-            ["operator", "Agents", "Desks", "system"]
-        );
+        assert_eq!(RESERVED_AGENT_IDS, ["operator", "agents", "desks", "system"]);
     }
 
     /// Issue #966: the host's own author is not a name a teammate can be given.
