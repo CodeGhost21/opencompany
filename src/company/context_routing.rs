@@ -543,6 +543,39 @@ mod tests {
             );
         }
 
+        /// A company created before the lowercase-dashed rule holds `BRIEF.md`,
+        /// and a manifest written then asks for `BRIEF.md`. Both still route.
+        ///
+        /// This is the compatibility seam the rule needs most: routing is what
+        /// a role reasons *from*, so an unmatched name is not a missing file
+        /// message — it is an agent quietly answering without the company's
+        /// brief, and nothing anywhere says so.
+        #[tokio::test]
+        async fn a_legacy_uppercase_document_still_routes() {
+            let (_dir, ws, company) = store().await;
+            file(&ws, &company, None, "BRIEF.md", "What we established.").await;
+
+            let mut a = agent(Some("frontend"));
+            a.context = Some(vec!["BRIEF.md".into()]);
+            let by_old_name = resolve_routed_documents(ws.as_ref(), &company, &a)
+                .await
+                .expect("resolves");
+            assert_eq!(by_old_name.len(), 1, "{by_old_name:?}");
+
+            // And the same node answers the canonical spelling, which is what
+            // the default routing table now asks for.
+            let mut b = agent(Some("frontend"));
+            b.context = Some(vec![BRIEF.into()]);
+            let by_new_name = resolve_routed_documents(ws.as_ref(), &company, &b)
+                .await
+                .expect("resolves");
+            assert_eq!(
+                by_new_name,
+                vec![(BRIEF.to_string(), "What we established.".to_string())],
+                "the routed name is the one asked for, resolved against what exists"
+            );
+        }
+
         /// The rule that differs from `prompt_files`: a live workspace note that
         /// does not exist yet is skipped, not an error. Failing the roster build
         /// here would take a whole company down over a file anybody could create.
