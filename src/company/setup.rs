@@ -2213,7 +2213,11 @@ mod tests {
             focus: Some(AgentFocus::Writing),
         }];
         let manifest = manifest_from_setup(&answers("consulting", ""), &roster, None);
-        let persona = crate::company::prompt::persona_prompt("Acme", &manifest.agents[0], None);
+        let persona = crate::company::prompt::persona_prompt(
+            "Acme",
+            &manifest.agents[0],
+            manifest.agents[0].prompt.as_deref(),
+        );
         assert!(persona.contains("Report Writer"), "{persona}");
         assert!(persona.contains("The written report."), "{persona}");
         // Compared against the instructions themselves rather than a copy of
