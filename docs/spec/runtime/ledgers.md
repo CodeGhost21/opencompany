@@ -252,9 +252,39 @@ refused — the same reads-heal/writes-fail asymmetry `LEGACY_COLUMN_BACKLOG`
 already makes for a stored card, and for the same reason: a client should learn
 the surviving vocabulary once rather than be kept quietly on the old one.
 
-A ledger a company declares is not capped at three — the wizard's presets are
+### Five for authored ledgers
+
+The shipped templates get one notch looser, and a test holds them there
+(`no_shipped_template_ledger_declares_more_than_five_statuses`, over both
+`globals/ledgers/` and `companies/*/ledgers/`). A template ledger is a
+*pipeline* far more often than a built-in is — a candidate, a deal, a filing
+genuinely moves through stages — and three would have forced each one to throw
+away either its pipeline or its outcomes.
+
+Five leaves room for both. What it forbids is the sprawl these started at: seven
+statuses, four of which an agent had to choose between on every write with
+nothing to tell them apart but a blurb. Past five, the extra status is reliably
+answering a second question — how is it going, which flavour of over — and that
+answer belongs in a field, where it does not have to be guessed:
+
+| what was merged | where the distinction went |
+| --- | --- |
+| `at_risk` into the active status (commitments, engagements) | the row's own progress line — a status saying how something is *going* is one nothing ever moves back out of |
+| `stalled`, `on_hold`, `paused` into the working status | same |
+| a third closed outcome into a second (`extended`+`not_required` → `not_filed`, `passed`+`lost` → `not_bought`) | `reason`, which is required on close and is what a closed row is read for |
+| adjacent pipeline stages (`hit_finding`+`lead_optimization` → `discovery`) | nothing — they were one stage under two names |
+
+Where a file argued for a distinction it had, that argument won: `deals` in
+enterprise sales keeps `no_decision` separate from `lost`, because its own blurb
+says collapsing them hides that the competitor was inertia, so its **pipeline**
+compressed instead.
+
+Every retired word is an alias on the status that adopted it, so no stored row
+moves or disappears.
+
+A ledger a company declares at run time is not capped — the wizard's presets are
 three, and the argument above is an argument, not a mechanism. What is
-guaranteed is that nothing the runtime ships asks a reader to hold more.
+guaranteed is that nothing OpenCompany ships asks a reader to hold more.
 
 ## What a declaration cannot do
 
