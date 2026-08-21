@@ -731,7 +731,18 @@ export class OpenCompanyClient {
    * callers fall back to a local-only add.
    */
   addTeamMember(
-    input: { name: string; role: string; description?: string; budgetUsdDaily?: number },
+    input: {
+      name: string;
+      role: string;
+      description?: string;
+      budgetUsdDaily?: number;
+      /**
+       * Optional persona instructions to give the teammate at birth (issue
+       * #1530). Omitted keys are left off the wire, so a caller that does not
+       * collect instructions changes nothing.
+       */
+      instructions?: string;
+    },
     company?: string | null,
   ): Promise<TeamMemberDto> {
     return this.request<TeamMemberDto>("POST", `${this.scope(company)}/team`, input);
@@ -764,10 +775,14 @@ export class OpenCompanyClient {
    * null` clears the instructions and `description: undefined` leaves them,
    * which is why the two must not be collapsed on the way in.
    *
-   * The host refuses a manifest teammate with a 409 — its fields live in the
-   * version-controlled `company.toml`, and the console does not rewrite that.
-   * Ask `getAgent` first: its `editable` list is the host's own statement of
-   * which fields this call will accept.
+   * The host refuses a manifest teammate's *manifest-native* fields with a 409 —
+   * name, role, description live in the version-controlled `company.toml`, and
+   * the console does not rewrite that. `instructions` are the exception (issue
+   * #1530): they write to a per-agent override record, not the manifest, so an
+   * `instructions`-only patch is accepted for a manifest teammate too — and
+   * `instructions: null` resets it to the blueprint. Ask `getAgent` first: its
+   * `editable` list is the host's own statement of which fields this call will
+   * accept.
    */
   updateAgent(
     agentId: string,
