@@ -91,7 +91,12 @@ async fn state_at(dir: &std::path::Path) -> AppState {
 }
 
 /// Issues one authenticated request against the whole router.
-async fn call(state: &AppState, method: &str, uri: &str, body: Option<Value>) -> (StatusCode, Value) {
+async fn call(
+    state: &AppState,
+    method: &str,
+    uri: &str,
+    body: Option<Value>,
+) -> (StatusCode, Value) {
     let builder = Request::builder()
         .method(method)
         .uri(uri)
@@ -106,7 +111,10 @@ async fn call(state: &AppState, method: &str, uri: &str, body: Option<Value>) ->
     let response = router(state.clone()).oneshot(request).await.unwrap();
     let status = response.status();
     let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-    (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+    )
 }
 
 /// The catalog is the console's whole menu, so an id it offers must be one the

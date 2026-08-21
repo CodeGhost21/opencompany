@@ -37,10 +37,11 @@
 //! stops "remember this page" from being a read primitive against the
 //! deployment's own network.
 
-use axum::extract::{DefaultBodyLimit, Multipart};
+use axum::extract::Path;
 use axum::extract::multipart::MultipartError;
+use axum::extract::{DefaultBodyLimit, Multipart};
 use axum::http::StatusCode;
-use axum::routing::post;
+use axum::routing::{delete, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
@@ -69,6 +70,7 @@ pub fn router() -> Router<AppState> {
     scoped("/memory/ingest", post(ingest))
         .layer(DefaultBodyLimit::max(INGEST_BODY_LIMIT))
         .merge(scoped("/memory/ingest/links", post(ingest_links)))
+        .merge(scoped("/memory/document/{source}", delete(forget_document)))
 }
 
 /// What happened to one dropped file or link.
@@ -205,6 +207,61 @@ async fn store_source(
         chunks: written,
         detail: None,
     }
+}
+
+/// The document whose chunks are to be forgotten, by its label slug.
+#[derive(Debug, Deserialize)]
+struct DocumentPath {
+    /// The `document/{slug}` label's slug half, as
+    /// [`label_for`](crate::ingest::label_for) derived it.
+    source: String,
+}
+
+/// `DELETE …/memory/document/{source}` — forget one dropped document.
+///
+/// The counterpart the drop zone needs to be usable: dropping the wrong folder
+/// is a mistake an operator makes once, and without this the only remedy is a
+/// company's whole memory. Scoped to `document/` labels alone — nothing here
+/// can reach an agent's own memory or a task outcome, which are records of
+/// what happened rather than material an operator supplied.
+async fn forget_document(
+    company: ScopedCompany,
+    Path(DocumentPath { source }): Path<DocumentPath>,
+) -> Result<Json<ForgottenDto>, ApiError> {
+    let prefix = format!("{}/{source}/", crate::ingest::DOCUMENT_LABEL_PREFIX);
+    let context = company.runtime.context.as_ref();
+    let all = context.list(company.id(), "").await?;
+    let mut forgotten = 0;
+    for meta in all.iter().filter(|m| m.label.starts_with(&prefix)) {
+        // Chunks are content-addressed, so one address can carry several
+        // labels: two identical paragraphs in one folder drop, or a document
+        // re-dropped under a new name. Deleting an address another label still
+        // points at would delete that row too — the shared-address rule the
+        // fact mirror's reap follows for the same reason.
+        let shared = all
+            .iter()
+            .any(|m| m.addr == meta.addr && !m.label.starts_with(&prefix));
+        if shared {
+            continue;
+        }
+        if context.delete(company.id(), &meta.addr).await? {
+            forgotten += 1;
+        }
+    }
+    if forgotten == 0 {
+        return Err(ApiError(OpenCompanyError::CompanyNotFound(format!(
+            "no document memory under `{source}`"
+        ))));
+    }
+    Ok(Json(ForgottenDto { forgotten }))
+}
+
+/// How much of a document was forgotten.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ForgottenDto {
+    /// Chunks removed.
+    forgotten: usize,
 }
 
 /// Classifies a multipart failure the way the workspace upload does: a body
@@ -363,7 +420,9 @@ fn guard_link(url: &str) -> Result<(), String> {
         Some("http") | Some("https") => {}
         _ => return Err("only http:// and https:// links can be fetched".to_string()),
     }
-    let host = parsed.host().ok_or_else(|| "no host in the URL".to_string())?;
+    let host = parsed
+        .host()
+        .ok_or_else(|| "no host in the URL".to_string())?;
     let lowered = host.to_ascii_lowercase();
     if lowered == "localhost" || lowered.ends_with(".localhost") || lowered.ends_with(".internal") {
         return Err("that host is internal to this deployment".to_string());

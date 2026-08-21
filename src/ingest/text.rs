@@ -40,7 +40,11 @@ pub fn from_bytes(name: &str, declared: &str, bytes: &[u8]) -> Extracted {
         Ok(text) => Extracted::Text(normalize(text)),
         Err(_) => Extracted::Unsupported(format!(
             "`{name}` is not UTF-8 text, and its type ({}) names no format this build can parse",
-            if declared.is_empty() { "unset" } else { declared }
+            if declared.is_empty() {
+                "unset"
+            } else {
+                declared
+            }
         )),
     }
 }

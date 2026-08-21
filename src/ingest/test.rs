@@ -22,7 +22,11 @@ fn a_text_file_declared_as_octet_stream_is_still_extracted() {
 /// memory that says nothing is worse than an upload that reported why.
 #[test]
 fn binary_bytes_are_refused_rather_than_mangled() {
-    let extracted = extract("logo.png", Some("image/png"), &[0x89, b'P', b'N', b'G', 0x00]);
+    let extracted = extract(
+        "logo.png",
+        Some("image/png"),
+        &[0x89, b'P', b'N', b'G', 0x00],
+    );
     assert!(
         matches!(extracted, Extracted::Unsupported(_)),
         "got {extracted:?}"
@@ -33,7 +37,10 @@ fn binary_bytes_are_refused_rather_than_mangled() {
 /// must be distinguishable from a stored memory.
 #[test]
 fn an_empty_file_extracts_as_empty() {
-    assert_eq!(extract("blank.txt", Some("text/plain"), b"   \n\n"), Extracted::Empty);
+    assert_eq!(
+        extract("blank.txt", Some("text/plain"), b"   \n\n"),
+        Extracted::Empty
+    );
 }
 
 /// A legacy binary format names what to do about it, rather than falling into
@@ -80,7 +87,11 @@ fn an_unclosed_script_does_not_leak_its_body() {
 fn a_path_like_source_slugs_into_one_label_segment() {
     let label = label_for("Contracts/2026/acme msa.pdf");
     assert_eq!(label, "document/contracts-2026-acme-msa.pdf");
-    assert_eq!(label.matches('/').count(), 1, "one segment after the prefix");
+    assert_eq!(
+        label.matches('/').count(),
+        1,
+        "one segment after the prefix"
+    );
 }
 
 /// Every chunk names its document: a chunk surfaces from recall alone, and a

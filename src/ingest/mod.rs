@@ -30,9 +30,9 @@
 
 pub mod chunk;
 pub mod documents;
-pub mod text;
 #[cfg(test)]
 mod test;
+pub mod text;
 
 pub use chunk::{DOCUMENT_LABEL_PREFIX, DocumentChunk, chunk_document, label_for};
 

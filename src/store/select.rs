@@ -580,7 +580,10 @@ impl StorageSettings {
     /// why the env layer wins rather than the more recent write.
     ///
     /// [`MemorySection`]: crate::app::config::MemorySection
-    pub fn with_memory_config(mut self, section: &crate::app::config::MemorySection) -> Result<Self> {
+    pub fn with_memory_config(
+        mut self,
+        section: &crate::app::config::MemorySection,
+    ) -> Result<Self> {
         if Self::memory_is_env_owned() {
             return Ok(self);
         }

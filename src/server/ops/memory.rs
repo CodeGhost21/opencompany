@@ -216,37 +216,37 @@ fn context_entries(chunks: Vec<RawChunk>, query: Option<&str>) -> Vec<MemoryEntr
             continue;
         }
 
-        let (origin, source): (MemoryOrigin, String) =
-            if chunk.label.starts_with(&document_prefix) {
-                // The document's own name, which `ingest::chunk_document`
-                // writes as the chunk's first line for exactly this reason: a
-                // label is slugged and truncated, so it cannot be rendered
-                // back as the file the operator dropped.
-                let named = chunk
-                    .body
-                    .lines()
-                    .next()
-                    .map(str::trim)
-                    .filter(|line| !line.is_empty())
-                    .unwrap_or("a document");
-                (MemoryOrigin::Document, named.to_string())
-            } else if let Some(agent) = chunk.label.strip_prefix(&outcome_prefix) {
-                let who = if agent.is_empty() { "an agent" } else { agent };
-                (MemoryOrigin::TaskOutcome, who.to_string())
-            } else {
-                // Deliberate memories live one segment deeper —
-                // `agent-memory/<agent>/<slug>` — so the naive first-segment
-                // parse attributed every one of them to the literal
-                // "agent-memory" (the #1290 review's M2).
-                let who = match chunk.label.strip_prefix(const_format_prefix()) {
-                    Some(rest) => rest.split('/').next().filter(|s| !s.is_empty()),
-                    None => chunk.label.split('/').next().filter(|s| !s.is_empty()),
-                };
-                (
-                    MemoryOrigin::AgentMemory,
-                    who.unwrap_or("an agent").to_string(),
-                )
+        let (origin, source): (MemoryOrigin, String) = if chunk.label.starts_with(&document_prefix)
+        {
+            // The document's own name, which `ingest::chunk_document`
+            // writes as the chunk's first line for exactly this reason: a
+            // label is slugged and truncated, so it cannot be rendered
+            // back as the file the operator dropped.
+            let named = chunk
+                .body
+                .lines()
+                .next()
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .unwrap_or("a document");
+            (MemoryOrigin::Document, named.to_string())
+        } else if let Some(agent) = chunk.label.strip_prefix(&outcome_prefix) {
+            let who = if agent.is_empty() { "an agent" } else { agent };
+            (MemoryOrigin::TaskOutcome, who.to_string())
+        } else {
+            // Deliberate memories live one segment deeper —
+            // `agent-memory/<agent>/<slug>` — so the naive first-segment
+            // parse attributed every one of them to the literal
+            // "agent-memory" (the #1290 review's M2).
+            let who = match chunk.label.strip_prefix(const_format_prefix()) {
+                Some(rest) => rest.split('/').next().filter(|s| !s.is_empty()),
+                None => chunk.label.split('/').next().filter(|s| !s.is_empty()),
             };
+            (
+                MemoryOrigin::AgentMemory,
+                who.unwrap_or("an agent").to_string(),
+            )
+        };
 
         let (mut title, body) = split_title_body(&chunk.body);
         if title.is_empty() {

@@ -88,7 +88,10 @@ async fn drop_files(state: &AppState, files: &[(&str, &str, &[u8])]) -> (StatusC
     let response = router(state.clone()).oneshot(request).await.unwrap();
     let status = response.status();
     let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-    (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+    )
 }
 
 /// Reads the company's Brain list back, which is where an operator will look
@@ -136,7 +139,10 @@ async fn a_dropped_document_becomes_recallable_memory() {
         .find(|row| row["origin"] == "document")
         .unwrap_or_else(|| panic!("no document row in {rows:#?}"));
     assert!(
-        document["body"].as_str().unwrap().contains("Receipts go to finance"),
+        document["body"]
+            .as_str()
+            .unwrap()
+            .contains("Receipts go to finance"),
         "{document}"
     );
     assert_eq!(
@@ -155,8 +161,16 @@ async fn a_folder_drop_keeps_each_file_apart_by_its_path() {
     let (status, body) = drop_files(
         &state,
         &[
-            ("docs/alpha/README.md", "text/markdown", b"Alpha service notes."),
-            ("docs/beta/README.md", "text/markdown", b"Beta service notes."),
+            (
+                "docs/alpha/README.md",
+                "text/markdown",
+                b"Alpha service notes.",
+            ),
+            (
+                "docs/beta/README.md",
+                "text/markdown",
+                b"Beta service notes.",
+            ),
         ],
     )
     .await;
@@ -188,7 +202,11 @@ async fn an_unreadable_file_is_reported_without_failing_the_batch() {
         &state,
         &[
             ("notes.txt", "text/plain", b"Keep this."),
-            ("logo.png", "image/png", &[0x89, b'P', b'N', b'G', 0x00, 0x01]),
+            (
+                "logo.png",
+                "image/png",
+                &[0x89, b'P', b'N', b'G', 0x00, 0x01],
+            ),
             ("blank.txt", "text/plain", b"   "),
         ],
     )
@@ -235,4 +253,62 @@ fn link_ingestion_refuses_this_deployments_own_network() {
         );
     }
     assert!(super::guard_link("https://example.com/pricing").is_ok());
+}
+
+/// Dropping the wrong folder is a mistake an operator makes once; without a
+/// forget, the only remedy would be the company's whole memory.
+#[tokio::test]
+async fn a_dropped_document_can_be_forgotten_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = state_at(dir.path()).await;
+    drop_files(
+        &state,
+        &[
+            ("private/salaries.csv", "text/csv", b"name,amount\nada,100"),
+            ("keep.md", "text/markdown", b"Keep this one."),
+        ],
+    )
+    .await;
+
+    let request = Request::builder()
+        .method("DELETE")
+        .uri(format!(
+            "/api/v1/company/memory/document/{}",
+            crate::ingest::label_for("private/salaries.csv")
+                .strip_prefix("document/")
+                .unwrap()
+        ))
+        .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+        .body(Body::empty())
+        .unwrap();
+    let response = router(state.clone()).oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let rows = brain_rows(&state).await;
+    let documents: Vec<&str> = rows
+        .iter()
+        .filter(|r| r["origin"] == "document")
+        .map(|r| r["source"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        documents,
+        vec!["keep.md"],
+        "only the named document is forgotten"
+    );
+}
+
+/// Forgetting reaches document memory and nothing else: an agent's own memory
+/// is a record of what happened, not material an operator supplied.
+#[tokio::test]
+async fn forgetting_an_unknown_document_is_a_not_found() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = state_at(dir.path()).await;
+    let request = Request::builder()
+        .method("DELETE")
+        .uri("/api/v1/company/memory/document/never-uploaded")
+        .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+        .body(Body::empty())
+        .unwrap();
+    let response = router(state.clone()).oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }

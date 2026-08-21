@@ -351,7 +351,10 @@ fn saved_selection(state: &AppState) -> Result<(MemorySelection, &'static str), 
     }
     let file = ConfigFile::load(state.config_root())?;
     let section = file.map(|f| f.memory).unwrap_or_default();
-    let named = section.backend.as_deref().is_some_and(|b| !b.trim().is_empty());
+    let named = section
+        .backend
+        .as_deref()
+        .is_some_and(|b| !b.trim().is_empty());
     let selection = MemorySelection::from_section(&section)?;
     Ok((selection, if named { "config.toml" } else { "default" }))
 }
