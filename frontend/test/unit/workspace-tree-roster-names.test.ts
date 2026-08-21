@@ -17,7 +17,7 @@ import { WorkspaceView } from "@/views/WorkspaceView";
  * surface that prints the id instead of the name tells the operator nothing.
  * #939 fixed the two connections surfaces (`McpServersSection`,
  * `ProviderDetail`, `RepositoriesCard`) but never touched this one, so the
- * `Agents/` folders kept showing raw ids one tab over. This is the guard for
+ * `agents/` folders kept showing raw ids one tab over. This is the guard for
  * this surface, so a sixth one cannot regress the same way silently: it
  * renders the real tree component against a fake host and reads the DOM the
  * operator actually sees, the same way `provider-detail-render.test.ts` pins
@@ -77,7 +77,7 @@ async function render(host: OpenCompanyClient) {
 }
 
 describe("the workspace tree", () => {
-  it("names a teammate's Agents/ folder instead of its raw roster id", async () => {
+  it("names a teammate's agents/ folder instead of its raw roster id", async () => {
     const tree = [
       node({ id: "agents-root", name: "Agents", kind: "folder" }),
       node({ id: "n-zeta", name: "zeta-id", kind: "folder", parentId: "agents-root" }),
@@ -98,7 +98,7 @@ describe("the workspace tree", () => {
     expect(zeta?.textContent).toBe("Alex");
   });
 
-  it("sorts Agents/ folders by display name, not by the lexical id", async () => {
+  it("sorts agents/ folders by display name, not by the lexical id", async () => {
     // Chosen so id order and name order disagree in both directions: raw-id
     // order is [alpha-id, zeta-id], name order must be [Alex, Zoe].
     const tree = [
@@ -115,8 +115,8 @@ describe("the workspace tree", () => {
     expect(text.indexOf("Zoe")).toBeGreaterThan(text.indexOf("Alex"));
   });
 
-  it("keeps a raw folder name outside Agents/ unresolved even if it matches a roster id", async () => {
-    // The resolver is scoped to Agents/'s direct children, not a blanket
+  it("keeps a raw folder name outside agents/ unresolved even if it matches a roster id", async () => {
+    // The resolver is scoped to agents/'s direct children, not a blanket
     // find-and-replace over every folder name in the tree — a folder an
     // operator happened to name after a teammate's id elsewhere in the tree
     // must not be relabeled.
@@ -132,9 +132,9 @@ describe("the workspace tree", () => {
     expect(container.textContent).not.toContain("Backend Engineer");
   });
 
-  it("sorts a direct Agents/ file by its raw name, not a roster id it happens to match", async () => {
+  it("sorts a direct agents/ file by its raw name, not a roster id it happens to match", async () => {
     // Only a roster *folder*'s name is an id worth resolving into a display
-    // name for sorting. A file living directly under `Agents/` is unusual but
+    // name for sorting. A file living directly under `agents/` is unusual but
     // legal, and its raw name could coincidentally collide with a roster id —
     // that collision must not reorder it by a display name it was never given
     // one for (it still renders under its raw name either way; only the sort

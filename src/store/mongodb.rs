@@ -3943,7 +3943,7 @@ mod test {
     /// `rename_move` has to `$unset` `folder_path_key`, and a missing unset is
     /// invisible until somebody needs the vacated path again. The moved
     /// document would keep guarding the path it left, so the next publish that
-    /// wanted `Agents/cmo/task-42/` would be refused by an index entry
+    /// wanted `agents/cmo/task-42/` would be refused by an index entry
     /// describing a folder that is no longer there — the permanent outage this
     /// primitive exists to prevent, reintroduced by the fix itself.
     ///

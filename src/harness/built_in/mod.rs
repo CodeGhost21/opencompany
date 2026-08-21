@@ -1569,9 +1569,9 @@ impl HarnessPool {
         // console's `add_member`, the orchestrator's `add_agent`) all land here
         // as a moved overlay fingerprint and boot could not have known about
         // them. That justification is gone: a member folder is no longer a
-        // function of the roster. `Agents/` and `Desks/` are laid down once at
+        // function of the roster. `agents/` and `desks/` are laid down once at
         // boot ([`RuntimeBuilder::build`]) and depend on nothing a rebuild can
-        // change, and `Agents/<id>/` is minted by
+        // change, and `agents/<id>/` is minted by
         // [`ensure_agent_folder`](crate::company::workspace_scaffold::ensure_agent_folder)
         // at the moment that agent first produces something — which is also the
         // repair path if boot's create ever fail-softed, since the minter
@@ -3954,8 +3954,8 @@ description = "Builds the product."
         /// name-only hash would leave the edit invisible until a restart.
         #[test]
         fn the_fingerprint_moves_when_a_documents_body_changes() {
-            let before = routed_context_fingerprint(&docs(&[("ceo", &[("BRIEF.md", "old")])]));
-            let after = routed_context_fingerprint(&docs(&[("ceo", &[("BRIEF.md", "new")])]));
+            let before = routed_context_fingerprint(&docs(&[("ceo", &[("brief.md", "old")])]));
+            let after = routed_context_fingerprint(&docs(&[("ceo", &[("brief.md", "new")])]));
             assert_ne!(
                 before, after,
                 "an edited routed note must rebuild the roster"
@@ -3967,12 +3967,12 @@ description = "Builds the product."
         #[test]
         fn the_fingerprint_is_stable_across_map_iteration_order() {
             let one = docs(&[
-                ("ceo", &[("BRIEF.md", "b")]),
-                ("engineer", &[("CLAIMS.md", "c")]),
+                ("ceo", &[("brief.md", "b")]),
+                ("engineer", &[("claims.md", "c")]),
             ]);
             let two = docs(&[
-                ("engineer", &[("CLAIMS.md", "c")]),
-                ("ceo", &[("BRIEF.md", "b")]),
+                ("engineer", &[("claims.md", "c")]),
+                ("ceo", &[("brief.md", "b")]),
             ]);
             assert_eq!(
                 routed_context_fingerprint(&one),
@@ -3984,7 +3984,7 @@ description = "Builds the product."
         /// the persona quotes the path as the section heading.
         #[test]
         fn the_fingerprint_moves_when_a_document_is_renamed() {
-            let before = routed_context_fingerprint(&docs(&[("ceo", &[("BRIEF.md", "same")])]));
+            let before = routed_context_fingerprint(&docs(&[("ceo", &[("brief.md", "same")])]));
             let after = routed_context_fingerprint(&docs(&[("ceo", &[("GOAL.md", "same")])]));
             assert_ne!(before, after);
         }
@@ -4018,7 +4018,7 @@ description = "Builds the product."
                 &company,
                 &WorkspaceNode {
                     id: "n-brief".to_string(),
-                    name: "BRIEF.md".to_string(),
+                    name: "brief.md".to_string(),
                     kind: NodeKind::File,
                     parent_id: None,
                     updated_at_millis: 1,
@@ -4049,7 +4049,7 @@ description = "Builds the product."
                 assert_eq!(
                     documents,
                     &vec![(
-                        "BRIEF.md".to_string(),
+                        "brief.md".to_string(),
                         "What the company established.".to_string()
                     )],
                     "{agent}"
@@ -4367,7 +4367,7 @@ description = "Builds the product."
         let tree = ws.tree(&rec.id).await.expect("tree");
         let mut names: Vec<&str> = tree.iter().map(|n| n.name.as_str()).collect();
         names.sort_unstable();
-        assert_eq!(names, vec!["Agents", "designer"]);
+        assert_eq!(names, vec!["agents", "designer"]);
         assert_eq!(
             tree.iter().find(|n| n.id == minted).unwrap().created_by,
             crate::ports::WorkspaceOrigin::Agent {

@@ -3802,7 +3802,7 @@ members = ["engineer"]
         }
     }
 
-    /// The named node under `Agents/maya/t-1/`, with its body — the tree's own
+    /// The named node under `agents/maya/t-1/`, with its body — the tree's own
     /// answer, read without going through the artifact chain at all.
     async fn note_in_tree(
         ops: &FsOps,

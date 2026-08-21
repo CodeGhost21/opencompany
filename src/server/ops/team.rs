@@ -450,7 +450,7 @@ async fn add_member(
     let agent = OverlayAgent {
         // A readable id derived from the name, unique against the roster this
         // record already holds (issue #686). Minted here rather than pushed and
-        // renamed later: the id names the teammate's `Agents/<id>/` folder and
+        // renamed later: the id names the teammate's `agents/<id>/` folder and
         // stamps every artifact it authors, so it has to be right on the first
         // save. The surrounding write lock is what makes the uniqueness check
         // and the save below one atomic step.
@@ -1418,7 +1418,7 @@ mod tests {
 
     /// Issue #686 — a console-added teammate gets a readable snake_case id
     /// derived from its name, so its workspace folder reads
-    /// `Agents/dana_designer/` rather than `Agents/019fad5ada20-…/`.
+    /// `agents/dana_designer/` rather than `agents/019fad5ada20-…/`.
     ///
     /// A second teammate with the same name suffixes rather than being refused:
     /// duplicate display names were always accepted here, and taking that away

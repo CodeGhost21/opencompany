@@ -1307,7 +1307,7 @@ impl RuntimeBuilder {
         //
         // NOT gated on `seed_dir`, deliberately: a platform-provisioned tenant
         // carries no bundle, and the *global* ledgers are part of what a company
-        // is, exactly like the `Agents/`/`Desks/` roots below.
+        // is, exactly like the `agents/`/`desks/` roots below.
         //
         // Gated on the store holding no declaration at all rather than on each
         // slug's absence, so retiring a seeded ledger sticks. The honest limit:
@@ -1319,8 +1319,8 @@ impl RuntimeBuilder {
             seed_ledgers(&ops, &id, self.seed_dir.as_deref()).await?;
         }
 
-        // Issue #551: lay down the workspace's system roots — `Agents/` and
-        // `Desks/` — beside the template-seeded top-level folders, so anything
+        // Issue #551: lay down the workspace's system roots — `agents/` and
+        // `desks/` — beside the template-seeded top-level folders, so anything
         // an agent or a desk produces has a named home both the operator and
         // the other agents can navigate to. The roots only; the folder for a
         // given agent or desk is minted the first time that agent or desk
@@ -2679,7 +2679,7 @@ impl RuntimeBuilder {
                                 // Issue #237: the SAME workspace handle the
                                 // console's REST/GraphQL surface writes through
                                 // (`ops.workspace`, seeded just above), so an
-                                // operator's edit to `Standards/` is what the
+                                // operator's edit to `standards/` is what the
                                 // next agent turn reads. The tools cache
                                 // nothing, so no rebuild is needed for an edit
                                 // to take effect.
@@ -4898,9 +4898,9 @@ mod test {
         let home = home_dir.path().to_path_buf();
         // A company definition dir with a workspace subtree.
         let seed_dir = home.join("def");
-        std::fs::create_dir_all(seed_dir.join("workspace/Brand")).unwrap();
-        std::fs::write(seed_dir.join("workspace/README.md"), "# Root").unwrap();
-        std::fs::write(seed_dir.join("workspace/Brand/voice.md"), "# Voice").unwrap();
+        std::fs::create_dir_all(seed_dir.join("workspace/brand")).unwrap();
+        std::fs::write(seed_dir.join("workspace/readme.md"), "# Root").unwrap();
+        std::fs::write(seed_dir.join("workspace/brand/voice.md"), "# Voice").unwrap();
 
         let manifest = parse("[company]\nname=\"Acme\"\n[policy]\nmode=\"full\"\n");
         let id = CompanyId::new("acme");
@@ -4910,8 +4910,8 @@ mod test {
             .build()
             .await
             .unwrap();
-        // Seeded: README.md, Brand/, Brand/voice.md — plus runtime scaffold
-        // (`Agents/` and `secrets/README.md`) which is not what the re-seed
+        // Seeded: README.md, brand/, brand/voice.md — plus runtime scaffold
+        // (`agents/` and `secrets/README.md`) which is not what the re-seed
         // gate is about.
         let seeded = |tree: &[crate::ports::WorkspaceNode]| {
             let secrets = tree
@@ -4933,7 +4933,7 @@ mod test {
             names
         };
         let tree = runtime.workspace().tree(&id).await.unwrap();
-        assert_eq!(seeded(&tree), vec!["Brand", "README.md", "voice.md"]);
+        assert_eq!(seeded(&tree), vec!["brand", "readme.md", "voice.md"]);
 
         // Operator deletes a node.
         let voice = tree.iter().find(|n| n.name == "voice.md").unwrap();
@@ -4950,7 +4950,7 @@ mod test {
         let tree = runtime.workspace().tree(&id).await.unwrap();
         assert_eq!(
             seeded(&tree),
-            vec!["Brand", "README.md"],
+            vec!["brand", "readme.md"],
             "workspace re-seeded despite operator deletion"
         );
         // Sanity: the record store still loads.
@@ -5148,7 +5148,7 @@ needs_reason = true
             .await
             .expect("republished");
         let tree = runtime.workspace().tree(&id).await.unwrap();
-        for name in ["MATTERS.md", "DEADLINES.md", "POSITIONS.md"] {
+        for name in ["matters.md", "deadlines.md", "positions.md"] {
             assert!(
                 tree.iter().any(|node| node.name == name),
                 "`{name}` was not rendered"
@@ -5156,7 +5156,7 @@ needs_reason = true
         }
     }
 
-    /// Boot lays down `Agents/` and operator-only `secrets/README.md`. `Desks/`
+    /// Boot lays down `agents/` and operator-only `secrets/readme.md`. `desks/`
     /// has no producer, so it is minted on first use instead of standing empty.
     ///
     /// The per-agent folder is deliberately absent: it is minted the first time
@@ -5194,8 +5194,8 @@ needs_reason = true
         names.sort_unstable();
         assert_eq!(
             names,
-            vec![AGENTS_ROOT, "README.md", SECRETS_ROOT],
-            "boot provisions the managed roots with no seed dir — no `Desks/`, and no \
+            vec![AGENTS_ROOT, "readme.md", SECRETS_ROOT],
+            "boot provisions the managed roots with no seed dir — no `desks/`, and no \
              folder for a teammate that has produced nothing"
         );
         for node in &tree {
@@ -5215,7 +5215,7 @@ needs_reason = true
         // With one managed root, deleting it would leave the tree empty and
         // stop pinning that. A lazily-minted desk folder stands in for the
         // content a real company would have — and doubles as the #645 check
-        // that boot neither re-manages, duplicates nor disturbs a `Desks/` that
+        // that boot neither re-manages, duplicates nor disturbs a `desks/` that
         // already exists.
         crate::company::workspace_scaffold::ensure_desk_folder(
             runtime.workspace().as_ref(),
@@ -5250,12 +5250,12 @@ needs_reason = true
             names,
             vec![
                 AGENTS_ROOT,
-                "Desks",
-                "README.md",
-                "creative_studio",
+                "creative-studio",
+                "desks",
+                "readme.md",
                 SECRETS_ROOT,
             ],
-            "the deleted root was re-provisioned, and the unmanaged `Desks/` left as it stood"
+            "the deleted root was re-provisioned, and the unmanaged `desks/` left as it stood"
         );
     }
 
@@ -5279,7 +5279,7 @@ needs_reason = true
         let tree = runtime.workspace().tree(&id).await.unwrap();
         let mut names: Vec<&str> = tree.iter().map(|n| n.name.as_str()).collect();
         names.sort_unstable();
-        assert_eq!(names, vec![AGENTS_ROOT, "README.md", SECRETS_ROOT]);
+        assert_eq!(names, vec![AGENTS_ROOT, "readme.md", SECRETS_ROOT]);
     }
 
     /// Issue #85: the launch path's template provenance is stamped onto the

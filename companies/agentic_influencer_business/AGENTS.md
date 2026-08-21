@@ -2,7 +2,7 @@
 
 > A creator business of agents that spots trends, writes, edits, designs thumbnails, publishes, engages the community and sells sponsorships — with a human making the occasional appearance.
 
-This file is routed into every teammate's system prompt alongside `METHOD.md`
+This file is routed into every teammate's system prompt alongside `method.md`
 (`context_routing::UNIVERSAL_DOCUMENTS`), so it is the one place a convention
 reaches the whole roster without being repeated in every agent's `context`.
 
@@ -26,8 +26,8 @@ the creator cannot stand behind. Everything here is aimed at those two.
 | `analytics_analyst` | Analytics Analyst | — | Analyze performance and advise. |
 | `sponsorship_outreach` | Sponsorship Outreach | — | Source and negotiate sponsorships. |
 
-`scriptwriter` is the orchestrator: it holds the routing picture (`BRIEF.md`,
-`CLAIMS.md`, `THREADS.md`) and unrestricted ledger access.
+`scriptwriter` is the orchestrator: it holds the routing picture (`brief.md`,
+`claims.md`, `threads.md`) and unrestricted ledger access.
 
 Humans keep **the occasional appearance**, and every commitment made in the
 creator's name.
@@ -84,16 +84,16 @@ Plus the baseline's `web-research`, `weekly-report` and `meeting-brief`.
 
 ## Workspace layout
 
-- `Standards/`, `Playbooks/`, `Series/` — shared, operator-seeded notes.
-- `Agents/<your agent id>/` — your own folder, the default home for anything you
+- `standards/`, `playbooks/`, `series/` — shared, operator-seeded notes.
+- `agents/<your agent id>/` — your own folder, the default home for anything you
   produce.
 - `derived/` — rendered ledger views. Never hand-write anything here.
 
 ## Write scope
 
 Every specialist but `scriptwriter` declares an explicit `context` confining
-`workspace_write`/`workspace_create` to `Series/Beginner cooking series.md` —
-this business's shared active-work document — plus its own `Agents/<id>/` home.
+`workspace_write`/`workspace_create` to `series/beginner-cooking-series.md` —
+this business's shared active-work document — plus its own `agents/<id>/` home.
 
 ## The bar
 

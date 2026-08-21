@@ -1019,7 +1019,7 @@ export interface SetBudgetInput {
  */
 /**
  * One agent-authored dashboard page's manifest, from `GET {scope}/pages`.
- * Mirrors the `page.toml` a page's `Pages/<slug>/` bundle carries
+ * Mirrors the `page.toml` a page's `pages/<slug>/` bundle carries
  * (`docs/spec/runtime/pages.md`) — the page's own compiled bundle is served
  * separately, at `GET {scope}/pages/{slug}` (the iframe host document) and
  * `GET {scope}/pages/{slug}/bundle.mjs` (the compiled JS).

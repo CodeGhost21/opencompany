@@ -3503,7 +3503,7 @@ impl CompanyRecord {
     /// `PATCH …/team/{agent_id}` edits a teammate's name, role and description
     /// and deliberately leaves the id alone. A name-keyed id would orphan
     /// everything already filed under the old one — the teammate's
-    /// `Agents/<id>/` folder, its `WorkspaceOrigin::Agent` stamps, its budget
+    /// `agents/<id>/` folder, its `WorkspaceOrigin::Agent` stamps, its budget
     /// override row, its desk memberships, its inbox — which is the same trap
     /// name-keyed DM ids sprang on the console's chat journals (issue #364).
     /// So a slug records what a teammate was called when it was created, and
@@ -3517,7 +3517,7 @@ impl CompanyRecord {
     /// and that folder's `Agent` origin stamps re-attribute to it. That is the
     /// intended remedy for a typo'd name — the same human, correcting
     /// themselves, keeping the work — but it does mean remove-plus-re-add is not
-    /// a way to give a teammate a clean slate. `Agents/<slug>/` is a folder
+    /// a way to give a teammate a clean slate. `agents/<slug>/` is a folder
     /// named for a seat, not a chain of custody for whoever last sat in it.
     pub fn mint_agent_id(&self, display_name: &str) -> String {
         let stem = agent_slug(display_name);
@@ -5409,7 +5409,7 @@ mod test {
     }
 
     /// A free slug is minted bare — the whole point of issue #686 is that the
-    /// common case reads as `Agents/dana_designer/`.
+    /// common case reads as `agents/dana_designer/`.
     #[test]
     fn mint_agent_id_takes_the_bare_slug_when_it_is_free() {
         let record = mint_record();
@@ -5501,7 +5501,7 @@ mod test {
         assert_eq!(record.mint_agent_id("System"), "system_2");
         assert_eq!(
             RESERVED_AGENT_IDS,
-            ["operator", "Agents", "Desks", "system"]
+            ["operator", "agents", "desks", "system"]
         );
     }
 

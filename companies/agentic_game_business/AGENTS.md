@@ -2,7 +2,7 @@
 
 > A live-game business of agents running LiveOps events, user acquisition, monetization, store optimization, community and player support — with a human owning monetization and growth strategy.
 
-This file is routed into every teammate's system prompt alongside `METHOD.md`
+This file is routed into every teammate's system prompt alongside `method.md`
 (`context_routing::UNIVERSAL_DOCUMENTS`), so it is the one place a convention
 reaches the whole roster without being repeated in every agent's `context`.
 
@@ -27,7 +27,7 @@ itself.
 | `player_support` | Player Support | — | Resolve player issues and refunds. |
 
 `user_acquisition` is the orchestrator: it holds the routing picture
-(`BRIEF.md`, `CLAIMS.md`, `THREADS.md`) and unrestricted ledger access.
+(`brief.md`, `claims.md`, `threads.md`) and unrestricted ledger access.
 
 Humans keep **monetization and growth strategy**; everything else here is the
 roster's to run.
@@ -84,16 +84,16 @@ Plus the baseline's `web-research`, `weekly-report` and `meeting-brief`.
 
 ## Workspace layout
 
-- `Standards/`, `Playbooks/`, `Events/` — shared, operator-seeded notes.
-- `Agents/<your agent id>/` — your own folder, the default home for anything you
+- `standards/`, `playbooks/`, `events/` — shared, operator-seeded notes.
+- `agents/<your agent id>/` — your own folder, the default home for anything you
   produce.
 - `derived/` — rendered ledger views. Never hand-write anything here.
 
 ## Write scope
 
 Every specialist but `user_acquisition` declares an explicit `context` confining
-`workspace_write`/`workspace_create` to `Events/Summer festival.md` — this
-company's shared active-work document — plus its own `Agents/<id>/` home.
+`workspace_write`/`workspace_create` to `events/summer-festival.md` — this
+company's shared active-work document — plus its own `agents/<id>/` home.
 
 ## The bar
 

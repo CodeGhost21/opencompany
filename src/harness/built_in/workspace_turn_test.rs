@@ -252,13 +252,13 @@ async fn harness(
     let store: Arc<dyn WorkspaceStore> = Arc::new(FsOps::new(dir));
     let id = CompanyId::new("acme");
     store
-        .create(&id, &folder("f-std", "Standards"), None)
+        .create(&id, &folder("f-std", "standards"), None)
         .await
         .unwrap();
     store
         .create(
             &id,
-            &note("n-eng", "Engineering standards.md", "f-std"),
+            &note("n-eng", "engineering-standards.md", "f-std"),
             Some("# Engineering\nReview every PR before merge."),
         )
         .await
@@ -396,10 +396,10 @@ async fn a_real_turn_lists_reads_and_revises_a_workspace_note() {
         },
         Turn::Call {
             tool: "workspace_read",
-            args: json!({ "path": "Standards/Engineering standards.md" }),
+            args: json!({ "path": "standards/engineering-standards.md" }),
         },
         Turn::WriteWithObservedRev {
-            path: "Standards/Engineering standards.md",
+            path: "standards/engineering-standards.md",
             content: "# Engineering\nReview every PR before merge.\nShip on Fridays.",
             delta: 0,
         },
@@ -440,7 +440,7 @@ async fn a_real_turn_lists_reads_and_revises_a_workspace_note() {
     let results = tool_results(&script);
     let joined = results.join("\n---\n");
     assert!(
-        joined.contains("Standards/Engineering standards.md"),
+        joined.contains("standards/engineering-standards.md"),
         "the listing never reached the model: {joined}"
     );
     assert!(
@@ -467,7 +467,7 @@ async fn a_real_turn_lists_reads_and_revises_a_workspace_note() {
         body,
         "# Engineering\nReview every PR before merge.\nShip on Fridays."
     );
-    assert_eq!(node.name, "Engineering standards.md");
+    assert_eq!(node.name, "engineering-standards.md");
 }
 
 /// The compare-and-swap guard, proven through a real turn: a model writing with
@@ -478,11 +478,11 @@ async fn a_real_turn_is_refused_when_it_writes_with_a_stale_revision() {
     let (base_url, script) = spawn_script(vec![
         Turn::Call {
             tool: "workspace_read",
-            args: json!({ "path": "Standards/Engineering standards.md" }),
+            args: json!({ "path": "standards/engineering-standards.md" }),
         },
         // Pretend the operator edited the note between read and write.
         Turn::WriteWithObservedRev {
-            path: "Standards/Engineering standards.md",
+            path: "standards/engineering-standards.md",
             content: "clobbered",
             delta: -1,
         },
@@ -535,13 +535,13 @@ async fn a_wildcard_grant_turn_can_read_but_is_never_offered_the_write_tool() {
     let (base_url, script) = spawn_script(vec![
         Turn::Call {
             tool: "workspace_read",
-            args: json!({ "path": "Standards/Engineering standards.md" }),
+            args: json!({ "path": "standards/engineering-standards.md" }),
         },
         // Nothing stops a model naming a tool it was never offered. Under a
         // bare `*` the write must be *refused*, not merely left unadvertised —
         // advertisement is a hint, the grant check is the control.
         Turn::WriteWithObservedRev {
-            path: "Standards/Engineering standards.md",
+            path: "standards/engineering-standards.md",
             content: "clobbered",
             delta: 0,
         },
@@ -594,12 +594,12 @@ async fn an_edit_between_turns_changes_what_the_next_turn_reads() {
     let (base_url, script) = spawn_script(vec![
         Turn::Call {
             tool: "workspace_read",
-            args: json!({ "path": "Standards/Engineering standards.md" }),
+            args: json!({ "path": "standards/engineering-standards.md" }),
         },
         Turn::Say("first"),
         Turn::Call {
             tool: "workspace_read",
-            args: json!({ "path": "Standards/Engineering standards.md" }),
+            args: json!({ "path": "standards/engineering-standards.md" }),
         },
         Turn::Say("second"),
     ])
@@ -671,7 +671,7 @@ async fn an_oversized_note_reaches_the_model_whole_and_read_only() {
     let (base_url, script) = spawn_script(vec![
         Turn::Call {
             tool: "workspace_read",
-            args: json!({ "path": "Standards/Big standard.md" }),
+            args: json!({ "path": "standards/Big standard.md" }),
         },
         Turn::Say("I read what I could of it."),
     ])
@@ -801,10 +801,10 @@ async fn a_supervised_turn_reads_the_workspace_freely_and_parks_a_write_with_no_
     let (base, script) = spawn_script(vec![
         Turn::Call {
             tool: "workspace_read",
-            args: json!({ "path": "Standards/Engineering standards.md" }),
+            args: json!({ "path": "standards/engineering-standards.md" }),
         },
         Turn::WriteWithObservedRev {
-            path: "Standards/Engineering standards.md",
+            path: "standards/engineering-standards.md",
             content: "# Engineering\nRewritten.",
             delta: 0,
         },

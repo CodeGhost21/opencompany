@@ -98,7 +98,7 @@ fn hazards() -> Value {
         "slug": "hazards",
         "title": "Hazards",
         "purpose": "What could go wrong.",
-        "derived": "derived/HAZARDS.md",
+        "derived": "derived/hazards.md",
         "fields": [
             { "name": "id", "role": "id" },
             { "name": "risk", "role": "title" },
@@ -428,7 +428,7 @@ async fn the_derived_file_appears_in_the_workspace_and_is_read_only() {
     let nodes = tree.as_array().expect("tree");
     let file = nodes
         .iter()
-        .find(|node| node["name"] == "HAZARDS.md")
+        .find(|node| node["name"] == "hazards.md")
         .expect("the ledger's file is in the tree");
     let id = file["id"].as_str().unwrap();
 

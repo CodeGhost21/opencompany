@@ -2,7 +2,7 @@
 
 > A studio of agents that finds opportunities, founds ventures, builds and markets them, hires, handles the legal and financial work, and supports customers — with a human allocating capital and making the major strategic calls.
 
-This file is routed into every teammate's system prompt alongside `METHOD.md`
+This file is routed into every teammate's system prompt alongside `method.md`
 (`context_routing::UNIVERSAL_DOCUMENTS`), so it is the one place a convention
 reaches the whole roster without being repeated in every agent's `context`.
 
@@ -29,7 +29,7 @@ and no capital left.
 | `customer_support` | Customer Support | — | Support the ventures' customers. |
 
 `opportunity_scout` is the orchestrator: it holds the routing picture
-(`BRIEF.md`, `CLAIMS.md`, `THREADS.md`) and unrestricted ledger access.
+(`brief.md`, `claims.md`, `threads.md`) and unrestricted ledger access.
 
 Humans keep **capital allocation and major strategic decisions**; everything
 else here is the studio's to run.
@@ -86,8 +86,8 @@ Plus the baseline's `web-research`, `weekly-report` and `meeting-brief`.
 
 ## Workspace layout
 
-- `Standards/`, `Playbooks/`, `Ventures/` — shared, operator-seeded notes.
-- `Agents/<your agent id>/` — your own folder, the default home for anything you
+- `standards/`, `playbooks/`, `ventures/` — shared, operator-seeded notes.
+- `agents/<your agent id>/` — your own folder, the default home for anything you
   produce.
 - `derived/` — rendered ledger views. Never hand-write anything here.
 
@@ -95,8 +95,8 @@ Plus the baseline's `web-research`, `weekly-report` and `meeting-brief`.
 
 Every specialist but `opportunity_scout` declares an explicit `context`
 confining `workspace_write`/`workspace_create` to
-`Ventures/Local services marketplace.md` — this studio's shared active-work
-document — plus its own `Agents/<id>/` home.
+`ventures/local-services-marketplace.md` — this studio's shared active-work
+document — plus its own `agents/<id>/` home.
 
 ## The bar
 

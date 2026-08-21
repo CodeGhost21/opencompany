@@ -1,10 +1,10 @@
 //! Live read/write tools over the company [`WorkspaceStore`] (issue #237).
 //!
-//! The company workspace is the shared note tree — `Playbooks/`, `Product/`,
-//! `Standards/` — seeded from `companies/<name>/workspace/**` and thereafter
+//! The company workspace is the shared note tree — `playbooks/`, `product/`,
+//! `standards/` — seeded from `companies/<name>/workspace/**` and thereafter
 //! written by the operator in the console and by the agents through these
 //! tools. Before this module nothing under `src/harness/` touched it, so an
-//! operator could fill `Standards/` with the guidance every agent is supposed
+//! operator could fill `standards/` with the guidance every agent is supposed
 //! to follow and no agent would ever read a word of it.
 //!
 //! Seven tools close that gap:
@@ -35,7 +35,7 @@
 //! # Agents write broadly by default — `secrets/` is out, per-path scope is opt-in
 //!
 //! Two independent boundaries sit on this surface, and neither is the old
-//! "confine create to `Agents/<id>/`" idea (issue #551, revisited).
+//! "confine create to `agents/<id>/`" idea (issue #551, revisited).
 //!
 //! The first is unconditional and is about confidentiality: `secrets/` is
 //! operator-only. That subtree is omitted from the agent path index and from
@@ -47,13 +47,13 @@
 //! two, ordinary shared content still has no prefix gate: an agent may create
 //! and overwrite anywhere in the company's tree, exactly as `workspace_write`
 //! always could. Confining
-//! *create* to `Agents/<id>/` while leaving *overwrite* free would protect
+//! *create* to `agents/<id>/` while leaving *overwrite* free would protect
 //! nothing — overwriting an existing standard is the strictly more destructive
 //! of the two operations — so a confinement that stopped at create alone would
 //! be theatre with a maintenance cost.
 //!
 //! What replaces that as the default is a steering-plus-attribution pair.
-//! [`workspace_brief`] and the tool descriptions name `Agents/<your agent id>/`
+//! [`workspace_brief`] and the tool descriptions name `agents/<your agent id>/`
 //! as the default home for anything an agent produces and mark shared guidance
 //! as something to touch only on purpose; and every node records who created
 //! it and who last wrote it (issue #326), so a mess is legible and reversible
@@ -63,7 +63,7 @@
 //! least one `context` entry with `access = "write"` (see
 //! [`crate::company::Agent::write_scope`]). That agent's `workspace_write` and
 //! `workspace_create` are then confined to exactly the paths it declared, plus
-//! its own `Agents/<id>/` home, which stays writable regardless — a role given
+//! its own `agents/<id>/` home, which stays writable regardless — a role given
 //! a real access list keeps its ability to produce and revise its own work.
 //! **This is opt-in, not the default**: a manifest that declares no write
 //! entry is unaffected, so every company written before this existed keeps the
@@ -77,7 +77,7 @@
 //! produce leaves every superseded draft in place forever, under whatever name
 //! its first attempt gave it — and since issue #607 each of those competes for
 //! a slot in a bounded search result with the note that replaced it. So rename
-//! and delete are on this surface now, confined to `Agents/<agent id>/`:
+//! and delete are on this surface now, confined to `agents/<agent id>/`:
 //! tidying your own folder is upkeep, while rearranging anybody else's work is
 //! still the operator's call. That confinement is **not** a security boundary —
 //! the same grant already confers unconfined overwrite — and [`lifecycle`] says
@@ -208,6 +208,7 @@ use crate::company::artifact_mirror::{MirrorOutcome, mirror_node_edit};
 // One rule for what a node's path is and what a caller may pass as one, shared
 // with `workspace_search` so search can never offer a node this module's
 // `PathIndex` would then refuse to resolve.
+use crate::company::workspace_names::{kebab_name, kebab_name_or, kebab_path};
 use crate::company::workspace_paths::{render_path, split_logical_path};
 use crate::company::workspace_scaffold::{AGENTS_ROOT, is_agent_hidden_path};
 // The one definition of a workspace match, shared with the REST route and the
@@ -409,7 +410,7 @@ impl CompanyWorkspace {
     /// `None` scope is unconfined — every path is in scope, matching the
     /// behaviour every agent had before this existed. `Some(paths)` allows an
     /// exact match against a declared path, or anything under this agent's own
-    /// `Agents/<id>/` home, which stays writable regardless of scope: a role
+    /// `agents/<id>/` home, which stays writable regardless of scope: a role
     /// narrowed to a real access list must not also lose the ability to
     /// produce and revise its own work.
     fn write_allowed(&self, path: &str) -> bool {
@@ -425,10 +426,23 @@ impl CompanyWorkspace {
         if self.is_own_home(&segments) || self.is_strictly_inside_own_home(&segments) {
             return true;
         }
-        let key = segments.join("/");
+        // Compared under the workspace naming rule, on both sides. A grant is
+        // written by hand in a manifest — often before this rule existed, and
+        // always without knowing which spelling the tree ended up storing — so
+        // an exact string match would refuse an agent the very document its
+        // operator granted it, over a capital letter.
+        //
+        // The one thing this widens, stated rather than glossed: in a tree that
+        // holds *both* `Notes.md` and `notes.md`, a grant on either covers
+        // both. That shape is already ambiguous for every reader here — it is
+        // what the naming rule exists to stop — and the alternative is a grant
+        // that silently does not apply to the note the operator meant.
+        let key = crate::company::workspace_names::kebab_path(&segments.join("/"));
         scope.iter().any(|allowed| {
             crate::company::workspace_paths::split_logical_path(allowed)
-                .map(|allowed_segments| allowed_segments.join("/") == key)
+                .map(|allowed_segments| {
+                    crate::company::workspace_names::kebab_path(&allowed_segments.join("/")) == key
+                })
                 .unwrap_or(false)
         })
     }
@@ -450,18 +464,18 @@ impl CompanyWorkspace {
     }
 
     /// Whether `segments` spell exactly this agent's own home folder,
-    /// `Agents/<this agent's id>`.
+    /// `agents/<this agent's id>`.
     ///
     /// Compared segment-wise against the id fixed at agent-build time, so it
     /// cannot be spoofed from a tool argument and cannot match a *teammate's*
-    /// home — a path one level deeper (`Agents/<self>/drafts`) is not the home
+    /// home — a path one level deeper (`agents/<self>/drafts`) is not the home
     /// either, which is what keeps the one-node-per-call rule intact.
     fn is_own_home(&self, segments: &[&str]) -> bool {
-        matches!(segments, [root, agent] if *root == AGENTS_ROOT && *agent == self.agent_id)
+        matches!(segments, [root, agent] if is_agents_root(root) && self.names_self(agent))
     }
 
     /// Whether `segments` name something **inside** this agent's own home —
-    /// `Agents/<this agent's id>/…` at any depth below the folder itself.
+    /// `agents/<this agent's id>/…` at any depth below the folder itself.
     ///
     /// The companion to [`is_own_home`](Self::is_own_home), which is an exact
     /// match and stays one: create needs "is this precisely the folder I may
@@ -474,10 +488,26 @@ impl CompanyWorkspace {
     /// teammate's home and everything under it answer `false` no matter what a
     /// tool argument says.
     fn is_strictly_inside_own_home(&self, segments: &[&str]) -> bool {
-        segments.len() >= 3 && segments[0] == AGENTS_ROOT && segments[1] == self.agent_id
+        segments.len() >= 3 && is_agents_root(segments[0]) && self.names_self(segments[1])
     }
 
-    /// Adopt-or-create this agent's own `Agents/<id>/` folder, returning its id.
+    /// Whether one path segment names *this* agent's home folder.
+    ///
+    /// The canonical name is the lowercase-dashed one
+    /// ([`workspace_names`](crate::company::workspace_names)), and a company
+    /// that predates that rule has the folder under the roster id verbatim
+    /// (`page_builder`, not `page-builder`) — so both spellings must answer
+    /// yes or an agent loses access to its own folder across an upgrade.
+    ///
+    /// This cannot widen into a *teammate's* home. Roster ids are snake_case
+    /// (`is_snake_case`), so `-` never occurs in one: normalizing is injective
+    /// over the id alphabet, and no id's canonical form can equal another id's
+    /// verbatim form.
+    fn names_self(&self, segment: &str) -> bool {
+        segment == self.agent_id || segment == kebab_name_or(&self.agent_id, &self.agent_id)
+    }
+
+    /// Adopt-or-create this agent's own `agents/<id>/` folder, returning its id.
     ///
     /// Since issue #551 a member folder is minted on first use rather than
     /// provisioned for every roster member at boot, so the agent's home may
@@ -496,6 +526,17 @@ impl CompanyWorkspace {
 // Path index
 // ---------------------------------------------------------------------------
 
+/// Whether one path segment names the reserved agents root, in any spelling a
+/// company might carry it under.
+///
+/// Case-insensitive for the same reason
+/// [`is_agent_hidden_path`](crate::company::workspace_scaffold::is_agent_hidden_path)
+/// is: the root was `Agents/` before the lowercase-dashed rule, and a company
+/// created then still has it.
+fn is_agents_root(segment: &str) -> bool {
+    segment.eq_ignore_ascii_case(AGENTS_ROOT)
+}
+
 /// A node plus its rendered logical path.
 #[derive(Clone, Debug)]
 struct Entry {
@@ -512,6 +553,20 @@ struct PathIndex {
     /// Logical path → every node carrying it. More than one entry means the
     /// path is ambiguous and must not be resolved (see [`ResolveError`]).
     by_path: BTreeMap<String, Vec<Entry>>,
+    /// The same entries keyed by their **normalized** path — every segment run
+    /// through [`kebab_name`](crate::company::workspace_names::kebab_name).
+    ///
+    /// The lowercase-dashed rule is what the runtime mints and what the brief
+    /// tells agents to type, but a company that predates it still has
+    /// `playbooks/close-checklist.md` sitting in its tree. Without this map an
+    /// agent typing the canonical spelling is told the note does not exist, and
+    /// an agent typing the stored spelling is told to use the canonical one —
+    /// a loop with the note visible in the listing the whole time.
+    ///
+    /// A *fallback*, never a replacement: [`lookup`](Self::lookup) tries the
+    /// literal path first, so an exact match still wins and the ambiguity rules
+    /// below are unchanged for a tree that has no legacy names in it.
+    by_canonical: BTreeMap<String, Vec<Entry>>,
     /// Node id → entry.
     by_id: HashMap<String, Entry>,
     /// Nodes omitted from the index because they are not addressable by path:
@@ -581,6 +636,11 @@ impl PathIndex {
                         node: node.clone(),
                     };
                     index.by_id.insert(node.id.clone(), entry.clone());
+                    index
+                        .by_canonical
+                        .entry(kebab_path(&path))
+                        .or_default()
+                        .push(entry.clone());
                     index.by_path.entry(path).or_default().push(entry);
                 }
                 Some(_) => {}
@@ -590,6 +650,9 @@ impl PathIndex {
         // Ambiguous paths get a stable order so an "ambiguous" error names its
         // candidates identically across calls.
         for entries in index.by_path.values_mut() {
+            entries.sort_by(|a, b| a.node.id.cmp(&b.node.id));
+        }
+        for entries in index.by_canonical.values_mut() {
             entries.sort_by(|a, b| a.node.id.cmp(&b.node.id));
         }
         index
@@ -613,6 +676,20 @@ impl PathIndex {
             .collect()
     }
 
+    /// Every entry carrying `path`, matching the literal path first and its
+    /// normalized form second.
+    ///
+    /// The one place the legacy-name fallback lives, so "does this path exist?"
+    /// and "what does this path resolve to?" cannot answer differently — a
+    /// create that checked one and a read that checked the other would let an
+    /// agent mint `q3-report.md` beside the `Q3 Report.md` it had just been
+    /// shown, making the path ambiguous for everyone.
+    fn lookup(&self, path: &str) -> Option<&Vec<Entry>> {
+        self.by_path
+            .get(path)
+            .or_else(|| self.by_canonical.get(&kebab_path(path)))
+    }
+
     /// Resolve exactly one of `path` / `id` to an entry in **this company's**
     /// index.
     ///
@@ -625,7 +702,7 @@ impl PathIndex {
                 "pass either `path` or `id`, not both".to_string(),
             )),
             (None, None) => Err(ResolveError::BadArgs(
-                "pass either `path` (e.g. \"Standards/Engineering standards.md\") or `id`"
+                "pass either `path` (e.g. \"standards/engineering-standards.md\") or `id`"
                     .to_string(),
             )),
             (None, Some(id)) => {
@@ -638,7 +715,7 @@ impl PathIndex {
                 let normalized = split_logical_path(path)
                     .map_err(ResolveError::BadArgs)?
                     .join("/");
-                match self.by_path.get(&normalized) {
+                match self.lookup(&normalized) {
                     None => Err(ResolveError::NotFound(format!("path `{normalized}`"))),
                     Some(entries) if entries.len() == 1 => Ok(&entries[0]),
                     Some(entries) => Err(ResolveError::Ambiguous {
@@ -671,7 +748,8 @@ impl ResolveError {
             Self::BadArgs(why) => format!("Invalid arguments: {why}."),
             Self::NotFound(what) => format!(
                 "No workspace note matches {what}. Call `{WORKSPACE_LIST_TOOL}` to see what \
-                 exists — paths are case-sensitive and include the file extension."
+                 exists — workspace names are lowercase and dashed \
+                 (`playbooks/close-checklist.md`), and include the file extension."
             ),
             Self::Ambiguous { path, ids } => format!(
                 "The path `{path}` is ambiguous — {n} notes share it ({ids}). Re-issue the call \
@@ -847,7 +925,7 @@ pub fn workspace_brief(can_write: bool) -> String {
              itself appears the first time you use it, so create the note straight away rather \
              than the folder first; do not be put off if you do not see it in a listing yet. \
              You may create \
-             or edit notes anywhere in the tree, but shared guidance (`Standards/`, `Playbooks/`) \
+             or edit notes anywhere in the tree, but shared guidance (`standards/`, `playbooks/`) \
              belongs to everyone: edit it only when the task you were given is about it, and \
              otherwise leave it alone. Revising an existing note is `{WORKSPACE_WRITE_TOOL}`, \
              which requires the `expected_updated_at` revision from a `{WORKSPACE_READ_TOOL}` of \
@@ -860,7 +938,11 @@ pub fn workspace_brief(can_write: bool) -> String {
              `{AGENTS_ROOT}/<your agent id>/`. Deleting is permanent for anything you simply \
              created — only a note you published keeps a history anywhere else — so remove what is \
              genuinely superseded rather than what is merely untidy. Renaming or deleting anything \
-             OUTSIDE your own folder stays the operator's job, not yours."
+             OUTSIDE your own folder stays the operator's job, not yours. Every name in this \
+             tree is lowercase and dashed — `playbooks/close-checklist.md`, never \
+             `Playbooks/Close checklist.md`. You do not have to get that right: whatever you \
+             pass is normalized for you, and the reply tells you the path it actually landed at. \
+             Use that path afterwards rather than the one you asked for."
         ));
     }
     brief
@@ -892,7 +974,7 @@ impl Tool for WorkspaceListTool {
          playbooks and product context. USE FOR discovering what company documentation exists \
          before answering anything about company standards, processes or product decisions. \
          Returns each folder and note with its path, id and revision. Pass `prefix` to list one \
-         subtree (e.g. \"Standards\"). NOT for your own scratch files — those are the `file_*` \
+         subtree (e.g. \"standards\"). NOT for your own scratch files — those are the `file_*` \
          tools."
     }
 
@@ -902,7 +984,7 @@ impl Tool for WorkspaceListTool {
             "properties": {
                 "prefix": {
                     "type": "string",
-                    "description": "Optional folder path to list beneath, e.g. \"Standards\" or \"Product/Specs\". Omit to list the whole tree."
+                    "description": "Optional folder path to list beneath, e.g. \"standards\" or \"product/specs\". Omit to list the whole tree."
                 }
             },
             "additionalProperties": false
@@ -1066,7 +1148,7 @@ impl Tool for WorkspaceReadTool {
             "properties": {
                 "path": {
                     "type": "string",
-                    "description": "The note's path as shown by workspace_list, e.g. \"Standards/Engineering standards.md\". Case-sensitive, includes the extension."
+                    "description": "The note's path as shown by workspace_list, e.g. \"standards/engineering-standards.md\". Case-sensitive, includes the extension."
                 },
                 "id": {
                     "type": "string",
@@ -1275,7 +1357,7 @@ impl Tool for WorkspaceSearchTool {
                 },
                 "prefix": {
                     "type": "string",
-                    "description": "Optional folder path to search beneath, e.g. \"Standards\" or \"Product/Specs\". Omit to search the whole tree."
+                    "description": "Optional folder path to search beneath, e.g. \"standards\" or \"product/specs\". Omit to search the whole tree."
                 },
                 "limit": {
                     "type": "integer",
@@ -1483,7 +1565,7 @@ impl Tool for WorkspaceWriteTool {
 
     fn description(&self) -> &str {
         "Overwrite one EXISTING note in the company's shared workspace with a complete new body. \
-         USE FOR revising a note you have just read — your own work under `Agents/<your agent \
+         USE FOR revising a note you have just read — your own work under `agents/<your agent \
          id>/`, or shared company documentation when the task you were given is about it. You \
          must pass `expected_updated_at` — the `rev` from a `workspace_read` of that same note — \
          and the write is refused if the note changed since. This replaces the whole body, so \
@@ -1499,7 +1581,7 @@ impl Tool for WorkspaceWriteTool {
             "properties": {
                 "path": {
                     "type": "string",
-                    "description": "The note's path as shown by workspace_list, e.g. \"Standards/Engineering standards.md\"."
+                    "description": "The note's path as shown by workspace_list, e.g. \"standards/engineering-standards.md\"."
                 },
                 "id": {
                     "type": "string",
@@ -1592,7 +1674,7 @@ impl Tool for WorkspaceWriteTool {
             return Ok(ToolResult::error(format!(
                 "Refused: `{}` is outside your declared write scope. Your manifest confines \
                  `workspace_write` to specific paths — ask the operator to add this one, or work \
-                 in `Agents/<your agent id>/`, which is always writable.",
+                 in `agents/<your agent id>/`, which is always writable.",
                 entry.path
             )));
         }
@@ -1787,8 +1869,10 @@ impl Tool for WorkspaceCreateTool {
     fn description(&self) -> &str {
         "Create ONE new folder or note in the company's shared workspace at `path`. USE FOR \
          putting work you have produced somewhere the operator and your teammates can find it — \
-         your own folder `Agents/<your agent id>/` is the default home for it, and is made for \
-         you the first time you put something directly in it. Everywhere else the parent folder \
+         your own folder `agents/<your agent id>/` is the default home for it, and is made for \
+         you the first time you put something directly in it. The name you pass is normalized to \
+         the workspace convention — lowercase and dashed — and the reply names the path it landed \
+         at. Everywhere else the parent folder \
          must already exist (create it first, one level at a time). The path must be free — this \
          never overwrites. To change a note that already exists use `workspace_write`. NOT for \
          your own scratch files (use the `file_*` tools)."
@@ -1800,7 +1884,7 @@ impl Tool for WorkspaceCreateTool {
             "properties": {
                 "path": {
                     "type": "string",
-                    "description": "Where to create it, e.g. \"Agents/ceo/Q3 launch brief.md\". Every segment but the last must already be an existing folder, except your own `Agents/<your agent id>/`, which is made on demand. Include the file extension on a note."
+                    "description": "Where to create it, e.g. \"agents/ceo/q3-launch-brief.md\". Every segment but the last must already be an existing folder, except your own `agents/<your agent id>/`, which is made on demand. Include the file extension on a note; the final segment is normalized to lowercase and dashes."
                 },
                 "kind": {
                     "type": "string",
@@ -1833,7 +1917,7 @@ impl Tool for WorkspaceCreateTool {
             .filter(|p| !p.is_empty())
         else {
             return Ok(ToolResult::error(
-                "Invalid arguments: `path` is required, e.g. \"Agents/ceo/Launch brief.md\"."
+                "Invalid arguments: `path` is required, e.g. \"agents/ceo/launch-brief.md\"."
                     .to_string(),
             ));
         };
@@ -1896,12 +1980,24 @@ impl Tool for WorkspaceCreateTool {
             return Ok(ToolResult::error(format!(
                 "Refused: `{normalized}` is outside your declared write scope. Your manifest \
                  confines `workspace_create` to specific paths — ask the operator to add this \
-                 one, or work in `Agents/<your agent id>/`, which is always writable."
+                 one, or work in `agents/<your agent id>/`, which is always writable."
             )));
         }
 
         let (parent_segments, name) = segments.split_at(segments.len() - 1);
-        let name = name[0];
+        // The host owns the name, not the model (the issue #580 rule for
+        // workflow ids, applied to the tree everyone reads): whatever the agent
+        // typed becomes lowercase and dashed, so one document has one spelling
+        // and no path in the workspace needs quoting. The reply below echoes
+        // the path it actually landed at, which is the whole contract — an
+        // agent that reads it back is told where to look.
+        let name = kebab_name(name[0]);
+        let normalized = parent_segments
+            .iter()
+            .copied()
+            .chain(std::iter::once(name.as_str()))
+            .collect::<Vec<_>>()
+            .join("/");
 
         let index = match self.workspace.index().await {
             Ok(index) => index,
@@ -1918,7 +2014,7 @@ impl Tool for WorkspaceCreateTool {
         // path ambiguous for **every** agent from then on, and the reserved
         // `Agents` root is exactly the path an agent must not be able to
         // shadow with a rival of its own.
-        if let Some(existing) = index.by_path.get(&normalized) {
+        if let Some(existing) = index.lookup(&normalized) {
             let what = match existing.first().map(|e| e.node.kind) {
                 Some(NodeKind::Folder) => "a folder",
                 _ => "a note",
@@ -1936,7 +2032,7 @@ impl Tool for WorkspaceCreateTool {
         // silently making the intermediate folders would let a single typo grow
         // a whole phantom subtree nobody asked for.
         //
-        // The agent's own `Agents/<self>/` home is the one exception, and it is
+        // The agent's own `agents/<self>/` home is the one exception, and it is
         // not a relaxation of that rule: since issue #551 the home is minted on
         // first use rather than provisioned at boot, so the *only* way an agent
         // reaches the folder the brief tells it to work in is by putting
@@ -1944,13 +2040,22 @@ impl Tool for WorkspaceCreateTool {
         // refusing an agent access to its own home for the exact call that is
         // supposed to bring it into existence. It stays one node per call:
         // nothing else in the tree is auto-made, and a path one level deeper
-        // (`Agents/<self>/drafts/x.md`) still gets the ordinary refusal.
+        // (`agents/<self>/drafts/x.md`) still gets the ordinary refusal.
+        // Both halves of "where did it go": the id to parent it under, and the
+        // parent's *stored* path. They differ whenever the agent typed a legacy
+        // spelling — `agents/ceo` for a folder stored as `agents/ceo` — and the
+        // reply has to name the path the node can actually be read back at, not
+        // the one that was asked for.
+        let mut parent_display: Option<String> = None;
         let parent_id = if parent_segments.is_empty() {
             None
         } else {
             let parent_path = parent_segments.join("/");
-            match index.by_path.get(&parent_path).map(Vec::as_slice) {
-                Some([entry]) if entry.node.kind == NodeKind::Folder => Some(entry.node.id.clone()),
+            match index.lookup(&parent_path).map(Vec::as_slice) {
+                Some([entry]) if entry.node.kind == NodeKind::Folder => {
+                    parent_display = Some(entry.path.clone());
+                    Some(entry.node.id.clone())
+                }
                 Some([entry]) => {
                     return Ok(ToolResult::error(format!(
                         "Refused: `{parent}` is a note, not a folder, so nothing can be created \
@@ -1969,7 +2074,26 @@ impl Tool for WorkspaceCreateTool {
                 // The agent's own home, not yet minted: make it and carry on.
                 None if self.workspace.is_own_home(parent_segments) => {
                     match self.workspace.ensure_own_home().await {
-                        Ok(id) => Some(id),
+                        Ok(id) => {
+                            // The scaffold names the home, so it may not be the
+                            // spelling the agent typed: it mints
+                            // `agents/<dashed id>` and adopts a legacy folder
+                            // under either the old root case or the roster id
+                            // verbatim. Take the path from the node it returned
+                            // when the index already knows it, and otherwise
+                            // from what the scaffold mints.
+                            parent_display = Some(match index.by_id.get(&id) {
+                                Some(entry) => entry.path.clone(),
+                                None => format!(
+                                    "{AGENTS_ROOT}/{agent}",
+                                    agent = kebab_name_or(
+                                        &self.workspace.agent_id,
+                                        &self.workspace.agent_id
+                                    ),
+                                ),
+                            });
+                            Some(id)
+                        }
                         Err(e) => {
                             return Ok(ToolResult::error(format!(
                                 "Could not create your own workspace folder `{parent}`: \
@@ -1992,10 +2116,18 @@ impl Tool for WorkspaceCreateTool {
             }
         };
 
+        // The home the branch above may have just minted is named by the
+        // scaffold, not by what the agent typed, so re-derive the display path
+        // from the segments rather than assuming they match.
+        let normalized = match &parent_display {
+            Some(parent) => format!("{parent}/{name}"),
+            None => normalized,
+        };
+
         let origin = self.workspace.origin();
         let node = WorkspaceNode {
             id: crate::ports::generate_id(),
-            name: name.to_string(),
+            name: name.clone(),
             kind,
             parent_id,
             updated_at_millis: crate::ports::now_millis(),
@@ -2150,17 +2282,17 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let ops: Arc<dyn WorkspaceStore> = Arc::new(FsOps::new(dir.path()));
         let id = CompanyId::new(company);
-        ops.create(&id, &folder("f-standards", "Standards", None), None)
+        ops.create(&id, &folder("f-standards", "standards", None), None)
             .await
             .expect("folder");
         ops.create(
             &id,
-            &file("n-eng", "Engineering standards.md", Some("f-standards")),
+            &file("n-eng", "engineering-standards.md", Some("f-standards")),
             Some("# Engineering\nReview every PR."),
         )
         .await
         .expect("note");
-        ops.create(&id, &file("n-readme", "README.md", None), Some("# Root"))
+        ops.create(&id, &file("n-readme", "readme.md", None), Some("# Root"))
             .await
             .expect("readme");
         (dir, ops)
@@ -2175,13 +2307,13 @@ mod tests {
     #[test]
     fn paths_render_from_the_ancestor_chain() {
         let nodes = vec![
-            folder("a", "Standards", None),
-            file("b", "Engineering standards.md", Some("a")),
-            file("c", "README.md", None),
+            folder("a", "standards", None),
+            file("b", "engineering-standards.md", Some("a")),
+            file("c", "readme.md", None),
         ];
         let index = PathIndex::build(nodes);
-        assert_eq!(index.by_id["b"].path, "Standards/Engineering standards.md");
-        assert_eq!(index.by_id["c"].path, "README.md");
+        assert_eq!(index.by_id["b"].path, "standards/engineering-standards.md");
+        assert_eq!(index.by_id["c"].path, "readme.md");
         assert_eq!(index.unaddressable, 0);
     }
 
@@ -2385,10 +2517,10 @@ mod tests {
     fn traversal_shaped_paths_are_rejected_before_resolution() {
         for path in [
             "../secrets.md",
-            "Standards/../../etc/passwd",
+            "standards/../../etc/passwd",
             "./Standards",
             "..",
-            "Standards/..",
+            "standards/..",
             "C:\\Windows",
             "   ",
         ] {
@@ -2402,12 +2534,12 @@ mod tests {
     #[test]
     fn redundant_separators_are_tolerated_but_segments_are_not_invented() {
         assert_eq!(
-            split_logical_path("/Standards/").unwrap(),
-            vec!["Standards"]
+            split_logical_path("/standards/").unwrap(),
+            vec!["standards"]
         );
         assert_eq!(
-            split_logical_path("Standards//Eng.md").unwrap(),
-            vec!["Standards", "Eng.md"]
+            split_logical_path("standards//eng.md").unwrap(),
+            vec!["standards", "eng.md"]
         );
         assert!(split_logical_path("/").unwrap_err().contains("segments"));
     }
@@ -2417,8 +2549,8 @@ mod tests {
     #[test]
     fn an_absolute_host_path_resolves_to_nothing() {
         let index = PathIndex::build(vec![
-            folder("a", "Standards", None),
-            file("b", "Engineering standards.md", Some("a")),
+            folder("a", "standards", None),
+            file("b", "engineering-standards.md", Some("a")),
         ]);
         let err = index.resolve(Some("/etc/passwd"), None).unwrap_err();
         assert!(matches!(err, ResolveError::NotFound(_)), "{err:?}");
@@ -2432,11 +2564,11 @@ mod tests {
     #[test]
     fn a_duplicated_path_is_refused_rather_than_guessed() {
         let index = PathIndex::build(vec![
-            folder("a", "Standards", None),
+            folder("a", "standards", None),
             file("b1", "dup.md", Some("a")),
             file("b2", "dup.md", Some("a")),
         ]);
-        let err = index.resolve(Some("Standards/dup.md"), None).unwrap_err();
+        let err = index.resolve(Some("standards/dup.md"), None).unwrap_err();
         match &err {
             ResolveError::Ambiguous { ids, .. } => assert_eq!(ids, &["b1", "b2"]),
             other => panic!("expected Ambiguous, got {other:?}"),
@@ -2490,7 +2622,7 @@ mod tests {
         let tool = WorkspaceListTool::new(ws(store.clone(), CompanyId::new("other")));
         let out = text(&tool.execute(json!({})).await.unwrap());
         assert!(out.contains("workspace is empty"), "{out}");
-        assert!(!out.contains("Engineering standards.md"), "{out}");
+        assert!(!out.contains("engineering-standards.md"), "{out}");
     }
 
     /// Step 2: a *valid* node id lifted from company A cannot be read by
@@ -2545,7 +2677,7 @@ mod tests {
         let tool = WorkspaceReadTool::new(ws(store, CompanyId::new("acme")));
         for path in [
             "../../../../etc/passwd",
-            "Standards/../../../etc/passwd",
+            "standards/../../../etc/passwd",
             "/etc/passwd",
             "..",
         ] {
@@ -2564,16 +2696,16 @@ mod tests {
         let tool = WorkspaceListTool::new(ws(store, CompanyId::new("acme")));
 
         let all = text(&tool.execute(json!({})).await.unwrap());
-        assert!(all.contains("folder\tStandards\tid=f-standards"), "{all}");
+        assert!(all.contains("folder\tstandards\tid=f-standards"), "{all}");
         assert!(
-            all.contains("file\tStandards/Engineering standards.md\tid=n-eng\trev=2000"),
+            all.contains("file\tstandards/engineering-standards.md\tid=n-eng\trev=2000"),
             "{all}"
         );
-        assert!(all.contains("README.md"), "{all}");
+        assert!(all.contains("readme.md"), "{all}");
 
-        let scoped = text(&tool.execute(json!({"prefix": "Standards"})).await.unwrap());
-        assert!(scoped.contains("Engineering standards.md"), "{scoped}");
-        assert!(!scoped.contains("README.md"), "{scoped}");
+        let scoped = text(&tool.execute(json!({"prefix": "standards"})).await.unwrap());
+        assert!(scoped.contains("engineering-standards.md"), "{scoped}");
+        assert!(!scoped.contains("readme.md"), "{scoped}");
     }
 
     #[tokio::test]
@@ -2582,7 +2714,7 @@ mod tests {
         let tool = WorkspaceReadTool::new(ws(store, CompanyId::new("acme")));
         let out = text(
             &tool
-                .execute(json!({"path": "Standards/Engineering standards.md"}))
+                .execute(json!({"path": "standards/engineering-standards.md"}))
                 .await
                 .unwrap(),
         );
@@ -2661,7 +2793,7 @@ mod tests {
     async fn reading_a_folder_points_at_the_listing_instead() {
         let (_dir, store) = seeded("acme").await;
         let tool = WorkspaceReadTool::new(ws(store, CompanyId::new("acme")));
-        let result = tool.execute(json!({"path": "Standards"})).await.unwrap();
+        let result = tool.execute(json!({"path": "standards"})).await.unwrap();
         assert!(result.is_error);
         let out = text(&result);
         assert!(out.contains("is a folder"), "{out}");
@@ -2782,8 +2914,8 @@ mod tests {
     /// A tree with one folder and one note inside it, for the fault doubles.
     fn small_tree() -> Vec<WorkspaceNode> {
         vec![
-            folder("f-standards", "Standards", None),
-            file("n-eng", "Engineering standards.md", Some("f-standards")),
+            folder("f-standards", "standards", None),
+            file("n-eng", "engineering-standards.md", Some("f-standards")),
         ]
     }
 
@@ -2803,7 +2935,7 @@ mod tests {
         let faulty = || -> Arc<dyn WorkspaceStore> {
             Arc::new(FixedTree::failing_tree(small_tree(), planted_store_io))
         };
-        let note = json!({"path": "Standards/Engineering standards.md"});
+        let note = json!({"path": "standards/engineering-standards.md"});
 
         let mut outcomes: Vec<(&str, ToolResult)> = vec![
             (
@@ -2830,7 +2962,7 @@ mod tests {
             (
                 WORKSPACE_CREATE_TOOL,
                 WorkspaceCreateTool::new(ws(faulty(), id.clone()))
-                    .execute(json!({"path": "Standards/new.md", "kind": "file"}))
+                    .execute(json!({"path": "standards/new.md", "kind": "file"}))
                     .await
                     .unwrap(),
             ),
@@ -2838,7 +2970,7 @@ mod tests {
                 WORKSPACE_WRITE_TOOL,
                 WorkspaceWriteTool::new(ws(faulty(), id.clone()))
                     .execute(json!({
-                        "path": "Standards/Engineering standards.md",
+                        "path": "standards/engineering-standards.md",
                         "content": "x",
                         "expected_updated_at": 2_000,
                     }))
@@ -2934,7 +3066,7 @@ mod tests {
             Arc::new(FixedTree::failing_tree(small_tree(), planted_store_io));
         let tool = WorkspaceReadTool::new(ws(store, id.clone()));
         let outcome = tool
-            .execute(json!({"path": "Standards/Engineering standards.md"}))
+            .execute(json!({"path": "standards/engineering-standards.md"}))
             .await
             .unwrap();
         assert_own_sentence(&outcome, "Could not read the company workspace");
@@ -2951,7 +3083,7 @@ mod tests {
         // 3. The target is a folder, and the useful next call is a listing.
         let (_dir, store) = seeded("acme").await;
         let tool = WorkspaceReadTool::new(ws(store, id.clone()));
-        let outcome = tool.execute(json!({"path": "Standards"})).await.unwrap();
+        let outcome = tool.execute(json!({"path": "standards"})).await.unwrap();
         assert_own_sentence(&outcome, "is a folder, not a note");
 
         // 4. The note was deleted between the tree read and the body read.
@@ -2959,7 +3091,7 @@ mod tests {
             Arc::new(FixedTree::failing_read(small_tree(), ReadFault::Vanished));
         let tool = WorkspaceReadTool::new(ws(store, id.clone()));
         let outcome = tool
-            .execute(json!({"path": "Standards/Engineering standards.md"}))
+            .execute(json!({"path": "standards/engineering-standards.md"}))
             .await
             .unwrap();
         assert_own_sentence(&outcome, "was removed while you were reading it");
@@ -2971,12 +3103,12 @@ mod tests {
         ));
         let tool = WorkspaceReadTool::new(ws(store, id));
         let outcome = tool
-            .execute(json!({"path": "Standards/Engineering standards.md"}))
+            .execute(json!({"path": "standards/engineering-standards.md"}))
             .await
             .unwrap();
         assert_own_sentence(
             &outcome,
-            "Could not read `Standards/Engineering standards.md`",
+            "Could not read `standards/engineering-standards.md`",
         );
     }
 
@@ -3031,7 +3163,7 @@ mod tests {
                 .unwrap(),
         );
 
-        assert!(out.contains("Standards/Engineering standards.md"), "{out}");
+        assert!(out.contains("standards/engineering-standards.md"), "{out}");
         assert!(out.contains("id=n-eng"), "{out}");
         assert!(out.contains("rev=2000"), "{out}");
         assert!(out.contains("match=content"), "{out}");
@@ -3141,18 +3273,18 @@ mod tests {
         // "#" appears in both notes; the prefix keeps the root README out.
         let scoped = text(
             &tool
-                .execute(json!({"query": "#", "prefix": "Standards"}))
+                .execute(json!({"query": "#", "prefix": "standards"}))
                 .await
                 .unwrap(),
         );
         assert!(
-            scoped.contains("Standards/Engineering standards.md"),
+            scoped.contains("standards/engineering-standards.md"),
             "{scoped}"
         );
         assert!(!scoped.contains("id=n-readme"), "{scoped}");
-        assert!(scoped.contains("under `Standards`"), "{scoped}");
+        assert!(scoped.contains("under `standards`"), "{scoped}");
 
-        for prefix in ["../etc", "Standards/../..", "C:\\Windows"] {
+        for prefix in ["../etc", "standards/../..", "C:\\Windows"] {
             let refused = tool
                 .execute(json!({"query": "#", "prefix": prefix}))
                 .await
@@ -3339,7 +3471,7 @@ mod tests {
         let tool = WorkspaceWriteTool::new(ws(store.clone(), id.clone()));
         let result = tool
             .execute(json!({
-                "path": "Standards/Engineering standards.md",
+                "path": "standards/engineering-standards.md",
                 "content": "# Engineering\nShip on Fridays.",
                 "expected_updated_at": 2_000,
             }))
@@ -3457,7 +3589,7 @@ mod tests {
         let tool = WorkspaceWriteTool::new(ws(store.clone(), id.clone()));
         let result = tool
             .execute(json!({
-                "path": "Standards/brand new.md",
+                "path": "standards/brand new.md",
                 "content": "hello",
                 "expected_updated_at": 0,
             }))
@@ -3477,7 +3609,7 @@ mod tests {
         let tool = WorkspaceWriteTool::new(ws(store, CompanyId::new("acme")));
         let result = tool
             .execute(json!({
-                "path": "Standards",
+                "path": "standards",
                 "content": "x",
                 "expected_updated_at": 1_000,
             }))
@@ -3752,11 +3884,11 @@ mod tests {
 
     #[tokio::test]
     async fn a_long_listing_fits_the_budget_and_carries_its_guidance_in_the_header() {
-        let mut nodes = vec![folder("f-standards", "Standards", None)];
+        let mut nodes = vec![folder("f-standards", "standards", None)];
         for n in 0..MAX_LIST_ENTRIES {
             nodes.push(file(
                 &format!("node-{n:04}-0000000000"),
-                &format!("Engineering standards v{n:03}.md"),
+                &format!("engineering-standards-v{n:03}.md"),
                 Some("f-standards"),
             ));
         }
@@ -4034,7 +4166,7 @@ mod tests {
 
         let out = tool
             .execute(json!({
-                "path": "Standards/Deploys.md",
+                "path": "standards/Deploys.md",
                 "kind": "file",
                 "content": "# Deploys\nGreen builds only.",
             }))
@@ -4045,7 +4177,7 @@ mod tests {
         let tree = store.tree(&id).await.unwrap();
         let node = tree
             .iter()
-            .find(|n| n.name == "Deploys.md")
+            .find(|n| n.name == "deploys.md")
             .expect("the note is in the tree");
         assert_eq!(node.kind, NodeKind::File);
         let (_, body) = store.read(&id, &node.id).await.unwrap().unwrap();
@@ -4064,7 +4196,7 @@ mod tests {
     /// Authorship: a created node is stamped with the creating agent on BOTH
     /// origins, and the path it was created at has nothing to do with it.
     ///
-    /// This test is deliberately sited under `Standards/` — shared,
+    /// This test is deliberately sited under `standards/` — shared,
     /// operator-owned guidance, as far from the agent's own folder as the tree
     /// goes. It is the executable form of the settled decision that agents
     /// write **unconfined**: if someone later adds a prefix gate, this fails.
@@ -4075,12 +4207,12 @@ mod tests {
         let tool = WorkspaceCreateTool::new(ws(store.clone(), id.clone()));
 
         let out = tool
-            .execute(json!({ "path": "Standards/Agent addendum.md", "kind": "file" }))
+            .execute(json!({ "path": "standards/Agent addendum.md", "kind": "file" }))
             .await
             .unwrap();
         assert!(
             !out.is_error,
-            "creating outside `Agents/` must be allowed: {}",
+            "creating outside `agents/` must be allowed: {}",
             text(&out)
         );
 
@@ -4089,10 +4221,80 @@ mod tests {
             .await
             .unwrap()
             .into_iter()
-            .find(|n| n.name == "Agent addendum.md")
+            .find(|n| n.name == "agent-addendum.md")
             .unwrap();
         assert_eq!(node.created_by, agent_origin());
         assert_eq!(node.updated_by, agent_origin());
+    }
+
+    /// The name the agent typed is normalized, and the reply names where the
+    /// note actually landed.
+    ///
+    /// The echo is the whole contract: the agent has to be able to read back
+    /// what it just wrote, and an acknowledgement quoting the path it *asked*
+    /// for would send it to a path that does not exist.
+    #[tokio::test]
+    async fn create_normalizes_the_name_and_says_where_it_landed() {
+        let (_dir, store) = seeded("acme").await;
+        let id = CompanyId::new("acme");
+        let tool = WorkspaceCreateTool::new(ws(store.clone(), id.clone()));
+
+        let out = tool
+            .execute(json!({ "path": "standards/Q3 Launch Brief.md", "kind": "file" }))
+            .await
+            .unwrap();
+        assert!(!out.is_error, "{}", text(&out));
+        assert!(
+            text(&out).contains("standards/q3-launch-brief.md"),
+            "the reply must name the stored path: {}",
+            text(&out)
+        );
+
+        let tree = store.tree(&id).await.unwrap();
+        assert!(
+            tree.iter().any(|n| n.name == "q3-launch-brief.md"),
+            "{:?}",
+            tree.iter().map(|n| &n.name).collect::<Vec<_>>()
+        );
+    }
+
+    /// A parent folder stored under a legacy spelling still resolves, and the
+    /// reply names *its* spelling rather than the one the agent typed.
+    ///
+    /// Both halves matter. Refusing would tell an agent that a folder it can
+    /// see in the listing does not exist; echoing the typed spelling would hand
+    /// it a path that resolves only by the same fallback it does not know
+    /// about.
+    #[tokio::test]
+    async fn create_resolves_a_legacy_parent_and_echoes_its_stored_path() {
+        let (_dir, store) = seeded("acme").await;
+        let id = CompanyId::new("acme");
+        store
+            .adopt_or_create_folder(&id, None, "Playbooks", WorkspaceOrigin::Operator)
+            .await
+            .unwrap();
+        let tool = WorkspaceCreateTool::new(ws(store.clone(), id.clone()));
+
+        let out = tool
+            .execute(json!({ "path": "playbooks/Release checklist.md", "kind": "file" }))
+            .await
+            .unwrap();
+
+        assert!(!out.is_error, "{}", text(&out));
+        assert!(
+            text(&out).contains("Playbooks/release-checklist.md"),
+            "the reply must name the folder as it is stored: {}",
+            text(&out)
+        );
+        let tree = store.tree(&id).await.unwrap();
+        assert_eq!(
+            tree.iter()
+                .filter(|n| n.name.eq_ignore_ascii_case("playbooks"))
+                .count(),
+            1,
+            "no rival folder: {:?}",
+            tree.iter().map(|n| &n.name).collect::<Vec<_>>()
+        );
     }
 
     /// The steered-for case: the agent's own folder, created as a folder and
@@ -4105,15 +4307,15 @@ mod tests {
 
         for args in [
             json!({ "path": "Agents", "kind": "folder" }),
-            json!({ "path": "Agents/ceo", "kind": "folder" }),
-            json!({ "path": "Agents/ceo/Launch brief.md", "kind": "file", "content": "# Launch" }),
+            json!({ "path": "agents/ceo", "kind": "folder" }),
+            json!({ "path": "agents/ceo/Launch brief.md", "kind": "file", "content": "# Launch" }),
         ] {
             let out = tool.execute(args.clone()).await.unwrap();
             assert!(!out.is_error, "{args}: {}", text(&out));
         }
 
         let tree = store.tree(&id).await.unwrap();
-        let brief = tree.iter().find(|n| n.name == "Launch brief.md").unwrap();
+        let brief = tree.iter().find(|n| n.name == "launch-brief.md").unwrap();
         let ceo = tree.iter().find(|n| n.name == "ceo").unwrap();
         assert_eq!(brief.parent_id.as_deref(), Some(ceo.id.as_str()));
         assert_eq!(ceo.kind, NodeKind::Folder);
@@ -4137,7 +4339,7 @@ mod tests {
 
         let out = tool
             .execute(json!({
-                "path": "Agents/ceo/Launch brief.md",
+                "path": "agents/ceo/Launch brief.md",
                 "kind": "file",
                 "content": "# Launch",
             }))
@@ -4161,13 +4363,13 @@ mod tests {
             agent_origin(),
             "the folder belongs to the agent that earned it"
         );
-        let brief = tree.iter().find(|n| n.name == "Launch brief.md").unwrap();
+        let brief = tree.iter().find(|n| n.name == "launch-brief.md").unwrap();
         assert_eq!(brief.parent_id.as_deref(), Some(home.id.as_str()));
 
         // A second note goes into the same folder — minting is find-or-create,
         // not create.
         let out = tool
-            .execute(json!({ "path": "Agents/ceo/Retro.md", "kind": "file" }))
+            .execute(json!({ "path": "agents/ceo/Retro.md", "kind": "file" }))
             .await
             .unwrap();
         assert!(!out.is_error, "{}", text(&out));
@@ -4179,7 +4381,7 @@ mod tests {
         );
         assert_eq!(
             tree.iter()
-                .find(|n| n.name == "Retro.md")
+                .find(|n| n.name == "retro.md")
                 .unwrap()
                 .parent_id
                 .as_deref(),
@@ -4189,7 +4391,7 @@ mod tests {
 
     /// The mint repairs its own root too: an agent whose company never got the
     /// boot scaffold (or whose create fail-softed) still lands its work under
-    /// `Agents/`, rather than being stuck behind a folder nobody will make.
+    /// `agents/`, rather than being stuck behind a folder nobody will make.
     #[tokio::test]
     async fn the_home_mint_creates_the_agents_root_when_it_is_missing() {
         let (_dir, store) = seeded("acme").await;
@@ -4197,7 +4399,7 @@ mod tests {
         let tool = WorkspaceCreateTool::new(ws(store.clone(), id.clone()));
 
         let out = tool
-            .execute(json!({ "path": "Agents/ceo/Brief.md", "kind": "file" }))
+            .execute(json!({ "path": "agents/ceo/Brief.md", "kind": "file" }))
             .await
             .unwrap();
         assert!(!out.is_error, "{}", text(&out));
@@ -4233,11 +4435,11 @@ mod tests {
         let tool = WorkspaceCreateTool::new(ws(store.clone(), id.clone()));
 
         let out = tool
-            .execute(json!({ "path": "Agents/cmo/Brief.md", "kind": "file" }))
+            .execute(json!({ "path": "agents/cmo/Brief.md", "kind": "file" }))
             .await
             .unwrap();
         assert!(out.is_error, "{}", text(&out));
-        assert!(text(&out).contains("Agents/cmo"), "{}", text(&out));
+        assert!(text(&out).contains("agents/cmo"), "{}", text(&out));
         assert_eq!(
             store.tree(&id).await.unwrap().len(),
             before,
@@ -4259,11 +4461,11 @@ mod tests {
         let tool = WorkspaceCreateTool::new(ws(store.clone(), id.clone()));
 
         let out = tool
-            .execute(json!({ "path": "Agents/ceo/drafts/Brief.md", "kind": "file" }))
+            .execute(json!({ "path": "agents/ceo/drafts/Brief.md", "kind": "file" }))
             .await
             .unwrap();
         assert!(out.is_error, "{}", text(&out));
-        assert!(text(&out).contains("Agents/ceo/drafts"), "{}", text(&out));
+        assert!(text(&out).contains("agents/ceo/drafts"), "{}", text(&out));
         assert_eq!(
             store.tree(&id).await.unwrap().len(),
             before,
@@ -4282,7 +4484,7 @@ mod tests {
 
         let out = tool
             .execute(json!({
-                "path": "Standards/Engineering standards.md",
+                "path": "standards/engineering-standards.md",
                 "kind": "file",
                 "content": "# Mine now",
             }))
@@ -4300,9 +4502,9 @@ mod tests {
     }
 
     /// The reserved-root case of the rule above, called out because it is the
-    /// one that matters most: identity in `Agents/` is by path, so an agent
+    /// one that matters most: identity in `agents/` is by path, so an agent
     /// that could mint a rival root named `Agents` would make every
-    /// `Agents/...` path permanently ambiguous — for itself, for its teammates
+    /// `agents/...` path permanently ambiguous — for itself, for its teammates
     /// and for the provisioner.
     #[tokio::test]
     async fn create_cannot_mint_a_rival_agents_root() {
@@ -4324,7 +4526,11 @@ mod tests {
                 .await
                 .unwrap()
                 .iter()
-                .filter(|n| n.name == "Agents" && n.parent_id.is_none())
+                // Case-insensitively: the reserved root is `agents/`, and a
+                // company that predates the naming rule carries `Agents/`.
+                // Either way there must be exactly one — a rival root under the
+                // other spelling is the failure this test exists to catch.
+                .filter(|n| n.name.eq_ignore_ascii_case(AGENTS_ROOT) && n.parent_id.is_none())
                 .count(),
             1,
         );
@@ -4340,12 +4546,12 @@ mod tests {
         let tool = WorkspaceCreateTool::new(ws(store.clone(), id.clone()));
 
         let out = tool
-            .execute(json!({ "path": "Playbooks/Launch/Checklist.md", "kind": "file" }))
+            .execute(json!({ "path": "playbooks/Launch/Checklist.md", "kind": "file" }))
             .await
             .unwrap();
         assert!(out.is_error);
         let message = text(&out);
-        assert!(message.contains("Playbooks/Launch"), "{message}");
+        assert!(message.contains("playbooks/Launch"), "{message}");
         assert!(message.contains(WORKSPACE_CREATE_TOOL), "{message}");
         assert!(message.contains("folder"), "{message}");
         assert_eq!(
@@ -4374,7 +4580,7 @@ mod tests {
     async fn create_refuses_traversal_shaped_paths() {
         let (_dir, store) = seeded("acme").await;
         let tool = WorkspaceCreateTool::new(ws(store.clone(), CompanyId::new("acme")));
-        for path in ["../escape.md", "Standards/../../etc/passwd", "./x.md", ".."] {
+        for path in ["../escape.md", "standards/../../etc/passwd", "./x.md", ".."] {
             let out = tool
                 .execute(json!({ "path": path, "kind": "file" }))
                 .await
@@ -4397,7 +4603,7 @@ mod tests {
         let tool = WorkspaceCreateTool::new(ws(store.clone(), CompanyId::new("acme")));
         let out = tool
             .execute(json!({
-                "path": "Standards/Huge.md",
+                "path": "standards/Huge.md",
                 "kind": "file",
                 "content": "x".repeat(MAX_WRITE_BYTES + 1),
             }))
@@ -4414,10 +4620,10 @@ mod tests {
         let (_dir, store) = seeded("acme").await;
         let tool = WorkspaceCreateTool::new(ws(store, CompanyId::new("acme")));
         for args in [
-            json!({ "path": "Standards/x.md" }),
-            json!({ "path": "Standards/x.md", "kind": "note" }),
+            json!({ "path": "standards/x.md" }),
+            json!({ "path": "standards/x.md", "kind": "note" }),
             json!({ "kind": "file" }),
-            json!({ "path": "Standards/x", "kind": "folder", "content": "body" }),
+            json!({ "path": "standards/x", "kind": "folder", "content": "body" }),
         ] {
             let out = tool.execute(args.clone()).await.unwrap();
             assert!(out.is_error, "{args} must be refused");
@@ -4435,7 +4641,7 @@ mod tests {
         let author = CompanyWorkspace::new(store.clone(), id.clone(), "cmo".to_string());
         let out = WorkspaceCreateTool::new(author)
             .execute(json!({
-                "path": "Standards/Brand voice.md",
+                "path": "standards/Brand voice.md",
                 "kind": "file",
                 "content": "# Brand voice\nWarm, plain, specific.",
             }))
@@ -4450,11 +4656,11 @@ mod tests {
                 .await
                 .unwrap(),
         );
-        assert!(listing.contains("Standards/Brand voice.md"), "{listing}");
+        assert!(listing.contains("standards/brand-voice.md"), "{listing}");
 
         let read = text(
             &WorkspaceReadTool::new(reader)
-                .execute(json!({ "path": "Standards/Brand voice.md" }))
+                .execute(json!({ "path": "standards/Brand voice.md" }))
                 .await
                 .unwrap(),
         );
@@ -4473,7 +4679,7 @@ mod tests {
             id.clone(),
             "cmo".to_string(),
         ))
-        .execute(json!({ "path": "Standards/Voice.md", "kind": "file", "content": "v1" }))
+        .execute(json!({ "path": "standards/Voice.md", "kind": "file", "content": "v1" }))
         .await
         .unwrap();
         assert!(!created.is_error, "{}", text(&created));
@@ -4483,12 +4689,12 @@ mod tests {
             .await
             .unwrap()
             .into_iter()
-            .find(|n| n.name == "Voice.md")
+            .find(|n| n.name == "voice.md")
             .unwrap();
 
         let out = WorkspaceWriteTool::new(ws(store.clone(), id.clone()))
             .execute(json!({
-                "path": "Standards/Voice.md",
+                "path": "standards/Voice.md",
                 "content": "v2",
                 "expected_updated_at": node.updated_at_millis,
             }))
@@ -4501,7 +4707,7 @@ mod tests {
             .await
             .unwrap()
             .into_iter()
-            .find(|n| n.name == "Voice.md")
+            .find(|n| n.name == "voice.md")
             .unwrap();
         assert_eq!(
             after.created_by,
@@ -4723,7 +4929,7 @@ mod tests {
             vec![AGENTS_ROOT],
             vec![AGENTS_ROOT, "cmo"],
             vec![AGENTS_ROOT, "cmo", "brief.md"],
-            vec!["Standards", "Engineering standards.md"],
+            vec!["standards", "engineering-standards.md"],
             // A name that merely starts with the agent's id is a different
             // folder, because the comparison is segment-wise and not a prefix.
             vec![AGENTS_ROOT, "ceo-archive", "brief.md"],
@@ -4894,7 +5100,7 @@ mod tests {
             // otherwise reasonably conclude it has none.
             "appears the first time you use it",
             "anywhere in the tree",
-            "Standards/",
+            "standards/",
             // Issue #671: tidying is asked for, bounded, and honest about what
             // a delete costs.
             "part of producing work in it",
@@ -5044,7 +5250,7 @@ mod tests {
         let (_dir, store) = seeded("acme").await;
         let id = CompanyId::new("acme");
         let workspace = ws(store.clone(), id.clone())
-            .with_write_scope(Some(vec!["Standards/Engineering standards.md".to_string()]));
+            .with_write_scope(Some(vec!["standards/engineering-standards.md".to_string()]));
         let tool = WorkspaceWriteTool::new(workspace);
 
         let result = tool
@@ -5058,7 +5264,7 @@ mod tests {
         assert!(!result.is_error, "{}", text(&result));
     }
 
-    /// A write-scoped agent may still create inside its own `Agents/<id>/`
+    /// A write-scoped agent may still create inside its own `agents/<id>/`
     /// home — the scope narrows the shared tree, not the ability to produce
     /// and revise its own work.
     #[tokio::test]
@@ -5071,7 +5277,7 @@ mod tests {
 
         let result = tool
             .execute(json!({
-                "path": "Agents/ceo/Notes.md",
+                "path": "agents/ceo/Notes.md",
                 "kind": "file",
                 "content": "# Notes"
             }))
@@ -5092,7 +5298,7 @@ mod tests {
 
         let result = tool
             .execute(json!({
-                "path": "Standards/New standard.md",
+                "path": "standards/New standard.md",
                 "kind": "file",
                 "content": "# New"
             }))
@@ -5195,7 +5401,7 @@ mod tests {
         // discriminator, so it must not appear on text entries.
         let note = out
             .lines()
-            .find(|l| l.contains("README.md"))
+            .find(|l| l.contains("readme.md"))
             .expect("the note is listed");
         assert!(!note.contains("image/"), "{note}");
     }

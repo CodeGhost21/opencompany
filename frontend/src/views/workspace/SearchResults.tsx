@@ -228,7 +228,7 @@ export function SearchResults({
                     beside the name where `Seeded` used to sit. "Written by a
                     ledger" and "Hidden from agents" are both wide, the pane is
                     256px, and on the name line either truncated the very thing
-                    the operator is scanning for — `DECISIONS.md` became
+                    the operator is scanning for — `decisions.md` became
                     `DECISIONS…`. Down here it costs no name width and lands
                     next to its own evidence, the `derived/` or `secrets/`
                     segment it explains. The scan-for-glyphs affordance lives in

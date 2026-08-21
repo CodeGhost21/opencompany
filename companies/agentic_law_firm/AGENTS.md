@@ -2,7 +2,7 @@
 
 > Within regulatory limits, a firm of agents does legal research, drafts contracts, supports litigation, runs discovery, and checks compliance — a licensed human approves filings.
 
-This file is routed into every teammate's system prompt alongside `METHOD.md`
+This file is routed into every teammate's system prompt alongside `method.md`
 (`context_routing::UNIVERSAL_DOCUMENTS`), so it is the one place a convention
 reaches the whole roster without being repeated in every agent's `context`.
 
@@ -26,7 +26,7 @@ parked rather than sent.
 | `compliance_agent` | Compliance Agent | Check regulatory compliance. |
 
 `legal_researcher` is this firm's orchestrator: it holds the routing picture
-(`BRIEF.md`, `CLAIMS.md`, `THREADS.md`) and unrestricted ledger access, so it
+(`brief.md`, `claims.md`, `threads.md`) and unrestricted ledger access, so it
 sets and revises goals and decisions rather than a specialist re-deciding them
 mid-task.
 
@@ -90,10 +90,10 @@ Plus the baseline's `web-research`, `weekly-report` and `meeting-brief`.
 
 ## Workspace layout
 
-- `Standards/`, `Playbooks/`, `Matters/` — shared, operator-seeded notes. Read
+- `standards/`, `playbooks/`, `matters/` — shared, operator-seeded notes. Read
   them before proposing work that touches an area they cover; edit them on
   purpose, not as a side effect of an unrelated task.
-- `Agents/<your agent id>/` — your own folder, the default home for anything you
+- `agents/<your agent id>/` — your own folder, the default home for anything you
   produce. Always writable, whatever your `context` write scope says.
 - `derived/` — rendered ledger views. Never hand-write anything here; it is
   regenerated on every ledger write.
@@ -102,9 +102,9 @@ Plus the baseline's `web-research`, `weekly-report` and `meeting-brief`.
 
 Every specialist but `legal_researcher` declares an explicit `context`
 confining `workspace_write`/`workspace_create` to
-`Matters/Acme services agreement.md` — this firm's one shared active-work
-document — plus its own `Agents/<id>/` home, which stays writable regardless.
-`Standards/` and `Playbooks/` are left out of that grant: governance documents,
+`matters/acme-services-agreement.md` — this firm's one shared active-work
+document — plus its own `agents/<id>/` home, which stays writable regardless.
+`standards/` and `playbooks/` are left out of that grant: governance documents,
 read by everyone and changed by the operator or the unconfined orchestrator.
 
 ## The bar
