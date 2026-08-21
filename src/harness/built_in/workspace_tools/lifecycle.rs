@@ -276,7 +276,7 @@ impl Tool for WorkspaceDeleteTool {
     }
 
     fn description(&self) -> &str {
-        "Delete ONE folder or note from your own workspace folder `Agents/<your agent id>/`. USE \
+        "Delete ONE folder or note from your own workspace folder `agents/<your agent id>/`. USE \
          FOR tidying up after yourself — removing a draft you have replaced, or a working note \
          that is no longer worth a teammate's time to find. You must pass `expected_updated_at` — \
          the `rev` from a `workspace_read` of the note, or the `rev=` on its `workspace_list` line \

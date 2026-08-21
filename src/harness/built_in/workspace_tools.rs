@@ -53,7 +53,7 @@
 //! be theatre with a maintenance cost.
 //!
 //! What replaces that as the default is a steering-plus-attribution pair.
-//! [`workspace_brief`] and the tool descriptions name `Agents/<your agent id>/`
+//! [`workspace_brief`] and the tool descriptions name `agents/<your agent id>/`
 //! as the default home for anything an agent produces and mark shared guidance
 //! as something to touch only on purpose; and every node records who created
 //! it and who last wrote it (issue #326), so a mess is legible and reversible
