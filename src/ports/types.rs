@@ -2862,6 +2862,35 @@ impl BudgetOverride {
     }
 }
 
+impl AgentOverride {
+    /// The first `agent_id` carried by more than one entry, or `None` when every
+    /// teammate appears at most once.
+    ///
+    /// The counterpart of [`BudgetOverride::duplicate_agent_id`], and it exists
+    /// for the identical reason: [`CompanyRecord::agent_override`] reads the
+    /// *first* match, so a second row for one teammate is not a harmless
+    /// duplicate — it makes the applied name, role, description and tool grant a
+    /// function of serialization order. `upsert_agent_override` is the only
+    /// write path and it replaces in place, so this cannot happen to a record
+    /// this process wrote; a bundle is the one door these arrive through from
+    /// outside, and callers there reject rather than guess. Picking silently
+    /// would restore a name an operator changed, or apply a tool grant they
+    /// narrowed, with nothing to say which row won.
+    ///
+    /// Linear scan: an edit set is one row per edited teammate, so it is bounded
+    /// by roster size.
+    pub fn duplicate_agent_id(entries: &[AgentOverride]) -> Option<&str> {
+        let mut seen: Vec<&str> = Vec::with_capacity(entries.len());
+        for entry in entries {
+            if seen.contains(&entry.agent_id.as_str()) {
+                return Some(&entry.agent_id);
+            }
+            seen.push(&entry.agent_id);
+        }
+        None
+    }
+}
+
 /// An operator-set override of the company's `[policy]` block, persisted on the
 /// [`CompanyRecord`] so a tier change wins over the manifest without rewriting
 /// `company.toml` and without a redeploy (issue #562).
