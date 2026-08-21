@@ -102,6 +102,13 @@ enum MemoryOrigin {
     AgentMemory,
     /// A stored task outcome the harness wrote (ContextStore). Read-only.
     TaskOutcome,
+    /// A chunk of a document or link an operator dropped on the Brain page
+    /// (`crate::server::ops::memory_ingest`). Its own origin rather than
+    /// folded into [`AgentMemory`](MemoryOrigin::AgentMemory): an operator has
+    /// to be able to see what their upload became, and rendering it as
+    /// something a teammate learned would say the wrong thing about where the
+    /// knowledge came from.
+    Document,
 }
 
 /// A durable memory entry as the console renders it.
@@ -119,7 +126,8 @@ struct MemoryEntry {
     kind: Option<FactKind>,
     /// Which backend the row came from; drives editable-vs-read-only rendering.
     origin: MemoryOrigin,
-    /// Whether the operator may edit/delete this row (true only for facts).
+    /// Whether the operator may delete this row: facts, and the documents
+    /// they dropped on the Brain page. Never the agents' own memory.
     editable: bool,
     title: String,
     body: String,
@@ -193,6 +201,7 @@ fn context_entries(chunks: Vec<RawChunk>, query: Option<&str>) -> Vec<MemoryEntr
     let needle = query.map(|q| q.to_lowercase());
     let mirror_prefix = format!("{OPERATOR_FACT_PREFIX}/");
     let outcome_prefix = format!("{OUTCOME_LABEL_PREFIX}/");
+    let document_prefix = format!("{}/", crate::ingest::DOCUMENT_LABEL_PREFIX);
 
     let mut entries: Vec<MemoryEntry> = Vec::new();
 
@@ -208,29 +217,43 @@ fn context_entries(chunks: Vec<RawChunk>, query: Option<&str>) -> Vec<MemoryEntr
             continue;
         }
 
-        let (origin, source): (MemoryOrigin, String) =
-            if let Some(agent) = chunk.label.strip_prefix(&outcome_prefix) {
-                let who = if agent.is_empty() { "an agent" } else { agent };
-                (MemoryOrigin::TaskOutcome, who.to_string())
-            } else {
-                // Deliberate memories live one segment deeper —
-                // `agent-memory/<agent>/<slug>` — so the naive first-segment
-                // parse attributed every one of them to the literal
-                // "agent-memory" (the #1290 review's M2).
-                let who = match chunk.label.strip_prefix(const_format_prefix()) {
-                    Some(rest) => rest.split('/').next().filter(|s| !s.is_empty()),
-                    None => chunk.label.split('/').next().filter(|s| !s.is_empty()),
-                };
-                (
-                    MemoryOrigin::AgentMemory,
-                    who.unwrap_or("an agent").to_string(),
-                )
+        let (origin, source): (MemoryOrigin, String) = if chunk.label.starts_with(&document_prefix)
+        {
+            // The document's own name, which `ingest::chunk_document`
+            // writes as the chunk's first line for exactly this reason: a
+            // label is slugged and truncated, so it cannot be rendered
+            // back as the file the operator dropped.
+            let named = chunk
+                .body
+                .lines()
+                .next()
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .unwrap_or("a document");
+            (MemoryOrigin::Document, named.to_string())
+        } else if let Some(agent) = chunk.label.strip_prefix(&outcome_prefix) {
+            let who = if agent.is_empty() { "an agent" } else { agent };
+            (MemoryOrigin::TaskOutcome, who.to_string())
+        } else {
+            // Deliberate memories live one segment deeper —
+            // `agent-memory/<agent>/<slug>` — so the naive first-segment
+            // parse attributed every one of them to the literal
+            // "agent-memory" (the #1290 review's M2).
+            let who = match chunk.label.strip_prefix(const_format_prefix()) {
+                Some(rest) => rest.split('/').next().filter(|s| !s.is_empty()),
+                None => chunk.label.split('/').next().filter(|s| !s.is_empty()),
             };
+            (
+                MemoryOrigin::AgentMemory,
+                who.unwrap_or("an agent").to_string(),
+            )
+        };
 
         let (mut title, body) = split_title_body(&chunk.body);
         if title.is_empty() {
             title = match origin {
                 MemoryOrigin::TaskOutcome => "Task outcome".to_string(),
+                MemoryOrigin::Document => "Document".to_string(),
                 _ => "Agent memory".to_string(),
             };
         }
@@ -241,7 +264,12 @@ fn context_entries(chunks: Vec<RawChunk>, query: Option<&str>) -> Vec<MemoryEntr
             id: format!("ctx:{}", chunk.addr),
             kind: None,
             origin,
-            editable: false,
+            // A document is material the operator supplied, so they may take
+            // it back — through `…/memory/document/{slug}`, which forgets the
+            // whole document rather than this one chunk of it. The two agent
+            // origins stay read-only: they are the record of what the company
+            // did, not something anybody typed.
+            editable: matches!(origin, MemoryOrigin::Document),
             title,
             body,
             source,
