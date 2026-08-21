@@ -70,6 +70,7 @@ use openhuman_core::openhuman::tools::traits::{PermissionLevel, Tool, ToolResult
 
 use crate::company::artifact_mirror::published_record_for_node;
 use crate::company::workspace_paths::{is_legal_segment, split_logical_path};
+use crate::company::workspace_names::kebab_name;
 use crate::company::workspace_scaffold::AGENTS_ROOT;
 use crate::ports::workspace::NodeKind;
 
@@ -326,6 +327,13 @@ impl Tool for WorkspaceDeleteTool {
                  last looked at it is not deleted out from under whoever changed it."
             )));
         };
+
+        // The host owns the name (the same rule `workspace_create` applies to
+        // the name it mints): a rename lands lowercase and dashed, so renaming
+        // cannot walk a node back out of the convention the tree is kept in.
+        // The reply below echoes the path it actually landed at.
+        let new_name = new_name.map(kebab_name);
+        let new_name = new_name.as_deref();
 
         let (index, entry) = match resolve_in_index(&self.workspace, path, id).await {
             Ok(pair) => pair,
@@ -657,7 +665,7 @@ impl Tool for WorkspaceRenameTool {
         let final_name = new_name.unwrap_or(entry.node.name.as_str());
         let target_path = format!("{parent_path}/{final_name}");
 
-        if let Some(occupants) = index.by_path.get(&target_path) {
+        if let Some(occupants) = index.lookup(&target_path) {
             if occupants.len() == 1 && occupants[0].node.id == entry.node.id {
                 return Ok(ToolResult::error(format!(
                     "Refused: `{shown}` is already exactly where you asked to put it, so nothing \
