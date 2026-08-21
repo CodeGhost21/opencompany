@@ -42,6 +42,13 @@ Which applies is **derived, not configured**: `needsCarriedSession` compares the
 host's origin with the document's, so a console cannot be told to hold a token
 where a cookie would have worked.
 
+Which of the N is on screen is part of the **address**, not private state: a
+console holding more than one host writes `#/<view>?host=<connectionId>`, so
+switching is a history entry Back can undo and the bar names the host being
+looked at even when that host answers nothing. `src/hooks/use-host-route.ts`
+owns the rule; see
+[desktop-hosts.md](../docs/spec/runtime/desktop-hosts.md#which-host-the-address-names).
+
 Every surface is built to one pattern so the backend can land incrementally:
 
 1. **Real** — the endpoint exists; the console uses it directly. **This is now

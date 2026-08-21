@@ -21,6 +21,7 @@ import { Button } from "@/components/ui/button";
 import { ConnectionScopeProvider } from "@/connections/ConnectionContext";
 import { adoptSession, probe, useConnection } from "@/connections/registry";
 import type { ConnectionId } from "@/connections/types";
+import { withHostParam } from "@/hooks/use-host-route";
 import { Login } from "@/views/Login";
 import { SetupWizard } from "@/views/setup/SetupWizard";
 
@@ -326,7 +327,11 @@ function clearEntityHash() {
   // A hash sub-route names an entity within the current company. The shell
   // remounts for a company switch, so remove that stale identity before the
   // new shell reads the route as an intentional deep link.
-  window.history.replaceState(null, "", `#/${view}`);
+  //
+  // The connection scope survives it: the company changed, the host did not,
+  // and a `replaceState` fires no `hashchange` for `useHostAddress` to put it
+  // back with (`use-host-route.ts`).
+  window.history.replaceState(null, "", withHostParam(view));
 }
 
 /**
