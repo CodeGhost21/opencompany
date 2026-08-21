@@ -398,7 +398,7 @@ function RunHistoryRow({
       ref={selectedRowRef}
       className={`${
         compact
-          ? "border-x-0 border-t-0 rounded-none bg-transparent px-0 py-2"
+          ? "border-b border-x-0 border-t-0 rounded-none bg-transparent px-0 py-2"
           : "rounded-lg border bg-background/40 p-2"
       } ${run.error ? "border-status-failed/50 bg-status-failed-soft" : ""} ${
         selected ? "ring-2 ring-primary/40" : ""
