@@ -62,7 +62,7 @@ For each bare company, using `agentic_marketing_agency` as the template:
 Batches (one subagent each, zero file overlap):
 
 1. Professional services: law, accounting, consultation, recruiting.
-2. Product/tech: software, design studio, game studio, game business, pharma.
+2. product/tech: software, design studio, game studio, game business, pharma.
 3. Go-to-market: enterprise sales, customer support, influencer, media.
 4. Capital: VC, venture studio, real estate, accelerator misc
    (`signals_opportunity_studio`, `startup_accelerator`).

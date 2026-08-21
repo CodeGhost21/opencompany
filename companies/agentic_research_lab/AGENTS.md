@@ -21,7 +21,7 @@ This file is routed into every teammate's system prompt alongside `METHOD.md` (`
 
 ## Workspace layout
 
-- `Standards/`, `Product/`, `Playbooks/` — shared, operator-seeded notes. Read them before proposing work that touches an area they cover; edit them on purpose, not as a side effect of an unrelated task.
+- `standards/`, `product/`, `playbooks/` — shared, operator-seeded notes. Read them before proposing work that touches an area they cover; edit them on purpose, not as a side effect of an unrelated task.
 - `Agents/<your agent id>/` — your own folder, the default home for anything you produce. Always writable, whatever your `context` write scope says.
 - `derived/` — rendered ledger views (see below). Never hand-write anything here; it is regenerated on every ledger write.
 

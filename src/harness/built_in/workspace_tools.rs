@@ -1,10 +1,10 @@
 //! Live read/write tools over the company [`WorkspaceStore`] (issue #237).
 //!
-//! The company workspace is the shared note tree — `Playbooks/`, `Product/`,
-//! `Standards/` — seeded from `companies/<name>/workspace/**` and thereafter
+//! The company workspace is the shared note tree — `playbooks/`, `product/`,
+//! `standards/` — seeded from `companies/<name>/workspace/**` and thereafter
 //! written by the operator in the console and by the agents through these
 //! tools. Before this module nothing under `src/harness/` touched it, so an
-//! operator could fill `Standards/` with the guidance every agent is supposed
+//! operator could fill `standards/` with the guidance every agent is supposed
 //! to follow and no agent would ever read a word of it.
 //!
 //! Seven tools close that gap:
@@ -545,7 +545,7 @@ struct PathIndex {
     ///
     /// The lowercase-dashed rule is what the runtime mints and what the brief
     /// tells agents to type, but a company that predates it still has
-    /// `Playbooks/Close checklist.md` sitting in its tree. Without this map an
+    /// `playbooks/close-checklist.md` sitting in its tree. Without this map an
     /// agent typing the canonical spelling is told the note does not exist, and
     /// an agent typing the stored spelling is told to use the canonical one —
     /// a loop with the note visible in the listing the whole time.
@@ -689,7 +689,7 @@ impl PathIndex {
                 "pass either `path` or `id`, not both".to_string(),
             )),
             (None, None) => Err(ResolveError::BadArgs(
-                "pass either `path` (e.g. \"Standards/Engineering standards.md\") or `id`"
+                "pass either `path` (e.g. \"standards/engineering-standards.md\") or `id`"
                     .to_string(),
             )),
             (None, Some(id)) => {
@@ -912,7 +912,7 @@ pub fn workspace_brief(can_write: bool) -> String {
              itself appears the first time you use it, so create the note straight away rather \
              than the folder first; do not be put off if you do not see it in a listing yet. \
              You may create \
-             or edit notes anywhere in the tree, but shared guidance (`Standards/`, `Playbooks/`) \
+             or edit notes anywhere in the tree, but shared guidance (`standards/`, `playbooks/`) \
              belongs to everyone: edit it only when the task you were given is about it, and \
              otherwise leave it alone. Revising an existing note is `{WORKSPACE_WRITE_TOOL}`, \
              which requires the `expected_updated_at` revision from a `{WORKSPACE_READ_TOOL}` of \
@@ -967,7 +967,7 @@ impl Tool for WorkspaceListTool {
             "properties": {
                 "prefix": {
                     "type": "string",
-                    "description": "Optional folder path to list beneath, e.g. \"Standards\" or \"Product/Specs\". Omit to list the whole tree."
+                    "description": "Optional folder path to list beneath, e.g. \"Standards\" or \"product/Specs\". Omit to list the whole tree."
                 }
             },
             "additionalProperties": false
@@ -1131,7 +1131,7 @@ impl Tool for WorkspaceReadTool {
             "properties": {
                 "path": {
                     "type": "string",
-                    "description": "The note's path as shown by workspace_list, e.g. \"Standards/Engineering standards.md\". Case-sensitive, includes the extension."
+                    "description": "The note's path as shown by workspace_list, e.g. \"standards/engineering-standards.md\". Case-sensitive, includes the extension."
                 },
                 "id": {
                     "type": "string",
@@ -1340,7 +1340,7 @@ impl Tool for WorkspaceSearchTool {
                 },
                 "prefix": {
                     "type": "string",
-                    "description": "Optional folder path to search beneath, e.g. \"Standards\" or \"Product/Specs\". Omit to search the whole tree."
+                    "description": "Optional folder path to search beneath, e.g. \"Standards\" or \"product/Specs\". Omit to search the whole tree."
                 },
                 "limit": {
                     "type": "integer",
@@ -1564,7 +1564,7 @@ impl Tool for WorkspaceWriteTool {
             "properties": {
                 "path": {
                     "type": "string",
-                    "description": "The note's path as shown by workspace_list, e.g. \"Standards/Engineering standards.md\"."
+                    "description": "The note's path as shown by workspace_list, e.g. \"standards/engineering-standards.md\"."
                 },
                 "id": {
                     "type": "string",
@@ -2257,7 +2257,7 @@ mod tests {
             file("c", "README.md", None),
         ];
         let index = PathIndex::build(nodes);
-        assert_eq!(index.by_id["b"].path, "Standards/Engineering standards.md");
+        assert_eq!(index.by_id["b"].path, "standards/engineering-standards.md");
         assert_eq!(index.by_id["c"].path, "README.md");
         assert_eq!(index.unaddressable, 0);
     }
@@ -2462,10 +2462,10 @@ mod tests {
     fn traversal_shaped_paths_are_rejected_before_resolution() {
         for path in [
             "../secrets.md",
-            "Standards/../../etc/passwd",
+            "standards/../../etc/passwd",
             "./Standards",
             "..",
-            "Standards/..",
+            "standards/..",
             "C:\\Windows",
             "   ",
         ] {
@@ -2479,11 +2479,11 @@ mod tests {
     #[test]
     fn redundant_separators_are_tolerated_but_segments_are_not_invented() {
         assert_eq!(
-            split_logical_path("/Standards/").unwrap(),
+            split_logical_path("/standards/").unwrap(),
             vec!["Standards"]
         );
         assert_eq!(
-            split_logical_path("Standards//Eng.md").unwrap(),
+            split_logical_path("standards//Eng.md").unwrap(),
             vec!["Standards", "Eng.md"]
         );
         assert!(split_logical_path("/").unwrap_err().contains("segments"));
@@ -2513,7 +2513,7 @@ mod tests {
             file("b1", "dup.md", Some("a")),
             file("b2", "dup.md", Some("a")),
         ]);
-        let err = index.resolve(Some("Standards/dup.md"), None).unwrap_err();
+        let err = index.resolve(Some("standards/dup.md"), None).unwrap_err();
         match &err {
             ResolveError::Ambiguous { ids, .. } => assert_eq!(ids, &["b1", "b2"]),
             other => panic!("expected Ambiguous, got {other:?}"),
@@ -2622,7 +2622,7 @@ mod tests {
         let tool = WorkspaceReadTool::new(ws(store, CompanyId::new("acme")));
         for path in [
             "../../../../etc/passwd",
-            "Standards/../../../etc/passwd",
+            "standards/../../../etc/passwd",
             "/etc/passwd",
             "..",
         ] {
@@ -2643,7 +2643,7 @@ mod tests {
         let all = text(&tool.execute(json!({})).await.unwrap());
         assert!(all.contains("folder\tStandards\tid=f-standards"), "{all}");
         assert!(
-            all.contains("file\tStandards/Engineering standards.md\tid=n-eng\trev=2000"),
+            all.contains("file\tstandards/engineering-standards.md\tid=n-eng\trev=2000"),
             "{all}"
         );
         assert!(all.contains("README.md"), "{all}");
@@ -2659,7 +2659,7 @@ mod tests {
         let tool = WorkspaceReadTool::new(ws(store, CompanyId::new("acme")));
         let out = text(
             &tool
-                .execute(json!({"path": "Standards/Engineering standards.md"}))
+                .execute(json!({"path": "standards/engineering-standards.md"}))
                 .await
                 .unwrap(),
         );
@@ -2880,7 +2880,7 @@ mod tests {
         let faulty = || -> Arc<dyn WorkspaceStore> {
             Arc::new(FixedTree::failing_tree(small_tree(), planted_store_io))
         };
-        let note = json!({"path": "Standards/Engineering standards.md"});
+        let note = json!({"path": "standards/engineering-standards.md"});
 
         let mut outcomes: Vec<(&str, ToolResult)> = vec![
             (
@@ -2907,7 +2907,7 @@ mod tests {
             (
                 WORKSPACE_CREATE_TOOL,
                 WorkspaceCreateTool::new(ws(faulty(), id.clone()))
-                    .execute(json!({"path": "Standards/new.md", "kind": "file"}))
+                    .execute(json!({"path": "standards/new.md", "kind": "file"}))
                     .await
                     .unwrap(),
             ),
@@ -2915,7 +2915,7 @@ mod tests {
                 WORKSPACE_WRITE_TOOL,
                 WorkspaceWriteTool::new(ws(faulty(), id.clone()))
                     .execute(json!({
-                        "path": "Standards/Engineering standards.md",
+                        "path": "standards/engineering-standards.md",
                         "content": "x",
                         "expected_updated_at": 2_000,
                     }))
@@ -3011,7 +3011,7 @@ mod tests {
             Arc::new(FixedTree::failing_tree(small_tree(), planted_store_io));
         let tool = WorkspaceReadTool::new(ws(store, id.clone()));
         let outcome = tool
-            .execute(json!({"path": "Standards/Engineering standards.md"}))
+            .execute(json!({"path": "standards/engineering-standards.md"}))
             .await
             .unwrap();
         assert_own_sentence(&outcome, "Could not read the company workspace");
@@ -3036,7 +3036,7 @@ mod tests {
             Arc::new(FixedTree::failing_read(small_tree(), ReadFault::Vanished));
         let tool = WorkspaceReadTool::new(ws(store, id.clone()));
         let outcome = tool
-            .execute(json!({"path": "Standards/Engineering standards.md"}))
+            .execute(json!({"path": "standards/engineering-standards.md"}))
             .await
             .unwrap();
         assert_own_sentence(&outcome, "was removed while you were reading it");
@@ -3048,12 +3048,12 @@ mod tests {
         ));
         let tool = WorkspaceReadTool::new(ws(store, id));
         let outcome = tool
-            .execute(json!({"path": "Standards/Engineering standards.md"}))
+            .execute(json!({"path": "standards/engineering-standards.md"}))
             .await
             .unwrap();
         assert_own_sentence(
             &outcome,
-            "Could not read `Standards/Engineering standards.md`",
+            "Could not read `standards/engineering-standards.md`",
         );
     }
 
@@ -3108,7 +3108,7 @@ mod tests {
                 .unwrap(),
         );
 
-        assert!(out.contains("Standards/Engineering standards.md"), "{out}");
+        assert!(out.contains("standards/engineering-standards.md"), "{out}");
         assert!(out.contains("id=n-eng"), "{out}");
         assert!(out.contains("rev=2000"), "{out}");
         assert!(out.contains("match=content"), "{out}");
@@ -3223,13 +3223,13 @@ mod tests {
                 .unwrap(),
         );
         assert!(
-            scoped.contains("Standards/Engineering standards.md"),
+            scoped.contains("standards/engineering-standards.md"),
             "{scoped}"
         );
         assert!(!scoped.contains("id=n-readme"), "{scoped}");
         assert!(scoped.contains("under `Standards`"), "{scoped}");
 
-        for prefix in ["../etc", "Standards/../..", "C:\\Windows"] {
+        for prefix in ["../etc", "standards/../..", "C:\\Windows"] {
             let refused = tool
                 .execute(json!({"query": "#", "prefix": prefix}))
                 .await
@@ -3416,7 +3416,7 @@ mod tests {
         let tool = WorkspaceWriteTool::new(ws(store.clone(), id.clone()));
         let result = tool
             .execute(json!({
-                "path": "Standards/Engineering standards.md",
+                "path": "standards/engineering-standards.md",
                 "content": "# Engineering\nShip on Fridays.",
                 "expected_updated_at": 2_000,
             }))
@@ -3534,7 +3534,7 @@ mod tests {
         let tool = WorkspaceWriteTool::new(ws(store.clone(), id.clone()));
         let result = tool
             .execute(json!({
-                "path": "Standards/brand new.md",
+                "path": "standards/brand new.md",
                 "content": "hello",
                 "expected_updated_at": 0,
             }))
@@ -4111,7 +4111,7 @@ mod tests {
 
         let out = tool
             .execute(json!({
-                "path": "Standards/Deploys.md",
+                "path": "standards/Deploys.md",
                 "kind": "file",
                 "content": "# Deploys\nGreen builds only.",
             }))
@@ -4141,7 +4141,7 @@ mod tests {
     /// Authorship: a created node is stamped with the creating agent on BOTH
     /// origins, and the path it was created at has nothing to do with it.
     ///
-    /// This test is deliberately sited under `Standards/` — shared,
+    /// This test is deliberately sited under `standards/` — shared,
     /// operator-owned guidance, as far from the agent's own folder as the tree
     /// goes. It is the executable form of the settled decision that agents
     /// write **unconfined**: if someone later adds a prefix gate, this fails.
@@ -4152,7 +4152,7 @@ mod tests {
         let tool = WorkspaceCreateTool::new(ws(store.clone(), id.clone()));
 
         let out = tool
-            .execute(json!({ "path": "Standards/Agent addendum.md", "kind": "file" }))
+            .execute(json!({ "path": "standards/Agent addendum.md", "kind": "file" }))
             .await
             .unwrap();
         assert!(
@@ -4359,7 +4359,7 @@ mod tests {
 
         let out = tool
             .execute(json!({
-                "path": "Standards/Engineering standards.md",
+                "path": "standards/engineering-standards.md",
                 "kind": "file",
                 "content": "# Mine now",
             }))
@@ -4417,12 +4417,12 @@ mod tests {
         let tool = WorkspaceCreateTool::new(ws(store.clone(), id.clone()));
 
         let out = tool
-            .execute(json!({ "path": "Playbooks/Launch/Checklist.md", "kind": "file" }))
+            .execute(json!({ "path": "playbooks/Launch/Checklist.md", "kind": "file" }))
             .await
             .unwrap();
         assert!(out.is_error);
         let message = text(&out);
-        assert!(message.contains("Playbooks/Launch"), "{message}");
+        assert!(message.contains("playbooks/Launch"), "{message}");
         assert!(message.contains(WORKSPACE_CREATE_TOOL), "{message}");
         assert!(message.contains("folder"), "{message}");
         assert_eq!(
@@ -4451,7 +4451,7 @@ mod tests {
     async fn create_refuses_traversal_shaped_paths() {
         let (_dir, store) = seeded("acme").await;
         let tool = WorkspaceCreateTool::new(ws(store.clone(), CompanyId::new("acme")));
-        for path in ["../escape.md", "Standards/../../etc/passwd", "./x.md", ".."] {
+        for path in ["../escape.md", "standards/../../etc/passwd", "./x.md", ".."] {
             let out = tool
                 .execute(json!({ "path": path, "kind": "file" }))
                 .await
@@ -4474,7 +4474,7 @@ mod tests {
         let tool = WorkspaceCreateTool::new(ws(store.clone(), CompanyId::new("acme")));
         let out = tool
             .execute(json!({
-                "path": "Standards/Huge.md",
+                "path": "standards/Huge.md",
                 "kind": "file",
                 "content": "x".repeat(MAX_WRITE_BYTES + 1),
             }))
@@ -4491,10 +4491,10 @@ mod tests {
         let (_dir, store) = seeded("acme").await;
         let tool = WorkspaceCreateTool::new(ws(store, CompanyId::new("acme")));
         for args in [
-            json!({ "path": "Standards/x.md" }),
-            json!({ "path": "Standards/x.md", "kind": "note" }),
+            json!({ "path": "standards/x.md" }),
+            json!({ "path": "standards/x.md", "kind": "note" }),
             json!({ "kind": "file" }),
-            json!({ "path": "Standards/x", "kind": "folder", "content": "body" }),
+            json!({ "path": "standards/x", "kind": "folder", "content": "body" }),
         ] {
             let out = tool.execute(args.clone()).await.unwrap();
             assert!(out.is_error, "{args} must be refused");
@@ -4512,7 +4512,7 @@ mod tests {
         let author = CompanyWorkspace::new(store.clone(), id.clone(), "cmo".to_string());
         let out = WorkspaceCreateTool::new(author)
             .execute(json!({
-                "path": "Standards/Brand voice.md",
+                "path": "standards/Brand voice.md",
                 "kind": "file",
                 "content": "# Brand voice\nWarm, plain, specific.",
             }))
@@ -4527,11 +4527,11 @@ mod tests {
                 .await
                 .unwrap(),
         );
-        assert!(listing.contains("Standards/Brand voice.md"), "{listing}");
+        assert!(listing.contains("standards/Brand voice.md"), "{listing}");
 
         let read = text(
             &WorkspaceReadTool::new(reader)
-                .execute(json!({ "path": "Standards/Brand voice.md" }))
+                .execute(json!({ "path": "standards/Brand voice.md" }))
                 .await
                 .unwrap(),
         );
@@ -4550,7 +4550,7 @@ mod tests {
             id.clone(),
             "cmo".to_string(),
         ))
-        .execute(json!({ "path": "Standards/Voice.md", "kind": "file", "content": "v1" }))
+        .execute(json!({ "path": "standards/Voice.md", "kind": "file", "content": "v1" }))
         .await
         .unwrap();
         assert!(!created.is_error, "{}", text(&created));
@@ -4565,7 +4565,7 @@ mod tests {
 
         let out = WorkspaceWriteTool::new(ws(store.clone(), id.clone()))
             .execute(json!({
-                "path": "Standards/Voice.md",
+                "path": "standards/Voice.md",
                 "content": "v2",
                 "expected_updated_at": node.updated_at_millis,
             }))
@@ -4971,7 +4971,7 @@ mod tests {
             // otherwise reasonably conclude it has none.
             "appears the first time you use it",
             "anywhere in the tree",
-            "Standards/",
+            "standards/",
             // Issue #671: tidying is asked for, bounded, and honest about what
             // a delete costs.
             "part of producing work in it",
@@ -5121,7 +5121,7 @@ mod tests {
         let (_dir, store) = seeded("acme").await;
         let id = CompanyId::new("acme");
         let workspace = ws(store.clone(), id.clone())
-            .with_write_scope(Some(vec!["Standards/Engineering standards.md".to_string()]));
+            .with_write_scope(Some(vec!["standards/engineering-standards.md".to_string()]));
         let tool = WorkspaceWriteTool::new(workspace);
 
         let result = tool
@@ -5169,7 +5169,7 @@ mod tests {
 
         let result = tool
             .execute(json!({
-                "path": "Standards/New standard.md",
+                "path": "standards/New standard.md",
                 "kind": "file",
                 "content": "# New"
             }))

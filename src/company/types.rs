@@ -751,7 +751,7 @@ fn is_false(value: &bool) -> bool {
 
 /// One [`Agent::context`] entry.
 ///
-/// A bare TOML string (`"Brand/Voice.md"`) deserializes as [`Self::Path`], read
+/// A bare TOML string (`"brand/Voice.md"`) deserializes as [`Self::Path`], read
 /// access, matching every manifest written before write access existed. The
 /// table form (`{ path = "...", access = "write" }`) is [`Self::Detailed`].
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -1903,7 +1903,7 @@ mod test {
         );
 
         let read_only: Agent =
-            toml::from_str("id = \"critic\"\nrole = \"Critic\"\ncontext = [\"Brand/Voice.md\"]\n")
+            toml::from_str("id = \"critic\"\nrole = \"Critic\"\ncontext = [\"brand/Voice.md\"]\n")
                 .unwrap();
         assert_eq!(
             read_only.write_scope(),
@@ -1915,7 +1915,7 @@ mod test {
             r#"
             id = "critic"
             role = "Critic"
-            context = ["Brand/Voice.md", { path = "Agents/critic/notes.md", access = "write" }]
+            context = ["brand/Voice.md", { path = "Agents/critic/notes.md", access = "write" }]
             "#,
         )
         .expect("parse toml");

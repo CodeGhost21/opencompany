@@ -17,8 +17,8 @@
 //!
 //! * `Agents/` is scaffolding. [`ensure_workspace_scaffold`] lays it down on
 //!   every boot, empty, whether or not the company has a roster — it is part of
-//!   what a workspace *is*, the same way the template-seeded `Playbooks/` and
-//!   `Standards/` are, and it has a real producer behind it: the persona brief
+//!   what a workspace *is*, the same way the template-seeded `playbooks/` and
+//!   `standards/` are, and it has a real producer behind it: the persona brief
 //!   steers every agent to write beneath it, so an operator opening the
 //!   Workspace tab on a brand-new company is being shown where things are about
 //!   to appear rather than a void.

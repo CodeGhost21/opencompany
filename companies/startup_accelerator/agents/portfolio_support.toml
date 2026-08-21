@@ -14,9 +14,9 @@ ledgers = [
 # shared active-work document, plus the always-writable Agents/<id> home.
 # The bare entries below preserve this agent's existing (reasoning-tier)
 # routed context — only the last entry changes behavior, by adding a write
-# grant. Standards/ and Playbooks/ stay out: governance documents, left to
+# grant. standards/ and playbooks/ stay out: governance documents, left to
 # the operator and the unconfined orchestrator.
 context = [
     "BRIEF.md", "CLAIMS.md",
-    { path = "Cohorts/Spring cohort.md", access = "write" },
+    { path = "cohorts/spring-cohort.md", access = "write" },
 ]

@@ -89,7 +89,7 @@ test("the Workspace tab reads and writes the host's store, not localStorage", as
   }[];
   await openWorkspace(page);
 
-  // The harness company seeds `README.md` + `Standards.md`, so a real seeded
+  // The harness company seeds `README.md` + `standards.md`, so a real seeded
   // note must be on screen. It came from the company bundle, not the console.
   const seeded = tree.find((n) => n.name === "README.md");
   expect(seeded, "the harness company must seed a workspace").toBeTruthy();

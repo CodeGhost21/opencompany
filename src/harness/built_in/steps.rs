@@ -1046,7 +1046,7 @@ mod tests {
     /// the class for a remote one.
     #[test]
     fn a_non_intrinsic_tools_output_is_still_collapsed_to_its_class() {
-        let output = "Could not read `Standards/Engineering standards.md`: the workspace store \
+        let output = "Could not read `standards/engineering-standards.md`: the workspace store \
                       failed (store_io).";
         let classified = oh::tools::status::classify(output, false);
 

@@ -264,7 +264,7 @@ each page under the 500-line cap.
     (active / paused at cap 0 / awaiting credential / not granted / not in this
     build).
   - **`workspace`** (issues #237, #551, #671) grants the company's shared note tree —
-    the `Standards/` / `Playbooks/` / `Product/` documents seeded from
+    the `standards/` / `playbooks/` / `product/` documents seeded from
     `companies/<name>/workspace/**`, plus whatever the operator and the agents
     have written since. It is **split**, unlike every other namespace: *reads*
     (`workspace_list`, `workspace_search`, `workspace_read`) follow the

@@ -2656,7 +2656,7 @@ impl RuntimeBuilder {
                                 // Issue #237: the SAME workspace handle the
                                 // console's REST/GraphQL surface writes through
                                 // (`ops.workspace`, seeded just above), so an
-                                // operator's edit to `Standards/` is what the
+                                // operator's edit to `standards/` is what the
                                 // next agent turn reads. The tools cache
                                 // nothing, so no rebuild is needed for an edit
                                 // to take effect.
@@ -4807,7 +4807,7 @@ mod test {
         let seed_dir = home.join("def");
         std::fs::create_dir_all(seed_dir.join("workspace/Brand")).unwrap();
         std::fs::write(seed_dir.join("workspace/README.md"), "# Root").unwrap();
-        std::fs::write(seed_dir.join("workspace/Brand/voice.md"), "# Voice").unwrap();
+        std::fs::write(seed_dir.join("workspace/brand/voice.md"), "# Voice").unwrap();
 
         let manifest = parse("[company]\nname=\"Acme\"\n[policy]\nmode=\"full\"\n");
         let id = CompanyId::new("acme");
@@ -4817,7 +4817,7 @@ mod test {
             .build()
             .await
             .unwrap();
-        // Seeded: README.md, Brand/, Brand/voice.md — plus runtime scaffold
+        // Seeded: README.md, brand/, brand/voice.md — plus runtime scaffold
         // (`Agents/` and `secrets/README.md`) which is not what the re-seed
         // gate is about.
         let seeded = |tree: &[crate::ports::WorkspaceNode]| {

@@ -20,7 +20,7 @@ Humans keep **creative direction sign-off**; everything else here is the roster'
 
 ## Workspace layout
 
-- `Standards/`, `Product/`, `Playbooks/` — shared, operator-seeded notes. Read them before proposing work that touches an area they cover; edit them on purpose, not as a side effect of an unrelated task.
+- `standards/`, `product/`, `playbooks/` — shared, operator-seeded notes. Read them before proposing work that touches an area they cover; edit them on purpose, not as a side effect of an unrelated task.
 - `Agents/<your agent id>/` — your own folder, the default home for anything you produce. Always writable, whatever your `context` write scope says.
 - `derived/` — rendered ledger views (see below). Never hand-write anything here; it is regenerated on every ledger write.
 
@@ -34,5 +34,5 @@ This company keeps the three built-in ledgers — `tasks` (the task board), `goa
 
 ## Write scope
 
-Every specialist but `brand_designer` declares an explicit `context` confining `workspace_write`/`workspace_create` to `Projects/Fintech rebrand.md` — this company's one shared active-work document — plus its own `Agents/<id>/` home, which stays writable regardless. `Standards/` and `Playbooks/` are left out of that grant: governance documents, read by everyone but reserved for the operator and `brand_designer` (unconfined) to change.
+Every specialist but `brand_designer` declares an explicit `context` confining `workspace_write`/`workspace_create` to `projects/fintech-rebrand.md` — this company's one shared active-work document — plus its own `Agents/<id>/` home, which stays writable regardless. `standards/` and `playbooks/` are left out of that grant: governance documents, read by everyone but reserved for the operator and `brand_designer` (unconfined) to change.
 

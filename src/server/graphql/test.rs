@@ -1968,7 +1968,7 @@ async fn workspace_search_resolves_hits_with_paths_and_totals() {
     assert_eq!(results["total"], 1, "{value}");
     let hits = results["hits"].as_array().unwrap();
     assert_eq!(hits.len(), 1);
-    assert_eq!(hits[0]["path"], "Standards/Support.md");
+    assert_eq!(hits[0]["path"], "standards/Support.md");
     assert_eq!(hits[0]["matched"], "content");
     assert_eq!(hits[0]["node"]["id"], "n-support");
     assert_eq!(hits[0]["node"]["kind"], "file");

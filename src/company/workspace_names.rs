@@ -1,7 +1,7 @@
 //! The one naming rule for everything the runtime puts in a workspace:
 //! **lowercase, dashed**.
 //!
-//! A workspace mixed `Agents/`, `Playbooks/Close checklist.md`, `Page.tsx` and
+//! A workspace mixed `Agents/`, `playbooks/close-checklist.md`, `Page.tsx` and
 //! `page.toml` — three conventions in one tree, none of them stated anywhere.
 //! That is not only untidy. Identity in the workspace is *by path*, so the
 //! shape of a name is load-bearing:
