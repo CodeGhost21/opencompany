@@ -72,6 +72,35 @@ pub enum McpSource {
     /// flavour of [`Self::Manifest`] — nobody wrote it into *this* company, and
     /// the console must not label it as operator-added.
     Default,
+    /// Installed from an upstream MCP directory — Smithery.ai or the official
+    /// `modelcontextprotocol/registry` — through the console's browse surface
+    /// (issue #1270).
+    ///
+    /// Distinct from [`Self::Runtime`] because the two are keyed differently and
+    /// deleted differently: a runtime server is addressed by `name` and lives in
+    /// this company's runtime index, while a registry install is addressed by a
+    /// stable `server_id` and lives in OpenHuman's own store, so removing one
+    /// means uninstalling it there rather than dropping an index row.
+    Registry,
+}
+
+/// The operator-facing refusal for a directory entry that can only run as a
+/// local stdio subprocess (issue #1270).
+///
+/// Says *why* rather than "unsupported": the blocker is not the read-only root
+/// filesystem (tenants mount a writable `/data` and an emptyDir `/tmp`) but that
+/// the tenant image carries no Node, Python or package manager to launch one
+/// with — a stdio install would fail on `npx: not found`. One function so the
+/// two places that can refuse an install — the catalogue pre-check at the route
+/// and the post-install belt in
+/// [`McpRuntime`](crate::harness::mcp::McpRuntime) — say the same sentence, and
+/// so the day a sidecar makes stdio runnable there is one message to retire.
+pub fn stdio_install_refusal(qualified_name: &str) -> String {
+    format!(
+        "`{qualified_name}` offers no hosted HTTP endpoint — it can only run as a local \
+         subprocess, and this deployment ships no Node, Python or package manager to launch \
+         one. Pick a server with a hosted endpoint, or add it by URL if you host it yourself."
+    )
 }
 
 /// Resolved outbound auth material for one MCP server.
@@ -235,6 +264,12 @@ pub struct McpServerDecl {
     pub allowed_tools: Vec<String>,
     /// Deny-list of remote tool names (takes precedence).
     pub disallowed_tools: Vec<String>,
+    /// Remote tool names the operator declares **read-only** on this server
+    /// (issue #1124). Merged through [`effective_mcp_servers`] and editable
+    /// through the runtime-override layer exactly as the two lists above are, so
+    /// an operator expresses it without hand-editing the manifest. A call to a
+    /// tool named here does not park under `auto`; every other bridge call does.
+    pub read_only_tools: Vec<String>,
     /// Per-request timeout in seconds.
     pub timeout_secs: u64,
     /// Whether this server is exposed to agents.
@@ -253,6 +288,7 @@ impl McpServerDecl {
             description: server.description.clone(),
             allowed_tools: normalize_tools(&server.allowed_tools),
             disallowed_tools: normalize_tools(&server.disallowed_tools),
+            read_only_tools: normalize_tools(&server.read_only_tools),
             timeout_secs: server.timeout_secs,
             enabled: server.enabled,
             source,
@@ -327,6 +363,23 @@ pub fn effective_mcp_servers(
     }
 
     out
+}
+
+/// Flattens a company's effective MCP servers into the `(server, tool)`
+/// read-only set the approval gate consults (issue #1124).
+///
+/// Keyed by the server's `name` — the slug the `mcp_call_tool` bridge names its
+/// server under — paired with each `read_only_tools` entry. The gate looks a
+/// live call's `(server, tool)` pair up here; an undeclared pair is simply
+/// absent, which is the gated answer. A disabled server contributes nothing: it
+/// hands out no tool, so a call through it could not have been made.
+pub fn mcp_read_set(servers: &[McpServerDecl]) -> crate::policy::McpReadSet {
+    crate::policy::McpReadSet::from_pairs(servers.iter().filter(|s| s.enabled).flat_map(|server| {
+        server
+            .read_only_tools
+            .iter()
+            .map(move |tool| (server.name.clone(), tool.clone()))
+    }))
 }
 
 /// Loads the runtime server index from the secret store. A missing/empty key
@@ -910,6 +963,7 @@ mod tests {
             command: None,
             allowed_tools: Vec::new(),
             disallowed_tools: Vec::new(),
+            read_only_tools: Vec::new(),
             timeout_secs: 30,
             enabled: true,
             auth_secret: None,

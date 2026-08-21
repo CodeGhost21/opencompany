@@ -1,0 +1,91 @@
+# Workflow graph: progress_checkin
+#
+# Referenced by `[workflows].enabled` in ../company.toml. A company's committed
+# goals are tested against what actually happened. Measuring against their own
+# commitment rather than against the cohort is the point: relative progress hides
+# a cohort that is uniformly stuck.
+
+id = "progress_checkin"
+name = "Progress check-in"
+description = "A company is measured against what it committed to, and what it actually needs is established."
+
+[[node]]
+id = "checkpoint"
+kind = "trigger"
+name = "Checkpoint"
+summary = "A cycle checkpoint, or a company's updates have started sounding the same each week."
+
+[[node]]
+id = "commitment"
+kind = "agent"
+name = "Read what they committed to"
+summary = "In their own words, before hearing this week's narrative."
+agent = "progress_coach"
+
+[[node]]
+id = "actual"
+kind = "agent"
+name = "Get the number"
+summary = "A narrative about momentum is what arrives when the number did not move."
+agent = "progress_coach"
+
+[[node]]
+id = "ontrack"
+kind = "condition"
+name = "On track?"
+summary = "Branch on whether they met what they themselves said."
+[node.config]
+field = "=item.on_track"
+
+[[node]]
+id = "unblock"
+kind = "agent"
+name = "Find what would help"
+summary = "Usually a specific introduction. Almost never more advice, though advice is what gets offered."
+agent = "mentor_matcher"
+
+[[node]]
+id = "next"
+kind = "agent"
+name = "Set the next commitment"
+summary = "Specific enough that the next check-in can be measured rather than discussed."
+agent = "progress_coach"
+
+[[node]]
+id = "review"
+kind = "output"
+name = "Report to the desk"
+summary = "The real state, including \"their update looks fine and I learned nothing new\"."
+[node.destination]
+kind = "channel"
+target = "cohort_review"
+
+[[edge]]
+from = "checkpoint"
+to = "commitment"
+
+[[edge]]
+from = "commitment"
+to = "actual"
+
+[[edge]]
+from = "actual"
+to = "ontrack"
+
+[[edge]]
+from = "ontrack"
+to = "next"
+label = "yes"
+
+[[edge]]
+from = "ontrack"
+to = "unblock"
+label = "no"
+
+[[edge]]
+from = "unblock"
+to = "next"
+
+[[edge]]
+from = "next"
+to = "review"

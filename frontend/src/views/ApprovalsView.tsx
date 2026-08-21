@@ -22,7 +22,12 @@ import {
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import type { CompanyFeed } from "@/hooks/use-company";
-import { approvedByRuntimeLine, approvedLine } from "@/lib/approval-wording";
+import {
+  approvedByRuntimeLine,
+  approvedLine,
+  batchPositions,
+  staleDecisionLine,
+} from "@/lib/approval-wording";
 import { approvalSummary, grantHeadline, timeAgo, toolAction, untilLabel } from "@/lib/language";
 import { approvalsForTask } from "@/lib/task-approvals";
 import { startVisiblePolling } from "@/lib/visible-poll";
@@ -90,6 +95,13 @@ interface Props {
   sub?: string | null;
   onResolved: (systemLine: string) => void;
   onGoToConversation: () => void;
+  /**
+   * Called the instant a decide click starts, before the network call
+   * (issue #1211) — so the shell can mark this approval as "this tab decided
+   * it" before the SSE echo of the resolution has a chance to race ahead of
+   * the awaited response and arrive first.
+   */
+  onDecideStart?: (approvalId: string) => void;
 }
 
 /** The approvals inbox: the few things the company parked for the operator. */
@@ -100,6 +112,7 @@ export function ApprovalsView({
   sub,
   onResolved,
   onGoToConversation,
+  onDecideStart,
 }: Props) {
   // Issue #373: in-flight state is per approval, not a single module-wide slot.
   //
@@ -157,15 +170,14 @@ export function ApprovalsView({
    * Counted over what is still pending rather than over the whole batch, so the
    * number shrinks as rows are decided instead of promising a fourth row that
    * has already been signed off.
+   *
+   * Both halves of "N of M" come from one walk of that pending list (#1289): a
+   * per-card `index` as well as the batch `total`, so a two-card turn reads
+   * "1 of 2" then "2 of 2" rather than the hardcoded "1 of 2" twice, and a
+   * focus-narrowed view cannot count the position over a subset and the total
+   * over the whole.
    */
-  const batchTotals = useMemo(() => {
-    const counts = new Map<string, number>();
-    for (const a of approvals) {
-      if (!a.batch) continue;
-      counts.set(a.batch, (counts.get(a.batch) ?? 0) + 1);
-    }
-    return counts;
-  }, [approvals]);
+  const batchPos = useMemo(() => batchPositions(approvals), [approvals]);
 
   const markInFlight = (id: string, verdict: Verdict | null) =>
     setInFlight((prev) => {
@@ -179,6 +191,7 @@ export function ApprovalsView({
     // Per-row guard: only a double-press on THIS card is ignored. The global
     // early return that used to live here made every other card inert too.
     if (inFlight.has(a.id)) return;
+    onDecideStart?.(a.id);
     markInFlight(a.id, verdict);
     const startedAt = Date.now();
     try {
@@ -203,6 +216,32 @@ export function ApprovalsView({
       // so approving one of several releases nothing — and saying otherwise is
       // the one part of this flow that actively misleads.
       const stillAwaiting = "stillAwaiting" in answer ? answer.stillAwaiting : undefined;
+      // Issue #1449, and it comes FIRST because everything below it is written
+      // for a decision that actually happened. The host answers `200` to a click
+      // on a card whose deadline has passed — it has to, nothing failed — and
+      // then default-denies it. Read that way, the wording below was a green
+      // success line over work the host had just refused, and the operator's
+      // only next signal was the work silently not happening.
+      //
+      // `null` means the host said `settled`, or is too old to say. Both keep
+      // the pre-#1449 wording: guessing is the defect, in either direction.
+      const stale = staleDecisionLine(
+        "outcome" in answer ? answer.outcome : undefined,
+        approvalSummary(a),
+      );
+      if (stale) {
+        onResolved(stale);
+        // Neither success nor error, exactly as the #380 timeout line is
+        // neither: the request was answered correctly and the answer is that
+        // there was no decision left to make. Still exactly one toast for this
+        // click (#1211) — the SSE echo for the id is suppressed by
+        // `onDecideStart` above, whichever verdict the host ends up appending.
+        toast.info(stale);
+        // The queue is the reconciliation: this card is gone from the host's
+        // parked set either way, so a refresh drops it.
+        void feed.refresh();
+        return;
+      }
       const line =
         verdict !== "approve"
           ? `Declined: ${approvalSummary(a)}`
@@ -262,6 +301,10 @@ export function ApprovalsView({
   return (
     <div className="flex-1 overflow-y-auto">
       <div className="mx-auto w-full max-w-3xl px-4 py-6">
+        {/* The queue's own count heading below only renders once loaded, so
+            it can't be the page's one `h1` — this stays present through
+            loading, error and empty states alike (issue #1221). */}
+        <h1 className="sr-only">Approvals</h1>
         {/* Issue #883: the filter says so, and offers the way out of itself.
             A narrowed queue that looked identical to the whole one would make a
             decided-elsewhere approval look like it had vanished. */}
@@ -322,7 +365,8 @@ export function ApprovalsView({
                   now={now}
                   askerNames={askerNames}
                   deciding={inFlight.get(a.id) ?? null}
-                  batchTotal={batchTotals.get(a.batch ?? "") ?? 1}
+                  batchIndex={batchPos.get(a.id)?.index ?? 1}
+                  batchTotal={batchPos.get(a.id)?.total ?? 1}
                   onDecide={(verdict, scope) => void decide(a, verdict, scope)}
                 />
               ))}
@@ -549,6 +593,7 @@ function ApprovalCard({
   now,
   askerNames,
   deciding,
+  batchIndex,
   batchTotal,
   onDecide,
 }: {
@@ -557,6 +602,12 @@ function ApprovalCard({
   askerNames: Map<string, string>;
   /** The verdict this card is waiting on, or `null` when it is idle (#373). */
   deciding: Verdict | null;
+  /**
+   * This card's 1-based position within its turn's batch — the numerator of
+   * "N of M from the same turn" (#1289). `1` is the default for an approval
+   * with no batch, where the line is not shown at all.
+   */
+  batchIndex: number;
   /**
    * How many rows this turn's batch still has waiting, including this one
    * (#842). `1` — the default for an approval with no batch — says nothing.
@@ -646,7 +697,7 @@ function ApprovalCard({
                   // here, on its own, and pointing at the others would imply a
                   // batch decision this page does not offer. The conversation's
                   // card is where one Approve covers all of them (#842).
-                  `1 of ${batchTotal} from the same turn`
+                  `${batchIndex} of ${batchTotal} from the same turn`
                 : undefined
           }
         />

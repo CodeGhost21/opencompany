@@ -126,6 +126,16 @@ impl ContextStore for ConfinedContext {
         Ok(Vec::new())
     }
 
+    async fn delete(
+        &self,
+        _id: &CompanyId,
+        _addr: &crate::ports::types::ChunkAddr,
+    ) -> crate::Result<bool> {
+        // Nothing is ever stored, so there is never anything to delete —
+        // `false` is the truth, same as the empty reads above.
+        Ok(false)
+    }
+
     async fn peek(
         &self,
         _id: &CompanyId,
@@ -342,6 +352,7 @@ mod tests {
             "query_company",
             "spawn_task",
             "delegate_to_desk",
+            "memory_forget",
             "memory_recall",
             "memory_store",
             "workspace_read",

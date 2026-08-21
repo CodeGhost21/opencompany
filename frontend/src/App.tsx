@@ -15,12 +15,14 @@ import {
   createLocalInstance,
   embeddedHost,
   localInstances,
+  openSshTunnel,
   startLocalInstance,
   stopLocalInstance,
   type LocalInstance,
 } from "@/api/transport/desktop";
 import { ApiError } from "@/api/types";
 import { AddHostDialog, ConsoleChrome } from "@/components/host-switcher";
+import { Button } from "@/components/ui/button";
 import { resolveConfig } from "@/config";
 import {
   addConnection,
@@ -31,7 +33,8 @@ import {
   restoreConnections,
   useConnections,
 } from "@/connections/registry";
-import { HostsProvider, type HostsValue } from "@/connections/HostsContext";
+import { HostsProvider, useHosts, type HostsValue } from "@/connections/HostsContext";
+import { firstHostCopy } from "@/connections/first-host";
 import type { ConnectionId } from "@/connections/types";
 import { ConnectionConsole } from "@/views/ConnectionConsole";
 
@@ -407,10 +410,14 @@ function Console() {
         try {
           redemption.current ??= verifyCode(client!, magicLink.company ?? config.company, magicLink.code);
           await redemption.current;
-        } catch {
+        } catch (err) {
           // A dead link is not fatal — fall through to sign-in and let them ask
-          // for another. The reason stays vague on purpose.
-          if (!cancelled) setAuth({ ready: true, failed: true });
+          // for another. It has to *say so*, though: `failed` alone only forces
+          // the form, and the form a refused link lands on is byte-identical to
+          // the one a cold visit gets, so the click reads as having done
+          // nothing at all (issue #1305). The reason stays vague about *people*
+          // and specific about the *credential* — see `magicLinkNotice`.
+          if (!cancelled) setAuth({ ready: true, failed: true, notice: magicLinkNotice(err) });
           return;
         }
       }
@@ -482,8 +489,8 @@ function Console() {
     connections,
     selected: active?.id ?? null,
     onSelect: setSelected,
-    onAdd: (baseUrl) => {
-      const id = addConnection({ baseUrl });
+    onAdd: (baseUrl, connector) => {
+      const id = addConnection({ baseUrl, connector });
       setSelected(id);
       void probe(id);
     },
@@ -503,6 +510,26 @@ function Console() {
             );
             if (opened) setSelected(opened.id);
           }
+        }
+      : undefined,
+    // Only where a process can be started, like the local half above. The
+    // tunnel is opened here rather than left to the first probe so that a
+    // destination `ssh` refuses is reported in the dialog the operator is
+    // standing in front of, instead of becoming a red row they have to go and
+    // read. Every *later* launch does it from `probe`, where the address of a
+    // remembered tunnel is rebuilt.
+    onAddSsh: isDesktopRuntime()
+      ? async (target) => {
+          const tunnel = await openSshTunnel(target);
+          const id = addConnection({
+            baseUrl: tunnel.baseUrl,
+            // The machine's name, not the loopback port: the port is this
+            // launch's and means nothing to the person who typed the other.
+            label: target.destination,
+            connector: { kind: "ssh", target },
+          });
+          setSelected(id);
+          void probe(id);
         }
       : undefined,
     onStartLocal: isDesktopRuntime()
@@ -544,7 +571,7 @@ function Console() {
           // gone still has somewhere else to connect to — and "Add a host" is
           // the only way out of a desktop that holds none.
           <ConsoleChrome>
-            <NoConnection starting={!embedded.resolved} />
+            <NoConnection starting={!embedded.resolved} desktop={isDesktopRuntime()} />
           </ConsoleChrome>
         )}
       </div>
@@ -603,16 +630,25 @@ function Waiting({ children }: { children: React.ReactNode }) {
 /**
  * What to show when there is no connection at all.
  *
- * The browser build cannot reach this: its bootstrap connection exists whether
- * or not the host answers, and an unreachable one is a *console* rendering an
- * error rather than an absence. The desktop genuinely can — it holds only the
- * hosts it was told about, and the embedded one may not have started.
+ * Two runtimes reach this and they are not in the same situation. The desktop
+ * holds only the hosts it was told about, and the one inside it may not have
+ * started — something went wrong. A **hub** has no bootstrap connection at all
+ * (`hub-console.md`), so a hub nobody has added a host to yet is simply new.
+ * `firstHostCopy` is what keeps a first run from reading as a failure.
  *
- * The host switcher stays on screen above this (see `ConsoleChrome`), because
- * an operator whose local host is gone still has somewhere else to connect to,
- * and this is the state in which that matters most.
+ * The ordinary browser build still cannot reach it: its bootstrap connection
+ * exists whether or not the host answers, and an unreachable one is a *console*
+ * rendering an error rather than an absence.
+ *
+ * The host switcher stays on screen above this (see `ConsoleChrome`), and the
+ * button below opens its dialog. Both, deliberately: the switcher is where an
+ * operator will look next time, and the button is the answer *this* time —
+ * telling somebody with nothing on screen to go and find a control is not an
+ * answer, it is a description of one.
  */
-function NoConnection({ starting }: { starting: boolean }) {
+function NoConnection({ starting, desktop }: { starting: boolean; desktop: boolean }) {
+  const { setAddingHost } = useHosts();
+  const copy = firstHostCopy(desktop);
   return (
     <FullScreen>
       {starting ? (
@@ -620,13 +656,12 @@ function NoConnection({ starting }: { starting: boolean }) {
           <span data-testid="no-connection-starting">Starting the host on this computer…</span>
         </Waiting>
       ) : (
-        <div className="max-w-sm space-y-2" data-testid="no-connection">
-          <p className="text-sm font-medium">No host to show</p>
-          <p className="text-sm text-muted-foreground">
-            The host on this computer didn't start — another copy of OpenCompany may be
-            holding its data. Quit the other copy and reopen this one, or add a host from
-            the switcher above.
-          </p>
+        <div className="max-w-sm space-y-3" data-testid="no-connection">
+          <p className="text-sm font-medium">{copy.title}</p>
+          <p className="text-sm text-muted-foreground">{copy.body}</p>
+          <Button data-testid="no-connection-add" onClick={() => setAddingHost(true)}>
+            {copy.action}
+          </Button>
         </div>
       )}
     </FullScreen>
@@ -652,6 +687,45 @@ function hubNotice(err: unknown): string {
       return "This host isn't connected to a TinyHumans account. Sign in with a link instead.";
     default:
       return "We couldn't complete that sign-in. Try a link below.";
+  }
+}
+
+/**
+ * What to tell someone whose magic link did not redeem.
+ *
+ * The counterpart of {@link hubNotice}, and it exists for the same reason: a
+ * refused sign-in that says nothing renders the ordinary form, which is
+ * indistinguishable from the screen a cold visit gets. A link that lapsed after
+ * fifteen minutes is the *routine* outcome of clicking one out of a mailbox the
+ * next morning — not an edge case — and the person who does it has no reason to
+ * believe pressing "Email me a link" will behave any differently (#1305).
+ *
+ * Every line is about the *credential* or the *host*: "expired", "already
+ * used", "couldn't reach". None of them names an address or admits that one has
+ * an account here, so this leaks exactly as little as the silence it replaces —
+ * which is the rule the whole sign-in surface is built around, and the reason
+ * the host answers `invalid_login` to an unknown address, a lapsed code and a
+ * spent one alike. That single answer is also why the first case below has to
+ * name both causes: the console genuinely cannot tell which one happened.
+ */
+export function magicLinkNotice(err: unknown): string {
+  const api = err instanceof ApiError ? err : null;
+  // A host that cannot be reached checked nothing, so the link may well still
+  // be good. Saying it expired would send someone off to request a second one
+  // that cannot arrive either.
+  if (api?.status === 0) {
+    return "We couldn't reach this company's host, so that sign-in link wasn't checked. Try again in a moment.";
+  }
+  switch (api?.code) {
+    case "invalid_login":
+      return "That sign-in link didn't work — links expire after 15 minutes and can only be used once. Request a new one below.";
+    case "auth_mode":
+      // The company changed how it signs people in while the link sat in a
+      // mailbox. "Request a new one" would be advice for a form that is no
+      // longer on screen, so this one points at whatever replaced it.
+      return "This company doesn't sign in with email links any more. Use the sign-in shown below.";
+    default:
+      return "That sign-in link didn't work. Request a new one below.";
   }
 }
 

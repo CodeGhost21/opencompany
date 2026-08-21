@@ -52,9 +52,13 @@
 // * **A rail opens under the drag.** `over` already tracks the column the
 //   pointer is on, so the same state that draws the drop highlight suppresses
 //   the collapse. Dropping into an empty column looks the way it always did.
-// * **Nothing collapses unless something else is populated.** A board that is
-//   empty everywhere would otherwise render as six rails and no board, which is
-//   a worse answer to "show me the work" than the one this fixes.
+// * **Nothing collapses unless the columns genuinely do not fit.** The premise
+//   is *"the 101 cards you came for are two columns off the right edge"* — which
+//   is a claim about width, so width is what it is tested against. Collapsing on
+//   "some other column has cards" instead cost two things: a list declared this
+//   morning (three stages, one row) rendered as two rails of rotated text beside
+//   800px of empty page, and a rail opening under a drag shoved every column to
+//   its right by a quarter of the board while the operator was aiming at one.
 //
 // Clicking a rail pins it open, and a pinned column stays open until the
 // operator collapses it again. Nothing else may re-collapse it: a column that
@@ -64,6 +68,7 @@
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -113,11 +118,30 @@ const CARD_MIME = "application/x-opencompany-task";
 /**
  * The collapsed column's width.
  *
- * Wide enough for the vertical label and the count badge under it, narrow
+ * Wide enough for the vertical label and the count badge beside it, narrow
  * enough that three of them cost less than half of one open column — which is
  * the whole point: the room has to go somewhere the operator can use it.
  */
 const RAIL_WIDTH = "w-10";
+
+/**
+ * An open column's width and the gutter between two of them, in pixels, as the
+ * design reference draws them (Figma `927:2643` / `927:2294`).
+ *
+ * Duplicated here as numbers because {@link fits} has to answer "would these
+ * columns fit?" *before* they are laid out — the whole point is to decide
+ * whether to collapse, and measuring the collapsed board to find out would
+ * answer a different question every frame. The Tailwind classes below are the
+ * same two values; they are asserted equal in `board-collapsed-columns.test.ts`
+ * so a change to one cannot silently drift from the other.
+ */
+export const COLUMN_PX = 260;
+export const GUTTER_PX = 20;
+/** The trailing spacer past the last column. See the gutter note at the foot. */
+const TRAILING_PX = 16;
+
+export const COLUMN_WIDTH = "w-65";
+export const BOARD_GAP = "gap-5";
 
 export interface BoardProps<T extends BoardRow> {
   /** The columns, in board order. The host declares them; nothing here does. */
@@ -133,7 +157,13 @@ export interface BoardProps<T extends BoardRow> {
   onMiss: () => void;
   /** Show a placeholder in each column until the first read lands. */
   loading?: boolean;
-  /** What an empty column says. */
+  /**
+   * What an empty column says.
+   *
+   * An affordance, not a status. "Nothing here" reports a fact the empty column
+   * is already making obvious; the board's whole gesture is the drop, and the
+   * empty column is the one place with room to say so.
+   */
   emptyHint?: string;
   /** Rendered at the top of the column whose id this names — the intake slot. */
   columnHeader?: (column: TaskColumn) => ReactNode;
@@ -147,7 +177,7 @@ export function LedgerBoard<T extends BoardRow>({
   onMove,
   onMiss,
   loading = false,
-  emptyHint = "Nothing here",
+  emptyHint = "Drop tasks here",
   columnHeader,
 }: BoardProps<T>) {
   const [dragId, setDragId] = useState<string | null>(null);
@@ -211,6 +241,41 @@ export function LedgerBoard<T extends BoardRow>({
   // opening a card — must not leave a frame running against a detached node.
   useEffect(() => stopEdgeScroll, [stopEdgeScroll]);
 
+  /**
+   * How wide the board's viewport is, so {@link fits} can ask whether the
+   * columns would fit at full width.
+   *
+   * A layout effect rather than an ordinary one: this runs before paint, so a
+   * board never flashes six rails on its first frame on its way to measuring
+   * itself. `0` is the pre-measurement value and also what jsdom reports, and
+   * both mean the same thing here — *nothing is known to fit* — which is the
+   * conservative answer and the one the pre-existing collapse tests assert.
+   */
+  const [viewport, setViewport] = useState(0);
+  /**
+   * Whether the board is scrolled to its last column.
+   *
+   * Drives the right-edge fade. The reference lets the last column bleed off
+   * the edge on purpose — it is the affordance that says the board continues —
+   * but a hard clip is indistinguishable from a layout bug, and at 1100px the
+   * app was cutting a button through the middle of its own label. The fade is
+   * what makes the same bleed read as *more this way*.
+   */
+  const [atEnd, setAtEnd] = useState(true);
+  useLayoutEffect(() => {
+    const board = boardRef.current;
+    if (!board) return;
+    const measure = () => {
+      setViewport(board.clientWidth);
+      setAtEnd(board.scrollLeft + board.clientWidth >= board.scrollWidth - 1);
+    };
+    measure();
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(measure);
+    observer.observe(board);
+    return () => observer.disconnect();
+  }, []);
+
   const togglePin = useCallback((id: string) => {
     setPinned((current) => {
       const next = new Set(current);
@@ -236,14 +301,36 @@ export function LedgerBoard<T extends BoardRow>({
   }, [columns, rows, statusOf]);
 
   /**
+   * Whether every column would fit side by side at full width.
+   *
+   * The arithmetic rather than a measurement of the rendered board, because the
+   * rendered board is *already* collapsed — reading its `scrollWidth` would
+   * report that everything fits, uncollapse, report that it does not, and
+   * oscillate. This asks the one question the decision actually turns on, and
+   * its answer does not depend on its own outcome.
+   */
+  const fits =
+    viewport > 0 &&
+    columns.length * COLUMN_PX +
+      Math.max(0, columns.length - 1) * GUTTER_PX +
+      TRAILING_PX <=
+      viewport;
+
+  /**
    * Whether an empty column is allowed to collapse at all.
    *
-   * Only once some *other* column has work in it. A board that is empty
+   * Only when the columns do not fit, and only once some *other* column has
+   * work in it. The second half is the original guard — a board that is empty
    * everywhere has nothing to make room for, and six rails would answer "show
-   * me the work" worse than the three honest zeros this issue is about.
+   * me the work" worse than the three honest zeros #1101 is about. The first
+   * half is what stops a board with room to spare paying the same price: a
+   * three-stage list holding one row has no columns off any edge to rescue, so
+   * folding two of its three into rails buys nothing and costs the whole shape
+   * of the board.
    */
   const collapsible =
     !loading &&
+    !fits &&
     columns.some((column) => (held.get(column.id)?.length ?? 0) > 0);
 
   /** Reads the dragged row out of the event, falling back to our own state. */
@@ -261,212 +348,244 @@ export function LedgerBoard<T extends BoardRow>({
   }
 
   return (
-    <div
-      ref={boardRef}
-      data-testid="ledger-board"
-      onDragOver={(event) => {
-        // The columns preventDefault as well; this handler also covers the
-        // pixels between and around them, so the board keeps scrolling while a
-        // drag crosses a gap on its way to a far column.
-        event.preventDefault();
-        edgeScrollTo(event.clientX);
-      }}
-      onDragLeave={(event) => {
-        // Only when the pointer has genuinely left the board, not while it
-        // moves between two of the board's own children.
-        if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+    <div className="relative flex min-h-0 flex-1">
+      <div
+        ref={boardRef}
+        data-testid="ledger-board"
+        onDragOver={(event) => {
+          // The columns preventDefault as well; this handler also covers the
+          // pixels between and around them, so the board keeps scrolling while a
+          // drag crosses a gap on its way to a far column.
+          event.preventDefault();
+          edgeScrollTo(event.clientX);
+        }}
+        onDragLeave={(event) => {
+          // Only when the pointer has genuinely left the board, not while it
+          // moves between two of the board's own children.
+          if (
+            !event.currentTarget.contains(event.relatedTarget as Node | null)
+          ) {
+            stopEdgeScroll();
+          }
+        }}
+        onDrop={(event) => {
+          // Columns claim their own drops and stop them here, so anything that
+          // reaches this handler landed on dead board pixels.
+          event.preventDefault();
           stopEdgeScroll();
-        }
-      }}
-      onDrop={(event) => {
-        // Columns claim their own drops and stop them here, so anything that
-        // reaches this handler landed on dead board pixels.
-        event.preventDefault();
-        stopEdgeScroll();
-        const id = event.dataTransfer?.getData(CARD_MIME) || dragId;
-        setDragId(null);
-        setOver(null);
-        if (id) onMiss();
-      }}
-      className="flex min-h-0 flex-1 gap-4 overflow-x-auto py-1"
-    >
-      {columns.map((column) => {
-        const cards = held.get(column.id) ?? [];
-        const head = columnHeader?.(column);
-        // A column whose header slot is filled carries an affordance — the
-        // intake `+` is the one this board was built for — and a rail has
-        // nowhere to put it. Collapsing it would hide a control rather than
-        // some whitespace, so it stays open. `false` counts as empty: a caller
-        // writing `column.id === ADD_TASK_COLUMN && <Plus/>` returns it for
-        // every other column.
-        const hasHead = head != null && head !== false && head !== "";
-        const collapsed =
-          collapsible &&
-          cards.length === 0 &&
-          !hasHead &&
-          !pinned.has(column.id) &&
-          over !== column.id;
-        // Offered only where it undoes something: on a column the operator
-        // pinned open that would otherwise have collapsed itself.
-        const canCollapse =
-          collapsible && cards.length === 0 && pinned.has(column.id);
-        return (
-          <div
-            key={column.id}
-            data-testid="board-column"
-            data-column={column.id}
-            data-collapsed={collapsed ? "true" : "false"}
-            onDragOver={(event) => {
-              event.preventDefault();
-              // Runs before the board's own dragover (this is the inner
-              // handler), and the board leaves it alone — so the cursor says
-              // "move" over a column and nothing over the dead pixels.
-              if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
-              setOver(column.id);
-            }}
-            onDragLeave={(event) => {
-              // Only when the pointer has genuinely left the column. A rail
-              // that opens under the drag replaces its own contents, and an
-              // element removed from under a pointer can fire `dragleave` —
-              // which without this guard would collapse the column again on
-              // the frame it opened, forever.
-              if (
-                event.currentTarget.contains(event.relatedTarget as Node | null)
-              )
-                return;
-              setOver((current) => (current === column.id ? null : current));
-            }}
-            onDrop={(event) => {
-              event.preventDefault();
-              // Claim the drop, so anything still reaching the board's own
-              // handler is known to have missed every column.
-              event.stopPropagation();
-              stopEdgeScroll();
-              const row = dragged(event);
-              setDragId(null);
-              setOver(null);
-              // A row dropped back on its own column is a no-op, not a move:
-              // the one deliberate silence on a board where every other exit
-              // says something.
-              if (row && statusOf(row) !== column.id) onMove(row, column.id);
-            }}
-            className={cn(
-              "flex min-h-0 shrink-0 flex-col rounded-xl border bg-card/40 transition-colors",
-              collapsed ? RAIL_WIDTH : "w-72",
-              over === column.id && "border-primary/40 bg-accent/40",
-            )}
-          >
-            {collapsed ? (
-              // The whole rail is the control, so the target is the thing the
-              // eye reads rather than a chevron tucked inside it. The label and
-              // count are `aria-hidden` and restated in the button's own name:
-              // read as text they run together ("To-do0"), and a vertical
-              // writing mode is a paint instruction that a screen reader cannot
-              // see at all.
-              <button
-                type="button"
-                onClick={() => togglePin(column.id)}
-                aria-label={`Expand ${column.label}, ${cards.length} cards`}
-                title={`Expand ${column.label}`}
-                className="flex min-h-0 flex-1 cursor-pointer flex-col items-center gap-2 rounded-xl py-3 outline-none transition-colors hover:bg-accent/60 focus-visible:ring-3 focus-visible:ring-ring/50"
-              >
-                <span
-                  aria-hidden
-                  data-testid="column-label"
-                  className="min-h-0 [writing-mode:vertical-rl] truncate text-sm font-medium text-muted-foreground"
+          const id = event.dataTransfer?.getData(CARD_MIME) || dragId;
+          setDragId(null);
+          setOver(null);
+          if (id) onMiss();
+        }}
+        onScroll={(event) => {
+          const el = event.currentTarget;
+          setAtEnd(el.scrollLeft + el.clientWidth >= el.scrollWidth - 1);
+        }}
+        className={cn("flex min-h-0 flex-1 overflow-x-auto py-1", BOARD_GAP)}
+      >
+        {columns.map((column) => {
+          const cards = held.get(column.id) ?? [];
+          const head = columnHeader?.(column);
+          // A column whose header slot is filled carries an affordance — the
+          // intake `+` is the one this board was built for — and a rail has
+          // nowhere to put it. Collapsing it would hide a control rather than
+          // some whitespace, so it stays open. `false` counts as empty: a caller
+          // writing `column.id === ADD_TASK_COLUMN && <Plus/>` returns it for
+          // every other column.
+          const hasHead = head != null && head !== false && head !== "";
+          const collapsed =
+            collapsible &&
+            cards.length === 0 &&
+            !hasHead &&
+            !pinned.has(column.id) &&
+            over !== column.id;
+          // Offered only where it undoes something: on a column the operator
+          // pinned open that would otherwise have collapsed itself.
+          const canCollapse =
+            collapsible && cards.length === 0 && pinned.has(column.id);
+          return (
+            <div
+              key={column.id}
+              data-testid="board-column"
+              data-column={column.id}
+              data-collapsed={collapsed ? "true" : "false"}
+              onDragOver={(event) => {
+                event.preventDefault();
+                // Runs before the board's own dragover (this is the inner
+                // handler), and the board leaves it alone — so the cursor says
+                // "move" over a column and nothing over the dead pixels.
+                if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
+                setOver(column.id);
+              }}
+              onDragLeave={(event) => {
+                // Only when the pointer has genuinely left the column. A rail
+                // that opens under the drag replaces its own contents, and an
+                // element removed from under a pointer can fire `dragleave` —
+                // which without this guard would collapse the column again on
+                // the frame it opened, forever.
+                if (
+                  event.currentTarget.contains(
+                    event.relatedTarget as Node | null,
+                  )
+                )
+                  return;
+                setOver((current) => (current === column.id ? null : current));
+              }}
+              onDrop={(event) => {
+                event.preventDefault();
+                // Claim the drop, so anything still reaching the board's own
+                // handler is known to have missed every column.
+                event.stopPropagation();
+                stopEdgeScroll();
+                const row = dragged(event);
+                setDragId(null);
+                setOver(null);
+                // A row dropped back on its own column is a no-op, not a move:
+                // the one deliberate silence on a board where every other exit
+                // says something.
+                if (row && statusOf(row) !== column.id) onMove(row, column.id);
+              }}
+              className={cn(
+                // A full surface rung, not an alpha of one. `bg-card/40` over the
+                // page is a whole value step at 40% opacity, which in dark
+                // (`#0C0D0F` on `#08090B`) is no step at all — the board read as
+                // a flat black field with hairline borders, and the cards inside
+                // it were the same colour as the column holding them. The
+                // gradient is the reference's vertical wash, and it is what keeps
+                // the light board from reading as a flat card too.
+                "flex min-h-0 shrink-0 flex-col rounded-xl border bg-gradient-to-b from-card to-muted/60 transition-colors",
+                collapsed ? RAIL_WIDTH : COLUMN_WIDTH,
+                over === column.id &&
+                  "border-primary/40 from-accent/50 to-accent/50",
+              )}
+            >
+              {collapsed ? (
+                // The whole rail is the control, so the target is the thing the
+                // eye reads rather than a chevron tucked inside it. The label and
+                // count are `aria-hidden` and restated in the button's own name:
+                // read as text they run together ("To-do0"), and a vertical
+                // writing mode is a paint instruction that a screen reader cannot
+                // see at all.
+                <button
+                  type="button"
+                  onClick={() => togglePin(column.id)}
+                  aria-label={`Expand ${column.label}, ${cards.length} cards`}
+                  title={`Expand ${column.label}`}
+                  className="flex min-h-0 flex-1 cursor-pointer flex-col items-center gap-2 rounded-xl py-3 outline-none transition-colors hover:bg-accent/60 focus-visible:ring-3 focus-visible:ring-ring/50"
                 >
-                  {column.label}
-                </span>
-                <span
-                  aria-hidden
-                  className="mt-auto rounded-full bg-muted px-1.5 text-2xs font-medium tabular-nums text-muted-foreground"
-                >
-                  {cards.length}
-                </span>
-              </button>
-            ) : (
-              <>
-                <div className="mx-3 flex shrink-0 items-center gap-2 border-b py-2.5">
                   <span
+                    aria-hidden
                     data-testid="column-label"
-                    className="text-sm font-medium"
+                    className="min-h-0 [writing-mode:vertical-rl] truncate text-sm font-medium text-muted-foreground"
                   >
                     {column.label}
                   </span>
-                  <span className="rounded-full bg-muted px-1.5 text-2xs font-medium tabular-nums text-muted-foreground">
+                  {/* Beside the label, not `mt-auto`. Pinned to the foot of a
+                    full-height rail it sat some 650px below the word it counts
+                    — two halves of one fact with nothing between them, which
+                    reads as an orphan rather than as a column holding none. */}
+                  <span
+                    aria-hidden
+                    className="rounded-full bg-muted px-1.5 text-2xs font-medium tabular-nums text-muted-foreground"
+                  >
                     {cards.length}
                   </span>
-                  <div className="ml-auto flex items-center gap-1">
-                    {head}
-                    {canCollapse && (
-                      <button
-                        type="button"
-                        onClick={() => togglePin(column.id)}
-                        aria-label={`Collapse ${column.label}`}
-                        title={`Collapse ${column.label}`}
-                        className="flex size-5 cursor-pointer items-center justify-center rounded-md text-muted-foreground outline-none transition-colors hover:bg-accent hover:text-foreground focus-visible:ring-3 focus-visible:ring-ring/50"
+                </button>
+              ) : (
+                <>
+                  <div className="mx-3 flex shrink-0 items-center gap-2 border-b py-2.5">
+                    <span
+                      data-testid="column-label"
+                      className="text-sm font-medium"
+                    >
+                      {column.label}
+                    </span>
+                    <span className="rounded-full bg-muted px-1.5 text-2xs font-medium tabular-nums text-muted-foreground">
+                      {cards.length}
+                    </span>
+                    <div className="ml-auto flex items-center gap-1">
+                      {head}
+                      {canCollapse && (
+                        <button
+                          type="button"
+                          onClick={() => togglePin(column.id)}
+                          aria-label={`Collapse ${column.label}`}
+                          title={`Collapse ${column.label}`}
+                          className="flex size-5 cursor-pointer items-center justify-center rounded-md text-muted-foreground outline-none transition-colors hover:bg-accent hover:text-foreground focus-visible:ring-3 focus-visible:ring-ring/50"
+                        >
+                          <ChevronsLeft className="size-3.5" />
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                  <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto px-2 pb-2">
+                    {loading && cards.length === 0 ? (
+                      <Skeleton className="h-20 rounded-lg" />
+                    ) : (
+                      cards.map((row) => (
+                        <div
+                          key={row.id}
+                          draggable
+                          onDragStart={(event) => {
+                            setDragId(row.id);
+                            if (event.dataTransfer) {
+                              event.dataTransfer.effectAllowed = "move";
+                              // The id is what a drop reads back. The `text/plain`
+                              // copy is what makes the drag well-formed for browsers
+                              // that abort one carrying no data at all.
+                              event.dataTransfer.setData(CARD_MIME, row.id);
+                              event.dataTransfer.setData("text/plain", row.id);
+                            }
+                          }}
+                          onDragEnd={() => {
+                            setDragId(null);
+                            setOver(null);
+                            stopEdgeScroll();
+                          }}
+                        >
+                          {renderCard(row, dragId === row.id)}
+                        </div>
+                      ))
+                    )}
+                    {!loading && cards.length === 0 && (
+                      <p
+                        className={cn(
+                          "mt-2 flex h-38 items-center justify-center rounded-lg px-1 text-center text-xs",
+                          over === column.id && dragId
+                            ? // A column that opened to receive a card says so. The
+                              // rail is a small target and the operator is holding
+                              // something: the empty column has to read as a landing
+                              // spot, not as the same "nothing here" it shows at rest.
+                              "border border-dashed border-primary/50 bg-accent/60 font-medium text-foreground"
+                            : "bg-muted/50 text-muted-foreground",
+                        )}
                       >
-                        <ChevronsLeft className="size-3.5" />
-                      </button>
+                        {over === column.id && dragId
+                          ? "Drop it here"
+                          : emptyHint}
+                      </p>
                     )}
                   </div>
-                </div>
-                <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto px-2 pb-2">
-                  {loading && cards.length === 0 ? (
-                    <Skeleton className="h-20 rounded-lg" />
-                  ) : (
-                    cards.map((row) => (
-                      <div
-                        key={row.id}
-                        draggable
-                        onDragStart={(event) => {
-                          setDragId(row.id);
-                          if (event.dataTransfer) {
-                            event.dataTransfer.effectAllowed = "move";
-                            // The id is what a drop reads back. The `text/plain`
-                            // copy is what makes the drag well-formed for browsers
-                            // that abort one carrying no data at all.
-                            event.dataTransfer.setData(CARD_MIME, row.id);
-                            event.dataTransfer.setData("text/plain", row.id);
-                          }
-                        }}
-                        onDragEnd={() => {
-                          setDragId(null);
-                          setOver(null);
-                          stopEdgeScroll();
-                        }}
-                      >
-                        {renderCard(row, dragId === row.id)}
-                      </div>
-                    ))
-                  )}
-                  {!loading && cards.length === 0 && (
-                    <p
-                      className={cn(
-                        "mt-2 flex h-38 items-center justify-center rounded-lg px-1 text-center text-xs",
-                        over === column.id && dragId
-                          ? // A column that opened to receive a card says so. The
-                            // rail is a small target and the operator is holding
-                            // something: the empty column has to read as a landing
-                            // spot, not as the same "nothing here" it shows at rest.
-                            "border border-dashed border-primary/50 bg-accent/60 font-medium text-foreground"
-                          : "bg-muted/50 text-muted-foreground",
-                      )}
-                    >
-                      {over === column.id && dragId
-                        ? "Drop it here"
-                        : emptyHint}
-                    </p>
-                  )}
-                </div>
-              </>
-            )}
-          </div>
-        );
-      })}
-      {/* Trailing gutter: flex scroll containers drop their padding-inline-end,
+                </>
+              )}
+            </div>
+          );
+        })}
+        {/* Trailing gutter: flex scroll containers drop their padding-inline-end,
           so this spacer keeps ~16px of breathing room past the last column. */}
-      <div aria-hidden className="w-4 shrink-0" />
+        <div aria-hidden className="w-4 shrink-0" />
+      </div>
+      {/* The bleed, made legible. Painted over the scroller rather than inside
+          it so it stays put while the columns move under it, and
+          `pointer-events-none` so it can never eat a drop aimed at the column
+          beneath — which is exactly the class of bug #334 was reported as. */}
+      {!atEnd && (
+        <div
+          aria-hidden
+          className="pointer-events-none absolute inset-y-0 right-0 w-12 bg-gradient-to-l from-background to-transparent"
+        />
+      )}
     </div>
   );
 }

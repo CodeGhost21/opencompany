@@ -6,10 +6,21 @@ a manifest plus its docs, never its own program.
 
 Every folder follows the same shape:
 
-- `company.toml` — the manifest: the roster of agents, their responsibilities,
-  the output, and the moments reserved for the human (the machine-readable
+- `company.toml` — the manifest: company-wide tool grants, the desks, the
+  workflow graphs to enable, and the approval tier (the machine-readable
   definition the host loads).
+- `AGENTS.md` — the working agreement, routed into every teammate's system
+  prompt. The one place a convention reaches the whole roster without being
+  repeated in every agent's `context`.
 - `README.md` — what the company does, in plain language.
+- `agents/<id>.toml` — one file per teammate: role, ledger grants, write scope.
+- `ledgers/<slug>.toml` — the axes this vertical keeps beyond the built-in
+  `tasks`/`goals`/`decisions` and the baseline's own. Seeded into the company's
+  store at first boot; see [`../docs/spec/runtime/ledgers.md`](../docs/spec/runtime/ledgers.md).
+- `skills/<slug>/SKILL.md` — the procedures this vertical runs, in the shape the
+  shared library at [`../skills/`](../skills/) uses.
+- `workflows/<id>.toml` — the graphs `[workflows].enabled` turns on.
+- `workspace/**` — the Obsidian-style notes the company starts with, seeded once.
 
 Adding a business is a new folder, not a new crate. The behavior lives entirely
 in the host and the vendored runtimes; each definition just configures it.

@@ -51,8 +51,8 @@ why this is not a read/write split: [authority.md](authority.md).
 | `team` | `POST …/team`, `DELETE …/team/{id}`, `PUT …/team/{id}/inbox` (overlay; roster-only in v1) |
 | `mail` | `POST …/inboxes/{key}/read` |
 | `inbox` | `POST …/inboxes/ingest` (HMAC-signed inbound email) |
-| `domain` | `PUT …/domain`, `POST …/domain/verify` |
-| `smtp` | `PUT …/smtp`, `POST …/smtp/test` |
+| `domain` | `GET …/domain` (the stored records and last verify result, or `null`), `PUT …/domain`, `POST …/domain/verify` (the `GET` is a REST twin of the GraphQL `Company.domain` read, #1460) |
+| `smtp` | `GET …/smtp` (non-secret status; never the password), `PUT …/smtp` (the password is a patch — omit it to keep the stored one), `POST …/smtp/test` (the `GET` is a REST twin of the GraphQL `Company.smtp` read, #1460) |
 | `connections` (feature `oauth`) | `POST …/connections/{provider}/start` → dated `410` retirement bridge, `POST …/connections/{provider}/disconnect`, `GET /api/v1/oauth/callback` → dated `410` browser landing page (#838; removal #1023) |
 | `workflows` | `POST …/workflows`, `GET …/workflows`, `GET …/workflows/runs`, `POST …/workflows/cron/preview`, `GET …/workflows/{wid}`, `PUT …/workflows/{wid}`, `DELETE …/workflows/{wid}`, `POST …/workflows/{wid}/run`, `POST …/workflows/runs/{runId}/cancel` |
 
@@ -280,6 +280,11 @@ What a run **adds up to** — the `verdict` both run DTOs carry, why an
 undelivered report is its own reading rather than a failure, and why it is
 derived on the read rather than journaled (issue #981) — has its own focused
 page: [run-verdict.md](run-verdict.md).
+
+How the run history is **paged** — why the page is cut by `seq` but displayed
+by `(atMillis, seq)`, why the cursor is server-issued rather than derived from
+the last row, and what a console must do when an older host omits it
+(issue #1012) — likewise: [run-history-paging.md](run-history-paging.md).
 
 ### Pausing a workflow, and the disarm rule (issue #276)
 

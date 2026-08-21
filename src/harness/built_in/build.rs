@@ -114,7 +114,7 @@ use crate::harness::tool_dispatcher::AttrTolerantXmlDispatcher;
 use crate::harness::toolbelt;
 use crate::ports::skills_state::SkillState;
 use crate::ports::types::CompanyId;
-use crate::runtime::tools::extends_on_boundary;
+use crate::runtime::tools::{NAMESPACE_SEPARATORS, extends_on_boundary};
 
 /// The per-tool-result byte budget every OpenCompany agent runs under.
 ///
@@ -284,11 +284,9 @@ pub fn build_agent(
         }
     };
 
-    // Intrinsic memory tools are withheld for now — see `memory_tools`'s doc
-    // comment for why. `tools` still starts from that call so the moment
-    // openhuman gives embedders a way back in, wiring them is a one-line
-    // change here again rather than a rediscovery.
-    let mut tools: Vec<Box<dyn Tool>> = memory_tools(&memory);
+    // Deliberate-memory tools, oc-authored over this company's own context
+    // port — see `memory_tools`'s doc comment for why not the vendored ones.
+    let mut tools: Vec<Box<dyn Tool>> = memory_tools(deps, company, &manifest_agent.id);
     #[cfg(feature = "mcp")]
     {
         // These config-free tools read OpenHuman's live process registry, so
@@ -302,7 +300,16 @@ pub fn build_agent(
     // namespace (`docs.*`, `files.*`, or `*`). The security policy is
     // `workspace_only`, so a granted agent can read and write within its
     // workspace and nowhere else on the host.
-    let wants_files = grants_cover(grants, "files") || grants_cover(grants, "docs");
+    //
+    // Issue #1192: a *caller* of the shared predicate, not a second spelling of
+    // it. The console's capability panel has to answer the same question — is
+    // publishing on for this company — and the way that panel comes to report a
+    // capability the toolbelt does not wire is a second derivation drifting from
+    // this one (issue #886's whole subject). This gate is also what decides
+    // whether the file belt itself is offered, two lines down, so a predicate
+    // that is *nearly* identical would silently grant or revoke file tools as
+    // well as publishing.
+    let wants_files = crate::company::grants_files_or_docs(grants);
     if wants_files {
         tools.extend(file_tools(&workspace));
     }
@@ -1138,8 +1145,11 @@ pub fn build_agent(
     Ok(agent)
 }
 
-/// The intrinsic `memory_store` / `memory_recall` tools — **withheld today**,
-/// pending a way to point them at a company's own [`OcMemory`] again.
+/// The intrinsic deliberate-memory tools (`memory_store` / `memory_recall` /
+/// `memory_forget`) — **oc-authored**, over the company's own `ContextStore`
+/// (issue #1113 / G11).
+///
+/// # Why not the vendored upstream tools (history that must not be re-learned)
 ///
 /// Through openhuman's earlier API, `MemoryStoreTool::new` /
 /// `MemoryRecallTool::new` took the `Arc<dyn Memory>` directly, so each
@@ -1156,29 +1166,18 @@ pub fn build_agent(
 /// memory parameter at all, so there is no route left by which a per-company
 /// `Arc<dyn Memory>` could reach these two tools.
 ///
-/// Wiring them anyway would mean every company's "deliberate" memory read and
-/// write lands in one shared, unconfigured store instead of that company's own
-/// `ContextStore` — silently wrong at best, a cross-company memory leak at
-/// worst under this crate's multi-tenant-in-one-process model. Withholding the
-/// tools is the safe default until either openhuman restores an injection seam
-/// for embedders that do not run its RPC/`CoreContext` dispatch, or this crate
-/// builds real per-company `CoreContext` scoping over its own per-company
-/// workspace directories (a materially larger change than this vendor bump).
-///
-/// `MemoryForgetTool` was already excluded before this — [`OcMemory`]'s
-/// append-only `ContextStore` cannot delete, so a forget tool would silently
-/// no-op — and stays excluded now for the same reason it would apply again the
-/// day these two return.
-fn memory_tools(memory: &Arc<dyn Memory>) -> Vec<Box<dyn Tool>> {
-    let _ = memory;
-    Vec::new()
+/// Wiring the upstream tools would mean every company's "deliberate" memory
+/// read and write lands in one shared, unconfigured store instead of that
+/// company's own `ContextStore` — silently wrong at best, a cross-company
+/// memory leak at worst under this crate's multi-tenant-in-one-process model.
+/// So the tools here are oc-authored instead (`super::memory_tools`), the
+/// `workspace_tools` shape: company and agent captured at build time, the
+/// port a field, nothing ambient for `execute()` to reach. Forget became
+/// possible when `ContextStore` grew `delete` (every backend implements it);
+/// it is scoped to the agent's own `agent-memory/<id>/` rows.
+fn memory_tools(deps: &HarnessDeps, company: &CompanyId, agent_id: &str) -> Vec<Box<dyn Tool>> {
+    super::memory_tools::memory_tools(deps.context.clone(), company.clone(), agent_id.to_string())
 }
-
-/// The namespace separator for a `[tools].allow` grant: only `.`, because a
-/// namespace grant is written dotted (`docs.read`). Deliberately narrower than
-/// [`crate::runtime::tools`]'s tool-name set — `files_scratch` is not a grant
-/// under the `files` namespace, and never was.
-const NAMESPACE_SEPARATORS: &[char] = &['.'];
 
 /// Whether an agent's effective `grants` cover a tool `namespace`.
 ///
@@ -1309,63 +1308,43 @@ pub(crate) fn file_tools(workspace: &Path) -> Vec<Box<dyn Tool>> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn memory_tools_are_withheld_until_a_per_company_injection_seam_exists() {
-        // Regression lock for the finding behind `memory_tools`'s doc comment:
-        // openhuman's `MemoryStoreTool`/`MemoryRecallTool` no longer accept an
-        // `Arc<dyn Memory>` at construction, and `Tool::execute(&self, args)`
-        // takes no session/memory parameter either — so there is currently no
-        // route by which a company's own `Arc<dyn OcMemory>` reaches either
-        // tool. Wiring them anyway would point every company's "deliberate"
-        // memory read/write at one shared, unconfigured openhuman-internal
-        // store instead of that company's own `ContextStore`. Should this
-        // start failing because `memory_tools` grew tools again, the fix that
-        // flips it back on must first confirm each company's own `ContextStore`
-        // is genuinely what backs them — see the doc comment on
-        // `memory_tools` for what that requires.
+    #[tokio::test]
+    async fn memory_tools_are_wired_to_the_company_context_store() {
+        // The flip of the old withholding lock. The doc comment on
+        // `memory_tools` demanded that whatever un-withholds these must first
+        // confirm each company's own `ContextStore` genuinely backs them — so
+        // that is exactly what this asserts: a store through the tool lands in
+        // THIS company's context rows, under the agent's own label prefix,
+        // reachable by the same port the memory_loop and the Brain view read.
         use crate::ports::ContextStore;
-        use crate::ports::types::{ChunkAddr, ChunkHit, ChunkMeta, CompanyId, ContextChunk};
+        use crate::ports::types::CompanyId;
+        use std::sync::Arc;
 
-        // The memory handle is never exercised — the tools are withheld
-        // unconditionally — so a no-op context suffices.
-        struct NoopContext;
-        #[async_trait::async_trait]
-        impl ContextStore for NoopContext {
-            async fn put(&self, _: &CompanyId, _: ContextChunk) -> crate::Result<ChunkAddr> {
-                Ok(ChunkAddr::new("x"))
-            }
-            async fn list(&self, _: &CompanyId, _: &str) -> crate::Result<Vec<ChunkMeta>> {
-                Ok(Vec::new())
-            }
-            async fn peek(
-                &self,
-                _: &CompanyId,
-                _: &ChunkAddr,
-                _: Option<std::ops::Range<usize>>,
-            ) -> crate::Result<String> {
-                Ok(String::new())
-            }
-            async fn search(
-                &self,
-                _: &CompanyId,
-                _: &str,
-                _: usize,
-            ) -> crate::Result<Vec<ChunkHit>> {
-                Ok(Vec::new())
-            }
-        }
-
-        let memory: Arc<dyn Memory> = Arc::new(OcMemory::new(
-            CompanyId::new("acme"),
-            "ceo",
-            Arc::new(NoopContext),
-        ));
-        let tools = memory_tools(&memory);
-        assert!(
-            tools.is_empty(),
-            "expected no intrinsic memory tools while withheld, got {:?}",
-            tools.iter().map(|t| t.name()).collect::<Vec<_>>()
+        let dir = tempfile::tempdir().expect("tempdir");
+        let context: Arc<dyn ContextStore> =
+            Arc::new(crate::store::FsContextStore::new(dir.path().to_path_buf()));
+        let company = CompanyId::new("acme");
+        let tools = super::super::memory_tools::memory_tools(
+            context.clone(),
+            company.clone(),
+            "ceo".to_string(),
         );
+        let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
+        assert_eq!(names, ["memory_store", "memory_recall", "memory_forget"]);
+
+        let store = &tools[0];
+        let reply = store
+            .execute(serde_json::json!({"title": "Pin", "body": "the fact"}))
+            .await
+            .expect("execute");
+        assert!(!reply.is_error, "{reply:?}");
+        let rows = context.list(&company, "agent-memory/ceo/").await.unwrap();
+        assert_eq!(
+            rows.len(),
+            1,
+            "the tool write must land on the company port"
+        );
+        assert_eq!(rows[0].label, "agent-memory/ceo/pin");
     }
 
     #[test]
@@ -1675,6 +1654,13 @@ mod tests {
         }
         async fn search(&self, _: &CompanyId, _: &str, _: usize) -> crate::Result<Vec<ChunkHit>> {
             Ok(Vec::new())
+        }
+        async fn delete(
+            &self,
+            _: &CompanyId,
+            _: &crate::ports::types::ChunkAddr,
+        ) -> crate::Result<bool> {
+            Ok(false)
         }
     }
 
@@ -2007,6 +1993,52 @@ mod tests {
             storeless.contains(&"file_write".to_string()),
             "{storeless:?}"
         );
+    }
+
+    /// **Issue #1192, the standard issue #886 stated.** The verdict the console
+    /// renders must equal what the toolbelt actually wires — asserted by running
+    /// both over the same grant matrix, not by reading the two implementations
+    /// and agreeing they look alike.
+    ///
+    /// The console panel calls
+    /// [`grants_files_or_docs`](crate::company::grants_files_or_docs); this gate
+    /// calls it too, so today the equality is true by construction. That is the
+    /// point of pinning it: the day somebody re-inlines a `starts_with` on
+    /// either side — or "tidies" the predicate into the `_explicit` family,
+    /// where `*` confers nothing — this fails instead of a panel quietly
+    /// reporting a capability no agent has, which is the failure #886 was filed
+    /// about and the failure #886 said a test like this one prevents.
+    ///
+    /// An artifact store is wired throughout, so the store gate is held constant
+    /// and the grant is the only variable — which is exactly the axis the
+    /// console field answers on. (The store half is not a console field at all:
+    /// production always configures one, so a `artifactStoreConfigured` flag
+    /// would serialize a hardcoded `true`.)
+    #[test]
+    fn the_capability_verdict_matches_what_the_toolbelt_wires() {
+        let tool = crate::harness::publish::PUBLISH_ARTIFACT_TOOL.to_string();
+        for grant in [
+            "*",
+            "files",
+            "docs",
+            "files.write",
+            "docs.read",
+            "web",
+            "shell",
+            "documentation",
+            "docsy",
+            "filesystem",
+            "composio",
+            "repo",
+        ] {
+            let verdict = crate::company::grants_files_or_docs(&[grant.to_string()]);
+            let wired = built_tool_names_with_artifacts(&[grant]).contains(&tool);
+            assert_eq!(
+                verdict, wired,
+                "`{grant}`: the console would report publishing={verdict} while the toolbelt \
+                 wires={wired}"
+            );
+        }
     }
 
     /// The three gate states of the metered `web_search` surface (issue #238),
@@ -2541,6 +2573,11 @@ mod tests {
             "http_request",
             "image_info",
             "list",
+            // The deliberate-memory trio (issue #1113): intrinsic, on every
+            // belt — company-scoped by construction, see memory_tools.rs.
+            "memory_forget",
+            "memory_recall",
+            "memory_store",
             "read_workspace_state",
             "shell",
             "web_fetch",
@@ -2792,9 +2829,9 @@ mod tests {
             "memory_tree",
             "memory_tree_search",
             "memory_tree_get",
-            // destructive memory
+            // destructive memory: upstream's raw `forget` stays out; the
+            // scoped oc-authored `memory_forget` is a real belt tool now.
             "forget",
-            "memory_forget",
         ];
         for tool in forbidden {
             assert!(

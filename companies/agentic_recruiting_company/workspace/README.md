@@ -9,6 +9,8 @@ Start here:
 - [[Hiring checklist]] — how a search runs from open role to offer
 - [[Screening rubric]] — how we score candidates fairly
 - [[Senior engineer search]] — a search in flight
+- [[Fair assessment]] — the bar, and why it is written first
+- [[Candidate experience]] — what candidates actually remember
 
 Everything here is a plain `.md` file, so it version-controls cleanly and seeds
 the operator console's Workspace view.

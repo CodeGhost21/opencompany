@@ -3,7 +3,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { OpenCompanyClient } from "@/api/client";
 import type { TeamMemberDto } from "@/api/types";
 import { useLocalScope } from "@/connections/ConnectionContext";
-import { shouldOfferSetup, teamIsEmpty } from "@/lib/company-setup";
+import { shouldOfferSetup, teamIsUnstaffed } from "@/lib/company-setup";
 import { SetupDialog } from "./SetupDialog";
 import { clearSetupSkipped, markSetupSkipped, setupSkipped } from "./state";
 
@@ -19,14 +19,20 @@ import { clearSetupSkipped, markSetupSkipped, setupSkipped } from "./state";
  *
  * ## The gate
  *
- * Open when the roster is empty and the operator has not skipped. The emptiness
- * test is the host's answer, not a stored flag, so it cannot drift from the thing
- * setup changes — see `shouldOfferSetup` for why a browser flag would be unsafe
- * for this and is fine for the skip.
+ * Open when nobody has staffed this company and the operator has not skipped.
+ * The test is the host's answer, not a stored flag, so it cannot drift from the
+ * thing setup changes — see `shouldOfferSetup` for why a browser flag would be
+ * unsafe for this and is fine for the skip.
  *
- * A company whose manifest already names agents therefore never sees the offer.
- * That is deliberate: it came with a team, so there is nothing to set up. `force`
- * is how the Team page's in-place prompt reopens it anyway.
+ * "Staffed" is narrower than "has a roster", and the difference is the whole of
+ * issue #1404: the global baseline puts undeletable teammates on **every**
+ * company, so an emptiness test never answered `true` anywhere and this dialog
+ * could not open in the shipped product. `teamIsUnstaffed` reads the host's
+ * per-row provenance instead.
+ *
+ * A company whose manifest names agents of its own therefore never sees the
+ * offer. That is deliberate: it came with a team, so there is nothing to set up.
+ * `force` is how the Team page's in-place prompt reopens it anyway.
  */
 export function SetupController({
   client,
@@ -78,7 +84,10 @@ export function SetupController({
    * staffed company or fail to open over an empty one until the fetch landed.
    */
   const [checked, setChecked] = useState(false);
-  /** Whether the host's roster is empty, independent of the skip flag. */
+  /**
+   * Whether the host says nobody has staffed this company, independent of the
+   * skip flag. The global baseline does not count — see `teamIsUnstaffed`.
+   */
   const [unstaffed, setUnstaffed] = useState(false);
   /**
    * Whether the gate has already been evaluated once in this mount.
@@ -127,7 +136,7 @@ export function SetupController({
       if (cancelled) return;
       const first = !evaluatedOnce.current;
       evaluatedOnce.current = true;
-      setUnstaffed(teamIsEmpty(roster));
+      setUnstaffed(teamIsUnstaffed(roster));
       // Only the first evaluation may open the dialog by itself; see
       // `evaluatedOnce`. Later switches still report `unstaffed`, so the tour
       // keeps holding and the Team page keeps prompting.

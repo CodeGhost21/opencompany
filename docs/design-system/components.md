@@ -189,6 +189,61 @@ Never nest a modal inside a modal.
 
 ---
 
+## Shell: chrome and the content card
+
+The console's window is two layers, not two panes (issue #1178).
+
+| Layer | What paints it | Fill |
+| --- | --- | --- |
+| Chrome | the shell root (`SidebarProvider`) | `bg-chrome` |
+| Card | `ContentSurface` | `bg-background`, `rounded-2xl`, `border-chrome-border`, `shadow-sm` |
+
+The chrome is painted **once**. The sidebar column and the frame around the card
+are the same surface showing through: `Sidebar`'s inner container and
+`SidebarInset` are both `bg-transparent`, and the sidebar draws no border. Give
+either one a fill of its own and the two regions land on different values, which
+is the seam this layout exists to remove — the reason the rule is "painted
+once" and not "painted the same".
+
+The card is the only opaque sheet in the shell. Everything a page draws — its
+own `bg-card` panels, its dialogs — stacks on top of it, which is why it keeps
+`--background` rather than a colour of its own: page contrast is exactly what it
+was before the shell was rebuilt.
+
+**Anything that cuts a hole in the chrome must ask for the chrome.** A `ring-2`
+around a status dot is a cut-out of the ground behind it, not a decoration. The
+two in the shell — `SidebarMenuDot` on the collapsed rail and the host
+switcher's status dot — take `ring-chrome`. `ring-sidebar` there paints a halo.
+
+### The frame
+
+`ContentSurface` is inset by `--frame-inset` (12px) on all four sides — one
+quantity, spent four times, so the frame is even by construction rather than by
+four numbers that happen to agree.
+
+The top was briefly a special case, aligned to the sidebar's header block and
+measured at runtime to stay aligned as the header changed. That is gone, and so
+is the measurement: an even frame is what this needs, and a mechanism kept for a
+rule that no longer exists is a thing that rots.
+
+### Every page is framed
+
+There is no full-bleed escape hatch, deliberately. `ContentSurface` carried an
+`unframed` prop and two surfaces used it — the Overview knowledge graph and the
+React Flow workflow canvas — and both are framed now. The reference shell keeps
+that prop for a constraint this console does not have: CEF composited its
+provider webviews *above* the HTML layer, so a rounded card underneath showed
+four square corners punching through, maskable by no CSS. Nothing here draws
+above the HTML layer.
+
+If a surface ever genuinely cannot be framed, the prop goes back — with the
+surface that needs it, not before. What a full-bleed page must not do meanwhile
+is size itself against the *viewport*: Overview claimed `h-svh`, which inside a
+card shorter than the window laid the graph out taller than the box clipping it
+and cropped its bottom band. Take the height the card gives you.
+
+---
+
 ## Scrollbars
 
 Native scrollbars are themed once, globally, in `index.css` — nothing opts in

@@ -140,7 +140,7 @@ export function UsageView({ client, company }: Props) {
       <div className="mx-auto w-full max-w-6xl space-y-6 px-4 py-6">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="space-y-1">
-            <h2 className="text-2xl font-semibold tracking-tight">Usage</h2>
+            <h1 className="text-2xl font-semibold tracking-tight">Usage</h1>
             <p className="text-sm text-muted-foreground">
               What your company is burning — tokens and OAuth calls.
             </p>
@@ -303,6 +303,14 @@ export function UsageView({ client, company }: Props) {
             {/* Metered web search (issue #238): opt-in, managed-credential-gated,
                 and capped per day — its own status row like media/composio. */}
             {capsLoaded && caps ? <SearchStatusRow caps={caps} /> : null}
+            {/* Publishing (issue #244, panel half #1192): opt-in per tool grant
+                like the three above, but with no credential and no store toggle
+                — so two rungs rather than three. */}
+            {capsLoaded && caps ? <PublishStatusRow caps={caps} /> : null}
+            {/* The MCP directory's Smithery key (issue #1287): not metered and
+                not opt-in, but it decides whether browsing finds anything, and
+                this panel is where an operator checks what is configured. */}
+            {capsLoaded && caps ? <McpDirectoryStatusRow caps={caps} /> : null}
           </CardContent>
         </Card>
       </div>
@@ -439,6 +447,55 @@ function SearchStatusRow({ caps }: { caps: CapabilityStatusDto }) {
   );
 }
 
+/**
+ * The MCP directory's credential tier (issue #1287).
+ *
+ * Three states, not two. The shared-host tier is a *working* directory, so
+ * badging it "Awaiting credential" would be false; badging it "Active" would
+ * hide that every company on the instance browses through one Smithery account.
+ * It gets its own word.
+ */
+function McpDirectoryStatusRow({ caps }: { caps: CapabilityStatusDto }) {
+  const { label, variant } = mcpDirectoryStatus(caps);
+  return (
+    <div
+      className="flex items-center justify-between gap-3 border-t pt-4 text-sm"
+      data-testid="usage-mcp-directory"
+    >
+      <div className="space-y-0.5">
+        <span className="font-medium">MCP directory</span>
+        <p className="text-xs text-muted-foreground">
+          Browsing and installing MCP servers from Smithery. Without a key only the open registry
+          is searched, and nearly everything in it runs as a local subprocess this host cannot
+          launch. Servers already installed keep their own credentials and are unaffected.
+        </p>
+      </div>
+      <Badge variant={variant} className="shrink-0">
+        {label}
+      </Badge>
+    </div>
+  );
+}
+
+export function mcpDirectoryStatus(caps: CapabilityStatusDto): {
+  label: string;
+  variant: BadgeVariant;
+} {
+  switch (caps.mcpDirectoryCredential) {
+    case "company":
+      return { label: "Active", variant: "default" };
+    case "environment":
+      return { label: "Shared host key", variant: "secondary" };
+    case "none":
+      return { label: "Awaiting credential", variant: "destructive" };
+    default:
+      // Absent: the host could not determine it. "Unknown" is the only honest
+      // badge — claiming "Awaiting credential" would send an admin to paste a
+      // key they may already have.
+      return { label: "Unknown", variant: "outline" };
+  }
+}
+
 function searchStatus(caps: CapabilityStatusDto): { label: string; variant: BadgeVariant } {
   if (caps.searchInBuild === false) return { label: "Not in this build", variant: "outline" };
   if (!caps.searchGranted) return { label: "Not granted", variant: "secondary" };
@@ -447,6 +504,60 @@ function searchStatus(caps: CapabilityStatusDto): { label: string; variant: Badg
   // A zero cap leaves the grant in place but spends nothing — say so rather
   // than reporting "Active" for a tool that will refuse every call.
   if (caps.searchDailyCallCap === 0) return { label: "Paused (cap 0)", variant: "destructive" };
+  return { label: "Active", variant: "default" };
+}
+
+/**
+ * Publishing (issue #244) is opt-in per tool grant like media/composio/search,
+ * so it gets its own status row — but it is the one capability on this card with
+ * **no third rung**. There is no credential to configure and no store to switch
+ * on: the artifact store is always wired, so a "store configured" badge could
+ * only ever read green. States: not compiled into this build, unknown, not
+ * granted, active — see {@link publishStatus}.
+ */
+function PublishStatusRow({ caps }: { caps: CapabilityStatusDto }) {
+  const { label, variant } = publishStatus(caps);
+  return (
+    <div className="flex items-center justify-between gap-3 border-t pt-4 text-sm">
+      <div className="space-y-0.5">
+        <span className="font-medium">Publishing deliverables</span>
+        <p className="text-xs text-muted-foreground">
+          Handing a file a teammate wrote to the board as a deliverable — the only way work in a
+          teammate&apos;s sandbox becomes something you can open. It rides the same{" "}
+          <code className="font-mono">files</code> / <code className="font-mono">docs</code> grant
+          as their file tools: add one of those to{" "}
+          <code className="font-mono">[tools].allow</code> in the company manifest. Unlike{" "}
+          <code className="font-mono">repo</code>, a broad <code className="font-mono">*</code>{" "}
+          <em>does</em> confer it — publishing spends nothing and reaches nothing outside this
+          company&apos;s own board.
+        </p>
+      </div>
+      <Badge variant={variant} className="shrink-0">
+        {label}
+      </Badge>
+    </div>
+  );
+}
+
+/**
+ * The publishing row's four states, in order (issue #1192).
+ *
+ * The `undefined` rung takes {@link composioStatus}'s stricter shape and NOT
+ * {@link mediaStatus}'s: media collapses "absent" into `!granted` and paints an
+ * older host — or one that did not answer — as a definite "Not granted", which
+ * is the #886 lie in miniature. An unanswered host is unknown, and unknown is
+ * shown as unknown.
+ *
+ * There is no credential rung below these. Publishing has no credential and no
+ * store toggle, so `granted && inBuild` is the whole of the verdict.
+ */
+export function publishStatus(caps: CapabilityStatusDto): {
+  label: string;
+  variant: BadgeVariant;
+} {
+  if (caps.publishInBuild === false) return { label: "Not in this build", variant: "outline" };
+  if (caps.publishGranted === undefined) return { label: "Couldn't check", variant: "outline" };
+  if (!caps.publishGranted) return { label: "Not granted", variant: "secondary" };
   return { label: "Active", variant: "default" };
 }
 

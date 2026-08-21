@@ -1,57 +1,91 @@
 import { expect, test, type APIRequestContext, type Page } from "@playwright/test";
 
+import { FIRST_RUN_COMPANY } from "./capabilities";
+
 /**
  * First-run company setup, end to end
  * (`docs/spec/runtime/company-setup.md`).
  *
  * Three questions asked once, then a team created on the host. This spec covers
- * the half only a browser proves: that the dialog opens by itself on an
- * unstaffed company, that the build-out screen names each teammate as its write
+ * the half only a browser proves: that the dialog opens by itself on a company
+ * nobody has staffed, that the build-out screen names each teammate as its write
  * lands, and that the roster the operator is left looking at came from the
  * **host** rather than from the console's fabricated starter team.
  *
  * A unit test pins the decisions (`test/unit/company-setup.test.ts`); this pins
  * that they are wired to a real host.
  *
- * # This lane needs its own company
+ * # This lane needs its own company, and now has its own run
  *
- * Setup opens only when the roster is empty, and every company under
- * `companies/` declares agents in its manifest — including
- * `companies/e2e_harness`, this suite's default. So a company that came with a
- * team can never reach the flow, and running this spec against the default host
- * would fail on a dialog that correctly never appears.
- *
- * Run it against the fixture that ships with nobody on it:
+ * Setup opens only on a company nobody has staffed, and every company under
+ * `companies/` except one declares agents of its own — including
+ * `companies/e2e_harness`, which the rest of the suite drives. So this spec
+ * needs a different host, which is why it is a separate run:
  *
  * ```sh
- * PW_HOST_COMPANY=companies/e2e_setup npx playwright test company-setup
+ * npm run e2e:first-run
  * ```
  *
- * The guard below skips rather than fails when that is missing, so an ordinary
- * `npx playwright test` stays green — and so a reader of the skip reason learns
- * what to set. **It is therefore not covered by any lane that does not set
- * `PW_HOST_COMPANY`**; a CI job wanting this must set it, the same trap
- * `CLAUDE.md` describes for Rust integration targets.
+ * That sets `PW_FIRST_RUN=1`, and `playwright.config.ts` does the rest: it
+ * serves `companies/e2e_setup` on a data root of its own, and selects this spec
+ * and only this spec. An ordinary `npx playwright test` does not run it at all —
+ * not by skipping it, by not selecting it.
+ *
+ * # Why the guard below fails instead of skipping (issue #1404)
+ *
+ * What stood here was:
+ *
+ * ```ts
+ * test.skip(left.length > 0, "this company ships with N manifest agents ...");
+ * ```
+ *
+ * It was written for a host serving the wrong company. What it actually did,
+ * once the global baseline began merging four undeletable teammates into
+ * **every** company, was fire on every run — including the right one. So the
+ * lane went green while first-run setup could not open anywhere in the shipped
+ * product, and nothing said a word. That is `CLAUDE.md`'s "builds, runs and
+ * reports zero without failing anything", one level up from the Rust targets it
+ * describes.
+ *
+ * A first-run lane that skips itself is worse than no lane, so the guard is now
+ * an assertion. A run pointed at the wrong host fails on its first line, naming
+ * the command to use, rather than passing vacuously.
  */
 
 const COMPANY_SCOPE = "/api/v1/company";
 
-/** The roster the host actually holds. */
-async function hostRoster(request: APIRequestContext): Promise<Array<{ role: string }>> {
+/** One row of the host's roster, as this spec reads it. */
+type RosterRow = { id?: string; role: string; global?: boolean };
+
+/** The roster the host actually holds — baseline teammates included. */
+async function hostRoster(request: APIRequestContext): Promise<RosterRow[]> {
   const res = await request.get(`${COMPANY_SCOPE}/team`);
   expect(res.ok()).toBeTruthy();
-  return (await res.json()) as Array<{ role: string }>;
+  return (await res.json()) as RosterRow[];
+}
+
+/**
+ * The teammates somebody staffed this company with — the roster minus the global
+ * baseline (`docs/spec/runtime/globals.md`), which is merged into every company
+ * and is therefore evidence of nothing.
+ *
+ * This is the quantity the whole spec is about. `hostRoster().length` is never
+ * zero on any company this host can serve, which is exactly the confusion
+ * issue #1404 was filed over; asserting on it would put the bug back.
+ */
+function staffed(roster: RosterRow[]): RosterRow[] {
+  return roster.filter((member) => member.global !== true);
 }
 
 /**
  * Removes every operator-added teammate, so a re-run starts from a first run
- * again. A manifest teammate 409s and is left alone — the fixture company has
- * none, which is the point of it.
+ * again. A manifest or baseline teammate 409s and is left alone.
  */
 async function unstaffCompany(request: APIRequestContext) {
   for (const member of await hostRoster(request)) {
-    const id = (member as { id?: string }).id;
-    if (id) await request.delete(`${COMPANY_SCOPE}/team/${id}`).catch(() => undefined);
+    if (member.id) {
+      await request.delete(`${COMPANY_SCOPE}/team/${member.id}`).catch(() => undefined);
+    }
   }
 }
 
@@ -64,15 +98,16 @@ async function answer(page: Page, field: string, text: string) {
 
 test.beforeEach(async ({ request }) => {
   await unstaffCompany(request);
-  // A company that still has people on it after unstaffing declares them in its
-  // manifest, so setup can never open. Say so, rather than failing on a missing
-  // dialog thirty lines later.
-  const left = await hostRoster(request);
-  test.skip(
-    left.length > 0,
-    `this company ships with ${left.length} manifest agents, so first-run setup ` +
-      "cannot open — run with PW_HOST_COMPANY=companies/e2e_setup",
-  );
+  // Anyone still here after unstaffing is declared in the manifest and cannot be
+  // deleted, so setup can never open on this host. Fail now, naming the command
+  // that fixes it — a skip here is what made this whole spec vacuous (#1404).
+  const left = staffed(await hostRoster(request));
+  expect(
+    left.map((member) => member.role),
+    `this host serves a company that ships with ${left.length} teammate(s) of its ` +
+      "own, so first-run setup cannot open against it. Run this spec with " +
+      `\`npm run e2e:first-run\`, which serves ${FIRST_RUN_COMPANY}.`,
+  ).toEqual([]);
 });
 
 test("first-run setup builds a real team from three answers", async ({ page, request }) => {
@@ -120,13 +155,17 @@ test("first-run setup builds a real team from three answers", async ({ page, req
   await page.getByTestId("setup-finish").click();
   await expect(dialog).toBeHidden();
 
-  // 5. The host really holds them — not the console's fabricated starter team.
-  const roster = await hostRoster(request);
-  expect(roster.length).toBeGreaterThanOrEqual(4);
+  // 5. The host really holds them — not the console's fabricated starter team,
+  //    and not the global baseline every company already had.
+  const designed = staffed(await hostRoster(request));
+  expect(
+    designed.length,
+    "the teammates setup created, over and above the baseline every company gets",
+  ).toBeGreaterThanOrEqual(4);
 
   // 6. And the Team page shows that roster, refreshed without a reload.
   await page.goto("/#/company");
-  for (const member of roster.slice(0, 3)) {
+  for (const member of designed.slice(0, 3)) {
     await expect(page.getByText(member.role, { exact: false }).first()).toBeVisible();
   }
 
@@ -156,8 +195,9 @@ test("skipping setup leaves a way back in", async ({ page, request }) => {
   await page.goto("/#/company");
   await expect(page.getByTestId("setup-prompt")).toBeVisible({ timeout: 20_000 });
 
-  // And nothing was created by skipping.
-  expect(await hostRoster(request)).toHaveLength(0);
+  // And nothing was created by skipping. The baseline is still there — it always
+  // is — so this asks the only question that distinguishes the two states.
+  expect(staffed(await hostRoster(request))).toHaveLength(0);
 
   // The prompt reopens the same dialog.
   await page.getByTestId("setup-prompt-run").click();

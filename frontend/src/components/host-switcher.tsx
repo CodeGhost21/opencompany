@@ -54,7 +54,13 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { isDesktopRuntime } from "@/api/transport";
 import type { LocalInstance } from "@/api/transport/desktop";
 import { hostShortcutLabel, useHosts } from "@/connections/HostsContext";
-import type { Connection, ConnectionStatus } from "@/connections/types";
+import type {
+  Connection,
+  ConnectionStatus,
+  ConnectorKind,
+  SshTarget,
+} from "@/connections/types";
+import { DEFAULT_REMOTE_PORT, availableConnectors } from "@/connections/types";
 import { cn } from "@/lib/utils";
 
 /**
@@ -65,13 +71,33 @@ import { cn } from "@/lib/utils";
  * #1167), because hue alone tells an operator that *something* differs without
  * saying what, and tells someone who cannot separate amber from green nothing.
  */
-const STATUS_COPY: Record<ConnectionStatus, { label: string; dot: string }> = {
+export const STATUS_COPY: Record<ConnectionStatus, { label: string; dot: string }> = {
   connecting: { label: "Connecting…", dot: "bg-muted-foreground/50" },
   live: { label: "Connected", dot: "bg-status-done" },
   degraded: { label: "Partly available", dot: "bg-status-blocked" },
   down: { label: "Unreachable", dot: "bg-destructive" },
   unauthenticated: { label: "Sign-in needed", dot: "bg-status-blocked" },
 };
+
+/**
+ * How a host's state reads on its own row.
+ *
+ * {@link STATUS_COPY} keyed by status, except for the one case where the
+ * status alone is not the whole answer: a cloud tenant that has been idle is
+ * being *started*, not contacted, and that takes seconds rather than
+ * milliseconds. "Connecting…" for that long reads as a hang, so the connector
+ * supplies the word — which is why this takes a connection rather than a
+ * status.
+ *
+ * Deliberately not a fifth `ConnectionStatus`. Waking is a connecting host and
+ * ranks exactly like one on the trigger; a new status would need a place in the
+ * severity ordering, and every `switch` over the union would have to grow a
+ * branch for a state that behaves identically.
+ */
+export function statusCopy(connection: Connection): { label: string; dot: string } {
+  const copy = STATUS_COPY[connection.status];
+  return connection.waking ? { ...copy, label: "Waking…" } : copy;
+}
 
 /**
  * How loudly each state asks to be noticed.
@@ -176,7 +202,12 @@ export function HostSwitcher({ variant = "sidebar", companyName }: Props) {
       <span
         data-testid="host-switcher-status"
         className={cn(
-          "absolute -right-0.5 -bottom-0.5 size-2.5 rounded-full ring-2 ring-sidebar",
+          "absolute -right-0.5 -bottom-0.5 size-2.5 rounded-full ring-2",
+          // The ring is a CUT-OUT of the ground, and the two variants stand on
+          // different grounds (issue #1178). In the shell the trigger has no
+          // fill at rest, so half this ring lands on the window chrome; the
+          // standalone console draws its own `bg-sidebar` card behind it.
+          variant === "sidebar" ? "ring-chrome" : "ring-sidebar",
           STATUS_COPY[worst].dot,
         )}
       />
@@ -243,7 +274,7 @@ export function HostSwitcher({ variant = "sidebar", companyName }: Props) {
       <DropdownMenuGroup>
         <DropdownMenuLabel>Hosts</DropdownMenuLabel>
         {connections.map((connection, index) => {
-          const status = STATUS_COPY[connection.status];
+          const status = statusCopy(connection);
           const shortcut = hostShortcutLabel(index);
           return (
             <DropdownMenuItem
@@ -416,11 +447,19 @@ export function AddHostDialog() {
     setAddingHost: onOpenChange,
     localInstances,
     onAddLocal,
+    onAddSsh,
     onStartLocal,
     onStopLocal,
   } = hosts;
-  const onAdd = (baseUrl: string) => {
-    hosts.onAdd(baseUrl);
+  // The two connectors that need a process on this machine are offered only
+  // where one can be started. `onAddLocal` rather than `isDesktopRuntime()`:
+  // `App` withholds these handlers on a shell too old to honour them, and a tab
+  // whose button does nothing is worse than a tab that is not there.
+  const tabs = availableConnectors(Boolean(onAddLocal)).filter(
+    (kind) => kind !== "ssh" || onAddSsh,
+  );
+  const onAdd = (baseUrl: string, kind: ConnectorKind) => {
+    hosts.onAdd(baseUrl, kind === "cloud" ? { kind, tenant: tenantOf(baseUrl) } : { kind: "remote" });
     onOpenChange(false);
   };
 
@@ -430,23 +469,28 @@ export function AddHostDialog() {
         <DialogHeader>
           <DialogTitle>Add a host</DialogTitle>
           <DialogDescription>
-            A host is one OpenCompany server. Run another on this computer, or point at one
-            somewhere else. Either way it stays connected alongside the others.
+            A host is one OpenCompany server. Run one on this computer, use one hosted
+            for you, or point at one somewhere else — over ssh if it is not on the open
+            internet. Whichever you choose stays connected alongside the others, and it
+            decides where a <em>new</em> company lives rather than moving one you have.
           </DialogDescription>
         </DialogHeader>
-        {onAddLocal ? (
-          // The desktop leads with the local half, because starting a host is
-          // the thing it can do that a browser cannot — and because a person
-          // who has just installed the application has no URL to type.
-          <Tabs defaultValue="local">
-            <TabsList className="w-full">
-              <TabsTrigger value="local" data-testid="add-host-local">
-                On this computer
+        {/*
+          The desktop leads with the local half, because starting a host is the
+          thing it can do that a browser cannot — and because a person who has
+          just installed the application has no URL to type. A browser leads
+          with the cloud, which is the only one of the four it can offer that
+          nobody has to run themselves.
+        */}
+        <Tabs defaultValue={tabs[0]}>
+          <TabsList className="w-full">
+            {tabs.map((kind) => (
+              <TabsTrigger key={kind} value={kind} data-testid={`add-host-${kind}`}>
+                {CONNECTOR_LABELS[kind]}
               </TabsTrigger>
-              <TabsTrigger value="remote" data-testid="add-host-remote">
-                Somewhere else
-              </TabsTrigger>
-            </TabsList>
+            ))}
+          </TabsList>
+          {onAddLocal ? (
             <TabsContent value="local">
               <LocalInstances
                 instances={localInstances}
@@ -455,15 +499,95 @@ export function AddHostDialog() {
                 onStop={onStopLocal}
               />
             </TabsContent>
-            <TabsContent value="remote">
-              <RemoteHost onAdd={onAdd} onCancel={() => onOpenChange(false)} />
+          ) : null}
+          <TabsContent value="cloud">
+            <CloudHost
+              onAdd={(baseUrl) => onAdd(baseUrl, "cloud")}
+              onCancel={() => onOpenChange(false)}
+            />
+          </TabsContent>
+          <TabsContent value="remote">
+            <RemoteHost
+              onAdd={(baseUrl) => onAdd(baseUrl, "remote")}
+              onCancel={() => onOpenChange(false)}
+              desktop={Boolean(onAddLocal)}
+            />
+          </TabsContent>
+          {onAddSsh ? (
+            <TabsContent value="ssh">
+              <SshHost onAdd={onAddSsh} onDone={() => onOpenChange(false)} />
             </TabsContent>
-          </Tabs>
-        ) : (
-          <RemoteHost onAdd={onAdd} onCancel={() => onOpenChange(false)} />
-        )}
+          ) : null}
+        </Tabs>
       </DialogContent>
     </Dialog>
+  );
+}
+
+/** What each connector is called where an operator has to choose between them. */
+const CONNECTOR_LABELS: Record<ConnectorKind, string> = {
+  local: "On this computer",
+  cloud: "TinyHumans Cloud",
+  remote: "Another gateway",
+  ssh: "Over SSH",
+};
+
+/**
+ * Which tenant a cloud address names.
+ *
+ * The first label of the host name, which is the subdomain the control plane
+ * gives a tenant. Only ever a *name* — it decides nothing about where requests
+ * go, which is `baseUrl`'s job — so a url shaped some other way degrading to
+ * the whole authority costs nothing but a longer word in a row.
+ */
+function tenantOf(baseUrl: string): string {
+  try {
+    const { hostname } = new URL(baseUrl);
+    return hostname.split(".")[0] || hostname;
+  } catch {
+    return baseUrl;
+  }
+}
+
+/** A tenant of the hosted platform, at the address it was given. */
+function CloudHost({
+  onAdd,
+  onCancel,
+}: {
+  onAdd: (baseUrl: string) => void;
+  onCancel: () => void;
+}) {
+  const [url, setUrl] = useState("");
+  return (
+    <>
+      <div className="space-y-2">
+        <Label htmlFor="cloud-url">Company address</Label>
+        <Input
+          id="cloud-url"
+          placeholder="https://acme.opencompany.cloud"
+          value={url}
+          onChange={(e) => setUrl(e.target.value)}
+        />
+        {/*
+          Worth saying before the first probe rather than after it: a tenant
+          that has been idle is not running, and the platform starts it when a
+          request arrives. The row says "Waking…" for as long as that takes,
+          and an operator who has not been told that reads it as a hang.
+        */}
+        <p className="text-muted-foreground text-xs">
+          A company hosted for you. If it has been idle it is started on the next
+          request, so the first connection can take a few seconds.
+        </p>
+      </div>
+      <DialogFooter>
+        <Button variant="ghost" onClick={onCancel}>
+          Cancel
+        </Button>
+        <Button disabled={!url.trim()} onClick={() => onAdd(url.trim())}>
+          Add
+        </Button>
+      </DialogFooter>
+    </>
   );
 }
 
@@ -471,9 +595,11 @@ export function AddHostDialog() {
 function RemoteHost({
   onAdd,
   onCancel,
+  desktop,
 }: {
   onAdd: (baseUrl: string) => void;
   onCancel: () => void;
+  desktop: boolean;
 }) {
   const [url, setUrl] = useState("");
   return (
@@ -486,6 +612,20 @@ function RemoteHost({
           value={url}
           onChange={(e) => setUrl(e.target.value)}
         />
+        {/*
+          The most likely support question this tab generates, answered where
+          it is cheapest to answer. A browser reaches a gateway from *this*
+          origin, so the gateway has to allow it — and there is no wildcard,
+          because the session is a credential. The desktop proxies from Rust,
+          where no origin is involved and none of this applies.
+        */}
+        {desktop ? null : (
+          <p className="text-muted-foreground text-xs">
+            A gateway you run yourself. It has to allow this console's address in{" "}
+            <code>OPENCOMPANY_CORS_ORIGINS</code>, or your browser will block every
+            reply.
+          </p>
+        )}
       </div>
       <DialogFooter>
         <Button variant="ghost" onClick={onCancel}>
@@ -493,6 +633,85 @@ function RemoteHost({
         </Button>
         <Button disabled={!url.trim()} onClick={() => onAdd(url.trim())}>
           Add
+        </Button>
+      </DialogFooter>
+    </>
+  );
+}
+
+/**
+ * A host on another machine that is bound to loopback there, reached through a
+ * tunnel this application opens.
+ *
+ * The destination leads and everything else has a default, because the shape
+ * this is for is `acme-vps` — a `Host` alias out of `~/.ssh/config`. Anyone
+ * with a bastion, a jump host or a non-default key has already written that
+ * file, and a form that re-asks for its contents is one they will fill in
+ * wrong.
+ */
+function SshHost({
+  onAdd,
+  onDone,
+}: {
+  onAdd: (target: SshTarget) => Promise<void>;
+  onDone: () => void;
+}) {
+  const [destination, setDestination] = useState("");
+  const [remotePort, setRemotePort] = useState(String(DEFAULT_REMOTE_PORT));
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function add(): Promise<void> {
+    setBusy(true);
+    setError(null);
+    try {
+      await onAdd({
+        destination: destination.trim(),
+        remotePort: Number(remotePort) || DEFAULT_REMOTE_PORT,
+      });
+      onDone();
+    } catch (err) {
+      // `ssh`'s own words, kept: "Host key verification failed" and
+      // "Permission denied (publickey)" each name a specific thing to go and
+      // fix, and a summary of either would name none of them.
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <>
+      <div className="space-y-2">
+        <Label htmlFor="ssh-destination">Machine</Label>
+        <Input
+          id="ssh-destination"
+          placeholder="acme-vps, or deploy@10.0.0.4"
+          value={destination}
+          onChange={(e) => setDestination(e.target.value)}
+        />
+        <Label htmlFor="ssh-remote-port">Port it serves on there</Label>
+        <Input
+          id="ssh-remote-port"
+          inputMode="numeric"
+          placeholder={String(DEFAULT_REMOTE_PORT)}
+          value={remotePort}
+          onChange={(e) => setRemotePort(e.target.value)}
+        />
+        <p className="text-muted-foreground text-xs">
+          The host stays reachable only from that machine; this application
+          forwards it over your own ssh. Your key has to be one ssh can use
+          without asking — an agent key, or one with no passphrase.
+        </p>
+        {error ? <p className="text-destructive text-xs">{error}</p> : null}
+      </div>
+      <DialogFooter>
+        <Button variant="ghost" onClick={onDone}>
+          Cancel
+        </Button>
+        <Button disabled={busy || !destination.trim()} onClick={() => void add()}>
+          {busy ? <Loader2 className="size-4 animate-spin" /> : null}
+          Connect
         </Button>
       </DialogFooter>
     </>

@@ -326,6 +326,31 @@ pub(super) fn is_orchestrator(record: &CompanyRecord, agent_id: &str) -> bool {
     crate::company::orchestrator_id(&record.manifest.agents) == Some(agent_id)
 }
 
+/// Whether `agent_id` came from the **global baseline**
+/// ([`crate::globals`]) rather than from this company.
+///
+/// Provenance, and the one question first-run setup turns on (issue #1404).
+/// `apply_globals` appends `globals/agents/*.toml` to *every* company's roster
+/// whatever its manifest says, so "is the roster empty?" is answered `no` on a
+/// company nobody has ever staffed — which is how the whole first-run flow came
+/// to be unreachable in the shipped product. The console needs to tell the
+/// baseline apart from a team, and it must not do that by hard-coding the
+/// baseline's ids: the next global added would silently re-break the gate.
+///
+/// Read from [`Agent::global`](crate::company::Agent::global), the marker the
+/// merge itself sets, so this answer moves with the baseline rather than
+/// alongside it. An overlay teammate is never global — the merge only ever
+/// touches the manifest roster — so an id this does not find is `false`, which
+/// is also the right answer for an id that is not on the roster at all.
+pub(super) fn is_global(record: &CompanyRecord, agent_id: &str) -> bool {
+    record
+        .manifest
+        .agents
+        .iter()
+        .find(|agent| agent.id == agent_id)
+        .is_some_and(|agent| agent.global)
+}
+
 /// One agent's grants at all three levels — the single constructor for
 /// [`AgentToolsDto`].
 ///

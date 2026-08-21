@@ -1,0 +1,95 @@
+# Introductions made, and what came of them.
+#
+# An accelerator's network is its actual asset, and it is spent rather than
+# owned: every introduction costs a small amount of credibility with the person
+# on the receiving end, and a bad one costs more than a good one returns.
+# Recording who was introduced to whom, and what happened, is what stops the same
+# investor being sent four companies that do not fit their thesis.
+
+title = "Introductions"
+purpose = """
+Every introduction made: who to whom, why they were a fit, and what came of it. \
+Read it before making one — the network is spent rather than owned, and the \
+person on the other end remembers the last three.\
+"""
+written_by = "`record_entry` to record or update an introduction, `close_entry` when its outcome is known"
+checks = ["required-field", "known-status", "closed-needs-reason"]
+
+[[field]]
+name = "id"
+role = "id"
+required = true
+
+[[field]]
+name = "introduction"
+role = "title"
+required = true
+description = "Who was introduced to whom."
+
+[[field]]
+name = "status"
+role = "status"
+required = true
+
+[[field]]
+name = "company"
+role = "refs"
+required = true
+
+[[field]]
+name = "why_a_fit"
+role = "prose"
+required = true
+description = "Why this person for this company, specifically. A generic introduction spends credibility and returns nothing."
+
+[[field]]
+name = "asked_first"
+role = "prose"
+description = "Whether the recipient was asked before the introduction was made. Double opt-in, always."
+
+[[field]]
+name = "outcome"
+role = "prose"
+description = "What came of it, including nothing. Nothing is the usual outcome and worth recording."
+
+[[field]]
+name = "owner"
+role = "owner"
+
+[[field]]
+name = "reason"
+role = "prose"
+description = "How it closed — led somewhere, or did not. Required when it closes."
+
+[[status]]
+name = "proposed"
+
+[[status]]
+name = "made"
+
+[[status]]
+name = "productive"
+closed = true
+needs_reason = true
+
+[[status]]
+name = "no_outcome"
+label = "No outcome"
+closed = true
+needs_reason = true
+
+[[section]]
+heading = "Live"
+blurb = "Proposed or made, awaiting an outcome. Double opt-in before anything moves from proposed."
+statuses = ["proposed", "made"]
+order = "recent"
+
+[[section]]
+heading = "Closed"
+blurb = """
+Productive or not, each with the outcome. A run of no-outcome introductions to \
+one person is the signal to stop introducing companies to them — which is \
+invisible without this record.\
+"""
+statuses = ["productive", "no_outcome"]
+cap = 20

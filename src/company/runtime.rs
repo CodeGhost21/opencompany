@@ -194,6 +194,10 @@ pub struct CompanyRuntime {
     pub(crate) events: Arc<dyn EventLog>,
     pub(crate) memory: Arc<dyn MemoryStore>,
     pub(crate) context: Arc<dyn ContextStore>,
+    /// The taint-stamping context port for external content (issue #1113);
+    /// resolved at build time — same store as `context` when the engine
+    /// cannot represent taint.
+    pub(crate) inbound_context: Arc<dyn ContextStore>,
     pub(crate) tools: Arc<dyn ToolProvider>,
     pub(crate) channels: Vec<Arc<dyn ChannelAdapter>>,
     pub(crate) economy: Option<Arc<dyn AgentEconomy>>,
@@ -417,6 +421,7 @@ impl CompanyRuntime {
         events: Arc<dyn EventLog>,
         memory: Arc<dyn MemoryStore>,
         context: Arc<dyn ContextStore>,
+        inbound_context: Arc<dyn ContextStore>,
         tools: Arc<dyn ToolProvider>,
         channels: Vec<Arc<dyn ChannelAdapter>>,
         economy: Option<Arc<dyn AgentEconomy>>,
@@ -443,6 +448,7 @@ impl CompanyRuntime {
             events,
             memory,
             context,
+            inbound_context,
             tools,
             channels,
             economy,
@@ -1467,7 +1473,37 @@ impl CompanyRuntime {
         let receipt = CycleRunner::new(self)
             .settle_approval(id, verdict, by, scope)
             .await?;
+        self.retire_if_expired(id, &receipt).await?;
         Ok((receipt.clone(), self.spawn_follow_up(receipt)))
+    }
+
+    /// Finishes the retirement a [`ResolveReceipt::Expired`] owes (issue #1449).
+    ///
+    /// The gate dropped the entry inside its own critical section — that is what
+    /// `Expired` reports — and this is the rest of the transaction:
+    /// [`retire_approval`](Self::retire_approval), the single retirement
+    /// primitive, exactly as the sweeper reaches it. So a deadline that passes
+    /// unnoticed and a deadline that passes one second before the operator
+    /// clicks now leave **the same** durable trail: an `ApprovalExpired` line
+    /// and an `ApprovalResolved { verdict: Deny, by: System }` event, with no
+    /// human's name attached to an approval that did not happen.
+    ///
+    /// It runs **here**, inline, rather than inside the spawned follow-up: the
+    /// detached resolve answers `recorded: true` the moment this returns, and a
+    /// receipt that claims durability while its journal write is still queued on
+    /// another task is the same class of untrue statement as the one being fixed.
+    ///
+    /// A no-op for every other receipt.
+    async fn retire_if_expired(
+        self: &Arc<Self>,
+        id: &ApprovalId,
+        receipt: &ResolveReceipt,
+    ) -> Result<()> {
+        if !receipt.expired() {
+            return Ok(());
+        }
+        self.retire_approval(id, ExpiryReason::Ttl, now_millis())
+            .await
     }
 
     /// How many **other** decisions the turn behind `id` is still blocked on
@@ -1528,6 +1564,7 @@ impl CompanyRuntime {
         let receipt = CycleRunner::new(self)
             .settle_approval_amended(id, amended_payload, by)
             .await?;
+        self.retire_if_expired(id, &receipt).await?;
         Ok((receipt.clone(), self.spawn_follow_up(receipt)))
     }
 
@@ -1557,6 +1594,14 @@ impl CompanyRuntime {
             let event = match receipt {
                 ResolveReceipt::AlreadyResolved => {
                     return Ok(CycleRunner::new(&rt).already_resolved_report());
+                }
+                // Issue #1449: an expiry owes no continuation *from here*.
+                // `retire_approval` — already run inline by `retire_if_expired`
+                // — released the turn itself, banking the expiry as the deny it
+                // is. Running one here too would decide the same approval twice
+                // against the continuation queue.
+                ResolveReceipt::Expired => {
+                    return Ok(CycleRunner::new(&rt).expired_report());
                 }
                 ResolveReceipt::Settled(event) => *event,
             };
@@ -2413,6 +2458,41 @@ impl CompanyRuntime {
     /// says so, rather than showing an all-clear it cannot stand behind.
     pub fn has_undescribed_history(&self) -> bool {
         self.journal.has_undescribed_history()
+    }
+
+    /// The approvals queue as it is right now, in the two shapes a workflow run
+    /// is joined against it by (issue #1189).
+    ///
+    /// One pass over the same parked effects [`pending_approvals`](Self::pending_approvals)
+    /// projects, collecting both keys at once: every live approval id, and every
+    /// live `(run, gate node)` pair. See
+    /// [`LiveApprovals`](crate::ports::workflow_verdict::LiveApprovals) for why
+    /// one key cannot answer for both shapes.
+    ///
+    /// It reads the **raw** effects rather than the projected summaries on
+    /// purpose. `ApprovalSummary::payload` is `display_payload` — redacted and
+    /// node-budget-bounded — so recovering a gate's node id from it would be
+    /// reading a rendering of the fact instead of the fact, and would break
+    /// silently the day the redaction rules change. Building the answer here
+    /// also keeps raw parked effects out of the HTTP layer, which is the whole
+    /// reason the projection exists.
+    ///
+    /// No task-link discrimination is needed for the gate half, unlike
+    /// [`workflow_run_of`]: `gate_node_id` kind-checks `workflow.approve`, a
+    /// kind only `park_pending_gates` ever mints, and on that effect `run_id` is
+    /// always the workflow run that paused.
+    pub fn live_approvals(&self) -> crate::ports::workflow_verdict::LiveApprovals {
+        let mut live = crate::ports::workflow_verdict::LiveApprovals::default();
+        for parked in self.journal.pending() {
+            live.insert_id(parked.id.as_ref());
+            if let (Some(run_id), Some(node_id)) = (
+                parked.effect.run_id.as_deref(),
+                crate::runtime::workflow_resume::gate_node_id(&parked.effect),
+            ) {
+                live.insert_gate(run_id, node_id);
+            }
+        }
+        live
     }
 
     /// The approvals currently awaiting the operator.

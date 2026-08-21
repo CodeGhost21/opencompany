@@ -62,8 +62,22 @@ export interface RunUsage {
 export interface RunSummary {
   /** Stable id for the attempt within the company. */
   id: string;
-  /** The card this is an attempt at. */
-  taskId: string;
+  /**
+   * The card this is an attempt at.
+   *
+   * **Absent, never null**, when the attempt is at no card — an operator chat
+   * turn (issue #983), which the run store now records so a turn in flight is
+   * queryable. Test for it by presence.
+   */
+  taskId?: string;
+  /**
+   * The conversation this attempt belongs to, when one raised it (issue #983).
+   * Absent for a card dispatch, which is reachable through its card instead.
+   *
+   * This is what lets a reloading console match an open turn back to the thread
+   * whose working indicator it should re-arm.
+   */
+  chatId?: string;
   /** The desk/teammate it was dispatched to. */
   agentId: string;
   /** Which attempt at the card this is — **1-based**; the first run is `1`. */

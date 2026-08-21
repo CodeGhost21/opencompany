@@ -591,6 +591,7 @@ mod tests {
             "apply_patch",
             "csv_export",
             "memory_store",
+            "memory_forget",
         ] {
             assert_eq!(judge_bare(tool), Judgement::Silent, "`{tool}` is a draft");
         }

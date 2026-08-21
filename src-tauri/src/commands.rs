@@ -383,6 +383,43 @@ pub async fn oc_rename_local_instance(
     state.local.lock().await.rename(&id, &label)
 }
 
+/// Opens a tunnel to a host on another machine, and answers with the loopback
+/// address the console should use for it.
+///
+/// Idempotent per target: asking for a host that is already tunnelled hands
+/// back the tunnel that is up. The console reopens every remembered `ssh`
+/// connection at launch, and a second call must not mean a second child.
+#[tauri::command]
+pub async fn oc_open_ssh_tunnel(
+    state: State<'_, crate::AppHandleState>,
+    target: crate::ssh::SshTarget,
+) -> Result<crate::ssh::SshTunnelInfo, String> {
+    state.ssh.lock().await.open(target).await
+}
+
+/// Closes the tunnel to a target. Not an error when there is none — the
+/// console closes on removal, and removal can arrive twice.
+#[tauri::command]
+pub async fn oc_close_ssh_tunnel(
+    state: State<'_, crate::AppHandleState>,
+    target: crate::ssh::SshTarget,
+) -> Result<(), String> {
+    state.ssh.lock().await.close(&target).await;
+    Ok(())
+}
+
+/// Every tunnel, and which of them stopped forwarding.
+///
+/// The roster the console re-reads rather than keeping its own copy of, for
+/// the same reason [`oc_local_instances`] is: one source of truth, on the side
+/// that actually holds the processes.
+#[tauri::command]
+pub async fn oc_ssh_tunnels(
+    state: State<'_, crate::AppHandleState>,
+) -> Result<Vec<crate::ssh::SshTunnelInfo>, String> {
+    Ok(state.ssh.lock().await.list())
+}
+
 /// Drops a host from the roster. **Leaves its data on disk** — see
 /// [`crate::local::LocalHosts::forget`].
 #[tauri::command]

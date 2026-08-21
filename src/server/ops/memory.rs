@@ -12,11 +12,13 @@
 //!
 //! ## Known limitation (flagged seam)
 //!
-//! [`ContextStore`] is append-only (no delete port), so deleting a fact removes
-//! it from the `FactStore` and the console but its mirrored chunk stays
-//! agent-recallable until a delete port lands. The `operator-fact/{id}` label
-//! makes that future reap trivial. We deliberately do NOT fork the retrieval
-//! path to work around this — the seam is documented, not hidden.
+//! Deleting a fact removes it from the `FactStore` AND reaps its mirrored
+//! `operator-fact/{id}` context chunk — the delete port this comment once
+//! said was missing landed with #1290, and leaving the reap unwired would
+//! have kept showing the operator "deleted" while agents still recalled it.
+//! The reap honors the shared-address rule: chunks are content-addressed, so
+//! a mirror whose byte-identical body is indexed under any OTHER label is
+//! left in place rather than deleting someone else's row.
 
 use axum::extract::{Path, Query};
 use axum::http::StatusCode;
@@ -27,10 +29,37 @@ use serde::{Deserialize, Serialize};
 use crate::AppState;
 use crate::error::OpenCompanyError;
 use crate::ports::facts::{FactKind, FactRecord};
-use crate::ports::types::{CompanyEvent, ContextChunk};
+use crate::ports::types::{ChunkAddr, ChunkMeta, CompanyEvent, ContextChunk};
 use crate::ports::{generate_id, now_millis};
 use crate::server::error::ApiError;
 use crate::server::ops::{ScopedCompany, scoped};
+
+/// The deliberate-memory label family's prefix, with its separator.
+///
+/// A LOCAL copy: the authoring module (`crate::harness::built_in::memory_tools`,
+/// `AGENT_MEMORY_LABEL_PREFIX`) is `openhuman`-gated and this file is not, so
+/// the constant cannot be imported on every shape. The gated test below pins
+/// the two spellings together, which makes the lockstep compiler-checked on
+/// exactly the lanes that build both.
+fn const_format_prefix() -> &'static str {
+    "agent-memory/"
+}
+
+#[cfg(all(test, feature = "openhuman"))]
+mod label_lockstep_test {
+    /// A rename of the tool module's prefix must break here, not silently
+    /// mis-attribute every deliberate memory in the Brain view.
+    #[test]
+    fn the_brain_view_parses_the_prefix_the_tools_write() {
+        assert_eq!(
+            super::const_format_prefix(),
+            format!(
+                "{}/",
+                crate::harness::built_in::memory_tools::AGENT_MEMORY_LABEL_PREFIX
+            )
+        );
+    }
+}
 
 /// Label prefix for the [`ContextStore`](crate::ports::ContextStore) mirror of
 /// an operator-authored fact. Keyed by fact id so a future delete port can reap
@@ -146,18 +175,26 @@ fn split_title_body(body: &str) -> (String, String) {
     (truncate_chars(first, CONTEXT_TITLE_MAX), rest.to_string())
 }
 
-/// Turns peeked context chunks into read-only [`MemoryEntry`]s, ordered agent
-/// memory first then task outcomes. Drops operator-fact mirrors (they are
-/// already represented by their FactStore row — never double-list them) and
-/// applies `query` (case-insensitive substring over the chunk body) so the
-/// list's free-text search reaches context rows too, matching fact search.
+/// Turns peeked context chunks into read-only [`MemoryEntry`]s, newest first
+/// across both origins. Drops operator-fact mirrors (they are already
+/// represented by their FactStore row — never double-list them) and applies
+/// `query` (case-insensitive substring over the chunk body) so the list's
+/// free-text search reaches context rows too, matching fact search.
+///
+/// Ordering is by stamp, never by origin. Bucketing agent memories ahead of
+/// task outcomes put *every* outcome behind *every* memory whatever their
+/// stamps, so the newest memory in the company could render last — the #1488
+/// symptom reached by a second route, and past the cap the sort in
+/// [`capped_newest_first`] was the only thing keeping it out of the list at
+/// all. The console filters by origin client-side, so the grouping bought
+/// nothing. The `id` tie-break carries the addr, so chunks sharing a
+/// millisecond keep a total, call-stable order, as the cap's sort does.
 fn context_entries(chunks: Vec<RawChunk>, query: Option<&str>) -> Vec<MemoryEntry> {
     let needle = query.map(|q| q.to_lowercase());
     let mirror_prefix = format!("{OPERATOR_FACT_PREFIX}/");
     let outcome_prefix = format!("{OUTCOME_LABEL_PREFIX}/");
 
-    let mut agent_memory = Vec::new();
-    let mut task_outcomes = Vec::new();
+    let mut entries: Vec<MemoryEntry> = Vec::new();
 
     for chunk in chunks {
         // The operator-fact mirror is the same knowledge as its FactStore row;
@@ -171,20 +208,22 @@ fn context_entries(chunks: Vec<RawChunk>, query: Option<&str>) -> Vec<MemoryEntr
             continue;
         }
 
-        let (origin, source, bucket): (MemoryOrigin, String, &mut Vec<MemoryEntry>) =
+        let (origin, source): (MemoryOrigin, String) =
             if let Some(agent) = chunk.label.strip_prefix(&outcome_prefix) {
                 let who = if agent.is_empty() { "an agent" } else { agent };
-                (
-                    MemoryOrigin::TaskOutcome,
-                    who.to_string(),
-                    &mut task_outcomes,
-                )
+                (MemoryOrigin::TaskOutcome, who.to_string())
             } else {
-                let who = chunk.label.split('/').next().filter(|s| !s.is_empty());
+                // Deliberate memories live one segment deeper —
+                // `agent-memory/<agent>/<slug>` — so the naive first-segment
+                // parse attributed every one of them to the literal
+                // "agent-memory" (the #1290 review's M2).
+                let who = match chunk.label.strip_prefix(const_format_prefix()) {
+                    Some(rest) => rest.split('/').next().filter(|s| !s.is_empty()),
+                    None => chunk.label.split('/').next().filter(|s| !s.is_empty()),
+                };
                 (
                     MemoryOrigin::AgentMemory,
                     who.unwrap_or("an agent").to_string(),
-                    &mut agent_memory,
                 )
             };
 
@@ -196,7 +235,7 @@ fn context_entries(chunks: Vec<RawChunk>, query: Option<&str>) -> Vec<MemoryEntr
             };
         }
 
-        bucket.push(MemoryEntry {
+        entries.push(MemoryEntry {
             // Prefix so a context row's id can never collide with a fact id
             // (delete targets fact ids only; this keeps React keys unique too).
             id: format!("ctx:{}", chunk.addr),
@@ -212,8 +251,15 @@ fn context_entries(chunks: Vec<RawChunk>, query: Option<&str>) -> Vec<MemoryEntr
         });
     }
 
-    agent_memory.extend(task_outcomes);
-    agent_memory
+    // The cap upstream sorted metas; re-sort here because the query filter and
+    // the mirror drop above both reshape the set, and because a caller that
+    // hands us chunks in any other order still gets newest-first.
+    entries.sort_by(|a, b| {
+        b.updated_at
+            .cmp(&a.updated_at)
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    entries
 }
 
 /// The create-fact body.
@@ -270,12 +316,14 @@ struct MemoryStats {
 }
 
 /// `GET /memory` — everything the company remembers, so the console lists what
-/// the Brain header counts. Three sources, in this order:
+/// the Brain header counts. Two sources, in this order:
 ///
 /// 1. **Operator facts** (FactStore) — newest-first, editable/deletable.
-/// 2. **Agent memory** (ContextStore chunks that are neither task outcomes nor
-///    operator-fact mirrors) — read-only.
-/// 3. **Task outcomes** (ContextStore `task-outcome/*`) — read-only.
+/// 2. **Context rows** (ContextStore chunks that are not operator-fact
+///    mirrors) — read-only, newest-first, agent memories and task outcomes
+///    interleaved by stamp rather than grouped by origin, so the newest
+///    memory in the company always heads the context half. The console's
+///    type filter separates the two origins client-side.
 ///
 /// `?query=` (case-insensitive substring over title + body) filters all three.
 /// `?kind=` is a *fact* taxonomy filter, so when it is set the context sources
@@ -301,43 +349,76 @@ async fn list_facts(
         // the reads so a huge context store can't unbound this request.
         let mirror_prefix = format!("{OPERATOR_FACT_PREFIX}/");
         let metas = company.runtime.context.list(company.id(), "").await?;
-        let mut chunks = Vec::new();
-        for meta in metas
-            .into_iter()
-            .filter(|m| !m.label.starts_with(&mirror_prefix))
-            .take(MAX_CONTEXT_ENTRIES)
+        let metas = capped_newest_first(metas, &mirror_prefix, MAX_CONTEXT_ENTRIES);
+        // One batched read for every surviving body — how few round trips
+        // that really is, is the backend's business (see `peek_many`); what
+        // matters here is that the route no longer peeks per chunk. A body
+        // that cannot be read
+        // degrades that row to empty rather than failing the whole list, but
+        // log it so a real storage fault surfaces instead of silently
+        // rendering blank cards.
+        let addrs: Vec<ChunkAddr> = metas.iter().map(|m| m.addr.clone()).collect();
+        let bodies = match company
+            .runtime
+            .context
+            .peek_many(company.id(), &addrs)
+            .await
         {
-            // A peek failure degrades one row to an empty body rather than
-            // failing the whole list, but log it so a real storage fault
-            // surfaces instead of silently rendering blank cards.
-            let body = match company
-                .runtime
-                .context
-                .peek(company.id(), &meta.addr, None)
-                .await
-            {
-                Ok(body) => body,
-                Err(err) => {
+            Ok(bodies) => bodies,
+            Err(err) => {
+                tracing::warn!(
+                    company = %company.id(),
+                    error = %err,
+                    "bulk context read failed; rendering empty bodies"
+                );
+                vec![None; metas.len()]
+            }
+        };
+        let chunks = metas
+            .into_iter()
+            .zip(bodies)
+            .map(|(meta, body)| {
+                let body = body.unwrap_or_else(|| {
                     tracing::warn!(
                         company = %company.id(),
                         addr = %meta.addr,
-                        error = %err,
                         "failed to peek context chunk; rendering empty body"
                     );
                     String::new()
+                });
+                RawChunk {
+                    addr: meta.addr.to_string(),
+                    label: meta.label,
+                    body,
+                    stored_at_millis: meta.stored_at_millis,
                 }
-            };
-            chunks.push(RawChunk {
-                addr: meta.addr.to_string(),
-                label: meta.label,
-                body,
-                stored_at_millis: meta.stored_at_millis,
-            });
-        }
+            })
+            .collect();
         entries.extend(context_entries(chunks, query.as_deref()));
     }
 
     Ok(Json(entries))
+}
+
+/// Drops the operator-fact mirrors, then keeps the newest `cap` chunks.
+///
+/// Every backend lists oldest-first, so capping the head would pin the Brain
+/// view to the oldest `cap` chunks forever — once a company crossed the cap, a
+/// new memory could never appear again. Sort newest-first BEFORE capping; the
+/// addr tie-break keeps the order total, so chunks stamped in the same
+/// millisecond cannot swap places between calls.
+fn capped_newest_first(metas: Vec<ChunkMeta>, mirror_prefix: &str, cap: usize) -> Vec<ChunkMeta> {
+    let mut metas: Vec<ChunkMeta> = metas
+        .into_iter()
+        .filter(|m| !m.label.starts_with(mirror_prefix))
+        .collect();
+    metas.sort_by(|a, b| {
+        b.stored_at_millis
+            .cmp(&a.stored_at_millis)
+            .then_with(|| a.addr.as_ref().cmp(b.addr.as_ref()))
+    });
+    metas.truncate(cap);
+    metas
 }
 
 /// `GET /memory/stats` — counts across the fact store and the agents' context
@@ -423,10 +504,23 @@ async fn delete_fact(
         .delete(company.id(), &fact_id)
         .await?
     {
-        // Journal the operator deletion to the event log (audit trail). Note the
-        // mirrored `operator-fact/{fact_id}` chunk is NOT removed here: the
-        // ContextStore has no delete port, so it stays agent-recallable until
-        // one lands (documented seam, module doc).
+        // Reap the mirrored context chunk so recall stops serving a fact the
+        // operator just deleted. Best-effort: the fact row is already gone,
+        // and a reap failure leaves only the pre-#1290 status quo (a stale
+        // mirror), which must not turn the successful delete into an error —
+        // but it must be visible, because agents keep recalling the survivor
+        // while the Brain view shows the fact gone.
+        if let Err(err) =
+            reap_fact_mirror(company.runtime.context.as_ref(), company.id(), &fact_id).await
+        {
+            tracing::warn!(
+                fact_id = %fact_id,
+                error = %err,
+                "fact deleted but its context mirror could not be reaped; \
+                 recall may keep serving it until a retry or #1300's reaper"
+            );
+        }
+        // Journal the operator deletion to the event log (audit trail).
         company
             .runtime
             .events()
@@ -445,6 +539,101 @@ async fn delete_fact(
     }
 }
 
+/// Removes the `operator-fact/{fact_id}` mirror chunk(s), shared-address
+/// aware: an address also carrying any label OUTSIDE this mirror's own is
+/// skipped — deleting it would delete that other row too (content
+/// addressing; the same rule `memory_forget` enforces).
+///
+/// KNOWN RACE (#1300): the shared-label check is a snapshot; a write of
+/// byte-identical content landing between the check and the delete loses its
+/// row. The port has no conditional delete to close this — that is exactly
+/// the label-scoped-delete work item in #1300, which fixes it by
+/// construction. Until then the window is one operator HTTP call wide and
+/// requires an adversarially-timed identical-content write.
+pub(crate) async fn reap_fact_mirror(
+    context: &dyn crate::ports::ContextStore,
+    company: &crate::ports::CompanyId,
+    fact_id: &str,
+) -> crate::Result<()> {
+    let mirror_label = format!("{OPERATOR_FACT_PREFIX}/{fact_id}");
+    let all = context.list(company, "").await?;
+    for meta in all.iter().filter(|m| m.label == mirror_label) {
+        let shared = all
+            .iter()
+            .any(|m| m.addr == meta.addr && m.label != mirror_label);
+        if !shared {
+            context.delete(company, &meta.addr).await?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod reap_test {
+    use super::*;
+    use crate::ports::ContextStore;
+    use crate::ports::types::{CompanyId, ContextChunk};
+    use crate::store::FsContextStore;
+    use std::sync::Arc;
+
+    /// Deleting a fact reaps its mirror; a mirror whose content is shared
+    /// with another label survives (the other row must not vanish).
+    #[tokio::test]
+    async fn the_mirror_is_reaped_unless_its_address_is_shared() {
+        let dir = tempfile::tempdir().unwrap();
+        let context: Arc<dyn ContextStore> =
+            Arc::new(FsContextStore::new(dir.path().to_path_buf()));
+        let company = CompanyId::new("acme");
+
+        let lone = context
+            .put(
+                &company,
+                ContextChunk {
+                    label: "operator-fact/f1".into(),
+                    body: "fact one".into(),
+                },
+            )
+            .await
+            .unwrap();
+        reap_fact_mirror(context.as_ref(), &company, "f1")
+            .await
+            .unwrap();
+        assert!(
+            context.peek(&company, &lone, None).await.is_err(),
+            "the unshared mirror must be reaped"
+        );
+
+        // Identical bodies share one address: the reap must leave it.
+        let shared = context
+            .put(
+                &company,
+                ContextChunk {
+                    label: "operator-fact/f2".into(),
+                    body: "shared text".into(),
+                },
+            )
+            .await
+            .unwrap();
+        context
+            .put(
+                &company,
+                ContextChunk {
+                    label: "agent-memory/ceo/note".into(),
+                    body: "shared text".into(),
+                },
+            )
+            .await
+            .unwrap();
+        reap_fact_mirror(context.as_ref(), &company, "f2")
+            .await
+            .unwrap();
+        context
+            .peek(&company, &shared, None)
+            .await
+            .expect("a shared-address mirror must survive the reap");
+    }
+}
+
 #[cfg(test)]
 mod combined_list_tests {
     use super::*;
@@ -456,6 +645,18 @@ mod combined_list_tests {
     fn chunk_at(label: &str, body: &str, stored_at_millis: u64) -> RawChunk {
         RawChunk {
             addr: format!("addr-{label}"),
+            label: label.to_string(),
+            body: body.to_string(),
+            stored_at_millis,
+        }
+    }
+
+    /// A chunk whose address is set explicitly, for the stamp-tie tie-break
+    /// (`chunk_at` derives the addr from the label, so two chunks with
+    /// different labels can never share one).
+    fn chunk_at_addr(addr: &str, label: &str, body: &str, stored_at_millis: u64) -> RawChunk {
+        RawChunk {
+            addr: addr.to_string(),
             label: label.to_string(),
             body: body.to_string(),
             stored_at_millis,
@@ -499,6 +700,25 @@ mod combined_list_tests {
         // Title/body split off the first line.
         assert_eq!(entries[0].title, "Learned a thing");
         assert_eq!(entries[0].body, "more detail");
+    }
+
+    /// The #1290 review's M2 red-proof, now green: a deliberate memory's
+    /// `agent-memory/<agent>/<slug>` label attributes to the AGENT, not to
+    /// the literal first segment "agent-memory".
+    #[test]
+    fn deliberate_memories_are_attributed_to_the_storing_agent() {
+        let chunks = vec![chunk(
+            "agent-memory/ceo/fiscal-year",
+            "Fiscal year\n\nFebruary",
+        )];
+        let entries = context_entries(chunks, None);
+        assert_eq!(entries.len(), 1);
+        assert!(matches!(entries[0].origin, MemoryOrigin::AgentMemory));
+        assert_eq!(
+            entries[0].source, "ceo",
+            "the Brain view must name the agent that stored the memory"
+        );
+        assert_eq!(entries[0].title, "Fiscal year");
     }
 
     #[test]
@@ -545,8 +765,47 @@ mod combined_list_tests {
             ],
             None,
         );
-        assert_eq!(entries[0].updated_at, 2_000);
-        assert_eq!(entries[1].updated_at, 3_000);
+        // Newest first, so the fresher task outcome heads the pair.
+        assert_eq!(entries[0].updated_at, 3_000);
+        assert_eq!(entries[1].updated_at, 2_000);
+    }
+
+    /// The route used to bucket rows by origin and concatenate — agent
+    /// memories, then task outcomes — which pushed EVERY outcome behind EVERY
+    /// memory whatever their stamps. A company whose newest memory is a task
+    /// outcome saw it render last: the #1488 symptom by a second route.
+    #[test]
+    fn context_rows_interleave_the_two_origins_by_stamp() {
+        let entries = context_entries(
+            vec![
+                chunk_at("task-outcome/agent-1", "newest outcome", 900),
+                chunk_at("agent-memory/agent-1/five", "middle memory", 500),
+                chunk_at("agent-memory/agent-1/one", "oldest memory", 100),
+            ],
+            None,
+        );
+        let stamps: Vec<u64> = entries.iter().map(|e| e.updated_at).collect();
+        assert_eq!(
+            stamps,
+            vec![900, 500, 100],
+            "context rows order by stamp across origins, not by origin"
+        );
+        assert!(matches!(entries[0].origin, MemoryOrigin::TaskOutcome));
+    }
+
+    #[test]
+    fn context_rows_break_stamp_ties_by_addr_like_the_cap() {
+        // Same tie-break as `capped_newest_first`, so chunks sharing a
+        // millisecond cannot swap places between two calls.
+        let entries = context_entries(
+            vec![
+                chunk_at_addr("z", "agent-1/z", "zulu", 500),
+                chunk_at_addr("a", "task-outcome/agent-1", "alpha", 500),
+            ],
+            None,
+        );
+        let ids: Vec<&str> = entries.iter().map(|e| e.id.as_str()).collect();
+        assert_eq!(ids, vec!["ctx:a", "ctx:z"]);
     }
 
     #[test]
@@ -593,6 +852,289 @@ mod combined_list_tests {
         let ctx = context_entries(vec![chunk("task-outcome/a", "   ")], None);
         assert_eq!(ctx[0].title, "Task outcome");
         assert_eq!(ctx[0].body, "");
+    }
+
+    fn meta(addr: &str, label: &str, stored_at_millis: u64) -> ChunkMeta {
+        ChunkMeta {
+            addr: ChunkAddr::new(addr),
+            label: label.to_string(),
+            len: 0,
+            stored_at_millis,
+        }
+    }
+
+    /// #1488: backends list oldest-first, so capping before sorting pinned the
+    /// Brain view to the oldest chunks forever — the cap must keep the newest.
+    #[test]
+    fn the_cap_keeps_the_newest_chunks_not_the_oldest() {
+        let metas = vec![
+            meta("a1", "agent-1/one", 100),
+            meta("a2", "agent-1/two", 200),
+            meta("a3", "agent-1/three", 300),
+            meta("a4", "agent-1/four", 400),
+        ];
+        let capped = capped_newest_first(metas, "operator-fact/", 2);
+        let stamps: Vec<u64> = capped.iter().map(|m| m.stored_at_millis).collect();
+        assert_eq!(
+            stamps,
+            vec![400, 300],
+            "the newest chunks survive the cap, newest first; the oldest fall off"
+        );
+    }
+
+    #[test]
+    fn the_cap_drops_mirrors_first_and_breaks_stamp_ties_by_addr() {
+        // The mirror must not consume a cap slot even as the newest chunk, and
+        // equal stamps must order deterministically (by addr) between calls.
+        let metas = vec![
+            meta("b", "agent-1/two", 500),
+            meta("m", "operator-fact/f1", 900),
+            meta("a", "agent-1/one", 500),
+        ];
+        let capped = capped_newest_first(metas, "operator-fact/", 2);
+        let addrs: Vec<&str> = capped.iter().map(|m| m.addr.as_ref()).collect();
+        assert_eq!(addrs, vec!["a", "b"]);
+    }
+}
+
+#[cfg(test)]
+mod route_tests {
+    use std::collections::HashMap;
+    use std::ops::Range;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use async_trait::async_trait;
+    use axum::body::{Body, to_bytes};
+    use axum::http::{Request, StatusCode};
+    use serde_json::Value;
+    use tower::ServiceExt;
+
+    use super::MAX_CONTEXT_ENTRIES;
+    use crate::company::CompanyManifest;
+    use crate::ports::context::ContextStore;
+    use crate::ports::types::{
+        ChunkAddr, ChunkHit, ChunkMeta, CompanyId, CompanyRecord, ContextChunk,
+    };
+    use crate::runtime::RuntimeBuilder;
+    use crate::server::router;
+    use crate::store::FsCompanyStore;
+    use crate::{AppConfig, AppState};
+
+    /// A scripted [`ContextStore`]: `list` answers a fixed meta set (oldest
+    /// first, as every real backend lists), and reads are counted so a test
+    /// can pin HOW the route fetched bodies, not only what it rendered.
+    struct ScriptedContext {
+        metas: Vec<ChunkMeta>,
+        bodies: HashMap<String, String>,
+        single_peeks: AtomicUsize,
+        bulk_peeks: AtomicUsize,
+    }
+
+    impl ScriptedContext {
+        /// `total` chunks stamped `1..=total`, listed oldest-first, with the
+        /// two context origins interleaved: even stamps are task outcomes,
+        /// odd ones agent memories. The mix is load-bearing — with a
+        /// single-origin fixture the route's own bucketing hid a cross-origin
+        /// ordering bug from every newest-first assertion below (the newest
+        /// chunk here, `total`, is deliberately a task outcome).
+        fn with_chunks(total: usize) -> Arc<Self> {
+            let mut metas = Vec::new();
+            let mut bodies = HashMap::new();
+            for i in 1..=total {
+                let addr = format!("addr-{i:04}");
+                let label = if i % 2 == 0 {
+                    "task-outcome/agent-1".to_string()
+                } else {
+                    format!("agent-1/note-{i}")
+                };
+                metas.push(ChunkMeta {
+                    addr: ChunkAddr::new(addr.clone()),
+                    label,
+                    len: 0,
+                    stored_at_millis: i as u64,
+                });
+                bodies.insert(addr, format!("note {i}"));
+            }
+            Arc::new(Self {
+                metas,
+                bodies,
+                single_peeks: AtomicUsize::new(0),
+                bulk_peeks: AtomicUsize::new(0),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl ContextStore for ScriptedContext {
+        async fn put(&self, _id: &CompanyId, chunk: ContextChunk) -> crate::Result<ChunkAddr> {
+            // Nothing in these read-only tests writes context; answer with a
+            // derived addr rather than failing an incidental write.
+            Ok(ChunkAddr::new(format!("scripted/{}", chunk.label)))
+        }
+
+        async fn list(&self, _id: &CompanyId, prefix: &str) -> crate::Result<Vec<ChunkMeta>> {
+            Ok(self
+                .metas
+                .iter()
+                .filter(|m| m.label.starts_with(prefix))
+                .cloned()
+                .collect())
+        }
+
+        async fn peek(
+            &self,
+            _id: &CompanyId,
+            addr: &ChunkAddr,
+            _range: Option<Range<usize>>,
+        ) -> crate::Result<String> {
+            self.single_peeks.fetch_add(1, Ordering::SeqCst);
+            self.bodies.get(addr.as_ref()).cloned().ok_or_else(|| {
+                crate::error::OpenCompanyError::Store(format!(
+                    "context chunk not found: {}",
+                    addr.as_ref()
+                ))
+            })
+        }
+
+        async fn peek_many(
+            &self,
+            _id: &CompanyId,
+            addrs: &[ChunkAddr],
+        ) -> crate::Result<Vec<Option<String>>> {
+            self.bulk_peeks.fetch_add(1, Ordering::SeqCst);
+            Ok(addrs
+                .iter()
+                .map(|addr| self.bodies.get(addr.as_ref()).cloned())
+                .collect())
+        }
+
+        async fn search(
+            &self,
+            _id: &CompanyId,
+            _query: &str,
+            _limit: usize,
+        ) -> crate::Result<Vec<ChunkHit>> {
+            Ok(Vec::new())
+        }
+
+        async fn delete(&self, _id: &CompanyId, _addr: &ChunkAddr) -> crate::Result<bool> {
+            Ok(false)
+        }
+    }
+
+    /// An [`AppState`] whose company runtime reads context from `context`,
+    /// with everything else on fresh fs stores under `home`.
+    async fn state_over(home: &std::path::Path, context: Arc<ScriptedContext>) -> AppState {
+        use crate::ports::CompanyStore;
+        let manifest: CompanyManifest =
+            toml::from_str("[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n").unwrap();
+        let store = FsCompanyStore::new(home.to_path_buf());
+        let id = CompanyId::new("acme");
+        store
+            .save(&CompanyRecord {
+                id: id.clone(),
+                manifest: manifest.clone(),
+                ledger: Vec::new(),
+                lifecycle: "running".to_string(),
+                overlay_agents: Vec::new(),
+                overlay_desk_members: Vec::new(),
+                overlay_desk_order: Vec::new(),
+                overlay_desks: Vec::new(),
+                overlay_workflows: Vec::new(),
+                overlay_budgets: Vec::new(),
+                overlay_policy: None,
+                overlay_desk_tools: Default::default(),
+                disabled_workflows: Vec::new(),
+                template_provenance: None,
+                setup: None,
+            })
+            .await
+            .unwrap();
+        let runtime = RuntimeBuilder::new(home.to_path_buf(), manifest)
+            .with_id(id.clone())
+            .with_context(context)
+            .build()
+            .await
+            .unwrap();
+        let state = AppState::new(AppConfig::default());
+        state.registry().insert(id, Arc::new(runtime));
+        crate::server::test_support::seed_fixed_admin(&state, "acme").await;
+        state
+    }
+
+    async fn get_memory(state: &AppState) -> (StatusCode, Value) {
+        let request = Request::builder()
+            .method("GET")
+            .uri("/api/v1/company/memory")
+            .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+            .body(Body::empty())
+            .unwrap();
+        let response = router(state.clone()).oneshot(request).await.unwrap();
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        (status, value)
+    }
+
+    /// #1488: with more chunks than the cap, the list must keep the NEWEST
+    /// `MAX_CONTEXT_ENTRIES`, newest first. Before the fix the route took the
+    /// head of the backend's oldest-first list, so a company past the cap
+    /// never saw a new memory again.
+    #[tokio::test]
+    async fn the_brain_list_keeps_the_newest_chunks_once_over_the_cap() {
+        let home = tempfile::tempdir().unwrap();
+        let total = MAX_CONTEXT_ENTRIES + 2;
+        let state = state_over(home.path(), ScriptedContext::with_chunks(total)).await;
+
+        let (status, rows) = get_memory(&state).await;
+        assert_eq!(status, StatusCode::OK);
+        let rows = rows.as_array().expect("a JSON array");
+        assert_eq!(rows.len(), MAX_CONTEXT_ENTRIES);
+        let stamps: Vec<u64> = rows
+            .iter()
+            .map(|row| row["updatedAt"].as_u64().unwrap())
+            .collect();
+        assert_eq!(stamps[0], total as u64, "the newest chunk heads the list");
+        assert_eq!(
+            rows[0]["origin"], "task-outcome",
+            "the newest chunk heads the list whatever its origin — grouping \
+             outcomes behind memories put it last"
+        );
+        assert!(
+            stamps.windows(2).all(|pair| pair[0] >= pair[1]),
+            "context rows render newest-first"
+        );
+        assert!(
+            stamps.iter().all(|stamp| *stamp > 2),
+            "the oldest chunks fell off the cap, not the newest"
+        );
+    }
+
+    /// The other half of #1488: bodies arrive through ONE bulk `peek_many`,
+    /// not a peek-per-chunk loop.
+    #[tokio::test]
+    async fn the_brain_list_reads_bodies_in_one_bulk_peek() {
+        let home = tempfile::tempdir().unwrap();
+        let context = ScriptedContext::with_chunks(3);
+        let state = state_over(home.path(), context.clone()).await;
+
+        let (status, rows) = get_memory(&state).await;
+        assert_eq!(status, StatusCode::OK);
+        let rows = rows.as_array().expect("a JSON array");
+        assert_eq!(rows.len(), 3);
+        // The bodies really flowed through the bulk read (newest first).
+        assert_eq!(rows[0]["title"], "note 3");
+        assert_eq!(
+            context.bulk_peeks.load(Ordering::SeqCst),
+            1,
+            "one bulk read"
+        );
+        assert_eq!(
+            context.single_peeks.load(Ordering::SeqCst),
+            0,
+            "the per-chunk peek loop is gone"
+        );
     }
 }
 

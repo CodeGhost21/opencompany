@@ -290,6 +290,65 @@ export interface ChatResponse {
    * reacted to" rather than guessing an id.
    */
   messageId?: string;
+  /**
+   * The durable turn row this message opened (issue #983) — pollable at
+   * `GET {scope}/runs/{turnId}`. Additive: absent on a host that predates the
+   * field, which the console reads as "this turn cannot be watched", falling
+   * back to re-reading history.
+   */
+  turnId?: string;
+  /**
+   * On a resolve: which end state it reached (#1449).
+   *
+   * The Approvals page resolves **without** `detach`, so it never sees a
+   * {@link ResolveReceipt} — this is the only shape that can tell it its click
+   * was refused. Absent on every other answer, and on a host that predates the
+   * field.
+   */
+  outcome?: ResolveOutcome;
+}
+
+/**
+ * The answer to a **detached** chat post (issue #983): the turn has been
+ * accepted, journaled and given an id, and that is all it claims. The reply
+ * arrives afterwards on the event stream's `agent_reply` frame, and durably in
+ * `chat/history`.
+ *
+ * `detached` is a constant `true` and exists to be *present*: a newer console
+ * pointed at a host that predates the field sends `detach`, the host ignores it,
+ * and the full synchronous body comes back. So the console can only tell the two
+ * apart by what arrived — never by what it asked for.
+ */
+export interface DetachedChatResponse {
+  /**
+   * The turn's durable row, to poll. Optional for the same reason
+   * `ChatResponse.turnId` is: a run store that refused a row does not get to
+   * refuse the turn, so a detached turn can exist unwatched.
+   */
+  turnId?: string;
+  /**
+   * The durable id of the operator's own message. Never optional here — since
+   * #983 the append happens at accept time, so it is already a fact when this
+   * body is written. That is what lets the console reconcile its optimistic
+   * bubble immediately instead of waiting for the turn to settle.
+   */
+  messageId: string;
+  detached: true;
+}
+
+/** What `POST {scope}/chat` can answer with — settled, or accepted (#983). */
+export type ChatPostResult = ChatResponse | DetachedChatResponse;
+
+/**
+ * Which shape came back, decided on the **response**, never on the request.
+ *
+ * Reads `detached` as a presence check rather than trusting `detach` was
+ * honoured: an older host silently ignores the field and answers synchronously,
+ * and a console that assumed otherwise would sit waiting for a reply it was
+ * already holding.
+ */
+export function isDetachedChat(answer: ChatPostResult): answer is DetachedChatResponse {
+  return (answer as DetachedChatResponse).detached === true;
 }
 
 /** One parked approval from `/approvals`. */
@@ -455,6 +514,25 @@ export interface ApprovalSummary {
 }
 
 /**
+ * **Which** end state a resolve reached (#1449).
+ *
+ * A resolve can succeed as a *request* and still not be the operator's
+ * decision, and the console has to be able to tell those apart — the whole of
+ * #1449 is that it could not, so it rendered the success line over a click the
+ * host had refused.
+ *
+ * * `settled` — the verdict is the operator's and it is recorded.
+ * * `expired` — the approval was still queued but past its deadline, so the
+ *   host default-denied it whatever the button said. **Nothing was carried
+ *   out**, and nothing was recorded against the operator's name.
+ * * `already_resolved` — there was nothing left to resolve. The click changed
+ *   nothing. Could be a double-submit, another operator, another tab, or the
+ *   sweeper retiring it a moment earlier; the host cannot tell which, and
+ *   neither may the wording.
+ */
+export type ResolveOutcome = "settled" | "expired" | "already_resolved";
+
+/**
  * The answer to a **detached** resolve (#383): the verdict is durable, and that
  * is all it claims. The agent's continuation arrives afterwards on the event
  * stream's `agent_reply` frame.
@@ -463,6 +541,12 @@ export interface ResolveReceipt {
   recorded: boolean;
   /** There was nothing left to resolve — a double-click, not a failure. */
   alreadyResolved: boolean;
+  /**
+   * Which end state this resolve reached (#1449). Absent on a host that
+   * predates the field, which the console reads as "cannot tell" and words its
+   * confirmation exactly as it did before rather than guessing.
+   */
+  outcome?: ResolveOutcome;
   /**
    * How many OTHER decisions the turn behind this approval is still blocked on
    * (issue #561). `0` means this decision released it; absent on a host that
@@ -591,6 +675,14 @@ export interface MemorySpec {
   driver_id?: string;
   /** Capability families negotiated at bind time; empty = not negotiated. */
   capabilities: string[];
+  /**
+   * Whether the boot-time reachability probe found the engine usable — ready
+   * or degraded (reachable, possibly reduced); only a down engine is `false`.
+   * A boot-time snapshot, not a live gauge: the provider can recover or fail
+   * after boot without this moving. Absent = not probed (base store, direct
+   * engine, or an older host) — treat as unknown, not unhealthy.
+   */
+  healthy?: boolean;
 }
 
 export interface AppSpec {
@@ -668,6 +760,26 @@ export interface TeamMemberDto {
   budgetSetBy?: string;
   /** When that cap was set (epoch millis). Paired with `budgetSetBy`. */
   budgetSetAtMillis?: number;
+  /**
+   * Whether this teammate came from the **global baseline** — the agents,
+   * workflows and skills every company gets whichever vertical it started from
+   * (`docs/spec/runtime/globals.md`) — rather than from this company's own
+   * roster or from an operator.
+   *
+   * Provenance, and the field first-run setup is gated on (issue #1404). The
+   * baseline is merged into every company whatever its manifest says, so
+   * `roster.length === 0` is never true and the gate that used it could never
+   * open — including on `companies/e2e_setup`, the fixture that exists solely
+   * to reach that flow. Read this rather than testing ids against a hard-coded
+   * list of baseline agents, which re-breaks the moment the baseline changes.
+   *
+   * **Optional on the type, not on the wire**: a host predating the field omits
+   * it, and `undefined` means "this host cannot say". The setup gate reads that
+   * as *not* baseline, which is the conservative answer — counting an unknown
+   * row as baseline would offer setup to a company that already has a team and
+   * stack a second one on it.
+   */
+  global?: boolean;
   /**
    * The declared cognition-tier hint (`[[agent]].tier`) verbatim, from the same
    * host-side helper that answers `GET .../team/{agentId}` (issue #643).
@@ -1035,19 +1147,57 @@ export interface RosterAgent {
 }
 
 /**
+ * How a server got into the company's effective set.
+ *
+ * - `manifest` — committed in `company.toml`'s `[[mcp_server]]`.
+ * - `runtime` — typed into the console by URL.
+ * - `default` — shipped enabled by the packaged install (issue #527). Nobody
+ *   wrote it into *this* company, so it is not "operator-added".
+ * - `registry` — installed from an upstream MCP directory through the browse
+ *   surface (issue #1270). Keyed by {@link McpServer.serverId}, not by name,
+ *   and addressed by the `…/mcp/registry/…` routes rather than List A's.
+ */
+export type McpSource = "manifest" | "runtime" | "default" | "registry";
+
+/**
  * One effective MCP tool server (issue #50), as `.../mcp/servers` returns it.
  * The credential is never present — only the non-secret `authConfigured` flag
  * and the last (scrubbed) probe `health`.
+ *
+ * Since issue #1270 this one list carries directory installs too. The four
+ * registry fields below are all optional and omitted by the host on a row with
+ * no install behind it, so a manifest / runtime / default row arrives exactly
+ * as it always did.
  */
 export interface McpServer {
   name: string;
   endpoint: string;
   description?: string;
-  /** `manifest` (committed in company.toml) or `runtime` (console-added). */
-  source: "manifest" | "runtime";
+  /**
+   * Where this row came from. **The console's single source of provenance** —
+   * it decides the badge, the delete guard, and which set of routes the row's
+   * controls may call.
+   *
+   * A row that is *both* a directory install and a List A declaration is one
+   * reconciled row carrying List A's provenance, not `registry` (issue #1270).
+   * Never re-derive provenance from {@link McpServer.serverId} being present:
+   * a manifest server that was also installed from the directory carries a
+   * `serverId` and must still badge `manifest` and still refuse a delete.
+   */
+  source: McpSource;
   enabled: boolean;
   allowedTools: string[];
   disallowedTools: string[];
+  /**
+   * Remote tool names the operator has declared **read-only** on this server
+   * (issue #1124). A bridge call to one is priced as an outward read rather than
+   * parked for approval, so it can run unattended under `auto`; every other call
+   * through the server still parks. Independent of {@link McpServer.allowedTools}
+   * / {@link McpServer.disallowedTools} — it says nothing about whether a tool is
+   * exposed, only how a call to it is gated. Carries this row's provenance badge
+   * exactly as the two lists above do.
+   */
+  readOnlyTools: string[];
   timeoutSecs: number;
   /** Whether an outbound credential is stored — never the credential itself. */
   authConfigured: boolean;
@@ -1066,6 +1216,22 @@ export interface McpServer {
   reachableBy?: RosterAgent[];
   /** The last recorded (scrubbed) probe outcome, when the server has been probed. */
   health?: McpHealth;
+  /**
+   * The stable install id, present only on a row backed by a directory install
+   * (issue #1270). Every `…/mcp/registry/{serverId}/…` route keys on this;
+   * `name` is a display slug the host mints for the row and addresses nothing
+   * in the registry's own store.
+   *
+   * Present does **not** mean `source === "registry"` — a reconciled row is a
+   * List A server that also has an install. See {@link McpServer.source}.
+   */
+  serverId?: string;
+  /** The directory's qualified name (`@org/server`), when this row came from one. */
+  qualifiedName?: string;
+  /** The directory's icon, when this row came from one. */
+  iconUrl?: string;
+  /** How an install is dialled — `http_remote` or `stdio`. Absent on a List A-only row. */
+  transport?: string;
 }
 
 /**
@@ -1204,6 +1370,18 @@ export interface CapabilityStatusDto {
    */
   searchInBuild?: boolean;
   /** Whether a managed search credential is configured on this build (env-only). */
+  /**
+   * Which Smithery key the company's MCP **directory** browsing presents
+   * (issue #1287): `company` (its own), `environment` (one key set for the
+   * whole host and shared by every company on it), or `none` (Smithery is not
+   * queried, so the directory shows only the open registry's few hosted
+   * entries).
+   *
+   * Absent when the host could not determine it — an unknown answer is not
+   * `none`, and reporting a confident "no key" on a transient store failure
+   * would send an admin to paste one they already have.
+   */
+  mcpDirectoryCredential?: "company" | "environment" | "none";
   searchCredentialConfigured?: boolean;
   /** The company's daily `web_search` call ceiling. */
   searchDailyCallCap?: number;
@@ -1217,6 +1395,34 @@ export interface CapabilityStatusDto {
    * send the field, and must not be rendered as "not granted".
    */
   repoGranted?: boolean;
+  /**
+   * Publishing (issue #244, panel half #1192): whether the company's grants
+   * confer `publish_artifact` — the only way a file an agent wrote becomes a
+   * deliverable.
+   *
+   * **Unlike every other `*Granted` flag here, a bare `*` DOES confer this.**
+   * Publishing spends nothing and reaches nothing outside the company's own
+   * board, so it rides the ordinary namespace rule rather than the
+   * opt-in-by-name rule the real-money surfaces use. The host derives it from
+   * the same predicate the toolbelt's own gate calls, so the panel cannot
+   * report a capability no agent has.
+   *
+   * `undefined` is an older host that does not send the field, and must not be
+   * rendered as "not granted".
+   */
+  publishGranted?: boolean;
+  /**
+   * Whether the harness carrying `publish_artifact` is compiled into this
+   * build. There is no `publish` Cargo feature — the tool rides the harness
+   * feature, exactly as `searchInBuild` does.
+   *
+   * There is deliberately no third flag beside these two. Media, Composio and
+   * search each carry a credential/config rung because each can be granted and
+   * still wire nothing; publishing has neither a credential nor a store toggle,
+   * so a `artifactStoreConfigured` field could only ever be a hardcoded `true`
+   * — the always-reassuring flag issue #886 was filed about.
+   */
+  publishInBuild?: boolean;
   /**
    * Whether the agent-side MCP bridge is compiled into this build (issue #567).
    * Not a grant question like the flags above: the `/mcp/servers` management
@@ -1382,6 +1588,30 @@ export function workflowProblemLocator(problem: WorkflowProblem): string | undef
   return parts.length ? parts.join(" · ") : undefined;
 }
 
+/**
+ * The per-node breakdown a refusal carries, or `null` when it carries none
+ * (issue #1191).
+ *
+ * A function rather than an inline ternary at each call site because the three
+ * branches are the whole of the decision and the console has no component-test
+ * harness that could catch getting them wrong in JSX:
+ *
+ * * not an {@link ApiError} at all (a network failure, an abort) — no breakdown;
+ * * an `ApiError` the host answered without a `problems` array (every refusal
+ *   that is not a workflow refusal) — no breakdown;
+ * * an `ApiError` carrying an EMPTY array — still no breakdown, because a list
+ *   with nothing in it renders as an empty bullet list under the sentence, which
+ *   reads as a rendering bug rather than as "there was nothing more to say".
+ *
+ * `null` rather than `undefined` so a caller holding it in state can distinguish
+ * "asked and there was none" from "never asked", and so the render guard is a
+ * single truthiness check.
+ */
+export function workflowRefusalProblems(error: unknown): WorkflowProblem[] | null {
+  if (!(error instanceof ApiError)) return null;
+  return error.problems?.length ? error.problems : null;
+}
+
 export class ApiError extends Error {
   /**
    * The raw response body, kept only when it was **not** the host's envelope
@@ -1399,7 +1629,7 @@ export class ApiError extends Error {
 
   /**
    * The per-node, per-field breakdown behind `message`, when the host sent one
-   * (issue #836).
+   * (issues #1016, #836).
    *
    * The host already computes this and puts it on the wire; before this field
    * existed the console parsed the envelope's `error` and `code` and dropped

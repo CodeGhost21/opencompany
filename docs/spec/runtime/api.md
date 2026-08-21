@@ -72,6 +72,16 @@ run is then followed through the `workflow_run_started` / `workflow_node_finishe
 / `workflow_run_finished` frames it already keys by that `runId`, and read back
 from `GET …/workflows/runs`, whose fold reports `running: true` until it settles.
 
+That read is **paged** (issue #1012): `{ runs, hasMore, nextBeforeSeq }`, where
+`nextBeforeSeq` is the cursor to pass back as `?before_seq=` and is omitted once
+`hasMore` is `false`. The page is cut by `seq` and only then sorted for display
+by `(atMillis, seq)`, so the cursor is the page's *lowest* `seq` rather than its
+last row — clients must send back what the host issued rather than deriving it,
+and a client talking to a host that omits the field falls back to the old
+`runs.at(-1).seq` derivation, never to "no more pages". Why the two keys differ,
+and the partition argument that makes paging lossless under a clock regression:
+[server/run-history-paging.md](../../modules/server/run-history-paging.md).
+
 **Clients must discriminate on the response shape, not on what they sent.** A
 host predating this ignores the unknown `detach` field and answers the full
 synchronous `200`, so `output` present means "already settled" and `detached`

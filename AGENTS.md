@@ -47,6 +47,23 @@ dedicated `test.rs` file when they grow.
 Run commands from the repository root unless a future workspace layout changes
 the module location.
 
+`rust-toolchain.toml` pins an **explicit** Rust version (issue #1298), and
+every `dtolnay/rust-toolchain` call site in `.github/workflows/` passes that
+same version. Do not change either back to `stable`. Both said `stable` until
+rustc 1.98.0 shipped on 2026-08-18 with a newly-enforced
+`clippy::result_large_err`, at which point every open PR in the repo went red
+at once — including PRs touching no Rust — while everyone still on 1.97.x
+passed `cargo clippy` locally and could not reproduce it. A pin turns the next
+stable release into one reviewable bump PR instead.
+
+To bump: edit `rust-toolchain.toml`, then run
+`scripts/ci/assert-toolchain-pin.sh`, which fails and names any workflow call
+site still on the old version. That script runs in the `rust` job, so a
+half-finished bump is caught rather than shipped. Because the pin is in
+`rust-toolchain.toml`, a plain `cargo` in this checkout already uses it — you
+do not need `cargo +<version>`, and if your `rustup` lacks the toolchain it
+will fetch it.
+
 `.cargo/config.toml` sets `RUST_MIN_STACK = 8388608` for every cargo-invoked
 process (issue #895). Do not drop it. The gated suite exceeds libtest's 2 MiB
 default thread stack, and when it does the failure is a `SIGABRT` that aborts

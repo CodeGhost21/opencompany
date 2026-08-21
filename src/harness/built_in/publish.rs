@@ -302,6 +302,15 @@ fn cannot_publish_here(path: &str) -> String {
 #[derive(Clone, Default)]
 pub struct PendingPublishQueue {
     inner: Arc<Mutex<Vec<PendingPublish>>>,
+    /// Publishes that were **refused** because nothing here could record one
+    /// (issue #1192) — the source path, recorded at the moment the refusal is
+    /// raised.
+    ///
+    /// A second bucket rather than a variant in `inner`, and the separation is
+    /// the load-bearing part: a refused file is by definition **not** staged,
+    /// so it must not be visible to [`sources`](Self::sources). See that
+    /// method's note.
+    refusals: Arc<Mutex<Vec<String>>>,
     destination: Arc<Mutex<PublishDestination>>,
 }
 
@@ -309,6 +318,32 @@ impl PendingPublishQueue {
     /// Stages a publish.
     pub fn push(&self, publish: PendingPublish) {
         self.inner.lock().expect("publish queue").push(publish);
+    }
+
+    /// Records that a publish of `source` was **refused** because nothing in
+    /// this context can record a deliverable (issue #1192).
+    ///
+    /// Written at the one site that raises the refusal, so what a caller later
+    /// reports is a fact the tool produced rather than an inference drawn from
+    /// its prose. Matching on
+    /// [`cannot_publish_here`]'s wording would be the same drift trap a
+    /// classifier keyed on a `Display` string always is: the sentence is
+    /// agent-facing copy and will be reworded, and the day it is, the operator's
+    /// notice silently stops appearing with every test still green.
+    pub fn push_refusal(&self, source: String) {
+        self.refusals.lock().expect("publish refusals").push(source);
+    }
+
+    /// Takes every refusal recorded so far (FIFO), emptying the bucket.
+    ///
+    /// Drained per turn by whichever caller is in a position to tell somebody —
+    /// today
+    /// [`HarnessAgentRunner`](crate::workflows::caps::HarnessAgentRunner), which
+    /// turns each one into a run notice because a workflow run has no
+    /// conversation to say it in.
+    pub fn drain_refusals(&self) -> Vec<String> {
+        let mut guard = self.refusals.lock().expect("publish refusals");
+        std::mem::take(&mut *guard)
     }
 
     /// Where staged publishes are currently headed.
@@ -338,8 +373,14 @@ impl PendingPublishQueue {
     /// Empties the queue. Called before each turn so nothing a prior turn — an
     /// operator chat turn earlier in the same cycle, or an abandoned redirect
     /// re-run — staged can be attributed to this card.
+    ///
+    /// Empties **both** buckets (issue #1192), for the reason the staged half is
+    /// emptied: a redirect abandons the previous turn's work, and a refusal that
+    /// turn provoked is part of the work being abandoned. Surfacing it on the
+    /// re-run would report a refusal against a turn that never asked.
     pub fn clear(&self) {
         self.inner.lock().expect("publish queue").clear();
+        self.refusals.lock().expect("publish refusals").clear();
     }
 
     /// Drains every staged publish (FIFO), emptying the queue.
@@ -352,6 +393,13 @@ impl PendingPublishQueue {
     ///
     /// This is the nudge's whole gate: `changed − staged` is what the agent
     /// wrote and did not offer.
+    ///
+    /// **A refused publish is deliberately NOT in here** (issue #1192).
+    /// Refusals live in their own bucket precisely so this list keeps meaning
+    /// "offered and accepted". A file whose publish was refused is still
+    /// unpublished — it is the file *most* at risk of being lost — so folding
+    /// refusals in would make the #244 unpublished-work scan go quiet on exactly
+    /// the case it exists for.
     pub fn sources(&self) -> Vec<String> {
         self.inner
             .lock()
@@ -802,6 +850,12 @@ impl Tool for PublishArtifactTool {
                 "[publish] `publish_artifact` was called from a turn with no claimed \
                  destination; refusing rather than staging into a queue nothing will drain"
             );
+            // Issue #1192: record the refusal as a typed fact, here, where it is
+            // raised. Before this the *only* record was the sentence below — the
+            // model read it, wrote an apology about it, and that apology became
+            // the node output while the run scored clean. A caller that can
+            // reach an operator now has something structural to say instead.
+            self.queue.push_refusal(raw_path.trim().to_string());
             return Ok(ToolResult::error(cannot_publish_here(raw_path.trim())));
         };
 

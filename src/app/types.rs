@@ -1050,11 +1050,13 @@ impl AppState {
                 backend: crate::store::MemoryBackend::Store.as_str(),
                 driver_id: None,
                 capabilities: Vec::new(),
+                healthy: None,
             },
             Some(overlay) => MemorySpec {
                 backend: overlay.descriptor.backend.as_str(),
                 driver_id: Some(overlay.descriptor.driver_id.clone()),
                 capabilities: overlay.descriptor.capabilities.clone(),
+                healthy: overlay.descriptor.healthy,
             },
         }
     }
@@ -1147,6 +1149,19 @@ pub struct MemorySpec {
     /// provider. An operator reads this to see what a hosted engine does *not*
     /// support before a cycle discovers it.
     pub capabilities: Vec<String>,
+    /// Whether the boot-time reachability probe found the engine usable —
+    /// `Ready` or `Degraded` (reachable, possibly reduced); only `Down`
+    /// serializes as `false`.
+    ///
+    /// Absent means "not probed": the base backend serves memory, the in-pod
+    /// engine is driven directly, or this host predates the probe — a client
+    /// must treat absence as unknown, not unhealthy. `false` is a bound
+    /// engine whose probe failed at boot: still bound. A boot-time snapshot,
+    /// not a live gauge — the provider can recover (or fail) after boot
+    /// without this bit moving, so treat `false` as "was unreachable at
+    /// boot", never "the next operation will fail".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub healthy: Option<bool>,
 }
 
 #[cfg(test)]
@@ -1224,6 +1239,10 @@ mod tests {
     }
 
     /// A host with nothing to open is the only one the wizard is for.
+    ///
+    /// The registered-company half of this lives in `server::setup::test`,
+    /// beside the helper that can build a real runtime:
+    /// `spec_reports_setup_complete_once_a_company_is_registered`.
     #[test]
     fn spec_reports_setup_incomplete_for_an_empty_unstamped_host() {
         let spec = AppState::new(AppConfig::default()).spec();
@@ -1233,10 +1252,6 @@ mod tests {
             "no stamp and no companies is exactly the first-run case"
         );
     }
-
-    /// The registered-company half of this lives in `server::setup::test`,
-    /// beside the helper that can build a real runtime:
-    /// `spec_reports_setup_complete_once_a_company_is_registered`.
 
     #[cfg(feature = "mcp")]
     #[test]

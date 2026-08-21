@@ -1,0 +1,106 @@
+// @vitest-environment jsdom
+
+import { act, createElement } from "react";
+import { createRoot, type Root } from "react-dom/client";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+
+import { useHashView } from "@/hooks/use-hash-view";
+import { VIEWS, type View } from "@/lib/console-routes";
+
+/**
+ * Every surface the console renders has to answer at its own address.
+ *
+ * Issue #1311: `#/pages` resolved to Overview for four months. #1172 commented
+ * the Pages row out of `NAV` and wrote a comment promising the route "stays
+ * live", but routing was `NAV` plus a second hand-maintained list, and only the
+ * first half of the treatment landed. The shell's `view === "pages"` block, its
+ * `lazy()` import and the entire sandboxed-iframe Pages surface behind them
+ * were unreachable code the whole time, and nothing said so.
+ *
+ * These tests import the REAL table from `@/lib/console-routes` rather than
+ * transcribing it (which is what `task-route.test.ts` has to do for the shell's
+ * `REWRITE_RETIRED`, and why a copy of the route table could rot unobserved).
+ */
+
+describe("the console's route table", () => {
+  /**
+   * The regression itself. Named on its own rather than left to the table below
+   * so a failure reads as "Pages is unreachable again" rather than as one row
+   * of a loop.
+   */
+  it("keeps #/pages routable even though Pages has no nav row (#1311)", () => {
+    expect(VIEWS).toContain("pages");
+  });
+
+  it("has no duplicate entries", () => {
+    expect(new Set(VIEWS).size).toBe(VIEWS.length);
+  });
+});
+
+describe("resolving an address", () => {
+  let container: HTMLDivElement;
+  let root: Root;
+  let seen: [View, string | null];
+
+  // No `rewrite` argument: this asks what the allow-list alone resolves, which
+  // is the property #1311 broke. The shell's `REWRITE_RETIRED` — which sends
+  // bare `#/tasks` and `#/team` elsewhere before the allow-list is consulted —
+  // is `task-route.test.ts`'s subject, not this file's.
+  function Probe() {
+    const [view, sub] = useHashView<View>(VIEWS, "overview");
+    seen = [view, sub];
+    return null;
+  }
+
+  /**
+   * One render per test: `useHashView` canonicalizes from a mount effect, so a
+   * second `render()` into the same root updates rather than remounts and would
+   * report the first address's answer.
+   */
+  async function visit(hash: string) {
+    window.history.replaceState(null, "", hash);
+    await act(async () => {
+      root.render(createElement(Probe));
+    });
+  }
+
+  beforeEach(() => {
+    (
+      globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }
+    ).IS_REACT_ACT_ENVIRONMENT = true;
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+  });
+
+  afterEach(async () => {
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
+  // Every routable view, including the ones with no nav row. A view dropped
+  // from the table lands on Overview silently — a link that quietly shows
+  // Overview looks like a link that worked — so each one is asserted, not just
+  // the one #1311 was filed about.
+  it.each(VIEWS)("resolves #/%s to itself and leaves the address alone", async (view) => {
+    await visit(`#/${view}`);
+    expect(seen).toEqual([view, null]);
+    expect(window.location.hash).toBe(`#/${view}`);
+  });
+
+  it("carries a sub-page through for a hidden view's deep link", async () => {
+    // `#/team/<agentId>` and `#/pages` are hidden for the same reason and would
+    // fail the same way: an unknown head discards its sub-page too.
+    await visit("#/team/agent-1");
+    expect(seen).toEqual(["team", "agent-1"]);
+    expect(window.location.hash).toBe("#/team/agent-1");
+  });
+
+  it("still collapses an address that names nothing onto Overview", async () => {
+    // The fallback is what makes a typo or a genuinely retired address safe;
+    // widening the allow-list must not have widened it into accepting anything.
+    await visit("#/nope");
+    expect(seen).toEqual(["overview", null]);
+    expect(window.location.hash).toBe("#/overview");
+  });
+});

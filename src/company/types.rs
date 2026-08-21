@@ -273,6 +273,53 @@ pub fn grants_repo_explicit(grants: &[String]) -> bool {
         .any(|grant| grant == "repo" || grant.starts_with("repo."))
 }
 
+/// Whether a tool-grant list confers the **publishing** capability (issue #244)
+/// — the `files`/`docs` namespace on which both an agent's file tools and
+/// `publish_artifact` ride.
+///
+/// # This is deliberately NOT a member of the `_explicit` family above
+///
+/// Read that first, because the naming invites exactly the wrong edit. Every
+/// `grants_*_explicit` sibling guards a surface that spends real money or
+/// reaches a third party, and for those the catch-all `*` confers **nothing**:
+/// a decision that size is made by name. Publishing is the opposite case. It
+/// spends nothing and reaches nothing outside the company's own board, so it
+/// rides the ordinary namespace rule and **a bare `*` DOES confer it** — which
+/// is what `build_agent`'s own gate has always done.
+///
+/// So do not "harmonise" this into the `_explicit` shape. The overwhelming
+/// majority of shipped manifests grant `*`; renaming this predicate into that
+/// family would silently revoke publishing for all of them, and the only
+/// symptom would be agents that can write files and quietly cannot deliver
+/// them.
+///
+/// # One derivation, two callers
+///
+/// [`build_agent`](crate::harness::build::build_agent)'s `wants_files` gate —
+/// which decides whether `publish_artifact` (and the file belt) is wired at all
+/// — and the always-compiled console capability route both call this. That is
+/// the point: a second copy of the rule is how the panel comes to report a
+/// capability the toolbelt does not actually wire (issue #886), and a
+/// hand-rolled `starts_with` here would additionally re-fork the boundary rule
+/// issue #461 de-forked.
+///
+/// Lives in this module rather than in `harness::build` because `harness` is
+/// behind the `openhuman` feature and the console route is not.
+///
+/// A caller of
+/// [`extends_on_boundary`](crate::runtime::tools::extends_on_boundary) over the
+/// grant separator set, so `docs`, `docs.read`, `files.write` and `*` all
+/// confer it while `documentation` — which a naive prefix test would accept —
+/// does not.
+pub fn grants_files_or_docs(grants: &[String]) -> bool {
+    use crate::runtime::tools::{NAMESPACE_SEPARATORS, extends_on_boundary};
+    grants.iter().any(|grant| {
+        grant == "*"
+            || extends_on_boundary(grant, "files", NAMESPACE_SEPARATORS)
+            || extends_on_boundary(grant, "docs", NAMESPACE_SEPARATORS)
+    })
+}
+
 /// Whether a tool-grant list **explicitly** grants the repository *write* tier
 /// (issue #734) — the tier under which an agent's work can be pushed to a real
 /// remote and opened as a pull request.
@@ -950,6 +997,16 @@ pub struct McpServer {
     /// Exact remote tool names to always hide/block (takes precedence).
     #[serde(default)]
     pub disallowed_tools: Vec<String>,
+    /// Exact remote tool names on this server the operator declares **read-only**
+    /// (issue #1124): they read and change nothing, so a bridge call to one need
+    /// not park under `auto` the way calling *through* a server otherwise does.
+    ///
+    /// This is an operator declaration, not a claim read off the remote — there
+    /// is no client-side annotation to trust — so an undeclared tool always
+    /// gates. Independent of `allowed_tools`/`disallowed_tools`: it says nothing
+    /// about whether a tool is *exposed*, only how a call to it is priced.
+    #[serde(default)]
+    pub read_only_tools: Vec<String>,
     /// Per-request timeout in seconds.
     #[serde(default = "default_mcp_timeout_secs")]
     pub timeout_secs: u64,
@@ -2037,5 +2094,84 @@ mod test {
         assert_eq!(manifest.plan.total_tokens, Some(1000));
         assert!(manifest.plan.name.is_none());
         assert!(manifest.plan.token_budgets.is_empty());
+    }
+
+    /// Helper: the grant list shape every predicate here takes.
+    fn grants(list: &[&str]) -> Vec<String> {
+        list.iter().map(|g| g.to_string()).collect()
+    }
+
+    /// **The asymmetry, pinned.** A bare `*` confers publishing and does NOT
+    /// confer `repo`.
+    ///
+    /// This test exists to stop a future tidy-up, not to describe a subtlety.
+    /// `grants_files_or_docs` sits in a file of `grants_*_explicit` siblings
+    /// that all reject `*`, and folding it into that family is the obvious
+    /// "consistency" edit. It would be a silent revocation: most shipped
+    /// manifests grant `*` and nothing else, so publishing would switch off for
+    /// them with no error anywhere — agents that can still write files and can
+    /// no longer deliver one. `repo` is asserted alongside it so the contrast is
+    /// in the same assertion block as the temptation.
+    #[test]
+    fn a_bare_wildcard_confers_publishing_unlike_repo() {
+        let wildcard = grants(&["*"]);
+        assert!(
+            grants_files_or_docs(&wildcard),
+            "a bare `*` must confer publishing — it is what most shipped manifests grant"
+        );
+        assert!(
+            !grants_repo_explicit(&wildcard),
+            "a bare `*` must NOT confer `repo`; the two rules are different on purpose"
+        );
+
+        // The ordinary namespace forms confer it too.
+        for grant in ["files", "docs", "files.write", "docs.read"] {
+            assert!(
+                grants_files_or_docs(&grants(&[grant])),
+                "`{grant}` must confer publishing"
+            );
+        }
+    }
+
+    /// The boundary rule, pinned against a naive `starts_with`.
+    ///
+    /// A documentation-flavoured grant is not a grant on `docs`, and a
+    /// filesystem-flavoured one is not a grant on `files`. `docsy` and
+    /// `filesystem` are the cases a bare prefix test actually gets wrong: both
+    /// extend the namespace without stopping on a separator, so `starts_with`
+    /// accepts them and would hand `publish_artifact` (and, through the shared
+    /// `wants_files` gate, the whole file belt) to an agent the manifest never
+    /// granted it to. Issue #461 removed this class of disagreement by routing
+    /// every grant match through `extends_on_boundary`; this asserts the
+    /// publishing predicate is on that side of it.
+    #[test]
+    fn documentation_grant_does_not_confer_publishing() {
+        for grant in [
+            "documentation",
+            "documentation.read",
+            "docsy",
+            "filesystem",
+            "filesystem.wipe",
+            "web",
+            "shell",
+        ] {
+            assert!(
+                !grants_files_or_docs(&grants(&[grant])),
+                "`{grant}` is not a grant on the files/docs namespace"
+            );
+        }
+
+        // …and the real `e2e_harness` allow list, which grants no file family,
+        // confers nothing either.
+        assert!(
+            !grants_files_or_docs(&grants(&[
+                "composio",
+                "mcp:*",
+                "workspace",
+                "workspace.*",
+                "web"
+            ])),
+            "the shipped e2e_harness grants confer no publishing"
+        );
     }
 }

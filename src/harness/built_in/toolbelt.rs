@@ -762,6 +762,7 @@ mod tests {
         // Intrinsic tools are unmapped (always kept by the filter).
         assert_eq!(namespace_of("memory_store"), None);
         assert_eq!(namespace_of("memory_recall"), None);
+        assert_eq!(namespace_of("memory_forget"), None);
         assert_eq!(namespace_of("file_read"), None);
         assert_eq!(namespace_of("mcp_registry_tool_call"), None);
     }

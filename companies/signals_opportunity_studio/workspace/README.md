@@ -9,6 +9,8 @@ Start here:
 - [[Weekly scan]] — how the weekly opportunity loop runs
 - [[Ranking rubric]] — how we score opportunities
 - [[AI ops opportunities]] — this week's brief in progress
+- [[Signal hygiene]] — keeping observation apart from interpretation
+- [[Brief standards]] — what makes a brief actionable
 
 Everything here is a plain `.md` file, so it version-controls cleanly and seeds
 the operator console's Workspace view.

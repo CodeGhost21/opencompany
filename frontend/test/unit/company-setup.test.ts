@@ -14,8 +14,9 @@ import {
   emptySetupDraft,
   shouldOfferSetup,
   shouldPromptSetup,
+  staffedTeam,
   stepProblem,
-  teamIsEmpty,
+  teamIsUnstaffed,
   type SetupDraft,
 } from "@/lib/company-setup";
 
@@ -26,10 +27,27 @@ import {
  * offering it twice would stack a second team on the first — the failure this
  * feature would be judged on. It is a pure function of the roster and the skip
  * flag precisely so it can be pinned here rather than left to an effect.
+ *
+ * Since issue #1404 it has a second failure mode of equal weight, in the other
+ * direction: offering it *never*. The global baseline puts undeletable
+ * teammates on every company, so a rule that counts them can no longer answer
+ * "is this a first run?" at all — which is how the whole flow came to be
+ * unreachable in the shipped product while every test here stayed green.
  */
 
 const member = (id: string): TeamMemberDto =>
   ({ id, role: "Analyst", inboxEnabled: false }) as TeamMemberDto;
+
+/**
+ * A teammate from the global baseline (`docs/spec/runtime/globals.md`) — the set
+ * merged into every company whatever its manifest says, and undeletable
+ * (`DELETE …/team/{id}` answers 409).
+ */
+const baseline = (id: string): TeamMemberDto =>
+  ({ id, role: "Analyst", inboxEnabled: false, global: true }) as TeamMemberDto;
+
+/** The baseline as a fresh company actually receives it: nothing else on the roster. */
+const BASELINE_ONLY = ["operations", "page_builder", "researcher", "writer"].map(baseline);
 
 const draft = (over: Partial<SetupDraft> = {}): SetupDraft => ({
   ...emptySetupDraft(),
@@ -95,6 +113,50 @@ describe("shouldOfferSetup", () => {
   });
 
   /**
+   * **The regression this gate was broken by (issue #1404).**
+   *
+   * `companies/e2e_setup` declares no `[[agent]]` at all and exists solely to
+   * reach first-run setup, yet `GET …/team` answers it with the four baseline
+   * teammates — none of which can be deleted. Under the old `roster.length === 0`
+   * rule that was indistinguishable from a staffed company, so the dialog could
+   * not open on the one fixture built for it, or anywhere else.
+   */
+  it("offers to a company that has the baseline and nothing else", () => {
+    expect(shouldOfferSetup({ roster: BASELINE_ONLY, skipped: false })).toBe(true);
+  });
+
+  /**
+   * And it must not be a subtraction of today's four ids. The baseline is
+   * documented as a thing that grows (`docs/spec/runtime/globals.md`), so a
+   * fifth global has to fall out of the gate the same way — which it does only
+   * because the rule reads provenance rather than a copied list.
+   */
+  it("keeps offering when the baseline gains a teammate", () => {
+    const grown = [...BASELINE_ONLY, baseline("scheduler")];
+    expect(shouldOfferSetup({ roster: grown, skipped: false })).toBe(true);
+  });
+
+  /**
+   * The moment setup creates the first teammate the gate closes, which is what
+   * stops a reload building a second team on top of the first.
+   */
+  it("stops offering as soon as one non-baseline teammate exists", () => {
+    const staffed = [...BASELINE_ONLY, member("meta-ads-specialist")];
+    expect(shouldOfferSetup({ roster: staffed, skipped: false })).toBe(false);
+  });
+
+  /**
+   * A host predating `global` sends no such field, and `undefined` must read as
+   * "not baseline" — the old behaviour, no offer. The other reading would offer
+   * setup to a company that already has a team, which is the expensive
+   * direction: it stacks a second team on the first.
+   */
+  it("treats a roster from a host that cannot say as staffed", () => {
+    const legacy = ["operations", "page_builder"].map(member);
+    expect(shouldOfferSetup({ roster: legacy, skipped: false })).toBe(false);
+  });
+
+  /**
    * The duplicate-team guard. Whatever else changes, a company that already has
    * people on it must never be offered setup unprompted.
    */
@@ -132,12 +194,34 @@ describe("shouldPromptSetup", () => {
   it("stops once the company is staffed", () => {
     expect(shouldPromptSetup([member("a")])).toBe(false);
   });
+
+  /**
+   * The Team page's way back in has the same blind spot as the dialog, and had
+   * it for the same reason (issue #1404): a company holding only the baseline
+   * read as staffed, so skipping the dialog really was a dead end.
+   */
+  it("keeps prompting a company that has the baseline and nothing else", () => {
+    expect(shouldPromptSetup(BASELINE_ONLY)).toBe(true);
+  });
 });
 
-describe("teamIsEmpty", () => {
-  it("is emptiness and nothing else", () => {
-    expect(teamIsEmpty([])).toBe(true);
-    expect(teamIsEmpty([member("a")])).toBe(false);
+describe("staffedTeam", () => {
+  it("is the roster minus the global baseline", () => {
+    const roster = [...BASELINE_ONLY, member("meta-ads-specialist")];
+    expect(staffedTeam(roster).map((m) => m.id)).toEqual(["meta-ads-specialist"]);
+  });
+
+  it("keeps a row whose host does not report provenance", () => {
+    expect(staffedTeam([member("a")]).map((m) => m.id)).toEqual(["a"]);
+  });
+});
+
+describe("teamIsUnstaffed", () => {
+  it("asks whether anyone was staffed here, not whether the roster is empty", () => {
+    expect(teamIsUnstaffed([])).toBe(true);
+    expect(teamIsUnstaffed(BASELINE_ONLY)).toBe(true);
+    expect(teamIsUnstaffed([member("a")])).toBe(false);
+    expect(teamIsUnstaffed([...BASELINE_ONLY, member("a")])).toBe(false);
   });
 });
 

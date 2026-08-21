@@ -196,6 +196,83 @@ failing the registry: a company that wrote one bad ledger must still reach its
 board. The faults ride the listing so the company can see why something stopped
 appearing.
 
+## Where a declaration comes from
+
+Three places, all producing the same [`LedgerSpec`] and all held to the rules
+above:
+
+| source | authored in | when it lands |
+| --- | --- | --- |
+| built-in | `src/ledger/registry.rs`, in Rust | always; never stored, so a company's copy cannot drift from the code every prompt is written against |
+| the global baseline | `globals/ledgers/<slug>.toml` | seeded into the company's store at first boot |
+| the company's own bundle | `companies/<name>/ledgers/<slug>.toml` | seeded at first boot, replacing a baseline declaration of the same slug |
+| an agent, mid-run | `define_ledger` | whenever the company discovers it needs an axis |
+
+The last row is the one that must exist — a company discovers which axes it
+needs while it is running, and a declaration that required a release would be
+discovered and then not made. The middle two exist because it was the *only*
+row, and that made every shipped template start blank on its own subject: a law
+firm shipped with five agents, three skills and a workflow graph, and no matter
+list, getting one only if some turn thought to invent it. Two runs of one
+template then disagreed about what the company even tracks.
+
+### Authoring one
+
+The file is TOML, the filename is the slug, and everything else mirrors the
+declaration a `define_ledger` call sends:
+
+```toml
+# companies/agentic_law_firm/ledgers/matters.toml
+title = "Matters"
+purpose = "Every matter this firm has open, whose it is, and how each one ended."
+written_by = "`record_entry` to open or update a matter, `close_entry` to close one"
+checks = ["required-field", "known-status", "closed-needs-reason"]
+
+[[field]]
+name = "id"
+role = "id"
+required = true
+
+[[status]]
+name = "open"
+
+[[status]]
+name = "closed"
+closed = true
+needs_reason = true
+
+[[section]]
+heading = "Open matters"
+statuses = ["open"]
+order = "recent"
+```
+
+`derived` is deliberately omitted: `derived/<SLUG>.md` is what the author meant,
+and naming the folder convention by hand is one more thing to get wrong. A body
+`slug` key is accepted only as a cross-check — one that disagrees with the
+filename is refused rather than resolved, because either precedence rule ships a
+ledger under a slug its author did not write, and every `[[agent]].ledgers` grant
+naming the other one then reads as a ledger that does not exist.
+
+Reading is [`company::ledger_file`](../../../src/company/ledger_file.rs), and it
+is a *seam*, not a second validator: every file goes through
+`LedgerSpec::normalize`, so a bundle ledger and one an agent declares at run time
+are held to exactly one set of rules. What the reader adds is what only it can
+see — a filename that is not a slug, a slug that shadows a built-in, two files
+claiming one derived path, and more declarations than `MAX_DECLARED`.
+
+A company's own bundle is all-or-nothing (shipping a vertical silently short the
+axis it is about is the failure this exists to prevent); the baseline is
+fault-isolated (one malformed global must not cost the others), which is the same
+split `agent_file` already makes for the roster.
+
+### Seeded once, then the company's
+
+Seeding runs at first boot only, and only when the company has declared nothing
+at all — see `docs/spec/runtime/globals.md` for why re-applying a baseline on
+every boot would undo a retirement, which is a person's call. The built-ins are
+never written to the store.
+
 ## The agent surface: five tools, however many ledgers
 
 `list_ledgers`, `read_ledger`, `record_entry`, `close_entry`, `define_ledger`.
@@ -275,9 +352,15 @@ the loss the append-only shape exists to prevent. Deleting the rows too is
 
 ## The console
 
-The Ledgers section renders from the ledger's own `fields`, `statuses` and
-`sections`, never from anything hard-coded. A ledger a teammate declared this
-morning renders correctly this afternoon with no console release; a screen that
+The console-facing IA — naming ("ledger" stays an internal word only), how a
+company's lists reach the sidebar, where declaring and retiring one lives, and
+the plain-language wizard that replaced the JSON declare dialog — is
+`docs/spec/runtime/ledgers-console-ia.md` (issue #1284). What follows here is
+how a list's own screen renders, which that redesign left unchanged.
+
+Each list's screen renders from its own `fields`, `statuses` and `sections`,
+never from anything hard-coded. A list a teammate declared this morning
+renders correctly this afternoon with no console release; a screen that
 hard-coded the goals columns would have made "declare your own axis" a promise
 the UI quietly broke.
 

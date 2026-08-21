@@ -158,6 +158,17 @@ struct TeamMemberDto {
     /// When that cap was set (epoch millis). Paired with `budgetSetBy`.
     #[serde(skip_serializing_if = "Option::is_none")]
     budget_set_at_millis: Option<u64>,
+    /// Whether this teammate came from the **global baseline**
+    /// (`docs/spec/runtime/globals.md`) rather than from this company — the
+    /// same `Agent::global` marker the merge itself sets (issue #1404).
+    ///
+    /// Always sent, never skipped. The console's first-run gate asks "has
+    /// anybody staffed this company?", and the baseline is appended to every
+    /// company whatever its manifest says, so a row that omitted this would be
+    /// counted as staff and first-run setup could never open. Absence has to
+    /// mean "this host predates the field", which the console reads as the old
+    /// behaviour; it must not also mean "not global".
+    global: bool,
 }
 
 /// The add-teammate body.
@@ -341,6 +352,10 @@ fn member_row(
         spent_today_usd: cap.and_then(|_| spent(agent_id)),
         budget_set_by: attribution.map(|entry| entry.set_by.id.clone()),
         budget_set_at_millis: attribution.map(|entry| entry.at_millis),
+        // Through the same helper as the four above, for the same reason: the
+        // roster read is what the first-run gate is decided on, so a second
+        // copy of the provenance rule here is a second thing to forget.
+        global: super::team_agent::is_global(record, agent_id),
     }
 }
 
@@ -495,6 +510,10 @@ async fn add_member(
         spent_today_usd: body.budget_usd_daily.map(|_| 0.0),
         budget_set_by: attribution.as_ref().map(|entry| entry.set_by.id.clone()),
         budget_set_at_millis: attribution.as_ref().map(|entry| entry.at_millis),
+        // An operator just created this one, so it is by construction not from
+        // the baseline — the merge only ever appends to the manifest roster.
+        // It is also exactly the write that closes the first-run gate.
+        global: false,
     }))
 }
 
@@ -818,7 +837,22 @@ mod tests {
     }
 
     async fn state_with_manifest(home: &std::path::Path, manifest_toml: &str) -> AppState {
-        let manifest: CompanyManifest = toml::from_str(manifest_toml).unwrap();
+        state_with(home, toml::from_str(manifest_toml).unwrap()).await
+    }
+
+    /// As above, but with the **global baseline merged in** — the roster every
+    /// company actually boots with (`docs/spec/runtime/globals.md`).
+    ///
+    /// Kept apart from `state_with_manifest` on purpose: most tests here are
+    /// about one hand-written teammate and are clearer without four extra rows,
+    /// while the provenance tests are meaningless without them.
+    async fn state_with_globals(home: &std::path::Path, manifest_toml: &str) -> AppState {
+        let mut manifest: CompanyManifest = toml::from_str(manifest_toml).unwrap();
+        manifest.apply_globals();
+        state_with(home, manifest).await
+    }
+
+    async fn state_with(home: &std::path::Path, manifest: CompanyManifest) -> AppState {
         let store = FsCompanyStore::new(home.to_path_buf());
         let id = CompanyId::new("acme");
         store
@@ -1808,6 +1842,121 @@ mod tests {
             row["isOrchestrator"], false,
             "an empty manifest roster names nobody, so it does not fall through \
              to the overlay half: {row}"
+        );
+    }
+
+    // --- Baseline provenance, and the first-run gate (issue #1404) ----------
+
+    /// The roster says which of its rows came from the global baseline.
+    ///
+    /// This is the field the console's first-run gate turns on. `apply_globals`
+    /// appends `globals/agents/*.toml` to **every** company whatever its
+    /// manifest says, so a company nobody has ever staffed still answers this
+    /// route with a non-empty list — and "is the roster empty?" therefore
+    /// answered `no` everywhere, which is what made first-run setup unreachable
+    /// in the shipped product.
+    ///
+    /// Asserted as "at least one row, all of them global" rather than against a
+    /// count or the four current ids: the baseline is meant to grow, and a test
+    /// that pins its contents here would fail for the wrong reason.
+    #[tokio::test]
+    async fn a_company_with_no_declared_roster_answers_with_the_baseline_only() {
+        let home_dir = home();
+        let state = state_with_globals(
+            home_dir.path(),
+            "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n",
+        )
+        .await;
+
+        let (status, body) = get_team(&state).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let rows = body.as_array().unwrap();
+        assert!(
+            !rows.is_empty(),
+            "the baseline is merged into every company, so this is never empty: {body}"
+        );
+        assert!(
+            rows.iter().all(|row| row["global"] == true),
+            "a company declaring no `[[agent]]` has nothing but baseline \
+             teammates, and every one of them must say so: {body}"
+        );
+    }
+
+    /// A teammate the company wrote, and one the operator adds, are both
+    /// `global: false` — beside a baseline that is `true` on the same read.
+    ///
+    /// Both halves are the point. The gate must stay shut for a company that
+    /// shipped with a roster (`docs/spec/runtime/company-setup.md`), and it must
+    /// close the moment setup creates the first teammate.
+    #[tokio::test]
+    async fn a_declared_or_operator_added_teammate_is_never_marked_global() {
+        let home_dir = home();
+        let state = state_with_globals(home_dir.path(), ROSTER).await;
+
+        let declared = team_row(&state, "analyst").await;
+        assert_eq!(
+            declared["global"], false,
+            "a `[[agent]]` the company wrote is the company's own: {declared}"
+        );
+
+        let (status, created) = send(
+            &state,
+            "POST",
+            "/api/v1/company/team",
+            Some(json!({"name": "Nova", "role": "Researcher"})),
+            Some(&admin_cookie()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{created}");
+        assert_eq!(
+            created["global"], false,
+            "the create response answers the same way the read does: {created}"
+        );
+        let id = created["id"].as_str().unwrap().to_string();
+        assert_eq!(team_row(&state, &id).await["global"], false);
+
+        // …and the baseline on the same roster still says otherwise, so the two
+        // are distinguishable rather than uniformly false.
+        let (_, body) = get_team(&state).await;
+        assert!(
+            body.as_array()
+                .unwrap()
+                .iter()
+                .any(|row| row["global"] == true),
+            "the baseline rows are on this roster too: {body}"
+        );
+    }
+
+    /// A baseline teammate cannot be deleted — the 409 that made "just delete
+    /// them to reach first-run" impossible. Pinned beside the marker so the two
+    /// answers to the same question stay together.
+    #[tokio::test]
+    async fn a_baseline_teammate_refuses_deletion() {
+        let home_dir = home();
+        let state = state_with_globals(
+            home_dir.path(),
+            "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n",
+        )
+        .await;
+
+        let (_, body) = get_team(&state).await;
+        let id = body.as_array().unwrap()[0]["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let (status, _) = send(
+            &state,
+            "DELETE",
+            &format!("/api/v1/company/team/{id}"),
+            None,
+            Some(&admin_cookie()),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::CONFLICT,
+            "a baseline teammate is part of the blueprint; the console must not \
+             be able to empty the roster to reach first-run setup"
         );
     }
 }

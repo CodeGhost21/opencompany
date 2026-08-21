@@ -9,6 +9,8 @@ Start here:
 - [[Production checklist]] — how a build ships
 - [[Design pillars]] — what every decision defers to
 - [[Skyward]] — the game in flight
+- [[Build honesty]] — what "in" is allowed to mean
+- [[Playtest discipline]] — how a session is run and recorded
 
 Everything here is a plain `.md` file, so it version-controls cleanly and seeds
 the operator console's Workspace view.

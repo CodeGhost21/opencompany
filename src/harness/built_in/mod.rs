@@ -90,6 +90,7 @@ pub mod mcp;
 pub mod mcp_probe;
 pub mod memory;
 pub mod memory_loop;
+pub mod memory_tools;
 pub mod orchestrator;
 /// Chargebee billing tools (issue #788), wired per company from its own
 /// SecretStore. Always compiled so the credential resolution and the fail-closed
@@ -224,6 +225,7 @@ pub struct HarnessDeps {
     pub serves: Option<std::collections::HashSet<String>>,
     /// Context store backing every agent's [`OcMemory`](memory::OcMemory).
     pub context: Arc<dyn ContextStore>,
+
     /// Company store the cost hook appends ledger entries to.
     pub store: Arc<dyn CompanyStore>,
     /// Optional usage meter (WS5 seam); `None` skips usage sampling.
@@ -2539,6 +2541,15 @@ impl HarnessPool {
         // SECURITY: the reply **text only** — the scrubbed `outcome.steps` never
         // enter the memory store, so a step detail can never be retrieved and
         // re-injected into a later turn.
+        //
+        // TAINT (issue #1113): deliberately `deps.context` (Internal), not
+        // the runtime's inbound port. Harness turns are operator-triggered —
+        // `OperatorMessage` is operator speech, the same authorship precedent
+        // that stamps operator facts Internal — while channel/webhook content
+        // enters through the cycle path, which routes its puts through the
+        // inbound port (`CycleHostImpl::external_trigger`). If a harness turn
+        // ever takes a webhook trigger, that turn must route its store half
+        // through the runtime's inbound port — the cycle path shows the shape.
         if !matches!(
             steer.and_then(SteerControl::pending),
             Some(SteerAction::Cancel)
@@ -3017,6 +3028,13 @@ pub(crate) fn build_roster(
     // the delegating-orchestrator persona + tools (issue #53).
     let orchestrator = orchestrator::orchestrator_id(&company.manifest.agents);
 
+    // Issue #1124: the company's per-server read-only MCP declaration, resolved
+    // once and installed on every agent's policy so a server-declared read-only
+    // bridge call does not park under `auto`. Built from the same effective MCP
+    // servers the harness wires tools from, so the gate and the toolbelt cannot
+    // disagree about which server declared what.
+    let mcp_reads = crate::company::mcp::mcp_read_set(&deps.mcp_servers);
+
     let mut roster =
         Vec::with_capacity(company.manifest.agents.len() + company.overlay_agents.len());
 
@@ -3038,7 +3056,10 @@ pub(crate) fn build_roster(
             .with_requests(deps.approval_requests.clone())
             // Issue #243: stamp who the parked effect belongs to, so approving it
             // can hand the grant back to this agent rather than to nobody.
-            .with_agent(manifest_agent.id.clone());
+            .with_agent(manifest_agent.id.clone())
+            // Issue #1124: the per-server read-only MCP declaration, so a
+            // server-declared read-only bridge call does not park under `auto`.
+            .with_mcp_reads(mcp_reads.clone());
         // Issue #304: give the policy something to measure `budget_usd_daily`
         // against. Only wired when the host has a meter — without one the cap
         // arm stays inert and warns once, rather than parking every priced call
@@ -3102,7 +3123,10 @@ pub(crate) fn build_roster(
             .with_requests(deps.approval_requests.clone())
             // An overlay teammate is a real roster agent and re-dispatches the
             // same way a manifest one does (issue #243).
-            .with_agent(manifest_agent.id.clone());
+            .with_agent(manifest_agent.id.clone())
+            // Issue #1124: the same per-server read-only MCP declaration the
+            // manifest agents get — an overlay teammate calls the same servers.
+            .with_mcp_reads(mcp_reads.clone());
         if let Some(meter) = deps.meter.as_ref() {
             agent_policy = agent_policy.with_spend(meter.clone(), company.id.clone());
         }
@@ -3504,13 +3528,19 @@ mod tests {
     #[derive(Default)]
     struct MockContext {
         chunks: StdMutex<Vec<(ChunkAddr, ContextChunk)>>,
+        // Monotonic, NOT chunks.len(): a delete shrinks the vec, and a
+        // len-derived addr would then collide with a surviving chunk's.
+        next_addr: std::sync::atomic::AtomicUsize,
     }
 
     #[async_trait]
     impl ContextStore for MockContext {
         async fn put(&self, _id: &CompanyId, chunk: ContextChunk) -> crate::Result<ChunkAddr> {
+            let n = self
+                .next_addr
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let mut guard = self.chunks.lock().unwrap();
-            let addr = ChunkAddr::new(format!("addr-{}", guard.len()));
+            let addr = ChunkAddr::new(format!("addr-{n}"));
             guard.push((addr.clone(), chunk));
             Ok(addr)
         }
@@ -3542,6 +3572,12 @@ mod tests {
                 .map(|(_, c)| c.body.clone())
                 .unwrap_or_default())
         }
+        async fn delete(&self, _id: &CompanyId, addr: &ChunkAddr) -> crate::Result<bool> {
+            let mut guard = self.chunks.lock().unwrap();
+            let before = guard.len();
+            guard.retain(|(a, _)| a != addr);
+            Ok(guard.len() < before)
+        }
         async fn search(
             &self,
             _id: &CompanyId,
@@ -3560,6 +3596,39 @@ mod tests {
                 })
                 .collect())
         }
+    }
+
+    /// The mock's addresses are monotonic, not len-derived: a delete must not
+    /// make the next put reuse a surviving chunk's address (len-derived bug:
+    /// delete `addr-0` of `[addr-0, addr-1]`, and the next put minted
+    /// `addr-1` again — a later delete of `addr-1` then removed both rows).
+    #[tokio::test]
+    async fn mock_context_addresses_survive_deletion_without_reuse() {
+        let ctx = MockContext::default();
+        let company = CompanyId::new("acme");
+        let chunk = |label: &str| ContextChunk {
+            label: label.into(),
+            body: label.into(),
+        };
+        let first = ctx.put(&company, chunk("l/0")).await.unwrap();
+        let second = ctx.put(&company, chunk("l/1")).await.unwrap();
+        assert!(
+            ctx.delete(&company, &first).await.unwrap(),
+            "first delete removes the row"
+        );
+        assert!(
+            !ctx.delete(&company, &first).await.unwrap(),
+            "repeat delete of the same addr finds nothing"
+        );
+        let third = ctx.put(&company, chunk("l/2")).await.unwrap();
+        assert_ne!(
+            third.as_ref() as &str,
+            second.as_ref(),
+            "a post-delete put must not reuse a surviving address"
+        );
+        assert!(ctx.delete(&company, &second).await.unwrap());
+        let left = ctx.list(&company, "l/").await.unwrap();
+        assert_eq!(left.len(), 1, "only the newest row remains: {left:?}");
     }
 
     /// `CompanyStore` that records what the cost hook appends.
@@ -4899,6 +4968,7 @@ description = "Builds the product."
                 command: None,
                 allowed_tools: Vec::new(),
                 disallowed_tools: Vec::new(),
+                read_only_tools: Vec::new(),
                 timeout_secs: 30,
                 enabled: true,
                 auth_secret: None,
@@ -6662,6 +6732,7 @@ budget_usd_daily = 0.0
                 description: None,
                 allowed_tools: Vec::new(),
                 disallowed_tools: Vec::new(),
+                read_only_tools: Vec::new(),
                 timeout_secs: 30,
                 enabled: true,
                 source: crate::company::mcp::McpSource::Runtime,

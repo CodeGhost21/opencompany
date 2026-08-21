@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Mail, MoreHorizontal, Network, Plus, Sparkles, UserPlus, Wallet } from "lucide-react";
+import { Mail, MoreHorizontal, Network, Plus, Sparkles, UserPlus } from "lucide-react";
 import { toast } from "sonner";
 
 import { listPeople, me as fetchMe, type Person } from "@/api/auth";
@@ -7,6 +7,7 @@ import type { OpenCompanyClient } from "@/api/client";
 import { setInboxEnabled } from "@/api/inbox";
 import { listTasks } from "@/api/tasks";
 import { ApiError, type TeamMemberDto } from "@/api/types";
+import { TeammateAvatar } from "@/components/teammate-avatar";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import {
@@ -21,7 +22,6 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
-  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
@@ -30,6 +30,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
 import { emptyDraft, type AgentDraft, type AgentFieldKey } from "@/lib/agent";
 import { fetchBoardColumns } from "@/lib/board-columns";
+import { shouldPromptSetup } from "@/lib/company-setup";
 import {
   addMemberFailure,
   addOutcome,
@@ -39,7 +40,6 @@ import {
 import { fromDto, newMember, roleSubtitle, type TeamMember } from "@/lib/team";
 import { workloadByAssignee, type Workload } from "@/lib/team-workload";
 import { cn } from "@/lib/utils";
-import { Avatar } from "@/views/chat/Avatar";
 import { AgentDetailView } from "@/views/team/AgentDetailView";
 import { AgentFields } from "@/views/team/AgentFields";
 
@@ -90,12 +90,18 @@ export function TeamView({
   const [load, setLoad] = useState<Load>("loading");
   const [fromHost, setFromHost] = useState(false);
   /**
-   * The host answered the roster read **and** answered with nobody
+   * The host answered the roster read **and** nobody has staffed this company
    * (`docs/spec/runtime/company-setup.md`).
    *
    * Distinct from `!fromHost`, which also covers a host with no `…/team` surface
    * at all. Only the first case is a company waiting to be set up; offering
    * setup on the second would open a dialog whose first call 404s.
+   *
+   * Also distinct from "the host answered with nobody", which is what this used
+   * to mean and is a state no company can be in: the global baseline puts
+   * undeletable teammates on every roster (issue #1404). `shouldPromptSetup`
+   * discounts those, so this is `true` on a company that has the baseline and
+   * nothing else — which is exactly the company that needs the prompt.
    */
   const [hostEmpty, setHostEmpty] = useState(false);
   const [members, setMembers] = useState<TeamMember[]>([]);
@@ -105,8 +111,6 @@ export function TeamView({
   // empty for a member — and the attribution line degrades to "an admin"
   // rather than disappearing.
   const [people, setPeople] = useState<Person[]>([]);
-  // The member whose budget dialog is open, if any.
-  const [budgetFor, setBudgetFor] = useState<TeamMember | null>(null);
   /**
    * Open cards and running state per teammate (issue #1141), or `null` while
    * nothing has been read and for a host that cannot answer.
@@ -154,10 +158,15 @@ export function TeamView({
   const boot = useCallback(async (): Promise<boolean> => {
     try {
       const roster = await client.listTeam(company);
+      // Every row the host holds is rendered, baseline teammates included: they
+      // are real agents an operator can open, brief and cap. The setup prompt is
+      // gated on a *different* question — whether anyone has been staffed here —
+      // so the two are read separately rather than one inferred from the other
+      // (issue #1404).
+      setHostEmpty(shouldPromptSetup(roster));
       if (roster.length) {
         setMembers(roster.map(fromDto));
         setFromHost(true);
-        setHostEmpty(false);
       } else {
         // NOT `starterTeam()`. The host answered, and answered with nobody — so
         // fabricating twelve agents here would put "Ops Lead", "Front Desk" and
@@ -167,7 +176,6 @@ export function TeamView({
         // (`docs/spec/runtime/company-setup.md`).
         setMembers([]);
         setFromHost(false);
-        setHostEmpty(true);
       }
       return true;
     } catch {
@@ -256,36 +264,11 @@ export function TeamView({
     return person?.displayName?.trim() || person?.email || "an admin";
   }
 
-  /**
-   * Set, change, or remove a teammate's daily cap.
-   *
-   * `cap` is `null` to remove the cap and a number to set one — `0` included,
-   * which caps the teammate at nothing. The two are different states on the host
-   * and must stay different here, which is why this takes `number | null` and
-   * never an optional.
-   */
-  async function applyBudget(member: TeamMember, cap: number | null) {
-    try {
-      const row = await client.setTeamBudget(member.id, cap, company);
-      // Update the one card from the host's answer rather than refetching the
-      // roster: the response IS the new state, so a refetch could only disagree.
-      setMembers((ms) => ms.map((m) => (m.id === member.id ? { ...m, ...fromDto(row) } : m)));
-      toast.success(cap === null ? "Daily cap removed." : `Daily cap set to $${cap.toFixed(2)}.`);
-    } catch (error) {
-      toast.error(budgetError(error, "Couldn't change the daily cap."));
-    }
-  }
-
-  /** Drop the override so the company's own default applies again. */
-  async function resetBudget(member: TeamMember) {
-    try {
-      const row = await client.clearTeamBudgetOverride(member.id, company);
-      setMembers((ms) => ms.map((m) => (m.id === member.id ? { ...m, ...fromDto(row) } : m)));
-      toast.success("Reset to the company default.");
-    } catch (error) {
-      toast.error(budgetError(error, "Couldn't reset the daily cap."));
-    }
-  }
+  // Setting, changing and resetting a teammate's daily cap moved to the
+  // teammate's own detail page (issue #1206), beside Inbox — see
+  // `AgentDetailView`'s `Budget` section. This view keeps `whoSet`/`people`
+  // above only to attribute the cap it still *displays* on the card via
+  // `DailyBudgetLine`.
 
   async function addMember(fields: AddMemberFields) {
     let created: TeamMemberDto | null = null;
@@ -387,32 +370,40 @@ export function TeamView({
           way. Two headings over one page's two halves is how an operator ends
           up believing they are on two different pages.
         */}
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div className="space-y-1">
-            <h2 className="text-2xl font-semibold tracking-tight">Company</h2>
-            <p className="text-sm text-muted-foreground">
-              The teammates that make up your company — what each does, and what
-              they're on. {fromHost ? "Defined by this company." : "Start from these and shape your own."}
-            </p>
-          </div>
-          <div className="ml-auto flex flex-wrap items-center justify-end gap-2">
-            {onManageDesks && (
-              <Button variant="outline" onClick={onManageDesks} data-testid="company-manage-desks">
-                <Network className="size-4" /> Manage desks
+        <div className="space-y-1">
+          <div
+            className="flex flex-wrap items-center justify-between gap-3"
+            data-testid="company-header"
+          >
+            <h1 className="text-2xl font-semibold tracking-tight">Company</h1>
+            <div className="ml-auto flex flex-wrap items-center justify-end gap-2">
+              {onManageDesks && (
+                <Button variant="outline" onClick={onManageDesks} data-testid="company-manage-desks">
+                  <Network className="size-4" /> Manage desks
+                </Button>
+              )}
+              <Button onClick={() => setAddOpen(true)}>
+                <UserPlus className="size-4" /> Add teammate
               </Button>
-            )}
-            <Button onClick={() => setAddOpen(true)}>
-              <UserPlus className="size-4" /> Add teammate
-            </Button>
+            </div>
           </div>
+          <p className="text-sm text-muted-foreground">
+            The teammates that make up your company — what each does, and what
+            they're on. {fromHost ? "Defined by this company." : "Start from these and shape your own."}
+          </p>
         </div>
 
         {/*
-          The other half of "blocking but skippable": while nobody is on this
-          company, keep a visible way back into setup. Skipping the dialog leaves
-          an operator on an empty page, and burying the offer would make that a
-          dead end. Gated on `fromHost` too, so the pre-connection fabricated
-          starter roster — which is not a real team — cannot hide the prompt.
+          The other half of "blocking but skippable": until somebody has staffed
+          this company, keep a visible way back into setup. Skipping the dialog
+          leaves an operator on a page with nothing of theirs on it, and burying
+          the offer would make that a dead end.
+
+          The copy says "not been set up" rather than "has no team", and that is
+          load-bearing: this prompt now renders directly above the global
+          baseline's teammates, who are real agents on the host (issue #1404).
+          Claiming there is nobody here, over four cards, would be the same lie
+          the fabricated starter roster was deleted for — pointing the other way.
         */}
         {load === "ready" && onRunSetup && hostEmpty && (
           <div
@@ -420,7 +411,7 @@ export function TeamView({
             data-testid="setup-prompt"
           >
             <div className="space-y-0.5">
-              <p className="text-sm font-medium">This company has no team yet</p>
+              <p className="text-sm font-medium">This company hasn't been set up yet</p>
               <p className="text-sm text-muted-foreground">
                 Answer three questions and we'll build you a starting team.
               </p>
@@ -449,12 +440,6 @@ export function TeamView({
                 // id would 404 and the detail view would report a teammate that
                 // was never removed.
                 onOpen={fromHost ? () => onOpenAgent(m.id) : undefined}
-                // Budget edits need a teammate the host actually knows about;
-                // starter-team cards are local placeholders with no record.
-                canEditBudget={isAdmin && fromHost}
-                onEditBudget={() => setBudgetFor(m)}
-                onRemoveCap={() => void applyBudget(m, null)}
-                onResetBudget={() => void resetBudget(m)}
                 setByLabel={m.budgetSetBy ? whoSet(m.budgetSetBy) : undefined}
                 // Looked up by roster id, so a card the board assigned to a
                 // *desk* is never attributed to the people on it.
@@ -483,17 +468,6 @@ export function TeamView({
         onAdd={addMember}
         canSetBudget={isAdmin && fromHost}
       />
-      <BudgetDialog
-        member={budgetFor}
-        onOpenChange={(open) => {
-          if (!open) setBudgetFor(null);
-        }}
-        onSave={(cap) => {
-          const target = budgetFor;
-          setBudgetFor(null);
-          if (target) void applyBudget(target, cap);
-        }}
-      />
     </div>
   );
 }
@@ -516,29 +490,10 @@ interface AddMemberFields {
   budgetUsdDaily?: number;
 }
 
-/**
- * Turns a failed budget write into something worth reading.
- *
- * The 403 is the one an operator will actually hit, and it needs to say *why* —
- * "only an admin can change a spend limit" is the answer, not "request failed".
- */
-function budgetError(error: unknown, fallback: string): string {
-  if (error instanceof ApiError) {
-    if (error.status === 403) return "Only an admin can change a teammate's daily cap.";
-    if (error.status === 404) return "This host doesn't support console budgets yet.";
-    return error.message;
-  }
-  return error instanceof Error ? error.message : fallback;
-}
-
 function MemberCard({
   member,
   onRemove,
   onOpen,
-  canEditBudget,
-  onEditBudget,
-  onRemoveCap,
-  onResetBudget,
   setByLabel,
   workload,
 }: {
@@ -546,11 +501,6 @@ function MemberCard({
   onRemove: () => void;
   /** Open this agent's detail page. Undefined when the card has no host record. */
   onOpen?: () => void;
-  /** Whether to offer the budget controls at all (admins, host-backed cards). */
-  canEditBudget: boolean;
-  onEditBudget: () => void;
-  onRemoveCap: () => void;
-  onResetBudget: () => void;
   /** Who set the current override, already resolved to something readable. */
   setByLabel?: string;
   /**
@@ -559,17 +509,41 @@ function MemberCard({
    */
   workload?: Workload;
 }) {
-  const capped = member.budgetUsdDaily !== undefined;
-  // An override exists (someone set this deliberately), as opposed to the cap
-  // simply coming from the company's own definition.
-  const overridden = member.budgetSetBy !== undefined;
   // Issue #1208: the role only earns its line when it is not the name again.
   // Every manifest-declared agent in the shipped companies resolves both to one
   // string, so this slot was the same words twice on every card — directly
   // above the description that actually says what the teammate does.
   const subtitle = roleSubtitle(member.name, member.role);
   return (
-    <Card data-testid="team-card">
+    <Card
+      data-testid="team-card"
+      // Issue #1206: the whole card is the way in, not just the name. Both the
+      // Inbox switch (#1190) and the menu's "View teammate"/budget items are
+      // gone now, so there is nothing left inside the card that a whole-card
+      // click would swallow — the earlier "deliberately this block rather than
+      // the card" tradeoff no longer applies. Cursor and hover say so before
+      // the click does; `role`/`tabIndex`/`onKeyDown` keep it reachable and
+      // activatable from the keyboard, the same pattern `TaskItem` already uses
+      // for a whole-card click target.
+      onClick={onOpen}
+      role={onOpen ? "button" : undefined}
+      tabIndex={onOpen ? 0 : undefined}
+      onKeyDown={
+        onOpen
+          ? (e) => {
+              if (e.target !== e.currentTarget) return;
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                onOpen();
+              }
+            }
+          : undefined
+      }
+      className={cn(
+        onOpen &&
+          "cursor-pointer transition-colors hover:border-primary/40 hover:shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+      )}
+    >
       <CardContent className="flex h-full flex-col gap-3 py-4">
         <div className="flex items-start gap-3">
           {/*
@@ -581,77 +555,98 @@ function MemberCard({
             44px, comfortably above the ~24px floor under which a mascot is a
             smudge and the bare tone tile is the honest fallback.
           */}
-          <Avatar name={member.name} tone={member.tone} className="size-11 rounded-xl text-sm" />
-          {onOpen ? (
-            // The card's own name is the way in (issue #264). A whole-card
-            // click would swallow the inbox switch and the actions menu, both
-            // of which live inside it, so the target is deliberately this
-            // block rather than the card.
-            <button
-              onClick={onOpen}
-              className="min-w-0 flex-1 rounded-md text-left transition-colors hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-              data-testid="team-card-open"
-            >
-              <p className="truncate font-medium">{member.name}</p>
-              {subtitle && (
-                <p className="truncate text-xs text-muted-foreground">{subtitle}</p>
-              )}
-            </button>
-          ) : (
-            <div className="min-w-0 flex-1">
-              <p className="truncate font-medium">{member.name}</p>
-              {subtitle && (
-                <p className="truncate text-xs text-muted-foreground">{subtitle}</p>
-              )}
-            </div>
-          )}
-          <DropdownMenu>
-            <DropdownMenuTrigger
-              render={<Button variant="ghost" size="icon" className="-mr-1 -mt-1 size-7" aria-label="Teammate actions" />}
-            >
-              <MoreHorizontal className="size-4" />
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="end">
-              {onOpen && (
-                <>
-                  <DropdownMenuItem onClick={onOpen} data-testid="team-open-agent">
-                    View teammate
-                  </DropdownMenuItem>
-                  <DropdownMenuSeparator />
-                </>
-              )}
-              {canEditBudget && (
-                <>
-                  <DropdownMenuItem onClick={onEditBudget} data-testid="team-budget-edit">
-                    <Wallet className="size-4" />
-                    {capped ? "Change daily budget…" : "Set daily budget…"}
-                  </DropdownMenuItem>
-                  {capped && (
-                    <DropdownMenuItem onClick={onRemoveCap} data-testid="team-budget-remove">
-                      Remove cap
-                    </DropdownMenuItem>
-                  )}
-                  {overridden && (
-                    <DropdownMenuItem onClick={onResetBudget} data-testid="team-budget-reset">
-                      Reset to company default
-                    </DropdownMenuItem>
-                  )}
-                  <DropdownMenuSeparator />
-                </>
-              )}
-              <DropdownMenuItem variant="destructive" onClick={onRemove}>
-                Remove
-              </DropdownMenuItem>
-            </DropdownMenuContent>
-          </DropdownMenu>
+          <TeammateAvatar name={member.name} tone={member.tone} avatar={member.avatar} className="size-11 rounded-xl text-sm" />
+          {/*
+            Plain text, not its own button (issue #1206): the whole card above
+            is now the single click/keyboard target, so a second nested
+            interactive element here would just be a second tab stop for the
+            same action. `data-testid` stays for the e2e specs that click this
+            block by name — a click here still reaches the host, it just
+            bubbles to the card's own handler rather than firing one of its own.
+          */}
+          <div className="min-w-0 flex-1" data-testid="team-card-open">
+            <p className="truncate font-medium">{member.name}</p>
+            {subtitle && (
+              <p className="truncate text-xs text-muted-foreground">{subtitle}</p>
+            )}
+          </div>
+          {/*
+            Stops every click inside — the trigger and, since Base UI portals
+            the menu content elsewhere in the DOM but React still bubbles
+            synthetic events along the *component* tree, every item inside it
+            too — from reaching the card's own onClick above. Without this,
+            opening the menu (or clicking Remove) would also navigate.
+          */}
+          <div onClick={(e) => e.stopPropagation()}>
+            <DropdownMenu>
+              <DropdownMenuTrigger
+                render={<Button variant="ghost" size="icon" className="-mr-1 -mt-1 size-7" aria-label="Teammate actions" />}
+              >
+                <MoreHorizontal className="size-4" />
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end">
+                {/*
+                  Issue #1206: "View teammate" is gone — the card itself
+                  navigates now, so a menu item doing the same thing was noise
+                  that also implied (wrongly) that the card did not. The
+                  budget-editing items ("Set/Change daily budget…", "Remove
+                  cap", "Reset to company default") are gone too, for the same
+                  reason the Inbox switch left the card in #1190: a card in a
+                  grid of thirteen is for recognising a teammate, not
+                  configuring one. Editing now lives on the teammate's own
+                  detail page, beside Inbox — see `AgentDetailView`'s `Budget`
+                  section. The card still *shows* the cap and today's spend
+                  via `DailyBudgetLine` below; only the controls that write
+                  moved.
+
+                  That leaves exactly one item. It stays a menu rather than a
+                  bare button: Remove is destructive, and a deliberate extra
+                  click before it is worth keeping now that the rest of the
+                  card is one big click target. Unlike "View teammate" it does
+                  not duplicate the card's own action, and unlike Budget it is
+                  not per-teammate configuration that reads better on a
+                  detail page — it is the one roster-level action an operator
+                  reaches for while scanning many cards deciding which to
+                  prune, and moving it off the grid would trade a fast,
+                  discoverable one-hop delete for an extra full-page
+                  navigation with no offsetting benefit.
+                */}
+                <DropdownMenuItem variant="destructive" onClick={onRemove}>
+                  Remove
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          </div>
         </div>
         {member.description && (
           <p className="line-clamp-3 text-sm text-muted-foreground" data-testid="team-card-description">
             {member.description}
           </p>
         )}
-        {workload && <WorkloadLine workload={workload} />}
-        <DailyBudgetLine member={member} setByLabel={setByLabel} />
+        {/*
+          Pinned to the bottom of the card, not left floating under whatever
+          length the description happened to be.
+
+          `CardContent` is a `h-full` column inside a stretched grid row, so
+          every card in a row is the same height — but the content was all
+          top-aligned, and the description is `line-clamp-3`. A one-line
+          description therefore put this block ~36px higher than the two-line
+          card beside it, and the status line is the one thing a roster is
+          scanned for: "who is working, and how much is on them" was on two or
+          three different baselines in every row, with dead space underneath
+          each card.
+
+          `mt-auto` takes the slack instead, so the running facts line up
+          across a row and the card has no empty tail. Wrapped rather than
+          applied to `WorkloadLine` directly because a host that cannot answer
+          the board renders no workload at all (see `IDLE` and the `workload`
+          prop) — the budget line has to inherit the same anchor, or the two
+          shapes of card disagree again.
+        */}
+        <div className="mt-auto space-y-1.5 empty:hidden">
+          {workload && <WorkloadLine workload={workload} />}
+          <DailyBudgetLine member={member} setByLabel={setByLabel} />
+        </div>
         {/*
           The card's footer is gone with the Inbox switch it existed to hold
           (issue #1190).
@@ -761,75 +756,8 @@ function DailyBudgetLine({
   );
 }
 
-/**
- * Enter a daily cap for one teammate.
- *
- * Empty input is **not** submittable: "no cap" is the explicit "Remove cap"
- * action on the card, not a blank field, so an operator clearing the box and
- * saving can never silently uncap a teammate. `0` is allowed and means exactly
- * what it says — this teammate may not spend.
- */
-function BudgetDialog({
-  member,
-  onOpenChange,
-  onSave,
-}: {
-  member: TeamMember | null;
-  onOpenChange: (open: boolean) => void;
-  onSave: (cap: number) => void;
-}) {
-  const [value, setValue] = useState("");
-
-  useEffect(() => {
-    setValue(member?.budgetUsdDaily !== undefined ? String(member.budgetUsdDaily) : "");
-  }, [member]);
-
-  const parsed = Number(value);
-  const valid = value.trim() !== "" && Number.isFinite(parsed) && parsed >= 0;
-
-  return (
-    <Dialog open={member !== null} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-md">
-        <DialogHeader>
-          <DialogTitle>Daily budget</DialogTitle>
-          <DialogDescription>
-            The most {member?.name ?? "this teammate"} may spend per day. It takes effect on their
-            next task — no restart needed.
-          </DialogDescription>
-        </DialogHeader>
-        <div className="grid gap-2">
-          <Label htmlFor="member-budget">US dollars per day</Label>
-          <Input
-            id="member-budget"
-            type="number"
-            min={0}
-            step="0.01"
-            inputMode="decimal"
-            value={value}
-            onChange={(e) => setValue(e.target.value)}
-            placeholder="e.g. 5.00"
-            data-testid="team-budget-input"
-          />
-          <p className="text-xs text-muted-foreground">
-            $0 stops them spending entirely. To let them spend freely, use “Remove cap”.
-          </p>
-        </div>
-        <DialogFooter>
-          <Button variant="ghost" onClick={() => onOpenChange(false)}>
-            Cancel
-          </Button>
-          <Button
-            onClick={() => valid && onSave(parsed)}
-            disabled={!valid}
-            data-testid="team-budget-save"
-          >
-            Save
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-  );
-}
+// `BudgetDialog` — entering a daily cap — moved to `AgentDetailView.tsx`
+// (issue #1206), alongside the editing controls it belongs to now.
 
 function AddMemberDialog({
   open,

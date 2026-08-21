@@ -37,6 +37,11 @@ pub mod credentials;
 pub mod dns;
 pub mod hosting;
 pub mod inference;
+/// Ledger declaration files: `companies/<name>/ledgers/<slug>.toml`. A vertical
+/// ships the axes it is about — a matter list, a deal pipeline, an experiment
+/// log — the way it already ships its roster, rather than waiting for some turn
+/// to think of declaring one.
+pub mod ledger_file;
 /// Dynamic ledgers: the one place a ledger is read, written, declared or
 /// retired. Every surface routes through it, because the rules that matter —
 /// only a person deletes, a close says why, the derived file follows the
@@ -64,6 +69,11 @@ pub mod runtime;
 // inference credential still gets a real team.
 pub mod setup;
 mod skill_file;
+// The company's Smithery directory credential (issue #1287): the key that
+// decides whether the MCP directory has hosted servers to show. Always compiled
+// — the console must be able to manage it in a build with no `mcp` feature, the
+// same way it manages the Composio token without the harness.
+pub mod smithery;
 // Steer (issue #111): pause / cancel / redirect an in-flight task or delegation
 // from the operator chat. Always compiled + openhuman-free so the operator
 // control plane can steer in any build and no agent tool can ever reach it.
@@ -117,6 +127,7 @@ pub mod workspace_sweep;
 use std::path::Path;
 
 pub use credentials::{Credential, CredentialSource, TinyhumansTokenSource, TokenTier};
+pub use ledger_file::{LEDGERS_DIR, has_ledger_files, load_dir_ledgers};
 /// The roster-id grammar check, shared with the runtime id minter so a slug and
 /// a hand-authored `[[agent]].id` are held to one rule (issue #686). Not `pub`:
 /// outside the crate the validator speaks through `CompanyManifest::validate`.
@@ -134,9 +145,9 @@ pub use types::{
     ORCHESTRATOR_TIER, PLAN_NAMES, PLAN_PERIODS, POLICY_MODES, PROMPT_CLASSES,
     PROMPT_FILE_BUDGET_CHARS, PROVISIONED_POLICY_MODE, Place, Plan, Policy, Schedule, Skill, TIERS,
     TOOL_PROVIDERS, Tools, grants_chargebee_explicit, grants_composio_explicit,
-    grants_hosting_explicit, grants_media_explicit, grants_paypal_explicit, grants_repo_explicit,
-    grants_repo_write_explicit, grants_search_explicit, grants_workspace_write_explicit,
-    orchestrator_id,
+    grants_files_or_docs, grants_hosting_explicit, grants_media_explicit, grants_paypal_explicit,
+    grants_repo_explicit, grants_repo_write_explicit, grants_search_explicit,
+    grants_workspace_write_explicit, orchestrator_id,
 };
 pub use workflow_file::{
     STAGELESS_SCHEDULE_REFUSAL, STAGELESS_WORKFLOW_NOTICE, UNDELIVERABLE_SCHEDULE_REFUSAL,
@@ -149,8 +160,8 @@ pub use workflow_file::{
 // from its request body, renders it to TOML, and re-parses it through
 // `parse_workflow` above for validation before writing to disk.
 pub(crate) use workflow_file::{
-    RawEdge, RawNode, RawWorkflow, raw_workflow_from_toml, render_workflow,
-    required_config_problems,
+    RawEdge, RawNode, RawWorkflow, channel_destination_missing_target_message,
+    raw_workflow_from_toml, render_workflow, required_config_problems,
 };
 // Issue #661 (M7): the read half of the agent workflow-admin surface — a stored
 // graph projected onto the narrow agent authoring schema, plus the policy

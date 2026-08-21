@@ -139,6 +139,17 @@ env:
 # Dependabot is unlikely to bump. Re-resolve it from the `stable` branch by
 # hand; never copy a SHA from another repo or another toolchain branch.
 #
+# Issue #1298: that input is a VERSION, not `stable`. It used to be `stable`,
+# which resolved at run time — so when rustc 1.98.0 shipped on 2026-08-18 and
+# brought a newly-enforced `clippy::result_large_err` with it, every open PR in
+# the repo went red at once, including PRs touching no Rust. The action was
+# pinned; the compiler it installed was not. A version here turns the next
+# stable release into a reviewable bump PR instead of a repo-wide outage that
+# no diff explains. `rust-toolchain.toml` carries the same version and the
+# reasoning in full; `scripts/ci/assert-toolchain-pin.sh` (run in the `rust`
+# job) fails if any call site below disagrees with it, so bumping one and
+# forgetting the others is caught rather than shipped.
+#
 # Pins rot: an unbumped pin is a frozen, eventually-unpatched action, which
 # trades one supply-chain risk for another. The `github-actions` ecosystem entry
 # in `.github/dependabot.yml` is the other half of this — it turns each upstream
@@ -207,6 +218,14 @@ jobs:
             frontend:
               - '.github/workflows/ci.yml'
               - 'frontend/**'
+              # The repository-wide policy checks ride this job, so a change to
+              # one of them has to select it. Without this line the guards are
+              # the one thing their own diff cannot run: a PR touching only
+              # `scripts/ci/**` skipped `Console` entirely, and a guard that
+              # asserts nothing merges green. That is how the broken
+              # `assert-single-tauri-app.sh` got in. `rust` already lists this
+              # path; `frontend` is where the scripts actually execute.
+              - 'scripts/ci/**'
             desktop:
               - '.github/workflows/ci.yml'
               - 'src-tauri/**'
@@ -378,9 +397,16 @@ jobs:
             echo "::warning title=Vendored openhuman drift::pin $pin is $behind commits behind openhuman main. Past ~25 the catch-up stops being a pointer move — see issue #499, where it reached 102 and the reorg in between turned the bump into a migration."
           fi
 
+      # Issue #1298. Runs BEFORE the toolchain install, and needs no toolchain
+      # of its own: it is a check on this repo's config, and a drifted pin
+      # should fail here in one legible line rather than as a lint difference
+      # between two lanes twenty minutes later.
+      - name: Assert toolchain pins agree
+        run: scripts/ci/assert-toolchain-pin.sh
+
       - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
         with:
-          toolchain: stable
+          toolchain: "1.98.0"
           components: rustfmt, clippy
 
       # Issue #1118. This job had NO build cache, which the comment above
@@ -665,7 +691,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
         with:
-          toolchain: stable
+          toolchain: "1.98.0"
 
       # Issue #1118: save the cache on a red run too — see the `rust` job.
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
@@ -799,7 +825,7 @@ jobs:
       # covered by the `rust` job and re-running it here would buy nothing.
       - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
         with:
-          toolchain: stable
+          toolchain: "1.98.0"
           components: clippy
 
       # Issue #1118: save the cache on a red run too — see the `rust` job.
@@ -1135,22 +1161,40 @@ jobs:
 
       - name: Test the memory engine selection surface
         run: scripts/ci/run-scoped-suite.sh "tinymemory selection" acp,runner,tinymemory store::select
+      # The `memory migrate` / bundle-command guards live in the lib
+      # (store::memory::migrate, store::select) and run above; this executes
+      # the bin target's own tests under the same features so nothing
+      # bin-resident is ever compile-only again (#1279 review: no lane ran
+      # `cargo test --bin` at any feature set).
+      - name: Bin tests (tinymemory)
+        run: cargo test --locked --features acp,runner,tinymemory --bin opencompany
 
-      # Issue #1113. `tinymemory-embedded` is the in-pod contract driver:
-      # `OPENCOMPANY_MEMORY=embedded` + `OPENCOMPANY_MEMORY_DRIVER=namespace`
-      # binds `tinymemory-core`'s durable `UnifiedMemory` through the same
-      # provider seam as the hosted engines. A separate feature from
-      # `tinymemory` — it deliberately links the in-pod engine weight (bundled
-      # SQLite) that the two steps above exist to keep OUT of the contract-only
-      # build — so its gated tests (the durable bind-store-reopen round trip in
-      # `store::memory`, the routing and ephemeral-data-dir refusals in
-      # `store::select`) are compiled by `Check (--all-features)` and executed
-      # only here.
-      - name: Test the embedded contract driver
-        run: scripts/ci/run-scoped-suite.sh "tinymemory embedded contract" acp,runner,tinymemory-embedded store::memory
+      # Issue #1113 gave `tinymemory-embedded` its own lane; these two steps are
+      # that lane moved onto the union of the openhuman+tinycortex core and the
+      # provider seam — the first lane that LINKS AND EXECUTES the two together
+      # (the shipped tenant set is neither a subset nor a superset of this lane;
+      # what matters is that the combination stops existing only as a
+      # typecheck). Until now that union existed only as
+      # `Check (--all-features)`: never linked as a
+      # binary, never executed, which is precisely the crack a feature-gated
+      # merge collision (the duplicated-struct-field kind that `fmt`, clippy and
+      # two green suites all missed once already) slips through. The union also
+      # runs the upstream driver-conformance suite against the providers
+      # `open_driver` constructs — the regression net for the namespace-driver
+      # defects #1201/#1238, which shipped while the driver's own upstream suite
+      # was green, because nothing ran it through THIS host's construction path.
+      #
+      # The two `tinymemory`-ALONE steps above stay, deliberately: per the #914
+      # rationale, the contract-only build (no bundled SQLite) must keep
+      # compiling and running on its own, or a regression in exactly that
+      # separation hides. The old `acp,runner,tinymemory-embedded` steps this
+      # replaces are subsumed — same filters, wider build — and feature-lanes.txt
+      # permits one lane per feature, so the row moved here with them.
+      - name: Test the memory engine union the tenant ships
+        run: scripts/ci/run-scoped-suite.sh "memory union contract" openhuman,tinycortex,tinymemory-embedded store::memory
 
-      - name: Test the embedded contract driver selection
-        run: scripts/ci/run-scoped-suite.sh "tinymemory embedded selection" acp,runner,tinymemory-embedded store::select
+      - name: Test the memory engine union selection
+        run: scripts/ci/run-scoped-suite.sh "memory union selection" openhuman,tinycortex,tinymemory-embedded store::select
 
       # Issue #477. Before this step, `tinyplace` was COMPILED by CI and
       # EXECUTED by nothing. `Check (--all-features)` above builds every
@@ -1255,7 +1299,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
         with:
-          toolchain: stable
+          toolchain: "1.98.0"
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
@@ -1416,6 +1460,24 @@ jobs:
       # Node-only and cheap; the rule itself is repository-wide.
       - run: ./scripts/ci/assert-md-line-cap.sh
 
+      # Exactly one Tauri app, and no script that picks it by working directory
+      # rather than by name.
+      #
+      # The tree had two apps sharing a `productName`, and because the Tauri CLI
+      # finds a project by scanning SUBFOLDERS of the working directory,
+      # `npm run tauri:dev` from `frontend/` ran the dead console wrapper rather
+      # than the shell — a desktop that opened, rendered the console, and
+      # reached no host, because the app that starts one was never the app that
+      # ran. Both crates compiled and both were tested, so nothing in this file
+      # could see it.
+      #
+      # Rides the `Console` job for the reason the cap above does: a policy
+      # grep, no toolchain. It also guards `frontend/package.json`, this job's
+      # own file — and the `Desktop` lane is path-filtered on `src-tauri/**`, so
+      # a second app added under `frontend/` would not have triggered that lane
+      # at all.
+      - run: ./scripts/ci/assert-single-tauri-app.sh
+
       # Issue #858. `pnpm-lock.yaml`, read by nothing until now.
       #
       # `npm ci` above is the fidelity guard for `package-lock.json`. There is a
@@ -1423,8 +1485,10 @@ jobs:
       # this file mentions pnpm, and the `Desktop` job runs `npm ci` plus
       # `npm run build` directly rather than `tauri build`, so it never reaches
       # Tauri's `beforeBuildCommand` either. The file is not vestigial —
-      # `frontend/src-tauri/tauri.conf.json` declares `pnpm dev` / `pnpm build`,
-      # so a developer running `npm run tauri:dev` locally resolves through it.
+      # `pnpm-workspace.yaml` declares the `esbuild` build opt-in the console's
+      # production build needs, and `scripts/desktop-dev.sh` prefers `pnpm` when
+      # it is on PATH, so a developer running `npm run tauri:dev` locally still
+      # resolves through it.
       # It went out of sync on `main` and stayed there until #857 regenerated
       # it; the person who would have found out is whoever next built the
       # desktop app.
@@ -1728,6 +1792,83 @@ jobs:
           path: frontend/test-results/
           retention-days: 7
 
+  # Issue #1404. First-run company setup gets its OWN lane because it needs its
+  # own host: the flow opens only on a company nobody has staffed, and every
+  # company under `companies/` except `companies/e2e_setup` declares a roster of
+  # its own — including `companies/e2e_harness`, which both `Console E2E` lanes
+  # serve. One host cannot satisfy both, so this is a third run rather than a
+  # matrix leg of either. It needs only the DEFAULT binary: nothing here runs an
+  # agent turn, and the design pass falls back to a curated team with no model
+  # reachable (decision D3), which is a path worth exercising in its own right.
+  #
+  # Before this lane existed, `company-setup.spec.ts` was covered by NOTHING. Its
+  # own header said so. It carried a `test.skip` for a host serving the wrong
+  # company, no job ever set the variable that would have un-skipped it, and once
+  # the global baseline began merging four undeletable teammates into every
+  # company the guard fired on every run — so the console lane stayed green while
+  # the entire first-run experience was unreachable in the shipped product. That
+  # is `CLAUDE.md`'s "builds, runs and reports zero without failing anything", in
+  # a browser suite.
+  #
+  # Which is why the step below is a SCRIPT and not `npm run e2e:first-run`.
+  # `assert-e2e-spec-ran.sh` reads the run's own reported count and fails on
+  # zero, the same way `assert-integration-targets-run.sh` does for the Rust
+  # targets. A lane whose only guarantee is its configuration can be silently
+  # vacuous; a lane that asserts a number cannot.
+  console-e2e-first-run:
+    needs: [changes, rust]
+    if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.frontend == 'true'
+    name: Console E2E (first run)
+    runs-on: ubuntu-latest
+    # One spec with two tests, each of which builds a real team. Well inside
+    # this; the cap is a wedged-browser backstop.
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          # No `submodules`: the binary arrives prebuilt from the `rust` job and
+          # nothing here resolves a cargo manifest, same as the lane above.
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: frontend/.nvmrc
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - run: npm ci
+        working-directory: frontend
+
+      - name: Download the host binary
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: opencompany-debug-binary
+          path: target/debug
+
+      # `upload-artifact` does not preserve the executable bit; `host.sh` tests
+      # for `-x` and would answer with a build instruction.
+      - name: Restore the executable bit
+        run: chmod +x target/debug/opencompany
+
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+        working-directory: frontend
+
+      # `PW_FIRST_RUN=1` (set by the npm script this calls) is what makes
+      # `playwright.config.ts` serve `companies/e2e_setup` on a data root of its
+      # own AND select the first-run spec and only it. The script then asserts
+      # the run reported a non-zero count — see its header.
+      - name: Run the first-run lane and assert it executed
+        run: scripts/ci/assert-e2e-spec-ran.sh
+
+      - name: Upload failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: playwright-first-run-failures
+          path: frontend/test-results/
+          retention-days: 7
+
   # The desktop shell.
   #
   # A SEPARATE JOB, and separate for the reason `src-tauri/Cargo.toml` explains
@@ -1793,8 +1934,15 @@ jobs:
         with:
           workspaces: |
             src-tauri
-            frontend/src-tauri
 
+      # Issue #1298. This lane installs no toolchain of its own — unlike the
+      # four `dtolnay/rust-toolchain` call sites elsewhere in this file — and
+      # does not need to: `src-tauri` has no `rust-toolchain.toml`, so rustup
+      # walks up to the repo root's and the cargo steps below run on the same
+      # pinned version every other Rust lane uses. That is why
+      # `assert-toolchain-pin.sh` finds nothing to check here; the pin still
+      # applies. If this job ever grows an explicit install, it must pass the
+      # same version, and the script will start covering it automatically.
       - name: Format
         run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
 
@@ -1815,18 +1963,25 @@ jobs:
       - name: Test
         run: cargo test --manifest-path src-tauri/Cargo.toml --locked
 
-      # The console's Tauri wrapper is also an independent workspace. It used
-      # to inherit the root workspace metadata and lockfile, but OpenHuman now
-      # contains nested workspaces of its own, so keeping it independent is
-      # what lets Cargo compose the current vendored graph.
-      - name: Format console desktop wrapper
-        run: cargo fmt --manifest-path frontend/src-tauri/Cargo.toml --all -- --check
-
-      - name: Clippy console desktop wrapper
-        run: cargo clippy --manifest-path frontend/src-tauri/Cargo.toml --locked --all-targets --no-deps -- -D warnings
-
-      - name: Test console desktop wrapper
-        run: cargo test --manifest-path frontend/src-tauri/Cargo.toml --locked
+      # There used to be a SECOND Tauri app here, `frontend/src-tauri/`, with
+      # three more steps of its own. It is deleted, and its absence is the
+      # point rather than a tidy-up.
+      #
+      # The CLI finds a project by searching SUBFOLDERS of the working
+      # directory, so `npm run tauri:dev` — run from `frontend/`, because that
+      # is where the script it names lives — resolved to that wrapper rather
+      # than to the shell. The wrapper registered exactly one command,
+      # `desktop_config`, and the console had stopped invoking it (see the
+      # comment at the top of `frontend/src/main.tsx`); every `oc_*` command the
+      # console uses to reach a host — `oc_embedded` first — was missing from
+      # its `generate_handler!`. So the window opened, the console rendered, and
+      # no host ever appeared. Two apps sharing a `productName`, one of them
+      # dead, and the working directory deciding which one a developer got.
+      #
+      # `frontend/package.json` now points `tauri:dev` at
+      # `scripts/desktop-dev.sh` and `tauri:build` at `src-tauri/`, and
+      # `scripts/ci/assert-single-tauri-app.sh` in the `Console` job keeps both
+      # halves from coming back.
 
       # Everything above proves the desktop crate COMPILES. Nothing above proves
       # it PACKAGES, and those are different claims: the steps above drive
@@ -1877,9 +2032,10 @@ jobs:
       # nearly free: same profile, same cache, everything already built.
       #
       # These two and no others: the CLI finds a project by searching SUBFOLDERS
-      # of the working directory rather than ancestors, so from `frontend/` it
-      # would package the console wrapper above instead — a different app that
-      # happens to share this one's `productName`.
+      # of the working directory rather than ancestors. That is what made the
+      # deleted `frontend/src-tauri/` wrapper reachable from `frontend/`, and
+      # running from these two directories is what keeps the shell the only app
+      # any invocation can find.
       - name: Package (from the repository root)
         run: ./frontend/node_modules/.bin/tauri build --debug --no-bundle
 

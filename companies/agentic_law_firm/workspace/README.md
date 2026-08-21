@@ -9,6 +9,8 @@ Start here:
 - [[Matter checklist]] — how a matter moves from intake to filing
 - [[Firm standards]] — drafting and review standards we hold to
 - [[Acme services agreement]] — a matter in flight
+- [[Intake checklist]] — the conflict check that gates everything else
+- [[Filing standards]] — what a filing has to be before a human signs it
 
 Everything here is a plain `.md` file, so it version-controls cleanly and seeds
 the operator console's Workspace view.

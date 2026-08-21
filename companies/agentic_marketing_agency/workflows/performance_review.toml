@@ -1,0 +1,91 @@
+# Workflow graph: performance_review
+#
+# Referenced by `[workflows].enabled` in ../company.toml. A live campaign's
+# numbers are pulled from the source, read against the measure the campaign
+# fixed *before* it launched, and turned into a kill-or-continue recommendation
+# the operator decides on.
+
+id = "performance_review"
+name = "Performance review"
+description = "A campaign's numbers are read against its own measure and turned into a recommendation."
+
+[[node]]
+id = "due"
+kind = "trigger"
+name = "Review due"
+summary = "A campaign ends, or has spent enough to be judged."
+
+[[node]]
+id = "pull"
+kind = "agent"
+name = "Pull the numbers"
+summary = "From the source, with the date range and currency stated."
+agent = "analytics_analyst"
+
+[[node]]
+id = "read"
+kind = "agent"
+name = "Read against the measure"
+summary = "Judge against the measure the campaign row fixed before launch, not against what the numbers are good at."
+agent = "analytics_analyst"
+
+[[node]]
+id = "working"
+kind = "condition"
+name = "Working?"
+summary = "Branch on whether the measure was met."
+[node.config]
+field = "=item.meeting_measure"
+
+[[node]]
+id = "scale"
+kind = "agent"
+name = "Plan the scale-up"
+summary = "What more of this costs, and where it stops working."
+agent = "paid_ads_manager"
+
+[[node]]
+id = "diagnose"
+kind = "agent"
+name = "Diagnose or kill"
+summary = "One change worth trying, or the case for stopping. Record the reason either way."
+agent = "creative_director"
+
+[[node]]
+id = "report"
+kind = "output"
+name = "Report and recommend"
+summary = "Hand the operator one recommendation with the number behind it."
+[node.destination]
+kind = "channel"
+target = "strategy"
+
+[[edge]]
+from = "due"
+to = "pull"
+
+[[edge]]
+from = "pull"
+to = "read"
+
+[[edge]]
+from = "read"
+to = "working"
+
+[[edge]]
+from = "working"
+to = "scale"
+label = "yes"
+
+[[edge]]
+from = "working"
+to = "diagnose"
+label = "no"
+
+[[edge]]
+from = "scale"
+to = "report"
+
+[[edge]]
+from = "diagnose"
+to = "report"

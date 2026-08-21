@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ChevronDown,
   ChevronRight,
+  EyeOff,
   FilePlus2,
   FileText,
   Folder,
@@ -52,6 +53,16 @@ import {
   type WorkspaceOrigin,
 } from "@/api/workspace";
 import { Alert, AlertDescription } from "@/components/ui/alert";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -65,7 +76,9 @@ import {
 import {
   DropdownMenu,
   DropdownMenuContent,
+  DropdownMenuGroup,
   DropdownMenuItem,
+  DropdownMenuLabel,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
@@ -78,21 +91,38 @@ import { rosterDisplayName, rosterNameMap, type RosterNames } from "@/lib/roster
 import { fromDto } from "@/lib/team";
 import { cn } from "@/lib/utils";
 import {
+  createSaveBuffer,
+  createUnloadGuard,
+  type SaveBuffer,
+} from "@/lib/workspace-save-buffer";
+import {
+  ancestorFolderIds,
   applyRepair,
+  breadcrumbOf,
   childrenOf,
   clearLegacyLocal,
+  DERIVED_LABEL,
+  DERIVED_REASON,
   ensureMdExt,
   fileByTitle,
   type FsNode,
   hasLegacyLocal,
   isDerivedNode,
+  isSecretNode,
+  type MoveAudienceChange,
+  type MoveAudienceWarning,
+  moveAudienceWarning,
   nodeById,
-  pathOf,
   readLegacyLocalNodes,
+  renameAudienceWarning,
+  SECRETS_LABEL,
+  SECRETS_REASON,
+  subtreeCounts,
   subtreeIds,
   titleOf,
 } from "@/lib/workspace";
 import { useLocalScope } from "@/connections/ConnectionContext";
+import { MoveAudienceConfirm } from "@/views/workspace/MoveAudienceConfirm";
 import { SearchResults } from "@/views/workspace/SearchResults";
 
 /**
@@ -137,19 +167,6 @@ interface Props {
 
 /** How long typing settles before the editor pushes a save to the host. */
 const AUTOSAVE_DELAY_MS = 800;
-
-/**
- * Why a file under `derived/` has no Edit tab (issue #1222).
- *
- * Says what writes it instead, because "read only" on its own tells an operator
- * that their edit is unwelcome without telling them where the edit belongs —
- * and there IS somewhere it belongs. The host's own refusal names the specific
- * ledger; this is the pane's version of the same sentence, said before the
- * typing rather than after it.
- */
-const READ_ONLY_TITLE =
-  "This file is written by a ledger and re-derived on every write to it — " +
-  "an edit here would be erased. Change it on the Ledgers page instead.";
 
 /**
  * How long the search box waits after the last keystroke before asking the host
@@ -213,7 +230,36 @@ export function migrationBannerText(files: number, folders: number): string {
 }
 
 /** What the editor's status line is currently reporting. */
-type SaveState = "idle" | "saving" | "saved" | "error";
+export type SaveState = "idle" | "dirty" | "saving" | "saved" | "error";
+
+/**
+ * What the status line says for a state, or `null` for the states with nothing
+ * to report (issue #1372).
+ *
+ * `dirty` exists because the line used to be **silent for the only window in
+ * which the operator's words are at risk**. Typing set `idle`, `idle` rendered
+ * nothing, and the first thing the header ever said was "Saved" — after the
+ * risk had passed. An operator who typed a sentence and reloaded inside the
+ * autosave debounce lost it, having been told nothing.
+ *
+ * So the two silent states are now the two honest silences: `idle` is an
+ * untouched note, and everything the operator has typed is announced until the
+ * host has acknowledged it.
+ */
+export function saveStatusLabel(state: SaveState): string | null {
+  switch (state) {
+    case "dirty":
+      return "Unsaved";
+    case "saving":
+      return "Saving…";
+    case "saved":
+      return "Saved";
+    case "error":
+      return "Not saved — retrying on edit";
+    default:
+      return null;
+  }
+}
 
 /**
  * Text the operator wrote into a note that no longer exists, held out of the
@@ -385,6 +431,16 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
   const [searchError, setSearchError] = useState<string | null>(null);
 
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
+  /**
+   * The node the explorer should bring into view next (issue #1371).
+   *
+   * Separate from `openId` because revealing is a one-shot *event*, not a piece
+   * of state: scrolling on every render that happens to have a note open would
+   * yank the tree back under an operator who had deliberately scrolled away
+   * from it to look at something else.
+   */
+  const [revealId, setRevealId] = useState<string | null>(null);
+  const onRevealed = useCallback(() => setRevealId(null), []);
   const [prompt, setPrompt] = useState<PromptState | null>(null);
   const [moving, setMoving] = useState<FsNode | null>(null);
   const [showExplorer, setShowExplorer] = useState(true);
@@ -401,6 +457,10 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
   // ride along on both.
   const [repair, setRepair] = useState<RepairState | null>(null);
   const [repairing, setRepairing] = useState(false);
+  // The node awaiting a second click before its delete API call goes out — a
+  // folder recursively takes every note nested inside it, so the dialog must
+  // name what is about to go before it goes (issue #1255).
+  const [confirmDelete, setConfirmDelete] = useState<FsNode | null>(null);
   // The pending scratchpad partitioned by kind, once, for every surface that
   // describes or imports it: the banner's sentence, the import loops, and the
   // receipt. #500 partitioned inside `importLegacy` so the loops and the
@@ -587,9 +647,14 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
 
   /* ---- the editor's dirty buffer ---- */
 
-  // The pending save, held in a ref so the debounce timer and the unmount
+  // The unsaved-text buffer, held in a ref so the debounce timer and the unmount
   // cleanup both see the latest value without re-subscribing on every keystroke.
-  const pending = useRef<{ id: string; content: string } | null>(null);
+  // It owns the two ordering rules the editor cannot get wrong — what counts as
+  // unsaved, and which write gets to speak — and both are unit-tested away from
+  // React in `lib/workspace-save-buffer.ts`.
+  const bufferRef = useRef<SaveBuffer | null>(null);
+  if (!bufferRef.current) bufferRef.current = createSaveBuffer();
+  const buffer = bufferRef.current;
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const flush = useCallback(async () => {
@@ -597,49 +662,47 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
       clearTimeout(timer.current);
       timer.current = null;
     }
-    const job = pending.current;
-    if (!job) return;
-    pending.current = null;
-    setSaveState("saving");
-    try {
-      const ack = await writeFile(client, company, job.id, job.content);
-      setSaveState("saved");
-      // Patch the authoritative stamp onto both the open file and the tree row,
-      // so "last updated" is the host's answer and not a guess. `updatedBy`
-      // rides along: this route stamps the operator server-side, and leaving
-      // the stale value would keep showing "edited by <agent>" on a note the
-      // operator has just rewritten, until the next refetch.
-      setOpenFile((f) =>
-        f && f.id === job.id
-          ? { ...f, content: job.content, updatedAt: ack.updatedAt, updatedBy: OPERATOR_ORIGIN }
-          : f,
-      );
-      setNodes((all) =>
-        all.map((n) =>
-          n.id === job.id ? { ...n, updatedAt: ack.updatedAt, updatedBy: OPERATOR_ORIGIN } : n,
-        ),
-      );
-    } catch (e) {
-      // Keep the buffer: the operator's text is never dropped because a save
-      // failed. A 404 means the note is gone on the host, which needs a decision
-      // rather than a retry, so say so explicitly.
-      //
-      // Only restore when nothing newer arrived. The operator can keep typing
-      // during the await above, and that typing writes a fresher job into
-      // `pending.current` — overwriting it with the job we just failed to save
-      // would silently discard every keystroke made while the request was in
-      // flight, which is the exact loss this buffer exists to prevent.
-      if (!pending.current) pending.current = job;
-      setSaveState("error");
-      if (isNotFound(e)) {
-        toast.error("This note no longer exists on the host.", {
-          description: "Someone deleted it. Your text is still here — save it as a new note.",
-        });
-      } else {
-        toast.error(message(e, "could not save this note"));
-      }
-    }
-  }, [client, company]);
+    // The buffer decides whether there is anything to send and whether the
+    // answer is still the newest word; a superseded write lands on none of
+    // these callbacks, so it can neither claim "Saved" over text the host has
+    // never seen nor overwrite an honest "Unsaved" with its own failure.
+    await buffer.flush({
+      write: (job) => writeFile(client, company, job.id, job.content),
+      onSaving: () => setSaveState("saving"),
+      onSaved: (job, ack) => {
+        setSaveState("saved");
+        // Patch the authoritative stamp onto both the open file and the tree
+        // row, so "last updated" is the host's answer and not a guess.
+        // `updatedBy` rides along: this route stamps the operator server-side,
+        // and leaving the stale value would keep showing "edited by <agent>" on
+        // a note the operator has just rewritten, until the next refetch.
+        setOpenFile((f) =>
+          f && f.id === job.id
+            ? { ...f, content: job.content, updatedAt: ack.updatedAt, updatedBy: OPERATOR_ORIGIN }
+            : f,
+        );
+        setNodes((all) =>
+          all.map((n) =>
+            n.id === job.id ? { ...n, updatedAt: ack.updatedAt, updatedBy: OPERATOR_ORIGIN } : n,
+          ),
+        );
+      },
+      onFailed: (_job, e) => {
+        // The buffer has already kept the text — the operator's words are never
+        // dropped because a save failed, and the next edit retries them. A 404
+        // means the note is gone on the host, which needs a decision rather than
+        // a retry, so say so explicitly.
+        setSaveState("error");
+        if (isNotFound(e)) {
+          toast.error("This note no longer exists on the host.", {
+            description: "Someone deleted it. Your text is still here — save it as a new note.",
+          });
+        } else {
+          toast.error(message(e, "could not save this note"));
+        }
+      },
+    });
+  }, [buffer, client, company]);
 
   // Always flush through the newest closure, including from cleanup callbacks
   // that captured an older one.
@@ -655,10 +718,29 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
     };
   }, []);
 
+  // …and neither must unloading the page (issue #1372). The unmount cleanup
+  // above covers every navigation React knows about, which is why switching
+  // notes was already safe. A reload, a tab close or a link out of the console
+  // is not one of those: the debounce timer dies with the document and the
+  // typing goes with it, silently — and so does the request, because the
+  // browser cancels an in-flight `PUT` on unload. The guard therefore asks the
+  // buffer, which counts a write in flight as unsaved just as it counts a job
+  // waiting on the debounce; checking a pending ref alone would leave the whole
+  // round trip unguarded.
+  useEffect(() => {
+    const guard = createUnloadGuard(buffer);
+    window.addEventListener("beforeunload", guard);
+    return () => window.removeEventListener("beforeunload", guard);
+  }, [buffer]);
+
   function onEdit(id: string, content: string) {
     setDraft(content);
-    setSaveState("idle");
-    pending.current = { id, content };
+    // `dirty`, not `idle`: from this keystroke until the host acknowledges the
+    // write, the only copy of these words is in this tab (issue #1372).
+    setSaveState("dirty");
+    // Also invalidates any write already in flight: its answer is about text
+    // this keystroke has just superseded, so it no longer gets to set the state.
+    buffer.stage({ id, content });
     if (timer.current) clearTimeout(timer.current);
     timer.current = setTimeout(() => void flushRef.current(), AUTOSAVE_DELAY_MS);
   }
@@ -767,10 +849,10 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
     }
     // Preferred over the plan's answer because it is a ref and therefore
     // current: the operator can keep typing during the tree refetch above, and
-    // those keystrokes reach `pending` while the plan was computed from the
+    // those keystrokes reach the buffer while the plan was computed from the
     // `draft` of the render the frame arrived in.
-    const job = pending.current;
-    pending.current = null;
+    const job = buffer.peek();
+    buffer.clear();
     const keep = job?.content ?? rescue;
     if (keep !== null) {
       const gone = nodeById(nodes, openId);
@@ -816,6 +898,25 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
     void open(initialNodeId);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [initialNodeId]);
+
+  /* ---- reveal the open note in the tree (#1371) ---- */
+
+  // Expanding runs off `nodes` as well as `openId`, and that is the whole
+  // point: on the deep-link route the note is opened before the tree has
+  // loaded, so the first pass has no ancestors to find and the second — once
+  // the nodes arrive — is the one that does the work. Expanding is idempotent,
+  // so re-running it costs nothing.
+  useEffect(() => {
+    if (!openId) return;
+    const ancestors = ancestorFolderIds(nodes, openId);
+    if (ancestors.length > 0) {
+      setExpanded((prev) => {
+        if (ancestors.every((id) => prev.has(id))) return prev;
+        return new Set([...prev, ...ancestors]);
+      });
+    }
+    setRevealId(openId);
+  }, [openId, nodes]);
 
   /* ---- migration off the retired localStorage scratchpad ---- */
 
@@ -888,11 +989,11 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
     setSaveState("idle");
     setOpenFile(null);
     setFileError(null);
-    setExpanded((prev) => {
-      const next = new Set(prev);
-      for (const a of pathOf(nodes, id)) if (a.kind === "folder") next.add(a.id);
-      return next;
-    });
+    // The ancestors are expanded by the reveal effect below rather than here.
+    // Doing it here read `nodes` out of this closure, and on the deep-link route
+    // (`#/workspace/<id>`) that closure runs before the tree has arrived — so
+    // `pathOf` walked an empty array, expanded nothing, and the note the
+    // operator had just been sent to was nowhere in the explorer (issue #1371).
     // A payload has no text body to fetch, and the host refuses the text read
     // for one — asking anyway would put an error in `fileError` for a file that
     // is perfectly fine (issue #553). `BinaryNodeView` fetches the bytes it
@@ -918,15 +1019,24 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
   async function openHit(hit: SearchHit) {
     if (hit.kind === "folder") {
       setSearchInput("");
-      setExpanded((prev) => {
-        const next = new Set(prev);
-        for (const a of pathOf(nodes, hit.id)) if (a.kind === "folder") next.add(a.id);
-        next.add(hit.id);
-        return next;
-      });
+      setExpanded((prev) => new Set([...prev, ...ancestorFolderIds(nodes, hit.id), hit.id]));
+      setRevealId(hit.id);
       return;
     }
     await open(hit.id);
+  }
+
+  /**
+   * Show a folder in the tree, from a breadcrumb crumb (issue #1371).
+   *
+   * Expands it as well as its ancestors — clicking the folder you are inside of
+   * means "show me what else is in here", and revealing it collapsed would
+   * answer a question nobody asked.
+   */
+  function revealFolder(id: string) {
+    setSearchInput("");
+    setExpanded((prev) => new Set([...prev, ...ancestorFolderIds(nodes, id), id]));
+    setRevealId(id);
   }
 
   function toggle(id: string) {
@@ -1037,7 +1147,7 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
       await deleteNodeApi(client, company, node.id);
       setNodes((all) => all.filter((n) => !removed.has(n.id)));
       if (openId && removed.has(openId)) {
-        pending.current = null;
+        buffer.clear();
         setOpenId(null);
         setOpenFile(null);
         setDraft(null);
@@ -1184,9 +1294,22 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
    * something else asks it to.
    */
   const readOnlyNote = isDerivedNode(nodes, openId);
+  /**
+   * Whether the open note is one the company's agents cannot read (#1465).
+   *
+   * The same folder rule the tree row asks, asked again for the header, because
+   * this is the pane an operator is looking at while typing the credential —
+   * and a note opened from a search hit or a `[[wiki link]]` arrives here with
+   * the tree never scrolled to it.
+   */
+  const secretNote = isSecretNode(nodes, openId);
 
   return (
     <div className="flex flex-1 overflow-hidden">
+      {/* The file tree and editor are the page, with no title of their own
+          (issue #1221) — this names the page for a screen reader the same
+          way every other view's title does. */}
+      <h1 className="sr-only">Workspace</h1>
       {/* Explorer */}
       <aside
         className={cn(
@@ -1331,12 +1454,14 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
               depth={0}
               expanded={expanded}
               openId={openId}
+              revealId={revealId}
+              onRevealed={onRevealed}
               rosterNames={rosterNames}
               onToggle={toggle}
               onOpen={(id) => void open(id)}
               onRename={(node) => setPrompt({ mode: "rename", node })}
               onMove={(node) => setMoving(node)}
-              onDelete={(node) => void remove(node)}
+              onDelete={(node) => setConfirmDelete(node)}
             />
           )}
         </div>
@@ -1404,11 +1529,52 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
               <IconBtn label="Toggle explorer" onClick={() => setShowExplorer((s) => !s)}>
                 <PanelLeft className="size-4" />
               </IconBtn>
-              <span className="truncate text-sm font-medium">{titleOf(openNode)}</span>
-              <Authorship
-                createdBy={openFile?.createdBy ?? openNode.createdBy}
-                updatedBy={openFile?.updatedBy ?? openNode.updatedBy}
-              />
+              <span className="flex min-w-0 items-baseline gap-1.5">
+                {/* Where this note lives (issue #1371). The header used to name
+                    the file and nothing else, which in a tree five deep with
+                    three notes called README answered neither "which one is
+                    this?" nor "what sits beside it?". Search already knew — it
+                    returns a `path` on every hit — and threw the answer away at
+                    exactly the moment it became useful. */}
+                <Breadcrumb nodes={nodes} nodeId={openNode.id} onOpenFolder={revealFolder} />
+                <span className="truncate text-sm font-medium">{titleOf(openNode)}</span>
+              </span>
+              {/* Said in the header and not only in the tree, because this is
+                  the pane the typing happens in — and unlike the tree, it is
+                  reached from a search hit and a wiki link too (issue #1465).
+                  It sits after the crumb rail rather than inside it: the rail
+                  says where the note is filed, this says who can read it. */}
+              {secretNote && (
+                <Badge
+                  variant="outline"
+                  className="shrink-0 gap-1 font-normal"
+                  title={SECRETS_REASON}
+                  data-testid="workspace-secret"
+                >
+                  <EyeOff className="size-3" />
+                  {SECRETS_LABEL}
+                </Badge>
+              )}
+              {/* No authorship on a derived file (#1377). `derived::publish`
+                  stamps `WorkspaceOrigin::Seed` — that is how the write guard
+                  tells its own derivation from a person — so `originLabel`
+                  renders `Seeded` on every one of these. "Seeded" means "it
+                  shipped with the company bundle and was typed by nobody",
+                  which is a different and wrong story: this file was rendered
+                  seconds ago and is rewritten on every `record_entry`. Two
+                  console-authored badges disagreeing about the same file is
+                  worse than one, so the chip that IS true says it alone. The
+                  breadcrumb above stays either way: where a derived file lives
+                  is the fact that explains which ledger wrote it.
+
+                  A `secrets/` note keeps its authorship — the README the host
+                  seeds there really was seeded, so both chips are true. */}
+              {!readOnlyNote && (
+                <Authorship
+                  createdBy={openFile?.createdBy ?? openNode.createdBy}
+                  updatedBy={openFile?.updatedBy ?? openNode.updatedBy}
+                />
+              )}
               <span className="hidden shrink-0 text-xs text-muted-foreground sm:inline">
                 {formatUpdated(openFile?.updatedAt ?? openNode.updatedAt)}
               </span>
@@ -1431,10 +1597,9 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
                   variant="outline"
                   className="ml-auto shrink-0 gap-1 font-normal"
                   data-testid="workspace-read-only"
-                  title={READ_ONLY_TITLE}
                 >
                   <Lock className="size-3" />
-                  Read only
+                  {DERIVED_LABEL}
                 </Badge>
               ) : (
                 <Tabs
@@ -1480,6 +1645,24 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
                   />
                 ) : (
                   <div className="mx-auto max-w-3xl px-6 py-6" data-testid="workspace-note">
+                    {/* The reason, said in the console's own voice and in plain
+                        sight (issue #1377). It used to live in a native `title`
+                        on the chip — a tooltip that waits a second, never
+                        appears on touch, and is never met by anyone who does
+                        not think to hover a passive-looking status label. The
+                        rendered body often explains itself too, but that text
+                        is the ledger's, not ours: a ledger whose template omits
+                        it would leave the operator with two words and no
+                        reason. */}
+                    {readOnlyNote && (
+                      <p
+                        className="mb-6 flex items-start gap-2 rounded-lg border border-border bg-muted/50 px-3 py-2 text-xs text-muted-foreground"
+                        data-testid="workspace-read-only-reason"
+                      >
+                        <Lock className="mt-0.5 size-3.5 shrink-0" />
+                        <span>{DERIVED_REASON}</span>
+                      </p>
+                    )}
                     <NoteMarkdown source={body} nodes={nodes} onWiki={(t) => void onWiki(t)} />
                   </div>
                 )}
@@ -1515,6 +1698,7 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
       </section>
 
       <NamePrompt
+        nodes={nodes}
         state={prompt}
         onClose={() => setPrompt(null)}
         onSubmit={(name) => {
@@ -1545,24 +1729,97 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
         onClose={() => setRepair(null)}
         onConfirm={() => void confirmRepair()}
       />
+      <DeleteDialog
+        nodes={nodes}
+        node={confirmDelete}
+        onClose={() => setConfirmDelete(null)}
+        onConfirm={(node) => {
+          // Close FIRST: remove() can clear openId/openFile out from under a
+          // still-mounted dialog (same reasoning as WorkflowsView's delete
+          // confirm).
+          setConfirmDelete(null);
+          void remove(node);
+        }}
+      />
     </div>
   );
 }
 
-/** The editor's save indicator: quiet when idle, explicit when it matters. */
+/**
+ * Where the open note lives, above its name (issue #1371).
+ *
+ * Rendered as separate clickable crumbs rather than one path string, because a
+ * path is only half an answer: the operator who has just discovered that this
+ * note is the one under `Rust/API design` almost always wants to see what else
+ * is in there, and a string cannot be clicked. Each crumb expands that folder
+ * and scrolls the tree to it.
+ *
+ * Nothing renders at the workspace root — a note with no folders above it has no
+ * location worth stating, and an empty crumb rail would be a line of chrome that
+ * says "top level" in the space where a real path would go.
+ */
+function Breadcrumb({
+  nodes,
+  nodeId,
+  onOpenFolder,
+}: {
+  nodes: FsNode[];
+  nodeId: string;
+  onOpenFolder: (id: string) => void;
+}) {
+  const crumbs = breadcrumbOf(nodes, nodeId);
+  if (crumbs.length === 0) return null;
+  return (
+    <span
+      className="hidden min-w-0 shrink items-baseline gap-1 text-xs text-muted-foreground sm:flex"
+      data-testid="workspace-breadcrumb"
+    >
+      {crumbs.map((crumb, i) =>
+        crumb === null ? (
+          <span key={`gap-${i}`} aria-hidden="true">
+            …/
+          </span>
+        ) : (
+          <span key={crumb.id} className="flex min-w-0 items-baseline">
+            <button
+              type="button"
+              onClick={() => onOpenFolder(crumb.id)}
+              className="truncate rounded-sm hover:text-foreground hover:underline"
+            >
+              {crumb.name}
+            </button>
+            <span aria-hidden="true">/</span>
+          </span>
+        ),
+      )}
+    </span>
+  );
+}
+
+/**
+ * The editor's save indicator: quiet only on a note nobody has touched.
+ *
+ * `dirty` carries a filled dot as well as the word, because "Unsaved" and
+ * "Saved" are one letter apart in a 12px muted line and the operator is meant
+ * to be able to read this at a glance, mid-sentence, without stopping to parse
+ * it (issue #1372).
+ */
 function SaveStatus({ state }: { state: SaveState }) {
-  if (state === "idle") return null;
-  const label =
-    state === "saving" ? "Saving…" : state === "saved" ? "Saved" : "Not saved — retrying on edit";
+  const label = saveStatusLabel(state);
+  if (!label) return null;
   return (
     <span
       data-testid="workspace-save-state"
       data-state={state}
       className={cn(
-        "shrink-0 text-xs",
+        "flex shrink-0 items-center gap-1.5 text-xs",
         state === "error" ? "text-destructive" : "text-muted-foreground",
+        state === "dirty" && "text-foreground",
       )}
     >
+      {state === "dirty" && (
+        <span aria-hidden="true" className="size-1.5 rounded-full bg-tone-2" />
+      )}
       {label}
     </span>
   );
@@ -1576,6 +1833,10 @@ interface TreeProps {
   depth: number;
   expanded: Set<string>;
   openId: string | null;
+  /** The node to scroll into view once its row exists (issue #1371). */
+  revealId: string | null;
+  /** Called by the row that scrolled itself, so the reveal fires once. */
+  onRevealed: () => void;
   /** id -> display name for roster ids (issue #973). See {@link isAgentsFolder}. */
   rosterNames: RosterNames;
   onToggle: (id: string) => void;
@@ -1676,7 +1937,19 @@ function sameOrigin(a: WorkspaceOrigin, b: WorkspaceOrigin): boolean {
 }
 
 function TreeRow({ node, ...props }: TreeProps & { node: FsNode }) {
-  const { depth, expanded, openId, onToggle, onOpen, nodes, rosterNames } = props;
+  const { depth, expanded, openId, onToggle, onOpen, nodes, rosterNames, revealId, onRevealed } =
+    props;
+  const rowRef = useRef<HTMLDivElement | null>(null);
+  // Scrolling belongs to the row rather than to the pane because only the row
+  // knows when it exists: the ancestors expand first, and the row this reveal
+  // is about is mounted by that render, not the one that asked for it
+  // (issue #1371). `block: "nearest"` so a row already on screen — the ordinary
+  // case, a click in the tree — does not move at all.
+  useEffect(() => {
+    if (revealId !== node.id) return;
+    rowRef.current?.scrollIntoView({ block: "nearest" });
+    onRevealed();
+  }, [revealId, node.id, onRevealed]);
   const isFolder = node.kind === "folder";
   const isOpen = expanded.has(node.id);
   const active = node.id === openId;
@@ -1687,13 +1960,52 @@ function TreeRow({ node, ...props }: TreeProps & { node: FsNode }) {
   // level below `Agents/`.
   const isRosterFolder = isFolder && isAgentsFolder(nodeById(nodes, node.parentId));
   const displayName = isRosterFolder ? rosterDisplayName(node.name, rosterNames) : node.name;
+  /**
+   * Whether this row is the `derived/` folder or something inside it (#1377).
+   *
+   * The tree is where a person decides what to open, so it is where "this one
+   * is not yours to edit" has to be readable. Before this, `derived/GOALS.md`
+   * rendered identically to a hand-written note — same icon, same weight, same
+   * `…` menu offering Rename and Move — and the only console-authored signal
+   * was a chip in the header of a file you had already opened.
+   *
+   * Recomputed per row rather than threaded down through {@link Tree}, so the
+   * rule stays the single {@link isDerivedNode} both this and the header ask.
+   * It walks the ancestry of one node, against a tree that is a few hundred
+   * nodes at most and is already re-sorted per level on every render.
+   */
+  const derived = isDerivedNode(nodes, node.id);
+  /**
+   * Whether this row is the `secrets/` folder or something inside it (#1465).
+   *
+   * The tree is where an operator decides where to put a credential, and until
+   * this shipped it was the one place that decision got no help: `secrets`
+   * rendered with the same folder icon, the same weight and the same `…` menu
+   * as `Playbooks`, and sorted in among them. The only statement of the rule
+   * was a README seeded inside the folder — reachable only by someone who had
+   * already found it.
+   *
+   * Recomputed per row rather than threaded down through {@link Tree}, for the
+   * same reason `derived` above is: the rule stays one function, asked by every
+   * surface, against a tree of a few hundred nodes that is already re-sorted
+   * per level on every render.
+   *
+   * Never true at the same time as `derived`: both read the first ancestor, and
+   * a node has one.
+   */
+  const secret = isSecretNode(nodes, node.id);
 
   return (
     <>
       <div
+        ref={rowRef}
         className={cn(
           "group flex items-center gap-1 rounded-md px-1.5 py-1 text-sm",
           active ? "bg-accent font-medium" : "hover:bg-accent/50",
+          // Muted whether or not it is the open note: neither what writes the
+          // file (#1377) nor who can read it (#1465) changes when you select
+          // it. The glyph after the name is what says which of the two it is.
+          (derived || secret) && "text-muted-foreground",
         )}
         style={{ paddingLeft: 6 + depth * 12 }}
       >
@@ -1712,6 +2024,36 @@ function TreeRow({ node, ...props }: TreeProps & { node: FsNode }) {
           <span className="truncate" title={isRosterFolder ? node.name : undefined}>
             {isFolder ? displayName : titleOf(node)}
           </span>
+          {/* The glyph is the whole of the tree-side signal: an icon, not a
+              badge, because a row in a 256px pane has no width for a phrase and
+              the name is the thing being scanned. The label rides along for a
+              screen reader, which gets no glyph, and the full reason is on the
+              `title` for a pointer.
+
+              A lock means `derived/` — "you may not write this" (#1377). An
+              eye-off means `secrets/` — the other rule: you may write it, and
+              no agent reads it (#1465). Two rules, two glyphs, and no row ever
+              wears both. */}
+          {derived && (
+            <span
+              className="flex shrink-0 items-center"
+              title={DERIVED_REASON}
+              data-testid="workspace-tree-derived"
+            >
+              <Lock className="size-3" aria-hidden />
+              <span className="sr-only">{DERIVED_LABEL}</span>
+            </span>
+          )}
+          {secret && (
+            <span
+              className="flex shrink-0 items-center"
+              title={SECRETS_REASON}
+              data-testid="workspace-tree-secret"
+            >
+              <EyeOff className="size-3" aria-hidden />
+              <span className="sr-only">{SECRETS_LABEL}</span>
+            </span>
+          )}
           {/* Agent-created nodes get a marker in the tree itself, so "what has
               the company been writing" is answerable by scanning rather than by
               opening each note. Only the agent case — badging the operator's
@@ -1733,13 +2075,48 @@ function TreeRow({ node, ...props }: TreeProps & { node: FsNode }) {
           >
             <MoreHorizontal className="size-3.5" />
           </DropdownMenuTrigger>
-          <DropdownMenuContent align="end">
-            <DropdownMenuItem onClick={() => props.onRename(node)}>Rename</DropdownMenuItem>
-            <DropdownMenuItem onClick={() => props.onMove(node)}>Move to…</DropdownMenuItem>
-            <DropdownMenuSeparator />
-            <DropdownMenuItem variant="destructive" onClick={() => props.onDelete(node)}>
-              Delete
-            </DropdownMenuItem>
+          {/* `w-auto` for the derived menu only: the popup is pinned to
+              `w-(--anchor-width)` — the width of the tiny `…` button — with a
+              128px floor, and the heading below is wider than that. Every other
+              menu in the tree fits the floor. */}
+          <DropdownMenuContent align="end" className={derived ? "w-auto" : undefined}>
+            {/* Exactly the actions the host will accept, which is not the same
+                set the issue asked for (#1377 said drop all three).
+                `DerivedGuardWorkspace::rename_move` refuses both ends — moving a
+                derived file out strands one the next derivation recreates, and
+                moving a note *in* puts a hand-written file in the folder whose
+                meaning is that nothing in it is hand-written — so Rename and
+                Move are controls whose only outcome is an error toast.
+
+                `delete` is deliberately unguarded there, and the module says
+                why: nothing is silently lost, the next write re-derives the
+                file, and a retired ledger's stale file has to be clearable by
+                somebody. Removing it here would take away the one remedy the
+                host actually offers. The heading is what explains the short
+                menu — an absence on its own reads as a broken menu. */}
+            {derived ? (
+              // Grouped because `DropdownMenuLabel` is Base UI's
+              // `Menu.GroupLabel`, which throws outside a `Menu.Group`.
+              <DropdownMenuGroup>
+                <DropdownMenuLabel className="flex items-center gap-1.5 font-normal whitespace-nowrap">
+                  <Lock className="size-3 shrink-0" />
+                  {DERIVED_LABEL}
+                </DropdownMenuLabel>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem variant="destructive" onClick={() => props.onDelete(node)}>
+                  Delete
+                </DropdownMenuItem>
+              </DropdownMenuGroup>
+            ) : (
+              <>
+                <DropdownMenuItem onClick={() => props.onRename(node)}>Rename</DropdownMenuItem>
+                <DropdownMenuItem onClick={() => props.onMove(node)}>Move to…</DropdownMenuItem>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem variant="destructive" onClick={() => props.onDelete(node)}>
+                  Delete
+                </DropdownMenuItem>
+              </>
+            )}
           </DropdownMenuContent>
         </DropdownMenu>
       </div>
@@ -1983,20 +2360,59 @@ interface PromptState {
   node?: FsNode;
 }
 
+/**
+ * Name a new node, or rename one — and stop first when the new name is what
+ * decides who can read it (issue #1465).
+ *
+ * `Move to…` was not the only control that crosses the `secrets/` boundary.
+ * The host's rule is the *first path segment*, so renaming the root `secrets/`
+ * folder rewrites that segment for everything under it; the host accepts the
+ * rename (`PATCH …/workspace/<id>` with a new `name` answers 200 — only
+ * `derived/` is guarded there), and until this it did so on one click and a
+ * toast. Same boundary, same consequence, so the same panel and the same words
+ * as {@link MoveDialog}.
+ */
 function NamePrompt({
+  nodes,
   state,
   onClose,
   onSubmit,
 }: {
+  nodes: FsNode[];
   state: PromptState | null;
   onClose: () => void;
   onSubmit: (name: string) => void;
 }) {
   const [name, setName] = useState("");
+  /** The typed name, held back until the audience warning is acknowledged. */
+  const [pending, setPending] = useState<{ name: string; warning: MoveAudienceWarning } | null>(
+    null,
+  );
 
   useEffect(() => {
     setName(state?.mode === "rename" ? (state.node?.name ?? "") : "");
+    // A second Rename must not open onto the previous one's warning.
+    setPending(null);
   }, [state]);
+
+  /**
+   * Submit, unless the name changes the audience — in which case ask first.
+   *
+   * Only a rename can: a *new* node is created empty, so naming one `secrets`
+   * hides nothing that was not already nothing.
+   */
+  function submit(next: string) {
+    if (state?.mode !== "rename" || !state.node) {
+      onSubmit(next);
+      return;
+    }
+    const warning = renameAudienceWarning(nodes, state.node, next);
+    if (!warning) {
+      onSubmit(next);
+      return;
+    }
+    setPending({ name: next, warning });
+  }
 
   const title = state?.mode === "folder" ? "New folder" : state?.mode === "file" ? "New note" : "Rename";
 
@@ -2006,35 +2422,68 @@ function NamePrompt({
         <DialogHeader>
           <DialogTitle>{title}</DialogTitle>
           <DialogDescription>
-            {state?.mode === "file" ? "Notes get a .md extension automatically." : "Give it a name."}
+            {pending
+              ? "This changes who can read it."
+              : state?.mode === "file"
+                ? "Notes get a .md extension automatically."
+                : "Give it a name."}
           </DialogDescription>
         </DialogHeader>
-        <div className="grid gap-2">
-          <Label htmlFor="fs-name">Name</Label>
-          <Input
-            id="fs-name"
-            autoFocus
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && name.trim()) onSubmit(name);
-            }}
-            placeholder={state?.mode === "folder" ? "e.g. Campaigns" : "e.g. Notes"}
+        {pending ? (
+          <MoveAudienceConfirm
+            warning={pending.warning}
+            // Back to the field rather than out of the dialog: the operator who
+            // reads the warning and changes their mind wanted a different name,
+            // not to abandon the rename.
+            onCancel={() => setPending(null)}
+            onConfirm={() => onSubmit(pending.name)}
           />
-        </div>
-        <DialogFooter>
-          <Button variant="ghost" onClick={onClose}>
-            Cancel
-          </Button>
-          <Button disabled={!name.trim()} onClick={() => onSubmit(name)}>
-            {state?.mode === "rename" ? "Rename" : "Create"}
-          </Button>
-        </DialogFooter>
+        ) : (
+          <>
+            <div className="grid gap-2">
+              <Label htmlFor="fs-name">Name</Label>
+              <Input
+                id="fs-name"
+                autoFocus
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && name.trim()) submit(name);
+                }}
+                placeholder={state?.mode === "folder" ? "e.g. Campaigns" : "e.g. Notes"}
+              />
+            </div>
+            <DialogFooter>
+              <Button variant="ghost" onClick={onClose}>
+                Cancel
+              </Button>
+              <Button disabled={!name.trim()} onClick={() => submit(name)}>
+                {state?.mode === "rename" ? "Rename" : "Create"}
+              </Button>
+            </DialogFooter>
+          </>
+        )}
       </DialogContent>
     </Dialog>
   );
 }
 
+/**
+ * Pick a destination for a `Move to…`, and say so when the destination changes
+ * who can read the note (issue #1465).
+ *
+ * Every destination but one is a filing decision. Moving into or out of
+ * `secrets/` is an audience decision, and it was indistinguishable from the
+ * others: one click, a "moved" toast, and a note that either stopped being
+ * readable by every agent in the company or started being. So a destination
+ * that crosses that line does not commit on the click — it swaps the list for
+ * {@link MoveAudienceConfirm}, which names the consequence and asks again.
+ *
+ * Ordinary destinations still commit on one click, deliberately: this adds a
+ * step to the moves that change something and to no others. (Issue #1477 is
+ * about the destination list itself — flat, path-less — and is left alone
+ * here.)
+ */
 function MoveDialog({
   nodes,
   moving,
@@ -2048,23 +2497,128 @@ function MoveDialog({
 }) {
   const blocked = moving ? subtreeIds(nodes, moving.id) : new Set<string>();
   const folders = nodes.filter((x) => x.kind === "folder" && !blocked.has(x.id));
+  /** The destination picked, held back until the warning is acknowledged. */
+  const [pending, setPending] = useState<{ destId: string | null; warning: MoveAudienceWarning } | null>(
+    null,
+  );
+
+  // A second `Move to…` must not open onto the previous one's warning.
+  useEffect(() => {
+    setPending(null);
+  }, [moving]);
+
+  function pick(destId: string | null) {
+    if (!moving) return;
+    const warning = moveAudienceWarning(nodes, moving, destId);
+    if (!warning) {
+      onMove(destId);
+      return;
+    }
+    setPending({ destId, warning });
+  }
 
   return (
     <Dialog open={Boolean(moving)} onOpenChange={(o) => !o && onClose()}>
       <DialogContent className="sm:max-w-sm">
         <DialogHeader>
           <DialogTitle>Move “{moving ? titleOf(moving) : ""}”</DialogTitle>
-          <DialogDescription>Pick a destination folder.</DialogDescription>
+          <DialogDescription>
+            {pending ? "This changes who can read it." : "Pick a destination folder."}
+          </DialogDescription>
         </DialogHeader>
-        <div className="max-h-72 space-y-1 overflow-y-auto">
-          <DestRow label="Workspace root" disabled={moving?.parentId === null} onClick={() => onMove(null)} />
-          {folders.map((f) => (
-            <DestRow key={f.id} label={f.name} disabled={moving?.parentId === f.id} onClick={() => onMove(f.id)} />
-          ))}
-        </div>
+        {pending ? (
+          <MoveAudienceConfirm
+            warning={pending.warning}
+            // Back to the list rather than out of the dialog: the operator who
+            // reads the warning and changes their mind wanted a different
+            // folder, not to abandon the move.
+            onCancel={() => setPending(null)}
+            onConfirm={() => onMove(pending.destId)}
+          />
+        ) : (
+          <div className="max-h-72 space-y-1 overflow-y-auto">
+            <DestRow
+              label="Workspace root"
+              disabled={moving?.parentId === null}
+              // Marked from the same predicate that raises the warning, so the
+              // consequence is legible *before* the click as well as after it.
+              // The root is never `secrets/`, so this row only ever marks the
+              // way out.
+              audience={moving ? moveAudienceWarning(nodes, moving, null)?.change : undefined}
+              onClick={() => pick(null)}
+            />
+            {folders.map((f) => (
+              <DestRow
+                key={f.id}
+                label={f.name}
+                disabled={moving?.parentId === f.id}
+                audience={moving ? moveAudienceWarning(nodes, moving, f.id)?.change : undefined}
+                onClick={() => pick(f.id)}
+              />
+            ))}
+          </div>
+        )}
       </DialogContent>
     </Dialog>
   );
+}
+
+/**
+ * Delete confirmation for a note or folder (issue #1255).
+ *
+ * A folder's delete recursively takes every note nested inside it in the same
+ * API call, so the dialog names exactly what that means — the file/folder
+ * counts under it, from {@link subtreeCounts} — rather than a bare "are you
+ * sure?" that reads the same for an empty folder and one holding a hundred
+ * notes.
+ */
+function DeleteDialog({
+  nodes,
+  node,
+  onClose,
+  onConfirm,
+}: {
+  nodes: FsNode[];
+  node: FsNode | null;
+  onClose: () => void;
+  onConfirm: (node: FsNode) => void;
+}) {
+  const counts = node ? subtreeCounts(nodes, node.id) : { files: 0, folders: 0 };
+  const description =
+    node?.kind === "file"
+      ? "This permanently deletes this note. There is no undo."
+      : counts.files === 0 && counts.folders === 0
+        ? "This folder is empty. Deleting it can’t be undone."
+        : `This folder and everything inside it — ${describeCounts(counts)} — will be permanently deleted. There is no undo.`;
+
+  return (
+    <AlertDialog open={Boolean(node)} onOpenChange={(o) => !o && onClose()}>
+      <AlertDialogContent>
+        <AlertDialogHeader>
+          <AlertDialogTitle>Delete “{node ? titleOf(node) : ""}”?</AlertDialogTitle>
+          <AlertDialogDescription>{description}</AlertDialogDescription>
+        </AlertDialogHeader>
+        <AlertDialogFooter>
+          <AlertDialogCancel>Keep it</AlertDialogCancel>
+          <AlertDialogAction
+            onClick={() => node && onConfirm(node)}
+            className="bg-destructive text-white hover:bg-destructive/90"
+            data-testid="workspace-delete-confirm"
+          >
+            Delete {node?.kind === "folder" ? "folder" : "note"}
+          </AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
+  );
+}
+
+/** "3 notes and 1 folder" / "2 notes" / "1 folder" — for {@link DeleteDialog}. */
+function describeCounts(counts: { files: number; folders: number }): string {
+  const parts: string[] = [];
+  if (counts.files > 0) parts.push(`${counts.files} note${counts.files === 1 ? "" : "s"}`);
+  if (counts.folders > 0) parts.push(`${counts.folders} folder${counts.folders === 1 ? "" : "s"}`);
+  return parts.join(" and ");
 }
 
 /**
@@ -2251,16 +2805,44 @@ function RepairDialog({
   );
 }
 
-function DestRow({ label, disabled, onClick }: { label: string; disabled?: boolean; onClick: () => void }) {
+function DestRow({
+  label,
+  disabled,
+  audience,
+  onClick,
+}: {
+  label: string;
+  disabled?: boolean;
+  /** Set when picking this destination changes who can read the note (#1465). */
+  audience?: MoveAudienceChange;
+  onClick: () => void;
+}) {
   return (
     <button
       disabled={disabled}
       onClick={onClick}
       className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-sm hover:bg-accent disabled:pointer-events-none disabled:opacity-40"
+      data-audience-change={audience}
     >
       <Folder className="size-4 text-tone-2" />
       <span className="truncate">{label}</span>
       {disabled && <span className="ml-auto text-xs text-muted-foreground">Here</span>}
+      {/* Two words, not the sentence: the row is a choice, and the sentence is
+          on the panel that follows the click. `Shares it` wears the destructive
+          colour because that is the direction there is no undoing — a note the
+          agents have read is read. */}
+      {!disabled && audience && (
+        <span
+          className={cn(
+            "ml-auto flex shrink-0 items-center gap-1 text-xs",
+            audience === "exposed" ? "text-destructive" : "text-muted-foreground",
+          )}
+          data-testid="workspace-move-dest-audience"
+        >
+          <EyeOff className="size-3" aria-hidden />
+          {audience === "hidden" ? "Hides it" : "Shares it"}
+        </span>
+      )}
     </button>
   );
 }

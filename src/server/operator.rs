@@ -1264,6 +1264,30 @@ struct ChatMessage {
     /// same message — the split-brain #1035 closed, pointed the other way.
     #[serde(default)]
     deliverable: Option<crate::ports::types::MessageIntent>,
+    /// Return as soon as the turn has been accepted and given an id, instead of
+    /// holding the request open for the whole turn (issue #983).
+    ///
+    /// A turn's duration is unbounded, so the synchronous shape is broken by
+    /// construction and no timeout value fixes it: five concurrent messages
+    /// queued on the per-company serial lock all 504'd at the edge while the
+    /// work ran on invisibly. This is the response path that removes the wait —
+    /// the turn is journaled and given a durable row before this returns, so the
+    /// operator reads its progress and its answer back rather than holding a
+    /// socket open for them.
+    ///
+    /// **Opt-in, and compatible in both directions.** A caller that omits it
+    /// gets today's synchronous response byte-for-byte. A newer console talking
+    /// to an *older* host sends it and the old host ignores the unknown field
+    /// (this struct has no `deny_unknown_fields`) and answers the full
+    /// synchronous 200 — which is exactly why the console must decide what
+    /// happened from the response's **shape**, not from what it asked for.
+    ///
+    /// Deliberately not the default. A trivial turn settles in 4–6s, and a fast
+    /// synchronous answer is genuinely better when it fits; the eventual right
+    /// shape is a hybrid that answers synchronously up to N seconds and then
+    /// hands back a 202, which needs this turn record to exist first.
+    #[serde(default)]
+    detach: bool,
 }
 
 /// A chat or approval-resolution response: the company's channel replies.
@@ -1289,6 +1313,81 @@ struct ChatResponse {
     /// exists.
     #[serde(skip_serializing_if = "Option::is_none")]
     still_awaiting: Option<usize>,
+    /// The durable turn row this message opened (issue #983), additive on the
+    /// synchronous response exactly as `runId` was added to the workflow run
+    /// response — so a caller that never asked to detach can still read the
+    /// turn back from `GET {scope}/runs/{turn_id}` afterwards.
+    ///
+    /// `None` when the run store refused to mint a row: record-keeping does not
+    /// get to fail the work it records, so the turn still ran and still answered
+    /// here. A caller that finds it missing has the reply in hand anyway.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    turn_id: Option<String>,
+    /// The same discriminator [`ResolveReceiptDto::outcome`] carries, for the
+    /// non-detached resolve the Approvals page makes (issue #1449).
+    ///
+    /// The page never sees a `ResolveReceiptDto` — that shape is the *detached*
+    /// answer, which only the inline chat card asks for — so without this the
+    /// one surface the bug was reproduced on had no way to learn its click had
+    /// been refused, whatever the receipt said.
+    ///
+    /// Only ever set by a resolve, and omitted by every host predating it, which
+    /// a console reads as "this host cannot tell me" and words its confirmation
+    /// exactly as it did before rather than guessing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    outcome: Option<&'static str>,
+}
+
+/// The `detach: true` response (issue #983): the turn's id and the durable id of
+/// the operator's own message, handed back before the cycle has taken the
+/// per-company lock.
+///
+/// **`detached` is the discriminator, and it is a constant `true` on purpose.**
+/// A newer console pointed at an older host sends `detach` and gets the *full
+/// synchronous* body back, because the old host ignores the unknown field. So
+/// the console cannot tell the two apart by what it asked for — only by what
+/// came back. `responses` present means the turn already settled; `detached`
+/// present means read it back. A field that is only ever `true` is what makes
+/// that a presence check rather than a guess.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DetachedChatResponse {
+    /// The turn's durable row, to poll on `GET {scope}/runs/{turn_id}`.
+    ///
+    /// Not optional, unlike [`ChatResponse::turn_id`]: this body is only ever
+    /// produced when the row exists (the handler falls through to the
+    /// synchronous settle when the run store refused one), because the console
+    /// arms its poll from this id and that poll is the detached turn's sole
+    /// delivery path when `/events` is buffered or unavailable.
+    turn_id: String,
+    /// The durable id the operator's own message was journaled under.
+    ///
+    /// Never optional here, unlike on the synchronous response: since issue #983
+    /// the append happens at accept time, so by the time this body exists the
+    /// message is already in the transcript. That is what lets the console
+    /// reconcile its optimistic bubble immediately instead of at settle.
+    message_id: String,
+    detached: bool,
+}
+
+/// The two shapes `POST {scope}/chat` can answer with.
+///
+/// An enum rather than a bare [`Response`] so the two bodies stay typed and the
+/// status codes live in one place: `200` for the settled turn the route has
+/// always returned, `202 Accepted` for a turn that has been accepted and started
+/// but has not finished — which is precisely what `202` means.
+enum ChatOk {
+    Settled(Box<ChatResponse>),
+    Detached(DetachedChatResponse),
+}
+
+impl IntoResponse for ChatOk {
+    fn into_response(self) -> Response {
+        match self {
+            Self::Settled(body) => Json(body).into_response(),
+            Self::Detached(body) => (StatusCode::ACCEPTED, Json(body)).into_response(),
+        }
+    }
 }
 
 /// The canonical assignee for a card opened from a chat message: whoever the
@@ -1776,7 +1875,7 @@ async fn chat_and_emit(
     runtime: Arc<CompanyRuntime>,
     message: ChatMessage,
     by: Option<Actor>,
-) -> Result<Json<ChatResponse>, ApiError> {
+) -> Result<ChatOk, ApiError> {
     // The default desk for an unaddressed message.
     let desk = message
         .chat
@@ -1814,7 +1913,13 @@ async fn chat_and_emit(
     // a turn killed with the pod becomes a `Failed` row and a `TurnFailed` line
     // rather than permanent silence.
     let accepted = accept_chat_turn(&runtime, id, &message, by.as_ref(), parent, &desk).await?;
-    let (report, feedback_note) = join_chat_turn(spawn_chat_turn(ChatTurn {
+    // Read off the accepted turn before it moves onto the task: both are facts
+    // the accept already established, so the 202 can carry them without waiting
+    // for a cycle that has not even taken the lock yet.
+    let turn_id = accepted.turn_id.clone();
+    let message_id = accepted.message_seq.value().to_string();
+    let detach = message.detach;
+    let turn = spawn_chat_turn(ChatTurn {
         runtime,
         company: id.clone(),
         desk,
@@ -1822,20 +1927,68 @@ async fn chat_and_emit(
         by,
         parent,
         accepted,
-    }))
-    .await?;
+    });
+
+    if detach && let Some(turn_id) = turn_id.as_ref() {
+        // Nothing here waits on the turn. The webhook fan-out still owes the
+        // report, so it moves onto its own task rather than being dropped — a
+        // detached turn must not silently stop notifying subscribers. Same shape
+        // as the detached approval resolve below (issue #561).
+        //
+        // The turn task is otherwise left to itself: it journals its own replies
+        // and settles its own row (issue #983), which is what the operator reads
+        // back. Detaching is the entire point.
+        //
+        // The row is what the detached contract is built on: the console arms
+        // its poll from this `202`'s `turnId` (issue #983), and that poll is
+        // the only delivery path when `/events` is buffered or unavailable
+        // (`opencompany-microservice#23`) — which is exactly the state #983
+        // exists for. A `202` with no row would strand the reply until reload,
+        // so a detach whose row the run store refused falls through to the
+        // synchronous settle below instead: the console learns it never
+        // detached, and the reply arrives in the body like any settled turn.
+        let state = state.clone();
+        let company = id.clone();
+        tokio::spawn(async move {
+            match join_chat_turn(turn).await {
+                Ok((report, feedback_note)) => {
+                    emit_cycle_webhooks(&state, &company, &report).await;
+                    if let Some(note) = feedback_note {
+                        emit_feedback_webhook(&state, &company, &note).await;
+                    }
+                }
+                // A failed turn already settled its row as `Failed` and wrote a
+                // `TurnFailed` transcript line, which is what the operator sees;
+                // there is no report to fan out. Logged because nothing else
+                // reports it once the request is gone.
+                Err(err) => {
+                    tracing::error!(%company, detail = %err.0, "[chat] a detached turn did not finish");
+                }
+            }
+        });
+        return Ok(ChatOk::Detached(DetachedChatResponse {
+            turn_id: turn_id.clone(),
+            message_id,
+            detached: true,
+        }));
+    }
+
+    let (report, feedback_note) = join_chat_turn(turn).await?;
     emit_cycle_webhooks(state, id, &report).await;
     if let Some(note) = feedback_note {
         emit_feedback_webhook(state, id, &note).await;
     }
-    Ok(Json(ChatResponse {
+    Ok(ChatOk::Settled(Box::new(ChatResponse {
         // The operator's own message is the cycle's single input event, so its
         // sequence is the first the cycle journaled (issue #364).
         message_id: report.input_seqs.first().map(|seq| seq.value().to_string()),
         responses: report.responses,
         // A chat turn is nobody's sign-off, so this stays absent here.
         still_awaiting: None,
-    }))
+        turn_id,
+        // …and it resolves nothing, so there is no resolve outcome to report.
+        outcome: None,
+    })))
 }
 
 /// Everything a chat turn needs once it is off the request's future.
@@ -2043,7 +2196,7 @@ async fn operator_chat(
     headers: HeaderMap,
     crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
     Json(message): Json<ChatMessage>,
-) -> Result<Json<ChatResponse>, Response> {
+) -> Result<ChatOk, Response> {
     let company = CompanyId::new(&id);
     let by = chat_actor(&headers, &state, &company, peer).await?;
     let runtime = lookup(&state, &id).map_err(IntoResponse::into_response)?;
@@ -2058,7 +2211,7 @@ async fn operator_chat_single(
     headers: HeaderMap,
     crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
     Json(message): Json<ChatMessage>,
-) -> Result<Json<ChatResponse>, Response> {
+) -> Result<ChatOk, Response> {
     let runtime = sole(&state).map_err(IntoResponse::into_response)?;
     let id = runtime.id().clone();
     let by = chat_actor(&headers, &state, &id, peer).await?;
@@ -2754,6 +2907,21 @@ struct ResolveReceiptDto {
     /// the action" for all four. This is what lets it say the true thing
     /// instead. `0` means this decision released the turn.
     still_awaiting: usize,
+    /// **Which** of the end states this resolve actually reached (issue #1449):
+    /// `"settled"`, `"already_resolved"`, or `"expired"`.
+    ///
+    /// `already_resolved` above is kept and still means what it always did —
+    /// there was nothing left to resolve — so a console predating this field
+    /// behaves byte for byte as it did. What it could never express is
+    /// `expired`: the approval **was** still parked, and the host default-denied
+    /// it because its deadline had passed. Before this the receipt had no shape
+    /// for that at all, so the console rendered the one thing it could — the
+    /// success line — over a decision the host had refused.
+    ///
+    /// A string rather than a second boolean because the states are mutually
+    /// exclusive: two booleans can spell combinations that cannot happen, and
+    /// every reader would have to know which ones are real.
+    outcome: &'static str,
 }
 
 async fn run_resolve(
@@ -2794,6 +2962,10 @@ async fn run_resolve(
     // what decrements the turn's counter — has not run yet, so this still counts
     // the approval just decided and `decisions_still_awaited` subtracts it.
     let still_awaiting = runtime.decisions_still_awaited(&id);
+    // Issue #1449: which end state this actually reached, read off the receipt
+    // rather than assumed from the fact that no error was returned. A resolve
+    // can succeed as a request and still not be the operator's decision.
+    let outcome = receipt.outcome();
 
     if body.detach {
         // Nothing here waits on the turn. The webhook fan-out still owes the
@@ -2816,6 +2988,7 @@ async fn run_resolve(
             recorded: true,
             already_resolved: receipt.already_resolved(),
             still_awaiting,
+            outcome,
         })
         .into_response());
     }
@@ -2826,6 +2999,10 @@ async fn run_resolve(
         message_id: None,
         responses: report.responses,
         still_awaiting: Some(still_awaiting),
+        outcome: Some(outcome),
+        // A resolve runs a follow-up cycle, not an operator turn, so it opens no
+        // turn row of its own.
+        turn_id: None,
     })
     .into_response())
 }
@@ -2929,6 +3106,19 @@ mod test {
         config: AppConfig,
         brain: Option<Arc<dyn crate::ports::brain::Brain>>,
     ) -> AppState {
+        build_state_with_brain_and_manifest(home, lifecycle, config, brain, manifest()).await
+    }
+
+    /// [`build_state_with_brain`], with the company manifest chosen by the
+    /// caller — the approval **deadline** lives in `[policy]`, so a test about
+    /// what a past-deadline card answers has to be able to set it (issue #1449).
+    async fn build_state_with_brain_and_manifest(
+        home: &std::path::Path,
+        lifecycle: &str,
+        config: AppConfig,
+        brain: Option<Arc<dyn crate::ports::brain::Brain>>,
+        manifest: CompanyManifest,
+    ) -> AppState {
         // Pre-seed a record so the builder preserves the requested lifecycle.
         let store = FsCompanyStore::new(home.to_path_buf());
         let id = CompanyId::new("acme");
@@ -2936,7 +3126,7 @@ mod test {
         store
             .save(&CompanyRecord {
                 id: id.clone(),
-                manifest: manifest(),
+                manifest: manifest.clone(),
                 ledger: Vec::new(),
                 lifecycle: lifecycle.to_string(),
                 overlay_agents: Vec::new(),
@@ -2954,12 +3144,108 @@ mod test {
             .await
             .unwrap();
 
-        let mut builder = RuntimeBuilder::new(home.to_path_buf(), manifest()).with_id(id.clone());
+        let mut builder = RuntimeBuilder::new(home.to_path_buf(), manifest).with_id(id.clone());
         if let Some(brain) = brain {
             builder = builder.with_brain(brain);
         }
         let runtime = builder.build().await.unwrap();
         let state = AppState::new(config);
+        state.registry().insert(id, Arc::new(runtime));
+        crate::server::test_support::seed_fixed_admin(&state, "acme").await;
+        state
+    }
+
+    /// A run store that refuses every verb — the persistence layer mid-outage.
+    /// `accept_chat_turn` treats a refused row best-effort, so this store is
+    /// what probes the other half of that promise: the turn still runs and the
+    /// request still gets an answer, it just cannot be a pollable `202`.
+    struct FailingRunStore;
+
+    #[async_trait::async_trait]
+    impl crate::ports::runs::RunStore for FailingRunStore {
+        async fn create_run(
+            &self,
+            _company: &CompanyId,
+            _spec: crate::ports::runs::NewRun,
+        ) -> crate::Result<crate::ports::runs::RunRecord> {
+            Err(OpenCompanyError::InvalidRequest(
+                "run store offline".to_string(),
+            ))
+        }
+        async fn get_run(
+            &self,
+            _company: &CompanyId,
+            _id: &str,
+        ) -> crate::Result<Option<crate::ports::runs::RunRecord>> {
+            Ok(None)
+        }
+        async fn put_run(
+            &self,
+            _company: &CompanyId,
+            _run: &crate::ports::runs::RunRecord,
+        ) -> crate::Result<()> {
+            Err(OpenCompanyError::InvalidRequest(
+                "run store offline".to_string(),
+            ))
+        }
+        async fn list_runs(
+            &self,
+            _company: &CompanyId,
+            _filter: &crate::ports::runs::RunFilter,
+        ) -> crate::Result<Vec<crate::ports::runs::RunRecord>> {
+            Ok(Vec::new())
+        }
+        async fn append_run_step(
+            &self,
+            _company: &CompanyId,
+            _step: &crate::ports::runs::RunStepRecord,
+        ) -> crate::Result<()> {
+            Err(OpenCompanyError::InvalidRequest(
+                "run store offline".to_string(),
+            ))
+        }
+        async fn list_run_steps(
+            &self,
+            _company: &CompanyId,
+            _run_id: &str,
+        ) -> crate::Result<Vec<crate::ports::runs::RunStepRecord>> {
+            Ok(Vec::new())
+        }
+    }
+
+    /// [`state_with_company`] with the run store swapped for one that refuses
+    /// every verb — the setup for the rowless-turn tests.
+    async fn state_with_failing_runs(home: &std::path::Path) -> AppState {
+        let store = FsCompanyStore::new(home.to_path_buf());
+        let id = CompanyId::new("acme");
+        use crate::ports::CompanyStore;
+        store
+            .save(&CompanyRecord {
+                id: id.clone(),
+                manifest: manifest(),
+                ledger: Vec::new(),
+                lifecycle: "running".to_string(),
+                overlay_agents: Vec::new(),
+                overlay_desk_members: Vec::new(),
+                overlay_desk_order: Vec::new(),
+                overlay_desks: Vec::new(),
+                overlay_workflows: Vec::new(),
+                overlay_budgets: Vec::new(),
+                overlay_policy: None,
+                overlay_desk_tools: Default::default(),
+                disabled_workflows: Vec::new(),
+                template_provenance: None,
+                setup: None,
+            })
+            .await
+            .unwrap();
+        let runtime = RuntimeBuilder::new(home.to_path_buf(), manifest())
+            .with_id(id.clone())
+            .with_runs(Arc::new(FailingRunStore))
+            .build()
+            .await
+            .unwrap();
+        let state = AppState::new(AppConfig::default());
         state.registry().insert(id, Arc::new(runtime));
         crate::server::test_support::seed_fixed_admin(&state, "acme").await;
         state
@@ -3577,6 +3863,7 @@ mode = "full"
                 chat: None,
                 parent: None,
                 deliverable: None,
+                detach: false,
             };
             let accepted = accept_chat_turn(
                 &runtime,
@@ -4642,6 +4929,35 @@ mode = "full"
         let state = state_with_company(&home, "running").await;
         let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
 
+        // The card has to actually be on the board: the history projection
+        // reports `taskId` only for a card that still exists, so that a chip
+        // cannot come back pointing at a card someone deleted (issue #984).
+        runtime
+            .tasks()
+            .upsert(
+                runtime.id(),
+                &crate::ports::tasks::TaskRecord {
+                    id: "t-77".to_string(),
+                    title: "Draft the launch note".to_string(),
+                    note: None,
+                    column: crate::ports::tasks::COLUMN_TODO.to_string(),
+                    priority: "medium".to_string(),
+                    assignee: String::new(),
+                    updated_at_millis: 1,
+                    origin_chat_id: None,
+                    parent_task_id: None,
+                    output: None,
+                    plan: None,
+                    planning_attempts: Vec::new(),
+                    deliverable: crate::ports::tasks::TaskDeliverable::Once,
+                    workflow_proposal: None,
+                    origin_run_id: None,
+                    origin_workflow_id: None,
+                },
+            )
+            .await
+            .unwrap();
+
         for (text, task_id) in [
             ("opened one", Some("t-77".to_string())),
             ("just talking", None),
@@ -4943,6 +5259,208 @@ mode = "full"
         assert!(
             ids.contains(&reply),
             "reply id absent from history: {ids:?}"
+        );
+    }
+
+    /// `detach: true` answers `202` with the ids the accept already established,
+    /// claims nothing about a turn that has not settled, and — the half that
+    /// removes the 504 from the operator's path — arrives while the turn is
+    /// demonstrably still going (issue #983).
+    #[tokio::test]
+    async fn a_detached_turn_answers_202_before_the_turn_finishes() {
+        let home_dir = home();
+        // The same blocking brain the queue tests use: it parks inside the cycle
+        // until released, so the turn is provably unfinished when the response
+        // below is read.
+        let (brain, entered, release) = BlockingChatBrain::new();
+        let state = build_state_with_brain(
+            home_dir.path(),
+            "running",
+            AppConfig::default(),
+            Some(brain),
+        )
+        .await;
+        let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
+        let app = router(state);
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/company/chat")
+                    .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"text":"do the long thing","detach":true}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+
+        assert_eq!(body["detached"], true, "{body}");
+        assert!(
+            body["turnId"].as_str().is_some_and(|s| !s.is_empty()),
+            "the turn id is what the console polls: {body}"
+        );
+        assert!(
+            body["messageId"].as_str().is_some_and(|s| !s.is_empty()),
+            "the message is journaled at accept, so its id is knowable here: {body}"
+        );
+        // The whole point: this body is not allowed to look settled. A console
+        // that found `responses` here would render an empty answer as the reply.
+        assert!(
+            body.get("responses").is_none(),
+            "a detached response must not look settled: {body}"
+        );
+        assert!(
+            body.get("stillAwaiting").is_none(),
+            "a detached response must not look settled: {body}"
+        );
+
+        // And the turn really had not finished when that body was written — the
+        // brain is still parked, holding the cycle open.
+        entered.acquire().await.expect("the turn entered").forget();
+        let statuses: Vec<String> = turn_rows(&runtime)
+            .await
+            .into_iter()
+            .map(|(_, status)| status)
+            .collect();
+        assert!(
+            statuses.iter().any(|s| s == "running" || s == "pending"),
+            "the response beat the turn, which is the point: {statuses:?}"
+        );
+
+        // It settles on its own, with nobody waiting on it.
+        release.add_permits(1);
+        until("the detached turn never settled", async || {
+            turn_rows(&runtime)
+                .await
+                .iter()
+                .any(|(_, status)| status == "succeeded")
+        })
+        .await;
+    }
+
+    /// The wire-compat guarantee in the other direction: a caller that sends no
+    /// `detach` gets exactly the response it always got — a `200` carrying the
+    /// settled turn — plus the additive `turnId`. An older console is untouched.
+    #[tokio::test]
+    async fn a_body_without_detach_still_gets_the_synchronous_response() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_company(&home, "running").await;
+        let app = router(state);
+        let cookie = crate::server::test_support::fixed_cookie("acme");
+
+        // `post_chat` asserts the 200 itself — the legacy status is part of what
+        // this test is pinning.
+        let body = post_chat(&app, &cookie, r#"{"text":"hi"}"#).await;
+
+        assert!(
+            body["responses"].as_array().is_some_and(|r| !r.is_empty()),
+            "the settled shape carries the replies: {body}"
+        );
+        assert!(
+            body["messageId"].as_str().is_some(),
+            "the legacy durable id is unchanged: {body}"
+        );
+        assert!(
+            body.get("detached").is_none(),
+            "the synchronous response must not carry the detach discriminator: {body}"
+        );
+        assert!(
+            body["turnId"].as_str().is_some(),
+            "`turnId` is additive on the synchronous response too: {body}"
+        );
+    }
+
+    /// The detached turn is not fire-and-forget: the message it journaled at
+    /// accept, and the answer the spawned task journals afterwards, both land in
+    /// the durable transcript. This is the backstop the console re-reads, and
+    /// the reason a dropped frame is not a lost answer.
+    #[tokio::test]
+    async fn a_detached_turn_still_journals_its_question_and_its_answer() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_company(&home, "running").await;
+        let app = router(state);
+        let cookie = crate::server::test_support::fixed_cookie("acme");
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/company/chat")
+                    .header("cookie", &cookie)
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"text":"detached hello","detach":true}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let mine = body["messageId"].as_str().unwrap().to_string();
+
+        // The turn owns its own settle, so wait for the answer to appear rather
+        // than for a handle this route deliberately does not hold.
+        let mut history = Vec::new();
+        for _ in 0..100 {
+            history = get_history(&app, &cookie, "").await;
+            if history
+                .iter()
+                .any(|m| m["text"].as_str() == Some("You said: detached hello"))
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+
+        let ids: Vec<&str> = history.iter().map(|m| m["id"].as_str().unwrap()).collect();
+        assert!(
+            ids.contains(&mine.as_str()),
+            "the id handed back at 202 must resolve in history: {ids:?}"
+        );
+        assert!(
+            history
+                .iter()
+                .any(|m| m["text"].as_str() == Some("You said: detached hello")),
+            "the detached turn's answer never reached the transcript: {history:?}"
+        );
+    }
+
+    /// **Issue #1000 — the floor of the `202` contract.** A detached response
+    /// is a promise the console can poll, and the poll starts from the body's
+    /// `turnId`; a `202` carrying no row is a promise a buffered-`/events`
+    /// tenant cannot collect, which strands the reply until reload. So when the
+    /// turn's row cannot be minted, the route must not answer `202` at all: it
+    /// settles the turn synchronously instead, handing the console the answer —
+    /// a state the console renders natively, being the same shape an older host
+    /// (one that ignored `detach`) has always returned.
+    #[tokio::test]
+    async fn a_detached_request_without_a_turn_row_settles_synchronously() {
+        let home_dir = home();
+        let state = state_with_failing_runs(home_dir.path()).await;
+        let app = router(state);
+        let cookie = crate::server::test_support::fixed_cookie("acme");
+
+        let body = post_chat(&app, &cookie, r#"{"text":"rowless detach","detach":true}"#).await;
+
+        // The settled shape, not the empty 202: the console is handed the
+        // answer, never a turn id it cannot act on.
+        assert!(
+            body.get("detached").is_none(),
+            "a rowless turn must not claim it can be read back: {body}"
+        );
+        assert!(
+            body["responses"].as_array().is_some_and(|r| !r.is_empty()),
+            "the synchronous fallback still delivers the reply: {body}"
         );
     }
 
@@ -6397,7 +6915,7 @@ mode = "full"
         let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(
             value,
-            serde_json::json!({ "recorded": true, "alreadyResolved": false, "stillAwaiting": 0 })
+            serde_json::json!({ "recorded": true, "alreadyResolved": false, "stillAwaiting": 0, "outcome": "settled" })
         );
 
         // The answer really did precede the work: the turn is only now under
@@ -6575,13 +7093,102 @@ mode = "full"
         let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(
             value,
-            serde_json::json!({ "recorded": true, "alreadyResolved": true, "stillAwaiting": 0 })
+            serde_json::json!({ "recorded": true, "alreadyResolved": true, "stillAwaiting": 0, "outcome": "already_resolved" })
         );
         assert_eq!(
             c.runtime.grants.live_count(),
             1,
             "re-approving minted no second grant"
         );
+    }
+
+    /// **Issue #1449 on the wire.** A card past its deadline answers `expired`,
+    /// on both response shapes, and journals no approval against the operator.
+    ///
+    /// The two shapes matter independently. The **detached** receipt is what the
+    /// inline chat card reads; the **synchronous** `ChatResponse` is what the
+    /// Approvals page reads — the surface the defect was reported on — and it
+    /// never sees a receipt at all, so a discriminator that only rode on the
+    /// receipt would have left the reproduced bug in place.
+    #[tokio::test]
+    async fn a_resolve_past_the_deadline_answers_expired_on_both_shapes() {
+        let home_dir = home();
+        // `approval_ttl_hours = 0`: anything parked is past its deadline the
+        // instant it lands, which is the state an operator meets when they get
+        // to a queue late.
+        let expiring: CompanyManifest = toml::from_str(
+            "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\napproval_ttl_hours = 0\n",
+        )
+        .unwrap();
+        let state = build_state_with_brain_and_manifest(
+            home_dir.path(),
+            "running",
+            AppConfig::default(),
+            Some(Arc::new(StalledContinuationBrain {
+                entered: Arc::new(tokio::sync::Notify::new()),
+                release: Arc::new(tokio::sync::Notify::new()),
+                parked: gated_tool_call(),
+            })),
+            expiring,
+        )
+        .await;
+        let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
+        let app = router(state);
+
+        let response = app.clone().oneshot(chat_request("do it")).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let approval_id = runtime.pending_approvals()[0].id.clone();
+
+        // The detached shape.
+        let detached = app
+            .clone()
+            .oneshot(resolve_request(
+                &approval_id,
+                serde_json::json!({"verdict":"approve","detach":true}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(detached.status(), StatusCode::OK);
+        let bytes = to_bytes(detached.into_body(), usize::MAX).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            value["outcome"], "expired",
+            "the host default-denied this; the receipt has to be able to say so, got {value}"
+        );
+        assert_eq!(
+            runtime.grants.live_count(),
+            0,
+            "and it minted nothing, as it always did"
+        );
+
+        // The synchronous shape, on a second card of the same company.
+        let response = app
+            .clone()
+            .oneshot(chat_request("do it again"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let second = runtime.pending_approvals()[0].id.clone();
+        let sync = app
+            .clone()
+            .oneshot(resolve_request(
+                &second,
+                serde_json::json!({"verdict":"approve"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(sync.status(), StatusCode::OK);
+        let bytes = to_bytes(sync.into_body(), usize::MAX).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(
+            value.get("responses").is_some_and(|r| r.is_array()),
+            "still a ChatResponse, got {value}"
+        );
+        assert_eq!(
+            value["outcome"], "expired",
+            "the Approvals page's own shape carries it too, got {value}"
+        );
+        assert_eq!(runtime.grants.live_count(), 0);
     }
 
     /// Both scope forms carry `detach` identically — the `/companies/{id}` route
@@ -6608,7 +7215,7 @@ mode = "full"
         let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(
             value,
-            serde_json::json!({ "recorded": true, "alreadyResolved": false, "stillAwaiting": 0 })
+            serde_json::json!({ "recorded": true, "alreadyResolved": false, "stillAwaiting": 0, "outcome": "settled" })
         );
         assert!(await_continuation(&c.runtime).await);
         assert_eq!(c.runtime.grants.live_count(), 1);

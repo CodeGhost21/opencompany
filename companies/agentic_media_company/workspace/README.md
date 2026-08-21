@@ -9,6 +9,8 @@ Start here:
 - [[Editorial process]] — how a tip becomes a published story
 - [[Editorial standards]] — the bar every story clears
 - [[Water rights investigation]] — the story in flight
+- [[Verification bar]] — what has to be true before publishing
+- [[Source terms]] — promises the whole newsroom keeps
 
 Everything here is a plain `.md` file, so it version-controls cleanly and seeds
 the operator console's Workspace view.

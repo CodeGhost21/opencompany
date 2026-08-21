@@ -9,6 +9,8 @@ Start here:
 - [[Project checklist]] — how a project runs from brief to delivery
 - [[Design principles]] — the craft bar we hold to
 - [[Fintech rebrand]] — a project in flight
+- [[Accessibility bar]] — the requirements, not the polish
+- [[Critique method]] — how work is checked before it leaves
 
 Everything here is a plain `.md` file, so it version-controls cleanly and seeds
 the operator console's Workspace view.

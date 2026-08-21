@@ -41,6 +41,7 @@ import { cn } from "@/lib/utils";
 export function WorkingIndicator({
   srLabel,
   steps,
+  queued,
   className,
 }: {
   /** The stable assistive string, e.g. "Replying…". Never the step label. */
@@ -50,6 +51,18 @@ export function WorkingIndicator({
    * one names the line; absent or all-settled falls back to "Working…".
    */
   steps?: readonly TurnStep[];
+  /**
+   * The turn is accepted but has not started — its durable row is still
+   * `pending`, meaning it is queued behind other turns on the per-company
+   * serial lock rather than doing anything (issue #983).
+   *
+   * Worth its own state because the honest word is the only queue fix available
+   * at this stage: the serial train is real, and a spinner that implies progress
+   * while a turn waits its turn is the console telling the operator something
+   * untrue. It cannot show a step label — a queued turn has produced no steps —
+   * so this deliberately outranks `steps`.
+   */
+  queued?: boolean;
   className?: string;
 }) {
   const reduced = usePrefersReducedMotion();
@@ -57,6 +70,12 @@ export function WorkingIndicator({
 
   return (
     <span
+      // Locatable from the E2E specs, which is how the reload leg proves the
+      // row was re-armed from the open-turn read (issue #983). The visible label
+      // is `aria-hidden` and its twin is `sr-only`, so matching on text alone
+      // resolves to two nodes and trips strict mode.
+      data-testid="working-indicator"
+      data-queued={queued ? "true" : "false"}
       className={cn(
         "flex items-center gap-2 rounded-full bg-muted px-3 py-2 text-sm text-muted-foreground",
         className,
@@ -65,21 +84,33 @@ export function WorkingIndicator({
       <span
         aria-hidden
         className={cn(
-          "size-1.5 shrink-0 rounded-full bg-status-running",
-          !reduced && "animate-pulse",
+          "size-1.5 shrink-0 rounded-full",
+          queued ? "bg-status-idle" : "bg-status-running",
+          // A queued turn is not progressing, so the mark does not move: the
+          // pulse is the "something is happening" signal and there is nothing
+          // happening yet.
+          !reduced && !queued && "animate-pulse",
         )}
       />
       {/* `aria-hidden`, because the stable label below is what should be read. */}
       <span aria-hidden className="truncate">
-        {running ?? GENERIC_LABEL}
+        {queued ? QUEUED_LABEL : (running ?? GENERIC_LABEL)}
       </span>
-      <span className="sr-only">{srLabel}</span>
+      <span className="sr-only">{queued ? QUEUED_LABEL : srLabel}</span>
     </span>
   );
 }
 
 /** What the line says when no step is in flight. */
 export const GENERIC_LABEL = "Working…";
+
+/**
+ * What the line says while the turn is accepted but has not started.
+ *
+ * "Queued" rather than "Working", because it is the truth: the turn is waiting
+ * on the per-company serial lock. See the `queued` prop.
+ */
+export const QUEUED_LABEL = "Queued…";
 
 /**
  * The label of the newest step still running, or `undefined`.

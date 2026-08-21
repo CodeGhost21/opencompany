@@ -23,6 +23,8 @@
 // from holding more than one host, and a convenience default here would
 // reintroduce it above the seam instead of below it.
 
+import type { SshTarget } from "@/connections/types";
+
 import { tauriCore } from "./bridge";
 
 /** What `oc_embedded` answers with. Mirrors `EmbeddedInfo` in Rust. */
@@ -276,6 +278,73 @@ export async function forgetLocalInstance(id: string): Promise<void> {
   const desktop = tauriCore();
   if (!desktop) throw new Error("running a host locally needs the desktop application");
   await desktop.invoke<void>("oc_forget_local_instance", { id });
+}
+
+/**
+ * One tunnel this application is holding open. Mirrors `SshTunnelInfo` in Rust.
+ */
+export interface SshTunnel {
+  /** Stable for a target across launches, and what closing one names. */
+  id: string;
+  destination: string;
+  remotePort: number;
+  /** The loopback address to address this host at, this launch. */
+  baseUrl: string;
+  /** Why it stopped forwarding, in `ssh`'s own words. */
+  error?: string;
+}
+
+/**
+ * Opens a tunnel to a host on another machine, and answers with the address to
+ * use for it.
+ *
+ * Idempotent per target: a host already tunnelled answers with the tunnel that
+ * is up. That is what lets the probe call this unconditionally rather than the
+ * console keeping its own idea of which tunnels exist.
+ *
+ * Rejects with what `ssh` printed — "Host key verification failed" and
+ * "Permission denied (publickey)" being the two likely ones, both of which the
+ * operator has to go and fix in a specific way that only `ssh` knows.
+ */
+export async function openSshTunnel(target: SshTarget): Promise<SshTunnel> {
+  const desktop = tauriCore();
+  if (!desktop) throw new Error("reaching a host over ssh needs the desktop application");
+  return desktop.invoke<SshTunnel>("oc_open_ssh_tunnel", { target });
+}
+
+/**
+ * Closes the tunnel to a target.
+ *
+ * Named by the target rather than by the id {@link SshTunnel} carries, so the
+ * roster key stays derived on the core's side alone. A connection restored
+ * from `localStorage` has the target and has never seen the id, and a second
+ * copy of that derivation here would be a rule two languages have to keep in
+ * step.
+ *
+ * Not an error when there is no such tunnel — removal can arrive twice.
+ */
+export async function closeSshTunnel(target: SshTarget): Promise<void> {
+  await tauriCore()?.invoke<void>("oc_close_ssh_tunnel", { target });
+}
+
+/**
+ * Every tunnel, and which of them stopped forwarding.
+ *
+ * `[]` in a browser, which holds none. `null` on a shell built before tunnels
+ * existed — the same distinction {@link localInstances} draws, and for the same
+ * reason: "this shell cannot do it" and "there are none" have different
+ * answers.
+ */
+export async function sshTunnels(): Promise<SshTunnel[] | null> {
+  const desktop = tauriCore();
+  if (!desktop) return [];
+  try {
+    const answer = await desktop.invoke<SshTunnel[]>("oc_ssh_tunnels");
+    return Array.isArray(answer) ? answer : null;
+  } catch (error) {
+    console.warn("[desktop] this shell has no ssh tunnels", error);
+    return null;
+  }
 }
 
 /**

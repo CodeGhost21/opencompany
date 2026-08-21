@@ -33,8 +33,8 @@ use crate::ports::skills_state::{SkillSource, SkillState, SkillStateStore};
 use crate::ports::store::CompanyStore;
 use crate::ports::tasks::{TaskRecord, TaskStore};
 use crate::ports::types::{
-    CompanyEvent, CompanyId, CompanyRecord, CompressedTrace, ContextChunk, EventSeq, LedgerEntry,
-    TemplateProvenance,
+    ChunkAddr, CompanyEvent, CompanyId, CompanyRecord, CompressedTrace, ContextChunk, EventSeq,
+    LedgerEntry, TemplateProvenance,
 };
 use crate::ports::usage::{SampleKind, UsageMeter, UsageSample};
 use crate::ports::users::{InviteRecord, UserRecord, UserRole, UserStatus, UserStore};
@@ -917,6 +917,28 @@ pub async fn assert_export_totality(
     let hits = context.search(&id, "gamma", usize::MAX).await.unwrap();
     assert_eq!(hits.len(), 1);
     assert!(hits[0].snippet.contains("gamma"));
+
+    // Delete removes the addressed chunk — gone from the list, gone from peek —
+    // reports true for the removal and false for a second attempt, and leaves
+    // every other chunk untouched. `false` on the re-delete is the contract a
+    // forget tool leans on: forgetting the already-forgotten is a no-op, never
+    // a fault.
+    let victim = addrs[0].clone();
+    assert!(context.delete(&id, &victim).await.unwrap());
+    assert!(!context.delete(&id, &victim).await.unwrap());
+    let metas = context.list(&id, "").await.unwrap();
+    assert_eq!(metas.len(), bodies.len() - 1);
+    assert!(
+        metas.iter().all(|m| m.addr != victim),
+        "deleted addr still listed"
+    );
+    assert!(
+        context.peek(&id, &victim, None).await.is_err(),
+        "deleted chunk still peekable"
+    );
+    for addr in &addrs[1..] {
+        context.peek(&id, addr, None).await.unwrap();
+    }
 }
 
 /// Asserts the [`InboxStore`] contract: per-company isolation, per-inbox
@@ -2312,6 +2334,101 @@ pub async fn assert_context_chunk_stamps(context: Arc<dyn ContextStore>) {
 
     // The stamp travels per company, like every other field on the port.
     assert!(context.list(&beta, "").await.unwrap().is_empty());
+}
+
+/// Asserts [`ContextStore::peek_many`] answers positionally: one entry per
+/// requested addr, in request order, `None` where nothing is stored — the
+/// contract the default loop-of-peeks gives and every bulk-read override must
+/// preserve exactly.
+pub async fn assert_context_peek_many_answers_positionally(context: Arc<dyn ContextStore>) {
+    let alpha = CompanyId::new("alpha");
+    let beta = CompanyId::new("beta");
+
+    let first = context
+        .put(
+            &alpha,
+            ContextChunk {
+                label: "agent/one".to_string(),
+                body: "first body".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+    let second = context
+        .put(
+            &alpha,
+            ContextChunk {
+                label: "agent/two".to_string(),
+                body: "second body".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+
+    // Out of storage order, with a hole in the middle: the answer must follow
+    // the REQUEST order and report the hole as `None`, not shift or error.
+    let missing = ChunkAddr::new("no-such-addr");
+    let bodies = context
+        .peek_many(&alpha, &[second.clone(), missing, first.clone()])
+        .await
+        .unwrap();
+    assert_eq!(
+        bodies,
+        vec![
+            Some("second body".to_string()),
+            None,
+            Some("first body".to_string()),
+        ],
+        "one answer per requested addr, positionally"
+    );
+
+    // An empty batch is a no-op, never an error.
+    assert_eq!(
+        context.peek_many(&alpha, &[]).await.unwrap(),
+        Vec::<Option<String>>::new()
+    );
+
+    // Addresses answer per company, like every other read on the port.
+    assert_eq!(
+        context.peek_many(&beta, &[first]).await.unwrap(),
+        vec![None],
+        "another company's addr must not leak a body"
+    );
+}
+
+/// A multibyte char near a match must not panic the search snippet's ±24-byte
+/// window, and a ranged `peek` whose bounds land mid-codepoint must widen to
+/// the char boundary rather than panic. `memory_recall` routes agent queries
+/// straight into `search`, so the panic would be reachable from any non-ASCII
+/// chunk body.
+pub async fn assert_multibyte_bodies_survive_search_and_ranged_peek(
+    context: Arc<dyn ContextStore>,
+) {
+    let alpha = CompanyId::new("alpha");
+    // Thirteen two-byte chars directly before the match, so the snippet
+    // window's `pos - 24` lands mid-codepoint.
+    let body = "ééééééééééééé match target";
+    let addr = context
+        .put(
+            &alpha,
+            ContextChunk {
+                label: "agent/multibyte".to_string(),
+                body: body.to_string(),
+            },
+        )
+        .await
+        .unwrap();
+
+    let hits = context.search(&alpha, "match", usize::MAX).await.unwrap();
+    assert_eq!(hits.len(), 1, "the multibyte body must hit, not panic");
+    assert!(
+        hits[0].snippet.contains("match"),
+        "the snippet lost the match: {:?}",
+        hits[0].snippet
+    );
+
+    // A range ending inside the first "é" widens to its boundary.
+    assert_eq!(context.peek(&alpha, &addr, Some(0..1)).await.unwrap(), "é");
 }
 
 /// Asserts the [`UsageMeter`] contract: isolation, record, and windowed query.

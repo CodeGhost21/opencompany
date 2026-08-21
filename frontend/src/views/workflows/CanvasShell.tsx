@@ -48,6 +48,18 @@
 //               Single occupancy, arbitrated by `WorkflowsView` with a
 //               ternary — opening the copilot clears the selected node.
 //
+//               Issue #1231 drew the line this slot was missing. "Covers the
+//               graph" is a fair trade for the copilot, which is a conversation
+//               about the workflow as a whole. It is not a fair trade for the
+//               node inspector, whose entire subject is one node and which is
+//               opened BY clicking that node — an overlay on the right ~344px
+//               routinely landed squarely on it. The slot's convention is
+//               unchanged; what changed is that the inspector now brings its
+//               subject out from under itself, by panning the canvas rather
+//               than by shrinking it (`RevealSelectedNode`, `node-reveal.ts`).
+//               A panel that mounts here and describes ONE thing on the canvas
+//               owes the operator the same.
+//
 // **Why the overlay and `rightRail` can never collide.** They are not siblings
 // in the same box: the overlay is `absolute` against the canvas's own
 // `relative` container (`children` below), not against this shell. When

@@ -475,6 +475,20 @@ fn hex_segment(value: &str) -> String {
 /// It still takes no [`PublishClaim`](crate::harness::publish::PublishClaim):
 /// `publish_artifact` needs a card to attach a version to, which a run does not
 /// have, so a refusal there remains the truthful answer.
+///
+/// What changed in issue #1192 is who hears about that refusal. It used to be
+/// told only to the model, which meant the only operator-visible trace was
+/// whatever prose the model wrote in reaction — and that prose became the node's
+/// output and rode the `=items` binding downstream while the run scored clean,
+/// which is the same shape #881 fixed for the *gated* case one paragraph up.
+/// The refusal is now recorded as a typed fact on the queue where it is raised
+/// and drained after every node turn into a run notice; see
+/// [`drain_publish_refusals`](HarnessAgentRunner::drain_publish_refusals). The
+/// tool's answer is unchanged — only the silence around it is.
+///
+/// Whether a run *should* be able to publish is a separate question this does
+/// not settle: `origin_run_id` (M5 / issue #661) taught runs to open cards,
+/// which arguably makes the "a run has nowhere to file one" premise stale.
 pub struct HarnessAgentRunner {
     /// The turn a workflow agent node runs on: the lane-aware router in a
     /// multi-harness company, the default lane over the pool in a
@@ -802,6 +816,88 @@ impl HarnessAgentRunner {
             }
         }
         self.board.extend(rows);
+    }
+
+    /// Issue #1192: say on the run that a node's publish was refused.
+    ///
+    /// The `Unclaimed` refusal is honest and stays — a run has no card to attach
+    /// a version to — but before this its **only** operator-visible record was
+    /// the model's own reaction to it. The tool refused, the model wrote an
+    /// apology, the apology became the node's `text` output, the `=items`
+    /// binding delivered it downstream as though it were the deliverable, and
+    /// the run scored clean. `caps`'s own doc already named this failure for the
+    /// *gated* case ("that is exactly how a gated `publish_artifact` came to hand
+    /// the model's apology downstream"), which #881 fixed with a structural
+    /// notice; the `Unclaimed` case never got the same treatment.
+    ///
+    /// # A notice, deliberately not a block
+    ///
+    /// [`RunNotices`] rather than [`RunBlocks`]: a refused publish did **not**
+    /// stop the node. The turn ran, the branch
+    /// continued, and whatever else the node produced is real. `Blocked` halts
+    /// the branch and is not auto-resumable — there is no approval to give here
+    /// and nothing to release, so promoting this to a block would tell the
+    /// operator to go answer a card that will never exist.
+    ///
+    /// # Structural wording only
+    ///
+    /// The sentence is composed from the source path and nothing else — never
+    /// the tool's refusal text and never the model's prose — the same split
+    /// [`drain_board_writes`](Self::drain_board_writes) keeps. Notices reach host
+    /// logs.
+    ///
+    /// Deduped by path: a turn that called `publish_artifact` on the same file
+    /// three times should name it once, for the reason
+    /// [`push_tool`] gives.
+    ///
+    /// # Known limitation: the bucket is unscoped
+    ///
+    /// The queue handle is shared across every path in the company, and the
+    /// chat cycle's `clear()` at the top of each turn empties it. So a chat
+    /// cycle starting between a node's refusal and this drain can discard the
+    /// notice. That is the **safe** direction and the reason it is left as is:
+    /// the loss is a notice that does not appear, never one attributed to a run
+    /// that did not earn it — a claimed destination records no refusal at all
+    /// (pinned by `a_claimed_destination_records_no_refusal`), so nothing a chat
+    /// or task turn does can *add* to this bucket.
+    ///
+    /// A *different* workflow run can add to it, though: two overlapping runs
+    /// of the same company share this same bucket, and whichever run's
+    /// `drain_publish_refusals` executes first takes every refusal queued so
+    /// far, including one a sibling run just raised — a misattribution, not a
+    /// loss (tracked as issue #1243). Closing it properly is **not** as simple
+    /// as handing each run a private queue at `build_capabilities` time: the
+    /// `agent` node type dispatches through `HarnessPool::run_background` to a
+    /// roster agent built **once** by `HarnessPool::ensure` and cached behind
+    /// fingerprints, so the `PublishArtifactTool` a model's turn actually calls
+    /// captures its `pending_publishes` handle at that cache-build time, not at
+    /// per-run dispatch time — a fork made here never reaches it. The fix needs
+    /// the same *task-local* run scope issue #771 gave the delegation queue
+    /// (`ApprovalScope` / `DelegationScope` / `board_claim.scoped(..)` above),
+    /// read by `push_refusal` at call time rather than baked in at tool
+    /// construction, which is a wider change than this fix.
+    fn drain_publish_refusals(&self) {
+        let refusals = self.deps.pending_publishes.drain_refusals();
+        let mut seen: Vec<String> = Vec::new();
+        for source in refusals {
+            if seen.iter().any(|s| s == &source) {
+                continue;
+            }
+            tracing::warn!(
+                company = %self.company,
+                workflow = %self.workflow_id,
+                run_id = %self.run_id,
+                path = %source,
+                "workflow agent node: a publish was refused because a run claims no publish \
+                 destination; reporting it as a run notice"
+            );
+            self.notices.push(format!(
+                "A step in this workflow wrote \"{source}\" and could not hand it over as a \
+                 deliverable — a workflow run has nowhere to file one. The file is still in that \
+                 teammate's sandbox."
+            ));
+            seen.push(source);
+        }
     }
 
     /// Parks every approval-gated tool call this node's turn just recorded
@@ -1203,6 +1299,11 @@ impl AgentRunner for HarnessAgentRunner {
             // card would be opened; refusing to drain would make that receipt false
             // and destroy the write when the scope ends.
             Box::pin(self.drain_board_writes()).await;
+            // Issue #1192: likewise on both arms. A turn that failed after being
+            // refused a publish was still refused one, and the file it wrote is
+            // still stranded — dropping the fact because the turn ended badly is
+            // how the refusal became invisible in the first place.
+            self.drain_publish_refusals();
             (outcome, parked)
         });
         let (outcome, parked) = self.board_claim.scoped(turn).await;

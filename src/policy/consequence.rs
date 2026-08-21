@@ -340,6 +340,38 @@ pub const WEB_FETCH: &str = "web_fetch";
 /// could not have run anyway; a call this cannot read simply stays `PerCall`.
 pub(crate) const WEB_FETCH_URL_KEY: &str = "url";
 
+/// The bridge tool that calls through a company-declared MCP server (#1124).
+///
+/// Argument-classified because one name carries every remote tool on every
+/// server: filing a Jira ticket and reading one arrive here identically, so
+/// classifying the *name* charged the operator the same approval card for both.
+/// The (server, tool) pair the call already carries is what separates them —
+/// see [`mcp_call_tool_consequence`].
+pub const MCP_CALL_TOOL: &str = "mcp_call_tool";
+
+/// The bridge tool that calls through a **registry**-installed MCP server
+/// (#1124) — a different store from [`MCP_CALL_TOOL`]'s, keyed by `server_id`
+/// rather than by name, but graded on the same declaration for the same reason.
+pub const MCP_REGISTRY_TOOL_CALL: &str = "mcp_registry_tool_call";
+
+/// The argument key [`MCP_CALL_TOOL`] names its server under. A required
+/// parameter of the tool's schema (`OcMcpCallTool::parameters_schema`), so a
+/// call this cannot read could not have run — and stays gated.
+pub(crate) const MCP_CALL_SERVER_KEY: &str = "server";
+
+/// The argument key [`MCP_CALL_TOOL`] names the remote tool under.
+pub(crate) const MCP_CALL_TOOL_KEY: &str = "tool";
+
+/// The argument key [`MCP_REGISTRY_TOOL_CALL`] names its server under —
+/// `server_id`, not `server`: the registry addresses installs by a stable id,
+/// not by the display name the [`MCP_CALL_TOOL`] path uses.
+pub(crate) const MCP_REGISTRY_SERVER_KEY: &str = "server_id";
+
+/// The argument key [`MCP_REGISTRY_TOOL_CALL`] names the remote tool under —
+/// `tool_name`, not `tool`, matching the vendored `McpRegistryToolCallTool`
+/// schema.
+pub(crate) const MCP_REGISTRY_TOOL_KEY: &str = "tool_name";
+
 /// Every tool this crate can wire onto an agent, and what it can reach.
 ///
 /// Ordered by family for reading, not by any semantic. The **coverage test**
@@ -438,6 +470,14 @@ const DECLARED: &[Declared] = &[
     d_grantable("apply_patch", EffectGroup::Other, Reach::Consequence),
     d_grantable("csv_export", EffectGroup::Other, Reach::Consequence),
     d_grantable("memory_store", EffectGroup::Other, Reach::Consequence),
+    // Per-call, like every other delete in this table (`delete_workflow`,
+    // `workspace_delete`, `pages_delete`) and for their stated reason: a
+    // standing grant on deletion is the shape that turns one bad turn into a
+    // memory that is quietly empty by the end of it. The own-prefix
+    // confinement is not grounds for a lower price — a memory row has no
+    // revision history and no artifact chain, so a wrong forget is simply
+    // gone.
+    d("memory_forget", EffectGroup::Other, Reach::Consequence),
     // `git_operations` is deliberately NOT grantable alongside its filesystem
     // siblings: it can push to a configured remote, so it reaches an address
     // this layer does not get to see.
@@ -633,7 +673,13 @@ const DECLARED: &[Declared] = &[
         EffectGroup::Other,
         Reach::Nothing,
     ),
-    d("mcp_call_tool", EffectGroup::Other, Reach::Consequence),
+    // `mcp_call_tool` keeps its row so `declared_tools` still walks it, but its
+    // reach is decided from the (server, tool) pair the call carries against the
+    // operator's per-server read declaration — see `mcp_call_tool_consequence`
+    // (#1124). This row's `Consequence` is the answer for a call whose server or
+    // tool argument cannot be read, and for a build without the classifier, both
+    // of which that function falls back to.
+    d(MCP_CALL_TOOL, EffectGroup::Other, Reach::Consequence),
     // Billing (issues #788, #789). Both integrations read the company's OWN
     // Chargebee site and PayPal account, so the reads are `Nothing` rather than
     // `ExternalRead`: that tier exists for reaching into a *counterparty's*
@@ -670,8 +716,10 @@ const DECLARED: &[Declared] = &[
         EffectGroup::Other,
         Reach::Consequence,
     ),
+    // The registry twin of `mcp_call_tool`, graded the same way against the same
+    // declaration (#1124). Its row is the fallback for an unreadable call.
     d(
-        "mcp_registry_tool_call",
+        MCP_REGISTRY_TOOL_CALL,
         EffectGroup::Other,
         Reach::Consequence,
     ),
@@ -864,6 +912,12 @@ type Grader = fn(&serde_json::Value) -> Consequence;
 /// * `web_fetch` — #673, keyed on the URL's host.
 /// * `shell` — #875, keyed on the command line.
 /// * `git_operations` — #877, keyed on the `operation`.
+/// * `mcp_call_tool` / `mcp_registry_tool_call` — #1124, keyed on the
+///   (server, tool) pair, but *only downgraded* against a per-server read
+///   declaration the operator supplies — which is company context this pure
+///   function cannot see. So the roster entry answers the fail-closed base
+///   (`Reach::Consequence`), and the downgrade is applied by
+///   [`mcp_call_reach`], which the policy calls with the declaration in hand.
 ///
 /// Every name here must be **lower-case**: [`consequence_of`] matches against a
 /// lower-cased tool name, so a mixed-case entry would be an entry that never
@@ -873,6 +927,8 @@ const ARGUMENT_GRADED: &[(&str, Grader)] = &[
     (WEB_FETCH, web_fetch_consequence),
     (SHELL, shell_consequence),
     (GIT_OPERATIONS, git_operations_consequence),
+    (MCP_CALL_TOOL, mcp_call_tool_consequence),
+    (MCP_REGISTRY_TOOL_CALL, mcp_call_tool_consequence),
 ];
 
 /// The classifier that answers for `name`, or `None` when the table does.
@@ -1509,6 +1565,152 @@ fn git_operations_consequence(args: &serde_json::Value) -> Consequence {
 /// itself does not classify (`push`, `pull`, `fetch`, `merge`, `rebase`,
 /// `clone`).
 const GIT_READ_ONLY_OPERATIONS: &[&str] = &["status", "diff", "log", "show", "branch", "rev-parse"];
+
+/// The consequence of one MCP bridge call — the fail-closed base for both
+/// [`MCP_CALL_TOOL`] and [`MCP_REGISTRY_TOOL_CALL`] (#1124).
+///
+/// One name carries every remote tool on every server, so this cannot be
+/// classified from the name: a call that reads a Jira ticket and one that files
+/// one arrive here identically. The distinguishing information is the (server,
+/// tool) pair in the arguments — but *whether that pair only reads* is an
+/// **operator declaration** per server, which is company context. A pure
+/// classifier cannot reach it, so this answers the cautious base every call
+/// keeps until proven otherwise: a call through a third-party server can perform
+/// any effect that server advertises, so it parks under `supervised` and `auto`
+/// and holds no standing grant.
+///
+/// The downgrade — the whole point of the issue — is applied by
+/// [`mcp_call_reach`], which the policy calls **with** the declaration. That the
+/// base is `Reach::Consequence` is what makes the split fail closed by
+/// construction: an undeclared server, a server whose declaration does not name
+/// this tool, a missing or non-string `server`/`tool` argument, and a build
+/// whose policy carries no declaration all resolve here, never to a downgrade.
+fn mcp_call_tool_consequence(_args: &serde_json::Value) -> Consequence {
+    Consequence {
+        group: EffectGroup::Other,
+        reach: Reach::Consequence,
+        standing: Standing::PerCall,
+    }
+}
+
+/// The operator's declaration of which remote MCP tools **only read**, keyed by
+/// the `(server, tool)` pair the bridge call carries (#1124).
+///
+/// This is the third per-server list beside `allowed_tools` / `disallowed_tools`
+/// (`McpServerDecl::read_only_tools`), flattened to a set the gate can consult
+/// in one lookup. It arrives on the policy — [`ApprovalPolicy::with_mcp_reads`]
+/// — because [`consequence_of`] is pure and company-blind; the policy is the one
+/// layer that has both the live call and this declaration.
+///
+/// The key is the server **as the call names it**: the `server` display name for
+/// [`MCP_CALL_TOOL`], the `server_id` for [`MCP_REGISTRY_TOOL_CALL`]. Two
+/// registries, one set — a caller populates it from whichever declaration source
+/// keys each server the way its bridge call will. Nothing here interprets the
+/// server key; membership is exact, so a server the operator has not declared a
+/// read for is simply absent, which is the gated answer.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct McpReadSet {
+    pairs: std::collections::HashSet<(String, String)>,
+}
+
+impl McpReadSet {
+    /// Builds the set from `(server, tool)` pairs. Empty — the default — means
+    /// no remote tool is declared read-only, so every bridge call gates, which
+    /// is exactly what every construction site that sets no declaration wants.
+    pub fn from_pairs(pairs: impl IntoIterator<Item = (String, String)>) -> Self {
+        Self {
+            pairs: pairs.into_iter().collect(),
+        }
+    }
+
+    /// Has the operator declared this exact remote tool on this server a read?
+    pub fn contains(&self, server: &str, tool: &str) -> bool {
+        self.pairs.contains(&(server.to_string(), tool.to_string()))
+    }
+
+    /// Whether any read is declared at all, so a caller can skip the lookup for
+    /// a policy that carries no declaration.
+    pub fn is_empty(&self) -> bool {
+        self.pairs.is_empty()
+    }
+}
+
+/// The `(server, tool)` pair an MCP bridge call names, read from the arguments
+/// with the keys the tool's own schema requires (#1124).
+///
+/// `None` when the tool is neither bridge tool, or when either key is absent or
+/// not a string — the tools' schemas mark both required, so such a call could
+/// not have run, and guessing a pair for it would be inventing a verdict for a
+/// call that never happened. The keys differ by tool: `mcp_call_tool` names its
+/// server `server` and its remote tool `tool`; `mcp_registry_tool_call` names
+/// them `server_id` and `tool_name`.
+fn mcp_call_pair<'a>(tool: &str, args: &'a serde_json::Value) -> Option<(&'a str, &'a str)> {
+    let (server_key, tool_key) = if tool.eq_ignore_ascii_case(MCP_CALL_TOOL) {
+        (MCP_CALL_SERVER_KEY, MCP_CALL_TOOL_KEY)
+    } else if tool.eq_ignore_ascii_case(MCP_REGISTRY_TOOL_CALL) {
+        (MCP_REGISTRY_SERVER_KEY, MCP_REGISTRY_TOOL_KEY)
+    } else {
+        return None;
+    };
+    let object = args.as_object()?;
+    let server = object.get(server_key)?.as_str()?;
+    let remote_tool = object.get(tool_key)?.as_str()?;
+    Some((server, remote_tool))
+}
+
+/// The reach of one MCP bridge call, downgraded to [`Reach::ExternalRead`]
+/// **only** when the operator has declared this call's remote tool a read on
+/// this server (#1124).
+///
+/// The one place the (server, tool) pair meets the declaration. Every other
+/// answer is [`Reach::Consequence`], the [`mcp_call_tool_consequence`] base:
+///
+///  1. a tool that is neither bridge tool — `None` from [`mcp_call_pair`];
+///  2. a call whose `server` / `tool` argument cannot be read — same;
+///  3. a server the operator has not declared this tool a read on — the set
+///     lookup misses.
+///
+/// So the downgrade is affirmative-membership-only, and the gate stays fail
+/// closed by construction rather than by a rule someone has to remember — the
+/// same shape [`git_operations_consequence`] takes against its read set. Returns
+/// the whole [`Consequence`] rather than a bare [`Reach`] so the policy replaces
+/// the base verdict wholesale, exactly as the argument graders do.
+///
+/// The downgrade is [`Reach::ExternalRead`], not [`Reach::Nothing`], and this is
+/// the Composio-read precedent (#559) rather than a fresh choice: a remote MCP
+/// read reaches a *third party's* server with the company's own connected
+/// credential. It changes nothing there or here and is billed for nothing, so
+/// `supervised` and `auto` let it run — the whole point of the issue — but a
+/// `readonly` desk still denies it, because that tier's contract is that nothing
+/// outside the company is reached at all. Folding it into [`Reach::Nothing`]
+/// would break that contract; folding it into [`Reach::Money`] would bill the
+/// operator for every page read.
+///
+/// [`Standing::PerCall`] stays: the declaration says "this reads", which is not
+/// "hand every remote tool on this server over for a week". A read-only remote
+/// tool nevertheless never parks under `auto` on its own, so nothing is grantable
+/// here for the tier to consult.
+pub fn mcp_call_reach(tool: &str, args: &serde_json::Value, reads: &McpReadSet) -> Consequence {
+    let base = mcp_call_tool_consequence(args);
+    if reads.is_empty() {
+        return base;
+    }
+    match mcp_call_pair(tool, args) {
+        Some((server, remote_tool)) if reads.contains(server, remote_tool) => Consequence {
+            group: EffectGroup::Other,
+            reach: Reach::ExternalRead,
+            standing: Standing::PerCall,
+        },
+        _ => base,
+    }
+}
+
+/// Whether `tool` is one of the MCP bridge tools whose reach a read declaration
+/// can downgrade (#1124). The policy asks this before consulting its
+/// declaration, so a non-bridge tool takes the plain [`consequence_of`] path.
+pub fn is_mcp_bridge_tool(tool: &str) -> bool {
+    tool.eq_ignore_ascii_case(MCP_CALL_TOOL) || tool.eq_ignore_ascii_case(MCP_REGISTRY_TOOL_CALL)
+}
 
 /// Lexical backstop for [`shell_consequence`]: does any whitespace-separated
 /// token in `command` name a location outside the agent's working directory?
@@ -3188,6 +3390,7 @@ mod tests {
     fn a_tool_whose_name_says_everything_has_no_scope() {
         for tool in [
             "file_write",
+            "memory_forget",
             "memory_store",
             "shell",
             "workspace_write",
@@ -3910,5 +4113,208 @@ mod tests {
         let c = consequence_of(SHELL, &json!({ SHELL_COMMAND_KEY: "ls -la" }));
         assert_eq!(c.reach, Reach::Consequence);
         assert!(c.parks_under_auto());
+    }
+
+    // ── MCP bridge calls, graded against a per-server read declaration (#1124) ──
+
+    /// A `mcp_call_tool` call as the policy layer sees it.
+    fn mcp_call(server: &str, tool: &str) -> serde_json::Value {
+        json!({
+            MCP_CALL_SERVER_KEY: server,
+            MCP_CALL_TOOL_KEY: tool,
+            "arguments": {},
+        })
+    }
+
+    /// A `mcp_registry_tool_call` call — different argument keys, same shape.
+    fn registry_call(server_id: &str, tool_name: &str) -> serde_json::Value {
+        json!({
+            MCP_REGISTRY_SERVER_KEY: server_id,
+            MCP_REGISTRY_TOOL_KEY: tool_name,
+            "arguments": {},
+        })
+    }
+
+    /// **Acceptance criterion 1, for both tools.** A call to a server-declared
+    /// read-only remote tool does not park under `auto`; every other combination
+    /// still parks.
+    ///
+    /// This is the classifier's OWN test (criterion 4): reverting
+    /// [`mcp_call_reach`] to return its base for the declared pair — the whole of
+    /// the downgrade — makes the first two assertions fail, because the declared
+    /// read would park again.
+    #[test]
+    fn a_declared_read_only_remote_tool_does_not_park_but_everything_else_does() {
+        let reads = McpReadSet::from_pairs([
+            ("jira".to_string(), "get_issue".to_string()),
+            ("registry-42".to_string(), "list_rows".to_string()),
+        ]);
+
+        // The declared read on each tool downgrades and stops parking.
+        let call_read = mcp_call_reach(MCP_CALL_TOOL, &mcp_call("jira", "get_issue"), &reads);
+        assert_eq!(call_read.reach, Reach::ExternalRead);
+        assert!(
+            !call_read.parks_under_auto(),
+            "a server-declared read must not park under auto"
+        );
+        let registry_read = mcp_call_reach(
+            MCP_REGISTRY_TOOL_CALL,
+            &registry_call("registry-42", "list_rows"),
+            &reads,
+        );
+        assert_eq!(registry_read.reach, Reach::ExternalRead);
+        assert!(!registry_read.parks_under_auto());
+
+        // Every other combination still parks: a write on the same declared
+        // server, a read on an undeclared server, and the same declared tool name
+        // on the WRONG tool of the pair (server declared, tool not).
+        for (tool, args) in [
+            (MCP_CALL_TOOL, mcp_call("jira", "create_issue")),
+            (MCP_CALL_TOOL, mcp_call("confluence", "get_issue")),
+            (MCP_CALL_TOOL, mcp_call("jira", "list_rows")),
+            (
+                MCP_REGISTRY_TOOL_CALL,
+                registry_call("registry-42", "write_row"),
+            ),
+            (
+                MCP_REGISTRY_TOOL_CALL,
+                registry_call("registry-99", "list_rows"),
+            ),
+            // The keys are not interchangeable across the two tools: a
+            // registry-shaped payload under `mcp_call_tool` reads no `server`.
+            (MCP_CALL_TOOL, registry_call("jira", "get_issue")),
+        ] {
+            let verdict = mcp_call_reach(tool, &args, &reads);
+            assert_eq!(
+                verdict.reach,
+                Reach::Consequence,
+                "`{tool}` {args} is not an affirmatively-declared read and must park"
+            );
+            assert!(
+                verdict.parks_under_auto(),
+                "`{tool}` {args} must park under auto"
+            );
+        }
+    }
+
+    /// The fail-closed base: with no declaration, every bridge call parks — the
+    /// verdict both tools carried before this issue, and the answer for every
+    /// non-harness construction site whose policy sets no read declaration.
+    #[test]
+    fn with_no_declaration_every_bridge_call_gates() {
+        let empty = McpReadSet::default();
+        assert!(empty.is_empty());
+        for (tool, args) in [
+            (MCP_CALL_TOOL, mcp_call("jira", "get_issue")),
+            (MCP_REGISTRY_TOOL_CALL, registry_call("r", "get_issue")),
+        ] {
+            let verdict = mcp_call_reach(tool, &args, &empty);
+            assert_eq!(verdict.reach, Reach::Consequence);
+            assert_eq!(verdict.standing, Standing::PerCall);
+            assert!(verdict.parks_under_auto());
+        }
+    }
+
+    /// A downgraded read is `ExternalRead`, not `Nothing`: it reaches a third
+    /// party's server with the company's credential, so a `readonly` desk still
+    /// denies it and it is never billed — the Composio-read precedent (#559).
+    #[test]
+    fn a_downgraded_read_is_denied_under_readonly_and_is_not_a_spend() {
+        let reads = McpReadSet::from_pairs([("jira".to_string(), "get_issue".to_string())]);
+        let verdict = mcp_call_reach(MCP_CALL_TOOL, &mcp_call("jira", "get_issue"), &reads);
+        assert_eq!(verdict.reach, Reach::ExternalRead);
+        assert!(
+            verdict.reach.denied_under_readonly(),
+            "a read of a counterparty's account is exactly what readonly refuses"
+        );
+        assert!(!verdict.reach.costs_money(), "a read is not billed");
+        assert!(
+            !verdict.reach.parks_under_supervision(),
+            "supervised runs it — nothing changes and nothing is spent"
+        );
+        assert_eq!(verdict.standing, Standing::PerCall);
+    }
+
+    /// A call this cannot read gates, whichever key is missing or mistyped. The
+    /// tools' schemas mark both required, so each of these is a call that could
+    /// not have run — the same fail-closed rule the other argument graders keep.
+    #[test]
+    fn an_unreadable_bridge_call_gates_even_with_a_matching_declaration() {
+        let reads = McpReadSet::from_pairs([
+            ("jira".to_string(), "get_issue".to_string()),
+            ("r".to_string(), "get_issue".to_string()),
+        ]);
+        let unreadable_call = [
+            json!({ MCP_CALL_TOOL_KEY: "get_issue", "arguments": {} }), // no server
+            json!({ MCP_CALL_SERVER_KEY: "jira", "arguments": {} }),    // no tool
+            json!({ MCP_CALL_SERVER_KEY: 7, MCP_CALL_TOOL_KEY: "get_issue" }), // non-string
+            json!({ MCP_CALL_SERVER_KEY: "jira", MCP_CALL_TOOL_KEY: null }),
+            json!(null),
+            json!("jira"),
+        ];
+        for args in unreadable_call {
+            let verdict = mcp_call_reach(MCP_CALL_TOOL, &args, &reads);
+            assert_eq!(verdict.reach, Reach::Consequence, "unreadable: {args}");
+            assert!(verdict.parks_under_auto(), "unreadable: {args}");
+        }
+        // …and the registry twin, under its own keys.
+        for args in [
+            json!({ MCP_REGISTRY_TOOL_KEY: "get_issue", "arguments": {} }),
+            json!({ MCP_REGISTRY_SERVER_KEY: "r", "arguments": {} }),
+            json!({ MCP_REGISTRY_SERVER_KEY: "r", MCP_REGISTRY_TOOL_KEY: 7 }),
+        ] {
+            let verdict = mcp_call_reach(MCP_REGISTRY_TOOL_CALL, &args, &reads);
+            assert_eq!(
+                verdict.reach,
+                Reach::Consequence,
+                "unreadable registry: {args}"
+            );
+        }
+    }
+
+    /// The tool name is matched case-insensitively, the way every other arm of
+    /// the gate reads it — the argument keys, and the bridge-tool predicate.
+    #[test]
+    fn the_bridge_tool_name_is_matched_case_insensitively() {
+        let reads = McpReadSet::from_pairs([("jira".to_string(), "get_issue".to_string())]);
+        assert!(is_mcp_bridge_tool("MCP_CALL_TOOL"));
+        assert!(is_mcp_bridge_tool("Mcp_Registry_Tool_Call"));
+        assert!(!is_mcp_bridge_tool("mcp_list_tools"));
+        let verdict = mcp_call_reach("MCP_CALL_TOOL", &mcp_call("jira", "get_issue"), &reads);
+        assert_eq!(verdict.reach, Reach::ExternalRead);
+    }
+
+    /// The plain `consequence_of` — which the roster, the coverage test and every
+    /// company-blind caller read — still sees the gated verdict for both bridge
+    /// tools. The downgrade lives only where the declaration does, on the policy.
+    #[test]
+    fn consequence_of_reads_both_bridge_tools_as_gated() {
+        for tool in [MCP_CALL_TOOL, MCP_REGISTRY_TOOL_CALL] {
+            let verdict = consequence_of(tool, &mcp_call("jira", "get_issue"));
+            assert_eq!(verdict.reach, Reach::Consequence, "`{tool}`");
+            assert_eq!(verdict.standing, Standing::PerCall, "`{tool}`");
+            assert!(verdict.parks_under_auto(), "`{tool}`");
+        }
+    }
+
+    /// **Acceptance criterion 3.** Both bridge tools sit on the argument-graded
+    /// side of the partition, so the roster and the table stay disjoint and
+    /// `declared_tools` enumerates each exactly once. This is a direct probe of
+    /// the same facts `the_roster_and_the_table_partition_the_known_tool_names`
+    /// enforces over the whole set, named here so a reader of this issue's change
+    /// sees the criterion asserted.
+    #[test]
+    fn both_bridge_tools_are_argument_graded_and_enumerated_once() {
+        for tool in [MCP_CALL_TOOL, MCP_REGISTRY_TOOL_CALL] {
+            assert!(
+                argument_grader(tool).is_some(),
+                "`{tool}` must be dispatched from its arguments"
+            );
+            assert_eq!(
+                declared_tools().filter(|name| *name == tool).count(),
+                1,
+                "`{tool}` holds both a roster entry and a DECLARED row and must be enumerated once"
+            );
+        }
     }
 }

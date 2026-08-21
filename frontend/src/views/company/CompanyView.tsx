@@ -31,6 +31,13 @@
 //
 // which means the chart survives a reload, can be linked, and is reached by
 // asking for it rather than by flipping a switch and hoping.
+//
+// Manage Lists (issue #1284) is deliberately NOT a segment of this page — an
+// early cut put it here, "parallel to Manage Desks", and that analogy was
+// wrong: desks are company *structure*, so managing them belongs here; lists
+// are work records, reached almost entirely from the title switcher on Work's
+// own screen. See `docs/spec/runtime/ledgers-console-ia.md`'s Rule 2 and
+// `LedgersView.MANAGE_SEGMENT`.
 
 import type { OpenCompanyClient } from "@/api/client";
 import { OrgChartView } from "@/views/company/OrgChartView";

@@ -41,6 +41,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
 import {
   CATEGORY_STYLES,
+  registryEmptyLabel,
   SKILLS_READ_ONLY_NOTE,
   type SkillCategory,
   skillReachLabel,
@@ -179,7 +180,7 @@ export function SkillsView({ client, company }: Props) {
       <div className="mx-auto w-full max-w-5xl space-y-5 px-4 py-6">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="space-y-1">
-            <h2 className="text-2xl font-semibold tracking-tight">Skills</h2>
+            <h1 className="text-2xl font-semibold tracking-tight">Skills</h1>
             <p className="text-sm text-muted-foreground">
               Playbooks your teammates read. Enable, install from the registry, or add your own.
             </p>
@@ -253,13 +254,11 @@ export function SkillsView({ client, company }: Props) {
                 <Skeleton className="h-32 rounded-xl" />
               </div>
             ) : visibleRegistry.length === 0 ? (
-              <Empty
-                label={
-                  registry.length === 0
-                    ? "This host serves no shared skill registry."
-                    : "No skills match that search."
-                }
-              />
+              // A failed read leaves `registry` empty too, so the label must not
+              // derive "serves no registry" from the same failure the alert above
+              // already reports (issue #1467). The decider keeps the three cases
+              // apart.
+              <Empty label={registryEmptyLabel(registryError !== null, registry.length === 0)} />
             ) : (
               <div className="grid gap-3 sm:grid-cols-2">
                 {visibleRegistry.map((s) => (
