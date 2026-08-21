@@ -1378,6 +1378,54 @@ mod tests {
         );
     }
 
+    /// A budget write answers with the teammate as it **effectively** stands,
+    /// not as the blueprint declared it.
+    ///
+    /// `updated_row` is a second place the roster is rendered, and it used to
+    /// read the raw manifest row. Once a manifest teammate became editable that
+    /// made one card change identity depending on which route last touched it:
+    /// a console rename showed on the Team page and then vanished the moment an
+    /// admin set a cap, because the budget response overwrote the row with the
+    /// name and role from `company.toml`.
+    #[tokio::test]
+    async fn a_budget_write_answers_with_the_edited_identity() {
+        let home_dir = home();
+        let state = state_with_manifest(home_dir.path(), ROSTER).await;
+
+        // Rename a blueprint teammate through the console.
+        let (status, _) = send(
+            &state,
+            "PATCH",
+            "/api/v1/company/team/ceo",
+            Some(json!({"role": "Managing Director", "description": "Runs the place."})),
+            Some(&admin_cookie()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        // Then set a cap on the same teammate. The response is a roster row.
+        let (status, row) = put_budget(&state, "ceo", json!({"budgetUsdDaily": 4.0})).await;
+        assert_eq!(status, StatusCode::OK, "{row}");
+        assert_eq!(
+            row["role"], "Managing Director",
+            "the budget write answered with the blueprint's role, undoing the rename on the \
+             card the console re-renders from: {row}"
+        );
+        assert_eq!(row["description"], "Runs the place.", "{row}");
+
+        // And clearing the cap answers the same way — same helper, same defect.
+        let (status, cleared) = send(
+            &state,
+            "DELETE",
+            "/api/v1/company/team/ceo/budget",
+            None,
+            Some(&admin_cookie()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{cleared}");
+        assert_eq!(cleared["role"], "Managing Director", "{cleared}");
+    }
+
     /// Removing a teammate takes its override with it, so the record does not
     /// accumulate rows for teammates that no longer exist.
     #[tokio::test]
