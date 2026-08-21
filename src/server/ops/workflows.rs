@@ -218,6 +218,12 @@ struct WorkflowSummary {
     name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     description: Option<String>,
+    /// The trigger node's 5-field UTC cron, or explicit `null` for a manual
+    /// workflow. Kept present when `None` so a current host can distinguish
+    /// "manual" from an older host that predates this field.
+    schedule: Option<String>,
+    /// Number of nodes in the graph. A body-less manifest entry reports zero.
+    node_count: usize,
     /// Whether `PUT`/`DELETE` on this id will be accepted (issue #259) — see
     /// [`is_editable`]. The console disables its Edit/Delete affordances on a
     /// `false`, so an operator is told *before* clicking rather than by a 409
@@ -236,10 +242,14 @@ struct WorkflowSummary {
 
 impl WorkflowSummary {
     fn new(f: WorkflowFile, editable: bool, enabled: bool) -> Self {
+        let schedule = f.trigger_schedule().map(str::to_owned);
+        let node_count = f.nodes.len();
         Self {
             id: f.id,
             name: f.name,
             description: f.description,
+            schedule,
+            node_count,
             editable,
             enabled,
         }
@@ -508,6 +518,8 @@ async fn list_workflows(company: ScopedCompany) -> Result<Json<Vec<WorkflowSumma
             id: id.clone(),
             name: id,
             description: None,
+            schedule: None,
+            node_count: 0,
             // A manifest-`enabled` id with no body in either source: there is
             // nothing to replace or remove, and the write core says so with a
             // 409. Never editable.
@@ -542,7 +554,7 @@ async fn get_workflow(
     let (overlays, disabled, globals_disable) = workflow_state(&company).await?;
     let file = load_workflow_with_globals(source_dir, &overlays, &globals_disable, &wid)
         .map_err(ApiError)?
-        .ok_or_else(|| ApiError(OpenCompanyError::CompanyNotFound(format!("workflow {wid}"))))?;
+        .ok_or_else(|| ApiError(OpenCompanyError::NotFound(format!("workflow {wid}"))))?;
     // Issue #259: the version token rides out with the graph, so the console
     // gets it for free on the same read it renders from — there is no second
     // round trip for a caller to skip and thereby lose the concurrency guard.
@@ -985,7 +997,7 @@ async fn set_workflow_enabled(
     let source_dir = company.runtime.source_dir();
     let file = load_workflow_with_globals(source_dir, &overlays, &globals_disable, &wid)
         .map_err(ApiError)?
-        .ok_or_else(|| ApiError(OpenCompanyError::CompanyNotFound(format!("workflow {wid}"))))?;
+        .ok_or_else(|| ApiError(OpenCompanyError::NotFound(format!("workflow {wid}"))))?;
     let editable = is_editable(source_dir, &overlays, &wid);
     let version = editable
         .then(|| overlay_toml(&overlays, &wid).map(workflow_version))
@@ -1407,7 +1419,7 @@ async fn run_workflow(
     // `wid` becomes a filename — reject anything that could escape `workflows/`.
     if !safe_wid(&wid) {
         return Err(
-            ApiError(OpenCompanyError::CompanyNotFound(format!("workflow {wid}"))).into_response(),
+            ApiError(OpenCompanyError::NotFound(format!("workflow {wid}"))).into_response(),
         );
     }
 
@@ -1424,7 +1436,7 @@ async fn run_workflow(
     )
     .map_err(|e| ApiError(e).into_response())?
     .ok_or_else(|| {
-        ApiError(OpenCompanyError::CompanyNotFound(format!("workflow {wid}"))).into_response()
+        ApiError(OpenCompanyError::NotFound(format!("workflow {wid}"))).into_response()
     })?;
 
     let body = body.map(|Json(b)| b).unwrap_or_default();
@@ -2024,7 +2036,7 @@ async fn fix_from_run(
     // escape `workflows/`.
     if !safe_wid(&wid) {
         return Err(
-            ApiError(OpenCompanyError::CompanyNotFound(format!("workflow {wid}"))).into_response(),
+            ApiError(OpenCompanyError::NotFound(format!("workflow {wid}"))).into_response(),
         );
     }
 
@@ -2067,7 +2079,7 @@ async fn fix_from_run(
     )
     .map_err(|e| ApiError(e).into_response())?
     .ok_or_else(|| {
-        ApiError(OpenCompanyError::CompanyNotFound(format!("workflow {wid}"))).into_response()
+        ApiError(OpenCompanyError::NotFound(format!("workflow {wid}"))).into_response()
     })?;
     // `workflow_spec_from_graph` below has no `on_error`/`retry`/`repeatable`
     // field on `WorkflowNodeSpec` (the builder never authors them — see its
@@ -3521,6 +3533,25 @@ mod tests {
             summaries[0].description.as_deref(),
             Some("A tiny trigger → agent → output graph.")
         );
+        assert_eq!(summaries[0].schedule, None);
+        assert_eq!(summaries[0].node_count, 3);
+
+        let json = serde_json::to_value(&summaries[0]).unwrap();
+        assert_eq!(json["schedule"], serde_json::Value::Null);
+        assert_eq!(json["nodeCount"], 3);
+    }
+
+    #[test]
+    fn scheduled_summary_carries_the_trigger_cron_and_node_count() {
+        let scheduled = DEMO.replace(
+            "name = \"Start\"\n        summary",
+            "name = \"Start\"\n        schedule = \"0 9 * * MON\"\n        summary",
+        );
+        let file = crate::company::parse_workflow(&scheduled).expect("scheduled fixture parses");
+        let json = serde_json::to_value(WorkflowSummary::new(file, false, true)).unwrap();
+
+        assert_eq!(json["schedule"], "0 9 * * MON");
+        assert_eq!(json["nodeCount"], 3);
     }
 
     #[test]
@@ -5535,6 +5566,8 @@ mod tests {
                 .find(|w| w["id"] == "greeter")
                 .expect("listed");
             assert_eq!(row["enabled"], serde_json::json!(false));
+            assert_eq!(row["schedule"], serde_json::Value::Null);
+            assert_eq!(row["nodeCount"], 2);
             assert_eq!(
                 row["editable"],
                 serde_json::json!(true),
@@ -5580,6 +5613,20 @@ mod tests {
 
             // And the graph read agrees, so it is the store's answer rather than
             // something the write path made up on the way out.
+            let listed = router(state.clone())
+                .oneshot(request("GET", "/api/v1/company/workflows", None))
+                .await
+                .unwrap();
+            let body = json_body(listed).await;
+            let row = body
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|workflow| workflow["id"] == "digest")
+                .expect("scheduled workflow is listed");
+            assert_eq!(row["schedule"], "0 9 * * *");
+            assert_eq!(row["nodeCount"], 2);
+
             let read = router(state)
                 .oneshot(request("GET", "/api/v1/company/workflows/digest", None))
                 .await
@@ -5605,6 +5652,25 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        }
+
+        /// A missing workflow is a missing nested resource, not a missing
+        /// company. Both variants are 404, so the envelope code pins the
+        /// distinction that operators and clients actually consume.
+        #[tokio::test]
+        async fn reading_an_unknown_workflow_reports_resource_not_found() {
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let (state, _store, _id) = hosted_state(&home).await;
+
+            let response = router(state)
+                .oneshot(request("GET", "/api/v1/company/workflows/ghost", None))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
+            let body = json_body(response).await;
+            assert_eq!(body["code"], "not_found", "{body}");
+            assert_eq!(body["error"], "not found: workflow ghost", "{body}");
         }
 
         /// A **global-only** workflow — no seed file, no overlay body, just the

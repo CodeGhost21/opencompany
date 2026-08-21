@@ -7,7 +7,8 @@ import { X } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
-import type { WorkflowNode as WorkflowNodeModel } from "@/api/workflows";
+import { nodeKindLabel, type WorkflowNode as WorkflowNodeModel } from "@/api/workflows";
+import type { TeamMemberDto } from "@/api/types";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { nodeKindMeta } from "@/lib/workflow-sample";
@@ -21,10 +22,13 @@ import { type NodeOutputView, parseNodeMessages } from "./run-output";
  * kind-specific config / error-handling policy. */
 export function NodeDetailPanel({
   node,
+  roster = [],
   output,
   onClose,
 }: {
   node: WorkflowNodeModel;
+  /** Roster names for resolving an agent node's machine id. */
+  roster?: TeamMemberDto[];
   /**
    * This node's output on the run being inspected (issue #596). `undefined`
    * means "not inspecting a run" — the panel then shows only the node's static
@@ -35,6 +39,9 @@ export function NodeDetailPanel({
   onClose: () => void;
 }) {
   const meta = nodeKindMeta(node.kind);
+  const kindLabel = nodeKindLabel(node.kind);
+  const teammate = node.agent ? roster.find((member) => member.id === node.agent) : undefined;
+  const teammateName = teammate ? teammate.name?.trim() || teammate.role : undefined;
   const hasConfig =
     node.config !== undefined && node.config !== null &&
     !(typeof node.config === "object" && Object.keys(node.config as object).length === 0);
@@ -62,7 +69,7 @@ export function NodeDetailPanel({
           </span>
           <div className="min-w-0">
             <div className="truncate text-sm font-semibold">{node.name}</div>
-            <div className="truncate text-2xs text-muted-foreground">{node.id}</div>
+            <div className="truncate text-2xs text-muted-foreground">{kindLabel}</div>
           </div>
         </div>
         <Button
@@ -79,7 +86,7 @@ export function NodeDetailPanel({
       <div className="min-h-0 flex-1 space-y-3 overflow-auto px-3 py-3 text-sm">
         <div className="flex flex-wrap items-center gap-1.5">
           <Badge variant="outline" className="font-normal">
-            {node.kind}
+            {kindLabel}
           </Badge>
           {node.requiresApproval && (
             <Badge variant="outline" className="border-status-blocked/40 bg-status-blocked-soft font-normal">
@@ -106,6 +113,10 @@ export function NodeDetailPanel({
           )}
         </div>
 
+        <DetailField label="Node ID">
+          <p className="font-mono text-xs text-muted-foreground">{node.id}</p>
+        </DetailField>
+
         {/* A saved schedule must be visible, not write-only — otherwise an
             operator cannot tell a self-running workflow from a manual one. */}
         {node.schedule && (
@@ -123,7 +134,10 @@ export function NodeDetailPanel({
 
         {node.agent && (
           <DetailField label="Assigned teammate">
-            <p className="font-mono text-xs">{node.agent}</p>
+            <p className="text-sm">{teammateName ?? node.agent}</p>
+            {teammateName && teammateName !== node.agent && (
+              <p className="font-mono text-3xs text-muted-foreground">Roster ID: {node.agent}</p>
+            )}
           </DetailField>
         )}
 

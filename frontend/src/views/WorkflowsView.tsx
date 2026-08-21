@@ -51,7 +51,7 @@ import {
 import type { CompanyStreamEvent } from "@/hooks/use-events";
 import type { OpenCompanyClient } from "@/api/client";
 import { ApiError } from "@/api/types";
-import type { ApprovalSummary, GrantScope, Verdict } from "@/api/types";
+import type { ApprovalSummary, GrantScope, TeamMemberDto, Verdict } from "@/api/types";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -412,6 +412,8 @@ export function WorkflowsView({
   // A run the copilot judged un-fixable, shown inline under that run's row.
   const [fixReason, setFixReason] = useState<{ seq: number; reason: string } | null>(null);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
+  /** Roster used only while an assigned agent node is being inspected. */
+  const [nodeRoster, setNodeRoster] = useState<TeamMemberDto[]>([]);
   // Issue #228: what past runs did, read back from the host's journal. This is
   // the half that survives a reload — before it, a manual run's delivery rows
   // vanished when the drawer was dismissed and a scheduled run's never reached
@@ -2065,6 +2067,27 @@ export function WorkflowsView({
     [graph, selectedNodeId],
   );
 
+  // Resolve an agent id to the teammate's display name in the inspector. Keep
+  // this lazy: workflows with no selected agent node do not need a roster read.
+  useEffect(() => {
+    if (!selectedNode?.agent) {
+      setNodeRoster([]);
+      return;
+    }
+    let live = true;
+    void client
+      .listTeam(company)
+      .then((team) => {
+        if (live) setNodeRoster(team);
+      })
+      .catch(() => {
+        if (live) setNodeRoster([]);
+      });
+    return () => {
+      live = false;
+    };
+  }, [client, company, selectedNode?.agent]);
+
   // Issue #596: lazily fetch a past run's per-node output ONCE when it is
   // overlaid, so clicking any of its nodes can show what that node produced. A
   // 404 (predates capture / dry / hard-aborted / older host) settles to `record:
@@ -2973,6 +2996,7 @@ export function WorkflowsView({
                 selectedNode && (
                   <NodeDetailPanel
                     node={selectedNode}
+                    roster={nodeRoster}
                     output={selectedNodeOutput}
                     onClose={() => setSelectedNodeId(null)}
                   />
