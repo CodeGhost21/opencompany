@@ -42,6 +42,7 @@ import {
   residualReason,
   renameMoveNode,
   searchWorkspace,
+  SEARCH_LIMIT,
   sweepEmptyAgentFolders,
   uploadFile,
   writeFile,
@@ -574,7 +575,12 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
       const mine = ++searchGen.current;
       setSearching(true);
       try {
-        const page = await searchWorkspace(client, company, query);
+        // Ask for the host's ceiling, not its default (issue #1457). The route
+        // clamps rather than refusing, so naming no limit was the console
+        // silently capping itself at 20 while the header said "20 of 50".
+        const page = await searchWorkspace(client, company, query, {
+          limit: SEARCH_LIMIT,
+        });
         if (mine !== searchGen.current) return;
         setSearchPage(page);
         setSearchError(null);

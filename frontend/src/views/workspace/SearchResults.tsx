@@ -286,6 +286,21 @@ export function SearchResults({
           );
         })}
       </ul>
+      {/* The head line says "20 of 50" and the list simply ends, so an operator
+          who scrolled to the bottom got no signal that 30 matches were withheld
+          — they met the last row and read it as the last match (issue #1457).
+          The route has no offset, so the remedy is a narrower query rather than
+          a next page, and this says which. */}
+      {hits.length < total && (
+        <p
+          className="border-t border-border/40 px-3 py-2 text-2xs text-muted-foreground"
+          data-testid="workspace-search-more"
+        >
+          {total - hits.length} more{" "}
+          {total - hits.length === 1 ? "match" : "matches"} not shown — narrow
+          your search to reach them.
+        </p>
+      )}
       {loading && (
         <p className="flex items-center gap-2 px-3 py-2 text-xs text-muted-foreground">
           <Search className="size-3.5" /> Updating…
