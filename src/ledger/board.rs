@@ -25,12 +25,36 @@
 //!
 //! # And why the table is not itself declarable
 //!
-//! A company may declare any ledger it likes, but not this one: a column here
+//! A company may declare any ledger it likes, but not this one: a stage here
 //! is a lifecycle state that spends money. `planning` fires a model call,
 //! `in_progress` opens an attempt, and `done` is reachable only through a human
-//! verdict. A company that could add a seventh column from a JSON file would
+//! verdict. A company that could add a seventh stage from a JSON file would
 //! have a state the runtime has no edge for, and a card that entered it would
 //! sit there forever with nothing to say why.
+//!
+//! # Stages are the runtime's; phases are everybody else's (issue #1512)
+//!
+//! Six lifecycle states is the right number for the *runtime*, and the wrong
+//! number for a reader. The board asked every agent and every operator to hold
+//! a six-word vocabulary in which four of the words mean some shade of "a
+//! teammate has started this", and told them apart by *which* machine is
+//! currently owed something — a distinction the runtime needs and nobody else
+//! does. What that bought in practice was agents moving cards to `in_review`
+//! when they meant paused, filing work as `planning` because a plan existed,
+//! and reading a rendered board they could not summarise.
+//!
+//! So the table now carries two vocabularies over one set of rows:
+//!
+//! * a **stage** ([`BoardColumn::id`]) — the six lifecycle states, unchanged.
+//!   Persisted, matched on by the dispatch edge, and never widened.
+//! * a **phase** ([`BoardColumn::phase`], and [`PHASES`]) — the three states
+//!   everything that reads the board is shown: pending, working, done.
+//!
+//! [`PHASES`] is what the `tasks` ledger declares as its statuses, what
+//! `derived/TASKS.md` groups under, and what the console renders as columns.
+//! A stage is still on the card — `Task.stage` on the wire, a badge on the
+//! card — so *waiting on your verdict* is still visible where it matters, as a
+//! property of a working card rather than as a fourth thing to file it under.
 
 use crate::ports::tasks::{
     COLUMN_DONE, COLUMN_IN_PROGRESS, COLUMN_IN_REVIEW, COLUMN_PAUSED, COLUMN_PLANNING, COLUMN_TODO,
