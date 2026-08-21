@@ -502,10 +502,12 @@ impl ManifestApprovalGate {
     /// The tier is real; it just does its work somewhere else. On the **tool**
     /// path `auto` is [`Consequence::parks_under_auto`](crate::policy::Consequence::parks_under_auto),
     /// which waves through the calls declared [`Standing::Grantable`](crate::policy::Standing::Grantable)
-    /// — the agent's own sandbox writes (`file_write`, `edit`, `apply_patch`,
-    /// `memory_store`) and reads scoped to one connected account. Those are what
-    /// `supervised` parks and `auto` does not, and they are the whole difference
-    /// between the tiers.
+    /// — chiefly the agent's own sandbox writes (`file_write`, `edit`,
+    /// `apply_patch`, `memory_store`) and reads scoped to one connected account.
+    /// The declaration table in [`consequence`](crate::policy::consequence) is
+    /// the list; this is a gloss on it, not a copy. Those are what `supervised`
+    /// parks and `auto` does not, and they are the whole difference between the
+    /// tiers.
     ///
     /// The **native** taxonomy has no such calls to wave through. Every group
     /// [`evaluate_supervised`](Self::evaluate_supervised) parks — spend at or
