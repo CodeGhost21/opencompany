@@ -462,6 +462,7 @@ The chooser picks where a *new* host lives. It does not migrate an existing
 one, and the UI must not imply it does. The data root is on the machine the
 runtime runs on; moving a company between connectors is the tar export/import of
 the company bundle, and it belongs to the company, not to the connection.
+
 ## What has landed, and what has not
 
 Landed:
