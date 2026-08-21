@@ -95,9 +95,17 @@ kind = "output"
 name = "Tell the operator"
 summary = "Report what shipped."
 
-# The report goes to the operator, not out of the company.
+# Engineering, not content: the two nodes before this are `ship` and `sign`, so
+# the audience is the desk that built and released the change.
+#
+# `channel` rather than `owner` is not a preference — `content_test.rs`'s
+# `every_seeded_output_destination_resolves_against_its_own_manifest` refuses
+# `owner` in any seeded template, because it reports Failed on a tenant with no
+# mailbox, which every freshly provisioned one is. The target must also be a
+# desk this company's manifest declares.
 [node.destination]
-kind = "owner"
+kind = "channel"
+target = "engineering"
 
 [[edge]]
 from = "start"
