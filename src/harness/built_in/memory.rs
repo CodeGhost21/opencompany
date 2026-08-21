@@ -366,6 +366,13 @@ mod tests {
                 .unwrap_or_default())
         }
 
+        async fn delete(&self, _id: &CompanyId, addr: &ChunkAddr) -> crate::Result<bool> {
+            let mut guard = self.chunks.lock().unwrap();
+            let before = guard.len();
+            guard.retain(|(a, _)| a != addr);
+            Ok(guard.len() < before)
+        }
+
         async fn search(
             &self,
             _id: &CompanyId,
