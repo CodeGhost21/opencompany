@@ -215,8 +215,9 @@ async fn tasks_crud_round_trips_under_both_scopes() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(task["title"], "Q2 brief");
-    // Issue #206/#301: manual entry lands in To-do, the board's one intake lane.
-    assert_eq!(task["column"], "todo");
+    // Issue #206/#301: manual entry lands in To-do, the board's one intake lane
+    // — which reads as `pending`, its phase, since issue #1512.
+    assert_eq!(task["column"], "pending");
     let id = task["id"].as_str().unwrap().to_string();
 
     // Drag (PATCH column) via the {id} scope.
@@ -348,7 +349,7 @@ async fn task_writes_reject_a_column_the_board_cannot_render() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert!(
-        body.to_string().contains("in_progress"),
+        body.to_string().contains("working"),
         "the refusal must list the columns that do exist: {body}"
     );
 
@@ -371,7 +372,11 @@ async fn task_writes_reject_a_column_the_board_cannot_render() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     let (_, board) = send(&state, "GET", "/api/v1/company/tasks", None).await;
-    assert_eq!(board.as_array().expect("board")[0]["column"], "paused");
+    // The refused patch left the card where it was: paused, which reads as the
+    // `working` phase with `paused` named as the stage (issue #1512).
+    let card = &board.as_array().expect("board")[0];
+    assert_eq!(card["column"], "working");
+    assert_eq!(card["stage"], "paused");
 }
 
 /// #334: `in_review → done` is a move the write boundary accepts, and the one
@@ -447,7 +452,7 @@ async fn created_tasks_default_to_the_todo_column() {
         Some(json!({"title": "queued work"})),
     )
     .await;
-    assert_eq!(defaulted["column"], crate::ports::tasks::COLUMN_TODO);
+    assert_eq!(defaulted["column"], crate::ledger::board::PHASE_PENDING);
 
     // An explicit column is still honored verbatim — `spawn_task`, the
     // orchestrator's `revise`, and a failed run all place their own card.
@@ -459,7 +464,8 @@ async fn created_tasks_default_to_the_todo_column() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(explicit["column"], crate::ports::tasks::COLUMN_PLANNING);
+    assert_eq!(explicit["column"], crate::ledger::board::PHASE_WORKING);
+    assert_eq!(explicit["stage"], crate::ports::tasks::COLUMN_PLANNING);
 
     // Issue #301: `backlog` is gone from the board, so a client still writing
     // it is refused rather than persisting a card nothing renders. Legacy data
@@ -474,7 +480,7 @@ async fn created_tasks_default_to_the_todo_column() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert!(
-        refused.to_string().contains("todo"),
+        refused.to_string().contains("pending"),
         "the refusal must name the columns that replaced it: {refused}"
     );
 
