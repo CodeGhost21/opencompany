@@ -128,6 +128,8 @@ pub fn run() {
             commands::oc_rename_local_instance,
             commands::oc_forget_local_instance,
             commands::oc_acp_harnesses,
+            commands::oc_acp_confirm_harness,
+            commands::oc_acp_install_harness,
         ])
         .run(tauri::generate_context!())
         .expect("run the desktop shell");

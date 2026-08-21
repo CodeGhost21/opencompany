@@ -398,17 +398,90 @@ pub async fn oc_forget_local_instance(
     local.forget(&id)
 }
 
-/// Every coding harness this shell knows how to drive over ACP, and whether
-/// each is actually usable right now.
+/// Every coding harness this shell knows how to drive over ACP, and what the
+/// **filesystem** says about each right now.
 ///
 /// Takes no state and no connection id: unlike everything else in this file,
-/// readiness is a property of *this machine*, not of a host it talks to. The
-/// probe reads `PATH` and the credential files each harness keeps under the
-/// user's home — see `acp::discovery`'s module docs for why that is checked by
-/// file rather than by starting the harness.
+/// readiness is a property of *this machine*, not of a host it talks to.
+///
+/// Answers nothing on its own. Every harness comes back `checking`, because
+/// nothing short of running the adapter can say whether it is installed,
+/// working, and signed in — and this call runs nothing. It exists to paint the
+/// list; [`oc_acp_confirm_harness`] is what settles each row.
 #[tauri::command]
 pub fn oc_acp_harnesses() -> Vec<crate::acp::discovery::HarnessStatus> {
-    crate::acp::discovery::survey(&crate::acp::discovery::SystemProbe)
+    crate::acp::discovery::survey()
+}
+
+/// Actually starts one harness, resolving its `checking` state to `ready` or
+/// `spawnFailed` — and returning the models it advertises.
+///
+/// Both answers come from one spawn because they come from the same call:
+/// `session/new` is where an adapter both proves it can open a session and
+/// lists what it can run. Asking twice would spawn twice for no more
+/// information.
+///
+/// Split from [`oc_acp_harnesses`] rather than folded into it so the list
+/// paints immediately and each row settles on its own: one slow CLI must not
+/// hold up the others, and the operator sees "Checking…" rather than an empty
+/// pane. Safe to call concurrently for every harness.
+///
+/// The subprocess is killed when the probe's client drops, so nothing is left
+/// running whether it succeeded, failed, or timed out.
+#[tauri::command]
+pub async fn oc_acp_confirm_harness(
+    state: tauri::State<'_, crate::AppHandleState>,
+    id: String,
+) -> Result<crate::acp::discovery::ConfirmedHarness, String> {
+    // Probed inside the shell's own data dir rather than a scratch temp: an
+    // agent that inspects its working directory on startup should see a
+    // stable, ordinary place, and this leaves nothing behind to clean up.
+    Ok(crate::acp::discovery::confirm(&id, &state.data_dir).await)
+}
+
+/// Installs (or updates) the ACP adapter this app owns for one harness.
+///
+/// The adapter is *our* dependency, not the operator's: they installed Claude
+/// Code, and `@agentclientprotocol/claude-agent-acp` is the piece that makes it
+/// speak this protocol. So the app fetches it, into its own directory, at the
+/// version this build pins — never into the operator's global npm prefix.
+///
+/// **Explicit, never automatic.** It is a network fetch that writes
+/// executables, and doing that unannounced on launch is not something an app
+/// should decide for someone. The console offers a button; this is what the
+/// button calls.
+///
+/// One install per harness at a time. Two concurrent `npm install --prefix`
+/// runs against the same directory interleave their writes, and the failure
+/// that produces is a half-populated `node_modules` that reads as a corrupt
+/// install rather than as a collision.
+#[tauri::command]
+pub async fn oc_acp_install_harness(id: String) -> Result<(), String> {
+    use std::collections::HashSet;
+    use std::sync::{Mutex, OnceLock};
+
+    static IN_FLIGHT: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    let in_flight = IN_FLIGHT.get_or_init(Default::default);
+
+    let harness = crate::acp::discovery::HARNESSES
+        .iter()
+        .find(|h| h.id == id)
+        .ok_or_else(|| format!("`{id}` is not a harness this build knows"))?;
+
+    // A guard rather than holding the lock across the await: the install takes
+    // seconds, and a held `std::sync::Mutex` would serialise *different*
+    // harnesses too — installing Claude's adapter must not block Codex's.
+    {
+        let mut held = in_flight.lock().map_err(|_| "install lock poisoned")?;
+        if !held.insert(id.clone()) {
+            return Err(format!("an install of {id} is already running"));
+        }
+    }
+    let result = crate::acp::tools::install(harness).await;
+    if let Ok(mut held) = in_flight.lock() {
+        held.remove(&id);
+    }
+    result
 }
 
 #[cfg(test)]
