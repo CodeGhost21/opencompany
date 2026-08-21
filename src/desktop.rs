@@ -686,7 +686,7 @@ mod tests {
     /// is this registration path, not the helper.
     #[cfg(feature = "openhuman")]
     #[tokio::test]
-    async fn a_seeded_company_can_reach_a_model() {
+    async fn a_seeded_company_has_a_harness() {
         let directory = tempfile::tempdir().unwrap();
         let state = state_over(directory.path());
 
