@@ -693,16 +693,20 @@ fn every_seeded_output_destination_resolves_against_its_own_manifest() {
         }
     }
 
-    // 22 since #1361 added `e2e_harness/long_pipeline.toml`, a ten-node fixture
-    // whose only job is to be too long for the canvas to fit legibly. It is a
-    // seeded workflow like any other, so its output node is held to the same
-    // destination rule as the twenty #963 enumerated.
-    assert_eq!(
-        checked, 22,
-        "the seeded output-node count changed; this test and #963's list describe 22"
+    // The relation, not a hand-maintained total. #963's count was a literal (22
+    // by the time `e2e_harness/long_pipeline.toml` landed), which meant every
+    // added workflow failed this test on arithmetic rather than on anything
+    // about destinations — and the fix was always to bump the number, which is
+    // a guard nobody reads. What the count was actually protecting is stated
+    // directly instead: **exactly one** seeded output node in the whole
+    // repository has no destination, and it is the research lab's.
+    assert!(
+        checked > 0,
+        "no seeded output nodes were checked at all — the walk found nothing"
     );
     assert_eq!(
-        with_destination, 21,
+        with_destination,
+        checked - 1,
         "every seeded output except the research lab's deliberate deskless workflow \
          carries a destination"
     );

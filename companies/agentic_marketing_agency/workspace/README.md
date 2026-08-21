@@ -10,6 +10,8 @@ Start here:
 - [[Spring launch]] — the campaign in flight
 - [[Brand voice]] — how we sound
 - [[Campaign checklist]] — the standard launch steps
+- [[Measurement standards]] — how a number may be reported
+- [[Audience notes]] — who the work is aimed at, and on what evidence
 
 Everything here is a plain `.md` file, so it version-controls cleanly and seeds
 the operator console's Workspace view.
