@@ -404,32 +404,52 @@ async fn read(
     Ok(Json(snapshot(&state)?))
 }
 
+/// Refuses an engine this build cannot construct, before its fields are
+/// checked.
+///
+/// Ahead of [`selection_from`] on purpose: telling an operator their endpoint
+/// is missing, when the engine could not be bound with any endpoint, sends
+/// them to fix the wrong thing.
+fn ensure_available(engine: &str) -> Result<(), OpenCompanyError> {
+    let option = option_for(engine.trim()).ok_or_else(|| unknown_engine(engine))?;
+    if option.available {
+        return Ok(());
+    }
+    Err(OpenCompanyError::Conflict(format!(
+        "{} cannot be bound here: {}.",
+        option.label,
+        option
+            .unavailable_reason
+            .unwrap_or_else(|| "it is not compiled into this build".to_string())
+    )))
+}
+
+/// The refusal for an id the catalog does not carry, listing what may be
+/// picked instead.
+fn unknown_engine(engine: &str) -> OpenCompanyError {
+    OpenCompanyError::InvalidRequest(format!(
+        "`{}` is not a memory engine this host knows. Pick one of: {}.",
+        engine.trim(),
+        catalog()
+            .iter()
+            .map(|o| o.id)
+            .collect::<Vec<_>>()
+            .join(", ")
+    ))
+}
+
 /// Turns a submitted choice into a validated [`MemorySelection`], carrying the
 /// stored credential forward when the request omits one.
+///
+/// Field rules only — whether this *build* can bind the engine is
+/// [`ensure_available`]'s question, kept separate so these rules are the same
+/// in every feature set and are therefore testable in every lane.
 fn selection_from(
     request: &EngineRequest,
     stored: &MemorySelection,
 ) -> Result<MemorySelection, OpenCompanyError> {
     let engine = request.engine.trim();
-    let option = option_for(engine).ok_or_else(|| {
-        OpenCompanyError::InvalidRequest(format!(
-            "`{engine}` is not a memory engine this host knows. Pick one of: {}.",
-            catalog()
-                .iter()
-                .map(|o| o.id)
-                .collect::<Vec<_>>()
-                .join(", ")
-        ))
-    })?;
-    if !option.available {
-        return Err(OpenCompanyError::Conflict(format!(
-            "{} cannot be bound here: {}.",
-            option.label,
-            option
-                .unavailable_reason
-                .unwrap_or_else(|| "it is not compiled into this build".to_string())
-        )));
-    }
+    let option = option_for(engine).ok_or_else(|| unknown_engine(engine))?;
     let (backend, driver) = split_engine(engine).ok_or_else(|| {
         OpenCompanyError::InvalidRequest(format!("`{engine}` has no runtime mapping"))
     })?;
@@ -506,6 +526,7 @@ async fn test_engine(
 ) -> Result<Json<ProbeDto>, ApiError> {
     let _ = company.id();
     let (stored, _) = saved_selection(&state)?;
+    ensure_available(&request.engine)?;
     let selection = selection_from(&request, &stored)?;
     // A failed *open* is a configuration answer, not a 500: a bad URL, a
     // driver this build cannot construct, a missing credential. The operator
@@ -550,6 +571,7 @@ async fn apply(
                 .to_string(),
         )));
     }
+    ensure_available(&request.engine)?;
     let selection = selection_from(&request, &stored)?;
 
     // Bind the replacement BEFORE anything is written or swapped. A refusal

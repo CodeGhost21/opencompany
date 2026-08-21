@@ -27,6 +27,27 @@ const MEMORY_ENV: [&str; 5] = [
     "OPENCOMPANY_DATA_DIR",
 ];
 
+/// A rebuilder that rebuilds a company over its live handover, so the apply
+/// path's live swap is exercised rather than reported as needing a restart.
+struct TestRebuilder {
+    home: std::path::PathBuf,
+}
+
+#[async_trait::async_trait]
+impl crate::runtime::RuntimeRebuilder for TestRebuilder {
+    async fn rebuild(
+        &self,
+        _state: &AppState,
+        request: crate::runtime::RebuildRequest,
+    ) -> crate::Result<crate::CompanyRuntime> {
+        RuntimeBuilder::new(self.home.clone(), request.manifest)
+            .with_id(request.id)
+            .with_handover(request.handover)
+            .build()
+            .await
+    }
+}
+
 /// A one-company host whose `config.toml` lives under `dir`.
 async fn state_at(dir: &std::path::Path) -> AppState {
     let manifest: CompanyManifest =
@@ -60,7 +81,10 @@ async fn state_at(dir: &std::path::Path) -> AppState {
         .unwrap();
     let state = AppState::new(AppConfig::default())
         .with_home(dir.to_path_buf())
-        .with_config_root(dir.to_path_buf());
+        .with_config_root(dir.to_path_buf())
+        .with_rebuilder(Arc::new(TestRebuilder {
+            home: dir.to_path_buf(),
+        }));
     state.registry().insert(id, Arc::new(runtime));
     crate::server::test_support::seed_fixed_admin(&state, "acme").await;
     state
@@ -129,6 +153,27 @@ fn catalog_matches_driver_registry() {
     assert_eq!(
         offered,
         crate::store::memory::driver::SUPPORTED_REMOTE_DRIVERS.to_vec()
+    );
+}
+
+/// Whether this build can bind an engine is answered separately from whether
+/// the operator filled the form in — so a build without the feature refuses
+/// with the reason that actually blocks it.
+#[test]
+fn an_engine_this_build_cannot_bind_is_refused_by_availability() {
+    let refused = ensure_available("supermemory");
+    if cfg!(feature = "tinymemory") {
+        assert!(refused.is_ok());
+    } else {
+        let error = refused.unwrap_err().to_string();
+        assert!(error.contains("tinymemory"), "unexpected message: {error}");
+    }
+    assert!(
+        ensure_available("pinecone")
+            .unwrap_err()
+            .to_string()
+            .contains("supermemory"),
+        "an unknown id lists the catalog"
     );
 }
 
@@ -281,7 +326,7 @@ async fn applying_an_engine_persists_it_to_config_toml() {
     assert_eq!(
         body["restartRequiredFor"].as_array().unwrap().len(),
         0,
-        "a one-company host with a rebuilder applies live"
+        "a host with a rebuilder wired applies the swap live: {body}"
     );
 
     let written = std::fs::read_to_string(dir.path().join("config.toml")).unwrap();
