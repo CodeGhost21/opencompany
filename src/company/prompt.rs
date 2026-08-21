@@ -404,6 +404,31 @@ mod tests {
         assert_eq!(clamp(text, 4), text);
     }
 
+
+    /// Overlong persona instructions are capped to the prompt budget at the
+    /// write boundary, keeping the leading portion and marking the cut — the
+    /// same budget `bundle_section`/`context_section` already apply, applied
+    /// here because `instructions` are injected into every turn's prompt.
+    #[test]
+    fn persona_instructions_are_capped_to_the_prompt_budget() {
+        let over = "x".repeat(PROMPT_FILE_BUDGET_CHARS + 50);
+        let capped = cap_persona_instructions(&over);
+        assert!(capped.starts_with(&"x".repeat(PROMPT_FILE_BUDGET_CHARS)));
+        assert!(
+            capped.contains("truncated"),
+            "a cut is marked: {capped:?}"
+        );
+
+        // Under-budget text passes through untouched.
+        let short = "Answer only in haiku.";
+        assert_eq!(cap_persona_instructions(short), short);
+
+        // The cut is on a character boundary for multi-byte text.
+        let many = "é".repeat(PROMPT_FILE_BUDGET_CHARS + 100);
+        let capped = cap_persona_instructions(&many);
+        assert_eq!(capped.chars().filter(|&c| c != '\n').count() >= PROMPT_FILE_BUDGET_CHARS, true);
+    }
+
     #[test]
     fn the_section_budget_applies_across_documents_not_per_document() {
         let long = "x".repeat(PROMPT_FILE_BUDGET_CHARS);
