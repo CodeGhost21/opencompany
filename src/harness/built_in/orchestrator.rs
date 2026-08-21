@@ -1618,7 +1618,7 @@ fn summarize_event(event: &CompanyEvent) -> String {
         CompanyEvent::AgentReply { agent_id, .. } => format!("reply from {agent_id}"),
         CompanyEvent::TaskDispatched { task_id, .. } => format!("task dispatched: {task_id}"),
         // Issue #464. Structural only, like every arm here: the id, the change
-        // word (fixed vocabulary) and the column (one of six). The card's title
+        // word (fixed vocabulary) and the stage (one of six). The card's title
         // is deliberately not named — it is operator- or agent-authored free
         // text, and this string is a non-sensitive one-liner for the insight
         // surface, which is exactly where free text does not belong.
