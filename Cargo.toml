@@ -25,6 +25,15 @@ name = "live_company_turn"
 path = "examples/live_company_turn.rs"
 required-features = ["openhuman"]
 
+# Server-only end-to-end drive of team orchestration: a company template on the
+# real host, mock inference + MCP credentials, one operator message through a
+# three-agent hand-off chain. Runs on loopback with no real key, so it is an
+# example anyone can run — but it is not built by the default `cargo build`.
+[[example]]
+name = "team_orchestration_e2e"
+path = "examples/team_orchestration_e2e.rs"
+required-features = ["openhuman", "mcp"]
+
 [dependencies]
 # Compiles agent-authored `Page.tsx` (issue: agent-authored dashboard pages)
 # into browser-runnable JS inside `pages_write` (`src/harness/pages_tools.rs`).
