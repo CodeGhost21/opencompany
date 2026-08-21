@@ -2366,11 +2366,18 @@ struct RunsQuery {
     limit: Option<usize>,
     /// Opaque pagination cursor (issue #1012): only runs whose displayed
     /// `seq` is strictly less than this are considered. Absent reads the
-    /// newest page. The console walks backward through history by passing the
-    /// `seq` of the oldest run it already holds — the same `before_seq` shape
+    /// newest page. Same `before_seq` shape
     /// [`chat_history`](crate::server::chat_history)'s `?before=` and
     /// `TaskDetailQuery`'s `?discussionBefore=` already use for the same
     /// problem.
+    ///
+    /// **What to pass is the boundary the previous response issued** —
+    /// [`WorkflowRunsResponse::next_before_seq`] — not "the `seq` of the oldest
+    /// run you hold". Those two coincided while the page was cut in display
+    /// order; they no longer do, because the cut is keyed on `seq` and the
+    /// display is keyed on `(at_millis, seq)`. Deriving the cursor from the
+    /// last displayed row re-opens the hole this parameter's own page cut
+    /// closes: see [`select_run_page`].
     before_seq: Option<u64>,
 }
 
@@ -2835,6 +2842,83 @@ fn fold_run_events(rows: Vec<StoredEvent>, wanted: Option<&str>) -> (Vec<Workflo
     (runs, read_through)
 }
 
+/// Cuts one page out of the folded run set and issues the cursor the *next*
+/// page must be asked for (issue #1012).
+///
+/// Three quantities the page needs, kept apart because they are not the same
+/// number:
+///
+/// * the **cut** — which `limit` runs this page carries,
+/// * the **display order** — how those runs are listed,
+/// * the **cursor** — the boundary the next request pages before.
+///
+/// # Why the cut is keyed on `seq` and the display is not
+///
+/// The page is cut by `seq` descending, and only then sorted for display by
+/// `(at_millis, seq)` descending — issue #228's ordering, kept verbatim, just
+/// applied *after* the cut rather than as the cut.
+///
+/// `seq` is the journal's own append position: monotonic, and the only key
+/// [`EventLog::read_before`](crate::ports::EventLog::read_before) can bound a
+/// read by. `at_millis` is wall-clock and is **not** monotonic in storage
+/// order — a clock step backwards (NTP correction, a VM resume, an operator
+/// setting the date) writes a row whose time is older than the row before it.
+///
+/// Cutting on `(at_millis, seq)` and then paging off the cut's boundary loses
+/// runs outright. Take a run `R` appended after this page's boundary run `B`
+/// under a regressed clock, so `R.seq > B.seq` but `R.at_millis < B.at_millis`.
+/// `R` sorts *below* `B`, so the truncate drops it from this page; the next
+/// request asks `before_seq = B.seq`, which excludes every row at or above
+/// `B.seq` — `R` among them. `R` is on neither page, and because the boundary
+/// only ever descends, on no later page either. It is permanently unreachable,
+/// and `has_more` may well be `true` *because* of it — a page the caller can
+/// see exists and can never fetch.
+///
+/// Cutting on `seq` closes that by construction rather than by any argument
+/// about how large a clock step can be: the set served here is exactly
+/// `{ seq >= next_before_seq }` of the candidates, and the next request asks
+/// for `{ seq < next_before_seq }`. The two partition the run set on the same
+/// key the read is bounded by, so nothing can fall between them.
+///
+/// The accepted cost, stated plainly: under a clock regression a run is served
+/// on the page its `seq` puts it on — correctly ordered *within* that page, but
+/// possibly out of order against the adjacent one. Under a monotonic clock
+/// `seq` and `at_millis` order identically and this is indistinguishable from
+/// cutting on the tuple. So the degradation fires only on the exact anomaly
+/// that previously caused permanent loss, and it degrades to "wrong order at
+/// one seam", never to "the run is gone".
+///
+/// Returns the page, whether an older page exists, and the cursor to ask for it
+/// with — `None` when there is no older page, so a caller is never handed a
+/// cursor for a page that does not exist.
+fn select_run_page(
+    mut runs: Vec<WorkflowRunOutcome>,
+    limit: usize,
+) -> (Vec<WorkflowRunOutcome>, bool, Option<u64>) {
+    // The backward-paged read stopped once it had settled at least `limit + 1`
+    // runs (or ran out of journal), precisely so this count is known here — one
+    // more than fits on the page means there is a page after this one.
+    let has_more = runs.len() > limit;
+    // The cut: the `limit` highest-`seq` runs.
+    runs.sort_by_key(|run| std::cmp::Reverse(run.seq));
+    runs.truncate(limit);
+    // The cursor: this page's low-water `seq`, which under the cut above is its
+    // minimum and NOT the last row in display order — which is why the client
+    // can no longer derive it and the host has to say it. Issued only when
+    // something is actually behind it.
+    let next_before_seq = if has_more {
+        runs.iter().map(|run| run.seq).min()
+    } else {
+        None
+    };
+    // The display order (issue #228 / #1012): newest FINISH first, on the very
+    // pair every row shows. Preserved exactly as merged; it only moves below
+    // the cut, and neither the cut nor this sort touches a single field of a
+    // row.
+    runs.sort_by_key(|run| std::cmp::Reverse((run.at_millis, run.seq)));
+    (runs, has_more, next_before_seq)
+}
+
 /// `GET …/workflows/runs?workflow=&limit=&before_seq=` — the company's
 /// finished workflow runs, **newest first** (issue #228), a page at a time
 /// (issue #1012).
@@ -3191,13 +3275,15 @@ async fn list_runs(
     // a single field of a row — they reorder and drop whole rows — so the
     // invariant the verdict pass is placed on ("derive after everything that
     // can still change its inputs") is not weakened by running them first.
-    runs.sort_by_key(|r| std::cmp::Reverse((r.at_millis, r.seq)));
-    // Issue #1012: the backward-paged read above stopped once it had settled
-    // at least `limit + 1` runs (or ran out of journal), precisely so this
-    // count is known here — one more than fit on the page means there is a
-    // page after this one.
-    let has_more = runs.len() > limit;
-    runs.truncate(limit);
+    //
+    // Issue #1012 follow-up: the sort above and the `limit` cut are no longer
+    // the same operation. The cut is keyed on `seq` alone and the sort — which
+    // is exactly the one described above — runs after it, because a cursor
+    // derived from a non-monotonic key cannot partition the run set and
+    // silently loses runs under a clock regression. The whole argument lives on
+    // [`select_run_page`], which now owns both steps plus the cursor this page
+    // hands back.
+    let (mut runs, has_more, next_before_seq) = select_run_page(runs, limit);
 
     // Issues #1143 + #1189. A run's record of what it stopped for is a receipt
     // and cannot go stale — but the *question* it points at can. `ApprovalParked`
@@ -3266,7 +3352,11 @@ async fn list_runs(
         run.verdict = run.derive_verdict();
     }
 
-    Ok(Json(WorkflowRunsResponse { runs, has_more }))
+    Ok(Json(WorkflowRunsResponse {
+        runs,
+        has_more,
+        next_before_seq,
+    }))
 }
 
 /// The `GET …/workflows/runs` response body (issue #1012).
@@ -3279,9 +3369,22 @@ async fn list_runs(
 #[serde(rename_all = "camelCase")]
 struct WorkflowRunsResponse {
     runs: Vec<WorkflowRunOutcome>,
-    /// Whether a further, older page exists behind `?before_seq=<oldest
-    /// returned run's seq>`.
+    /// Whether a further, older page exists behind [`next_before_seq`](Self::next_before_seq).
     has_more: bool,
+    /// The cursor to pass as `?before_seq=` to fetch the page behind this one —
+    /// this page's **lowest** `seq`, which is not in general the last row in
+    /// display order (see [`select_run_page`]).
+    ///
+    /// Server-issued rather than client-derived. The console used to take
+    /// `runs.at(-1)?.seq`, which was the same number only while the cut and the
+    /// display order shared a key; they no longer do, and the page cut is the
+    /// only place the boundary is known. Absent exactly when `has_more` is
+    /// `false` — nothing older to ask for.
+    ///
+    /// A console predating this field falls back to its old derivation, which
+    /// is why the field is omitted rather than sent as `null`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    next_before_seq: Option<u64>,
 }
 
 /// Relabels a run's node rows for the nodes it blocked on a human (issue #881).
@@ -4226,7 +4329,10 @@ mod tests {
         use axum::http::{Request, StatusCode};
         use tower::ServiceExt;
 
-        use super::super::{CompanyEvent, DEFAULT_RUN_LIMIT, WorkflowNodeStatus};
+        use super::super::{
+            CompanyEvent, DEFAULT_RUN_LIMIT, WorkflowNodeStatus, WorkflowRunOutcome,
+            WorkflowRunVerdict, select_run_page,
+        };
         use crate::company::CompanyManifest;
         use crate::ports::CompanyStore;
         use crate::ports::types::{CompanyId, CompanyRecord};
@@ -7284,6 +7390,277 @@ mod tests {
             assert!(
                 body["runs"].is_array(),
                 "graph read shadowed the history: {body}"
+            );
+        }
+
+        // -------------------------------------------------------------------
+        // Page cut / cursor partition (issue #1012 follow-up)
+        //
+        // `select_run_page` is exercised directly because the anomaly these
+        // tests are about — a run journaled with an `at_millis` OLDER than the
+        // row before it, after the clock stepped backwards — cannot be staged
+        // through the router at all: `FileStore::append` stamps
+        // `at_millis: now_millis()` itself, and `journal_start`/`journal_finish`
+        // hand it only a `CompanyEvent`. There is no seam to fake a clock
+        // regression end-to-end, so the cut is tested where it lives and the
+        // route is tested for the one thing the pure function cannot carry —
+        // the serialized field.
+        // -------------------------------------------------------------------
+
+        /// A settled run at `(seq, at_millis)`, with every other field at its
+        /// nothing-happened value. Only the two keys `select_run_page` reads
+        /// matter here.
+        fn page_run(seq: u64, at_millis: u64) -> WorkflowRunOutcome {
+            WorkflowRunOutcome {
+                seq,
+                at_millis,
+                workflow_id: "wf".to_string(),
+                scheduled: false,
+                run_id: Some(format!("run-{seq}")),
+                deliveries: Vec::new(),
+                pending_approvals: Vec::new(),
+                error: None,
+                nodes: Vec::new(),
+                started_nodes: Vec::new(),
+                started_at_millis: Some(at_millis),
+                running: false,
+                cancelled: false,
+                notices: Vec::new(),
+                board: Vec::new(),
+                blocked_nodes: Vec::new(),
+                approvals: Vec::new(),
+                stranded_approvals: 0,
+                verdict: WorkflowRunVerdict::Ok,
+            }
+        }
+
+        /// One request's worth of the read, as the route performs it: everything
+        /// strictly older than the cursor is a candidate (that is exactly what
+        /// `EventLog::read_before` bounds by), and the cut runs over it.
+        ///
+        /// Handing the whole candidate set in is a faithful superset of what the
+        /// backward walk accumulates — it stops once it has settled `limit + 1`
+        /// runs, and because it walks by descending `seq` those are the highest
+        /// `seq`s among the candidates, which is precisely the set the cut keeps.
+        fn page(
+            journal: &[(u64, u64)],
+            before_seq: Option<u64>,
+            limit: usize,
+        ) -> (Vec<WorkflowRunOutcome>, bool, Option<u64>) {
+            let candidates: Vec<WorkflowRunOutcome> = journal
+                .iter()
+                .filter(|(seq, _)| before_seq.is_none_or(|bound| *seq < bound))
+                .map(|(seq, at_millis)| page_run(*seq, *at_millis))
+                .collect();
+            select_run_page(candidates, limit)
+        }
+
+        /// A journal whose clock stepped backwards: `seq` 40 was appended after
+        /// 30 but carries a wall-clock time older than both 30 and 20. Every
+        /// other row is well-behaved.
+        const REGRESSED: [(u64, u64); 5] = [
+            (10, 1_000),
+            (20, 2_000),
+            (30, 3_000),
+            // NTP correction / VM resume / an operator setting the date: the
+            // append order is unchanged, the timestamp goes backwards.
+            (40, 1_500),
+            (50, 5_000),
+        ];
+
+        /// **The issue #1012 follow-up pin.** Paging must reach every run, and
+        /// a run whose `at_millis` regressed below the page boundary's is the
+        /// one that used to be lost.
+        ///
+        /// Pre-fix (cut on `(at_millis, seq)`, cursor derived from the last
+        /// displayed row) the first `limit=2` page is `[50, 30]` — run 40 sorts
+        /// below 30 on time and is truncated away — and the cursor is 30, which
+        /// excludes everything at or above `seq` 30. Run 40 is on neither page,
+        /// and since the boundary only descends, on no later page either.
+        #[test]
+        fn a_clock_regressed_run_is_reachable_on_a_later_page() {
+            let mut seen: Vec<u64> = Vec::new();
+            let mut cursor: Option<u64> = None;
+            // Bounded so a cursor that fails to advance fails the test instead
+            // of hanging it.
+            for _ in 0..10 {
+                let (rows, has_more, next) = page(&REGRESSED, cursor, 2);
+                seen.extend(rows.iter().map(|run| run.seq));
+                if !has_more {
+                    assert!(next.is_none(), "a last page must issue no cursor");
+                    break;
+                }
+                let next = next.expect("a page with more behind it must issue a cursor");
+                assert!(
+                    cursor.is_none_or(|previous| next < previous),
+                    "the cursor must descend, or the walk cannot terminate"
+                );
+                cursor = Some(next);
+            }
+
+            seen.sort_unstable();
+            assert_eq!(
+                seen,
+                vec![10, 20, 30, 40, 50],
+                "every journaled run must be reachable by paging; \
+                 40 is the clock-regressed one"
+            );
+        }
+
+        /// The property the design rests on, asserted directly rather than
+        /// inferred from a walk: the page and the cursor **partition** the
+        /// candidate set. Everything served is at or above the cursor,
+        /// everything withheld is strictly below it — so the next request,
+        /// which asks for `seq < cursor`, gets exactly the remainder with no
+        /// overlap and no gap.
+        #[test]
+        fn the_page_cursor_partitions_the_run_set() {
+            let (rows, has_more, next) = page(&REGRESSED, None, 2);
+            assert!(has_more);
+            let cursor = next.expect("cursor");
+
+            let served: Vec<u64> = rows.iter().map(|run| run.seq).collect();
+            assert!(
+                served.iter().all(|seq| *seq >= cursor),
+                "a served run below the cursor would be served twice: {served:?} vs {cursor}"
+            );
+            let withheld: Vec<u64> = REGRESSED
+                .iter()
+                .map(|(seq, _)| *seq)
+                .filter(|seq| !served.contains(seq))
+                .collect();
+            assert!(
+                withheld.iter().all(|seq| *seq < cursor),
+                "a withheld run at or above the cursor is unreachable forever: \
+                 {withheld:?} vs {cursor}"
+            );
+            assert_eq!(
+                served.len() + withheld.len(),
+                REGRESSED.len(),
+                "the two halves must account for every run"
+            );
+        }
+
+        /// Issue #228 / #1272's ordering is untouched: the cut is keyed on
+        /// `seq`, but what comes back is still sorted newest **finish** first,
+        /// on the very `(at_millis, seq)` pair each row displays.
+        #[test]
+        fn a_page_is_still_displayed_newest_finish_first() {
+            // Within one page, `seq` order and finish order disagree: 40 was
+            // appended last but finished (by the clock) before 30.
+            let (rows, _, _) = page(&[(30, 3_000), (40, 1_500), (50, 5_000)], None, 3);
+            let order: Vec<u64> = rows.iter().map(|run| run.seq).collect();
+            assert_eq!(
+                order,
+                vec![50, 30, 40],
+                "the page must be listed by finish time, not by the key it was cut on"
+            );
+        }
+
+        /// No older page, no cursor. A cursor for a page that does not exist
+        /// invites a caller to ask for it, and an absent field is also what
+        /// tells an older console to fall back to its own derivation.
+        #[test]
+        fn next_before_seq_is_absent_when_there_is_no_older_page() {
+            let (rows, has_more, next) = page(&REGRESSED, None, 50);
+            assert_eq!(rows.len(), 5);
+            assert!(!has_more);
+            assert_eq!(next, None);
+
+            // Exactly `limit` runs is still "no older page" — the read stops at
+            // `limit + 1` precisely so this case is knowable.
+            let (rows, has_more, next) = page(&REGRESSED, None, 5);
+            assert_eq!(rows.len(), 5);
+            assert!(!has_more);
+            assert_eq!(next, None);
+        }
+
+        /// The one part the pure function cannot cover: the cursor reaches the
+        /// console, under the camelCase name the client reads, and feeding it
+        /// back gets the next page with no repeat and no gap.
+        #[tokio::test]
+        async fn run_history_issues_the_page_cursor_on_the_wire() {
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let (state, _store, id) = hosted_state(&home).await;
+
+            for _ in 0..5 {
+                journal_run(&state, &id, "digest", false, Vec::new(), None).await;
+            }
+
+            let fetch = |uri: String| {
+                let state = state.clone();
+                async move {
+                    json_body(
+                        router(state)
+                            .oneshot(request("GET", &uri, None))
+                            .await
+                            .unwrap(),
+                    )
+                    .await
+                }
+            };
+            let seqs = |body: &serde_json::Value| -> Vec<u64> {
+                body["runs"]
+                    .as_array()
+                    .expect("array")
+                    .iter()
+                    .map(|row| row["seq"].as_u64().expect("seq"))
+                    .collect()
+            };
+
+            let first =
+                fetch("/api/v1/company/workflows/runs?workflow=digest&limit=2".to_string()).await;
+            assert_eq!(first["hasMore"], true, "{first}");
+            let cursor = first["nextBeforeSeq"]
+                .as_u64()
+                .unwrap_or_else(|| panic!("nextBeforeSeq must be on the wire: {first}"));
+            let page_one = seqs(&first);
+            assert_eq!(page_one.len(), 2, "{first}");
+            assert_eq!(
+                cursor,
+                *page_one.iter().min().expect("min"),
+                "the cursor is the page's low-water seq: {first}"
+            );
+
+            let second = fetch(format!(
+                "/api/v1/company/workflows/runs?workflow=digest&limit=2&before_seq={cursor}"
+            ))
+            .await;
+            let page_two = seqs(&second);
+            assert!(
+                page_two.iter().all(|seq| *seq < cursor),
+                "the next page must be strictly below the cursor: {second}"
+            );
+            assert!(
+                page_two.iter().all(|seq| !page_one.contains(seq)),
+                "no run may appear on two pages: {page_one:?} then {page_two:?}"
+            );
+
+            let last_cursor = second["nextBeforeSeq"]
+                .as_u64()
+                .expect("a third page exists");
+            let third = fetch(format!(
+                "/api/v1/company/workflows/runs?workflow=digest&limit=2&before_seq={last_cursor}"
+            ))
+            .await;
+            let page_three = seqs(&third);
+            assert_eq!(third["hasMore"], false, "{third}");
+            assert!(
+                third.get("nextBeforeSeq").is_none(),
+                "the last page must omit the cursor entirely: {third}"
+            );
+
+            // No gap: the three pages are the whole history, once each.
+            let mut walked: Vec<u64> = page_one;
+            walked.extend(page_two);
+            walked.extend(page_three);
+            walked.sort_unstable();
+            walked.dedup();
+            assert_eq!(
+                walked.len(),
+                5,
+                "paging must reach all five runs: {walked:?}"
             );
         }
 

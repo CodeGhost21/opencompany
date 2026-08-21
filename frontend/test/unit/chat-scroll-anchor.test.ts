@@ -356,3 +356,54 @@ describe("a transcript that arrives after mount", () => {
     expect(scrollTop).toBe(100);
   });
 });
+
+/**
+ * Which end short content settles against (issue #1323).
+ *
+ * Separate from the scroll rules above, and deliberately so: `scrollTop` cannot
+ * express this. A pane whose content is shorter than its viewport has no scroll
+ * range at all, so every anchoring call in this file is a no-op there and the
+ * only thing deciding where the block sits is the flex alignment on the inner
+ * wrapper. That is what these assert.
+ *
+ * The bug: an empty channel's intro — a heading, a sentence, and the two action
+ * cards that are the entire point of an empty channel — was bottom-pinned by
+ * `justify-end`, so it rendered crushed against the composer under most of a
+ * screen of dead canvas, with the primary invitation as the last thing the eye
+ * reached.
+ */
+describe("where an empty channel's intro sits", () => {
+  /** The inner wrapper, whose flex alignment is the whole subject here. */
+  function wrapper(): HTMLElement {
+    return scroller().firstElementChild as HTMLElement;
+  }
+
+  it("reads from the top when the channel has answered and is empty", () => {
+    const ch = channel("engineering");
+    render(ch, [], false);
+
+    expect(wrapper().className).toContain("justify-start");
+    expect(wrapper().className).not.toContain("justify-end");
+  });
+
+  it("keeps the bottom anchor once there is a transcript", () => {
+    // A short transcript still belongs above the composer, the way every chat
+    // client puts it. This is the behaviour #1323 must not disturb.
+    const ch = channel("engineering");
+    render(ch, items(3, ch), false);
+
+    expect(wrapper().className).toContain("justify-end");
+    expect(wrapper().className).not.toContain("justify-start");
+  });
+
+  it("keeps the bottom anchor while history is still on the wire", () => {
+    // `loading` renders the skeleton, which fills the space the real rows will.
+    // Flipping to the top here would lift the intro and then drop it back the
+    // moment the transcript landed — the jump the skeleton exists to prevent.
+    const ch = channel("engineering");
+    render(ch, [], true);
+
+    expect(wrapper().className).toContain("justify-end");
+    expect(wrapper().className).not.toContain("justify-start");
+  });
+});

@@ -197,6 +197,14 @@ export function MemoryView({ client, company }: Props) {
     return counts;
   }, [entries]);
 
+  // The one engine state the *writing* half of this page has to respect: the
+  // null engine takes every write and throws it away, so a live "New memory"
+  // button beside that warning invites work the host will silently drop
+  // (issue #1410). The panel's health dot already refuses to go green here for
+  // the same reason.
+  const mode = enginePanelMode(engine);
+  const discarding = mode === "discard";
+
   async function add(fields: { kind: MemoryKind; title: string; body: string }) {
     await createMemory(client, company, fields);
     await load({ silent: true });
@@ -228,13 +236,23 @@ export function MemoryView({ client, company }: Props) {
             </p>
           </div>
           <div className="flex items-center gap-3">
-            {engine && engine.backend !== "store" && (
+            {engine && mode !== "hidden" && (
               <span
-                className="rounded-full border px-3 py-1 text-xs text-muted-foreground"
+                className={cn(
+                  "rounded-full border px-3 py-1 text-xs",
+                  // A capability count in the calm register, inches above an
+                  // alert saying every write is discarded, reads as a fact
+                  // about a working engine. Amber, like the dot (issue #1410).
+                  discarding
+                    ? "border-status-blocked/40 text-status-blocked-text"
+                    : "text-muted-foreground",
+                )}
                 title={
-                  engine.capabilities.length
-                    ? `Capability families: ${engine.capabilities.join(", ")}`
-                    : "Capabilities not negotiated"
+                  discarding
+                    ? "This engine discards every write — nothing saved here is retained."
+                    : engine.capabilities.length
+                      ? `Capability families: ${engine.capabilities.join(", ")}`
+                      : "Capabilities not negotiated"
                 }
                 data-testid="memory-engine-badge"
               >
@@ -244,9 +262,28 @@ export function MemoryView({ client, company }: Props) {
                 )}
               </span>
             )}
-            <Button onClick={() => setAddOpen(true)} data-testid="memory-add">
-              <Plus className="size-4" /> New memory
-            </Button>
+            {/*
+              The reason rides on the wrapper, not the button: `Button` carries
+              `disabled:pointer-events-none`, so a `title` on a disabled button
+              never surfaces — the span still takes the hover and shows it.
+            */}
+            <span
+              title={
+                discarding
+                  ? "This engine discards every write — nothing saved here is retained."
+                  : undefined
+              }
+            >
+              <Button
+                onClick={() => setAddOpen(true)}
+                disabled={discarding}
+                // Rendered, not hidden: the operator should see that writing is
+                // the thing this engine cannot do, not find the control missing.
+                data-testid="memory-add"
+              >
+                <Plus className="size-4" /> New memory
+              </Button>
+            </span>
           </div>
         </div>
 
@@ -322,7 +359,10 @@ function HealthStrip({
   }
   const tiles: { label: string; value: string }[] = [
     { label: "Total items", value: String(total) },
-    { label: "Teammate memory", value: String(stats?.agentChunks ?? 0) },
+    // `agentChunks` minus the outcomes carved out of it — the two tiles are
+    // peers on screen, so they must be disjoint in fact. See
+    // `teammateMemoryCount` (issue #1402).
+    { label: "Teammate memory", value: String(teammateMemoryCount(stats)) },
     { label: "Task outcomes", value: String(stats?.taskOutcomes ?? 0) },
     // Across every memory source, not just operator facts — teammates write only
     // context chunks, so a facts-only figure left this stat at "—" forever.
@@ -543,6 +583,30 @@ export function probeLabel(healthy: boolean | undefined | null): string {
   if (healthy === true) return "reachable at boot";
   if (healthy === false) return "unreachable at boot — check the endpoint and credential";
   return "not probed";
+}
+
+/**
+ * How many context chunks are teammate memory rather than task outcomes.
+ *
+ * `/memory/stats` reports a superset and one of its own slices, not two
+ * populations: `agentChunks` counts *every* chunk, and `taskOutcomes` is
+ * carved out of it by label prefix — the backend says so where it computes
+ * them ("the task-outcome prefix narrows to stored outcomes (a subset of the
+ * total)", `src/server/ops/memory.rs`). Rendering both raw put a count and its
+ * own subset side by side as peers, so a company whose every chunk was an
+ * outcome read `Teammate memory 13 / Task outcomes 13` next to `Total items 13`
+ * — thirteen teammate memories that do not exist, and a strip that adds up to
+ * twice the company's memory (issue #1402).
+ *
+ * The cards below have always partitioned these correctly: `context_entries`
+ * sorts each chunk into one of two **disjoint** buckets. This is that same
+ * split, so the strip counts the way the list does.
+ *
+ * Clamped because the two figures are two reads of a live store and can cross
+ * under a concurrent write; a negative tile is a worse lie than a stale one.
+ */
+export function teammateMemoryCount(stats: MemoryStats | null): number {
+  return Math.max(0, (stats?.agentChunks ?? 0) - (stats?.taskOutcomes ?? 0));
 }
 
 /** Whether the negotiated families are exactly the mandatory floor. */

@@ -146,7 +146,7 @@ export function DeclareListWizard({
 
   return (
     <Dialog open onOpenChange={onCancel}>
-      <DialogContent className="max-h-[85vh] max-w-2xl overflow-y-auto">
+      <DialogContent className="max-h-[85vh] sm:max-w-2xl overflow-y-auto">
         <DialogHeader>
           <DialogTitle>New list</DialogTitle>
           <DialogDescription>

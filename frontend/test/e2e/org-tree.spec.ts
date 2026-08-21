@@ -516,8 +516,11 @@ test("#839 creates a teammate on a selected desk and persists it", async ({
   await openChart(page);
 
   const growth = deskNode(page, "Growth");
-  await growth
-    .getByRole("button", { name: "Create teammate on Growth" })
+  // One control per desk now, and "New teammate…" is an item inside its menu
+  // rather than an unlabelled icon button beside it.
+  await growth.getByRole("button", { name: "Add teammate" }).click();
+  await page
+    .getByRole("menuitem", { name: "Create teammate on Growth" })
     .click();
   const dialog = page.getByRole("dialog");
   await dialog.getByLabel("Name").fill("Babbage");
@@ -665,6 +668,42 @@ test("#311 the lead can be changed from the chart and survives a reload", async 
   ).toContainText("Ada");
 });
 
+test("a desk offers one add control, and it stays usable when the roster is exhausted", async ({
+  page,
+}) => {
+  await mockApi(page);
+  await openChart(page);
+
+  const engineering = deskNode(page, "Engineering");
+
+  // One control per desk. It used to be two: this button, and — flush against
+  // it, unlabelled — a `UserPlus` icon that created a teammate here. The icon
+  // wore the same glyph as the page header's "New teammate", touching a button
+  // that already said the words, so the create path was invisible.
+  await expect(engineering.getByRole("button", { name: /teammate/i })).toHaveCount(1);
+
+  // Seat everyone the roster has left, through the menu.
+  for (const name of ["Linus", "Hedy", "Turing"]) {
+    await engineering.getByRole("button", { name: "Add teammate" }).click();
+    await page.getByRole("menuitem", { name }).click();
+    await expect(engineering).toContainText(name);
+  }
+
+  // Nobody is left to seat — and the control is still live, because creating a
+  // teammate here is still something an operator can do. It used to go
+  // disabled and read "Everyone is on this desk", which left the unlabelled
+  // icon as the only way in.
+  const add = engineering.getByRole("button", { name: "Add teammate" });
+  await expect(add).toBeEnabled();
+  await add.click();
+
+  const menu = page.getByRole("menu");
+  await expect(menu).toContainText("Everyone on the roster is already here.");
+  await expect(
+    menu.getByRole("menuitem", { name: "Create teammate on Engineering" }),
+  ).toBeVisible();
+});
+
 test("#839 a teammate created but not placed is still on the chart to place by hand", async ({
   page,
 }) => {
@@ -677,8 +716,11 @@ test("#839 a teammate created but not placed is still on the chart to place by h
   await openChart(page);
 
   const growth = deskNode(page, "Growth");
-  await growth
-    .getByRole("button", { name: "Create teammate on Growth" })
+  // One control per desk now, and "New teammate…" is an item inside its menu
+  // rather than an unlabelled icon button beside it.
+  await growth.getByRole("button", { name: "Add teammate" }).click();
+  await page
+    .getByRole("menuitem", { name: "Create teammate on Growth" })
     .click();
   const dialog = page.getByRole("dialog");
   await dialog.getByLabel("Name").fill("Hopper");
