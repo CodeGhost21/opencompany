@@ -708,6 +708,8 @@ mod tests {
                 manifest: manifest.clone(),
                 ledger: Vec::new(),
                 lifecycle: "running".to_string(),
+                overlay_retired_agents: Vec::new(),
+                overlay_agent_edits: Vec::new(),
                 overlay_agents: Vec::new(),
                 overlay_desk_members: Vec::new(),
                 overlay_desk_order: Vec::new(),
