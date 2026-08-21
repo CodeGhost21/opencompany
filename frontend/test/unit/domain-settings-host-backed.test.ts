@@ -286,6 +286,34 @@ describe("saving the SMTP card", () => {
     expect(body.port).toBe(465);
   });
 
+  it("will not offer a test send until the host has something stored to test", async () => {
+    // The send goes through what the HOST holds. Gating on the form would light
+    // the button up on a typed-but-unsaved password and then report a verdict
+    // about a different configuration — the same class of lie the card told
+    // before #1460, one button along.
+    const { client } = fakeClient({ smtp: { configured: false, host: "smtp.postmarkapp.com" } });
+    await show(client);
+
+    expect((at("smtp-test") as HTMLButtonElement).disabled).toBe(true);
+    expect(at("smtp-test-hint")?.textContent).toContain("Save a complete configuration");
+  });
+
+  it("offers the test send once the host reports a stored configuration", async () => {
+    // The control: the assertion above is only worth having if the button is
+    // reachable at all.
+    const { client, calls } = fakeClient();
+    await show(client);
+
+    expect((at("smtp-test") as HTMLButtonElement).disabled).toBe(false);
+    expect(at("smtp-test-hint")).toBeNull();
+
+    await click("smtp-test");
+    expect(calls.post).toHaveLength(1);
+    expect(calls.post[0].path).toContain("/smtp/test");
+    // The host's own sentence, verbatim.
+    expect(toasts.success).toHaveBeenCalledWith("Sent.");
+  });
+
   it("refuses a port the host would reject with a serde error", async () => {
     // The host takes a `u16`. Caught here so the operator gets a sentence they
     // can act on instead of a deserialization message.

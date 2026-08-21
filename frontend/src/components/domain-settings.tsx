@@ -203,6 +203,11 @@ function DomainCard({ client, company }: Props) {
             <Input
               value={draft}
               data-testid="domain-input"
+              // The card title is the only thing naming this field, and a
+              // screen reader does not read it as the input's name. The
+              // placeholder is an example, not a label — it disappears on the
+              // first keystroke, which is exactly when it would be needed.
+              aria-label="Custom domain"
               onChange={(e) => setDraft(e.target.value)}
               placeholder="mail.acme.com"
               onKeyDown={(e) => e.key === "Enter" && void connect()}
@@ -500,7 +505,12 @@ function SmtpCard({ client, company }: Props) {
     );
   }
 
-  const complete = Boolean(host && port && username && fromEmail);
+  // Whether the host has a *stored* configuration to test — not whether the
+  // form on screen looks filled in. The test send goes through what the host
+  // holds, so gating on the form would enable the button on a typed-but-unsaved
+  // password and report a verdict about something else entirely. That is the
+  // same class of lie the card had before #1460, one button along.
+  const testable = Boolean(status?.configured);
 
   return (
     <Card data-testid="smtp-card">
@@ -619,15 +629,15 @@ function SmtpCard({ client, company }: Props) {
               </Button>
               <Button
                 variant="outline"
-                disabled={busy || !complete || testUnwired}
+                disabled={busy || !testable || testUnwired}
                 onClick={() => void test()}
                 data-testid="smtp-test"
               >
                 <ShieldAlert className="size-4" /> Test connection
               </Button>
-              {complete ? null : (
-                <span className="text-xs text-muted-foreground">
-                  Fill host, port, username, and from email.
+              {testable ? null : (
+                <span className="text-xs text-muted-foreground" data-testid="smtp-test-hint">
+                  Save a complete configuration, password included, to test it.
                 </span>
               )}
             </div>
