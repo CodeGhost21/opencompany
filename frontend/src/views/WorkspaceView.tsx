@@ -108,6 +108,7 @@ import {
   folderPathLabel,
   type FsNode,
   hasLegacyLocal,
+  hasOperatorContent,
   isAgentsFolder,
   isDerivedNode,
   isSecretNode,
@@ -1450,9 +1451,13 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
               them. Deliberately a button rather than something boot does: the
               operator's click is the opt-in, and the dialog names every folder
               before any of them goes. */}
+          {/* Nothing to tidy or repair in a tree with nothing in it. A no-op on
+              a live company, where the scaffold guarantees rows — but the
+              controls claimed to apply to a state they cannot act on, which is
+              the same claim the dead explorer branch was making (#1380). */}
           <IconBtn
             label="Tidy empty agent folders"
-            disabled={sweeping}
+            disabled={sweeping || nodes.length === 0}
             onClick={() => void previewSweep()}
             data-testid="workspace-sweep"
           >
@@ -1467,7 +1472,7 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
               rearranges somebody's tree unasked. */}
           <IconBtn
             label="Repair duplicate folders"
-            disabled={repairing}
+            disabled={repairing || nodes.length === 0}
             onClick={() => void previewRepair()}
             data-testid="workspace-repair"
           >
@@ -1551,11 +1556,12 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
                 Try again
               </Button>
             </div>
-          ) : nodes.length === 0 ? (
-            <p className="px-3 py-2 text-xs text-muted-foreground">
-              This workspace is empty. Create a note to start.
-            </p>
           ) : (
+            /* The `nodes.length === 0` branch that used to sit here said "This
+               workspace is empty. Create a note to start." — dead code, since
+               `ensure_workspace_scaffold` lays down `Agents/` and `secrets/` on
+               every boot, and a second message contradicting the note pane's
+               own (issue #1380). The pane owns what an empty workspace says. */
             <Tree
               nodes={nodes}
               parentId={null}
@@ -1714,7 +1720,14 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
                   updatedBy={openFile?.updatedBy ?? openNode.updatedBy}
                 />
               )}
-              <span className="hidden shrink-0 text-xs text-muted-foreground sm:inline">
+              {/* Labelled (issue #1382). A bare "2 days ago" beside the title
+                  read like part of it, and did not say which event it was
+                  timing. */}
+              <span
+                className="hidden shrink-0 text-xs text-muted-foreground sm:inline"
+                data-testid="workspace-updated"
+              >
+                Edited{" "}
                 {formatUpdated(openFile?.updatedAt ?? openNode.updatedAt)}
               </span>
               <SaveStatus state={saveState} />
@@ -1852,7 +1865,9 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
           />
         ) : (
           <EmptyNote
+            variant={hasOperatorContent(nodes) ? "no-selection" : "first-run"}
             onNew={() => setPrompt({ mode: "file" })}
+            onNewFolder={() => setPrompt({ mode: "folder" })}
             onToggleExplorer={() => setShowExplorer((s) => !s)}
           />
         )}
@@ -2631,31 +2646,87 @@ function MissingNote({
   );
 }
 
+/**
+ * The pane when no note is open — in its two genuinely different situations
+ * (issues #1380, #1481).
+ *
+ * There used to be one. "No note open / Pick a note from the explorer, or
+ * create one" is right for an operator with sixty notes who has not clicked
+ * one; it is wrong on a fresh company, where the explorer holds three rows the
+ * host scaffolded and the operator has no reason to open any of them. The
+ * explorer meanwhile carried a second, contradicting message — "This workspace
+ * is empty. Create a note to start." — on a `nodes.length === 0` branch that
+ * the boot-time scaffold makes unreachable.
+ *
+ * So the note pane owns the messaging, and the first-run variant finally says
+ * what this tree *is*. That premise — the workspace is shared with the
+ * company's agents, who read what is written here and write back into it —
+ * existed only in code comments in three files, none of them rendered. An
+ * operator could not learn from this screen that anyone but themselves would
+ * ever read it.
+ */
 function EmptyNote({
+  variant,
   onNew,
+  onNewFolder,
   onToggleExplorer,
 }: {
+  variant: "first-run" | "no-selection";
   onNew: () => void;
+  onNewFolder: () => void;
   onToggleExplorer: () => void;
 }) {
+  const firstRun = variant === "first-run";
   return (
-    <div className="flex flex-1 flex-col">
+    <div
+      className="flex flex-1 flex-col"
+      data-testid={`workspace-empty-${variant}`}
+    >
       <div className="flex items-center border-b px-3 py-2 md:hidden">
         <IconBtn label="Toggle explorer" onClick={onToggleExplorer}>
           <PanelLeft className="size-4" />
         </IconBtn>
       </div>
-      <div className="flex flex-1 flex-col items-center justify-center gap-3 text-center">
+      <div className="flex flex-1 flex-col items-center justify-center gap-3 px-6 text-center">
         <FileText className="size-8 text-muted-foreground" />
-        <div className="space-y-1">
-          <p className="font-medium">No note open</p>
-          <p className="text-sm text-muted-foreground">
-            Pick a note from the explorer, or create one.
-          </p>
-        </div>
-        <Button variant="outline" size="sm" onClick={onNew}>
-          <FilePlus2 className="size-4" /> New note
-        </Button>
+        {firstRun ? (
+          <>
+            <div className="max-w-md space-y-2">
+              <p className="font-medium">Your company&rsquo;s shared notes</p>
+              <p className="text-sm text-muted-foreground">
+                Everyone here reads this tree — your teammates and the
+                company&rsquo;s agents alike. What you write is what they work
+                from on their next turn, and the notes they write show up here
+                beside yours.
+              </p>
+              <p className="text-sm text-muted-foreground">
+                A <span className="font-mono text-xs">derived/</span> folder
+                appears on its own once a ledger has rows. Nobody edits that one
+                — it is rewritten from the ledger.
+              </p>
+            </div>
+            <div className="flex flex-wrap justify-center gap-2">
+              <Button variant="outline" size="sm" onClick={onNew}>
+                <FilePlus2 className="size-4" /> New note
+              </Button>
+              <Button variant="outline" size="sm" onClick={onNewFolder}>
+                <FolderPlus className="size-4" /> New folder
+              </Button>
+            </div>
+          </>
+        ) : (
+          <>
+            <div className="space-y-1">
+              <p className="font-medium">No note open</p>
+              <p className="text-sm text-muted-foreground">
+                Pick a note from the explorer, or create one.
+              </p>
+            </div>
+            <Button variant="outline" size="sm" onClick={onNew}>
+              <FilePlus2 className="size-4" /> New note
+            </Button>
+          </>
+        )}
       </div>
     </div>
   );
