@@ -19,6 +19,16 @@ import { openHostMenu } from "./host-switcher";
 /** A dead address, as in `add-host-connectors.spec.ts`. Port 9 is `discard`. */
 const ASLEEP = "http://127.0.0.1:9";
 
+/**
+ * A second dead address, for the move to land on.
+ *
+ * Deliberately *not* the console's own origin: the primary row holds that one
+ * (as the empty string), so moving here would be moving onto a host this
+ * console already has — which the page refuses, and which the test below
+ * asserts it refuses. Port 7 is `echo`; nothing is listening on either.
+ */
+const MOVED_TO = "http://127.0.0.1:7";
+
 /** Seeds a same-origin host and a second one at an address nothing answers. */
 async function seedTwoHosts(page: Page): Promise<void> {
   await page.addInitScript(
@@ -106,7 +116,31 @@ test("renaming a host keeps everything the console remembers about it", async ({
   expect(profiles.map((p) => p.id).sort()).toEqual(["conn-primary", "conn-second"]);
 });
 
-test("a host that moved is re-addressed under the id it already had", async ({ page, baseURL }) => {
+test("a host that moved is re-addressed under the id it already had", async ({ page }) => {
+  await seedTwoHosts(page);
+  await page.goto("/");
+  await expect(switcher(page)).toHaveAttribute("data-host-count", "2", { timeout: 30_000 });
+
+  await openTheManagePage(page);
+  await page.getByTestId("manage-host-edit-conn-second").click();
+  await page.getByLabel("Address").fill(MOVED_TO);
+  await page.getByTestId("manage-host-save-conn-second").click();
+
+  await expect
+    .poll(async () => (await storedProfiles(page)).find((p) => p.id === "conn-second")?.baseUrl, {
+      timeout: 30_000,
+    })
+    .toBe(MOVED_TO);
+  // Still two rows: a move is not an add.
+  await expect(switcher(page)).toHaveAttribute("data-host-count", "2");
+});
+
+test("moving a host onto one this console already holds is refused", async ({ page, baseURL }) => {
+  // The primary row *is* this origin, stored as the empty string — so its
+  // explicit url is the same host under a different spelling. Saved, it would
+  // be two connection ids for one host, with every browser-local key split
+  // between them. `canonicalAddress` is what makes the two spellings compare
+  // equal; this is the assertion that they do.
   await seedTwoHosts(page);
   await page.goto("/");
   await expect(switcher(page)).toHaveAttribute("data-host-count", "2", { timeout: 30_000 });
@@ -114,15 +148,9 @@ test("a host that moved is re-addressed under the id it already had", async ({ p
   await openTheManagePage(page);
   await page.getByTestId("manage-host-edit-conn-second").click();
   await page.getByLabel("Address").fill(baseURL ?? "");
-  await page.getByTestId("manage-host-save-conn-second").click();
 
-  await expect
-    .poll(async () => (await storedProfiles(page)).find((p) => p.id === "conn-second")?.baseUrl, {
-      timeout: 30_000,
-    })
-    .toBe(baseURL ?? "");
-  // Still two rows: a move is not an add.
-  await expect(switcher(page)).toHaveAttribute("data-host-count", "2");
+  await expect(page.getByTestId("manage-host-taken-conn-second")).toBeVisible();
+  await expect(page.getByTestId("manage-host-save-conn-second")).toBeDisabled();
 });
 
 test("an address with no scheme is refused rather than saved", async ({ page }) => {
