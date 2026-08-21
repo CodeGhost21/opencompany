@@ -58,7 +58,7 @@ fn a_declaration_parses_into_the_same_spec_a_run_time_declaration_would() {
     assert_eq!(spec.source, crate::ledger::LedgerSource::Events);
     // Not authored, derived: an author who never writes the folder convention
     // cannot get it wrong.
-    assert_eq!(spec.derived, "derived/PIPELINE.md");
+    assert_eq!(spec.derived, "derived/pipeline.md");
     assert_eq!(spec.id_field().expect("an id field").name, "deal");
     assert_eq!(spec.closing_statuses(), vec!["won"]);
     assert_eq!(spec.default_order(), crate::ledger::Order::Recent);
@@ -112,7 +112,7 @@ fn a_bundle_may_not_shadow_a_built_in() {
 
 #[test]
 fn two_declarations_may_not_claim_one_derived_file() {
-    let other = format!("derived = \"derived/PIPELINE.md\"\n{PIPELINE}");
+    let other = format!("derived = \"derived/pipeline.md\"\n{PIPELINE}");
     let names = vec!["pipeline.toml".to_string(), "renewals.toml".to_string()];
     let files = vec![
         ("pipeline.toml", PIPELINE),

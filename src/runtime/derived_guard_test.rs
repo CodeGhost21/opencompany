@@ -42,7 +42,7 @@ async fn with_a_ledger(runtime: &CompanyRuntime) -> (String, String) {
         &json!({
             "slug": "hazards",
             "title": "Hazards",
-            "derived": "derived/HAZARDS.md",
+            "derived": "derived/hazards.md",
             "fields": [
                 { "name": "id", "role": "id" },
                 { "name": "risk", "role": "title" },
@@ -62,7 +62,7 @@ async fn with_a_ledger(runtime: &CompanyRuntime) -> (String, String) {
         .clone();
     let file = tree
         .iter()
-        .find(|node| node.name == "HAZARDS.md")
+        .find(|node| node.name == "hazards.md")
         .expect("file")
         .id
         .clone();

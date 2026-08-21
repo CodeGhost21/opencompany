@@ -10,7 +10,7 @@ fn declared(slug: &str) -> LedgerSpec {
         &json!({
             "slug": slug,
             "title": slug,
-            "derived": format!("derived/{}.md", slug.to_uppercase()),
+            "derived": format!("derived/{slug}.md"),
             "fields": [
                 { "name": "id", "role": "id" },
                 { "name": "what", "role": "title" },
@@ -246,7 +246,7 @@ fn the_registry_names_the_owner_of_a_derived_file() {
     let registry = Registry::build([declared("risks")]);
     assert_eq!(
         registry
-            .owner_of_derived("derived/RISKS.md")
+            .owner_of_derived("derived/risks.md")
             .map(|s| s.slug.as_str()),
         Some("risks")
     );
