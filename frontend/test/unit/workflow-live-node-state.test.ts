@@ -76,6 +76,8 @@ type Ev = import("@/hooks/use-events").CompanyStreamEvent;
 const GRAPH: WorkflowGraph = {
   id: "digest",
   name: "Weekly digest",
+  // Editable-graph token is irrelevant to this fixture's fold/paint behavior;
+  // `version` just has to be present now that it is required (issue #1013).
   version: null,
   nodes: [
     { id: "start", kind: "trigger", name: "Monday morning" },

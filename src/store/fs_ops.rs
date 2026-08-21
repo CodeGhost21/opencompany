@@ -2102,7 +2102,7 @@ fn dedup_latest<T: HasId>(records: Vec<T>) -> Vec<T> {
 }
 
 /// Rewrites a JSONL file from a slice of records (one JSON object per line).
-async fn rewrite_jsonl<T>(path: &Path, records: &[T]) -> Result<()>
+pub(crate) async fn rewrite_jsonl<T>(path: &Path, records: &[T]) -> Result<()>
 where
     T: serde::Serialize,
 {

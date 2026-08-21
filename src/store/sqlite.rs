@@ -1034,6 +1034,17 @@ impl ContextStore for SqliteStore {
         }
     }
 
+    async fn delete(&self, id: &CompanyId, addr: &ChunkAddr) -> Result<bool> {
+        let conn = self.conn();
+        let removed = conn
+            .execute(
+                "DELETE FROM context_chunks WHERE company_id = ?1 AND addr = ?2",
+                params![id.as_ref(), addr.as_ref()],
+            )
+            .map_err(sql_err)?;
+        Ok(removed > 0)
+    }
+
     async fn search(&self, id: &CompanyId, query: &str, limit: usize) -> Result<Vec<ChunkHit>> {
         let conn = self.conn();
         let mut stmt = conn
