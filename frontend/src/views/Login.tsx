@@ -263,8 +263,24 @@ export function Login({
   }
 
   return (
-    <div className="min-h-svh bg-background">
-      <header className="flex items-center justify-between border-b px-6 py-4">
+    /*
+      The box that owns the viewport height has to be the flex container too.
+
+      `justify-center` distributes free space along its *own* main axis, so on a
+      `main` whose parent is a plain block it is inert: that `main` is exactly as
+      tall as its content and has no free space to distribute. The height lived
+      on this div and the centring lived on `main`, and neither reached the
+      other — the card sat pinned under the header with half the viewport empty
+      below it (#1332). `flex flex-col` here plus `flex-1` there hands `main`
+      the height the header left over, which is what the `justify-center` below
+      was always reaching for.
+
+      `flex-1` cannot clip the taller variants: a flex item's `min-height: auto`
+      floors it at its content height, so on a short viewport `main` grows past
+      its share, the page grows past `min-h-svh`, and the document scrolls.
+    */
+    <div className="flex min-h-svh flex-col bg-background">
+      <header className="flex shrink-0 items-center justify-between border-b px-6 py-4">
         <div className="flex items-center gap-2">
           <div className="flex size-7 items-center justify-center rounded-md bg-primary text-primary-foreground">
             <Building2 className="size-4" />
@@ -274,7 +290,7 @@ export function Login({
         <ThemeToggle />
       </header>
 
-      <main className="mx-auto flex w-full max-w-md flex-col justify-center px-6 py-16">
+      <main className="mx-auto flex w-full max-w-md flex-1 flex-col justify-center px-6 py-16">
         {/*
           The refusal, above the heading, where the eye lands first.
 
