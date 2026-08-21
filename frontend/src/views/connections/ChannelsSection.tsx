@@ -11,6 +11,8 @@ import {
   type TelegramChannelStatus,
 } from "@/api/channels";
 import { ApiError } from "@/api/types";
+import { classifyLoadFailure } from "@/lib/section-load";
+import { SectionUnreachable } from "@/views/connections/SectionUnreachable";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -27,7 +29,7 @@ interface Props {
   canManage: boolean;
 }
 
-type Load = "loading" | "ready" | "unavailable";
+type Load = "loading" | "ready" | "unavailable" | "error";
 
 /**
  * Configure the company's Telegram channel.
@@ -53,9 +55,11 @@ export function ChannelsSection({ client, company, canManage }: Props) {
     try {
       setStatus(await getTelegramChannel(client, company));
       setLoad("ready");
-    } catch {
-      // The channels surface isn't wired on this host — hide the section.
-      setLoad("unavailable");
+    } catch (err) {
+      // A 404 means the channels surface isn't wired on this host — hide it.
+      // Anything else is a host that could not answer; keep the section and say
+      // so rather than vanishing (issue #1470).
+      setLoad(classifyLoadFailure(err));
     }
   }, [client, company]);
 
@@ -152,7 +156,10 @@ export function ChannelsSection({ client, company, canManage }: Props) {
         )}
       </div>
 
-      <Card>
+      {load === "error" ? (
+        <SectionUnreachable label="Couldn't read this company's channel settings" />
+      ) : (
+        <Card>
         <CardContent className="space-y-4 pt-6">
           <div className="space-y-1">
             <p className="text-sm font-medium">Telegram</p>
@@ -287,6 +294,7 @@ export function ChannelsSection({ client, company, canManage }: Props) {
           )}
         </CardContent>
       </Card>
+      )}
     </section>
   );
 }

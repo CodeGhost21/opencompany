@@ -10,6 +10,8 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { repoCoverage } from "@/lib/repos";
+import { classifyLoadFailure } from "@/lib/section-load";
+import { SectionUnreachable } from "@/views/connections/SectionUnreachable";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 
@@ -23,7 +25,7 @@ interface Props {
   canManage: boolean;
 }
 
-type Load = "loading" | "ready" | "unavailable";
+type Load = "loading" | "ready" | "unavailable" | "error";
 
 /**
  * Bind real repositories to the company.
@@ -82,10 +84,11 @@ export function RepositoriesCard({ client, company, canManage }: Props) {
       } catch {
         setRepoGranted(undefined);
       }
-    } catch {
-      // No repository surface on this host — hide the card entirely rather
-      // than showing an error for a capability that was never offered.
-      setLoad("unavailable");
+    } catch (err) {
+      // A 404 is no repository surface on this host — hide the card. Anything
+      // else is a host that could not answer; keep the card and say so rather
+      // than showing nothing (issue #1470).
+      setLoad(classifyLoadFailure(err));
     }
   }, [client, company]);
 
@@ -167,6 +170,9 @@ export function RepositoriesCard({ client, company, canManage }: Props) {
         )}
       </div>
 
+      {load === "error" ? (
+        <SectionUnreachable label="Couldn't read this company's repositories" />
+      ) : (
       <Card>
         <CardContent className="space-y-4 pt-6">
           <div className="space-y-1">
@@ -336,6 +342,7 @@ export function RepositoriesCard({ client, company, canManage }: Props) {
           )}
         </CardContent>
       </Card>
+      )}
     </section>
   );
 }

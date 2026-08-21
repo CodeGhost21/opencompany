@@ -81,6 +81,7 @@ async function render(providers: GridProvider[]) {
         busy: null,
         noCredential: false,
         granted: true,
+        probeFailed: false,
         openMode: false,
         degraded: null,
         loading: false,
