@@ -602,7 +602,7 @@ mod tests {
     }
 
     fn scaffold_paths() -> Vec<&'static str> {
-        vec!["Agents", "secrets", "secrets/README.md"]
+        vec!["agents", "secrets", "secrets/readme.md"]
     }
 
     /// The scaffold has an empty agent root plus the operator-only secrets
@@ -1119,4 +1119,114 @@ mod tests {
             vec!["Agents", "agents/shared", "Desks", "desks/shared"]
         );
     }
+
+    /// The names the scaffold mints follow the workspace naming rule, so a
+    /// fresh company's tree is uniform from the first boot rather than mixing
+    /// `Agents/` with `playbooks/` the moment anybody puts something in it.
+    #[tokio::test]
+    async fn the_scaffolded_names_are_lowercase_and_dashed() {
+        let (_dir, ws) = store().await;
+        let company = CompanyId::new("acme");
+        ensure_workspace_scaffold(ws.as_ref(), &company)
+            .await
+            .unwrap();
+        ensure_agent_folder(ws.as_ref(), &company, "page_builder")
+            .await
+            .unwrap();
+
+        let paths = tree_paths(&ws, &company).await;
+        assert!(
+            paths.contains(&"agents/page-builder".to_string()),
+            "a snake_case roster id should mint a dashed folder: {paths:?}"
+        );
+        for path in &paths {
+            assert_eq!(
+                *path,
+                crate::company::workspace_names::kebab_path(path),
+                "the scaffold minted a name outside the rule: {path}"
+            );
+        }
+    }
+
+    /// A company created before the rule has `Agents/`, and must not grow a
+    /// second lowercase root beside it — that would put one agent's home in two
+    /// places, with neither view complete.
+    #[tokio::test]
+    async fn a_legacy_capitalised_root_is_adopted_not_duplicated() {
+        let (_dir, ws) = store().await;
+        let company = CompanyId::new("acme");
+        let legacy = ws
+            .adopt_or_create_folder(&company, None, "Agents", WorkspaceOrigin::Operator)
+            .await
+            .unwrap()
+            .into_node()
+            .id;
+
+        ensure_workspace_scaffold(ws.as_ref(), &company)
+            .await
+            .unwrap();
+        let home = ensure_agent_folder(ws.as_ref(), &company, "ceo")
+            .await
+            .unwrap();
+
+        let nodes = ws.tree(&company).await.unwrap();
+        assert_eq!(
+            nodes
+                .iter()
+                .filter(|n| n.parent_id.is_none() && n.name.eq_ignore_ascii_case("agents"))
+                .count(),
+            1,
+            "the legacy root should be adopted, not joined by a twin: {:?}",
+            paths(&nodes)
+        );
+        assert_eq!(
+            nodes.iter().find(|n| n.id == home).unwrap().parent_id,
+            Some(legacy),
+            "the member folder belongs under the root that already existed"
+        );
+    }
+
+    /// The other half of the same upgrade: the member folder itself was named
+    /// by the roster id verbatim, which differs from its dashed form by a
+    /// character rather than by case, so `find` cannot see it.
+    #[tokio::test]
+    async fn a_legacy_member_folder_named_by_the_raw_id_is_adopted() {
+        let (_dir, ws) = store().await;
+        let company = CompanyId::new("acme");
+        ensure_workspace_scaffold(ws.as_ref(), &company)
+            .await
+            .unwrap();
+        let root_id = ws
+            .tree(&company)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|n| n.name == AGENTS_ROOT)
+            .unwrap()
+            .id;
+        let legacy = ws
+            .adopt_or_create_folder(
+                &company,
+                Some(&root_id),
+                "page_builder",
+                agent("page_builder"),
+            )
+            .await
+            .unwrap()
+            .into_node()
+            .id;
+
+        let adopted = ensure_agent_folder(ws.as_ref(), &company, "page_builder")
+            .await
+            .unwrap();
+
+        assert_eq!(adopted, legacy, "one agent, one folder, across the upgrade");
+        let nodes = ws.tree(&company).await.unwrap();
+        assert!(
+            !nodes.iter().any(|n| n.name == "page-builder"),
+            "a rival dashed folder would split the agent's work: {:?}",
+            paths(&nodes)
+        );
+    }
+
 }
