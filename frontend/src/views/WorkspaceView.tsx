@@ -1832,8 +1832,19 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
         onReveal={(id) => {
           setRepair(null);
           const node = nodeById(nodes, id);
-          if (node?.kind === "folder") revealFolder(id);
-          else void open(id);
+          if (node?.kind === "folder") {
+            revealFolder(id);
+            return;
+          }
+          // A residual reveal is documented reveal-only (see the doc comment
+          // on RepairDialog's `onReveal` prop below). `open()` is not: it
+          // flushes the editor's staged draft before it opens anything, so
+          // falling through to it here for a file residual could fire a write
+          // the operator never asked for (#1498 review). Expand its ancestors
+          // and scroll to it, exactly like a folder — opening it is a
+          // separate, explicit click.
+          setExpanded((prev) => new Set([...prev, ...ancestorFolderIds(nodes, id)]));
+          setRevealId(id);
         }}
       />
       <DiscardConfirm
