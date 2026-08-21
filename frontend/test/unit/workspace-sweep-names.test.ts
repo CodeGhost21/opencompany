@@ -111,4 +111,43 @@ describe("the tidy names the teammate, not the id (issue #1479)", () => {
     // A resolved row makes no such claim.
     expect(rows.find((r) => r.startsWith("Nadia"))).not.toContain("no longer on the roster");
   });
+
+  it("does not call a roster hit orphaned just because its slug id equals its name (#1498 review)", async () => {
+    // `agent_slug` (src/ports/ids.rs) derives a roster id from the display
+    // name by lowercasing and joining with underscores — so a name that is
+    // already legal snake_case, like "ops", slugs to itself. A `folder.name`
+    // vs `display` string compare cannot tell that apart from an id the
+    // roster has never heard of; only membership can.
+    const selfSlugged = [{ id: "f-1", name: "ops" }];
+    const selfSluggedClient = {
+      scopeFor: () => "/api/v1/company/acme",
+      get: vi
+        .fn()
+        .mockResolvedValue([{ id: "agents", name: "Agents", kind: "folder", updatedAt: 1 }]),
+      post: vi.fn().mockResolvedValue({ wouldRemove: selfSlugged }),
+      listTeam: vi.fn().mockResolvedValue([member("ops", "ops")]),
+    } as unknown as OpenCompanyClient;
+
+    await act(async () => {
+      root.render(
+        createElement(ConnectionScopeProvider, {
+          scope: { connection: "c1", company: "acme" },
+          children: createElement(WorkspaceView, {
+            client: selfSluggedClient,
+            company: "acme",
+          }),
+        }),
+      );
+    });
+    await act(async () => {
+      (container.querySelector('[data-testid="workspace-sweep"]') as HTMLButtonElement).click();
+    });
+    const list = document.querySelector('[data-testid="workspace-sweep-folders"]');
+    if (!list) throw new Error(`no sweep list in:\n${document.body.innerHTML}`);
+    const rows = Array.from(list.querySelectorAll("li")).map((li) => li.textContent?.trim() ?? "");
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toContain("ops");
+    expect(rows[0]).not.toContain("no longer on the roster");
+  });
 });

@@ -2887,7 +2887,12 @@ function SweepDialog({
   const rows = (state?.folders ?? [])
     .map((folder) => {
       const display = rosterDisplayName(folder.name, rosterNames);
-      return { ...folder, display, resolved: display !== folder.name };
+      // Membership, not a string compare (#1498 review): `agent_slug` derives
+      // a roster id from the display name, so a name that is already legal
+      // snake_case — "ops", "scout" — slugs to itself, and `display !==
+      // folder.name` would then read a present, valid entry as absent just
+      // because its name and id happen to be spelled the same.
+      return { ...folder, display, resolved: rosterNames.has(folder.name) };
     })
     .sort((a, b) => a.display.localeCompare(b.display));
 
