@@ -7691,7 +7691,7 @@ async fn a_proposal_that_fails_validation_keeps_the_card_in_review() {
     // The card is untouched save for the reason on its note: still In Review,
     // still carrying the proposal to retry once the roster is fixed.
     let (_status, card) = send(&state, "GET", &format!("/api/v1/company/tasks/{id}"), None).await;
-    assert_eq!(card["task"]["column"], "in_review");
+    assert_eq!(card["task"]["stage"], "in_review");
     assert!(card["task"].get("workflowProposal").is_some(), "{card}");
 
     // …and no workflow was created.
@@ -7785,7 +7785,7 @@ async fn applying_a_proposal_with_an_unwired_channel_is_refused_and_keeps_the_ca
     // The card is recoverable, exactly as it is for roster drift: still In
     // Review, still carrying its proposal, with the reason on its note.
     let (_status, card) = send(&state, "GET", &format!("/api/v1/company/tasks/{id}"), None).await;
-    assert_eq!(card["task"]["column"], "in_review", "{card}");
+    assert_eq!(card["task"]["stage"], "in_review", "{card}");
     assert!(card["task"].get("workflowProposal").is_some(), "{card}");
     assert!(
         card["task"]["note"]
@@ -7875,7 +7875,7 @@ async fn rejecting_a_proposal_returns_the_card_to_todo() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{card}");
-    assert_eq!(card["column"], "todo");
+    assert_eq!(card["column"], "pending");
     assert!(card.get("workflowProposal").is_none(), "{card}");
     assert_eq!(
         card["deliverable"], "workflow",
