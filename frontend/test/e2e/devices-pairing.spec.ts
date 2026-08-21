@@ -36,7 +36,9 @@ test("the devices sub-page mints a pairing code from the live host", async ({ pa
   // The page the desktop's prompt names. Before this it resolved to nothing and
   // the hash silently fell back to General, so a person following the
   // instruction could not tell "wrong place" from "not built".
-  await expect(page.getByRole("heading", { name: "Devices" })).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByRole("heading", { level: 1, name: "Devices" })).toBeVisible({
+    timeout: 30_000,
+  });
   await expect(page.getByTestId("devices-empty")).toBeVisible();
 
   await page.getByTestId("devices-pair").click();
