@@ -4,6 +4,7 @@ import { Markdown } from "@/components/markdown";
 import { TeammateAvatar } from "@/components/teammate-avatar";
 import { Button } from "@/components/ui/button";
 import { isHostMessageId, type ChatMessage } from "@/lib/chat";
+import { timeAgo } from "@/lib/language";
 import { cn } from "@/lib/utils";
 import {
   formatTime,
@@ -125,10 +126,16 @@ export function MessageRow({
             onClick={() => onOpenThread(message.id)}
             className="mt-1 flex w-fit items-center gap-2 rounded-md px-1.5 py-1 text-xs font-medium text-primary transition-colors hover:bg-accent"
           >
-            <ReplyFacepile replies={replies} />
+            <ReplyFacepile senders={entry.replySenders} />
             {replies.length} {replies.length === 1 ? "reply" : "replies"}
+            {/* "Last reply" asks how long a thread has been quiet, and a
+                wall-clock time is the one form that does not answer it: on a
+                transcript older than a day it is ambiguous without the date,
+                and inside one day it makes the reader do the subtraction. The
+                day divider above already carries "Today", so the absolute time
+                was doubly redundant on the common case (issue #1328). */}
             <span className="font-normal text-muted-foreground">
-              Last reply {formatTime(replies[replies.length - 1].at)}
+              · Last reply {timeAgo(replies[replies.length - 1].at, Date.now())}
             </span>
           </button>
         )}
@@ -283,18 +290,36 @@ function ActionBar({
   );
 }
 
-function ReplyFacepile({ replies }: { replies: ChatMessage[] }) {
+/**
+ * Who is in this thread, as faces (issue #1324).
+ *
+ * This used to seed each tile on `message.channel` and draw it `markOnly` —
+ * and both halves defeated it. Every reply in a thread carries the same
+ * channel, so all three tiles hashed to one tone; and `markOnly` renders an
+ * *empty* tile by design, because 16px is below the size at which initials or
+ * a mascot can be read. The result was three identical featureless grey
+ * squares that read as a loading skeleton, carrying no information at all.
+ *
+ * Both are fixed by the same change. The senders arrive already resolved and
+ * deduped from {@link TimelineEntry.replySenders}, so the tiles are genuinely
+ * different people; and at 20px — the size the rail already draws a DM's face
+ * at, legibly — the real mascot fits, so there is nothing left for `markOnly`
+ * to apologise for.
+ */
+function ReplyFacepile({ senders }: { senders: Sender[] }) {
   // At most three faces — beyond that the count carries the information.
-  const shown = replies.slice(0, 3);
+  const shown = senders.slice(0, 3);
+  if (shown.length === 0) return null;
   return (
     <span className="flex -space-x-1.5" aria-hidden>
-      {shown.map((r) => (
+      {shown.map((s) => (
         <TeammateAvatar
-          key={r.id}
-          name={r.from === "you" ? "You" : (r.channel ?? "Company")}
-          tone={r.channel}
-          markOnly
-          className="size-4 rounded-[3px] ring-1 ring-background"
+          key={s.key}
+          name={s.name}
+          tone={s.tone}
+          avatar={s.avatar}
+          company={s.kind === "company"}
+          className="size-5 rounded-[4px] text-3xs ring-1 ring-background"
         />
       ))}
     </span>

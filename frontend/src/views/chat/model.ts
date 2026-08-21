@@ -519,6 +519,38 @@ export interface TimelineEntry {
   dayLabel?: string;
   /** Replies hanging off this row, oldest first. */
   replies: ChatMessage[];
+  /**
+   * The distinct voices in those replies, in the order they first spoke
+   * (issue #1324).
+   *
+   * Resolved here rather than in the row because resolving a sender needs the
+   * channel and the roster, and neither reaches the renderer. Without it the
+   * summary row could only seed a face on `message.channel` — one value shared
+   * by every reply in a thread — so a three-face pile drew one colour three
+   * times and said nothing at all.
+   *
+   * Deduped by `Sender.key`: a pile is a list of *people*, and someone who
+   * replied four times is still one face.
+   */
+  replySenders: Sender[];
+}
+
+/**
+ * The distinct voices in a run of messages, in first-spoken order.
+ *
+ * Goes through the same {@link senderOf} every rendered row does, so a face in
+ * a thread's summary pile is the same face that thread shows when it is opened.
+ * A system line is dropped: it has no voice to draw, and a pile that counted it
+ * would claim one more participant than the thread has.
+ */
+function distinctSenders(messages: ChatMessage[], channel: Channel, members: TeamMember[]): Sender[] {
+  const byKey = new Map<string, Sender>();
+  for (const m of messages) {
+    if (m.from === "system") continue;
+    const sender = senderOf(m, channel, members);
+    if (!byKey.has(sender.key)) byKey.set(sender.key, sender);
+  }
+  return [...byKey.values()];
 }
 
 /**
@@ -558,12 +590,14 @@ export function buildTimeline(
       // otherwise sit between two lines that read as one utterance.
       prev.replies.length === 0;
 
+    const own = replies.get(m.id) ?? [];
     const entry: TimelineEntry = {
       message: m,
       sender,
       continuation,
       dayLabel: newDay ? formatDay(m.at) : undefined,
-      replies: replies.get(m.id) ?? [],
+      replies: own,
+      replySenders: distinctSenders(own, channel, members),
     };
     entries.push(entry);
     prev = entry;
