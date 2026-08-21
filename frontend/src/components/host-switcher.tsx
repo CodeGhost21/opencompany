@@ -40,7 +40,7 @@ import {
 } from "@/components/ui/sidebar";
 import { isDesktopRuntime } from "@/api/transport";
 import { hostShortcutLabel, useHosts } from "@/connections/HostsContext";
-import type { Connection, ConnectionStatus } from "@/connections/types";
+import type { Connection, ConnectionStatus, ConnectorKind } from "@/connections/types";
 import { cn } from "@/lib/utils";
 
 /**
