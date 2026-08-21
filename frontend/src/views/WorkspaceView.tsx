@@ -90,17 +90,14 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { rosterDisplayName, rosterNameMap, type RosterNames } from "@/lib/roster-names";
 import { fromDto } from "@/lib/team";
 import { cn } from "@/lib/utils";
-import {
-  createSaveBuffer,
-  createUnloadGuard,
-  type SaveBuffer,
-} from "@/lib/workspace-save-buffer";
+import { createSaveBuffer, createUnloadGuard, type SaveBuffer } from "@/lib/workspace-save-buffer";
 import {
   ancestorFolderIds,
   applyRepair,
   breadcrumbOf,
   childrenOf,
   clearLegacyLocal,
+  declineLegacyImport,
   DERIVED_LABEL,
   DERIVED_REASON,
   ensureMdExt,
@@ -109,6 +106,7 @@ import {
   hasLegacyLocal,
   isDerivedNode,
   isSecretNode,
+  legacyImportDeclined,
   type MoveAudienceChange,
   type MoveAudienceWarning,
   moveAudienceWarning,
@@ -228,6 +226,19 @@ export function migrationBannerText(files: number, folders: number): string {
     `${total === 1 ? "is" : "are"} not in the company workspace yet.`
   );
 }
+
+/**
+ * What Import actually does, said before it is clicked (issue #1472).
+ *
+ * The banner used to offer "Import" and name neither half of the bargain: not
+ * where the notes land, and not that the browser's copy is **removed** on the
+ * way. It is a move, not a copy — `importLegacy` clears the scratchpad key on
+ * success — and an operator who expected a backup to remain in the browser had
+ * no way to learn otherwise until it was gone.
+ */
+export const MIGRATION_CONSEQUENCE =
+  `Import files them under “${IMPORT_FOLDER_NAME}” in the company workspace ` +
+  `and removes this browser's copy — it moves them rather than copying them.`;
 
 /** What the editor's status line is currently reporting. */
 export type SaveState = "idle" | "dirty" | "saving" | "saved" | "error";
@@ -445,7 +456,15 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
   const [moving, setMoving] = useState<FsNode | null>(null);
   const [showExplorer, setShowExplorer] = useState(true);
   const [legacy, setLegacy] = useState<FsNode[]>([]);
+  // Whether this connection already said "not now" to the migration offer.
+  // Read once per company rather than per render, because the answer lives in
+  // localStorage and cannot change without this component having changed it.
+  const [importDeclined, setImportDeclined] = useState(false);
   const [importing, setImporting] = useState(false);
+  // Which of the two irreversible "Discard" buttons is waiting on a confirm
+  // (issue #1472). Both destroy the last copy of something an operator typed,
+  // so neither fires from its own click any more.
+  const [confirmDiscard, setConfirmDiscard] = useState<DiscardTarget | null>(null);
   // The empty-agent-folder tidy (issue #700), in its two stages: `preview` is
   // what the host says *would* go, `done` is what actually went. Both name every
   // folder — a count is not something an operator who disagrees can check.
@@ -678,7 +697,12 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
         // a note the operator has just rewritten, until the next refetch.
         setOpenFile((f) =>
           f && f.id === job.id
-            ? { ...f, content: job.content, updatedAt: ack.updatedAt, updatedBy: OPERATOR_ORIGIN }
+            ? {
+                ...f,
+                content: job.content,
+                updatedAt: ack.updatedAt,
+                updatedBy: OPERATOR_ORIGIN,
+              }
             : f,
         );
         setNodes((all) =>
@@ -922,6 +946,7 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
 
   useEffect(() => {
     const mine = readLegacyLocalNodes(scope);
+    setImportDeclined(legacyImportDeclined(scope));
     if (mine.length > 0) {
       setLegacy(mine);
       return;
@@ -963,8 +988,17 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
       }
       clearLegacyLocal(scope);
       setLegacy([]);
-      toast.success(`Imported ${importSummary(legacyFiles.length, legacyFolders.length)}.`);
+      toast.success(
+        `Imported ${importSummary(legacyFiles.length, legacyFolders.length)} into “${IMPORT_FOLDER_NAME}”.`,
+      );
       await loadTree({ silent: true });
+      // Show the operator where their notes went (issue #1472). A toast naming
+      // a folder is still a folder they then have to find in a tree they did
+      // not build; the import is the one moment the console knows exactly which
+      // row is the answer.
+      setSearchInput("");
+      setExpanded((prev) => new Set([...prev, root.id]));
+      setRevealId(root.id);
     } catch (e) {
       // The key is left intact on failure, so the banner comes back and nothing
       // the operator wrote is lost to a half-finished import.
@@ -974,9 +1008,30 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
     }
   }
 
+  /**
+   * Destroy the browser's copy of the old scratchpad.
+   *
+   * Only ever reached from the confirm dialog. `clearLegacyLocal` removes both
+   * the scoped key and the pre-connection origin it was adopted from, so by
+   * construction there is nothing left to offer again — this is the delete, not
+   * a dismissal of the offer, and `declineImport` is the button for the latter.
+   */
   function discardLegacy() {
     clearLegacyLocal(scope);
     setLegacy([]);
+    setConfirmDiscard(null);
+  }
+
+  /** Stop offering the import without touching the notes (issue #1472). */
+  function declineImport() {
+    declineLegacyImport(scope);
+    setImportDeclined(true);
+  }
+
+  /** Throw away the rescued text — likewise only from the confirm. */
+  function discardRescued() {
+    setRescued(null);
+    setConfirmDiscard(null);
   }
 
   /* ---- navigation ---- */
@@ -1122,7 +1177,9 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
   async function rename(node: FsNode, name: string) {
     const next = (node.kind === "file" ? ensureMdExt(name.trim()) : name.trim()) || node.name;
     try {
-      const updated = await renameMoveNode(client, company, node.id, { name: next });
+      const updated = await renameMoveNode(client, company, node.id, {
+        name: next,
+      });
       setNodes((all) => all.map((n) => (n.id === updated.id ? updated : n)));
       setOpenFile((f) => (f && f.id === updated.id ? { ...f, name: updated.name } : f));
     } catch (e) {
@@ -1134,7 +1191,9 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
     try {
       // The move-cycle guard is the host's: it answers 400 for a folder moved
       // under its own descendant, which surfaces here as a toast.
-      const updated = await renameMoveNode(client, company, node.id, { parentId: destId });
+      const updated = await renameMoveNode(client, company, node.id, {
+        parentId: destId,
+      });
       setNodes((all) => all.map((n) => (n.id === updated.id ? updated : n)));
     } catch (e) {
       toast.error(message(e, "could not move this item"));
@@ -1468,12 +1527,18 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
       </aside>
 
       {/* Note pane */}
-      <section className={cn("flex-1 flex-col overflow-hidden", showExplorer ? "hidden md:flex" : "flex")}>
-        {legacy.length > 0 && (
+      <section
+        className={cn("flex-1 flex-col overflow-hidden", showExplorer ? "hidden md:flex" : "flex")}
+      >
+        {legacy.length > 0 && !importDeclined && (
           <Alert className="m-3 mb-0 w-auto" data-testid="workspace-migration-banner">
             <AlertDescription className="flex flex-wrap items-center gap-3">
-              <span className="flex-1">
-                {migrationBannerText(legacyFiles.length, legacyFolders.length)}
+              <span className="flex-1 space-y-1">
+                <span className="block">
+                  {migrationBannerText(legacyFiles.length, legacyFolders.length)}
+                </span>
+                {/* What Import does, before it is clicked (issue #1472). */}
+                <span className="block text-xs text-muted-foreground">{MIGRATION_CONSEQUENCE}</span>
               </span>
               <Button
                 size="sm"
@@ -1483,7 +1548,26 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
               >
                 {importing && <Loader2 className="size-3.5 animate-spin" />} Import
               </Button>
-              <Button size="sm" variant="ghost" disabled={importing} onClick={discardLegacy}>
+              {/* The non-destructive exit (issue #1472). Without it the only
+                  way to stop being asked was the button that deletes the
+                  notes, which is how the quiet control became the dangerous
+                  one. */}
+              <Button
+                size="sm"
+                variant="ghost"
+                disabled={importing}
+                onClick={declineImport}
+                data-testid="workspace-migration-decline"
+              >
+                Not now
+              </Button>
+              <Button
+                size="sm"
+                variant="destructive"
+                disabled={importing}
+                onClick={() => setConfirmDiscard("legacy")}
+                data-testid="workspace-migration-discard"
+              >
                 Discard
               </Button>
             </AlertDescription>
@@ -1516,7 +1600,12 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
                 <Button size="sm" variant="ghost" onClick={() => void copyRescued()}>
                   Copy
                 </Button>
-                <Button size="sm" variant="ghost" onClick={() => setRescued(null)}>
+                <Button
+                  size="sm"
+                  variant="destructive"
+                  onClick={() => setConfirmDiscard("rescued")}
+                  data-testid="workspace-rescued-discard"
+                >
                   Discard
                 </Button>
               </span>
@@ -1693,7 +1782,10 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
             </div>
           </>
         ) : (
-          <EmptyNote onNew={() => setPrompt({ mode: "file" })} onToggleExplorer={() => setShowExplorer((s) => !s)} />
+          <EmptyNote
+            onNew={() => setPrompt({ mode: "file" })}
+            onToggleExplorer={() => setShowExplorer((s) => !s)}
+          />
         )}
       </section>
 
@@ -1728,6 +1820,13 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
         busy={repairing}
         onClose={() => setRepair(null)}
         onConfirm={() => void confirmRepair()}
+      />
+      <DiscardConfirm
+        target={confirmDiscard}
+        legacyCount={legacy.length}
+        rescuedName={rescued?.name ?? ""}
+        onClose={() => setConfirmDiscard(null)}
+        onConfirm={confirmDiscard === "rescued" ? discardRescued : discardLegacy}
       />
       <DeleteDialog
         nodes={nodes}
@@ -1817,9 +1916,7 @@ function SaveStatus({ state }: { state: SaveState }) {
         state === "dirty" && "text-foreground",
       )}
     >
-      {state === "dirty" && (
-        <span aria-hidden="true" className="size-1.5 rounded-full bg-tone-2" />
-      )}
+      {state === "dirty" && <span aria-hidden="true" className="size-1.5 rounded-full bg-tone-2" />}
       {label}
     </span>
   );
@@ -2015,8 +2112,16 @@ function TreeRow({ node, ...props }: TreeProps & { node: FsNode }) {
         >
           {isFolder ? (
             <>
-              {isOpen ? <ChevronDown className="size-3.5 shrink-0 text-muted-foreground" /> : <ChevronRight className="size-3.5 shrink-0 text-muted-foreground" />}
-              {isOpen ? <FolderOpen className="size-4 shrink-0 text-tone-2" /> : <Folder className="size-4 shrink-0 text-tone-2" />}
+              {isOpen ? (
+                <ChevronDown className="size-3.5 shrink-0 text-muted-foreground" />
+              ) : (
+                <ChevronRight className="size-3.5 shrink-0 text-muted-foreground" />
+              )}
+              {isOpen ? (
+                <FolderOpen className="size-4 shrink-0 text-tone-2" />
+              ) : (
+                <Folder className="size-4 shrink-0 text-tone-2" />
+              )}
             </>
           ) : (
             <FileText className="ml-3.5 size-4 shrink-0 text-muted-foreground" />
@@ -2071,7 +2176,14 @@ function TreeRow({ node, ...props }: TreeProps & { node: FsNode }) {
         </button>
         <DropdownMenu>
           <DropdownMenuTrigger
-            render={<Button variant="ghost" size="icon" className="size-6 opacity-0 group-hover:opacity-100 data-[popup-open]:opacity-100" aria-label="Actions" />}
+            render={
+              <Button
+                variant="ghost"
+                size="icon"
+                className="size-6 opacity-0 group-hover:opacity-100 data-[popup-open]:opacity-100"
+                aria-label="Actions"
+              />
+            }
           >
             <MoreHorizontal className="size-3.5" />
           </DropdownMenuTrigger>
@@ -2258,16 +2370,16 @@ function NoteMarkdown({
   onWiki: (target: string) => void;
 }) {
   if (!source.trim()) {
-    return <p className="text-sm text-muted-foreground">This note is empty. Switch to Edit to write.</p>;
+    return (
+      <p className="text-sm text-muted-foreground">This note is empty. Switch to Edit to write.</p>
+    );
   }
   // Rewrite [[target]] / [[target|alias]] into links the renderer can style —
   // but leave fenced and inline code untouched (so `[[…]]` examples survive).
   const rewritten = source.replace(
     /(```[\s\S]*?```|~~~[\s\S]*?~~~|`[^`\n]*`)|\[\[([^\]|]+)(?:\|([^\]]+))?\]\]/g,
     (_m, code: string | undefined, target: string, alias?: string) =>
-      code
-        ? code
-        : `[${(alias ?? target).trim()}](#wiki:${encodeURIComponent(target.trim())})`,
+      code ? code : `[${(alias ?? target).trim()}](#wiki:${encodeURIComponent(target.trim())})`,
   );
   return (
     <div className="prose prose-sm max-w-none dark:prose-invert">
@@ -2307,7 +2419,13 @@ function NoteMarkdown({
   );
 }
 
-function EmptyNote({ onNew, onToggleExplorer }: { onNew: () => void; onToggleExplorer: () => void }) {
+function EmptyNote({
+  onNew,
+  onToggleExplorer,
+}: {
+  onNew: () => void;
+  onToggleExplorer: () => void;
+}) {
   return (
     <div className="flex flex-1 flex-col">
       <div className="flex items-center border-b px-3 py-2 md:hidden">
@@ -2319,7 +2437,9 @@ function EmptyNote({ onNew, onToggleExplorer }: { onNew: () => void; onToggleExp
         <FileText className="size-8 text-muted-foreground" />
         <div className="space-y-1">
           <p className="font-medium">No note open</p>
-          <p className="text-sm text-muted-foreground">Pick a note from the explorer, or create one.</p>
+          <p className="text-sm text-muted-foreground">
+            Pick a note from the explorer, or create one.
+          </p>
         </div>
         <Button variant="outline" size="sm" onClick={onNew}>
           <FilePlus2 className="size-4" /> New note
@@ -2414,7 +2534,8 @@ function NamePrompt({
     setPending({ name: next, warning });
   }
 
-  const title = state?.mode === "folder" ? "New folder" : state?.mode === "file" ? "New note" : "Rename";
+  const title =
+    state?.mode === "folder" ? "New folder" : state?.mode === "file" ? "New note" : "Rename";
 
   return (
     <Dialog open={Boolean(state)} onOpenChange={(o) => !o && onClose()}>
@@ -2498,9 +2619,10 @@ function MoveDialog({
   const blocked = moving ? subtreeIds(nodes, moving.id) : new Set<string>();
   const folders = nodes.filter((x) => x.kind === "folder" && !blocked.has(x.id));
   /** The destination picked, held back until the warning is acknowledged. */
-  const [pending, setPending] = useState<{ destId: string | null; warning: MoveAudienceWarning } | null>(
-    null,
-  );
+  const [pending, setPending] = useState<{
+    destId: string | null;
+    warning: MoveAudienceWarning;
+  } | null>(null);
 
   // A second `Move to…` must not open onto the previous one's warning.
   useEffect(() => {
@@ -2572,6 +2694,67 @@ function MoveDialog({
  * sure?" that reads the same for an empty folder and one holding a hundred
  * notes.
  */
+/** Which last-copy-destroying "Discard" the confirm is standing in front of. */
+type DiscardTarget = "legacy" | "rescued";
+
+/**
+ * The confirm both workspace "Discard" buttons now sit behind (issue #1472).
+ *
+ * Neither of these deletes has an undo and neither has a second copy anywhere.
+ * The scratchpad discard removes the adopted key *and* its pre-connection
+ * origin, so the notes can never be re-offered; the rescued-text discard drops
+ * the only remaining copy of words whose note is already gone. Both were plain
+ * ghost buttons — quieter than the {@link DeleteDialog} that guards deleting a
+ * note the host still holds, which is strictly the more recoverable act.
+ *
+ * Shares {@link DeleteDialog}'s shape and its solid-destructive action rather
+ * than inventing a second confirm style, so "this cannot be undone" looks the
+ * same everywhere in the view. The copy names the quantity, because a confirm
+ * that says only "are you sure?" is one an operator learns to click through.
+ */
+function DiscardConfirm({
+  target,
+  legacyCount,
+  rescuedName,
+  onClose,
+  onConfirm,
+}: {
+  target: DiscardTarget | null;
+  legacyCount: number;
+  rescuedName: string;
+  onClose: () => void;
+  onConfirm: () => void;
+}) {
+  const rescued = target === "rescued";
+  const title = rescued
+    ? "Discard your unsaved text?"
+    : `Delete ${legacyCount} note${legacyCount === 1 ? "" : "s"} kept only in this browser?`;
+  const description = rescued
+    ? `This is the last copy of what you wrote in “${rescuedName}”. That note is already gone, so nothing else holds this text. There is no undo.`
+    : "These notes were never sent to the company workspace, so this browser holds the only copy. Deleting them cannot be undone — “Not now” leaves them alone.";
+
+  return (
+    <AlertDialog open={Boolean(target)} onOpenChange={(o) => !o && onClose()}>
+      <AlertDialogContent>
+        <AlertDialogHeader>
+          <AlertDialogTitle>{title}</AlertDialogTitle>
+          <AlertDialogDescription>{description}</AlertDialogDescription>
+        </AlertDialogHeader>
+        <AlertDialogFooter>
+          <AlertDialogCancel>Keep it</AlertDialogCancel>
+          <AlertDialogAction
+            onClick={onConfirm}
+            className="bg-destructive text-white hover:bg-destructive/90"
+            data-testid="workspace-discard-confirm"
+          >
+            {rescued ? "Discard text" : "Delete notes"}
+          </AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
+  );
+}
+
 function DeleteDialog({
   nodes,
   node,
@@ -2662,10 +2845,7 @@ function SweepDialog({
               : `${count} folder${count === 1 ? "" : "s"} under Agents/ hold nothing at all. Removing them cannot take anything with them — a folder holding any file, note or subfolder is left alone.`}
           </DialogDescription>
         </DialogHeader>
-        <ul
-          className="max-h-64 space-y-1 overflow-y-auto"
-          data-testid="workspace-sweep-folders"
-        >
+        <ul className="max-h-64 space-y-1 overflow-y-auto" data-testid="workspace-sweep-folders">
           {state?.folders.map((folder) => (
             <li
               key={folder.id}

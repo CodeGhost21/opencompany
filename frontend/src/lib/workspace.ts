@@ -13,7 +13,7 @@
 
 export type { FsNode } from "@/api/workspace";
 
-import { type LocalScope, scopedKeyAdoptingLegacy } from "@/connections/types";
+import { type LocalScope, scopedKey, scopedKeyAdoptingLegacy } from "@/connections/types";
 
 import type { FsNode, RepairOutcome } from "@/api/workspace";
 
@@ -523,6 +523,38 @@ export function readLegacyLocalNodes(scope: LocalScope): FsNode[] {
 export function hasLegacyLocal(scope: LocalScope): boolean {
   try {
     return localStorage.getItem(KEY(scope)) !== null;
+  } catch {
+    return false;
+  }
+}
+
+/** Where a declined migration offer is remembered, per connection. */
+const DECLINED_KEY = (scope: LocalScope) => scopedKey("oc-workspace-migration-declined", scope);
+
+/**
+ * Remember that the operator said "not now" to the migration offer.
+ *
+ * A decline is deliberately *not* a discard. The banner used to offer exactly
+ * two exits — import, or destroy the notes — so an operator who wanted neither
+ * met the same offer on every mount, and the quietest way to make it stop was
+ * the button that deleted the only copy. This is the third exit: the notes stay
+ * in the browser, untouched, and the offer stops asking.
+ *
+ * Scoped per connection like every other console key, so declining on one host
+ * cannot hide the offer on another that has never made it.
+ */
+export function declineLegacyImport(scope: LocalScope): void {
+  try {
+    localStorage.setItem(DECLINED_KEY(scope), "1");
+  } catch {
+    /* storage unavailable — the offer will simply be made again */
+  }
+}
+
+/** Whether this connection has already declined the migration offer. */
+export function legacyImportDeclined(scope: LocalScope): boolean {
+  try {
+    return localStorage.getItem(DECLINED_KEY(scope)) !== null;
   } catch {
     return false;
   }
