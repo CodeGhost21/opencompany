@@ -2061,7 +2061,26 @@ impl Tool for WorkspaceCreateTool {
                 // The agent's own home, not yet minted: make it and carry on.
                 None if self.workspace.is_own_home(parent_segments) => {
                     match self.workspace.ensure_own_home().await {
-                        Ok(id) => Some(id),
+                        Ok(id) => {
+                            // The scaffold names the home, so it may not be the
+                            // spelling the agent typed: it mints
+                            // `agents/<dashed id>` and adopts a legacy folder
+                            // under either the old root case or the roster id
+                            // verbatim. Take the path from the node it returned
+                            // when the index already knows it, and otherwise
+                            // from what the scaffold mints.
+                            parent_display = Some(match index.by_id.get(&id) {
+                                Some(entry) => entry.path.clone(),
+                                None => format!(
+                                    "{AGENTS_ROOT}/{agent}",
+                                    agent = kebab_name_or(
+                                        &self.workspace.agent_id,
+                                        &self.workspace.agent_id
+                                    ),
+                                ),
+                            });
+                            Some(id)
+                        }
                         Err(e) => {
                             return Ok(ToolResult::error(format!(
                                 "Could not create your own workspace folder `{parent}`: \
