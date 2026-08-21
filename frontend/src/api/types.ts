@@ -297,6 +297,15 @@ export interface ChatResponse {
    * back to re-reading history.
    */
   turnId?: string;
+  /**
+   * On a resolve: which end state it reached (#1449).
+   *
+   * The Approvals page resolves **without** `detach`, so it never sees a
+   * {@link ResolveReceipt} — this is the only shape that can tell it its click
+   * was refused. Absent on every other answer, and on a host that predates the
+   * field.
+   */
+  outcome?: ResolveOutcome;
 }
 
 /**
@@ -505,6 +514,25 @@ export interface ApprovalSummary {
 }
 
 /**
+ * **Which** end state a resolve reached (#1449).
+ *
+ * A resolve can succeed as a *request* and still not be the operator's
+ * decision, and the console has to be able to tell those apart — the whole of
+ * #1449 is that it could not, so it rendered the success line over a click the
+ * host had refused.
+ *
+ * * `settled` — the verdict is the operator's and it is recorded.
+ * * `expired` — the approval was still queued but past its deadline, so the
+ *   host default-denied it whatever the button said. **Nothing was carried
+ *   out**, and nothing was recorded against the operator's name.
+ * * `already_resolved` — there was nothing left to resolve. The click changed
+ *   nothing. Could be a double-submit, another operator, another tab, or the
+ *   sweeper retiring it a moment earlier; the host cannot tell which, and
+ *   neither may the wording.
+ */
+export type ResolveOutcome = "settled" | "expired" | "already_resolved";
+
+/**
  * The answer to a **detached** resolve (#383): the verdict is durable, and that
  * is all it claims. The agent's continuation arrives afterwards on the event
  * stream's `agent_reply` frame.
@@ -513,6 +541,12 @@ export interface ResolveReceipt {
   recorded: boolean;
   /** There was nothing left to resolve — a double-click, not a failure. */
   alreadyResolved: boolean;
+  /**
+   * Which end state this resolve reached (#1449). Absent on a host that
+   * predates the field, which the console reads as "cannot tell" and words its
+   * confirmation exactly as it did before rather than guessing.
+   */
+  outcome?: ResolveOutcome;
   /**
    * How many OTHER decisions the turn behind this approval is still blocked on
    * (issue #561). `0` means this decision released it; absent on a host that

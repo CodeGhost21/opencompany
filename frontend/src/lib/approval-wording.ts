@@ -17,6 +17,8 @@
  * next is exactly the kind that drifts when it is written down three times.
  */
 
+import type { ResolveOutcome } from "@/api/types";
+
 /** How many other decisions a turn is still blocked on, as the host reports it. */
 export type StillAwaiting = number | undefined;
 
@@ -94,4 +96,49 @@ export function batchPositions(
     positions.set(a.id, { index, total: total.get(a.batch) ?? index });
   }
   return positions;
+}
+
+/**
+ * What to say when the click was not the decision (issue #1449).
+ *
+ * A resolve can succeed as a *request* and still not be the operator's verdict.
+ * Before this the console had no way to know that — the host's expired arm
+ * returned the same `Settled` shape as a real approval — so a card 30 minutes
+ * past its deadline answered a click with a green **"Approved — carrying it out
+ * now"** over work that could not have been carried out, and the journal agreed.
+ *
+ * Three end states, three sentences, and the differences between them are the
+ * point:
+ *
+ * * `settled` — `null`. This was the operator's decision; the caller's own
+ *   confirmation is the honest one and is left alone.
+ * * `expired` — the approval was still queued and the host default-denied it on
+ *   the deadline. This is the one case where the console may say flatly that
+ *   nothing was sent, because the host has just told it so.
+ * * `already_resolved` — there was nothing left to resolve. The click changed
+ *   nothing, and that is **all** that may be claimed: the host sees only that
+ *   the queue was empty, so it cannot tell a sweep from another operator from
+ *   another tab. Saying "it was declined automatically" here would be the same
+ *   defect pointing the other way — telling somebody nothing happened about a
+ *   payment a colleague approved a second earlier and which really is going out.
+ *
+ * Never `toast.success`. None of these is a success, and none is a failure
+ * either: the request was answered, correctly, and the answer is that there was
+ * no decision left to make. `toast.info` is the shape that says so.
+ */
+export function staleDecisionLine(
+  outcome: ResolveOutcome | undefined,
+  detail?: string,
+): string | null {
+  const suffix = detail ? `: ${detail}` : "";
+  switch (outcome) {
+    case "expired":
+      return `Too late — this one had passed its deadline, so it was declined automatically. Nothing was sent${suffix}`;
+    case "already_resolved":
+      return `Nothing to decide — this one was already settled before your click landed, so nothing changed${suffix}`;
+    // `settled`, and a host too old to say: the caller's own wording stands.
+    // Guessing here is exactly what #1449 is about.
+    default:
+      return null;
+  }
 }
