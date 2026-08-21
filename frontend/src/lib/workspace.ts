@@ -16,6 +16,7 @@ export type { FsNode } from "@/api/workspace";
 import { type LocalScope, scopedKey, scopedKeyAdoptingLegacy } from "@/connections/types";
 
 import type { FsNode, RepairOutcome } from "@/api/workspace";
+import { rosterDisplayName, type RosterNames } from "@/lib/roster-names";
 
 /* ---- queries ---- */
 
@@ -360,6 +361,74 @@ export function pathOf(nodes: FsNode[], id: string | null): FsNode[] {
  * ellipsis rather than dropped, so the operator can see that the path is longer
  * than what is shown instead of reading a shortened path as the whole truth.
  */
+/**
+ * Whether `folder` is the workspace's `Agents/` root — the one folder whose
+ * direct children are named by roster id rather than anything an operator
+ * chose (issue #973). Root-scoped (`parentId === null`) so a note or folder an
+ * operator names "Agents" somewhere else in the tree is never mistaken for it.
+ *
+ * Lives here rather than in the view because the tree is no longer the only
+ * surface that has to resolve those ids: the Move dialog lists the same folders
+ * (issue #1381).
+ */
+export function isAgentsFolder(folder: FsNode | undefined): boolean {
+  return (
+    folder?.kind === "folder" &&
+    folder.name === "Agents" &&
+    folder.parentId === null
+  );
+}
+
+/**
+ * A folder's full path as one line, with roster ids resolved (issue #1381).
+ *
+ * The Move dialog listed every folder by bare `name`, so two `Drafts` under
+ * different parents were identical rows and a roster folder was a raw ULID —
+ * in a list the operator is choosing a destination from, where picking the
+ * wrong one silently re-files a note.
+ */
+export function folderPathLabel(
+  nodes: FsNode[],
+  id: string,
+  names: RosterNames,
+): string {
+  return pathOf(nodes, id)
+    .map((node) =>
+      isAgentsFolder(nodeById(nodes, node.parentId))
+        ? rosterDisplayName(node.name, names)
+        : node.name,
+    )
+    .join(" / ");
+}
+
+/**
+ * Every folder in the tree, in the order the explorer draws them (issue #1381).
+ *
+ * `fetchTree` returns the host's order unmodified, and the host calls its own
+ * `tree()` order unspecified — so the destination list was arbitrary while the
+ * tree beside it was sorted. This walks the same {@link childrenOf} the tree
+ * does, depth-first, so the two agree.
+ *
+ * `blocked` drops a subtree wholesale: the moving node's own descendants (which
+ * would be a cycle), and the read-only `derived/` root, which the host refuses
+ * writes under — offering it could only ever produce an error toast.
+ */
+export function sortedFolders(
+  nodes: FsNode[],
+  blocked: ReadonlySet<string>,
+): FsNode[] {
+  const out: FsNode[] = [];
+  const walk = (parentId: string | null) => {
+    for (const node of childrenOf(nodes, parentId)) {
+      if (node.kind !== "folder" || blocked.has(node.id)) continue;
+      out.push(node);
+      walk(node.id);
+    }
+  };
+  walk(null);
+  return out;
+}
+
 export type Crumb = FsNode | null;
 
 /**

@@ -107,6 +107,7 @@ import {
   fileByTitle,
   type FsNode,
   hasLegacyLocal,
+  isAgentsFolder,
   isDerivedNode,
   isSecretNode,
   legacyImportDeclined,
@@ -1982,16 +1983,6 @@ interface TreeProps {
   onRename: (node: FsNode) => void;
   onMove: (node: FsNode) => void;
   onDelete: (node: FsNode) => void;
-}
-
-/**
- * Whether `folder` is the workspace's `Agents/` root — the one folder whose
- * direct children are named by roster id rather than anything an operator
- * chose (issue #973). Root-scoped (`parentId === null`) so a note or folder an
- * operator names "Agents" somewhere else in the tree is never mistaken for it.
- */
-function isAgentsFolder(folder: FsNode | undefined): boolean {
-  return folder?.kind === "folder" && folder.name === "Agents" && folder.parentId === null;
 }
 
 /**
