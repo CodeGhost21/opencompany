@@ -1735,6 +1735,40 @@ prompt = "Lead decisively."
         assert_eq!(reset["instructionsOverridden"], false, "{reset}");
     }
 
+
+    /// Review (PR #1549): an oversized `instructions` write is capped to the
+    /// prompt budget rather than stored verbatim, so a single pasted
+    /// "AGENT.md"-style document cannot unboundedly inflate every turn's
+    /// persona prompt. The leading portion is kept and the cut is marked.
+    #[tokio::test]
+    async fn overlong_instructions_are_capped_at_the_write_boundary() {
+        use crate::company::types::PROMPT_FILE_BUDGET_CHARS;
+
+        let home_dir = home();
+        let state = state_with_manifest(home_dir.path(), ROSTER).await;
+        let jamie = add_overlay(&state, "Jamie", "Growth").await;
+
+        let over: String = "x".repeat(PROMPT_FILE_BUDGET_CHARS + 40);
+        let (status, edited) =
+            patch_agent(&state, &jamie, json!({"instructions": over})).await;
+        assert_eq!(status, StatusCode::OK, "{edited}");
+        let stored = edited["instructions"].as_str().unwrap();
+        assert!(
+            stored.starts_with(&"x".repeat(PROMPT_FILE_BUDGET_CHARS)),
+            "the leading portion is kept: {:?}",
+            &stored[..64.min(stored.len())]
+        );
+        assert!(
+            stored.contains("truncated"),
+            "an overlong override is marked as cut"
+        );
+        assert!(
+            stored.chars().count() <= PROMPT_FILE_BUDGET_CHARS + 40,
+            "capped text stays bounded: {}",
+            stored.chars().count()
+        );
+    }
+
     /// The console renders read-only from the host's answer, not from a rule of
     /// its own — so this list is part of the contract.
     #[tokio::test]
