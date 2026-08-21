@@ -1840,6 +1840,56 @@ members = ["writer", "ceo"]
         assert_eq!(trimmed["name"], "Jamie R", "{trimmed}");
     }
 
+    /// A teammate the operator has **removed** is an id that names nobody, and
+    /// the refusal has to land before anything is written.
+    ///
+    /// A retired manifest id still matches `manifest.agents`, so the obvious
+    /// existence check passes and the handler stores an override — for a
+    /// teammate `detail` then answers `404` for. That is a failed request that
+    /// mutated the record on its way out, and it leaves an edit waiting to be
+    /// applied to whoever next takes that id: the id is a slug of the display
+    /// name, so a later teammate can inherit a rename nobody made for it.
+    #[tokio::test]
+    async fn a_removed_teammate_is_not_found_and_no_edit_is_stored() {
+        let home_dir = home();
+        let state = state_with_manifest(home_dir.path(), ROSTER).await;
+
+        // Remove `writer` through the route an operator would use, leaving the
+        // blueprint that declares it untouched.
+        let (status, _) = send(
+            &state,
+            "DELETE",
+            "/api/v1/company/team/writer",
+            None,
+            Some(&admin_cookie()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        let (status, _) = get_agent(&state, "writer").await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "a removed teammate is gone");
+
+        let (status, _) = patch_agent(&state, "writer", json!({"role": "Ghost Writer"})).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+
+        // The record is the assertion that matters: the refusal must be the end
+        // of the request, not a `404` rendered over a write that already landed.
+        let record = state
+            .registry()
+            .get(&CompanyId::new("acme"))
+            .unwrap()
+            .store()
+            .load(&CompanyId::new("acme"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            record.agent_override("writer").is_none(),
+            "the refused edit was stored anyway: {:?}",
+            record.overlay_agent_edits
+        );
+    }
+
     /// An id that names nobody is a `404` on both verbs, rather than a detail
     /// view of a teammate that does not exist or a write that lands nowhere.
     #[tokio::test]
