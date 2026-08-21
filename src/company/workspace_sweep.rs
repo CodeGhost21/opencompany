@@ -519,13 +519,13 @@ mod tests {
         assert_eq!(
             names(&ws, &company).await,
             vec![
-                "Agents",
-                "Archive",
-                "Desks",
-                "README.md",
+                "agents",
+                "archive",
                 "ceo",
-                "creative_studio",
+                "creative-studio",
+                "desks",
                 "drafts",
+                "readme.md",
                 "secrets"
             ],
         );

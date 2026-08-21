@@ -4805,8 +4805,8 @@ mod test {
         let home = home_dir.path().to_path_buf();
         // A company definition dir with a workspace subtree.
         let seed_dir = home.join("def");
-        std::fs::create_dir_all(seed_dir.join("workspace/Brand")).unwrap();
-        std::fs::write(seed_dir.join("workspace/README.md"), "# Root").unwrap();
+        std::fs::create_dir_all(seed_dir.join("workspace/brand")).unwrap();
+        std::fs::write(seed_dir.join("workspace/readme.md"), "# Root").unwrap();
         std::fs::write(seed_dir.join("workspace/brand/voice.md"), "# Voice").unwrap();
 
         let manifest = parse("[company]\nname=\"Acme\"\n[policy]\nmode=\"full\"\n");
@@ -4840,7 +4840,7 @@ mod test {
             names
         };
         let tree = runtime.workspace().tree(&id).await.unwrap();
-        assert_eq!(seeded(&tree), vec!["Brand", "readme.md", "voice.md"]);
+        assert_eq!(seeded(&tree), vec!["brand", "readme.md", "voice.md"]);
 
         // Operator deletes a node.
         let voice = tree.iter().find(|n| n.name == "voice.md").unwrap();
@@ -4857,7 +4857,7 @@ mod test {
         let tree = runtime.workspace().tree(&id).await.unwrap();
         assert_eq!(
             seeded(&tree),
-            vec!["Brand", "readme.md"],
+            vec!["brand", "readme.md"],
             "workspace re-seeded despite operator deletion"
         );
         // Sanity: the record store still loads.
@@ -4958,9 +4958,9 @@ mod test {
             names,
             vec![
                 AGENTS_ROOT,
-                "Desks",
-                "README.md",
-                "creative_studio",
+                "creative-studio",
+                "desks",
+                "readme.md",
                 SECRETS_ROOT,
             ],
             "the deleted root was re-provisioned, and the unmanaged `desks/` left as it stood"
