@@ -51,4 +51,11 @@ echo "==> src-tauri/icons"
 render icon 1024 "$work/tauri-source.png"
 (cd "$root" && cargo tauri icon "$work/tauri-source.png" --output src-tauri/icons)
 
+# `tauri icon` always writes the iOS and Android sets too. This app ships
+# desktop only — tauri.conf.json names none of them — so they are thirty-odd
+# PNGs that would be committed, reviewed and never read. Delete them here
+# rather than leaving each re-run to reintroduce them. If mobile is ever
+# targeted, drop these two lines and the sets come back.
+rm -rf "$root/src-tauri/icons/android" "$root/src-tauri/icons/ios"
+
 echo "done"
