@@ -48,6 +48,10 @@ for s in 16 32 48; do render icon "$s" "$work/ico-$s.png"; done
 python3 "$root/scripts/brand/build_ico.py" "$work" "$public/favicon.ico"
 
 echo "==> src-tauri/icons"
+# Everything this script writes is reproducible except icons/icon.icns, which
+# `tauri icon` re-encodes to different bytes at the same size on every run. So
+# a re-run always shows one 135 KB binary diff even when no source changed —
+# that is the tool, not a real change, and it is safe to check out over.
 render icon 1024 "$work/tauri-source.png"
 (cd "$root" && cargo tauri icon "$work/tauri-source.png" --output src-tauri/icons)
 
