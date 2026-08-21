@@ -17,6 +17,7 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { catalogWarning } from "@/lib/composio-catalog";
 import { toolkitSlug, type ComposioReach } from "@/lib/connections";
+import { classifyLoadFailure } from "@/lib/section-load";
 import {
   buildGridProviders,
   connectedProviderCount,
@@ -196,11 +197,16 @@ export function ConnectionsView({ client, company }: Props) {
           setStatus(probed);
           setAttested(probed?.credentialSource === "attested");
         }
-      } catch {
-        // No Composio surface on this host — not an error for this page.
+      } catch (err) {
+        // A 404 is the honest "no Composio surface on this host" (issue #822):
+        // leave the page in its no-route state. Anything else — a 5xx, an
+        // offline network, an expired session — is UNKNOWN, not absent, so it
+        // takes the same `probeFailed` path as the timeout above. Collapsing it
+        // to a confident empty catalog is the #1478 defect one level down.
         if (live) {
           setStatus(null);
           setAttested(false);
+          if (classifyLoadFailure(err) === "error") setProbeFailed(true);
         }
       } finally {
         if (live) setReachSettled(true);
