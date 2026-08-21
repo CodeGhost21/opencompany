@@ -221,10 +221,37 @@ capital C — never `Open Company`, `OPENCOMPANY`, or `opencompany` in prose
 - Never re-set it in another face, stretch it, add a gradient, outline it, or
   apply a shadow.
 
-> **Status:** the repository has no vector logo asset — only a raster in the
-> GitBook assets and `src-tauri/icons/icon.png`. An SVG wordmark and mark, plus
-> a favicon set, are outstanding. Until they exist, treat the type-set wordmark
-> above as the interim lockup.
+### The mark
+
+`logo/mark.svg` is the mark alone: two concentric stadiums reading as an `O`
+around a `C`, on a transparent ground and filled with `currentColor`, so it
+takes the colour of whatever it is placed in. Use it below the wordmark's 88px
+minimum, and anywhere the lockup would be too wide.
+
+`logo/icon.svg` is the application tile — the mark in white on a `#191919`
+rounded square, radius 80 at 350, the one place the mark appears locked to a
+background of its own. It is the source for the favicon set and the desktop
+app icon. `logo/icon-square.svg` is the same tile with the corners squared off,
+for the platforms that apply their own mask (the iOS home screen, Android
+maskable); handing those the pre-rounded tile rounds it twice and leaves dark
+fringes outside the mask.
+
+**These three SVGs are the authority.** Every raster the repository ships is
+generated from them by `scripts/brand/generate-icons.sh` — the favicon set and
+web manifest icons in `frontend/public/`, and the full desktop bundle set in
+`src-tauri/icons/`. Change a source and re-run the script; never hand-edit a
+generated PNG, or the set drifts apart one file at a time.
+
+> **Status:** the wordmark still has no vector asset — it remains type-set in
+> Geist Semibold, and an SVG lockup is outstanding. The mark, the tile and the
+> favicon set now exist as vectors above.
+>
+> At 16px the mark's concentric strokes merge into a blob: the gap between them
+> is under a pixel at that size. `favicon.ico` carries a 32px and a 48px frame
+> for the contexts that will take one, and the 16px frame is the honest limit
+> of this mark rather than a rendering fault. A simplified 16px variant —
+> dropping the inner stadium — would fix it, and needs a designer's call rather
+> than a script's.
 
 ---
 
