@@ -100,13 +100,20 @@ function readHubError(): boolean {
  * *second* id for the one host. Every key named after that id starts over: the
  * tour, unread counts, the last-visited channel, the mail draft. The reported
  * symptom was a welcome tour that came back after being skipped; see #1306.
+ *
+ * The hash is preserved: it is the router's, not ours, and a magic link may
+ * carry a deep link to land on.
  */
 export function clearMagicLinkFromUrl(): void {
   const params = new URLSearchParams(window.location.search);
   if (!params.has("code")) return;
   params.delete("code");
   const query = params.toString();
-  window.history.replaceState({}, "", window.location.pathname + (query ? `?${query}` : ""));
+  window.history.replaceState(
+    {},
+    "",
+    window.location.pathname + (query ? `?${query}` : "") + window.location.hash,
+  );
 }
 
 /**
@@ -119,15 +126,23 @@ export function clearMagicLinkFromUrl(): void {
  *
  * `company` is deliberately kept. It is not a credential, and dropping it would
  * un-scope the console on a reload of a multi-company host.
+ *
+ * The hash is preserved for the same reason it is in `clearMagicLinkFromUrl`:
+ * it belongs to the router, and rewriting the URL without it would bounce a
+ * deep link back to the default view.
  */
-function clearHubResultFromUrl(): void {
+export function clearHubResultFromUrl(): void {
   const params = new URLSearchParams(window.location.search);
   if (params.get("key") !== "auth") return;
   params.delete("token");
   params.delete("error");
   params.delete("key");
   const query = params.toString();
-  window.history.replaceState({}, "", window.location.pathname + (query ? `?${query}` : ""));
+  window.history.replaceState(
+    {},
+    "",
+    window.location.pathname + (query ? `?${query}` : "") + window.location.hash,
+  );
 }
 
 /**

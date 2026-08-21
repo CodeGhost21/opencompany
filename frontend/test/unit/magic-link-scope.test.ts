@@ -2,7 +2,7 @@
 
 import { beforeEach, describe, expect, it } from "vitest";
 
-import { clearMagicLinkFromUrl } from "@/App";
+import { clearHubResultFromUrl, clearMagicLinkFromUrl } from "@/App";
 import { resolveConfig } from "@/config";
 import { addConnection, resetConnections, restoreConnections } from "@/connections/registry";
 import { readProfiles } from "@/connections/profileStore";
@@ -95,12 +95,31 @@ describe("clearing a magic link", () => {
     ).toBe(JSON.stringify({ skipped: true }));
   });
 
+  it("leaves the router's hash alone, so a deep link survives the strip", () => {
+    land("?company=agentic-software-company&code=s3cret", "#/tasks/abc");
+
+    clearMagicLinkFromUrl();
+
+    expect(window.location.hash).toBe("#/tasks/abc");
+  });
+
   it("does nothing at all when there is no code to strip", () => {
-    land("?company=agentic-software-company");
+    land("?company=agentic-software-company", "#/overview");
 
     clearMagicLinkFromUrl();
 
     expect(window.location.search).toBe("?company=agentic-software-company");
+    expect(window.location.hash).toBe("#/overview");
   });
 });
 
+describe("clearing a hub sign-in result", () => {
+  it("takes the token out but keeps the scope and the hash", () => {
+    land("?company=agentic-software-company&token=jwt&key=auth", "#/overview");
+
+    clearHubResultFromUrl();
+
+    expect(window.location.search).toBe("?company=agentic-software-company");
+    expect(window.location.hash).toBe("#/overview");
+  });
+});
