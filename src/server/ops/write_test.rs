@@ -1356,7 +1356,7 @@ async fn workspace_tree_and_file_reads_reflect_writes() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
         provisioned_names(&tree),
-        vec!["agents", "readme.md", "secrets"],
+        vec!["agents", "artifacts", "readme.md", "readme.md", "secrets"],
         "a fresh company starts with its system scaffold and nothing else"
     );
     let provisioned = tree.as_array().unwrap().len();
@@ -1565,7 +1565,7 @@ async fn workspace_reads_are_isolated_between_companies() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
         provisioned_names(&tree_b),
-        vec!["agents", "readme.md", "secrets"]
+        vec!["agents", "artifacts", "readme.md", "readme.md", "secrets"]
     );
 
     // Even naming A's node id explicitly, B's scope does not resolve it.
@@ -1843,8 +1843,10 @@ async fn workspace_sweep_previews_then_removes_only_the_empty_agent_folders() {
         provisioned_names(&tree),
         vec![
             "agents".to_string(),
+            "artifacts".to_string(),
             "cmo".to_string(),
             "launch-brief.md".to_string(),
+            "readme.md".to_string(),
             "readme.md".to_string(),
             "readme.md".to_string(),
             "secrets".to_string(),
