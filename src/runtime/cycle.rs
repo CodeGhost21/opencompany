@@ -4385,6 +4385,212 @@ mod test {
         );
     }
 
+    /// Parks one harness tool call behind a **zero-TTL** gate, so it is past its
+    /// deadline the instant it lands — the state an operator meets when they get
+    /// to the queue late (issue #1449).
+    async fn park_one_past_its_deadline(
+        home: std::path::PathBuf,
+    ) -> (Arc<CompanyRuntime>, ApprovalId) {
+        let gate = Arc::new(
+            ManifestApprovalGate::new(manifest("supervised").policy.clone()).with_ttl_millis(0),
+        );
+        let rt = Arc::new(
+            RuntimeBuilder::new(home, manifest("supervised"))
+                .with_approvals(gate)
+                .with_brain(Arc::new(EffectBrain {
+                    effect: harness_effect(
+                        "finance",
+                        "composio_execute",
+                        serde_json::json!({ "to": "a@b.test" }),
+                    ),
+                }))
+                .build()
+                .await
+                .unwrap(),
+        );
+        let report = rt
+            .run_cycle(vec![CompanyEvent::OperatorMessage {
+                parent: None,
+                text: "do it".into(),
+                by: None,
+                chat: None,
+                deliverable: None,
+            }])
+            .await
+            .unwrap();
+        assert_eq!(report.parked.len(), 1);
+        let id = report.parked[0].clone();
+        (rt, id)
+    }
+
+    /// **The assertion this whole fix exists for** (issue #1449).
+    ///
+    /// The safety half was always right — an expired approval mints nothing, and
+    /// [`an_expired_approval_mints_nothing_even_on_approve`] pins that. What was
+    /// missing was the *reporting* half: the arm fell through to
+    /// `record_resolved`, so the immutable journal said **a named operator
+    /// approved this** about a call the host had already refused. That is a
+    /// false statement about a person, written permanently, on the surface whose
+    /// entire job is answering "who authorised this?".
+    ///
+    /// So: after a late approve, the journal must carry the expiry — the same
+    /// line the sweeper writes when the identical outcome is reached by silence
+    /// — and must carry **no** `ApprovalResolved` for that id at all.
+    #[tokio::test]
+    async fn a_late_approve_is_journaled_as_an_expiry_never_as_the_operators_verdict() {
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
+        let (rt, id) = park_one_past_its_deadline(home.clone()).await;
+
+        rt.resolve_approval(&id, Verdict::Approve, operator())
+            .await
+            .unwrap();
+
+        let raw = tokio::fs::read_to_string(Bundle::new(&home, rt.id()).journal_jsonl())
+            .await
+            .unwrap();
+        let lines: Vec<serde_json::Value> = raw
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .filter_map(|l| serde_json::from_str(l).ok())
+            .collect();
+        let about_this_approval = |record: &str| {
+            lines.iter().any(|line| {
+                line["record"] == record && line["id"] == serde_json::json!(id.as_ref() as &str)
+            })
+        };
+
+        assert!(
+            about_this_approval("ApprovalExpired"),
+            "a late click leaves the SAME record as a deadline nobody noticed, got {raw}"
+        );
+        assert!(
+            !about_this_approval("ApprovalResolved"),
+            "the journal must never say this operator resolved an approval the \
+             host had already default-denied, got {raw}"
+        );
+        assert!(
+            !about_this_approval("ApprovalAmended"),
+            "and it must not record an amendment either, got {raw}"
+        );
+        // The safety half, re-checked here rather than assumed: reporting the
+        // truth is only half a fix if the grant came back.
+        assert_eq!(rt.grants.live_count(), 0);
+        assert!(rt.pending_approvals().is_empty());
+    }
+
+    /// The event log — what the brain and the operator's SSE feed read — must
+    /// agree with the journal (issue #1449).
+    ///
+    /// Before this it received `ApprovalResolved { verdict: Approve, by: <the
+    /// operator> }`, so the agent was re-dispatched to make a call it had never
+    /// been granted, and the timeline named a person who approved nothing. An
+    /// expiry is a default-**deny** by the **system**, exactly as the sweeper
+    /// appends it.
+    #[tokio::test]
+    async fn a_late_approve_appends_a_system_deny_not_the_operators_approve() {
+        let home_dir = tmp_home();
+        let (rt, id) = park_one_past_its_deadline(home_dir.path().to_path_buf()).await;
+
+        rt.resolve_approval(&id, Verdict::Approve, operator())
+            .await
+            .unwrap();
+
+        let events = rt
+            .events()
+            .read_from(rt.id(), EventSeq::new(0), usize::MAX)
+            .await
+            .unwrap();
+        let resolutions: Vec<_> = events
+            .iter()
+            .filter_map(|stored| match &stored.event {
+                CompanyEvent::ApprovalResolved {
+                    approval_id,
+                    verdict,
+                    by,
+                } if approval_id == &id => Some((*verdict, by.clone())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            resolutions.len(),
+            1,
+            "exactly one resolution event, got {resolutions:?}"
+        );
+        assert_eq!(resolutions[0].0, Verdict::Deny);
+        assert_eq!(
+            resolutions[0].1.kind,
+            ActorKind::System,
+            "the deadline decided this, not the person who clicked"
+        );
+    }
+
+    /// The receipt says which end state was reached, so the HTTP layer can too.
+    #[tokio::test]
+    async fn a_late_approve_answers_with_an_expired_receipt() {
+        let home_dir = tmp_home();
+        let (rt, id) = park_one_past_its_deadline(home_dir.path().to_path_buf()).await;
+
+        let (receipt, follow_up) = rt
+            .resolve_approval_spawned(&id, Verdict::Approve, operator(), GrantScope::Once)
+            .await
+            .unwrap();
+        assert_eq!(receipt.outcome(), "expired");
+        assert!(receipt.expired());
+        assert!(
+            !receipt.already_resolved(),
+            "the approval WAS parked — it ran out, which is a different answer \
+             from somebody else having decided it"
+        );
+        // And it owes no continuation of its own: `retire_approval` already
+        // released the turn.
+        let report = crate::company::runtime::join_follow_up(follow_up)
+            .await
+            .unwrap();
+        assert!(report.responses[0].text.contains("deadline"));
+
+        // A second click on the same card is now the ordinary already-gone case.
+        let (again, _) = rt
+            .resolve_approval_spawned(&id, Verdict::Approve, operator(), GrantScope::Once)
+            .await
+            .unwrap();
+        assert_eq!(again.outcome(), "already_resolved");
+    }
+
+    /// The amend half of the same defect: an edit applied after the deadline is
+    /// still not a decision, and recorded an `ApprovalAmended` on top of the
+    /// false approval before this (issue #1449).
+    #[tokio::test]
+    async fn a_late_amend_records_an_expiry_and_no_amendment() {
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
+        let (rt, id) = park_one_past_its_deadline(home.clone()).await;
+
+        let (receipt, _) = rt
+            .resolve_approval_amended_spawned(
+                &id,
+                serde_json::json!({ "to": "elsewhere@b.test" }),
+                operator(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(receipt.outcome(), "expired");
+
+        let raw = tokio::fs::read_to_string(Bundle::new(&home, rt.id()).journal_jsonl())
+            .await
+            .unwrap();
+        assert!(raw.contains("ApprovalExpired"));
+        assert!(
+            !raw.contains("ApprovalAmended"),
+            "an edit the host refused is not an amendment the operator made, got {raw}"
+        );
+        assert!(
+            !raw.contains("elsewhere@b.test"),
+            "and the edited arguments must not be recorded as approved, got {raw}"
+        );
+        assert_eq!(rt.grants.live_count(), 0);
+    }
+
     /// A live grant survives a restart; a consumed one does not come back.
     ///
     /// The window between approve and re-issue spans a model turn, so a deploy
