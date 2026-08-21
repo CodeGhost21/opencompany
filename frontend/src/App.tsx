@@ -39,6 +39,7 @@ import {
 import { HostsProvider, useHosts, type HostsValue } from "@/connections/HostsContext";
 import { firstHostCopy } from "@/connections/first-host";
 import type { ConnectionId } from "@/connections/types";
+import { useHostAddress, useHostRoute } from "@/hooks/use-host-route";
 import { ConnectionConsole } from "@/views/ConnectionConsole";
 import { AddHostPage } from "@/views/setup/AddHostPage";
 import { cn } from "@/lib/utils";
@@ -358,8 +359,14 @@ function Console() {
    * no bootstrap connection to seed this with. What is on screen then is
    * decided by `active` below, not by leaving this pointing at a host that does
    * not exist.
+   *
+   * Local, but no longer *only* local: it is seeded from and mirrored into the
+   * address, so a switch is a history entry Back can undo and the bar names the
+   * host being looked at. That is issue #1358, and `use-host-route.ts` is the
+   * whole of it. The registry is still untouched — every connection stays
+   * registered and probed regardless of what the address says.
    */
-  const [selected, setSelected] = useState<ConnectionId | null>(bootstrapId);
+  const { selected, selectHost, resettleHost } = useHostRoute(bootstrapId);
 
   // A pure read, so StrictMode's double render is harmless.
   const magicLink = useMemo(() => readMagicLink(), []);
@@ -465,14 +472,6 @@ function Console() {
     }
   }, [auth.ready, connectionIds]);
 
-  if (!auth.ready) {
-    return (
-      <FullScreen>
-        <Waiting>Signing in…</Waiting>
-      </FullScreen>
-    );
-  }
-
   /**
    * Which connection is rendered, in the order these questions get answers.
    *
@@ -497,6 +496,24 @@ function Console() {
     (embedded.resolved ? connections[0] : undefined);
   const client = active ? clientFor(active.id) : undefined;
 
+  /**
+   * The address names the host on screen, and only while there is a choice.
+   *
+   * One host is unambiguous, so its console keeps clean addresses; the scope
+   * appears with the second. Declared here, above the sign-in gate, because it
+   * is a hook and that gate returns early — and `active` is a pure derivation,
+   * so resolving it first costs nothing.
+   */
+  useHostAddress(active?.id ?? null, connectionIds, connections.length > 1);
+
+  if (!auth.ready) {
+    return (
+      <FullScreen>
+        <Waiting>Signing in…</Waiting>
+      </FullScreen>
+    );
+  }
+
   // Everything the switcher needs, assembled once and carried down by context.
   //
   // Context rather than props because the switcher now lives in the sidebar
@@ -506,10 +523,15 @@ function Console() {
   const hosts: HostsValue = {
     connections,
     selected: active?.id ?? null,
-    onSelect: setSelected,
+    // A navigation, not a mode change: `selectHost` pushes a history entry, so
+    // Back returns to the host that was on screen. `active?.id` rather than
+    // `selected` is what the entry being left gets stamped with — the desktop
+    // leaves `selected` null until someone chooses, and a stamp of `null` would
+    // leave that entry naming nobody.
+    onSelect: (id) => selectHost(id, active?.id ?? null),
     onAdd: (baseUrl, connector) => {
       const id = addConnection({ baseUrl, connector });
-      setSelected(id);
+      selectHost(id, active?.id ?? null);
       void probe(id);
     },
     localInstances: embedded.instances,
@@ -526,7 +548,7 @@ function Console() {
             const opened = listConnections().find(
               (c) => c.identity?.instanceId === created.instanceId,
             );
-            if (opened) setSelected(opened.id);
+            if (opened) selectHost(opened.id, active?.id ?? null);
           }
         }
       : undefined,
@@ -546,7 +568,7 @@ function Console() {
             label: target.destination,
             connector: { kind: "ssh", target },
           });
-          setSelected(id);
+          selectHost(id, active?.id ?? null);
           void probe(id);
         }
       : undefined,
@@ -563,11 +585,16 @@ function Console() {
     // row's client for a frame — and in the desktop, where `selected` is
     // ordinarily null, it would keep rendering whatever came next without ever
     // recording the choice.
+    //
+    // `resettleHost`, not `selectHost`: a host that has been forgotten is not
+    // somewhere Back should be able to return to, and the entry would name a
+    // connection this client no longer holds. `useHostAddress` takes the dead
+    // id out of the bar for the same reason.
     onRemoveHost: (id) => {
       removeConnection(id);
       const remaining = listConnections();
-      setSelected((current) =>
-        remaining.some((c) => c.id === current) ? current : (remaining[0]?.id ?? null),
+      resettleHost(
+        remaining.some((c) => c.id === selected) ? selected : (remaining[0]?.id ?? null),
       );
     },
     onStopLocal: isDesktopRuntime()
