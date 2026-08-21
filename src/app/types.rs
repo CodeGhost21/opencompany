@@ -1075,7 +1075,7 @@ impl AppState {
     /// `OPENCOMPANY_MEMORY=store` default — so there is no separate engine to
     /// name and nothing was negotiated.
     fn memory_spec(&self) -> MemorySpec {
-        match &self.memory_overlay {
+        match self.memory_overlay() {
             None => MemorySpec {
                 backend: crate::store::MemoryBackend::Store.as_str(),
                 driver_id: None,
