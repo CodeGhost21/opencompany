@@ -2629,6 +2629,20 @@ pub struct OverlayAgent {
     /// JSON so a standard-grant teammate serializes exactly as it did before.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tools: Vec<String>,
+    /// A per-agent model override, carried the same way as
+    /// [`Agent::model`](crate::company::types::Agent) — see that field's docs.
+    /// `None` (the default, and how every record written before this field
+    /// existed deserializes) means this teammate takes its harness's own
+    /// model, unchanged from today.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Which `[[harness]]` this teammate runs its turns on, by id — carried
+    /// the same way as [`Agent::harness`](crate::company::types::Agent::harness).
+    /// `None` (the default, and how every record written before this field
+    /// existed deserializes) means the harness marked `default = true`,
+    /// unchanged from today's hardcoded behaviour.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness: Option<String>,
 }
 
 /// An operator-added desk membership that the version-controlled manifest does
@@ -5127,6 +5141,8 @@ mod test {
             role: "Growth".into(),
             description: None,
             tools: Vec::new(),
+            model: None,
+            harness: None,
         });
         assert!(record.is_roster_agent("ceo"));
         assert!(record.is_roster_agent("nova"));
@@ -5159,6 +5175,8 @@ mod test {
             role: "r".into(),
             description: None,
             tools: vec!["docs.*".into(), "email".into()],
+            model: None,
+            harness: None,
         };
         let round: OverlayAgent =
             serde_json::from_str(&serde_json::to_string(&scoped).unwrap()).unwrap();
@@ -5181,6 +5199,8 @@ mod test {
             role: "Worker".into(),
             description: None,
             tools: Vec::new(),
+            model: None,
+            harness: None,
         });
     }
 
@@ -5321,6 +5341,8 @@ mod test {
             role: "Designer".into(),
             description: None,
             tools: Vec::new(),
+            model: None,
+            harness: None,
         });
 
         assert_eq!(
@@ -5364,6 +5386,8 @@ mod test {
             role: "Growth".into(),
             description: None,
             tools: Vec::new(),
+            model: None,
+            harness: None,
         });
         assert_eq!(
             record.resolve_teammate_key("ceo"),
@@ -5384,6 +5408,8 @@ mod test {
                 role: "Designer".into(),
                 description: None,
                 tools: Vec::new(),
+                model: None,
+                harness: None,
             });
         }
         assert_eq!(
@@ -5739,6 +5765,8 @@ mod test {
             role: "Growth".to_string(),
             description: None,
             tools: Vec::new(),
+            model: None,
+            harness: None,
         });
         assert_eq!(record.effective_budget("shane"), None);
 

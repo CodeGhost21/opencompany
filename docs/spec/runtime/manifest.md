@@ -77,7 +77,7 @@ provider = "openrouter"
 # kind = "acp"
 # [harness.acp]
 # transport = "local"              # local | runner
-# agent = "claude"                 # claude | codex | goose
+# agent = "claude"                 # claude | codex
 
 [inference]                        # per-tenant BYOK (#56) — the fallback for a
 provider = "openrouter"            # harness declaring no [harness.inference].

@@ -48,7 +48,6 @@ use crate::acp::discovery::HARNESSES;
 fn model_env_var(agent: &str) -> Option<&'static str> {
     match agent {
         "claude" => Some("ANTHROPIC_MODEL"),
-        "goose" => Some("GOOSE_MODEL"),
         _ => None,
     }
 }
@@ -65,6 +64,14 @@ pub struct LocalAcpAgent {
     /// construction, so this is the only record of what was actually asked
     /// for in that case.
     model: Option<String>,
+    /// Per-agent model overrides for the teammates this harness serves,
+    /// keyed by agent id (issue #1245's per-agent follow-up). An agent absent
+    /// here takes [`Self::model`], the harness's own default, unchanged.
+    /// Always attempted via `session/set_config_option` in
+    /// [`Self::session_for`] regardless of [`Self::env`] — unlike the
+    /// harness-level model, an override cannot be satisfied by the shared
+    /// subprocess's env, since two agents on one harness share that process.
+    agent_models: HashMap<String, String>,
     /// The company's agent-workspace root (`HarnessDeps::workspace_root`).
     /// Each session roots at `workspace_root/<company>/<agent>/workspace`,
     /// mirroring `harness::built_in::build::agent_workspace` exactly, so an
@@ -82,8 +89,14 @@ pub struct LocalAcpAgent {
 impl LocalAcpAgent {
     /// `agent` is one of `ACP_AGENTS` (the manifest already validated this).
     /// `model`, when set, is forwarded via that agent's own startup lever
-    /// when this build knows one.
-    pub fn new(agent: &str, model: Option<&str>, workspace_root: PathBuf) -> Result<Self> {
+    /// when this build knows one. `agent_models` is this harness's own
+    /// per-agent overrides — see [`Self::agent_models`].
+    pub fn new(
+        agent: &str,
+        model: Option<&str>,
+        agent_models: HashMap<String, String>,
+        workspace_root: PathBuf,
+    ) -> Result<Self> {
         let def = HARNESSES.iter().find(|h| h.id == agent).ok_or_else(|| {
             OpenCompanyError::Config(format!("no local ACP harness definition for `{agent}`"))
         })?;
@@ -98,6 +111,7 @@ impl LocalAcpAgent {
             args: def.args.iter().map(|a| a.to_string()).collect(),
             env,
             model: model.map(str::to_string),
+            agent_models,
             workspace_root,
             client: AsyncMutex::new(None),
             sessions: AsyncMutex::new(HashMap::new()),
@@ -184,7 +198,8 @@ impl LocalAcpAgent {
     /// This session's cached ACP `sessionId`, opening one if none exists yet.
     ///
     /// A fresh session is where model steering happens when no startup env
-    /// var carries it ([`model_env_var`] returned `None` for this agent):
+    /// var carries it ([`model_env_var`] returned `None` for this agent), or
+    /// when `agent_id` carries its own override in [`Self::agent_models`]:
     /// `session/new`'s own response is inspected for a `configOptions` entry
     /// with `category: "model"` whose options include the desired value, and
     /// if found, `session/set_config_option` applies it before this session
@@ -195,6 +210,7 @@ impl LocalAcpAgent {
         &self,
         client: &AcpClient,
         session_key: &str,
+        agent_id: &str,
         root: &Path,
     ) -> Result<String> {
         let mut sessions = self.sessions.lock().await;
@@ -216,18 +232,29 @@ impl LocalAcpAgent {
             })?
             .to_string();
 
-        // `self.env` carries the model only when `new()` found a known env
-        // var for this agent — non-empty means the spawn already handled it,
-        // so the fallback below must not also fire (redundant at best, and
-        // this session's model would otherwise be decided by whichever of
-        // the two APIs the adapter honors last). No matching `config_id`
-        // falls through the same way: either an env var already carried it
-        // at spawn, or this build has no lever for this agent at all (issue
-        // #1245's documented codex gap, before this fallback existed) —
-        // either way, silently doing nothing here is correct, not a missed
-        // error.
-        if self.env.is_empty()
-            && let Some(model) = &self.model
+        // A per-agent override always takes the `session/set_config_option`
+        // path, whether or not `self.env` already carries the harness's own
+        // default: the env var is process-wide, set once at spawn, and two
+        // agents on this harness share that one subprocess — it cannot
+        // represent "this agent, specifically, on a different model" no
+        // matter which model the harness itself defaults to.
+        //
+        // Absent an override, `self.env` carries the model only when `new()`
+        // found a known env var for this agent — non-empty means the spawn
+        // already handled it, so the fallback must not also fire (redundant
+        // at best, and this session's model would otherwise be decided by
+        // whichever of the two APIs the adapter honors last). No matching
+        // `config_id` falls through the same way: either an env var already
+        // carried it at spawn, or this build has no lever for this agent at
+        // all (issue #1245's documented codex gap, before this fallback
+        // existed) — either way, silently doing nothing here is correct, not
+        // a missed error.
+        let desired = self.agent_models.get(agent_id).or(self
+            .env
+            .is_empty()
+            .then_some(self.model.as_ref())
+            .flatten());
+        if let Some(model) = desired
             && let Some(config_id) = model_config_id(&raw, model)
         {
             client
@@ -347,7 +374,9 @@ impl AcpAgent for LocalAcpAgent {
         let client = self.client().await?;
         let agent_id = Self::agent_id_of(company, session_key);
         let root = self.session_root(company, agent_id)?;
-        let session_id = self.session_for(&client, session_key, &root).await?;
+        let session_id = self
+            .session_for(&client, session_key, agent_id, &root)
+            .await?;
 
         // Clear any stale buffer before the turn starts, so the drain below
         // sees exactly this turn's updates and nothing left over from one
@@ -407,11 +436,13 @@ impl AcpAgentFactory for LocalAcpAgentFactory {
         &self,
         agent: &str,
         model: Option<&str>,
+        agent_models: &HashMap<String, String>,
         workspace_root: &Path,
     ) -> Result<Arc<dyn AcpAgent>> {
         Ok(Arc::new(LocalAcpAgent::new(
             agent,
             model,
+            agent_models.clone(),
             workspace_root.to_path_buf(),
         )?))
     }

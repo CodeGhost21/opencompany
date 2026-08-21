@@ -3183,10 +3183,11 @@ fn overlay_agent_to_manifest(overlay: &OverlayAgent) -> ManifestAgent {
         name: Some(overlay.name.clone()),
         description: overlay.description.clone(),
         tier: None,
-        // An operator- or orchestrator-added teammate runs on the company's
-        // default harness. There is no console field to name one, and inventing
-        // a binding here would put a teammate on a harness nobody chose.
-        harness: None,
+        // Carried straight through — issue #1245's harness-picker follow-up
+        // gave overlay teammates the same `harness` binding a manifest agent
+        // has. `None` still means "the default harness", exactly as before
+        // this field existed.
+        harness: overlay.harness.clone(),
         // Issue #661 / L5: carry the overlay's own per-teammate grant. An empty
         // list here is unchanged behaviour — `agent_effective_grants` reads it as
         // the standard company-wide grant, exactly as the hardcoded empty did.
@@ -3205,6 +3206,12 @@ fn overlay_agent_to_manifest(overlay: &OverlayAgent) -> ManifestAgent {
         classes: Vec::new(),
         ledgers: None,
         can_declare_ledgers: true,
+        // Issue #1245's per-agent follow-up: carried straight through, exactly
+        // like `tools`/`description` above. Meaningful only when the default
+        // harness this teammate lands on (see `harness: None` above) turns out
+        // to be an `acp` one — a `built_in` engine simply has no lever that
+        // reads it, the same as it ignores `AcpHarness::model`.
+        model: overlay.model.clone(),
     }
 }
 
@@ -3394,6 +3401,8 @@ mod tests {
             role: "Researcher".into(),
             description: None,
             tools: vec!["docs.*".into(), "payment.send".into()],
+            model: None,
+            harness: None,
         };
         let manifest = overlay_agent_to_manifest(&scoped);
         assert_eq!(
@@ -3414,6 +3423,8 @@ mod tests {
             role: "Generalist".into(),
             description: None,
             tools: Vec::new(),
+            model: None,
+            harness: None,
         };
         let manifest = overlay_agent_to_manifest(&standard);
         assert!(manifest.tools.is_empty());
@@ -3436,6 +3447,8 @@ mod tests {
             role: "Content Writer".into(),
             description: None,
             tools: Vec::new(),
+            model: None,
+            harness: None,
         };
 
         let manifest = overlay_agent_to_manifest(&overlay);
@@ -3461,6 +3474,8 @@ mod tests {
                 role: "r".into(),
                 description: None,
                 tools,
+                model: None,
+                harness: None,
             }]
         };
         let standard = one(Vec::new());
@@ -4036,6 +4051,8 @@ description = "Builds the product."
             role: "Growth Lead".into(),
             description: Some("Owns acquisition experiments.".into()),
             tools: Vec::new(),
+            model: None,
+            harness: None,
         });
 
         let roster = build_roster(&rec, &fx.deps, &[], &HashMap::new()).expect("roster builds");
@@ -4060,6 +4077,8 @@ description = "Builds the product."
             role: "Shadow CEO".into(),
             description: None,
             tools: Vec::new(),
+            model: None,
+            harness: None,
         });
 
         let roster = build_roster(&rec, &fx.deps, &[], &HashMap::new()).expect("roster builds");
@@ -4184,6 +4203,8 @@ description = "Builds the product."
             role: "Designer".into(),
             description: None,
             tools: Vec::new(),
+            model: None,
+            harness: None,
         });
         pool.ensure(&rec, &fx.deps).await.expect("second ensure");
 
@@ -5615,6 +5636,8 @@ description = "Builds the product."
             role: "Growth Lead".into(),
             description: None,
             tools: Vec::new(),
+            model: None,
+            harness: None,
         });
         live_store.save(&updated).await.unwrap();
 
@@ -6474,6 +6497,8 @@ description = "Builds the product."
             role: "Growth Lead".into(),
             description: None,
             tools: Vec::new(),
+            model: None,
+            harness: None,
         });
         let live_store = Arc::new(LiveStore::default());
         live_store.save(&rec).await.unwrap();
@@ -6732,6 +6757,7 @@ budget_usd_daily = 0.0
             classes: Vec::new(),
             ledgers: None,
             can_declare_ledgers: true,
+            model: None,
         };
         let policy = ApprovalPolicy::new(&Policy::default(), None);
         let grants: Vec<String> = grants.iter().map(|g| g.to_string()).collect();
@@ -6853,6 +6879,7 @@ budget_usd_daily = 0.0
             classes: Vec::new(),
             ledgers: None,
             can_declare_ledgers: true,
+            model: None,
         };
         let agent = build::build_agent(
             &CompanyId::new("acme"),

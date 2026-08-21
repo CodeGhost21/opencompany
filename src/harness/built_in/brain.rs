@@ -5426,6 +5426,8 @@ members = ["engineer"]
                 role: "Growth".into(),
                 description: None,
                 tools: Vec::new(),
+                model: None,
+                harness: None,
             })
         });
         tasks
@@ -5985,6 +5987,8 @@ members = ["eng1", "eng2"]
                 role: "CTO".to_string(),
                 description: None,
                 tools: Vec::new(),
+                model: None,
+                harness: None,
             }],
             overlay_desk_members: vec![crate::ports::types::OverlayDeskMember {
                 desk_id: "eng".to_string(),

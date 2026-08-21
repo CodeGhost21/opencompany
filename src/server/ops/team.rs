@@ -456,6 +456,8 @@ async fn add_member(
         // Issue #661 / L5: the teammate's own grant, intersected with the
         // company allow-list by the shared reads/roster build. Empty = standard.
         tools,
+        model: None,
+        harness: None,
     };
     record.overlay_agents.push(agent.clone());
     let attribution = author.map(|admin| BudgetOverride {
