@@ -116,8 +116,15 @@ test("a company agent opens from its card and shows what it is", async ({ page }
   // offering an edit that would 409. Since #1141 the affordance is *present and
   // disabled* rather than absent: an operator hunting for the edit needs to
   // learn why there isn't one, not to conclude the console forgot to build it.
-  await expect(page.getByTestId("agent-edit")).toBeDisabled();
-  await expect(page.getByTestId("agent-readonly-note")).toContainText("company.toml");
+  // Manifest teammates can be edited through an overlay without rewriting
+  // company.toml. The source remains visible as the company's blueprint.
+  await expect(page.getByTestId("agent-edit")).toBeEnabled();
+  await expect(page.getByTestId("agent-readonly-note")).toHaveCount(0);
+
+  // Opening the editor is enough to prove the manifest teammate follows the
+  // same editable flow as a teammate created in the console.
+  await page.getByTestId("agent-edit").click();
+  await expect(page.getByTestId("agent-field-description")).toBeVisible();
 
   // The breadcrumb returns to the Company page (issue #1141, replacing "Back to
   // team" — this page is linked into from the org chart and the chat pane, and
