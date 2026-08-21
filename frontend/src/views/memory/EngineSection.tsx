@@ -339,12 +339,12 @@ function EngineTile({
         <span className="flex flex-wrap items-center gap-1.5">
           <span className="font-medium">{option.label}</span>
           {active && (
-            <Badge variant="outline" className="text-[10px]">
+            <Badge variant="outline" className="text-3xs">
               in use
             </Badge>
           )}
           {!option.durable && (
-            <Badge variant="outline" className="border-status-blocked/40 text-[10px]">
+            <Badge variant="outline" className="border-status-blocked/40 text-3xs">
               keeps nothing
             </Badge>
           )}

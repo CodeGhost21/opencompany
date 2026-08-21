@@ -1,3 +1,5 @@
+import { cn } from "@/lib/utils";
+
 /**
  * The mark on an engine tile.
  *
@@ -6,30 +8,37 @@
  * proxy that blocks third-party image hosts, and the Connections grid's remote
  * logos already fall back to a grey initial there — acceptable for a provider
  * you are about to authenticate with, wrong for the control that decides where
- * a company's memory lives. And these are neutral geometric marks in each
- * vendor's brand colour, not their trademarks: the console names the engine in
- * text beside the mark, which is what an operator picks by.
+ * a company's memory lives. And these are neutral geometric marks, not
+ * anyone's trademark: the console names the engine in text beside the mark,
+ * which is what an operator picks by.
+ *
+ * ## Tinted from the identity palette, not from brand hexes
+ *
+ * Each vendor has a brand colour and none of them is used here. A hex cannot
+ * theme (`scripts/ci/assert-design-tokens.sh`), and Supermemory's near-black
+ * would be a mark you cannot see on this console's dark canvas. The `--tone-*`
+ * ramp is what the rest of the product distinguishes *identities* with, so the
+ * marks distinguish engines the same way: different, legible in both themes,
+ * and re-tuned whenever the palette is.
  */
 
-/** Brand colour per engine id; the tile tints its mark with this. */
-const ENGINE_COLORS: Record<string, string> = {
-  store: "#64748B",
-  embedded: "#14B8A6",
-  namespace: "#8B5CF6",
-  supermemory: "#0F0F0F",
-  mem0: "#3B82F6",
-  cognee: "#D946EF",
-  null: "#94A3B8",
+/** The identity tone per engine; the tile tints its mark with this. */
+const ENGINE_TONES: Record<string, string> = {
+  store: "text-tone-5-text",
+  embedded: "text-tone-3-text",
+  namespace: "text-tone-1-text",
+  supermemory: "text-foreground",
+  mem0: "text-tone-2-text",
+  cognee: "text-tone-4-text",
+  null: "text-muted-foreground",
 };
 
 /** The mark for `engine`, sized to the tile's 32px slot. */
 export function EngineMark({ engine, className }: { engine: string; className?: string }) {
-  const color = ENGINE_COLORS[engine] ?? "#64748B";
   return (
     <span
       aria-hidden="true"
-      className={className}
-      style={{ color }}
+      className={cn(ENGINE_TONES[engine] ?? "text-muted-foreground", className)}
       data-testid={`engine-mark-${engine}`}
     >
       <svg viewBox="0 0 24 24" className="size-8" fill="none" stroke="currentColor" strokeWidth="1.75">

@@ -135,6 +135,29 @@ that does and does not imply.
 | `OPENCOMPANY_PLATFORM_TOKEN` | — (no machine credential) | The shared platform secret. A bearer equal to it is the `tenant:platform` principal, with the `platform` scope |
 | `OPENCOMPANY_PLATFORM_JWT_SECRET` | — (signed tenant tokens not accepted) | HS256 secret that signs tenant-scoped machine tokens. No shipped literal and no fallback: unset means the path does not exist. Set on a build without `platform-jwt` (in the default feature set) and the host **refuses to boot** |
 
+### The `[memory]` section
+
+The memory engine is the one host-level choice the **console** can write, and
+it is the ordinary `env ⟵ config.toml` precedence rather than an exception to
+it:
+
+```toml
+[memory]
+backend = "remote"          # store | embedded | remote | null
+driver  = "supermemory"     # supermemory | mem0 | cognee | namespace
+url     = "https://api.supermemory.ai"
+api_key = "sk-…"
+```
+
+`OPENCOMPANY_MEMORY` **set at all** — whatever it names — makes this section
+inert and the console read-only, because a hosted tenant's control plane
+injects those variables and a picker that wrote a file the next boot ignores
+would be the silently-ignored-configuration failure the setup flow refuses for
+the same reason. Unset, this section is what boot binds, and
+`PUT …/memory/engine` is what writes it — probing the engine first, then
+rebinding it live so the choice does not wait for a restart. See
+[the memory engine](memory-engine.md#choosing-an-engine-from-the-console).
+
 ### Outbound mail
 
 Two credential scopes, deliberately separate:

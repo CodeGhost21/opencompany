@@ -58,8 +58,15 @@ const BATCH = 20;
 /** Files a folder drop should never carry into memory. */
 const IGNORED = new Set([".DS_Store", "Thumbs.db", ".gitkeep"]);
 
-/** Whether to skip a path outright, before it costs an upload. */
-function ignored(path: string): boolean {
+/**
+ * Whether to skip a path outright, before it costs an upload.
+ *
+ * Exported for its own tests: this is the rule that decides what a dropped
+ * folder does *not* put in a company's memory, and getting it wrong is either
+ * a repository's `.git` objects uploaded one refusal at a time or a real
+ * document silently skipped.
+ */
+export function ignored(path: string): boolean {
   const name = path.split("/").pop() ?? path;
   if (IGNORED.has(name)) return true;
   // Version-control and dependency directories: dropping a repository folder
