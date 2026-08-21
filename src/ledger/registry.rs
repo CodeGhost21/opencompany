@@ -186,9 +186,10 @@ fn goals() -> Value {
         // back), and the `met`/`missed` split (both are "this is over"; which
         // one it was is the first clause of the reason, which is required).
         "statuses": [
-            { "name": "active" },
+            { "name": "active", "aliases": ["proposed", "at_risk"] },
             { "name": "met", "closed": true, "needs_reason": true },
-            { "name": "dropped", "closed": true, "needs_reason": true }
+            { "name": "dropped", "closed": true, "needs_reason": true,
+              "aliases": ["missed"] }
         ],
         "sections": [
             {
@@ -257,7 +258,8 @@ fn decisions() -> Value {
         "statuses": [
             { "name": "proposed" },
             { "name": "accepted" },
-            { "name": "retired", "closed": true, "needs_reason": true }
+            { "name": "retired", "closed": true, "needs_reason": true,
+              "aliases": ["superseded", "reversed"] }
         ],
         "sections": [
             {
