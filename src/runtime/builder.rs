@@ -6731,7 +6731,6 @@ needs_reason = true
             [company]
             name = "Desk Co"
 
-            [policy]
             mode = "full"
 
             [[agent]]
@@ -6872,7 +6871,6 @@ needs_reason = true
             role = "Engineer One"
 
             [[agent]]
-            id = "eng2"
             role = "Engineer Two"
 
             [[group_chat]]
