@@ -372,6 +372,39 @@ for a desktop, "No company connected yet" and what the choice *is* for a hub —
 and both carry a button that opens the chooser. The switcher stays above it,
 because that is where an operator will look next time.
 
+### Modifying one afterwards
+
+Adding a host was for a long time the only thing that could be done to one. The
+missing half is not cosmetic: a host's address changes — a gateway gets a domain,
+a VPS moves, a tenant is renamed — and the only recourse was to forget it and add
+it again. That mints a **new connection id**, and every browser-local key is
+scoped by it, so re-adding a host that merely moved silently resets its tour
+progress, its last-read channel and its drafts, with nothing reporting it.
+
+So the switcher offers **"Manage hosts"** beside "Add a host", and it opens a
+page rather than a menu of row-level buttons. A switcher row is a *filter* —
+clicking it puts that host's console on screen and changes nothing else — and
+hanging a rename and a delete off the same row makes a control whose click
+targets disagree about what a row is for, with the destructive one sitting where
+a keyboard user lands while switching hosts.
+
+The page does three things, and `editConnection` in `connections/registry.ts` is
+where the first two land:
+
+- **rename**, which is the only edit a host reached over `ssh` or run locally
+  accepts;
+- **re-address**, offered for `remote` and `cloud` only. `local` and `ssh`
+  addresses are assigned by this application — an ephemeral port and a loopback
+  port this client chose — so an address typed here would be overwritten by the
+  next launch and point at nothing until it was. A move re-probes and drops the
+  identity, the company list and the error, all of which describe the host that
+  *was* at the old address;
+- **forget**, which is `removeConnection`: local to this client, closing an
+  `ssh` tunnel opened for it, and confirmed — because the connection id goes with
+  it, and with the id every scoped key underneath. A `local` host is not
+  forgettable here at all, because the instance roster would re-adopt it under a
+  fresh id on the next poll; those are managed where they are started.
+
 The **setup wizard is deliberately not** one of these places. It is served by a
 host that is already running, so by the time anyone sees it the question has
 been answered; a connector step there would be a decision that cannot be acted
@@ -432,7 +465,9 @@ Landed:
   says so;
 - `ssh` end to end: the supervised tunnel roster in `src-tauri/src/ssh.rs` over
   the system `ssh`, opened from the dialog and re-opened by every probe;
-- the first-host screen offering the choice rather than describing it.
+- the first-host screen offering the choice rather than describing it;
+- "Manage hosts": renaming, re-addressing and forgetting a connection without
+  minting a new id.
 
 Not yet:
 
