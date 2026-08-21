@@ -121,7 +121,7 @@ fn the_board_ledger_is_built_from_the_phase_table() {
     }
 }
 
-/// Every stage renders somewhere in `derived/TASKS.md` — through its phase. A
+/// Every stage renders somewhere in `derived/tasks.md` — through its phase. A
 /// stage whose phase no section carried would leave its cards out of the file
 /// entirely: the silent disappearance the column vocabulary exists to prevent,
 /// arrived at from the file's side.

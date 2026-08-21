@@ -39,7 +39,7 @@ dispatches the card; nothing dispatches out of `done`.
 the REST DTO is the stage's *phase* — `pending`, `working` or `done` — and the
 stage rides beside it as `TaskCard.stage`, omitted on a pending or done card.
 That is what the console renders as columns and what an agent reads in
-`derived/TASKS.md`: three states, because four of the six meant the same thing
+`derived/tasks.md`: three states, because four of the six meant the same thing
 to everyone who was not the runtime. A write takes a phase and the boundary
 resolves it to that phase's entry stage (`working` → `in_progress`, which
 dispatches); a stage word is still accepted, but the refusal names only the

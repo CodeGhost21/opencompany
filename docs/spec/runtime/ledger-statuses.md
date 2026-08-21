@@ -23,7 +23,7 @@ So the four middle stages are one column now:
 | `done` | `done` | yes |
 
 Nothing is lost. The stage rides on the row — a `stage` field in
-`derived/TASKS.md`, `Task.stage` on the wire, a badge beside the status on the
+`derived/tasks.md`, `Task.stage` on the wire, a badge beside the status on the
 card — so *waiting on your verdict* is still visible where it matters, as a
 property of a working card rather than as a fourth pile to file it into. The
 console reads the stage for everything genuinely stage-specific: Resume on a

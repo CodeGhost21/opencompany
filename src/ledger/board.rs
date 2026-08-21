@@ -51,7 +51,7 @@
 //!   everything that reads the board is shown: pending, working, done.
 //!
 //! [`PHASES`] is what the `tasks` ledger declares as its statuses, what
-//! `derived/TASKS.md` groups under, and what the console renders as columns.
+//! `derived/tasks.md` groups under, and what the console renders as columns.
 //! A stage is still on the card — `Task.stage` on the wire, a badge on the
 //! card — so *waiting on your verdict* is still visible where it matters, as a
 //! property of a working card rather than as a fourth thing to file it under.
@@ -104,7 +104,7 @@ pub struct BoardPhase {
     /// outstanding. A card in review or paused is **stopped, not finished** —
     /// which is why both are [`PHASE_WORKING`] and neither is closed.
     pub closed: bool,
-    /// The sentence under this phase's heading in `derived/TASKS.md`.
+    /// The sentence under this phase's heading in `derived/tasks.md`.
     pub blurb: &'static str,
     /// The stage a card enters when something drops it into this phase.
     ///
