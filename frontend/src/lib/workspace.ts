@@ -83,6 +83,48 @@ export function isDerivedNode(nodes: FsNode[], id: string | null): boolean {
   return head.kind === "folder" && head.name.trim().toLowerCase() === DERIVED_DIR;
 }
 
+/**
+ * The same rule as {@link isDerivedNode}, applied to a **path string** rather
+ * than a tree (issue #1377).
+ *
+ * The search hit list has no tree to walk — it is a flat list of results, and
+ * the nodes it names may sit in folders the explorer has never expanded. But
+ * every hit carries its own `path`, so the folder rule can be read straight off
+ * that. Kept beside `isDerivedNode` and written from the same `DERIVED_DIR`
+ * constant, so the two cannot drift into disagreeing about which files a person
+ * may write.
+ *
+ * Leading slashes are tolerated for the same reason `is_derived_path` tolerates
+ * them: the guard must not be steppable around by a formatting difference.
+ */
+export function isDerivedPath(path: string): boolean {
+  const head = path.trim().replace(/^\/+/, "").split("/")[0];
+  return head !== undefined && head.trim().toLowerCase() === DERIVED_DIR;
+}
+
+/**
+ * What the tree, the search list and the note header all call a `derived/`
+ * file (issue #1377).
+ *
+ * One phrase in three places on purpose. "Read only" — what the header chip
+ * used to say — reports that an edit is unwelcome without saying *why*, and a
+ * rule with no reason behind it is the kind of rule people work around or file
+ * as a bug. "Written by a ledger" is the reason, and it is short enough to fit
+ * a tree row, a search hit and a header chip alike.
+ */
+export const DERIVED_LABEL = "Written by a ledger";
+
+/**
+ * The long form of {@link DERIVED_LABEL} — what happens if you edit it anyway,
+ * and where the edit actually belongs.
+ *
+ * Lives here rather than in `WorkspaceView` because the search list is a
+ * sibling module that would otherwise have to import from its own parent.
+ */
+export const DERIVED_REASON =
+  "This file is written by a ledger and re-derived on every write to it — " +
+  "an edit here would be erased. Change it on the Ledgers page instead.";
+
 /** Ancestor folders (root → current), for breadcrumbs. */
 export function pathOf(nodes: FsNode[], id: string | null): FsNode[] {
   const path: FsNode[] = [];
@@ -92,6 +134,50 @@ export function pathOf(nodes: FsNode[], id: string | null): FsNode[] {
     cur = nodeById(nodes, cur.parentId);
   }
   return path;
+}
+
+/**
+ * One step of a note's location, for the header breadcrumb (issue #1371).
+ *
+ * `null` is the elided middle — a crumb the trail could not fit, rendered as an
+ * ellipsis rather than dropped, so the operator can see that the path is longer
+ * than what is shown instead of reading a shortened path as the whole truth.
+ */
+export type Crumb = FsNode | null;
+
+/**
+ * The folders a note sits inside, shortened to at most `max` of them.
+ *
+ * The note itself is **not** in the trail: its name is already the heading beside
+ * it, and repeating it would spend the widest crumb saying what the operator is
+ * looking straight at.
+ *
+ * When the trail is too long, the **root and the last two folders** survive and
+ * the middle collapses. That split is the useful one: the root says which part
+ * of the company this belongs to, and the last two say what it sits next to.
+ * Truncating the string instead — which is what `truncate` on a single span did
+ * — ellipsises the *tail*, so every note under `Standards/Engineering/…` renders
+ * the identical prefix and the discriminating end is exactly what is thrown away.
+ */
+export function breadcrumbOf(nodes: FsNode[], id: string | null, max = 3): Crumb[] {
+  const folders = pathOf(nodes, id).slice(0, -1);
+  if (folders.length <= max) return folders;
+  // `max - 2` leading crumbs, the ellipsis, then the final two.
+  return [...folders.slice(0, Math.max(max - 2, 1)), null, ...folders.slice(-2)];
+}
+
+/**
+ * The ids of every folder a node is nested in — what has to be expanded for the
+ * node's own row to exist in the tree (issue #1371).
+ *
+ * Excludes the node itself even when it is a folder: revealing a folder means
+ * showing its row, not opening it.
+ */
+export function ancestorFolderIds(nodes: FsNode[], id: string | null): string[] {
+  return pathOf(nodes, id)
+    .slice(0, -1)
+    .filter((node) => node.kind === "folder")
+    .map((node) => node.id);
 }
 
 /** Ids of a node and all its descendants (for delete / move guards). */

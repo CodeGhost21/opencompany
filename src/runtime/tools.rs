@@ -43,6 +43,20 @@ impl StubToolProvider {
 /// `filesystem_wipe`.
 const TOOL_NAME_SEPARATORS: &[char] = &['.', '_', ':'];
 
+/// The characters that end a namespace segment in a `[tools].allow` **grant**:
+/// only `.`, because a namespace grant is written dotted (`docs.read`).
+///
+/// Deliberately narrower than [`TOOL_NAME_SEPARATORS`] — `files_scratch` is not
+/// a grant under the `files` namespace, and never was.
+///
+/// Lives here, beside [`extends_on_boundary`], rather than in
+/// [`harness::build`](crate::harness::build) where it started: the namespace
+/// rule now has two always-compiled callers as well as the feature-gated one
+/// ([`grants_files_or_docs`](crate::company::grants_files_or_docs) is read by
+/// the console route, which ships without `openhuman`), and a second
+/// transcription of the separator set is precisely the fork issue #461 removed.
+pub(crate) const NAMESPACE_SEPARATORS: &[char] = &['.'];
+
 /// Whether `name` *is* `prefix`, or extends it and stops on a namespace
 /// boundary drawn from `separators`.
 ///

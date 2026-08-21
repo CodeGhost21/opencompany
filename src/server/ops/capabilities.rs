@@ -164,6 +164,37 @@ struct CapabilityStatusDto {
     /// each, which is why this flag travels beside the repositories list rather
     /// than only inside the manifest.
     repo_granted: bool,
+    /// Publishing (issue #244, panel half #1192): whether this company's grants
+    /// confer `publish_artifact` — the only way a file an agent wrote becomes a
+    /// deliverable.
+    ///
+    /// **Unlike every `*_granted` field above, a bare `*` DOES confer this.**
+    /// Publishing spends nothing and reaches nothing outside the company's own
+    /// board, so it rides the ordinary namespace rule rather than the
+    /// opt-in-by-name rule the real-money surfaces use. Sourced from
+    /// [`grants_files_or_docs`](crate::company::grants_files_or_docs), which is
+    /// the same predicate `build_agent`'s `wants_files` gate calls — one
+    /// derivation, so this panel cannot report a capability the toolbelt does
+    /// not wire.
+    ///
+    /// # There is deliberately no third rung
+    ///
+    /// Media, Composio and search each carry a credential/config flag beside
+    /// their grant, because each can be granted and still wire nothing.
+    /// Publishing has neither a credential nor a store toggle: the artifact
+    /// store is non-optional on the runtime ops bundle and the single
+    /// production `HarnessDeps` literal always sets it, so a
+    /// `artifactStoreConfigured` field could only ever serialize a hardcoded
+    /// `true` for every company on every deployment — a fresh instance of
+    /// exactly the always-reassuring flag issue #886 was filed about. If the
+    /// store ever becomes genuinely optional in production, the burden is on
+    /// adding the field back with a real derivation behind it.
+    publish_granted: bool,
+    /// Whether the harness that carries `publish_artifact` is compiled into this
+    /// build. There is no `publish` Cargo feature — the tool rides the plain
+    /// `openhuman` harness feature, exactly as
+    /// [`search_in_build`](Self::search_in_build) does, so do not invent one.
+    publish_in_build: bool,
     /// Whether the agent-side MCP bridge is compiled into this build (issue
     /// #567). Unlike media/composio/search this is **not** a grant question: the
     /// `/mcp/servers` management routes ship in every build, so an operator can
@@ -233,6 +264,12 @@ struct OptInFlags {
     search_granted: bool,
     search_daily_call_cap: u32,
     repo_granted: bool,
+    /// Issue #1192. Carried on the flags rather than derived per DTO site for
+    /// the reason the `composio_credential_source` note above already states:
+    /// the DTO is built in two places, and a field wired into one of them alone
+    /// reports honestly for a company with no plan and lies to every company
+    /// that has one.
+    publish_granted: bool,
 }
 
 impl OptInFlags {
@@ -253,6 +290,7 @@ impl OptInFlags {
             search_granted: false,
             search_daily_call_cap: crate::company::DEFAULT_SEARCH_DAILY_CALLS,
             repo_granted: false,
+            publish_granted: false,
         }
     }
 }
@@ -283,6 +321,8 @@ fn unconfigured(flags: OptInFlags) -> CapabilityStatusDto {
         search_credential_configured: search_credential_configured(),
         search_daily_call_cap: flags.search_daily_call_cap,
         repo_granted: flags.repo_granted,
+        publish_granted: flags.publish_granted,
+        publish_in_build: cfg!(feature = "openhuman"),
         mcp_in_build: cfg!(feature = "mcp"),
     }
 }
@@ -435,6 +475,11 @@ async fn effective_status(runtime: &CompanyRuntime) -> Result<CapabilityStatusDt
         // the same manifest field, so the repositories card can tell an operator
         // which half of the setup is missing.
         repo_granted: crate::company::grants_repo_explicit(&record.manifest.tools.allow),
+        // Issue #1192: the same predicate `build_agent`'s `wants_files` gate
+        // calls, so the panel's verdict and the wired toolbelt cannot disagree.
+        // Note the shape difference from its four neighbours above — this one is
+        // NOT `_explicit`, because a bare `*` confers publishing.
+        publish_granted: crate::company::grants_files_or_docs(&record.manifest.tools.allow),
     };
     let manifest_plan = &record.manifest.plan;
     let Some(plan) = CapabilityPlan::from_manifest(manifest_plan) else {
@@ -496,6 +541,8 @@ async fn effective_status(runtime: &CompanyRuntime) -> Result<CapabilityStatusDt
         search_credential_configured: search_credential_configured(),
         search_daily_call_cap: flags.search_daily_call_cap,
         repo_granted: flags.repo_granted,
+        publish_granted: flags.publish_granted,
+        publish_in_build: cfg!(feature = "openhuman"),
         mcp_in_build: cfg!(feature = "mcp"),
     })
 }
@@ -1154,6 +1201,94 @@ mod tests {
         assert_eq!(
             dto["composioGranted"], true,
             "the manifest-derived flags are unaffected by the store: {dto}"
+        );
+    }
+
+    /// **Issue #1192, test 1.** Publishing is reported on **both** DTO paths.
+    ///
+    /// The DTO is built in two places — `unconfigured` and the configured tail
+    /// of `effective_status` — and a field wired into one of them alone reports
+    /// honestly for a company with no `[plan]` and is silently absent for every
+    /// company that has one. That is the failure mode the `OptInFlags` note
+    /// names, and it is worth a test rather than a convention because the two
+    /// literals are 200 lines apart.
+    #[tokio::test]
+    async fn publish_capability_is_reported_on_both_dto_paths() {
+        // No `[plan]` → the `unconfigured` literal.
+        let home_a_dir = home();
+        let state = state_with_manifest(
+            home_a_dir.path(),
+            "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n[tools]\nallow = [\"files\"]\n",
+        )
+        .await;
+        let (status, dto) = get_capabilities(&state).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(dto["configured"], false, "{dto}");
+        assert_eq!(dto["publishGranted"], true, "{dto}");
+        assert!(
+            dto.get("publishInBuild").is_some(),
+            "the build flag is always present so the console can render every state: {dto}"
+        );
+
+        // A `[plan]` → the configured literal, the one a field is most easily
+        // forgotten in.
+        let home_b_dir = home();
+        let state2 = state_with_manifest(
+            home_b_dir.path(),
+            "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n[tools]\nallow = [\"files\"]\n\
+             [plan]\nname = \"starter\"\n",
+        )
+        .await;
+        let (status2, dto2) = get_capabilities(&state2).await;
+        assert_eq!(status2, StatusCode::OK);
+        assert_eq!(dto2["configured"], true, "{dto2}");
+        assert_eq!(
+            dto2["publishGranted"], true,
+            "a company with a plan must get the same publishing verdict: {dto2}"
+        );
+        assert_eq!(
+            dto2["publishInBuild"], dto["publishInBuild"],
+            "the build flag cannot depend on whether a plan is configured: {dto2}"
+        );
+    }
+
+    /// **Issue #1192, test 2.** A company whose grants confer no file family
+    /// reads as ungranted — using the *shipped* `companies/e2e_harness` allow
+    /// list rather than an invented one, so the negative is a real manifest
+    /// somebody runs rather than a string chosen to make the assertion pass.
+    #[tokio::test]
+    async fn publish_is_ungranted_without_a_file_or_docs_grant() {
+        let home_dir = home();
+        let state = state_with_manifest(
+            home_dir.path(),
+            "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n[tools]\n\
+             allow = [\"composio\", \"mcp:*\", \"workspace\", \"workspace.*\", \"web\"]\n",
+        )
+        .await;
+        let (status, dto) = get_capabilities(&state).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            dto["publishGranted"], false,
+            "no files/docs grant means no publish_artifact on the belt: {dto}"
+        );
+
+        // …and the wildcard the majority of manifests actually ship DOES grant
+        // it. Asserted here, beside the negative, because the asymmetry against
+        // `repoGranted` in the same response is the thing a reader gets wrong.
+        let wildcard_dir = home();
+        let state2 = state_with_manifest(
+            wildcard_dir.path(),
+            "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n[tools]\nallow = [\"*\"]\n",
+        )
+        .await;
+        let (_, dto2) = get_capabilities(&state2).await;
+        assert_eq!(
+            dto2["publishGranted"], true,
+            "a bare `*` confers publishing — this is the shape most manifests ship: {dto2}"
+        );
+        assert_eq!(
+            dto2["repoGranted"], false,
+            "…and the same `*` still confers no `repo`; the two rules differ on purpose: {dto2}"
         );
     }
 }

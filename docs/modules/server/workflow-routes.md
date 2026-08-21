@@ -147,6 +147,16 @@ rides the create body and the read shape under the same key, and the model
 type is reused verbatim in both directions (`kind` / `target` are single words,
 so there is no camelCase mirror to drift from).
 
+### Paging the run history (issue #1012)
+
+`GET …/workflows/runs` is paged: `?limit=` counts **runs** (not journal rows),
+`hasMore` says whether an older page exists, and `nextBeforeSeq` is the cursor
+to pass back as `?before_seq=`. The page is cut by `seq` and displayed by
+`(atMillis, seq)` — two different keys, because `atMillis` is wall-clock and
+cutting on it loses runs when the clock steps backwards. Clients must **not**
+derive the cursor. Full contract, the partition argument, and the
+version-skew fallback: [run-history-paging.md](run-history-paging.md).
+
 ### Destinations that can never deliver are refused at save (issue #981)
 
 Two of delivery's refusals are decided by facts that hold for *every* run of the

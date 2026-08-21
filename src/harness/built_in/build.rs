@@ -114,7 +114,7 @@ use crate::harness::tool_dispatcher::AttrTolerantXmlDispatcher;
 use crate::harness::toolbelt;
 use crate::ports::skills_state::SkillState;
 use crate::ports::types::CompanyId;
-use crate::runtime::tools::extends_on_boundary;
+use crate::runtime::tools::{NAMESPACE_SEPARATORS, extends_on_boundary};
 
 /// The per-tool-result byte budget every OpenCompany agent runs under.
 ///
@@ -300,7 +300,16 @@ pub fn build_agent(
     // namespace (`docs.*`, `files.*`, or `*`). The security policy is
     // `workspace_only`, so a granted agent can read and write within its
     // workspace and nowhere else on the host.
-    let wants_files = grants_cover(grants, "files") || grants_cover(grants, "docs");
+    //
+    // Issue #1192: a *caller* of the shared predicate, not a second spelling of
+    // it. The console's capability panel has to answer the same question — is
+    // publishing on for this company — and the way that panel comes to report a
+    // capability the toolbelt does not wire is a second derivation drifting from
+    // this one (issue #886's whole subject). This gate is also what decides
+    // whether the file belt itself is offered, two lines down, so a predicate
+    // that is *nearly* identical would silently grant or revoke file tools as
+    // well as publishing.
+    let wants_files = crate::company::grants_files_or_docs(grants);
     if wants_files {
         tools.extend(file_tools(&workspace));
     }
@@ -1170,12 +1179,6 @@ fn memory_tools(deps: &HarnessDeps, company: &CompanyId, agent_id: &str) -> Vec<
     super::memory_tools::memory_tools(deps.context.clone(), company.clone(), agent_id.to_string())
 }
 
-/// The namespace separator for a `[tools].allow` grant: only `.`, because a
-/// namespace grant is written dotted (`docs.read`). Deliberately narrower than
-/// [`crate::runtime::tools`]'s tool-name set — `files_scratch` is not a grant
-/// under the `files` namespace, and never was.
-const NAMESPACE_SEPARATORS: &[char] = &['.'];
-
 /// Whether an agent's effective `grants` cover a tool `namespace`.
 ///
 /// Matches the bare namespace (`docs`), any glob under it (`docs.*`,
@@ -1985,6 +1988,52 @@ mod tests {
             storeless.contains(&"file_write".to_string()),
             "{storeless:?}"
         );
+    }
+
+    /// **Issue #1192, the standard issue #886 stated.** The verdict the console
+    /// renders must equal what the toolbelt actually wires — asserted by running
+    /// both over the same grant matrix, not by reading the two implementations
+    /// and agreeing they look alike.
+    ///
+    /// The console panel calls
+    /// [`grants_files_or_docs`](crate::company::grants_files_or_docs); this gate
+    /// calls it too, so today the equality is true by construction. That is the
+    /// point of pinning it: the day somebody re-inlines a `starts_with` on
+    /// either side — or "tidies" the predicate into the `_explicit` family,
+    /// where `*` confers nothing — this fails instead of a panel quietly
+    /// reporting a capability no agent has, which is the failure #886 was filed
+    /// about and the failure #886 said a test like this one prevents.
+    ///
+    /// An artifact store is wired throughout, so the store gate is held constant
+    /// and the grant is the only variable — which is exactly the axis the
+    /// console field answers on. (The store half is not a console field at all:
+    /// production always configures one, so a `artifactStoreConfigured` flag
+    /// would serialize a hardcoded `true`.)
+    #[test]
+    fn the_capability_verdict_matches_what_the_toolbelt_wires() {
+        let tool = crate::harness::publish::PUBLISH_ARTIFACT_TOOL.to_string();
+        for grant in [
+            "*",
+            "files",
+            "docs",
+            "files.write",
+            "docs.read",
+            "web",
+            "shell",
+            "documentation",
+            "docsy",
+            "filesystem",
+            "composio",
+            "repo",
+        ] {
+            let verdict = crate::company::grants_files_or_docs(&[grant.to_string()]);
+            let wired = built_tool_names_with_artifacts(&[grant]).contains(&tool);
+            assert_eq!(
+                verdict, wired,
+                "`{grant}`: the console would report publishing={verdict} while the toolbelt \
+                 wires={wired}"
+            );
+        }
     }
 
     /// The three gate states of the metered `web_search` surface (issue #238),

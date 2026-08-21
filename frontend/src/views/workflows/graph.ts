@@ -618,3 +618,109 @@ export function layout(
 
   return { nodes, edges };
 }
+
+/**
+ * The zoom the canvas will not fit BELOW on load (issue #1361).
+ *
+ * Not a floor on zooming — that is `<ReactFlow minZoom>`, which issue #1261
+ * deliberately set to 0.1 and which this must not touch. This is a floor on the
+ * **initial fit**, and the two are different decisions: an operator who chooses
+ * to zoom out to 0.1 is looking at shape, while a canvas that *opens* below
+ * legibility has made that choice for them.
+ *
+ * WHY THERE HAS TO BE ONE. `layout` above puts one node per depth layer at
+ * `COL_GAP`, so a ten-node pipeline — `feature_pipeline`, shipped in every
+ * company — is 2890 x 64 graph units. Against a ~1224 x 782 canvas that is an
+ * aspect ratio of 45:1 fitting into 1.6:1, and `fitView` resolves it the only
+ * way it can: by zooming out until the width fits. Measured before this
+ * existed: **0.353** at a 1440px window, **0.28** at 1100px.
+ *
+ * WHERE THE NUMBER COMES FROM. A node's title is `text-sm` — 14px, and the one
+ * line that says what the step does. The console's own type scale bottoms out
+ * at `text-3xs` = 10px (`src/index.css`), which is the smallest size this
+ * design system is willing to render words at. A node title must not be
+ * rendered smaller than that:
+ *
+ *     14px x 0.75 = 10.5px  >=  the 10px floor
+ *
+ * so 0.75. At that zoom a ten-node pipeline is 2168px wide and about six of its
+ * nodes are on screen at once; the operator pans for the rest, which is what
+ * the minimap (#1259) and every comparable canvas expect. A four-node workflow
+ * still fits whole, because its natural fit is already above this and nothing
+ * here applies.
+ */
+export const LEGIBLE_FIT_ZOOM = 0.75;
+
+/** The gap between the canvas's left edge and the first node, when the fit was
+ * clamped and the graph runs off the right. A fixed gutter rather than a
+ * fraction: it is a margin around a thing, not a share of a space. */
+const START_GUTTER = 32;
+
+/**
+ * The x React Flow's own fit produces for `bounds` at `zoom` — the centred
+ * placement `getViewportForBounds` computes as `width / 2 - centerX * zoom`.
+ *
+ * Reproduced here so a caller can recognise that placement when it sees it.
+ * That recognition is the whole trigger for the correction below: "the viewport
+ * is sitting at the fit's floor" is not enough on its own, because an operator
+ * who zooms in and back out lands on exactly that zoom too, and a canvas that
+ * jumped to the start whenever they did would be worse than the bug. "At the
+ * floor AND placed exactly where the fit would place it" is a state only the
+ * fit produces.
+ */
+export function centredFitX(
+  bounds: { minX: number; width: number },
+  paneWidth: number,
+  zoom: number,
+): number {
+  const centreX = bounds.minX + bounds.width / 2;
+  return paneWidth / 2 - centreX * zoom;
+}
+
+/**
+ * Where to put the viewport when {@link LEGIBLE_FIT_ZOOM} stops `fitView` from
+ * shrinking the graph any further — or `null` when it does not, which is the
+ * common case and means "leave React Flow's own fit alone".
+ *
+ * The correction is needed because `getViewportForBounds` **centres** the
+ * bounds it was given. That is right when everything fits and wrong the moment
+ * it does not: centring a graph too wide for the pane hides its first node and
+ * its last one, and drops the operator into the middle of a pipeline with no
+ * indication that either end exists. A pipeline is read from its trigger, so a
+ * clamped fit anchors there and lets the graph run off to the right, where the
+ * arrows already point.
+ *
+ * Vertically the content stays centred: the clamp is a width problem, and a
+ * graph with sibling rows is no taller than the pane at this zoom.
+ *
+ * Pure, and given the pane's size rather than reading it, so the arithmetic can
+ * be tested without a canvas.
+ */
+export function startAnchoredFit(
+  bounds: { minX: number; minY: number; width: number; height: number },
+  paneWidth: number,
+  paneHeight: number,
+): { x: number; y: number; zoom: number } | null {
+  if (bounds.width <= 0 || bounds.height <= 0) return null;
+  if (paneWidth <= 0 || paneHeight <= 0) return null;
+
+  const usableWidth = paneWidth - START_GUTTER * 2;
+  const usableHeight = paneHeight - START_GUTTER * 2;
+  if (usableWidth <= 0 || usableHeight <= 0) return null;
+
+  // The zoom `fitView` would have chosen, unclamped. Anything at or above the
+  // floor is a fit that already shows the whole graph legibly, and this must
+  // not second-guess it.
+  const naturalZoom = Math.min(
+    usableWidth / bounds.width,
+    usableHeight / bounds.height,
+  );
+  if (naturalZoom >= LEGIBLE_FIT_ZOOM) return null;
+
+  const zoom = LEGIBLE_FIT_ZOOM;
+  return {
+    x: START_GUTTER - bounds.minX * zoom,
+    y: (paneHeight - bounds.height * zoom) / 2 - bounds.minY * zoom,
+    zoom,
+  };
+}

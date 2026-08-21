@@ -30,6 +30,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
 import { emptyDraft, type AgentDraft, type AgentFieldKey } from "@/lib/agent";
 import { fetchBoardColumns } from "@/lib/board-columns";
+import { shouldPromptSetup } from "@/lib/company-setup";
 import {
   addMemberFailure,
   addOutcome,
@@ -89,12 +90,18 @@ export function TeamView({
   const [load, setLoad] = useState<Load>("loading");
   const [fromHost, setFromHost] = useState(false);
   /**
-   * The host answered the roster read **and** answered with nobody
+   * The host answered the roster read **and** nobody has staffed this company
    * (`docs/spec/runtime/company-setup.md`).
    *
    * Distinct from `!fromHost`, which also covers a host with no `…/team` surface
    * at all. Only the first case is a company waiting to be set up; offering
    * setup on the second would open a dialog whose first call 404s.
+   *
+   * Also distinct from "the host answered with nobody", which is what this used
+   * to mean and is a state no company can be in: the global baseline puts
+   * undeletable teammates on every roster (issue #1404). `shouldPromptSetup`
+   * discounts those, so this is `true` on a company that has the baseline and
+   * nothing else — which is exactly the company that needs the prompt.
    */
   const [hostEmpty, setHostEmpty] = useState(false);
   const [members, setMembers] = useState<TeamMember[]>([]);
@@ -151,10 +158,15 @@ export function TeamView({
   const boot = useCallback(async (): Promise<boolean> => {
     try {
       const roster = await client.listTeam(company);
+      // Every row the host holds is rendered, baseline teammates included: they
+      // are real agents an operator can open, brief and cap. The setup prompt is
+      // gated on a *different* question — whether anyone has been staffed here —
+      // so the two are read separately rather than one inferred from the other
+      // (issue #1404).
+      setHostEmpty(shouldPromptSetup(roster));
       if (roster.length) {
         setMembers(roster.map(fromDto));
         setFromHost(true);
-        setHostEmpty(false);
       } else {
         // NOT `starterTeam()`. The host answered, and answered with nobody — so
         // fabricating twelve agents here would put "Ops Lead", "Front Desk" and
@@ -164,7 +176,6 @@ export function TeamView({
         // (`docs/spec/runtime/company-setup.md`).
         setMembers([]);
         setFromHost(false);
-        setHostEmpty(true);
       }
       return true;
     } catch {
@@ -383,11 +394,16 @@ export function TeamView({
         </div>
 
         {/*
-          The other half of "blocking but skippable": while nobody is on this
-          company, keep a visible way back into setup. Skipping the dialog leaves
-          an operator on an empty page, and burying the offer would make that a
-          dead end. Gated on `fromHost` too, so the pre-connection fabricated
-          starter roster — which is not a real team — cannot hide the prompt.
+          The other half of "blocking but skippable": until somebody has staffed
+          this company, keep a visible way back into setup. Skipping the dialog
+          leaves an operator on a page with nothing of theirs on it, and burying
+          the offer would make that a dead end.
+
+          The copy says "not been set up" rather than "has no team", and that is
+          load-bearing: this prompt now renders directly above the global
+          baseline's teammates, who are real agents on the host (issue #1404).
+          Claiming there is nobody here, over four cards, would be the same lie
+          the fabricated starter roster was deleted for — pointing the other way.
         */}
         {load === "ready" && onRunSetup && hostEmpty && (
           <div
@@ -395,7 +411,7 @@ export function TeamView({
             data-testid="setup-prompt"
           >
             <div className="space-y-0.5">
-              <p className="text-sm font-medium">This company has no team yet</p>
+              <p className="text-sm font-medium">This company hasn't been set up yet</p>
               <p className="text-sm text-muted-foreground">
                 Answer three questions and we'll build you a starting team.
               </p>
@@ -607,8 +623,30 @@ function MemberCard({
             {member.description}
           </p>
         )}
-        {workload && <WorkloadLine workload={workload} />}
-        <DailyBudgetLine member={member} setByLabel={setByLabel} />
+        {/*
+          Pinned to the bottom of the card, not left floating under whatever
+          length the description happened to be.
+
+          `CardContent` is a `h-full` column inside a stretched grid row, so
+          every card in a row is the same height — but the content was all
+          top-aligned, and the description is `line-clamp-3`. A one-line
+          description therefore put this block ~36px higher than the two-line
+          card beside it, and the status line is the one thing a roster is
+          scanned for: "who is working, and how much is on them" was on two or
+          three different baselines in every row, with dead space underneath
+          each card.
+
+          `mt-auto` takes the slack instead, so the running facts line up
+          across a row and the card has no empty tail. Wrapped rather than
+          applied to `WorkloadLine` directly because a host that cannot answer
+          the board renders no workload at all (see `IDLE` and the `workload`
+          prop) — the budget line has to inherit the same anchor, or the two
+          shapes of card disagree again.
+        */}
+        <div className="mt-auto space-y-1.5 empty:hidden">
+          {workload && <WorkloadLine workload={workload} />}
+          <DailyBudgetLine member={member} setByLabel={setByLabel} />
+        </div>
         {/*
           The card's footer is gone with the Inbox switch it existed to hold
           (issue #1190).

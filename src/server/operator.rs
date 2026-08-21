@@ -1323,6 +1323,19 @@ struct ChatResponse {
     /// here. A caller that finds it missing has the reply in hand anyway.
     #[serde(skip_serializing_if = "Option::is_none")]
     turn_id: Option<String>,
+    /// The same discriminator [`ResolveReceiptDto::outcome`] carries, for the
+    /// non-detached resolve the Approvals page makes (issue #1449).
+    ///
+    /// The page never sees a `ResolveReceiptDto` — that shape is the *detached*
+    /// answer, which only the inline chat card asks for — so without this the
+    /// one surface the bug was reproduced on had no way to learn its click had
+    /// been refused, whatever the receipt said.
+    ///
+    /// Only ever set by a resolve, and omitted by every host predating it, which
+    /// a console reads as "this host cannot tell me" and words its confirmation
+    /// exactly as it did before rather than guessing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    outcome: Option<&'static str>,
 }
 
 /// The `detach: true` response (issue #983): the turn's id and the durable id of
@@ -1973,6 +1986,8 @@ async fn chat_and_emit(
         // A chat turn is nobody's sign-off, so this stays absent here.
         still_awaiting: None,
         turn_id,
+        // …and it resolves nothing, so there is no resolve outcome to report.
+        outcome: None,
     })))
 }
 
@@ -2892,6 +2907,21 @@ struct ResolveReceiptDto {
     /// the action" for all four. This is what lets it say the true thing
     /// instead. `0` means this decision released the turn.
     still_awaiting: usize,
+    /// **Which** of the end states this resolve actually reached (issue #1449):
+    /// `"settled"`, `"already_resolved"`, or `"expired"`.
+    ///
+    /// `already_resolved` above is kept and still means what it always did —
+    /// there was nothing left to resolve — so a console predating this field
+    /// behaves byte for byte as it did. What it could never express is
+    /// `expired`: the approval **was** still parked, and the host default-denied
+    /// it because its deadline had passed. Before this the receipt had no shape
+    /// for that at all, so the console rendered the one thing it could — the
+    /// success line — over a decision the host had refused.
+    ///
+    /// A string rather than a second boolean because the states are mutually
+    /// exclusive: two booleans can spell combinations that cannot happen, and
+    /// every reader would have to know which ones are real.
+    outcome: &'static str,
 }
 
 async fn run_resolve(
@@ -2932,6 +2962,10 @@ async fn run_resolve(
     // what decrements the turn's counter — has not run yet, so this still counts
     // the approval just decided and `decisions_still_awaited` subtracts it.
     let still_awaiting = runtime.decisions_still_awaited(&id);
+    // Issue #1449: which end state this actually reached, read off the receipt
+    // rather than assumed from the fact that no error was returned. A resolve
+    // can succeed as a request and still not be the operator's decision.
+    let outcome = receipt.outcome();
 
     if body.detach {
         // Nothing here waits on the turn. The webhook fan-out still owes the
@@ -2954,6 +2988,7 @@ async fn run_resolve(
             recorded: true,
             already_resolved: receipt.already_resolved(),
             still_awaiting,
+            outcome,
         })
         .into_response());
     }
@@ -2964,6 +2999,7 @@ async fn run_resolve(
         message_id: None,
         responses: report.responses,
         still_awaiting: Some(still_awaiting),
+        outcome: Some(outcome),
         // A resolve runs a follow-up cycle, not an operator turn, so it opens no
         // turn row of its own.
         turn_id: None,
@@ -3070,6 +3106,19 @@ mod test {
         config: AppConfig,
         brain: Option<Arc<dyn crate::ports::brain::Brain>>,
     ) -> AppState {
+        build_state_with_brain_and_manifest(home, lifecycle, config, brain, manifest()).await
+    }
+
+    /// [`build_state_with_brain`], with the company manifest chosen by the
+    /// caller — the approval **deadline** lives in `[policy]`, so a test about
+    /// what a past-deadline card answers has to be able to set it (issue #1449).
+    async fn build_state_with_brain_and_manifest(
+        home: &std::path::Path,
+        lifecycle: &str,
+        config: AppConfig,
+        brain: Option<Arc<dyn crate::ports::brain::Brain>>,
+        manifest: CompanyManifest,
+    ) -> AppState {
         // Pre-seed a record so the builder preserves the requested lifecycle.
         let store = FsCompanyStore::new(home.to_path_buf());
         let id = CompanyId::new("acme");
@@ -3077,7 +3126,7 @@ mod test {
         store
             .save(&CompanyRecord {
                 id: id.clone(),
-                manifest: manifest(),
+                manifest: manifest.clone(),
                 ledger: Vec::new(),
                 lifecycle: lifecycle.to_string(),
                 overlay_agents: Vec::new(),
@@ -3095,7 +3144,7 @@ mod test {
             .await
             .unwrap();
 
-        let mut builder = RuntimeBuilder::new(home.to_path_buf(), manifest()).with_id(id.clone());
+        let mut builder = RuntimeBuilder::new(home.to_path_buf(), manifest).with_id(id.clone());
         if let Some(brain) = brain {
             builder = builder.with_brain(brain);
         }
@@ -6866,7 +6915,7 @@ mode = "full"
         let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(
             value,
-            serde_json::json!({ "recorded": true, "alreadyResolved": false, "stillAwaiting": 0 })
+            serde_json::json!({ "recorded": true, "alreadyResolved": false, "stillAwaiting": 0, "outcome": "settled" })
         );
 
         // The answer really did precede the work: the turn is only now under
@@ -7044,13 +7093,102 @@ mode = "full"
         let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(
             value,
-            serde_json::json!({ "recorded": true, "alreadyResolved": true, "stillAwaiting": 0 })
+            serde_json::json!({ "recorded": true, "alreadyResolved": true, "stillAwaiting": 0, "outcome": "already_resolved" })
         );
         assert_eq!(
             c.runtime.grants.live_count(),
             1,
             "re-approving minted no second grant"
         );
+    }
+
+    /// **Issue #1449 on the wire.** A card past its deadline answers `expired`,
+    /// on both response shapes, and journals no approval against the operator.
+    ///
+    /// The two shapes matter independently. The **detached** receipt is what the
+    /// inline chat card reads; the **synchronous** `ChatResponse` is what the
+    /// Approvals page reads — the surface the defect was reported on — and it
+    /// never sees a receipt at all, so a discriminator that only rode on the
+    /// receipt would have left the reproduced bug in place.
+    #[tokio::test]
+    async fn a_resolve_past_the_deadline_answers_expired_on_both_shapes() {
+        let home_dir = home();
+        // `approval_ttl_hours = 0`: anything parked is past its deadline the
+        // instant it lands, which is the state an operator meets when they get
+        // to a queue late.
+        let expiring: CompanyManifest = toml::from_str(
+            "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\napproval_ttl_hours = 0\n",
+        )
+        .unwrap();
+        let state = build_state_with_brain_and_manifest(
+            home_dir.path(),
+            "running",
+            AppConfig::default(),
+            Some(Arc::new(StalledContinuationBrain {
+                entered: Arc::new(tokio::sync::Notify::new()),
+                release: Arc::new(tokio::sync::Notify::new()),
+                parked: gated_tool_call(),
+            })),
+            expiring,
+        )
+        .await;
+        let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
+        let app = router(state);
+
+        let response = app.clone().oneshot(chat_request("do it")).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let approval_id = runtime.pending_approvals()[0].id.clone();
+
+        // The detached shape.
+        let detached = app
+            .clone()
+            .oneshot(resolve_request(
+                &approval_id,
+                serde_json::json!({"verdict":"approve","detach":true}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(detached.status(), StatusCode::OK);
+        let bytes = to_bytes(detached.into_body(), usize::MAX).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            value["outcome"], "expired",
+            "the host default-denied this; the receipt has to be able to say so, got {value}"
+        );
+        assert_eq!(
+            runtime.grants.live_count(),
+            0,
+            "and it minted nothing, as it always did"
+        );
+
+        // The synchronous shape, on a second card of the same company.
+        let response = app
+            .clone()
+            .oneshot(chat_request("do it again"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let second = runtime.pending_approvals()[0].id.clone();
+        let sync = app
+            .clone()
+            .oneshot(resolve_request(
+                &second,
+                serde_json::json!({"verdict":"approve"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(sync.status(), StatusCode::OK);
+        let bytes = to_bytes(sync.into_body(), usize::MAX).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(
+            value.get("responses").is_some_and(|r| r.is_array()),
+            "still a ChatResponse, got {value}"
+        );
+        assert_eq!(
+            value["outcome"], "expired",
+            "the Approvals page's own shape carries it too, got {value}"
+        );
+        assert_eq!(runtime.grants.live_count(), 0);
     }
 
     /// Both scope forms carry `detach` identically — the `/companies/{id}` route
@@ -7077,7 +7215,7 @@ mode = "full"
         let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(
             value,
-            serde_json::json!({ "recorded": true, "alreadyResolved": false, "stillAwaiting": 0 })
+            serde_json::json!({ "recorded": true, "alreadyResolved": false, "stillAwaiting": 0, "outcome": "settled" })
         );
         assert!(await_continuation(&c.runtime).await);
         assert_eq!(c.runtime.grants.live_count(), 1);

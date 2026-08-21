@@ -1,5 +1,13 @@
 import { useEffect, useState } from "react";
-import { ArrowRight, Building2, Loader2, MailCheck, Monitor, Wallet } from "lucide-react";
+import {
+  ArrowRight,
+  Building2,
+  Loader2,
+  MailCheck,
+  Monitor,
+  TriangleAlert,
+  Wallet,
+} from "lucide-react";
 
 import {
   fetchAuthConfig,
@@ -36,11 +44,17 @@ interface Props {
   /**
    * Why they landed here, when it was not simply "not signed in yet".
    *
-   * Set after a refused ecosystem sign-in. Without it a rejected or ineligible
-   * sign-in renders an ordinary form and looks like the click did nothing — the
-   * one failure mode most likely to be reported as "the button is broken". It
-   * never names an address, so it cannot become the membership oracle the rest
-   * of this view refuses to be.
+   * Set after a refused ecosystem sign-in *or* a magic link that would not
+   * redeem — the expired-or-spent link being by far the commonest of the two,
+   * since every email-mode sign-in is one and they last fifteen minutes.
+   * Without it a rejected or ineligible sign-in renders an ordinary form and
+   * looks like the click did nothing — the one failure mode most likely to be
+   * reported as "the button is broken" (issue #1305). It never names an
+   * address, so it cannot become the membership oracle the rest of this view
+   * refuses to be.
+   *
+   * A notice is also what puts the caret in the email field below, so that
+   * "request a new one" is a keystroke rather than a hunt.
    */
   notice?: string;
   /**
@@ -251,9 +265,20 @@ export function Login({
       </header>
 
       <main className="mx-auto flex w-full max-w-md flex-col justify-center px-6 py-16">
+        {/*
+          The refusal, above the heading, where the eye lands first.
+
+          Given the icon and full-strength text on purpose. `Alert`'s default
+          variant is card-coloured with a muted description, which on this page
+          sits on a card-coloured form — so an unadorned notice reads as chrome
+          and gets skimmed past, which is barely better than the nothing it
+          replaced (#1305). Not `destructive`: an expired link is the ordinary
+          fate of one left in a mailbox overnight, not an error someone made.
+        */}
         {notice && (
-          <Alert className="mb-6">
-            <AlertDescription>{notice}</AlertDescription>
+          <Alert className="mb-6" data-testid="login-notice">
+            <TriangleAlert className="size-4" />
+            <AlertDescription className="text-foreground">{notice}</AlertDescription>
           </Alert>
         )}
 
@@ -439,6 +464,13 @@ export function Login({
                   id="email"
                   type="email"
                   autoComplete="username"
+                  // Only when something was refused. Whoever is reading a
+                  // notice has one thing left to do — ask for another link —
+                  // and this makes it a keystroke instead of a hunt for the
+                  // field. A cold visit is left alone: stealing focus on an
+                  // ordinary page load moves the viewport for anyone using a
+                  // screen reader or a zoomed browser, for no reason.
+                  autoFocus={Boolean(notice)}
                   required
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
