@@ -21,16 +21,14 @@ const CLIENT = {
   scopeFor: () => "/api/v1/companies/acme",
 } as unknown as OpenCompanyClient;
 
-// A tiny harness that owns the `dueDays` state, so the dialog re-renders for
-// each input the way the real view does without re-mounting (and re-opening) a
-// portal every time.
 // The dialog owns its own field state, so rather than trying to drive React
-// through a portal, we mount a fresh instance per input value. Force it via a
-// key so a brand-new component mounts for each case.
+// through a portal we mount a fresh instance per input value. The `due` value
+// is used as the key so a brand-new component mounts for each case.
 function Mount({ due }: { due: string }) {
   return createElement(
     SendInvoiceDialog,
     {
+      key: due,
       client: CLIENT,
       company: "acme",
       site: "acme-test",
