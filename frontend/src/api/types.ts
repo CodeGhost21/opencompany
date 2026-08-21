@@ -297,6 +297,15 @@ export interface ChatResponse {
    * back to re-reading history.
    */
   turnId?: string;
+  /**
+   * On a resolve: which end state it reached (#1449).
+   *
+   * The Approvals page resolves **without** `detach`, so it never sees a
+   * {@link ResolveReceipt} — this is the only shape that can tell it its click
+   * was refused. Absent on every other answer, and on a host that predates the
+   * field.
+   */
+  outcome?: ResolveOutcome;
 }
 
 /**
@@ -505,6 +514,25 @@ export interface ApprovalSummary {
 }
 
 /**
+ * **Which** end state a resolve reached (#1449).
+ *
+ * A resolve can succeed as a *request* and still not be the operator's
+ * decision, and the console has to be able to tell those apart — the whole of
+ * #1449 is that it could not, so it rendered the success line over a click the
+ * host had refused.
+ *
+ * * `settled` — the verdict is the operator's and it is recorded.
+ * * `expired` — the approval was still queued but past its deadline, so the
+ *   host default-denied it whatever the button said. **Nothing was carried
+ *   out**, and nothing was recorded against the operator's name.
+ * * `already_resolved` — there was nothing left to resolve. The click changed
+ *   nothing. Could be a double-submit, another operator, another tab, or the
+ *   sweeper retiring it a moment earlier; the host cannot tell which, and
+ *   neither may the wording.
+ */
+export type ResolveOutcome = "settled" | "expired" | "already_resolved";
+
+/**
  * The answer to a **detached** resolve (#383): the verdict is durable, and that
  * is all it claims. The agent's continuation arrives afterwards on the event
  * stream's `agent_reply` frame.
@@ -513,6 +541,12 @@ export interface ResolveReceipt {
   recorded: boolean;
   /** There was nothing left to resolve — a double-click, not a failure. */
   alreadyResolved: boolean;
+  /**
+   * Which end state this resolve reached (#1449). Absent on a host that
+   * predates the field, which the console reads as "cannot tell" and words its
+   * confirmation exactly as it did before rather than guessing.
+   */
+  outcome?: ResolveOutcome;
   /**
    * How many OTHER decisions the turn behind this approval is still blocked on
    * (issue #561). `0` means this decision released it; absent on a host that
@@ -726,6 +760,26 @@ export interface TeamMemberDto {
   budgetSetBy?: string;
   /** When that cap was set (epoch millis). Paired with `budgetSetBy`. */
   budgetSetAtMillis?: number;
+  /**
+   * Whether this teammate came from the **global baseline** — the agents,
+   * workflows and skills every company gets whichever vertical it started from
+   * (`docs/spec/runtime/globals.md`) — rather than from this company's own
+   * roster or from an operator.
+   *
+   * Provenance, and the field first-run setup is gated on (issue #1404). The
+   * baseline is merged into every company whatever its manifest says, so
+   * `roster.length === 0` is never true and the gate that used it could never
+   * open — including on `companies/e2e_setup`, the fixture that exists solely
+   * to reach that flow. Read this rather than testing ids against a hard-coded
+   * list of baseline agents, which re-breaks the moment the baseline changes.
+   *
+   * **Optional on the type, not on the wire**: a host predating the field omits
+   * it, and `undefined` means "this host cannot say". The setup gate reads that
+   * as *not* baseline, which is the conservative answer — counting an unknown
+   * row as baseline would offer setup to a company that already has a team and
+   * stack a second one on it.
+   */
+  global?: boolean;
   /**
    * The declared cognition-tier hint (`[[agent]].tier`) verbatim, from the same
    * host-side helper that answers `GET .../team/{agentId}` (issue #643).
@@ -1070,6 +1124,16 @@ export interface McpServer {
   enabled: boolean;
   allowedTools: string[];
   disallowedTools: string[];
+  /**
+   * Remote tool names the operator has declared **read-only** on this server
+   * (issue #1124). A bridge call to one is priced as an outward read rather than
+   * parked for approval, so it can run unattended under `auto`; every other call
+   * through the server still parks. Independent of {@link McpServer.allowedTools}
+   * / {@link McpServer.disallowedTools} — it says nothing about whether a tool is
+   * exposed, only how a call to it is gated. Carries this row's provenance badge
+   * exactly as the two lists above do.
+   */
+  readOnlyTools: string[];
   timeoutSecs: number;
   /** Whether an outbound credential is stored — never the credential itself. */
   authConfigured: boolean;

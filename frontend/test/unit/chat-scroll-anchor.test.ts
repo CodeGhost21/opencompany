@@ -31,6 +31,42 @@ import {
 const CONTENT_HEIGHT = 4000;
 const VIEWPORT_HEIGHT = 800;
 /**
+ * How tall the *box* is right now (issue #1325).
+ *
+ * Mutable for the same reason `contentHeight` is, one level out: the composer
+ * below this pane grows with the draft and takes its height out of this
+ * scroller's `clientHeight`. The bug that models is entirely about the viewport
+ * shrinking while the content stands still, so the height has to be something a
+ * test can move.
+ */
+let viewportHeight = VIEWPORT_HEIGHT;
+/**
+ * Every live `ResizeObserver` callback, so a test can fire one.
+ *
+ * jsdom performs no layout and ships no `ResizeObserver` at all, so nothing
+ * would ever call these on their own — which is the same reason the geometry
+ * above is stubbed. The suite is asserting *which* anchoring call the component
+ * makes when its box changes, not that a browser would have noticed.
+ */
+let resizeCallbacks: Array<() => void> = [];
+
+class TestResizeObserver {
+  constructor(callback: () => void) {
+    resizeCallbacks.push(callback);
+  }
+  observe() {}
+  unobserve() {}
+  disconnect() {}
+}
+
+/** Shrink the pane by `px` and tell the component, as a browser would. */
+function shrinkViewport(px: number) {
+  viewportHeight -= px;
+  act(() => {
+    for (const fire of resizeCallbacks) fire();
+  });
+}
+/**
  * How tall the transcript is *right now* (issue #1224).
  *
  * A cold load renders this component before the history exists, so the box is
@@ -40,19 +76,21 @@ const VIEWPORT_HEIGHT = 800;
  */
 let contentHeight = CONTENT_HEIGHT;
 /** The largest `scrollTop` the current transcript allows — i.e. the bottom. */
-const bottom = () => contentHeight - VIEWPORT_HEIGHT;
+const bottom = () => contentHeight - viewportHeight;
 /** Every `scrollTo` the component made, in order. */
 let calls: Array<{ top: number; behavior?: string }> = [];
 let scrollTop = 0;
 let container: HTMLDivElement;
 let root: Root;
+/** jsdom's `ResizeObserver` — there is none — so this puts `undefined` back. */
+let savedResizeObserver: typeof globalThis.ResizeObserver | undefined;
 
 /** What each stubbed property looked like before, so it can be put back. */
 const saved = new Map<string, PropertyDescriptor | undefined>();
 
 const STUBS: Record<string, PropertyDescriptor> = {
   scrollHeight: { get: () => contentHeight, configurable: true },
-  clientHeight: { get: () => VIEWPORT_HEIGHT, configurable: true },
+  clientHeight: { get: () => viewportHeight, configurable: true },
   scrollTop: {
     get: () => scrollTop,
     // Clamped, as a browser clamps it. This is not decoration: issue #1224 is
@@ -62,7 +100,7 @@ const STUBS: Record<string, PropertyDescriptor> = {
     // 800px box and every assertion about "did the anchor work" would pass
     // whether or not it did.
     set: (v: number) => {
-      scrollTop = Math.max(0, Math.min(v, contentHeight - VIEWPORT_HEIGHT));
+      scrollTop = Math.max(0, Math.min(v, contentHeight - viewportHeight));
     },
     configurable: true,
   },
@@ -76,7 +114,7 @@ const STUBS: Record<string, PropertyDescriptor> = {
     value: (opts: { top: number; behavior?: string }) => {
       calls.push(opts);
       if (opts.behavior === "smooth") return;
-      scrollTop = Math.max(0, Math.min(opts.top, contentHeight - VIEWPORT_HEIGHT));
+      scrollTop = Math.max(0, Math.min(opts.top, contentHeight - viewportHeight));
     },
     configurable: true,
     writable: true,
@@ -157,6 +195,10 @@ beforeEach(() => {
   calls = [];
   scrollTop = 0;
   contentHeight = CONTENT_HEIGHT;
+  viewportHeight = VIEWPORT_HEIGHT;
+  resizeCallbacks = [];
+  savedResizeObserver = globalThis.ResizeObserver;
+  (globalThis as unknown as { ResizeObserver: unknown }).ResizeObserver = TestResizeObserver;
   stubGeometry();
   container = document.createElement("div");
   document.body.appendChild(container);
@@ -167,6 +209,9 @@ afterEach(() => {
   act(() => root.unmount());
   container.remove();
   restoreGeometry();
+  // Put the global back rather than leaving a stub behind for whichever file
+  // this worker picks up next — the same rule `restoreGeometry` follows.
+  (globalThis as unknown as { ResizeObserver: unknown }).ResizeObserver = savedResizeObserver;
 });
 
 describe("channel arrival", () => {
@@ -354,6 +399,86 @@ describe("a transcript that arrives after mount", () => {
 
     expect(calls).toHaveLength(0);
     expect(scrollTop).toBe(100);
+  });
+});
+
+/**
+ * Rule 3 — the viewport shrinking underneath (issue #1325).
+ *
+ * Rules 1 and 2 both watch the *content*. Neither watches the *box*, and the
+ * box moves: the composer below this pane grows with the draft and takes its
+ * height out of this scroller's `clientHeight`, while `scrollTop` stands still.
+ * Measured against a running host, a two-line draft slid 96px of transcript up
+ * behind the composer — often the very message being replied to, hidden for
+ * exactly as long as the draft was long.
+ *
+ * The distances below are the whole point, so they are asserted as numbers
+ * rather than as "did it call scrollTo": nothing about this bug is visible in
+ * the *number of calls*, only in where the view ends up relative to a bottom
+ * that has moved.
+ */
+describe("the composer growing under the transcript", () => {
+  it("follows the bottom down when the pane shrinks", () => {
+    const ch = channel("engineering");
+    render(ch, items(40, ch));
+    // Rule 1 has anchored: parked at the bottom of an 800px box.
+    expect(scrollTop).toBe(CONTENT_HEIGHT - VIEWPORT_HEIGHT);
+
+    shrinkViewport(96);
+
+    // The bottom is now 96px further down, and the view is on it — not 96px
+    // above it, which is where it used to be left.
+    expect(scrollTop).toBe(bottom());
+    expect(contentHeight - scrollTop - viewportHeight).toBe(0);
+  });
+
+  it("leaves a reader alone who has scrolled up to read history", () => {
+    // The same gate rule 2 uses. A draft opened while reading back through a
+    // transcript must not yank the viewport to the newest message.
+    const ch = channel("engineering");
+    render(ch, items(40, ch));
+
+    scrollTop = 100;
+    act(() => {
+      scroller().dispatchEvent(new Event("scroll", { bubbles: true }));
+    });
+
+    shrinkViewport(96);
+
+    expect(scrollTop).toBe(100);
+  });
+
+  it("keeps following as the composer grows a line at a time", () => {
+    // The composer does not jump to its full height; it grows a row per
+    // wrapped line, and each one is its own resize. Following once and then
+    // stopping would still hide everything after the first line.
+    const ch = channel("engineering");
+    render(ch, items(40, ch));
+
+    shrinkViewport(32);
+    expect(scrollTop).toBe(bottom());
+    shrinkViewport(32);
+    expect(scrollTop).toBe(bottom());
+    shrinkViewport(32);
+
+    expect(scrollTop).toBe(bottom());
+    expect(contentHeight - scrollTop - viewportHeight).toBe(0);
+  });
+
+  it("does not animate — a glide per keystroke would be a wobble", () => {
+    // Rule 2 animates because a message arriving should travel into view. This
+    // one fires as the composer grows a line at a time, so it must not.
+    const ch = channel("engineering");
+    render(ch, items(40, ch));
+    calls = [];
+
+    shrinkViewport(96);
+
+    // Asserted together on purpose: "no smooth call" is satisfied by doing
+    // nothing at all, so it only means something alongside evidence that the
+    // anchor did move.
+    expect(scrollTop).toBe(bottom());
+    expect(calls.filter((c) => c.behavior === "smooth")).toHaveLength(0);
   });
 });
 

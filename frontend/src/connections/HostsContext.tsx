@@ -23,7 +23,7 @@
 import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
 
 import type { LocalInstance } from "@/api/transport/desktop";
-import type { Connection, ConnectionId } from "@/connections/types";
+import type { Connection, ConnectionId, Connector, SshTarget } from "@/connections/types";
 
 export interface HostsValue {
   connections: Connection[];
@@ -31,8 +31,15 @@ export interface HostsValue {
   selected: ConnectionId | null;
   /** Puts another host's console on screen. A filter — see the note above. */
   onSelect: (id: ConnectionId) => void;
-  /** Registers a host reachable at `baseUrl`, and opens it. */
-  onAdd: (baseUrl: string) => void;
+  /**
+   * Registers a host reachable at `baseUrl`, and opens it.
+   *
+   * The connector says which of the four this is, and is not derivable from
+   * the address: a cloud tenant and a gateway someone runs are both
+   * `https://…`, and only the first is worth waiting for when it does not
+   * answer. See `docs/spec/runtime/connectors.md`.
+   */
+  onAdd: (baseUrl: string, connector?: Connector) => void;
   /**
    * The hosts this machine runs, running or not.
    *
@@ -44,6 +51,17 @@ export interface HostsValue {
   onAddLocal?: (label: string) => Promise<void>;
   onStartLocal?: (id: string) => Promise<void>;
   onStopLocal?: (id: string) => Promise<void>;
+  /**
+   * Opens a tunnel to a host on another machine and registers it.
+   *
+   * Absent in a browser, which cannot start a process — and absent on a shell
+   * built before tunnels existed, so the tab is offered only where the button
+   * behind it can be honoured.
+   *
+   * Rejects with what `ssh` said, which the dialog shows: a refused key names
+   * a specific thing to go and fix.
+   */
+  onAddSsh?: (target: SshTarget) => Promise<void>;
   /** Whether this is a hub deployment, which offers the switcher at any count. */
   hub: boolean;
 }

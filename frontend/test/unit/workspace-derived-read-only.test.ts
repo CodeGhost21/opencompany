@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { FsNode } from "@/api/workspace";
-import { DERIVED_DIR, isDerivedNode } from "@/lib/workspace";
+import { DERIVED_DIR, DERIVED_LABEL, DERIVED_REASON, isDerivedNode, isDerivedPath } from "@/lib/workspace";
 
 /**
  * Issue #1222: which notes the pane must refuse to edit.
@@ -83,5 +83,62 @@ describe("which notes the workspace refuses to edit", () => {
 
   it("names the folder once, so the host can be followed if it moves", () => {
     expect(DERIVED_DIR).toBe("derived");
+  });
+});
+
+/**
+ * Issue #1377: the same rule, read off a path.
+ *
+ * The search hit list replaces the tree in the explorer pane, so it has no
+ * ancestry to walk — it has `hit.path`. These cases are the ones a path check
+ * gets wrong if it is written casually, and they are lifted from the host's own
+ * `is_derived_path` tests in `src/ledger/derived.rs` so the two cannot drift.
+ */
+describe("which search hits the workspace marks as a ledger's", () => {
+  it("matches the folder and everything under it", () => {
+    expect(isDerivedPath("derived/GOALS.md")).toBe(true);
+    expect(isDerivedPath("/derived/GOALS.md")).toBe(true);
+    expect(isDerivedPath("derived")).toBe(true);
+    expect(isDerivedPath("derived/SOMETHING-NOBODY-HAS-DECLARED.md")).toBe(true);
+    // Deeper than any ledger renders, and marked anyway: the rule is the
+    // folder, so it holds for a path no ledger has claimed.
+    expect(isDerivedPath("derived/archive/OLD_GOALS.md")).toBe(true);
+  });
+
+  it("cannot be stepped around by capitalising a letter or padding it", () => {
+    expect(isDerivedPath("Derived/GOALS.md")).toBe(true);
+    // The host trims before it strips slashes; so does this. A guard that a
+    // stray space defeats is not a guard.
+    expect(isDerivedPath("  /derived/GOALS.md")).toBe(true);
+  });
+
+  it("leaves every other path alone", () => {
+    // Only the root segment counts — a false positive here would put a lock on
+    // a note the operator is entitled to edit, and take Rename off its menu.
+    expect(isDerivedPath("notes/derived/GOALS.md")).toBe(false);
+    expect(isDerivedPath("derivedish/GOALS.md")).toBe(false);
+    expect(isDerivedPath("GOALS.md")).toBe(false);
+    expect(isDerivedPath("")).toBe(false);
+    expect(isDerivedPath("/")).toBe(false);
+  });
+
+  it("agrees with the tree rule on the same node", () => {
+    // The two predicates are the point of failure: one is asked by the tree and
+    // the header, the other by the search list, and a disagreement would mean
+    // the same file is locked in one pane and editable in another.
+    expect(isDerivedNode(TREE, "promises")).toBe(isDerivedPath("derived/CUSTOMER_PROMISES.md"));
+    expect(isDerivedNode(TREE, "deep")).toBe(isDerivedPath("derived/archive/OLD_GOALS.md"));
+    expect(isDerivedNode(TREE, "inside")).toBe(isDerivedPath("derived-notes/Scratch.md"));
+    expect(isDerivedNode(TREE, "perf")).toBe(isDerivedPath("QA notes/Perf budget.md"));
+  });
+
+  it("says what writes the file, not merely that writing is refused", () => {
+    // The whole of #1377. "Read only" reports a rule with no reason behind it,
+    // and a refusal that reads as a bug is worse than one that reads as a rule.
+    expect(DERIVED_LABEL).toContain("ledger");
+    expect(DERIVED_LABEL.toLowerCase()).not.toContain("read only");
+    // And the long form has to say where the edit actually belongs, because
+    // there IS somewhere it belongs.
+    expect(DERIVED_REASON).toContain("Ledgers page");
   });
 });

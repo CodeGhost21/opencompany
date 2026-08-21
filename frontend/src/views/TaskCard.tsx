@@ -48,6 +48,55 @@ function priorityStyle(priority: string): string {
 }
 
 /**
+ * What a card's note says, once the runtime's own bookkeeping is out of it.
+ *
+ * `note` is not prose with the occasional machine line in it — **the whole
+ * field is an attributed journal**. `append_result`
+ * (`src/runtime/advance.rs:71`) writes every outcome as `[<who>] <what>` and
+ * joins the blocks with a blank line, never overwriting: *"the note is the
+ * card's history"*. `<who>` is `system` for the host's own paths and the
+ * teammate's id for everything else, so a live board shows both
+ * `[system] the dispatch cycle ended without settling this attempt` and
+ * `[frontend_engineer] __MOCK_LLM__ mock inference backend reply.`
+ *
+ * Reading that field as text has three consequences on a card face, which has
+ * room for exactly one secondary line:
+ *
+ * 1. **The bookkeeping reads as the work.** Three of eight To-do cards on a
+ *    healthy seeded board reported an error that had not happened.
+ * 2. **The attribution is said twice.** The card already carries the assignee
+ *    as an avatar and a name; `[frontend_engineer]` in the body is the same
+ *    fact again, in the noisiest possible place.
+ * 3. **`line-clamp-2` shows the *oldest* two lines.** The journal is
+ *    append-only, so a clamped note freezes on the first thing that ever
+ *    happened to the card and never moves again — the exact opposite of what a
+ *    running history is for.
+ *
+ * So: split the journal into its blocks, drop the host's own (`[system]`),
+ * take the **most recent** of what is left, and strip its `[<who>]` prefix.
+ * A block with no prefix is a note somebody typed, and is shown as-is.
+ *
+ * Only the *preview* is derived this way. The note itself is untouched, and the
+ * whole of it — system blocks included — is still on the detail screen's
+ * timeline, which is where a journal belongs and where somebody looking for one
+ * went.
+ *
+ * Returns `null` when nothing is left, so the card renders no line at all
+ * rather than an empty one holding space.
+ */
+export function notePreview(note: string | undefined): string | null {
+  if (!note) return null;
+  const blocks = note
+    .split(/\n\s*\n/)
+    .map((block) => block.trim())
+    .filter(Boolean)
+    .filter((block) => !block.startsWith("[system]"));
+  const latest = blocks[blocks.length - 1];
+  if (!latest) return null;
+  return latest.replace(/^\[[^\]\n]*\]\s*/, "").trim() || null;
+}
+
+/**
  * One card on the task board.
  *
  * It no longer carries the drag handlers: [`LedgerBoard`](./LedgerBoard) wraps
@@ -102,13 +151,22 @@ export function TaskItem({
     >
       <div className="flex items-start justify-between gap-2">
         <p className="text-sm font-medium leading-snug">{task.title}</p>
-        <Badge variant="outline" className={cn("shrink-0 capitalize", priorityStyle(task.priority))}>
-          {task.priority}
-        </Badge>
+        {/* Only when something is being asked. `low` is what a card takes when
+            nobody chose a priority, so a badge for it is a pill on a third of a
+            real board announcing the default — noise competing with the title
+            for the one line of the card that has to be read first.
+            `PRIORITY_STYLES` already makes the same call about colour, keeping
+            `low` neutral "for the same reason `idle` does: nothing is being
+            asked of anyone". This finishes that thought. */}
+        {task.priority !== "low" && (
+          <Badge variant="outline" className={cn("shrink-0 capitalize", priorityStyle(task.priority))}>
+            {task.priority}
+          </Badge>
+        )}
       </div>
-      {task.note && (
+      {notePreview(task.note) && (
         <p className="mt-1 line-clamp-2 whitespace-pre-wrap text-xs text-muted-foreground">
-          {task.note}
+          {notePreview(task.note)}
         </p>
       )}
       {task.assignee && (
@@ -312,10 +370,11 @@ function LinkIcon({ kind }: { kind: TaskLink["kind"] }) {
 /**
  * One line on a finished card: *here is the thing this task produced*.
  *
- * Every card in these columns gets one, including the ones that produced no
- * file — for those the link opens the attempt's trace, which is the deliverable
- * when there is no document. A card that recorded no attempt at all links to
- * itself, which is honest rather than absent.
+ * A card that produced no file still gets one, because for those the link opens
+ * the attempt's trace — which is the deliverable when there is no document. A
+ * card that recorded no attempt at all gets no row: `primaryLink` returns the
+ * `card` kind there, a link back to the card itself, and the card is already
+ * that click. See the guard below.
  *
  * The anchor stops its own click from bubbling: the whole card is a button that
  * opens the detail screen, and without this a click on the link would both
@@ -324,6 +383,13 @@ function LinkIcon({ kind }: { kind: TaskLink["kind"] }) {
 function OutputLinkRow({ task }: { task: Task }) {
   const link = primaryLink(task);
   const extra = extraOutputCount(task);
+  // A card that produced nothing links to itself, labelled "Open this task" —
+  // which is what the whole card already is (`role="button"`, `onOpen`). A
+  // second copy of the card's own action, given a divider and a row of its own,
+  // is most of why two cards for the same kind of object came out different
+  // heights and different shapes depending only on which column they sat in.
+  // The row still appears the moment there is a real deliverable behind it.
+  if (link.kind === "card") return null;
   return (
     <div className="mt-3 flex items-center gap-2 border-t pt-2 text-xs">
       <a
@@ -349,11 +415,22 @@ function OutputLinkRow({ task }: { task: Task }) {
   );
 }
 
-
-function initials(name: string): string {
+/**
+ * The two letters on a card's avatar.
+ *
+ * Splits on underscores and hyphens as well as whitespace, because a teammate
+ * id is snake_case and holds no whitespace at all — so this returned a
+ * **single** letter for every agent on the board, and `docs_writer`, `devrel`
+ * and `designer` all rendered the same "D". An avatar that cannot tell three
+ * teammates apart is decoration.
+ *
+ * Exported for `test/unit/task-card-face.test.ts`.
+ */
+export function initials(name: string): string {
   return name
     .trim()
-    .split(/\s+/)
+    .split(/[\s_-]+/)
+    .filter(Boolean)
     .slice(0, 2)
     .map((p) => p.charAt(0).toUpperCase())
     .join("");

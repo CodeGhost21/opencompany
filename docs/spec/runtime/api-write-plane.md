@@ -246,6 +246,15 @@ write. See [runtime/tools.md](tools.md).
 "orchestrator"` agent, else the first declared) rather than read off `tier`, so
 a company that tags nobody still names its orchestrator.
 
+`global` marks the teammates the [global baseline](globals.md) merged in — the
+ones every company has whichever vertical it started from, and the ones
+`DELETE …/team/{agentId}` refuses. It is sent on every row because a client
+cannot otherwise tell a company somebody staffed from one nobody has: the
+baseline is on every roster, so `length === 0` is a question with one answer.
+The console's first-run gate turns on it
+([company-setup.md](company-setup.md)); before the field existed that gate could
+never open.
+
 `PATCH …/team/{agentId}` edits an **overlay** teammate's `name`, `role` and
 `description`. It is a patch: an omitted key is left alone, and `"description":
 null` clears it — the two must stay apart or every partial save would erase an
@@ -317,14 +326,51 @@ credential: the old credential was unreachable by agents.
 ```text
 GET    …/credential                         whether the company has its own key + which tier it presents
 PUT    …/credential                         set / rotate / clear the company's TinyHumans key  [admin]
-PUT    …/domain                             set the custom domain
+GET    …/domain                             the stored domain + records + last verify result, or `null`
+PUT    …/domain                             set the custom domain  [admin]
 POST   …/domain/verify                       server-side DNS check
-PUT    …/smtp                               store SMTP credentials (secret store)
-POST   …/smtp/test                           send a test email
+GET    …/smtp                               non-secret SMTP status (`configured: false` when unset)
+PUT    …/smtp                               store SMTP credentials (secret store)  [admin]
+POST   …/smtp/test                           send a test email  [admin]
 POST   …/connections/{provider}/start        retired native OAuth bridge → 410 JSON until 2026-09-30  [feature: oauth]
 POST   …/connections/{provider}/disconnect   drop a legacy stored OAuth token  [feature: oauth]
 GET    /api/v1/oauth/callback                retired browser landing page → 410 HTML until 2026-09-30  [feature: oauth]
 ```
+
+The two `GET`s are the REST siblings of the GraphQL `Company.domain` /
+`Company.smtp` reads and share their loaders, so the planes cannot disagree
+about the fields they both carry. They can still differ in *detail*: REST
+answers the full `DomainStatus` and `SmtpStatus`, while `DomainStatusGql` omits
+the per-record `checks` from the last verify pass and `SmtpStatusGql` omits
+`security`, `from_name` and `from_email`. Both are open to any member (the
+`[admin]` line guards the company's outward identity, not the reading of it) and
+neither carries credential material: the SMTP password is absent from
+`SmtpStatus` by construction.
+
+`PUT …/smtp` treats the password as a **patch** — a body that omits it keeps the
+stored one, so a form can offer "stored — leave blank to keep" instead of
+charging a credential re-entry for a from-name fix. A body carrying one behaves
+exactly as before, and one that supplies neither with nothing stored is `400`.
+A supplied password is stored **byte for byte** — leading and trailing
+whitespace is preserved, because it can be significant to the remote server.
+Trimming decides only *whether* one was supplied: a value that is empty or
+entirely whitespace counts as omitted and keeps the stored password, so an
+all-whitespace password cannot be set through this route. Any value with a
+non-whitespace character in it is stored exactly as sent.
+
+Keeping the stored password costs no read-modify-write. The configuration and
+the password live under separate secret keys, so a passwordless save rewrites
+the configuration and never touches the secret — a rotation arriving at the same
+moment survives instead of being reverted, however many processes are writing.
+
+Credentials written before that split still carry the password inside the
+configuration blob; reads fall back to it, and the first passwordless save after
+the split migrates it to its own key. That migration is the one path that must
+read and then write, so `PUT …/smtp` serializes per company for the duration of
+the handler. The lock is in-process, which covers the deployed topology (a
+tenant is a single container); two replicas of one company would reopen the
+window on the legacy path alone, and closing it there would need a conditional
+write that `SecretStore` cannot express today.
 
 `…/credential` is the company's **one** TinyHumans key, presented by every
 surface wired to it (**Composio today**) — see

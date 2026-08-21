@@ -42,7 +42,12 @@ import {
   type McpStatus,
   type McpToolInfo,
 } from "@/api/types";
-import { type McpBridgeState, mcpAddedMessage, mcpBridgeState } from "@/lib/mcp-bridge";
+import {
+  type McpBridgeState,
+  mcpAddedMessage,
+  mcpBridgeState,
+  mcpHealthBadge,
+} from "@/lib/mcp-bridge";
 import {
   missingEnvKeys,
   mcpRowControls,
@@ -176,6 +181,12 @@ export function McpServersSection({ client, company, canManage, chrome = "inline
   // Starts `unknown` so nothing is claimed before the capability read lands.
   const [bridge, setBridge] = useState<McpBridgeState>("unknown");
   const [servers, setServers] = useState<McpServer[]>([]);
+  // The name of the row (or `"add"`) currently mutating. Every mutating handler
+  // serialises on it with an `if (busy) return`, so while one is in flight the
+  // controls on ALL rows disable, not just the busy one (issue #1475): the guard
+  // used to be invisible on the other rows, which accepted clicks and silently
+  // did nothing. The active control still shows its own spinner via
+  // `busy === server.name`, so the operator can see which row holds the lock.
   const [busy, setBusy] = useState<string | null>(null);
   const [tools, setTools] = useState<Record<string, ToolsState>>({});
   // Live health from an on-demand Test, overriding the persisted badge per row.
@@ -392,7 +403,15 @@ export function McpServersSection({ client, company, canManage, chrome = "inline
     if (!token) return;
     setBusy(server.name);
     try {
-      await updateMcpServer(client, company, server.name, { token, authKind: "bearer" });
+      // Rotate the credential VALUE only — never the auth scheme (issue #1464).
+      // The read model carries no `authKind`, so the console cannot know whether
+      // this server was added as a bearer token, an `X-Api-Key:` header or a
+      // `?api_key=` query parameter. Sending `authKind: "bearer"` here silently
+      // rewrote a header/query server to bearer, after which it rejected every
+      // request — and the immediate re-test below surfaced that as a bad-token
+      // error, sending the operator to re-paste a key that was never the
+      // problem. Omitting the field leaves the host's stored scheme untouched.
+      await updateMcpServer(client, company, server.name, { token });
       setCredentialFor(null);
       setCredentialDraft("");
       await refresh();
@@ -766,12 +785,16 @@ export function McpServersSection({ client, company, canManage, chrome = "inline
                         <Badge variant={badge.variant} data-testid="mcp-source-badge">
                           {badge.label}
                         </Badge>
-                        <McpHealthBadge health={health} authConfigured={server.authConfigured} />
+                        <McpHealthBadge
+                          health={health}
+                          authConfigured={server.authConfigured}
+                          bridge={bridge}
+                        />
                         <span className="ml-auto flex items-center gap-2">
                           {controls.toggle && (
                             <Switch
                               checked={server.enabled}
-                              disabled={busy === server.name || !canManage}
+                              disabled={busy !== null || !canManage}
                               onCheckedChange={(v) => void toggle(server, v)}
                               aria-label={`Enable ${server.name}`}
                             />
@@ -792,7 +815,7 @@ export function McpServersSection({ client, company, canManage, chrome = "inline
                                 variant="default"
                                 size="sm"
                                 data-testid="mcp-add-token"
-                                disabled={busy === server.name}
+                                disabled={busy !== null}
                                 onClick={() => {
                                   setCredentialDraft("");
                                   setCredentialFor(server.name);
@@ -805,7 +828,7 @@ export function McpServersSection({ client, company, canManage, chrome = "inline
                             <Button
                               variant="default"
                               size="sm"
-                              disabled={busy === server.name}
+                              disabled={busy !== null}
                               onClick={() => void signIn(server)}
                             >
                               {busy === server.name ? (
@@ -827,7 +850,7 @@ export function McpServersSection({ client, company, canManage, chrome = "inline
                                 variant="default"
                                 size="sm"
                                 data-testid="mcp-rotate-env"
-                                disabled={busy === server.name}
+                                disabled={busy !== null}
                                 onClick={() => void openEnvRotation(server)}
                               >
                                 <KeyRound className="size-4" /> Credentials
@@ -838,7 +861,7 @@ export function McpServersSection({ client, company, canManage, chrome = "inline
                               variant="ghost"
                               size="sm"
                               data-testid="mcp-lifecycle"
-                              disabled={busy === server.name}
+                              disabled={busy !== null}
                               onClick={() => void lifecycle(server, dial)}
                             >
                               {busy === server.name ? (
@@ -862,7 +885,7 @@ export function McpServersSection({ client, company, canManage, chrome = "inline
                               <Button
                                 variant="ghost"
                                 size="sm"
-                                disabled={busy === server.name}
+                                disabled={busy !== null}
                                 onClick={() => void test(server)}
                               >
                                 {busy === server.name ? (
@@ -875,7 +898,7 @@ export function McpServersSection({ client, company, canManage, chrome = "inline
                               <Button
                                 variant="ghost"
                                 size="sm"
-                                disabled={busy === server.name}
+                                disabled={busy !== null}
                                 onClick={() => void discover(server)}
                               >
                                 <ChevronDown className="size-4" /> Tools
@@ -886,7 +909,7 @@ export function McpServersSection({ client, company, canManage, chrome = "inline
                             <Button
                               variant="ghost"
                               size="sm"
-                              disabled={busy === server.name}
+                              disabled={busy !== null}
                               onClick={() => void remove(server)}
                               aria-label={`Remove ${server.name}`}
                             >
@@ -901,8 +924,17 @@ export function McpServersSection({ client, company, canManage, chrome = "inline
                           so that empty case is flagged loudly rather than shown as a blank list.
                           A disabled server is empty by construction — the harness hands out no
                           tool for it whatever the grants say — so the loud state is scoped to
-                          enabled servers; flagging an off server would cry wolf on intent. */}
-                      {server.reachableBy !== undefined &&
+                          enabled servers; flagging an off server would cry wolf on intent.
+
+                          Suppressed entirely when the bridge is absent (issue #1467): the
+                          reachability walk knows nothing about whether the `mcp` feature is
+                          compiled in, so with no bridge the red "no tool grant covers …, widen a
+                          grant" advice misdiagnoses the cause — grants cannot fix a missing
+                          bridge — and the positive "Reachable by: …" line contradicts the banner
+                          that says no teammate receives these tools. The banner already carries
+                          the real message here. */}
+                      {bridge !== "absent" &&
+                        server.reachableBy !== undefined &&
                         server.enabled &&
                         (server.reachableBy.length === 0 ? (
                           <p
@@ -935,6 +967,10 @@ export function McpServersSection({ client, company, canManage, chrome = "inline
                           <div className="flex-1 space-y-1">
                             <Label htmlFor={`mcp-token-${server.name}`} className="text-xs">
                               API token for {server.name}
+                              {/* The value is write-only and unrecoverable, so
+                                  say when saving it overwrites an existing one
+                                  (issue #1464). */}
+                              {server.authConfigured ? " — replaces the stored credential" : ""}
                             </Label>
                             <Input
                               id={`mcp-token-${server.name}`}
@@ -952,7 +988,7 @@ export function McpServersSection({ client, company, canManage, chrome = "inline
                           <Button
                             size="sm"
                             data-testid="mcp-token-save"
-                            disabled={busy === server.name || !credentialDraft.trim()}
+                            disabled={busy !== null || !credentialDraft.trim()}
                             onClick={() => void saveCredential(server)}
                           >
                             {busy === server.name ? (
@@ -964,7 +1000,7 @@ export function McpServersSection({ client, company, canManage, chrome = "inline
                           <Button
                             size="sm"
                             variant="ghost"
-                            disabled={busy === server.name}
+                            disabled={busy !== null}
                             onClick={() => setCredentialFor(null)}
                           >
                             Cancel
@@ -1014,7 +1050,7 @@ export function McpServersSection({ client, company, canManage, chrome = "inline
                               <Button
                                 size="sm"
                                 data-testid="mcp-env-save"
-                                disabled={busy === server.name}
+                                disabled={busy !== null}
                                 onClick={() => void saveEnvRotation(server, envFields.keys)}
                               >
                                 {busy === server.name ? (
@@ -1027,7 +1063,7 @@ export function McpServersSection({ client, company, canManage, chrome = "inline
                             <Button
                               size="sm"
                               variant="ghost"
-                              disabled={busy === server.name}
+                              disabled={busy !== null}
                               onClick={() => setEnvFor(null)}
                             >
                               {envFields.kind === "ready" && envFields.keys.length > 0
@@ -1132,7 +1168,7 @@ export function McpServersSection({ client, company, canManage, chrome = "inline
                   </div>
                   <Button
                     data-testid="mcp-add-submit"
-                    disabled={busy === "add"}
+                    disabled={busy !== null}
                     onClick={() => void add()}
                   >
                     {busy === "add" ? (
@@ -1205,44 +1241,44 @@ export function McpServersSection({ client, company, canManage, chrome = "inline
  * The per-server health badge: green `ok · N tools`, amber `needs config`, red
  * `error`. Falls back to a plain "auth set" hint when the server has never been
  * probed (no `health`).
+ *
+ * Bridge state is folded in the way `HostingView` folds `inBuild` (issue #1405).
+ * On a build with no MCP bridge the probe still answers for real — the server is
+ * reachable — but nothing it reports is delivered to a teammate, and the banner
+ * above the list says exactly that. A green `ok` under that banner tells the
+ * operator twelve tools are working when no teammate can call one, so on
+ * `bridge === "absent"` every affirmative reading drops out of the success
+ * colour into the neutral register: reachable and configured, but not
+ * delivering. `needs config` / `error` are genuine problems either way and keep
+ * their amber/red.
  */
 function McpHealthBadge({
   health,
   authConfigured,
+  bridge,
 }: {
   health?: McpHealth;
   authConfigured: boolean;
+  bridge: McpBridgeState;
 }) {
-  if (!health) {
-    // Never probed — show only the non-secret auth hint (unchanged behavior).
-    return authConfigured ? (
-      <span className="inline-flex items-center gap-1 text-xs text-status-done-text">
-        <Check className="size-3" /> auth set
-      </span>
-    ) : null;
-  }
-  if (health.status === "ok") {
-    return (
-      <span className="inline-flex items-center gap-1 text-xs text-status-done-text">
-        <Check className="size-3" /> ok · {health.toolCount} tool{health.toolCount === 1 ? "" : "s"}
-      </span>
-    );
-  }
-  if (health.status === "needs_config") {
-    return (
-      <span className="inline-flex items-center gap-1 text-xs text-status-blocked-text">
-        <AlertTriangle className="size-3" /> needs config
-      </span>
-    );
-  }
-  if (health.status === "error") {
-    return (
-      <span className="inline-flex items-center gap-1 text-xs text-destructive">
-        <AlertTriangle className="size-3" /> error
-      </span>
-    );
-  }
-  return null;
+  // The decision — which register, and the text — is the pure `mcpHealthBadge`
+  // decider (issue #1405), so the bridge fold is unit-tested and this component
+  // only maps a tone to its token colour and icon.
+  const badge = mcpHealthBadge(health, authConfigured, bridge);
+  if (!badge) return null;
+  const tone =
+    badge.tone === "delivering"
+      ? { className: "text-status-done-text", Icon: Check }
+      : badge.tone === "configured"
+        ? { className: "text-muted-foreground", Icon: Info }
+        : badge.tone === "warn"
+          ? { className: "text-status-blocked-text", Icon: AlertTriangle }
+          : { className: "text-destructive", Icon: AlertTriangle };
+  return (
+    <span className={`inline-flex items-center gap-1 text-xs ${tone.className}`}>
+      <tone.Icon className="size-3" /> {badge.label}
+    </span>
+  );
 }
 
 /** Renders the live-discovered tool list for one server. */

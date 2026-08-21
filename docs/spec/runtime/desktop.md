@@ -20,16 +20,32 @@ The cost is that no root `cargo` invocation reaches the desktop, including
 and tests it; without that lane the crate would be compiled by nothing, which is
 [issue #475](https://github.com/tinyhumansai/opencompany/issues/475)'s shape.
 
-There is a second Tauri crate in the tree — `frontend/src-tauri/`, the console's
-wrapper — and it is an independent workspace with its own `Cargo.lock` for the
-same reason this one is separate: OpenHuman's vendored dependencies own nested
-workspaces, which Cargo cannot resolve beneath another workspace root.
+### One Tauri app, because two made the desktop unusable
 
-Which one a `tauri` invocation picks up is decided by the working directory, and
-not the way most people expect: **the CLI searches subfolders of the working
-directory, not ancestors.** From `frontend/` it finds the wrapper; from the
-repository root or from `src-tauri/` it finds this one. That is worth knowing
-before reading a build failure, because the two apps share a `productName`.
+There used to be two. `frontend/src-tauri/` was a second Tauri crate sharing
+this one's `productName`, and which one a `tauri` invocation picked up was
+decided by the working directory in a way most people do not expect: **the CLI
+searches subfolders of the working directory, not ancestors.** From `frontend/`
+it found the wrapper; from the repository root or from `src-tauri/` it finds
+this one.
+
+`tauri:dev` and `tauri:build` are scripts in `frontend/package.json`, and npm
+runs a script from its manifest's own directory — so `npm run tauri:dev`, the
+obvious way to start the desktop app, started the wrapper every time. The
+wrapper registered exactly one command, `desktop_config`, and the console had
+stopped invoking it (see the comment at the top of `frontend/src/main.tsx`):
+every `oc_*` command the console uses to reach a host — `oc_embedded` first —
+was absent from its `generate_handler!`. The window opened, the console
+rendered, and no host ever appeared. The symptom reads as "the server doesn't
+start"; the cause is that the app which starts one was never the app that ran.
+
+Nothing could see it. Both crates compiled, both were tested by the `Desktop`
+lane, and the packaging steps ran from the two directories that find the shell.
+A second app is not a hazard that becomes safe by being currently correct — the
+ambiguity is the hazard — so the wrapper is deleted, `frontend/package.json`
+points `tauri:dev` at `scripts/desktop-dev.sh` and `tauri:build` at
+`src-tauri/`, and `scripts/ci/assert-single-tauri-app.sh` fails the build on
+either a second `tauri.conf.json` or a script that invokes a bare `tauri`.
 
 ## Packaging is a claim the lane has to make
 
@@ -88,12 +104,20 @@ environment variable naming the app directory, so nothing computed from the
 working directory can be trusted.
 
 Deleting the hook removes the whole class. The cost is that `tauri dev` no longer
-starts Vite for you — run `npm --prefix frontend run dev` alongside it; `devUrl`
-already points at `localhost:5173` — and that packaging a stale console is now
-possible locally, where before it was merely likely. The failure mode is at least
+starts Vite for you, which is what `scripts/desktop-dev.sh` is for: it brings the
+console up on `localhost:5173` — reusing one already there, never killing
+somebody else's — waits until that port answers with the console rather than
+with a stranger's page, and then runs `tauri dev` from `src-tauri/`.
+`npm run tauri:dev` in `frontend/` is that script. Driving `tauri dev` by hand
+instead means running `npm --prefix frontend run dev` alongside it; `devUrl`
+already points at `localhost:5173`. The other cost is that packaging a stale
+console is now possible locally, where before it was merely likely. The failure mode is at least
 legible: Tauri reports `Unable to find your web assets … frontendDist is set to
 "../frontend/dist"` with the absolute path it resolved, rather than an `npm
 ENOENT` for a directory nobody named.
+
+Which kinds of host it can hold, and how an operator picks one, is
+[`connectors.md`](connectors.md).
 
 ## N connections, and no active one
 
