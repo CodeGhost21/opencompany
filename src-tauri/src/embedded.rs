@@ -152,14 +152,17 @@ pub async fn start_with(
     // own `openhuman` default (issue #376). Core reads it into a client's
     // default headers AT CONSTRUCTION, so a later call would not re-tag a
     // client that already exists.
-    #[cfg(feature = "openhuman")]
-    {
-        tracing::info!(
-            "{}",
-            opencompany::app::journal::pin_keyring(instance.journal()).summary()
-        );
-        opencompany::product::install_into_embedded_core();
-    }
+    // Unconditional, not `#[cfg]`-guarded: this crate's `opencompany`
+    // dependency enables `mcp` (and so `openhuman`) outright, so a desktop
+    // build without the harness is not a shape that exists. If that dependency
+    // line ever loses the feature, these two lines stop compiling — which is
+    // the failure worth having, since the alternative is a bundle that boots
+    // fine and cannot think.
+    tracing::info!(
+        "{}",
+        opencompany::app::journal::pin_keyring(instance.journal()).summary()
+    );
+    opencompany::product::install_into_embedded_core();
 
     let config = AppConfig {
         bind: "127.0.0.1:0".to_string(),
