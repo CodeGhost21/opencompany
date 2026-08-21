@@ -1735,7 +1735,6 @@ prompt = "Lead decisively."
         assert_eq!(reset["instructionsOverridden"], false, "{reset}");
     }
 
-
     /// Review (PR #1549): an oversized `instructions` write is capped to the
     /// prompt budget rather than stored verbatim, so a single pasted
     /// "AGENT.md"-style document cannot unboundedly inflate every turn's
@@ -1749,8 +1748,7 @@ prompt = "Lead decisively."
         let jamie = add_overlay(&state, "Jamie", "Growth").await;
 
         let over: String = "x".repeat(PROMPT_FILE_BUDGET_CHARS + 40);
-        let (status, edited) =
-            patch_agent(&state, &jamie, json!({"instructions": over})).await;
+        let (status, edited) = patch_agent(&state, &jamie, json!({"instructions": over})).await;
         assert_eq!(status, StatusCode::OK, "{edited}");
         let stored = edited["instructions"].as_str().unwrap();
         assert!(

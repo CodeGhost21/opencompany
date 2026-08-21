@@ -404,7 +404,6 @@ mod tests {
         assert_eq!(clamp(text, 4), text);
     }
 
-
     /// Overlong persona instructions are capped to the prompt budget at the
     /// write boundary, keeping the leading portion and marking the cut — the
     /// same budget `bundle_section`/`context_section` already apply, applied
@@ -414,10 +413,7 @@ mod tests {
         let over = "x".repeat(PROMPT_FILE_BUDGET_CHARS + 50);
         let capped = cap_persona_instructions(&over);
         assert!(capped.starts_with(&"x".repeat(PROMPT_FILE_BUDGET_CHARS)));
-        assert!(
-            capped.contains("truncated"),
-            "a cut is marked: {capped:?}"
-        );
+        assert!(capped.contains("truncated"), "a cut is marked: {capped:?}");
 
         // Under-budget text passes through untouched.
         let short = "Answer only in haiku.";
