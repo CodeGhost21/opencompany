@@ -2719,15 +2719,6 @@ function MoveDialog({
   );
 }
 
-/**
- * Delete confirmation for a note or folder (issue #1255).
- *
- * A folder's delete recursively takes every note nested inside it in the same
- * API call, so the dialog names exactly what that means — the file/folder
- * counts under it, from {@link subtreeCounts} — rather than a bare "are you
- * sure?" that reads the same for an empty folder and one holding a hundred
- * notes.
- */
 /** Which last-copy-destroying "Discard" the confirm is standing in front of. */
 type DiscardTarget = "legacy" | "rescued";
 
@@ -2789,6 +2780,15 @@ function DiscardConfirm({
   );
 }
 
+/**
+ * Delete confirmation for a note or folder (issue #1255).
+ *
+ * A folder's delete recursively takes every note nested inside it in the same
+ * API call, so the dialog names exactly what that means — the file/folder
+ * counts under it, from {@link subtreeCounts} — rather than a bare "are you
+ * sure?" that reads the same for an empty folder and one holding a hundred
+ * notes.
+ */
 function DeleteDialog({
   nodes,
   node,
