@@ -10,29 +10,27 @@ import {
   CONTEXT_ORIGINS,
   createMemory,
   deleteMemory,
+  documentSlug,
+  forgetDocument,
   KIND_STYLES,
   listMemory,
   MEMORY_KINDS,
   memoryStats,
   ORIGIN_LABELS,
   ORIGIN_STYLES,
+  type MemoryEngineState,
   type MemoryEntry,
   type MemoryKind,
   type MemoryStats,
 } from "@/api/memory";
 import type { OpenCompanyClient } from "@/api/client";
-import type { MemorySpec } from "@/api/types";
+import { DropZone } from "@/views/memory/DropZone";
+import { EngineSection } from "@/views/memory/EngineSection";
 import { Markdown } from "@/components/markdown";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
+import { Card, CardContent } from "@/components/ui/card";
 import {
   Dialog,
   DialogContent,
@@ -156,28 +154,14 @@ export function MemoryView({ client, company }: Props) {
     };
   }, [load]);
 
-  // The bound memory engine, from the unauthenticated /spec handshake. Shown
-  // so an operator can see which engine is live and — for a remote driver
-  // serving only the mandatory families — what it does NOT support, before a
-  // cycle discovers it. undefined = host predates the field; render nothing.
-  const [engine, setEngine] = useState<MemorySpec | undefined>(undefined);
-  useEffect(() => {
-    let live = true;
-    // Clear first: on a client swap the old badge would otherwise survive a
-    // failed /spec and name the wrong host.
-    setEngine(undefined);
-    client
-      .spec()
-      .then((spec) => {
-        if (live) setEngine(spec.memory);
-      })
-      .catch(() => {
-        /* spec is best-effort here; the Brain view works without it */
-      });
-    return () => {
-      live = false;
-    };
-  }, [client]);
+  // The bound memory engine, from the engine route rather than `/spec`.
+  //
+  // One source, because the two can now disagree: `/spec`'s snapshot is what
+  // boot bound, and an operator who switches engines from the section below
+  // changes what is bound without restarting. A header badge naming the
+  // previous engine would be the most confusing possible answer to "did my
+  // change take".
+  const [engine, setEngine] = useState<MemoryEngineState | null>(null);
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -202,8 +186,7 @@ export function MemoryView({ client, company }: Props) {
   // button beside that warning invites work the host will silently drop
   // (issue #1410). The panel's health dot already refuses to go green here for
   // the same reason.
-  const mode = enginePanelMode(engine);
-  const discarding = mode === "discard";
+  const discarding = engine?.active === "null";
 
   async function add(fields: { kind: MemoryKind; title: string; body: string }) {
     await createMemory(client, company, fields);
@@ -215,7 +198,15 @@ export function MemoryView({ client, company }: Props) {
     // Optimistic: drop the card immediately, then reconcile counts from the host.
     setEntries((all) => all.filter((x) => x.id !== entry.id));
     try {
-      await deleteMemory(client, company, entry.id);
+      if (entry.origin === "document") {
+        // A document is many chunks under one slug, so forgetting it is one
+        // call against the document — deleting the card's own chunk would
+        // leave the rest of the file in memory, which is worse than not
+        // offering a delete at all.
+        await forgetDocument(client, company, documentSlug(entry.source));
+      } else {
+        await deleteMemory(client, company, entry.id);
+      }
       await load({ silent: true });
     } catch (e) {
       // Re-insert only this entry on failure (no whole-list rollback).
@@ -236,7 +227,7 @@ export function MemoryView({ client, company }: Props) {
             </p>
           </div>
           <div className="flex items-center gap-3">
-            {engine && mode !== "hidden" && (
+            {engine && (
               <span
                 className={cn(
                   "rounded-full border px-3 py-1 text-xs",
@@ -256,7 +247,7 @@ export function MemoryView({ client, company }: Props) {
                 }
                 data-testid="memory-engine-badge"
               >
-                engine: {engine.driver_id ?? engine.backend}
+                engine: {engine.active}
                 {engine.capabilities.length > 0 && (
                   <> · {engine.capabilities.length} families</>
                 )}
@@ -287,7 +278,24 @@ export function MemoryView({ client, company }: Props) {
           </div>
         </div>
 
-        <EnginePanel engine={engine} />
+        <EngineSection
+          client={client}
+          company={company}
+          onApplied={(next) => {
+            setEngine(next);
+            // The new engine's memory is a different set of rows — often an
+            // empty one, since nothing migrates between engines — so the list
+            // has to be re-read rather than left showing the old engine's.
+            void load({ silent: true });
+          }}
+        />
+
+        <DropZone
+          client={client}
+          company={company}
+          discarding={discarding}
+          onIngested={() => void load({ silent: true })}
+        />
 
         {error && (
           <Alert variant="destructive">
@@ -546,45 +554,6 @@ function AddMemoryDialog({
   );
 }
 
-/** The three families every provider-backed engine must serve. */
-/**
- * Frontend copy of the backend's mandatory-family contract. There is no
- * generated contract to import, so this can drift silently if the backend
- * renames a family — the authoritative assertions live in
- * `src/server/routes.rs` (spec_memory_capability_names) and
- * `src/store/memory/test.rs`; a rename must touch all three or the
- * mandatory-floor note below silently stops rendering.
- */
-export const MANDATORY_FAMILIES = ["core", "recall", "portability"];
-
-/**
- * What the engine panel does for a given `/spec` answer, as a pure decision
- * so it is unit-testable without a DOM:
- * - `hidden`: no `/spec` yet or an old host (`engine` undefined), or the base
- *   `store` backend — memory served by the host's own stores, nothing to say.
- * - `discard`: the `null` engine — bound, probed, and **throwing every write
- *   away**; the one case that must render as a warning, not a healthy row.
- * - `normal`: a real engine (embedded or remote).
- */
-export function enginePanelMode(
-  engine: MemorySpec | undefined,
-): "hidden" | "normal" | "discard" {
-  if (!engine || engine.backend === "store") return "hidden";
-  if (engine.backend === "null") return "discard";
-  return "normal";
-}
-
-/**
- * The boot-probe line, total over the field's whole domain: `true`, `false`,
- * and anything else (absent field, old host, or a literal `null` from a
- * future serializer change) — the render must never be an empty label.
- */
-export function probeLabel(healthy: boolean | undefined | null): string {
-  if (healthy === true) return "reachable at boot";
-  if (healthy === false) return "unreachable at boot — check the endpoint and credential";
-  return "not probed";
-}
-
 /**
  * How many context chunks are teammate memory rather than task outcomes.
  *
@@ -607,106 +576,4 @@ export function probeLabel(healthy: boolean | undefined | null): string {
  */
 export function teammateMemoryCount(stats: MemoryStats | null): number {
   return Math.max(0, (stats?.agentChunks ?? 0) - (stats?.taskOutcomes ?? 0));
-}
-
-/** Whether the negotiated families are exactly the mandatory floor. */
-export function isMandatoryOnly(capabilities: string[]): boolean {
-  return (
-    capabilities.length === MANDATORY_FAMILIES.length &&
-    MANDATORY_FAMILIES.every((f) => capabilities.includes(f))
-  );
-}
-
-/**
- * The read-only memory-engine panel: which engine is bound, what it
- * negotiated, and whether the boot probe reached it.
- *
- * Read-only by design — engine selection is instance-wide and belongs to the
- * infra operator (the `OPENCOMPANY_MEMORY*` variables, read once at boot), so
- * there is deliberately no setter here: a console admin must never be able to
- * repoint a deployment's storage. `docs/spec/runtime/memory-engine.md` carries
- * the switch runbook this panel points at.
- *
- * Renders nothing for the `store` default (no separate engine to describe) and
- * for a host predating the `/spec` memory field.
- */
-export function EnginePanel({ engine }: { engine: MemorySpec | undefined }) {
-  const mode = enginePanelMode(engine);
-  if (mode === "hidden" || !engine) return null;
-
-  // Exactly the mandatory three means a hosted engine serving the contract
-  // floor: worth saying out loud, because the spec's operator rights assume
-  // richer families that live only engine-side.
-  const mandatoryOnly = isMandatoryOnly(engine.capabilities);
-
-  return (
-    <Card data-testid="memory-engine-panel">
-      <CardHeader className="pb-3">
-        <CardTitle className="text-base">Memory engine</CardTitle>
-        <CardDescription>
-          Selected by the infra operator (<code className="text-xs">OPENCOMPANY_MEMORY*</code>,
-          read at boot) — instance-wide, no setter here by design.
-        </CardDescription>
-      </CardHeader>
-      <CardContent className="space-y-2 text-sm">
-        <div className="flex flex-wrap items-center gap-x-6 gap-y-1">
-          <span>
-            <span className="text-muted-foreground">Engine </span>
-            <span className="font-mono text-xs">{engine.driver_id ?? engine.backend}</span>
-          </span>
-          <span>
-            <span className="text-muted-foreground">Mode </span>
-            <span className="font-mono text-xs">{engine.backend}</span>
-          </span>
-          <span className="inline-flex items-center gap-1.5" data-testid="memory-engine-health">
-            <span
-              className={cn(
-                "size-2 rounded-full",
-                // The null engine's green would be a lie beside a write
-                // button: reachable, yes — retaining, no. Amber, always.
-                mode === "discard"
-                  ? "bg-status-blocked"
-                  : engine.healthy === true
-                    ? "bg-status-done"
-                    : engine.healthy === false
-                      ? "bg-status-failed"
-                      : "bg-muted-foreground/40",
-              )}
-            />
-            {probeLabel(engine.healthy)}
-          </span>
-        </div>
-        {mode === "discard" && (
-          <Alert variant="destructive" data-testid="memory-engine-discard">
-            <AlertDescription>
-              This engine accepts and discards every write — nothing this company is told will
-              be remembered, and every read comes back empty, indistinguishable from a company
-              that simply hasn't learned anything yet. Adding memories here does nothing until
-              the infra operator unsets <code className="text-xs">OPENCOMPANY_MEMORY=null</code>.
-            </AlertDescription>
-          </Alert>
-        )}
-        <div className="flex flex-wrap items-center gap-1.5">
-          <span className="text-muted-foreground">Capabilities</span>
-          {engine.capabilities.length === 0 ? (
-            <span className="text-muted-foreground">
-              not negotiated — the in-pod engine is driven directly
-            </span>
-          ) : (
-            engine.capabilities.map((family) => (
-              <Badge key={family} variant="outline" className="text-xs">
-                {family}
-              </Badge>
-            ))
-          )}
-        </div>
-        {mandatoryOnly && (
-          <p className="text-xs text-muted-foreground">
-            The mandatory contract families. Richer families (summary tree, graph, taint) live
-            engine-side; this engine serves only the floor.
-          </p>
-        )}
-      </CardContent>
-    </Card>
-  );
 }

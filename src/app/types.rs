@@ -411,7 +411,14 @@ pub struct AppState {
     /// not the base store's own memory. Provisioning and boot apply it after
     /// `stores` so a dedicated engine (TinyCortex) backs recall on top of any
     /// base backend. `None` means the base backend's memory is used unchanged.
-    memory_overlay: Option<crate::store::MemoryOverlay>,
+    ///
+    /// Behind a lock because the engine is no longer decided only at boot: the
+    /// console's engine route opens a replacement overlay and swaps it in, then
+    /// rebuilds each registered company so the new ports are actually in force
+    /// (`crate::server::ops::memory_engine`). Same shape, and the same reason,
+    /// as [`Self::auth_mode_override`] — a choice an operator makes while the
+    /// process is running, which telling them to restart for would defeat.
+    memory_overlay: Arc<RwLock<Option<crate::store::MemoryOverlay>>>,
     /// The repo-level shared skill library directory (`skills/`), set on the
     /// serve path. `None` in platform-provisioned mode (no repo checkout), where
     /// the `skillRegistry` query degrades to empty.
@@ -533,7 +540,7 @@ impl AppState {
             config_root: None,
             ownership: Arc::new(RwLock::new(HashMap::new())),
             stores: None,
-            memory_overlay: None,
+            memory_overlay: Arc::new(RwLock::new(None)),
             skills_root: None,
             skill_registry: Arc::new(OnceLock::new()),
             instance_id: Arc::new(OnceLock::new()),
@@ -674,15 +681,38 @@ impl AppState {
             .get_or_init(|| crate::app::instance::load_or_create(&self.home))
     }
 
-    /// Installs the memory engine overlay selected by `OPENCOMPANY_MEMORY`.
-    pub fn with_memory_overlay(mut self, overlay: crate::store::MemoryOverlay) -> Self {
-        self.memory_overlay = Some(overlay);
+    /// Installs the memory engine overlay selected at boot
+    /// (`OPENCOMPANY_MEMORY`, or `[memory]` in `config.toml`).
+    pub fn with_memory_overlay(self, overlay: crate::store::MemoryOverlay) -> Self {
+        self.set_memory_overlay(Some(overlay));
         self
     }
 
-    /// The memory engine overlay, if one is selected (`OPENCOMPANY_MEMORY`).
-    pub fn memory_overlay(&self) -> Option<&crate::store::MemoryOverlay> {
-        self.memory_overlay.as_ref()
+    /// The bound memory engine overlay, if one is selected.
+    ///
+    /// Returns a clone rather than a borrow: the overlay can be replaced while
+    /// the process runs (see [`Self::set_memory_overlay`]), and every field of
+    /// it is an `Arc`, so the clone costs a handful of refcount bumps and
+    /// cannot observe a half-applied swap.
+    pub fn memory_overlay(&self) -> Option<crate::store::MemoryOverlay> {
+        self.memory_overlay
+            .read()
+            .expect("memory overlay poisoned")
+            .clone()
+    }
+
+    /// Replaces the bound memory engine overlay.
+    ///
+    /// `None` returns memory to the base storage backend's own ports. This
+    /// only changes what a company built *after* it will bind — companies
+    /// already in the registry hold the previous ports on their cached
+    /// runtime, so a caller that wants the swap in force must rebuild them
+    /// ([`crate::runtime::rebuild_company`]).
+    pub fn set_memory_overlay(&self, overlay: Option<crate::store::MemoryOverlay>) {
+        *self
+            .memory_overlay
+            .write()
+            .expect("memory overlay poisoned") = overlay;
     }
 
     /// The repo-level shared skill registry, loaded from `dir` and cached.
@@ -1045,7 +1075,7 @@ impl AppState {
     /// `OPENCOMPANY_MEMORY=store` default — so there is no separate engine to
     /// name and nothing was negotiated.
     fn memory_spec(&self) -> MemorySpec {
-        match &self.memory_overlay {
+        match self.memory_overlay() {
             None => MemorySpec {
                 backend: crate::store::MemoryBackend::Store.as_str(),
                 driver_id: None,

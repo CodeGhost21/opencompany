@@ -460,11 +460,16 @@ pub struct StorageSettings {
     /// Which engine to bind for `OPENCOMPANY_MEMORY=remote`
     /// (`OPENCOMPANY_MEMORY_DRIVER`): `supermemory`, `mem0`, `cognee`.
     ///
-    /// Env is the only channel: memory selection is instance-level (one engine
-    /// per boot, like `OPENCOMPANY_STORAGE`), while manifests are per-company —
-    /// a company-scoped knob for an instance-wide choice would be incoherent.
+    /// Instance-level, never per-company: one engine per instance, like
+    /// `OPENCOMPANY_STORAGE`, while manifests are per-company — a
+    /// company-scoped knob for an instance-wide choice would be incoherent.
     /// This deliberately differs from `[inference].provider`, which *is*
     /// per-company and rightly lives in the manifest.
+    ///
+    /// Two channels, in the usual order: the environment, and — when the
+    /// deployment names no engine — the `[memory]` section of `config.toml`,
+    /// which is what lets an operator choose one from the console
+    /// ([`MemorySelection`], [`StorageSettings::with_memory_config`]).
     pub memory_driver: Option<String>,
     pub memory_url: Option<String>,
     /// The hosted engine's credential (`OPENCOMPANY_MEMORY_API_KEY`).
@@ -557,6 +562,106 @@ impl StorageSettings {
             memory_url: non_empty("OPENCOMPANY_MEMORY_URL"),
             memory_api_key: non_empty("OPENCOMPANY_MEMORY_API_KEY"),
         })
+    }
+
+    /// Whether the *deployment* named the memory engine
+    /// (`OPENCOMPANY_MEMORY`), in which case the `[memory]` section of
+    /// `config.toml` is inert and the console renders the engine read-only.
+    ///
+    /// Presence, not value: a control plane that injects `OPENCOMPANY_MEMORY`
+    /// owns the choice whichever engine it names, including `store`.
+    pub fn memory_is_env_owned() -> bool {
+        std::env::var("OPENCOMPANY_MEMORY").is_ok_and(|value| !value.trim().is_empty())
+    }
+
+    /// Layers a `config.toml` `[memory]` section under the environment.
+    ///
+    /// A no-op when [`Self::memory_is_env_owned`] — see [`MemorySection`] for
+    /// why the env layer wins rather than the more recent write.
+    ///
+    /// [`MemorySection`]: crate::app::config::MemorySection
+    pub fn with_memory_config(
+        mut self,
+        section: &crate::app::config::MemorySection,
+    ) -> Result<Self> {
+        if Self::memory_is_env_owned() {
+            return Ok(self);
+        }
+        let selection = MemorySelection::from_section(section)?;
+        self.memory_backend = selection.backend;
+        self.memory_driver = selection.driver;
+        self.memory_url = selection.url;
+        self.memory_api_key = selection.api_key;
+        Ok(self)
+    }
+
+    /// Replaces the memory selection with `selection`, leaving the base
+    /// backend, data dir and durability assertion untouched.
+    ///
+    /// This is what a live engine swap rebinds through
+    /// ([`crate::server::ops::memory_engine`]): the rest of a running
+    /// instance's storage settings must survive a memory change unchanged.
+    pub fn with_memory_selection(mut self, selection: MemorySelection) -> Self {
+        self.memory_backend = selection.backend;
+        self.memory_driver = selection.driver;
+        self.memory_url = selection.url;
+        self.memory_api_key = selection.api_key;
+        self
+    }
+}
+
+/// One instance's memory-engine choice: everything `OPENCOMPANY_MEMORY*`
+/// names, parsed and validated, independent of where it came from (the
+/// environment, `config.toml`, or a console write that has not been persisted
+/// yet).
+#[derive(Clone, Default, PartialEq, Eq)]
+pub struct MemorySelection {
+    pub backend: MemoryBackend,
+    pub driver: Option<String>,
+    pub url: Option<String>,
+    pub api_key: Option<String>,
+}
+
+impl MemorySelection {
+    /// Parses a `config.toml` `[memory]` section.
+    ///
+    /// Blank strings are treated as absent — a TOML key written and then
+    /// emptied means "not set", the same rule `non_empty` applies to the
+    /// environment, and routing on bare presence would send `""` down a path
+    /// that binds nothing.
+    pub fn from_section(section: &crate::app::config::MemorySection) -> Result<Self> {
+        let trimmed = |value: &Option<String>| {
+            value
+                .as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+                .map(str::to_string)
+        };
+        let backend = match trimmed(&section.backend) {
+            Some(raw) => raw.parse()?,
+            None => MemoryBackend::default(),
+        };
+        Ok(Self {
+            backend,
+            driver: trimmed(&section.driver),
+            url: trimmed(&section.url),
+            api_key: trimmed(&section.api_key),
+        })
+    }
+}
+
+/// Renders the credential as `<set>`, never its bytes — the same hand-written
+/// `Debug` [`StorageSettings`] carries, and for the same reason: this type is
+/// reachable from boot logging and from a route's error path, where a bare
+/// `{:?}` is one keystroke away.
+impl std::fmt::Debug for MemorySelection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MemorySelection")
+            .field("backend", &self.backend.as_str())
+            .field("driver", &self.driver)
+            .field("url", &self.url)
+            .field("api_key", &self.api_key.as_ref().map(|_| "<set>"))
+            .finish()
     }
 }
 
