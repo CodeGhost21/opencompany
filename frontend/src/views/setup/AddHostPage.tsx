@@ -30,7 +30,6 @@
 import { useState } from "react";
 import { ArrowLeft, Loader2, Play, Square } from "lucide-react";
 
-import { isDesktopRuntime } from "@/api/transport";
 import type { LocalInstance } from "@/api/transport/desktop";
 import { OnboardingShell } from "@/components/onboarding-shell";
 import { Button } from "@/components/ui/button";
@@ -492,6 +491,3 @@ function LocalInstances({
     </div>
   );
 }
-
-/** Only for the tests that assert which runtime offers which connector. */
-export const __testing = { isDesktopRuntime };
