@@ -530,7 +530,10 @@ function ProviderTile({
         <span
           className={cn(
             "block truncate text-3xs",
-            row.connected ? "text-status-done-text" : "text-muted-foreground",
+            // Delivery-aware, same as the glyph: a connected tile that reaches
+            // nobody drops the success colour rather than green-texting its
+            // account line under the "tools not delivered" state (issue #1407).
+            connectedTone,
           )}
         >
           {row.account ?? state}
@@ -566,7 +569,14 @@ function ProviderTile({
           className={cn(
             shell,
             "transition-colors hover:border-foreground/20",
-            row.connected ? "hover:bg-status-done/10" : "hover:bg-accent",
+            // Hover follows delivery too: a connected-but-not-delivering tile
+            // hovers neutral, matching its demoted shell, instead of flashing the
+            // success tint the "tools reach nobody" banner contradicts (#1407).
+            delivers
+              ? "hover:bg-status-done/10"
+              : row.connected
+                ? "hover:bg-muted/70"
+                : "hover:bg-accent",
             "focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none",
           )}
         >
