@@ -212,15 +212,15 @@ test("names the host it was told nothing about by the address it answers on", as
   await page.goto("/#/ledgers/tasks");
   await openHostMenu(page);
 
-  const rows = await page.getByRole("menuitem").allInnerTexts();
-  // Every menu item but the trailing actions — "Add a host" and "Manage hosts"
-  // — down to its first line: a row also carries its state and its shortcut,
-  // and a shortcut differs on every row, so comparing whole rows would call two
-  // identical names distinct.
-  const actions = ["Add a host", "Manage hosts"];
-  const names = rows
-    .filter((text) => !actions.some((action) => text.includes(action)))
-    .map((text) => text.split("\n")[0].trim());
+  // The host rows, by what marks them as host rows rather than by what they
+  // are not: the menu's trailing actions ("Add a host", "Manage hosts") carry
+  // their own testids, and filtering those out by their *text* would drop a
+  // real host somebody named "Add a host" — labels here are typed by an
+  // operator. Down to each row's first line, because a row also carries its
+  // state and its shortcut, and a shortcut differs on every row, so comparing
+  // whole rows would call two identical names distinct.
+  const rows = await page.locator('[data-testid^="host-row-"]').allInnerTexts();
+  const names = rows.map((text) => text.split("\n")[0].trim());
   expect(names.length).toBe(2);
   expect(new Set(names).size, `two hosts must not read alike: ${JSON.stringify(names)}`).toBe(2);
   // Addressable, so it distinguishes — and distinct from every other row, which
