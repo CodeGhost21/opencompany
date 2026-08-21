@@ -19,4 +19,8 @@ ledgers = [
     { name = "risks", access = "record" },
     { name = "commitments", access = "read" },
     { name = "learnings", access = "record" },
+    # This lab's own axes (`ledgers/`), which carry the investigation.
+    { name = "sources", access = "record" },
+    { name = "findings", access = "record" },
+    { name = "questions", access = "read" },
 ]
