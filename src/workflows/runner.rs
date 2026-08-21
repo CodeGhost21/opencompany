@@ -1830,6 +1830,8 @@ description = "Runs Acme."
         )
         .expect("valid manifest");
         CompanyRecord {
+            overlay_retired_agents: Vec::new(),
+            overlay_agent_edits: Vec::new(),
             id: CompanyId::new("acme"),
             manifest,
             ledger: Vec::new(),
@@ -1840,7 +1842,7 @@ description = "Runs Acme."
             overlay_desks: Vec::new(),
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
-            overlay_agent_overrides: Vec::new(),
+            overlay_agent_edits: Vec::new(),
             overlay_policy: None,
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
@@ -1937,6 +1939,8 @@ allow = ["*"]
         )
         .expect("valid manifest");
         CompanyRecord {
+            overlay_retired_agents: Vec::new(),
+            overlay_agent_edits: Vec::new(),
             id: CompanyId::new("acme"),
             manifest,
             ledger: Vec::new(),
@@ -1947,7 +1951,7 @@ allow = ["*"]
             overlay_desks: Vec::new(),
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
-            overlay_agent_overrides: Vec::new(),
+            overlay_agent_edits: Vec::new(),
             overlay_policy: None,
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),

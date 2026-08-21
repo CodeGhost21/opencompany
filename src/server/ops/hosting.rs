@@ -265,6 +265,8 @@ mod tests {
         .expect("manifest");
         crate::store::FsCompanyStore::new(home.to_path_buf())
             .save(&CompanyRecord {
+                overlay_retired_agents: Vec::new(),
+                overlay_agent_edits: Vec::new(),
                 id: id.clone(),
                 manifest: manifest.clone(),
                 ledger: Vec::new(),
@@ -276,7 +278,6 @@ mod tests {
                 overlay_desks: Vec::new(),
                 overlay_workflows: Vec::new(),
                 overlay_budgets: Vec::new(),
-                overlay_agent_overrides: Vec::new(),
                 overlay_policy: None,
                 disabled_workflows: Vec::new(),
                 template_provenance: None,

@@ -279,6 +279,8 @@ pub(super) fn deps(base_url: String, dir: &std::path::Path) -> (HarnessDeps, Arc
 
 pub(super) fn record() -> CompanyRecord {
     CompanyRecord {
+        overlay_retired_agents: Vec::new(),
+        overlay_agent_edits: Vec::new(),
         id: CompanyId::new("acme"),
         manifest: manifest(),
         ledger: Vec::new(),
@@ -289,7 +291,7 @@ pub(super) fn record() -> CompanyRecord {
         overlay_desks: Vec::new(),
         overlay_workflows: Vec::new(),
         overlay_budgets: Vec::new(),
-        overlay_agent_overrides: Vec::new(),
+        overlay_agent_edits: Vec::new(),
         overlay_policy: None,
         overlay_desk_tools: Default::default(),
         disabled_workflows: Vec::new(),

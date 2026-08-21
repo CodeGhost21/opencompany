@@ -145,6 +145,26 @@ export class OpenCompanyClient {
     return this.defaultCompany === null;
   }
 
+  /**
+   * Whether this client sends a **platform** bearer.
+   *
+   * Asked by the surfaces that offer `PlatformScope` routes — `suspend` and
+   * `archive` (issue #1401). Those resolve through `resolve_claims`, which
+   * cannot return a human, so a console authenticating as a person through the
+   * session cookie is refused by construction rather than by policy: there is
+   * no credential it could hold, and no setting an operator could change, that
+   * would let the call through. A control for one of them is only honest on a
+   * client that answers `true` here.
+   *
+   * True does not promise the call succeeds — the bearer still has to carry the
+   * `platform` scope, and a tenant token without it gets a `403`. That is a
+   * configuration mistake with a legible answer, which is a different thing
+   * from an unreachable button.
+   */
+  get carriesPlatformBearer(): boolean {
+    return Boolean(this.token);
+  }
+
   /** The route prefix for `company`, for callers building their own paths. */
   scopeFor(company: string | null | undefined): string {
     return this.scope(company);
@@ -826,14 +846,12 @@ export class OpenCompanyClient {
    * null` clears the instructions and `description: undefined` leaves them,
    * which is why the two must not be collapsed on the way in.
    *
-   * The host refuses a manifest teammate's *manifest-native* fields with a 409 —
-   * name, role, description live in the version-controlled `company.toml`, and
-   * the console does not rewrite that. `instructions` are the exception (issue
-   * #1530): they write to a per-agent override record, not the manifest, so an
-   * `instructions`-only patch is accepted for a manifest teammate too — and
-   * `instructions: null` resets it to the blueprint. Ask `getAgent` first: its
+   * A manifest teammate is editable too: the host stores the change as an
+   * override on the company record and never rewrites `company.toml`, including
+   * persona instructions (issue #1530). `instructions: null` clears that
+   * override and restores the blueprint value. Ask `getAgent` first — its
    * `editable` list is the host's own statement of which fields this call will
-   * accept.
+   * accept, and `tools` is admin-only.
    */
   updateAgent(
     agentId: string,
@@ -888,7 +906,11 @@ export class OpenCompanyClient {
     );
   }
 
-  /** Remove an operator-added teammate. 409s for a manifest teammate (can't be removed here). */
+  /**
+   * Remove a teammate. A blueprint teammate is removed by tombstone rather than
+   * by rewriting `company.toml`, so it works for both kinds; the only refusal is
+   * a `409` on the company's last teammate.
+   */
   removeTeamMember(agentId: string, company?: string | null): Promise<void> {
     return this.request<void>(
       "DELETE",

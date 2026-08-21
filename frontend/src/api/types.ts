@@ -932,7 +932,7 @@ export interface AgentDetailDto {
    * per-agent override when one is set, otherwise the blueprint seed. This is
    * the text the agent actually runs with, and the draft an edit starts from.
    */
-  instructions?: string;
+  instructions?: string | null;
   /**
    * The blueprint's own instructions — the manifest seed a manifest teammate
    * was declared with, kept beside the effective value so the console can show
@@ -947,10 +947,12 @@ export interface AgentDetailDto {
    */
   instructionsOverridden?: boolean;
   /**
-   * Which half of the roster this teammate comes from, and therefore what may
-   * be done to it. `manifest` teammates are declared in the version-controlled
-   * `company.toml`; `overlay` teammates were added at runtime and live on the
-   * company record this host writes.
+   * Which half of the roster this teammate comes from. `manifest` teammates are
+   * declared in the version-controlled `company.toml`; `overlay` teammates were
+   * added at runtime. Both are editable and both are removable — a manifest
+   * teammate's edits are stored as an override on the company record and its
+   * removal as a tombstone, so `company.toml` is never rewritten either way. The
+   * only refusal is the company's last teammate.
    */
   source: "manifest" | "overlay";
   /**

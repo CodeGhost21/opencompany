@@ -592,7 +592,8 @@ impl CompanyStore for SqliteStore {
             overlay_desks: overlay.desks,
             overlay_workflows: overlay.workflows,
             overlay_budgets: overlay.budgets,
-            overlay_agent_overrides: overlay.agent_overrides,
+            overlay_agent_edits: overlay.agent_edits,
+            overlay_retired_agents: overlay.retired_agents,
             overlay_policy: overlay.policy,
             overlay_desk_tools: overlay.desk_tools,
             disabled_workflows: overlay.disabled_workflows,
@@ -4227,6 +4228,7 @@ mod test {
         let id = CompanyId::new("acme");
         company
             .save(&CompanyRecord {
+                overlay_retired_agents: Vec::new(),
                 id: id.clone(),
                 manifest: toml::from_str(
                     "[company]\nname=\"Acme\"\noutput=\"widgets\"\n[[agent]]\nid=\"ceo\"\nrole=\"Chief\"\n[policy]\nmode=\"supervised\"\n",
@@ -4240,7 +4242,7 @@ mod test {
                 overlay_desks: Vec::new(),
                 overlay_workflows: Vec::new(),
                 overlay_budgets: Vec::new(),
-                overlay_agent_overrides: Vec::new(),
+                overlay_agent_edits: Vec::new(),
                 overlay_policy: None,
                 overlay_desk_tools: Default::default(),
                 disabled_workflows: Vec::new(),

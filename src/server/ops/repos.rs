@@ -274,6 +274,8 @@ mod test {
         let id = CompanyId::new("acme");
         store
             .save(&CompanyRecord {
+                overlay_retired_agents: Vec::new(),
+                overlay_agent_edits: Vec::new(),
                 id: id.clone(),
                 manifest: manifest(),
                 ledger: Vec::new(),
@@ -284,7 +286,6 @@ mod test {
                 overlay_desks: Vec::new(),
                 overlay_workflows: Vec::new(),
                 overlay_budgets: Vec::new(),
-                overlay_agent_overrides: Vec::new(),
                 disabled_workflows: Vec::new(),
                 template_provenance: None,
                 setup: None,

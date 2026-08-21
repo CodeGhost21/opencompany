@@ -328,6 +328,8 @@ async fn harness(
     };
 
     let record = CompanyRecord {
+        overlay_retired_agents: Vec::new(),
+        overlay_agent_edits: Vec::new(),
         id: CompanyId::new("acme"),
         manifest: manifest(grants, mode, daily_calls),
         ledger: Vec::new(),
@@ -338,7 +340,7 @@ async fn harness(
         overlay_desks: Vec::new(),
         overlay_workflows: Vec::new(),
         overlay_budgets: Vec::new(),
-        overlay_agent_overrides: Vec::new(),
+        overlay_agent_edits: Vec::new(),
         overlay_policy: None,
         overlay_desk_tools: Default::default(),
         disabled_workflows: Vec::new(),

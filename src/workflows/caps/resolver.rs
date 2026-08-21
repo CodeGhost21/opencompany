@@ -387,6 +387,8 @@ mod tests {
         ))
         .expect("valid manifest");
         Arc::new(MemStore(std::sync::Mutex::new(Some(CompanyRecord {
+            overlay_retired_agents: Vec::new(),
+            overlay_agent_edits: Vec::new(),
             id: CompanyId::new("acme"),
             manifest,
             ledger: Vec::new(),
@@ -397,7 +399,7 @@ mod tests {
             overlay_desks: Vec::new(),
             overlay_workflows: overlays,
             overlay_budgets: Vec::new(),
-            overlay_agent_overrides: Vec::new(),
+            overlay_agent_edits: Vec::new(),
             overlay_policy: None,
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
@@ -411,6 +413,8 @@ mod tests {
         let manifest: CompanyManifest =
             toml::from_str("[company]\nname = \"Acme\"\n").expect("valid manifest");
         Arc::new(MemStore(std::sync::Mutex::new(Some(CompanyRecord {
+            overlay_retired_agents: Vec::new(),
+            overlay_agent_edits: Vec::new(),
             id: CompanyId::new("acme"),
             manifest,
             ledger: Vec::new(),
@@ -421,7 +425,7 @@ mod tests {
             overlay_desks: Vec::new(),
             overlay_workflows: overlays,
             overlay_budgets: Vec::new(),
-            overlay_agent_overrides: Vec::new(),
+            overlay_agent_edits: Vec::new(),
             overlay_policy: None,
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),

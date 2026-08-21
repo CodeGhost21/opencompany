@@ -2671,7 +2671,7 @@ impl<'a> DelegationRunner<'a> {
     /// `HarnessBrain::orchestrator`; on an empty roster it is the empty string,
     /// which `orchestrator_id` already tolerates.
     fn orchestrator_id(&self) -> String {
-        orchestrator::orchestrator_id(&self.record.manifest.agents).unwrap_or_default()
+        orchestrator::orchestrator_id(&self.record.effective_agents()).unwrap_or_default()
     }
 
     /// The voice a note this drain appends is recorded under.
@@ -3606,6 +3606,8 @@ members = ["engineer"]
         )
         .expect("valid manifest");
         CompanyRecord {
+            overlay_retired_agents: Vec::new(),
+            overlay_agent_edits: Vec::new(),
             id: CompanyId::new("acme"),
             manifest,
             ledger: Vec::<LedgerEntry>::new(),
@@ -3616,7 +3618,7 @@ members = ["engineer"]
             overlay_desks: Vec::new(),
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
-            overlay_agent_overrides: Vec::new(),
+            overlay_agent_edits: Vec::new(),
             overlay_policy: None,
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),

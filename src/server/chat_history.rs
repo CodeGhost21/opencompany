@@ -1341,6 +1341,8 @@ mod test {
             let manifest: crate::company::CompanyManifest =
                 toml::from_str(src).expect("manifest parses");
             CompanyRecord {
+                overlay_retired_agents: Vec::new(),
+                overlay_agent_edits: Vec::new(),
                 id: crate::ports::types::CompanyId::new("acme"),
                 manifest,
                 ledger: Vec::new(),
@@ -1351,7 +1353,6 @@ mod test {
                 overlay_desks: Vec::new(),
                 overlay_workflows: Vec::new(),
                 overlay_budgets: Vec::new(),
-                overlay_agent_overrides: Vec::new(),
                 overlay_policy: None,
                 overlay_desk_tools: Default::default(),
                 disabled_workflows: Vec::new(),

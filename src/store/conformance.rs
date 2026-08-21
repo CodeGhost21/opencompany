@@ -123,17 +123,6 @@ fn sample_budget_overrides() -> Vec<crate::ports::types::BudgetOverride> {
     ]
 }
 
-/// The operator-set persona overrides the fixture seeds every record with, so
-/// each backend (fs, sqlite, mongodb) proves a console-edited persona survives
-/// persistence (issue #1530).
-fn sample_agent_overrides() -> Vec<crate::ports::types::AgentOverride> {
-    use crate::ports::types::AgentOverride;
-    vec![AgentOverride {
-        agent_id: "ceo".to_string(),
-        instructions: Some("Be exceedingly concise and decisive.".to_string()),
-    }]
-}
-
 /// A populated `[policy]` override, so every store's round-trip proves a
 /// console-set tier survives persistence (issue #562).
 ///
@@ -153,6 +142,22 @@ fn sample_policy_override() -> crate::ports::types::PolicyOverride {
     }
 }
 
+/// The operator's edits of a manifest-declared teammate: a renamed role, a
+/// cleared description (the empty-string form) and a narrowed tool scope, so a
+/// backend that drops the field — or that collapses "cleared" back into "not
+/// overridden" — is caught by the round-trip rather than in a console that
+/// silently re-inherits the blueprint after a restart.
+fn sample_agent_overrides() -> Vec<crate::ports::types::AgentOverride> {
+    vec![crate::ports::types::AgentOverride {
+        agent_id: "ceo".to_string(),
+        name: Some("Robin".to_string()),
+        role: Some("Chief Vibes".to_string()),
+        description: Some(String::new()),
+        tools: Some(vec!["docs.*".to_string()]),
+        instructions: Some("Be exceedingly concise and decisive.".to_string()),
+    }]
+}
+
 /// Builds a running record for `id` carrying a non-empty desk-order overlay (so
 /// the store round-trip covers the operator desk-hierarchy field, issue #131), a
 /// runtime-authored workflow body (issue #168), a populated budget-override set
@@ -161,6 +166,11 @@ fn sample_policy_override() -> crate::ports::types::PolicyOverride {
 /// assert it survives persistence, issue #85).
 fn record(id: &CompanyId) -> CompanyRecord {
     CompanyRecord {
+        overlay_agent_edits: sample_agent_overrides(),
+        // Non-empty so a backend that drops the field is caught: without the
+        // tombstone the manifest is re-read on load and the removed teammate
+        // comes straight back.
+        overlay_retired_agents: vec!["eng".to_string()],
         id: id.clone(),
         manifest: sample_manifest(),
         ledger: Vec::new(),
@@ -174,7 +184,6 @@ fn record(id: &CompanyId) -> CompanyRecord {
         overlay_desks: Vec::new(),
         overlay_workflows: vec![sample_overlay_workflow()],
         overlay_budgets: sample_budget_overrides(),
-        overlay_agent_overrides: sample_agent_overrides(),
         overlay_policy: Some(sample_policy_override()),
         // Non-empty so a backend that drops the field is caught: an empty map
         // survives every possible bug, including not persisting it at all.
@@ -304,13 +313,15 @@ pub async fn assert_isolation_by_company(
         sample_budget_overrides(),
         "overlay_budgets did not survive save/load"
     );
-    // The operator-set persona overrides survive the round-trip (issue #1530):
-    // a backend that dropped the field would silently revert a console-edited
-    // persona to the manifest's `prompt`.
     assert_eq!(
-        loaded.overlay_agent_overrides,
+        loaded.overlay_agent_edits,
         sample_agent_overrides(),
-        "overlay_agent_overrides did not survive save/load"
+        "overlay_agent_edits did not survive save/load"
+    );
+    assert_eq!(
+        loaded.overlay_retired_agents,
+        vec!["eng".to_string()],
+        "overlay_retired_agents did not survive save/load"
     );
     assert!(
         loaded
@@ -895,12 +906,19 @@ pub async fn assert_export_totality(
         sample_budget_overrides(),
         "overlay_budgets did not round-trip through the store"
     );
-    // Issue #1530: the console-edited persona round-trips on every backend —
-    // "no redeploy" durability for instructions, the same as the caps above.
+    // The console-shaped roster round-trips on every backend, for the same
+    // reason: a teammate renamed from the Team page has to still be renamed
+    // after the process restarts, or the edit was never really made.
     assert_eq!(
-        loaded.overlay_agent_overrides,
+        loaded.overlay_agent_edits,
         sample_agent_overrides(),
-        "overlay_agent_overrides did not round-trip through the store"
+        "overlay_agent_edits did not round-trip through the store"
+    );
+    assert_eq!(
+        loaded.overlay_retired_agents,
+        vec!["eng".to_string()],
+        "overlay_retired_agents did not round-trip through the store — a removed \
+         teammate would come back on the next load"
     );
     // Issue #562: the console-set tier round-trips on every backend, for the
     // same reason — an approval gate that forgets across a restart is not a gate.

@@ -733,12 +733,18 @@ struct Meta {
     /// `#[serde(default)]` keeps those loading with the manifest in charge.
     #[serde(default)]
     overlay_budgets: Vec<crate::ports::types::BudgetOverride>,
-    /// The operator-set per-teammate persona overrides (issue #1530). Absent on
-    /// meta files written before the console could edit a persona, so
-    /// `#[serde(default)]` keeps those loading with the manifest's `prompt` in
-    /// charge.
+    /// The operator's edits of manifest-declared teammates. Absent on meta files
+    /// written before the console could edit a blueprint teammate, and
+    /// `#[serde(default)]` reads that absence as "nothing is overridden" —
+    /// which leaves the manifest in charge, exactly as those companies ran.
     #[serde(default)]
-    overlay_agent_overrides: Vec<crate::ports::types::AgentOverride>,
+    overlay_agent_edits: Vec<crate::ports::types::AgentOverride>,
+    /// The ids of manifest teammates the operator has removed. Absent on meta
+    /// files written before a blueprint teammate could be removed, which
+    /// `#[serde(default)]` reads as "nobody was removed" — exactly how those
+    /// companies ran.
+    #[serde(default)]
+    overlay_retired_agents: Vec<String>,
     /// The operator's `[policy]` override (issue #562). Absent on meta files
     /// written before the console could write a tier, so `#[serde(default)]`
     /// keeps those loading with the manifest's `[policy]` in charge.
@@ -782,7 +788,8 @@ impl Default for Meta {
             overlay_desks: Vec::new(),
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
-            overlay_agent_overrides: Vec::new(),
+            overlay_agent_edits: Vec::new(),
+            overlay_retired_agents: Vec::new(),
             overlay_policy: None,
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
@@ -872,6 +879,8 @@ impl CompanyStore for FsCompanyStore {
         }
 
         Ok(Some(CompanyRecord {
+            overlay_agent_edits: meta.overlay_agent_edits,
+            overlay_retired_agents: meta.overlay_retired_agents,
             id: id.clone(),
             manifest,
             ledger,
@@ -882,7 +891,6 @@ impl CompanyStore for FsCompanyStore {
             overlay_desks: meta.overlay_desks,
             overlay_workflows: meta.overlay_workflows,
             overlay_budgets: meta.overlay_budgets,
-            overlay_agent_overrides: meta.overlay_agent_overrides,
             overlay_policy: meta.overlay_policy,
             overlay_desk_tools: meta.overlay_desk_tools,
             disabled_workflows: meta.disabled_workflows,
@@ -907,7 +915,8 @@ impl CompanyStore for FsCompanyStore {
             overlay_desks: record.overlay_desks.clone(),
             overlay_workflows: record.overlay_workflows.clone(),
             overlay_budgets: record.overlay_budgets.clone(),
-            overlay_agent_overrides: record.overlay_agent_overrides.clone(),
+            overlay_agent_edits: record.overlay_agent_edits.clone(),
+            overlay_retired_agents: record.overlay_retired_agents.clone(),
             overlay_policy: record.overlay_policy.clone(),
             overlay_desk_tools: record.overlay_desk_tools.clone(),
             disabled_workflows: record.disabled_workflows.clone(),
@@ -2455,6 +2464,8 @@ mod test {
         let store = FsCompanyStore::new(&root);
         let id = CompanyId::new("acme");
         let record = CompanyRecord {
+            overlay_retired_agents: Vec::new(),
+            overlay_agent_edits: Vec::new(),
             id: id.clone(),
             manifest: sample_manifest(),
             ledger: Vec::new(),
@@ -2465,7 +2476,6 @@ mod test {
             overlay_desks: Vec::new(),
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
-            overlay_agent_overrides: Vec::new(),
             overlay_policy: None,
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
@@ -2514,6 +2524,8 @@ mod test {
         let id = CompanyId::new("acme");
         store
             .save(&CompanyRecord {
+                overlay_retired_agents: Vec::new(),
+                overlay_agent_edits: Vec::new(),
                 id: id.clone(),
                 manifest: sample_manifest(),
                 ledger: Vec::new(),
@@ -2524,7 +2536,6 @@ mod test {
                 overlay_desks: Vec::new(),
                 overlay_workflows: Vec::new(),
                 overlay_budgets: Vec::new(),
-                overlay_agent_overrides: Vec::new(),
                 overlay_policy: None,
                 overlay_desk_tools: Default::default(),
                 disabled_workflows: Vec::new(),
@@ -2574,6 +2585,8 @@ mod test {
         let id = CompanyId::new("acme");
         store
             .save(&CompanyRecord {
+                overlay_retired_agents: Vec::new(),
+                overlay_agent_edits: Vec::new(),
                 id: id.clone(),
                 manifest: sample_manifest(),
                 ledger: Vec::new(),
@@ -2584,7 +2597,6 @@ mod test {
                 overlay_desks: Vec::new(),
                 overlay_workflows: Vec::new(),
                 overlay_budgets: Vec::new(),
-                overlay_agent_overrides: Vec::new(),
                 overlay_policy: None,
                 overlay_desk_tools: Default::default(),
                 disabled_workflows: Vec::new(),

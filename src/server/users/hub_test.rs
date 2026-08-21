@@ -61,6 +61,8 @@ async fn state_with_public_url(
     let id = CompanyId::new("acme");
     store
         .save(&CompanyRecord {
+            overlay_retired_agents: Vec::new(),
+            overlay_agent_edits: Vec::new(),
             id: id.clone(),
             manifest: manifest(),
             ledger: Vec::new(),
@@ -71,7 +73,6 @@ async fn state_with_public_url(
             overlay_desks: Vec::new(),
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
-            overlay_agent_overrides: Vec::new(),
             overlay_policy: None,
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
