@@ -322,7 +322,10 @@ function HealthStrip({
   }
   const tiles: { label: string; value: string }[] = [
     { label: "Total items", value: String(total) },
-    { label: "Teammate memory", value: String(stats?.agentChunks ?? 0) },
+    // `agentChunks` minus the outcomes carved out of it — the two tiles are
+    // peers on screen, so they must be disjoint in fact. See
+    // `teammateMemoryCount` (issue #1402).
+    { label: "Teammate memory", value: String(teammateMemoryCount(stats)) },
     { label: "Task outcomes", value: String(stats?.taskOutcomes ?? 0) },
     // Across every memory source, not just operator facts — teammates write only
     // context chunks, so a facts-only figure left this stat at "—" forever.
@@ -543,6 +546,30 @@ export function probeLabel(healthy: boolean | undefined | null): string {
   if (healthy === true) return "reachable at boot";
   if (healthy === false) return "unreachable at boot — check the endpoint and credential";
   return "not probed";
+}
+
+/**
+ * How many context chunks are teammate memory rather than task outcomes.
+ *
+ * `/memory/stats` reports a superset and one of its own slices, not two
+ * populations: `agentChunks` counts *every* chunk, and `taskOutcomes` is
+ * carved out of it by label prefix — the backend says so where it computes
+ * them ("the task-outcome prefix narrows to stored outcomes (a subset of the
+ * total)", `src/server/ops/memory.rs`). Rendering both raw put a count and its
+ * own subset side by side as peers, so a company whose every chunk was an
+ * outcome read `Teammate memory 13 / Task outcomes 13` next to `Total items 13`
+ * — thirteen teammate memories that do not exist, and a strip that adds up to
+ * twice the company's memory (issue #1402).
+ *
+ * The cards below have always partitioned these correctly: `context_entries`
+ * sorts each chunk into one of two **disjoint** buckets. This is that same
+ * split, so the strip counts the way the list does.
+ *
+ * Clamped because the two figures are two reads of a live store and can cross
+ * under a concurrent write; a negative tile is a worse lie than a stale one.
+ */
+export function teammateMemoryCount(stats: MemoryStats | null): number {
+  return Math.max(0, (stats?.agentChunks ?? 0) - (stats?.taskOutcomes ?? 0));
 }
 
 /** Whether the negotiated families are exactly the mandatory floor. */
