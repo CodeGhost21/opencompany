@@ -26,7 +26,7 @@ import {
 } from "@/components/ui/card";
 import { DevicePairing } from "@/components/device-pairing";
 import { DomainSettings } from "@/components/domain-settings";
-import { HarnessSettings } from "@/components/harness-settings";
+import { ExternalHarnesses } from "@/components/external-harnesses";
 import { PolicySettings } from "@/components/policy-settings";
 import { StatusPill } from "@/components/status-pill";
 import { ThemeToggle } from "@/components/theme-toggle";
@@ -56,9 +56,10 @@ export function SettingsView({ client, company, feed, onFlag }: Props) {
             session cookie already works. */}
         <DevicePairing />
 
-        {/* Coding harnesses this machine can run a teammate through (issue
-            #1245). Renders nothing in a browser, for the same reason. */}
-        <HarnessSettings />
+        {/* Every coding engine a teammate can be bound to, joined against
+            whether it can actually run on this machine (issue #1245). Works in
+            a browser; the installed-here half only fills in on the desktop. */}
+        <ExternalHarnesses client={client} company={company} />
 
         {/* Approvals: the autonomy tier and the always-ask list (issue #562).
             High in the page on purpose — an operator who comes to settings

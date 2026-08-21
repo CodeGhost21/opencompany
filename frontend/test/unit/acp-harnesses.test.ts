@@ -50,8 +50,7 @@ describe("asking the core which coding harnesses this machine has", () => {
   it("passes the core's readiness catalogue through unchanged", async () => {
     const catalogue = [
       { id: "claude", label: "Claude Code", readiness: { state: "ready" }, path: "/usr/local/bin/claude-agent-acp" },
-      { id: "codex", label: "Codex", readiness: { state: "notSignedIn" } },
-      { id: "goose", label: "goose", readiness: { state: "notInstalled" } },
+      { id: "codex", label: "Codex", readiness: { state: "notInstalled" } },
     ];
     installBridge({ oc_acp_harnesses: catalogue });
 
