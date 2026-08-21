@@ -196,12 +196,12 @@ mod tests {
         // Sorted, folders + markdown only; the .txt and .png are skipped.
         assert_eq!(
             paths,
-            vec!["Brand", "brand/brand-voice.md", "Campaigns", "README.md"]
+            vec!["brand", "brand/brand-voice.md", "campaigns", "readme.md"]
         );
 
         let readme = nodes
             .iter()
-            .find(|n| n.rel_path == Path::new("README.md"))
+            .find(|n| n.rel_path == Path::new("readme.md"))
             .unwrap();
         assert_eq!(readme.kind, NodeKind::Markdown);
         assert_eq!(readme.content.as_deref(), Some("# Root\n[[Brand voice]]"));

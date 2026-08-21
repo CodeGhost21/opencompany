@@ -64,7 +64,7 @@ async fn seeded() -> (tempfile::TempDir, Arc<dyn WorkspaceStore>, CompanyId) {
     .unwrap();
     ops.create(
         &id,
-        &file("n-support", "Support playbook.md", Some("f-std"), 2_000),
+        &file("n-support", "support-playbook.md", Some("f-std"), 2_000),
         Some("Escalate a refund request to the CEO."),
     )
     .await
@@ -102,12 +102,12 @@ async fn a_query_matches_both_names_and_bodies() {
     let (_dir, ops, id) = seeded().await;
 
     let by_name = search(&ops, &id, "playbook").await;
-    assert_eq!(paths(&by_name), vec!["standards/Support playbook.md"]);
+    assert_eq!(paths(&by_name), vec!["standards/support-playbook.md"]);
     assert_eq!(by_name.hits[0].matched, MatchKind::Name);
     assert_eq!(by_name.hits[0].excerpt, None, "a name match has no excerpt");
 
     let by_content = search(&ops, &id, "refund").await;
-    assert_eq!(paths(&by_content), vec!["standards/Support playbook.md"]);
+    assert_eq!(paths(&by_content), vec!["standards/support-playbook.md"]);
     assert_eq!(by_content.hits[0].matched, MatchKind::Content);
     assert!(
         by_content.hits[0]
