@@ -241,6 +241,7 @@ export function SetupWizard({ client, onDone, onCancel }: Props) {
     | { kind: "arranging" }
     | { kind: "link"; url: string }
     | { kind: "mailed" }
+    | { kind: "unmailable" }
     | { kind: "open" }
     | null
   >(null);
@@ -277,7 +278,7 @@ export function SetupWizard({ client, onDone, onCancel }: Props) {
   /**
    * Arrange the operator's way in, the moment the company exists.
    *
-   * Three outcomes, and each is said plainly rather than left to be discovered:
+   * Four outcomes, and each is said plainly rather than left to be discovered:
    *
    * - **No sign-in on this host** — nothing to arrange; the console is open.
    * - **A link we can hand over** — a loopback host with no mail transport
@@ -286,6 +287,15 @@ export function SetupWizard({ client, onDone, onCancel }: Props) {
    *   stay empty. This is the laptop case, and it was the broken one.
    * - **Mailed** — say which address, so they know where to look and that we
    *   used the one they typed.
+   * - **Unmailable** — a routable host with no transport. Nothing was sent and
+   *   nothing is coming, so say so rather than name an inbox.
+   *
+   * Which of the last two applies is the host's own answer (`status.mail`), not
+   * an inference from the echoed code. It used to be that inference, which is
+   * only sound on a loopback bind — echoing requires one — so a routable host
+   * with no transport ended setup by telling its operator to check a mailbox
+   * that would stay empty forever. The code still *sources* the link; it no
+   * longer decides which of these is true.
    *
    * Failure is not fatal: the sign-in form still works, and the button below
    * still opens the console.
@@ -313,14 +323,16 @@ export function SetupWizard({ client, onDone, onCancel }: Props) {
     setHandoff({ kind: "arranging" });
     requestCode(client, company, address)
       .then((result) => {
-        setHandoff(
-          result.dev_code
-            ? {
-                kind: "link",
-                url: `/login?company=${encodeURIComponent(company)}&code=${encodeURIComponent(result.dev_code)}`,
-              }
-            : { kind: "mailed" },
-        );
+        if (result.dev_code) {
+          // The only branch holding the code, and so the only one that can hand
+          // over a link rather than describe one.
+          setHandoff({
+            kind: "link",
+            url: `/login?company=${encodeURIComponent(company)}&code=${encodeURIComponent(result.dev_code)}`,
+          });
+        } else {
+          setHandoff(status.mail.wired ? { kind: "mailed" } : { kind: "unmailable" });
+        }
       })
       .catch(() => {
         // The sign-in form still works; the button below still opens it.
@@ -514,6 +526,25 @@ export function SetupWizard({ client, onDone, onCancel }: Props) {
             </Alert>
           )}
 
+          {handoff?.kind === "unmailable" && (
+            <Alert data-testid="setup-handoff-unmailable">
+              <AlertTriangle />
+              <AlertTitle>No sign-in link was sent</AlertTitle>
+              <AlertDescription>
+                <span className="block">
+                  This host has no mail transport, so a link to{" "}
+                  <strong className="text-foreground">{email.trim()}</strong> would have gone
+                  nowhere. There is nothing on its way and nothing to wait for.
+                </span>
+                <span className="mt-2 block">
+                  That address still administers this company. Sign in with one of the
+                  ecosystem buttons on the sign-in screen, or configure mail on this host and
+                  ask for a link then.
+                </span>
+              </AlertDescription>
+            </Alert>
+          )}
+
           {handoff?.kind === "link" && (
             <Alert data-testid="setup-handoff-link">
               <AlertTitle>You&apos;re ready to go in</AlertTitle>
@@ -536,7 +567,10 @@ export function SetupWizard({ client, onDone, onCancel }: Props) {
             </Button>
           ) : (
             <Button onClick={onDone} data-testid="setup-open-console">
-              {applied.restart_required.length > 0
+              {/* "Anyway" wherever something is genuinely outstanding — a
+                  staged setting, or a sign-in we could not arrange. That word is
+                  the only thing saying this button does not finish the job. */}
+              {applied.restart_required.length > 0 || handoff?.kind === "unmailable"
                 ? "Open the console anyway"
                 : "Open the console"}
             </Button>
@@ -827,6 +861,20 @@ function SignInStep({
           );
         })}
       </div>
+
+      {/* What choosing email actually gets you on *this* host.
+          Not a reason to hide the mode or grey the card out: hub OAuth and a
+          password sign people in with no transport anywhere in sight, so "no
+          mail" means the magic link is undeliverable, not that email sign-in is
+          broken. Hiding it would refuse a mode the operator may wire mail up
+          for ten minutes from now. */}
+      {status.auth_modes.includes("email") && !status.mail.wired && (
+        <p className="mt-3 text-xs text-muted-foreground" data-testid="setup-mail-note">
+          {status.mail.echoes_code
+            ? "This host sends no mail and doesn't need to: it only listens on this machine, so a sign-in link is handed straight back to your browser instead of arriving in an inbox."
+            : "This host has no mail transport, so a sign-in link would arrive nowhere. The ecosystem buttons and a password still work — configure mail before inviting anyone who would need a link."}
+        </p>
+      )}
 
       {!status.auth_modes.includes("none") && (
         <p className="mt-3 text-xs text-muted-foreground">

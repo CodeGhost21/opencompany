@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   ArrowRight,
   Building2,
@@ -174,6 +174,31 @@ export function Login({
   useEffect(() => {
     if (!authConfig.passwords && mode === "password") setMode("link");
   }, [authConfig.passwords, mode]);
+
+  /**
+   * A host in `email` mode that can deliver nothing.
+   *
+   * Not the same as "no email sign-in": hub OAuth and passwords never touch a
+   * mailbox, so this company still signs people in exactly as it says it does.
+   * What is dead is the *link*, and only the host knows that — `auth/request`
+   * answers `sent: true` here precisely as it does where the mail went out.
+   */
+  const linkGoesNowhere = authConfig.mode === "email" && !authConfig.magicLink;
+
+  /**
+   * Step out of link mode once, on such a host, when there is somewhere to step.
+   *
+   * Once, deliberately: someone may switch back on purpose — an operator who
+   * has just configured a transport behind this very screen is the likeliest
+   * visitor here — and a rule that re-applied itself would make the toggle
+   * beneath the form unusable rather than merely mistaken.
+   */
+  const demotedLink = useRef(false);
+  useEffect(() => {
+    if (demotedLink.current || !linkGoesNowhere || !authConfig.passwords) return;
+    demotedLink.current = true;
+    setMode("password");
+  }, [linkGoesNowhere, authConfig.passwords]);
 
   useEffect(() => {
     let cancelled = false;
@@ -415,6 +440,27 @@ export function Login({
           </div>
         )}
 
+        {/*
+          Said here because it is the last place it can be said. Every other
+          surface reports a link as sent, so an operator who is never told will
+          type an address, be thanked, and wait for a message no process on this
+          host will ever produce. The form stays below regardless: mail can be
+          configured without restarting this console, and a person who knows a
+          link is coming should still be able to ask for one.
+        */}
+        {linkGoesNowhere && (
+          <Alert className="mb-4" data-testid="login-no-mail">
+            <TriangleAlert className="size-4" />
+            <AlertDescription className="text-foreground">
+              {hubProviders.length > 0
+                ? `This host can't send mail, so a sign-in link won't arrive. Use one of the buttons above${authConfig.passwords ? ", or the password you set for this company." : "."}`
+                : authConfig.passwords
+                  ? "This host can't send mail, so a sign-in link won't arrive. Sign in with the password you set for this company — an admin can issue you one if you have none."
+                  : "This host can't send mail, so a sign-in link won't arrive. Whoever runs it needs to configure a mail transport before this screen can sign anyone in."}
+            </AlertDescription>
+          </Alert>
+        )}
+
         {authConfig.mode === "email" ? (
         <Card className="p-6">
           {sent && mode === "link" ? (
@@ -557,6 +603,9 @@ export function Login({
 function subtitle(config: AuthConfig, mode: Mode): string {
   if (config.mode === "none") return "";
   if (config.mode === "wallet") return "Prove you hold the wallet. Nothing is emailed.";
+  // Promising a link from a host with no transport is the one line here that
+  // sends someone away to wait for nothing.
+  if (mode === "link" && !config.magicLink) return "This host can\'t email you a link.";
   return mode === "link"
     ? "We\'ll email you a link. No password needed."
     : "Use the password you set for this company.";

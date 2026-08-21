@@ -38,6 +38,16 @@ sign-in the wizard can honestly offer *today* — mailed on `wired`, handed back
 as a link on `echoes_code`, and neither on a routable host that has configured
 no transport.
 
+That last case is why it is reported at all. The console used to infer mail from
+whether the sign-in request echoed a code back, and a code is only ever echoed
+on a loopback bind — so a routable host with no transport finished setup by
+telling its operator to check an inbox that would stay empty forever. The echoed
+code still *sources* the link it hands over; it no longer decides whether one
+was sent. The sign-in step says the same thing before the choice is made, and
+`/auth/config` carries it to the login screen as `magicLink`, which is the only
+place a returning visitor could ever be told: `auth/request` answers `sent:
+true` on a host that delivered nothing exactly as on one that did.
+
 `POST /api/v1/setup` applies a completed wizard: writes `config.toml`, seeds the
 chosen template when the registry is empty, and stamps `setup_completed_at`.
 Validation happens before anything is written — a partial apply is worse than a
@@ -48,6 +58,30 @@ unauthenticated handshake because an instance nobody has configured has nobody
 who *can* sign in; gating the answer behind auth would make the wizard
 unreachable exactly when it is needed. The boolean is the whole disclosure — the
 configuration itself stays behind `/api/v1/setup`.
+
+## The order the wizard asks in
+
+Six steps: **model, business, sign-in, you, advanced, review**.
+
+Model is first because its failure is silent everywhere else — the design pass
+falls back to a curated team on a missing or bad credential, so an untested key
+produces a *plausible* company and the operator finds out several screens later,
+if at all. It is a gate, not a wall: skipping is a first-class answer.
+
+Sign-in comes before the address, and that is the point of it having a step. It
+used to be the first card inside Advanced — one screen *after* the wizard asked
+for an email address, under copy inviting the operator to press straight past
+the lot — so someone setting up on a laptop was asked for an address they need
+never have supplied, by a flow that already knew it might not want one. A
+question with a consequence does not sit behind "press on if none of it matters
+to you"; what stays in Advanced is settings that already work.
+
+**A skipped step gets no slot in the bar.** Choosing `none` removes the address
+step outright rather than making it optional, and the progress bar renumbers
+with it — a five-step flow that says "step 3 of 6" is counting a screen that
+will never arrive. The console holds its position as a step *id* rather than an
+index for the same reason: a list that changes length behind the operator would
+otherwise silently mean a different screen.
 
 ## Every field carries its layer
 
