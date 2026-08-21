@@ -46,13 +46,6 @@ export function chargebeeHealth(status: BillingStatus): Health {
         "This host was built without Chargebee support. Credentials saved here will be stored and have no effect.",
       fixableHere: false,
     };
-  if (!status.apiKeyConfigured || !status.site)
-    return {
-      state: "not_configured",
-      label: "Not connected",
-      remedy: "Add the Chargebee site and API key to start raising invoices.",
-      fixableHere: true,
-    };
   if (!status.granted)
     return {
       state: "not_granted",
@@ -60,6 +53,13 @@ export function chargebeeHealth(status: BillingStatus): Health {
       remedy:
         "This company does not grant `chargebee`, so billing tools reach no teammate even with the key stored. Add `chargebee` to [tools].allow in the company's manifest — it cannot be fixed from this page.",
       fixableHere: false,
+    };
+  if (!status.apiKeyConfigured || !status.site)
+    return {
+      state: "not_configured",
+      label: "Not connected",
+      remedy: "Add the Chargebee site and API key to start raising invoices.",
+      fixableHere: true,
     };
   return {
     state: "connected",
@@ -83,13 +83,6 @@ export function paypalHealth(status: PaypalStatus): Health {
         "This host was built without PayPal support. Credentials saved here will be stored and have no effect.",
       fixableHere: false,
     };
-  if (!status.clientIdConfigured || !status.clientSecretConfigured)
-    return {
-      state: "not_configured",
-      label: "Not connected",
-      remedy: "Add the REST app client ID and secret to read the wallet.",
-      fixableHere: true,
-    };
   if (!status.granted)
     return {
       state: "not_granted",
@@ -97,6 +90,13 @@ export function paypalHealth(status: PaypalStatus): Health {
       remedy:
         "This company does not grant `paypal`, so wallet tools reach no teammate. Add `paypal` to [tools].allow in the company's manifest.",
       fixableHere: false,
+    };
+  if (!status.clientIdConfigured || !status.clientSecretConfigured)
+    return {
+      state: "not_configured",
+      label: "Not connected",
+      remedy: "Add the REST app client ID and secret to read the wallet.",
+      fixableHere: true,
     };
   return {
     state: "connected",
