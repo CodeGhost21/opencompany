@@ -78,27 +78,47 @@ function staffed(roster: RosterRow[]): RosterRow[] {
 }
 
 /**
+ * Where one teammate came from: `"manifest"` for a row the company declares in
+ * `company.toml` (the global baseline is merged in as manifest rows too),
+ * `"overlay"` for one somebody added through the console.
+ *
+ * The roster read does not carry it — only the detail read does — and the
+ * distinction is what keeps the guard below honest, so it is worth the extra
+ * request per staffed row. A host too old to answer is treated as `"overlay"`:
+ * that is the deletable case, so an unknown answer fails loudly at the delete
+ * rather than quietly skipping the row.
+ */
+async function sourceOf(request: APIRequestContext, id: string): Promise<string> {
+  const res = await request.get(`${COMPANY_SCOPE}/team/${id}`);
+  if (!res.ok()) return "overlay";
+  return ((await res.json()) as { source?: string }).source ?? "overlay";
+}
+
+/**
  * Removes every operator-added teammate, so a re-run starts from a first run
- * again.
+ * again — and refuses to touch a host that is not this lane's company.
  *
- * It deletes **only** the staffed rows, and that is load-bearing rather than
- * tidy. This used to fire a DELETE at every row and lean on the host to refuse
- * the ones it did not own: a manifest or baseline teammate answered `409` and
- * was left where it was. Both are removable now, and the roster's one remaining
- * refusal is its *last* teammate — a company with nobody on it has no
- * orchestrator and no way back. Deleting the whole roster therefore leaves one
- * survivor, and because the baseline is listed first, the survivor is a staffed
- * teammate the previous test created — exactly the row the guard below is
- * looking for. The lane failed with a leftover `Accountant` in front of it.
+ * This used to fire a DELETE at every row and lean on the host to sort them
+ * out: a manifest or baseline teammate answered `409` and was left where it
+ * was, which both unstaffed the company and protected a host serving the wrong
+ * one. Neither holds any more. A manifest teammate is removable now, so the
+ * blanket loop would *wipe* the roster of a host running the rest of the suite;
+ * and the roster's one remaining refusal is its **last** teammate, so the
+ * blanket loop leaves exactly one survivor — the staffed row the guard is
+ * looking for, since the baseline is listed first. That is the leftover
+ * `Accountant` this lane failed on.
  *
- * Aiming at the staffed rows leaves the baseline in place, so the last-teammate
+ * So the sorting happens here instead. Manifest rows are identified and left
+ * strictly alone, which keeps the wrong-host assertion below meaningful (#1404)
+ * rather than something this helper has already deleted its way past; the
+ * overlay rows are removed, and because the baseline stays the last-teammate
  * refusal is never reached and every delete lands.
  */
 async function unstaffCompany(request: APIRequestContext) {
   for (const member of staffed(await hostRoster(request))) {
-    if (member.id) {
-      await request.delete(`${COMPANY_SCOPE}/team/${member.id}`).catch(() => undefined);
-    }
+    if (!member.id) continue;
+    if ((await sourceOf(request, member.id)) === "manifest") continue;
+    await request.delete(`${COMPANY_SCOPE}/team/${member.id}`).catch(() => undefined);
   }
 }
 
@@ -111,9 +131,10 @@ async function answer(page: Page, field: string, text: string) {
 
 test.beforeEach(async ({ request }) => {
   await unstaffCompany(request);
-  // Anyone still here after unstaffing is declared in the manifest and cannot be
-  // deleted, so setup can never open on this host. Fail now, naming the command
-  // that fixes it — a skip here is what made this whole spec vacuous (#1404).
+  // Anyone still here after unstaffing is declared in the manifest, which
+  // `unstaffCompany` deliberately does not remove, so setup can never open on
+  // this host. Fail now, naming the command that fixes it — a skip here is what
+  // made this whole spec vacuous (#1404).
   const left = staffed(await hostRoster(request));
   expect(
     left.map((member) => member.role),
