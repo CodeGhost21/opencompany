@@ -340,20 +340,42 @@ fn validate_parent(
     Ok(())
 }
 
-/// Rejects a `column` the board does not render (issue #205).
+/// Resolves a written `column` to the stage that is actually stored, rejecting
+/// a word the board does not know (issue #205, issue #1512).
 ///
 /// `column` is a free string on the wire, and nothing checked it: a typo'd
 /// `"in-progress"` was persisted verbatim, so the card disappeared from every
 /// rendered column *and* — since only the exact literal `in_progress`
 /// edge-fires a dispatch — silently never ran. Refusing at the write boundary
-/// is the cheap place to keep the board's six columns the only six.
-fn validate_column(column: &str) -> Result<(), ApiError> {
+/// is the cheap place to keep the board's vocabulary the only vocabulary.
+///
+/// # Two words in, one word stored
+///
+/// Since #1512 the board *reads* as three phases and *stores* six stages, so a
+/// drop sends `working` where it used to send `in_progress`. Both are accepted
+/// and they are not equivalent:
+///
+/// * a **phase** resolves to that phase's [`entry_stage`](crate::ledger::board::BoardPhase::entry_stage)
+///   — `working` becomes `in_progress`, which dispatches. This is what the
+///   console, the tools and any ordinary client send.
+/// * a **stage** is stored verbatim. Nothing in the product needs this any
+///   more, but the runtime's own paths and every stored card speak it, and a
+///   boundary that refused `in_review` would refuse to describe a state the
+///   board can be in.
+///
+/// The error names the phases only. A caller who guessed wrong is a caller who
+/// should be sending one of three words, and listing the six would teach them
+/// the vocabulary this issue exists to stop teaching.
+fn resolve_column(column: &str) -> Result<String, ApiError> {
+    if let Some(stage) = crate::ledger::board::entry_stage(column) {
+        return Ok(stage.to_string());
+    }
     if is_board_column(column) {
-        return Ok(());
+        return Ok(column.to_string());
     }
     Err(ApiError(OpenCompanyError::InvalidRequest(format!(
         "\"{column}\" is not a board column — use one of: {}",
-        BOARD_COLUMNS.join(", ")
+        crate::ledger::board::phase_ids().join(", ")
     ))))
 }
 
@@ -413,8 +435,10 @@ async fn create_task(
     // into To-do, and every lifecycle return now lands here too, carrying its
     // reason on the note. So this default is no longer a choice between two
     // columns; it is simply where not-started work lives.
-    let column = body.column.unwrap_or_else(|| COLUMN_TODO.to_string());
-    validate_column(&column)?;
+    let column = match body.column {
+        Some(column) => resolve_column(&column)?,
+        None => COLUMN_TODO.to_string(),
+    };
     let assignee = resolve_assignee(&company, body.assignee.unwrap_or_default()).await?;
     let record = TaskRecord {
         id: generate_id(),
@@ -489,8 +513,7 @@ async fn patch_task(
     // so returning the `400` from here discards the partial edit rather than
     // persisting half of it.
     if let Some(column) = body.column {
-        validate_column(&column)?;
-        record.column = column;
+        record.column = resolve_column(&column)?;
     }
     if let Some(priority) = body.priority {
         record.priority = priority;
