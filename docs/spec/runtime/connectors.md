@@ -391,8 +391,10 @@ a keyboard user lands while switching hosts.
 The page does three things, and `editConnection` in `connections/registry.ts` is
 where the first two land:
 
-- **rename**, which is the only edit a host reached over `ssh` or run locally
-  accepts;
+- **rename**, which is the only edit a host reached over `ssh` accepts. A
+  `local` host is not renamed here at all: its name and its address are
+  re-applied from the local instance roster on every refresh, so the page
+  offers it no edit control rather than one whose result would not survive;
 - **re-address**, offered for `remote` and `cloud` only. `local` and `ssh`
   addresses are assigned by this application — an ephemeral port and a loopback
   port this client chose — so an address typed here would be overwritten by the
