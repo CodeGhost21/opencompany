@@ -213,11 +213,13 @@ test("names the host it was told nothing about by the address it answers on", as
   await openHostMenu(page);
 
   const rows = await page.getByRole("menuitem").allInnerTexts();
-  // Every menu item but the trailing "Add a host", down to its first line: a
-  // row also carries its state and its shortcut, and a shortcut differs on
-  // every row — comparing whole rows would call two identical names distinct.
+  // Every menu item but the trailing actions — "Add a host" and "Manage hosts"
+  // — down to its first line: a row also carries its state and its shortcut,
+  // and a shortcut differs on every row, so comparing whole rows would call two
+  // identical names distinct.
+  const actions = ["Add a host", "Manage hosts"];
   const names = rows
-    .filter((text) => !text.includes("Add a host"))
+    .filter((text) => !actions.some((action) => text.includes(action)))
     .map((text) => text.split("\n")[0].trim());
   expect(names.length).toBe(2);
   expect(new Set(names).size, `two hosts must not read alike: ${JSON.stringify(names)}`).toBe(2);
