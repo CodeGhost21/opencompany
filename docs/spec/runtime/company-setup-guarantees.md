@@ -1,7 +1,7 @@
 # First-run setup: what the host enforces
 
 The product decisions behind first-run setup live in
-[company-setup.md](company-setup.md). This file holds the four things the host
+[company-setup.md](company-setup.md). This file holds the five things the host
 *enforces* rather than requests, and why each is a boundary instead of a line in
 a prompt.
 
@@ -83,6 +83,42 @@ one holding a spend authority.
 
 The curated templates declare a focus too. An operator with no credential must
 not end up with the *wider* company.
+
+## A teammate is told how to work, and the host writes it
+
+**Decision D9: the focus that picks a belt also picks a set of standing
+instructions, and the model authors none of them.**
+
+`manifest_from_setup` set `id`, `role`, `description` and `tools` and left
+`prompt` unset. So everything a setup-built teammate was ever told was what
+`persona_prompt` assembles — "You are Ops, the Operations Manager at Acme. Speak
+in the first person as this role." plus a mandate capped at 200 characters.
+Around 150 characters of instruction, sitting on the same roster as a globals
+teammate carrying 500–600 (`globals/agents/*.toml`). The mandate says what a
+teammate owns; nothing said how it works.
+
+`AgentFocus::instructions` supplies that, keyed on the same closed enum that
+already picks the belt, for the same reason D7 gives: an agent's prompt is the
+single field that decides how it behaves, so letting the pass author it would put
+a stranger's free text — read by a model, written into a system prompt —
+inside the prompt's blast radius. The model names a work shape; the host owns
+every word the teammate is told.
+
+The instructions describe the *shape* of the work and never the business. The
+mandate already carries the business, and a second copy in the same prompt would
+be a staler one. They are written in the globals' register without reusing its
+sentences: a global teammate is on the same roster, and two agents given the
+same instructions are one agent twice.
+
+An unrecognised focus is instructed with **nothing**, which is the opposite of
+what the belt does with the same input — and deliberately. A belt substitutes
+because a permission has a safe direction to fail in; instructions have none.
+Telling an analyst "never invent a detail to make a sentence work" is worse
+guidance than the role framing it already has, so an unknown shape keeps exactly
+the pre-instruction behaviour.
+
+The curated templates declare a focus, so the fallback team is instructed too —
+an operator with no credential must not end up with the *less directed* company.
 
 ## A fallback says which fallback
 

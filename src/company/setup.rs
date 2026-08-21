@@ -179,6 +179,63 @@ impl AgentFocus {
         };
         belt.iter().map(|t| (*t).to_string()).collect()
     }
+
+    /// How a teammate with this focus works — the standing instructions that
+    /// become its `[[agent]].prompt`.
+    ///
+    /// ## Why the host writes these and the model does not
+    ///
+    /// The same argument that keeps `[tools]` out of the model's reach (see the
+    /// type docs): an agent's prompt is the one field that decides how it
+    /// behaves, and letting the setup pass author it would put a stranger's free
+    /// text — read by a model, written into a system prompt — inside the blast
+    /// radius of "what does your company do?". The model names a work *shape*
+    /// from a closed enum; the host owns every word the teammate is told.
+    ///
+    /// ## Why they exist at all
+    ///
+    /// [`manifest_from_setup`] left `prompt` unset, so a setup-built teammate's
+    /// entire instruction was what
+    /// [`persona_prompt`](crate::company::prompt::persona_prompt) assembles from
+    /// its role and its one-line mandate — around 150 characters, next to a
+    /// globals teammate carrying 500–600 of standing instruction. The four
+    /// `globals/agents/*.toml` prompts are the register these are written in,
+    /// deliberately without reusing their sentences: a global teammate is on the
+    /// same roster, and two agents given the same instructions are one agent
+    /// twice.
+    ///
+    /// Kept to the *shape* of the work, never the business: the mandate says
+    /// what this teammate owns, and repeating it here would put a second,
+    /// staler copy of the description in the same prompt.
+    pub fn instructions(self) -> &'static str {
+        match self {
+            Self::Research => {
+                "Go and look rather than recalling. Prefer a primary source to somebody's \
+                 summary of one, and say which of the two you actually used. Keep what you found \
+                 apart from what you conclude from it, and mark the second as yours. Hand a \
+                 finding on in a form the next person can act on without repeating your search."
+            }
+            Self::Writing => {
+                "Produce the finished thing, not an outline of it. Match the register this \
+                 company already uses elsewhere instead of inventing a new voice per piece. Put \
+                 the useful part first, so a reader who stops after two lines still has the \
+                 point. Where a sentence needs a fact you do not have, mark it for whoever does \
+                 rather than writing around the hole."
+            }
+            Self::Operations => {
+                "Move the work rather than reporting on it. Where the next step is yours, take \
+                 it and say what you did; where it is not, name the person or the thing it waits \
+                 on and what would release it. Prefer finishing one thing to advancing three. A \
+                 handoff is not done until somebody has picked it up."
+            }
+            Self::Analysis => {
+                "Show the number and where it came from before interpreting it. Say what moved \
+                 and by how much, then what you believe caused it — and keep those two apart, so \
+                 a reader can disagree with the second without losing the first. When the data is \
+                 too thin to carry a conclusion, report the thinness instead of the conclusion."
+            }
+        }
+    }
 }
 
 /// The belt for an optional focus. An unreadable or absent one gets the
@@ -203,6 +260,22 @@ impl AgentFocus {
 /// teammate that cannot browse, not one holding a spend authority.
 pub fn tools_for_focus(focus: Option<AgentFocus>) -> Vec<String> {
     focus.unwrap_or(AgentFocus::Writing).tools()
+}
+
+/// The standing instructions for an optional focus, or `None` when the work
+/// shape is unknown.
+///
+/// **Deliberately not [`tools_for_focus`]'s fallback.** That one substitutes
+/// [`Writing`](AgentFocus::Writing) because a tool belt is a permission
+/// boundary and an unreadable value must never buy more authority than a
+/// readable one — there is a safe direction to fail in. Instructions have no
+/// such direction. Guessing a work shape would put the wrong job's instructions
+/// in a teammate's head, and telling an analyst to "never invent a detail to
+/// make a sentence work" is worse guidance than the role framing it already
+/// has. So an unknown focus keeps exactly today's behaviour: the persona prompt
+/// and its mandate, and nothing invented on top.
+pub fn prompt_for_focus(focus: Option<AgentFocus>) -> Option<String> {
+    focus.map(|f| f.instructions().to_string())
 }
 
 /// Reads a focus off the wire, treating anything unrecognised as absent.
@@ -883,6 +956,12 @@ pub fn manifest_from_setup(
             // media and per-tenant Composio credentials. Intersected with
             // `[tools].allow`, so this can only ever narrow.
             built.tools = tools_for_focus(agent.focus);
+            // Standing instructions for the shape of work this teammate does.
+            // Without them a setup-built teammate carried only its role and its
+            // one-line mandate — around 150 characters of instruction, beside a
+            // globals teammate holding 500–600. The mandate says what it owns;
+            // this says how it works. See `AgentFocus::instructions`.
+            built.prompt = prompt_for_focus(agent.focus);
             built
         })
         .collect();
@@ -1583,6 +1662,157 @@ mod tests {
             assert!(!agent.tools.is_empty(), "{} inherits the lot", agent.id);
         }
         assert_eq!(manifest.validate(), Vec::<String>::new());
+    }
+
+    /// A setup-built teammate carries standing instructions, not only a mandate.
+    ///
+    /// The gap this closes: `manifest_from_setup` left `prompt` unset, so the
+    /// whole of what a teammate was ever told was `persona_prompt`'s role
+    /// framing plus its one-line description — beside a globals teammate
+    /// holding 500–600 characters of standing instruction on the same roster.
+    #[test]
+    fn a_designed_teammate_carries_standing_instructions() {
+        let roster = vec![ProposedAgent {
+            name: "Research".into(),
+            role: "Research Analyst".into(),
+            description: "Finds things out.".into(),
+            focus: Some(AgentFocus::Research),
+        }];
+        let manifest = manifest_from_setup(&answers("a shop", ""), &roster, None);
+        let prompt = manifest.agents[0]
+            .prompt
+            .as_deref()
+            .expect("a focused teammate is instructed");
+        assert_eq!(prompt, AgentFocus::Research.instructions());
+        assert_eq!(manifest.validate(), Vec::<String>::new());
+    }
+
+    /// The asymmetry with [`tools_for_focus`], pinned. A belt substitutes
+    /// because a permission has a safe direction to fail in; instructions have
+    /// none, so an unknown shape keeps exactly the pre-instruction behaviour
+    /// rather than being told the wrong job's rules.
+    #[test]
+    fn an_unreadable_focus_gets_no_invented_instructions() {
+        assert_eq!(prompt_for_focus(None), None);
+        let roster = vec![ProposedAgent {
+            name: "A".into(),
+            role: "Analyst".into(),
+            description: "d".into(),
+            focus: None,
+        }];
+        let manifest = manifest_from_setup(&answers("a shop", ""), &roster, None);
+        assert!(manifest.agents[0].prompt.is_none());
+        // The belt still fails closed on the same input, which is the point of
+        // the contrast.
+        assert!(!manifest.agents[0].tools.is_empty());
+        assert_eq!(manifest.validate(), Vec::<String>::new());
+    }
+
+    /// Four shapes, four different sets of instructions. Two teammates given
+    /// the same instructions are one teammate twice — the collision the
+    /// mandates themselves are written to avoid.
+    #[test]
+    fn every_focus_is_instructed_and_no_two_alike() {
+        let all = AgentFocus::ALL;
+        for focus in all {
+            assert!(
+                !focus.instructions().trim().is_empty(),
+                "{focus:?} has no instructions"
+            );
+        }
+        for (i, a) in all.iter().enumerate() {
+            for b in &all[i + 1..] {
+                assert_ne!(
+                    a.instructions(),
+                    b.instructions(),
+                    "{a:?} and {b:?} share instructions"
+                );
+            }
+        }
+    }
+
+    /// And distinct from every globals prompt, because a global teammate sits
+    /// on the same roster. `globals/agents/*.toml` is the register these are
+    /// written in, never the text to copy.
+    ///
+    /// Checked as a shared **run of words** rather than string equality, which
+    /// is the check this needs: the first draft of these four was written by
+    /// reading the globals prompts, and three came back as sentence-for-sentence
+    /// paraphrases — "cut anything that is there only because it was already
+    /// written" beside "cut anything that survives only because it was already
+    /// written". Equality passes that happily. Six words is short enough to
+    /// catch a paraphrase and long enough that shared phrasing like "the next
+    /// person" is not a failure.
+    #[test]
+    fn focus_instructions_do_not_reuse_a_globals_prompt() {
+        const RUN: usize = 6;
+        let runs = |text: &str| -> Vec<String> {
+            let words: Vec<String> = text
+                .split_whitespace()
+                .map(|w| {
+                    w.chars()
+                        .filter(|c| c.is_alphanumeric())
+                        .flat_map(char::to_lowercase)
+                        .collect::<String>()
+                })
+                .filter(|w| !w.is_empty())
+                .collect();
+            words.windows(RUN).map(|w| w.join(" ")).collect()
+        };
+
+        for focus in AgentFocus::ALL {
+            let mine = runs(focus.instructions());
+            for global in crate::globals::agents() {
+                let Some(prompt) = global.prompt.as_deref() else {
+                    continue;
+                };
+                let theirs = runs(prompt);
+                if let Some(shared) = mine.iter().find(|run| theirs.contains(run)) {
+                    panic!(
+                        "{focus:?} reuses the global `{}`'s phrasing: \"{shared}\"",
+                        global.id
+                    );
+                }
+            }
+        }
+    }
+
+    /// The curated fallback is instructed too, for the same reason it is scoped
+    /// too: an operator with no credential must not end up with the *less*
+    /// directed company.
+    #[test]
+    fn the_curated_fallback_is_instructed_too() {
+        let a = answers("I sell homeware online", "");
+        let proposal = template_proposal(&a, FallbackReason::NoModel);
+        let manifest = manifest_from_setup(&a, &proposal.agents, None);
+        for agent in &manifest.agents {
+            assert!(agent.prompt.is_some(), "{} is uninstructed", agent.id);
+        }
+        assert_eq!(manifest.validate(), Vec::<String>::new());
+    }
+
+    /// The payoff, composed: the mandate says what this teammate owns and the
+    /// instructions say how it works, and the agent is told both.
+    #[test]
+    fn the_persona_prompt_carries_the_mandate_and_the_instructions() {
+        let roster = vec![ProposedAgent {
+            name: "Writer".into(),
+            role: "Report Writer".into(),
+            description: "The written report.".into(),
+            focus: Some(AgentFocus::Writing),
+        }];
+        let manifest = manifest_from_setup(&answers("consulting", ""), &roster, None);
+        let persona = crate::company::prompt::persona_prompt("Acme", &manifest.agents[0]);
+        assert!(persona.contains("Report Writer"), "{persona}");
+        assert!(persona.contains("The written report."), "{persona}");
+        // Compared against the instructions themselves rather than a copy of
+        // their text: the first version of this assertion quoted the template
+        // verbatim, the template was reworded, and the test failed for saying
+        // something stale rather than for anything being wrong.
+        assert!(
+            persona.contains(AgentFocus::Writing.instructions()),
+            "{persona}"
+        );
     }
 
     /// Focus survives the round trip through the review screen, which is the
