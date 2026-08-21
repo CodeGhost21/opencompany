@@ -157,10 +157,15 @@ impl From<ApiError> for FinanceError {
 impl FinanceError {
     /// Classifies an error out of a provider `api` call.
     ///
+    /// Compiled only alongside a provider, since nothing calls it on a build
+    /// with neither — the tests reach it directly, which is why this is a `cfg`
+    /// rather than an `allow(dead_code)` that would also hide a real orphan.
+    ///
     /// Only the provider's own variants become a [`FinanceError::Provider`].
     /// Anything else — a store failure that surfaced mid-call — keeps whatever
     /// status [`ApiError`] already gives it, rather than being relabelled as the
     /// provider's fault.
+    #[cfg(any(feature = "chargebee", feature = "paypal", test))]
     fn from_provider(provider: &'static str, error: crate::error::OpenCompanyError) -> Self {
         match error {
             crate::error::OpenCompanyError::Chargebee {
@@ -250,6 +255,9 @@ impl IntoResponse for FinanceError {
 /// The same rule as `billing::read`, and deliberately the same one: a key
 /// written as `""` by a clear is *absent*, and a surface that treated it as
 /// present would build a client that authenticates as nobody.
+///
+/// Only a provider half calls this, so it is compiled only when one is present.
+#[cfg(any(feature = "chargebee", feature = "paypal"))]
 async fn read(runtime: &CompanyRuntime, key: &str) -> Result<Option<String>, ApiError> {
     Ok(runtime
         .secrets()
@@ -261,6 +269,11 @@ async fn read(runtime: &CompanyRuntime, key: &str) -> Result<Option<String>, Api
 }
 
 /// `?status=&customerEmail=&limit=` on the invoice list.
+///
+/// Still deserialized on a build without Chargebee — the route exists there and
+/// answers `501` — so the fields are written and never read. That is the
+/// `501`-not-`404` decision showing through, not an unused struct.
+#[cfg_attr(not(feature = "chargebee"), allow(dead_code))]
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct InvoiceQuery {
@@ -288,6 +301,7 @@ struct CustomerQuery {
 /// here would mean a clock in this module and a second opinion about PayPal's
 /// three-hour publication lag; the console owns the window because the console
 /// is what has to explain it to the operator (see `finance-console.md`).
+#[cfg_attr(not(feature = "paypal"), allow(dead_code))]
 #[derive(Debug, Default, Deserialize)]
 struct TransactionQuery {
     #[serde(default)]
