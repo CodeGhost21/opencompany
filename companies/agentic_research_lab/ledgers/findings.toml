@@ -1,0 +1,110 @@
+# What the lab believes it has established, and how strongly.
+#
+# The whole product. A finding is not a conclusion in a report — it is a claim
+# with its evidence, its confidence and its known weaknesses attached, so that
+# the critic can attack it and the operator can accept or reject it on
+# something other than tone. A confident sentence in a document is
+# indistinguishable from a well-evidenced one; a row here is not.
+
+title = "Findings"
+purpose = """
+Every claim this lab is prepared to defend, with the sources it rests on, how \
+confident it is, and what would falsify it. This is the report, before it is \
+written up. Nothing reaches the operator that is not a row here.\
+"""
+written_by = "`record_entry` to state or revise a finding, `close_entry` when it is accepted or refuted"
+checks = ["required-field", "known-status", "closed-needs-reason"]
+
+[[field]]
+name = "id"
+role = "id"
+required = true
+
+[[field]]
+name = "finding"
+role = "title"
+required = true
+description = "The claim, stated flatly and without hedging. The hedges belong in `confidence`."
+
+[[field]]
+name = "status"
+role = "status"
+required = true
+
+[[field]]
+name = "evidence"
+role = "prose"
+required = true
+description = "What it rests on, specifically — which source, which passage, which computation."
+
+[[field]]
+name = "confidence"
+role = "prose"
+required = true
+description = "How strongly, and why that and not higher. `established`, `supported`, `suggestive`, `speculative`."
+
+[[field]]
+name = "would_falsify"
+role = "prose"
+description = "What would show this to be wrong. A finding nothing could falsify is not a finding."
+
+[[field]]
+name = "attacked_by"
+role = "prose"
+description = "What the critic tried and what survived. An unattacked finding is not yet a finding."
+
+[[field]]
+name = "owner"
+role = "owner"
+
+[[field]]
+name = "reason"
+role = "prose"
+description = "Why it closed — accepted by the operator, or refuted. Required when it closes."
+
+[[field]]
+name = "refs"
+role = "refs"
+description = "Source ids from the `sources` ledger, and the questions it answers."
+
+[[status]]
+name = "draft"
+
+[[status]]
+name = "under_attack"
+label = "Under attack"
+
+[[status]]
+name = "defended"
+
+[[status]]
+name = "accepted"
+closed = true
+needs_reason = true
+
+[[status]]
+name = "refuted"
+closed = true
+needs_reason = true
+
+[[section]]
+heading = "Defended"
+blurb = "Survived the critic. These are what the lab is prepared to report."
+statuses = ["defended"]
+order = "recent"
+
+[[section]]
+heading = "In progress"
+blurb = "Drafted or currently being attacked. Not reportable yet, whatever they say."
+statuses = ["draft", "under_attack"]
+order = "recent"
+
+[[section]]
+heading = "Settled"
+blurb = """
+Accepted by the operator, or refuted — each with the reason. A refuted finding \
+is kept and is worth more than a missing one: it names an argument that looked \
+right and was not.\
+"""
+statuses = ["accepted", "refuted"]
+cap = 20

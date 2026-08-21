@@ -1,0 +1,104 @@
+# Experiments run against a venture's riskiest assumption, and what they showed.
+#
+# A studio's failure mode is building before validating, and the mechanism is
+# always the same: the validation is judged by the people who want to build. A
+# row that states the pass bar *before* the experiment runs is the only reliable
+# defence, because after the fact any result can be read as encouraging.
+
+title = "Validations"
+purpose = """
+Every experiment run to test whether a venture should exist: what was tested, \
+what would have counted as a pass, and what happened. Read it before building \
+anything — and set the bar before running, never after.\
+"""
+written_by = "`record_entry` to design or update a validation, `close_entry` when it concludes"
+checks = ["required-field", "known-status", "closed-needs-reason"]
+
+[[field]]
+name = "id"
+role = "id"
+required = true
+
+[[field]]
+name = "test"
+role = "title"
+required = true
+description = "What is being tested, as the assumption rather than the activity."
+
+[[field]]
+name = "status"
+role = "status"
+required = true
+
+[[field]]
+name = "venture"
+role = "refs"
+required = true
+
+[[field]]
+name = "pass_bar"
+role = "prose"
+required = true
+description = "What counts as a pass, fixed before the test runs. After the fact, any result reads as encouraging."
+
+[[field]]
+name = "method"
+role = "prose"
+description = "How it is being tested — interviews, a landing page, a concierge build, a pre-sale. A pre-sale is worth ten interviews."
+
+[[field]]
+name = "result"
+role = "prose"
+description = "What happened, against the bar rather than against hope."
+
+[[field]]
+name = "owner"
+role = "owner"
+
+[[field]]
+name = "reason"
+role = "prose"
+description = "How it concluded — passed, failed, or inconclusive. Required when it closes."
+
+[[status]]
+name = "designed"
+
+[[status]]
+name = "running"
+
+[[status]]
+name = "passed"
+closed = true
+needs_reason = true
+
+[[status]]
+name = "failed"
+closed = true
+needs_reason = true
+
+[[status]]
+name = "inconclusive"
+closed = true
+needs_reason = true
+
+[[section]]
+heading = "Running"
+blurb = "In flight, with a bar already fixed. Do not read a running test as a result."
+statuses = ["running"]
+order = "recent"
+
+[[section]]
+heading = "Designed"
+blurb = "Specified, not started. Each must name its pass bar before it runs."
+statuses = ["designed"]
+order = "recent"
+
+[[section]]
+heading = "Concluded"
+blurb = """
+Passed, failed, or inconclusive, judged against the bar set beforehand. A studio \
+that never records a failed validation is a studio validating nothing and \
+building anyway.\
+"""
+statuses = ["passed", "failed", "inconclusive"]
+cap = 20

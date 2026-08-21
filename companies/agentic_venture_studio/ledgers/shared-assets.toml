@@ -1,0 +1,88 @@
+# What one venture built that the others can use.
+#
+# The entire economic argument for a studio. A studio that builds six ventures
+# and shares nothing is six startups with a shared office, and the sharing does
+# not happen by proximity — it happens because somebody wrote down that the
+# billing service exists, what it does, and who to ask.
+
+title = "Shared assets"
+purpose = """
+What the studio has built once and can use again: services, playbooks, contracts, \
+integrations, supplier relationships. Read it before building anything — the \
+studio's advantage is entirely in not rebuilding this.\
+"""
+written_by = "`record_entry` to register or update an asset, `close_entry` when it is retired"
+checks = ["required-field", "known-status", "closed-needs-reason"]
+
+[[field]]
+name = "id"
+role = "id"
+required = true
+
+[[field]]
+name = "asset"
+role = "title"
+required = true
+description = "What it is and what it does, for somebody who has never seen it."
+
+[[field]]
+name = "status"
+role = "status"
+required = true
+
+[[field]]
+name = "built_for"
+role = "refs"
+description = "The venture it came out of."
+
+[[field]]
+name = "used_by"
+role = "refs"
+description = "Which ventures use it now. An asset with one user is not yet shared."
+
+[[field]]
+name = "owner"
+role = "owner"
+description = "Who maintains it. An unowned shared asset becomes an unmaintained dependency for everybody."
+
+[[field]]
+name = "cost_to_adopt"
+role = "prose"
+description = "What it actually takes to use it. Honest here, or the next venture rebuilds it and is right to."
+
+[[field]]
+name = "reason"
+role = "prose"
+description = "Why it closed — retired, replaced, or spun out with a venture. Required when it closes."
+
+[[status]]
+name = "available"
+
+[[status]]
+name = "experimental"
+
+[[status]]
+name = "retired"
+closed = true
+needs_reason = true
+
+[[section]]
+heading = "Available"
+blurb = "Maintained and usable. Check here before building anything."
+statuses = ["available"]
+order = "recent"
+
+[[section]]
+heading = "Experimental"
+blurb = "Built once, not yet hardened. Usable with the cost to adopt stated honestly."
+statuses = ["experimental"]
+order = "recent"
+
+[[section]]
+heading = "Retired"
+blurb = """
+Retired, replaced, or spun out with a venture — with the reason. Kept so nobody \
+adopts something that left with a spin-out.\
+"""
+statuses = ["retired"]
+cap = 20

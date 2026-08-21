@@ -1,0 +1,104 @@
+# What players actually did, as opposed to what the studio intended.
+#
+# The only external truth a studio gets before launch, and the easiest to
+# discount — a playtester who fails at something the designer finds obvious is
+# routinely explained away as unrepresentative. A row with the observation, the
+# build and how many players hit it is much harder to discount three weeks later
+# than a memory of a session is.
+
+title = "Playtests"
+purpose = """
+What playtesters did: where they got stuck, what they misunderstood, what they \
+enjoyed, and in which build. Read it before defending a design on intent — \
+somebody has probably already watched a player fail at it.\
+"""
+written_by = "`record_entry` to log or update a playtest observation, `close_entry` when it is addressed or accepted"
+checks = ["required-field", "known-status", "closed-needs-reason"]
+
+[[field]]
+name = "id"
+role = "id"
+required = true
+
+[[field]]
+name = "observation"
+role = "title"
+required = true
+description = "What players did, as behaviour. Not \"the tutorial is confusing\" but \"six of eight re-opened the map before finding the door\"."
+
+[[field]]
+name = "status"
+role = "status"
+required = true
+
+[[field]]
+name = "build"
+role = "prose"
+required = true
+description = "Which build it was seen in. An observation with no build cannot be re-tested."
+
+[[field]]
+name = "players"
+role = "number"
+description = "How many hit it, out of how many. The difference between a quirk and a design failure."
+
+[[field]]
+name = "severity"
+role = "prose"
+description = "blocking, frustrating, or noticed. Blocking outranks everything on the schedule."
+
+[[field]]
+name = "diagnosis"
+role = "prose"
+description = "Why it happened, once known. Frequently not where the designer expected."
+
+[[field]]
+name = "owner"
+role = "owner"
+
+[[field]]
+name = "reason"
+role = "prose"
+description = "How it closed — fixed, or deliberately accepted. Required when it closes."
+
+[[field]]
+name = "refs"
+role = "refs"
+
+[[status]]
+name = "observed"
+
+[[status]]
+name = "confirmed"
+
+[[status]]
+name = "fixed"
+closed = true
+needs_reason = true
+
+[[status]]
+name = "accepted"
+closed = true
+needs_reason = true
+
+[[section]]
+heading = "Blocking and confirmed"
+blurb = "Seen in more than one session. These outrank anything on the schedule."
+statuses = ["confirmed"]
+order = "recent"
+
+[[section]]
+heading = "Observed once"
+blurb = "Seen in a single session. Worth watching for; not yet worth rebuilding around."
+statuses = ["observed"]
+order = "recent"
+
+[[section]]
+heading = "Closed"
+blurb = """
+Fixed, or deliberately accepted with the reason. `accepted` is a real design \
+choice — some friction is intended — but it must be a choice, not a memory of \
+having decided it was fine.\
+"""
+statuses = ["fixed", "accepted"]
+cap = 20

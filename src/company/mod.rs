@@ -37,6 +37,11 @@ pub mod credentials;
 pub mod dns;
 pub mod hosting;
 pub mod inference;
+/// Ledger declaration files: `companies/<name>/ledgers/<slug>.toml`. A vertical
+/// ships the axes it is about — a matter list, a deal pipeline, an experiment
+/// log — the way it already ships its roster, rather than waiting for some turn
+/// to think of declaring one.
+pub mod ledger_file;
 /// Dynamic ledgers: the one place a ledger is read, written, declared or
 /// retired. Every surface routes through it, because the rules that matter —
 /// only a person deletes, a close says why, the derived file follows the
@@ -122,6 +127,7 @@ pub mod workspace_sweep;
 use std::path::Path;
 
 pub use credentials::{Credential, CredentialSource, TinyhumansTokenSource, TokenTier};
+pub use ledger_file::{LEDGERS_DIR, has_ledger_files, load_dir_ledgers};
 /// The roster-id grammar check, shared with the runtime id minter so a slug and
 /// a hand-authored `[[agent]].id` are held to one rule (issue #686). Not `pub`:
 /// outside the crate the validator speaks through `CompanyManifest::validate`.
