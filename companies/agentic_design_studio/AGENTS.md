@@ -2,7 +2,7 @@
 
 > A design studio of agents delivering branding, UI, motion, and illustration — validated with user testing, signed off by a human creative director.
 
-This file is routed into every teammate's system prompt alongside `METHOD.md` (`context_routing::UNIVERSAL_DOCUMENTS`), so it is the one place a convention reaches the whole roster without being repeated in every agent's `context`.
+This file is routed into every teammate's system prompt alongside `method.md` (`context_routing::UNIVERSAL_DOCUMENTS`), so it is the one place a convention reaches the whole roster without being repeated in every agent's `context`.
 
 ## Roster
 
@@ -14,14 +14,14 @@ This file is routed into every teammate's system prompt alongside `METHOD.md` (`
 | `ui_designer` | UI Designer | Product UI and design systems. |
 | `user_researcher` | User Researcher | User testing and design validation. |
 
-`brand_designer` (Brand Designer) is this company's orchestrator: it holds the routing picture (`BRIEF.md`, `CLAIMS.md`, `THREADS.md`) and unrestricted ledger access, so it is the one that sets and revises goals and decisions rather than a specialist re-deciding them mid-task.
+`brand_designer` (Brand Designer) is this company's orchestrator: it holds the routing picture (`brief.md`, `claims.md`, `threads.md`) and unrestricted ledger access, so it is the one that sets and revises goals and decisions rather than a specialist re-deciding them mid-task.
 
 Humans keep **creative direction sign-off**; everything else here is the roster's to run.
 
 ## Workspace layout
 
 - `standards/`, `product/`, `playbooks/` — shared, operator-seeded notes. Read them before proposing work that touches an area they cover; edit them on purpose, not as a side effect of an unrelated task.
-- `Agents/<your agent id>/` — your own folder, the default home for anything you produce. Always writable, whatever your `context` write scope says.
+- `agents/<your agent id>/` — your own folder, the default home for anything you produce. Always writable, whatever your `context` write scope says.
 - `derived/` — rendered ledger views (see below). Never hand-write anything here; it is regenerated on every ledger write.
 
 ## Ledgers
@@ -34,5 +34,5 @@ This company keeps the three built-in ledgers — `tasks` (the task board), `goa
 
 ## Write scope
 
-Every specialist but `brand_designer` declares an explicit `context` confining `workspace_write`/`workspace_create` to `projects/fintech-rebrand.md` — this company's one shared active-work document — plus its own `Agents/<id>/` home, which stays writable regardless. `standards/` and `playbooks/` are left out of that grant: governance documents, read by everyone but reserved for the operator and `brand_designer` (unconfined) to change.
+Every specialist but `brand_designer` declares an explicit `context` confining `workspace_write`/`workspace_create` to `projects/fintech-rebrand.md` — this company's one shared active-work document — plus its own `agents/<id>/` home, which stays writable regardless. `standards/` and `playbooks/` are left out of that grant: governance documents, read by everyone but reserved for the operator and `brand_designer` (unconfined) to change.
 

@@ -35,7 +35,7 @@
 //! # Agents write broadly by default — `secrets/` is out, per-path scope is opt-in
 //!
 //! Two independent boundaries sit on this surface, and neither is the old
-//! "confine create to `Agents/<id>/`" idea (issue #551, revisited).
+//! "confine create to `agents/<id>/`" idea (issue #551, revisited).
 //!
 //! The first is unconditional and is about confidentiality: `secrets/` is
 //! operator-only. That subtree is omitted from the agent path index and from
@@ -47,7 +47,7 @@
 //! two, ordinary shared content still has no prefix gate: an agent may create
 //! and overwrite anywhere in the company's tree, exactly as `workspace_write`
 //! always could. Confining
-//! *create* to `Agents/<id>/` while leaving *overwrite* free would protect
+//! *create* to `agents/<id>/` while leaving *overwrite* free would protect
 //! nothing — overwriting an existing standard is the strictly more destructive
 //! of the two operations — so a confinement that stopped at create alone would
 //! be theatre with a maintenance cost.
@@ -63,7 +63,7 @@
 //! least one `context` entry with `access = "write"` (see
 //! [`crate::company::Agent::write_scope`]). That agent's `workspace_write` and
 //! `workspace_create` are then confined to exactly the paths it declared, plus
-//! its own `Agents/<id>/` home, which stays writable regardless — a role given
+//! its own `agents/<id>/` home, which stays writable regardless — a role given
 //! a real access list keeps its ability to produce and revise its own work.
 //! **This is opt-in, not the default**: a manifest that declares no write
 //! entry is unaffected, so every company written before this existed keeps the
@@ -77,7 +77,7 @@
 //! produce leaves every superseded draft in place forever, under whatever name
 //! its first attempt gave it — and since issue #607 each of those competes for
 //! a slot in a bounded search result with the note that replaced it. So rename
-//! and delete are on this surface now, confined to `Agents/<agent id>/`:
+//! and delete are on this surface now, confined to `agents/<agent id>/`:
 //! tidying your own folder is upkeep, while rearranging anybody else's work is
 //! still the operator's call. That confinement is **not** a security boundary —
 //! the same grant already confers unconfined overwrite — and [`lifecycle`] says
@@ -410,7 +410,7 @@ impl CompanyWorkspace {
     /// `None` scope is unconfined — every path is in scope, matching the
     /// behaviour every agent had before this existed. `Some(paths)` allows an
     /// exact match against a declared path, or anything under this agent's own
-    /// `Agents/<id>/` home, which stays writable regardless of scope: a role
+    /// `agents/<id>/` home, which stays writable regardless of scope: a role
     /// narrowed to a real access list must not also lose the ability to
     /// produce and revise its own work.
     fn write_allowed(&self, path: &str) -> bool {
@@ -451,18 +451,18 @@ impl CompanyWorkspace {
     }
 
     /// Whether `segments` spell exactly this agent's own home folder,
-    /// `Agents/<this agent's id>`.
+    /// `agents/<this agent's id>`.
     ///
     /// Compared segment-wise against the id fixed at agent-build time, so it
     /// cannot be spoofed from a tool argument and cannot match a *teammate's*
-    /// home — a path one level deeper (`Agents/<self>/drafts`) is not the home
+    /// home — a path one level deeper (`agents/<self>/drafts`) is not the home
     /// either, which is what keeps the one-node-per-call rule intact.
     fn is_own_home(&self, segments: &[&str]) -> bool {
         matches!(segments, [root, agent] if is_agents_root(root) && self.names_self(agent))
     }
 
     /// Whether `segments` name something **inside** this agent's own home —
-    /// `Agents/<this agent's id>/…` at any depth below the folder itself.
+    /// `agents/<this agent's id>/…` at any depth below the folder itself.
     ///
     /// The companion to [`is_own_home`](Self::is_own_home), which is an exact
     /// match and stays one: create needs "is this precisely the folder I may
@@ -494,7 +494,7 @@ impl CompanyWorkspace {
         segment == self.agent_id || segment == kebab_name_or(&self.agent_id, &self.agent_id)
     }
 
-    /// Adopt-or-create this agent's own `Agents/<id>/` folder, returning its id.
+    /// Adopt-or-create this agent's own `agents/<id>/` folder, returning its id.
     ///
     /// Since issue #551 a member folder is minted on first use rather than
     /// provisioned for every roster member at boot, so the agent's home may
@@ -1552,7 +1552,7 @@ impl Tool for WorkspaceWriteTool {
 
     fn description(&self) -> &str {
         "Overwrite one EXISTING note in the company's shared workspace with a complete new body. \
-         USE FOR revising a note you have just read — your own work under `Agents/<your agent \
+         USE FOR revising a note you have just read — your own work under `agents/<your agent \
          id>/`, or shared company documentation when the task you were given is about it. You \
          must pass `expected_updated_at` — the `rev` from a `workspace_read` of that same note — \
          and the write is refused if the note changed since. This replaces the whole body, so \
@@ -2019,7 +2019,7 @@ impl Tool for WorkspaceCreateTool {
         // silently making the intermediate folders would let a single typo grow
         // a whole phantom subtree nobody asked for.
         //
-        // The agent's own `Agents/<self>/` home is the one exception, and it is
+        // The agent's own `agents/<self>/` home is the one exception, and it is
         // not a relaxation of that rule: since issue #551 the home is minted on
         // first use rather than provisioned at boot, so the *only* way an agent
         // reaches the folder the brief tells it to work in is by putting
@@ -2027,10 +2027,10 @@ impl Tool for WorkspaceCreateTool {
         // refusing an agent access to its own home for the exact call that is
         // supposed to bring it into existence. It stays one node per call:
         // nothing else in the tree is auto-made, and a path one level deeper
-        // (`Agents/<self>/drafts/x.md`) still gets the ordinary refusal.
+        // (`agents/<self>/drafts/x.md`) still gets the ordinary refusal.
         // Both halves of "where did it go": the id to parent it under, and the
         // parent's *stored* path. They differ whenever the agent typed a legacy
-        // spelling — `Agents/ceo` for a folder stored as `agents/ceo` — and the
+        // spelling — `agents/ceo` for a folder stored as `agents/ceo` — and the
         // reply has to name the path the node can actually be read back at, not
         // the one that was asked for.
         let mut parent_display: Option<String> = None;
@@ -4199,7 +4199,7 @@ mod tests {
             .unwrap();
         assert!(
             !out.is_error,
-            "creating outside `Agents/` must be allowed: {}",
+            "creating outside `agents/` must be allowed: {}",
             text(&out)
         );
 
@@ -4224,8 +4224,8 @@ mod tests {
 
         for args in [
             json!({ "path": "Agents", "kind": "folder" }),
-            json!({ "path": "Agents/ceo", "kind": "folder" }),
-            json!({ "path": "Agents/ceo/Launch brief.md", "kind": "file", "content": "# Launch" }),
+            json!({ "path": "agents/ceo", "kind": "folder" }),
+            json!({ "path": "agents/ceo/Launch brief.md", "kind": "file", "content": "# Launch" }),
         ] {
             let out = tool.execute(args.clone()).await.unwrap();
             assert!(!out.is_error, "{args}: {}", text(&out));
@@ -4256,7 +4256,7 @@ mod tests {
 
         let out = tool
             .execute(json!({
-                "path": "Agents/ceo/Launch brief.md",
+                "path": "agents/ceo/Launch brief.md",
                 "kind": "file",
                 "content": "# Launch",
             }))
@@ -4286,7 +4286,7 @@ mod tests {
         // A second note goes into the same folder — minting is find-or-create,
         // not create.
         let out = tool
-            .execute(json!({ "path": "Agents/ceo/Retro.md", "kind": "file" }))
+            .execute(json!({ "path": "agents/ceo/Retro.md", "kind": "file" }))
             .await
             .unwrap();
         assert!(!out.is_error, "{}", text(&out));
@@ -4308,7 +4308,7 @@ mod tests {
 
     /// The mint repairs its own root too: an agent whose company never got the
     /// boot scaffold (or whose create fail-softed) still lands its work under
-    /// `Agents/`, rather than being stuck behind a folder nobody will make.
+    /// `agents/`, rather than being stuck behind a folder nobody will make.
     #[tokio::test]
     async fn the_home_mint_creates_the_agents_root_when_it_is_missing() {
         let (_dir, store) = seeded("acme").await;
@@ -4316,7 +4316,7 @@ mod tests {
         let tool = WorkspaceCreateTool::new(ws(store.clone(), id.clone()));
 
         let out = tool
-            .execute(json!({ "path": "Agents/ceo/Brief.md", "kind": "file" }))
+            .execute(json!({ "path": "agents/ceo/Brief.md", "kind": "file" }))
             .await
             .unwrap();
         assert!(!out.is_error, "{}", text(&out));
@@ -4352,11 +4352,11 @@ mod tests {
         let tool = WorkspaceCreateTool::new(ws(store.clone(), id.clone()));
 
         let out = tool
-            .execute(json!({ "path": "Agents/cmo/Brief.md", "kind": "file" }))
+            .execute(json!({ "path": "agents/cmo/Brief.md", "kind": "file" }))
             .await
             .unwrap();
         assert!(out.is_error, "{}", text(&out));
-        assert!(text(&out).contains("Agents/cmo"), "{}", text(&out));
+        assert!(text(&out).contains("agents/cmo"), "{}", text(&out));
         assert_eq!(
             store.tree(&id).await.unwrap().len(),
             before,
@@ -4378,11 +4378,11 @@ mod tests {
         let tool = WorkspaceCreateTool::new(ws(store.clone(), id.clone()));
 
         let out = tool
-            .execute(json!({ "path": "Agents/ceo/drafts/Brief.md", "kind": "file" }))
+            .execute(json!({ "path": "agents/ceo/drafts/Brief.md", "kind": "file" }))
             .await
             .unwrap();
         assert!(out.is_error, "{}", text(&out));
-        assert!(text(&out).contains("Agents/ceo/drafts"), "{}", text(&out));
+        assert!(text(&out).contains("agents/ceo/drafts"), "{}", text(&out));
         assert_eq!(
             store.tree(&id).await.unwrap().len(),
             before,
@@ -4419,9 +4419,9 @@ mod tests {
     }
 
     /// The reserved-root case of the rule above, called out because it is the
-    /// one that matters most: identity in `Agents/` is by path, so an agent
+    /// one that matters most: identity in `agents/` is by path, so an agent
     /// that could mint a rival root named `Agents` would make every
-    /// `Agents/...` path permanently ambiguous — for itself, for its teammates
+    /// `agents/...` path permanently ambiguous — for itself, for its teammates
     /// and for the provisioner.
     #[tokio::test]
     async fn create_cannot_mint_a_rival_agents_root() {
@@ -5177,7 +5177,7 @@ mod tests {
         assert!(!result.is_error, "{}", text(&result));
     }
 
-    /// A write-scoped agent may still create inside its own `Agents/<id>/`
+    /// A write-scoped agent may still create inside its own `agents/<id>/`
     /// home — the scope narrows the shared tree, not the ability to produce
     /// and revise its own work.
     #[tokio::test]
@@ -5190,7 +5190,7 @@ mod tests {
 
         let result = tool
             .execute(json!({
-                "path": "Agents/ceo/Notes.md",
+                "path": "agents/ceo/Notes.md",
                 "kind": "file",
                 "content": "# Notes"
             }))

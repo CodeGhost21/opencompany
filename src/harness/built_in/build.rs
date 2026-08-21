@@ -42,7 +42,7 @@
 //!   **explicit** `workspace` / `workspace.write` grant — a bare `*` does not
 //!   confer them. `workspace_write` and `workspace_delete` are each guarded by
 //!   a required compare-and-swap revision token, and the lifecycle pair reaches
-//!   only `Agents/<agent id>/`. Unlike the file tools these are scoped by the
+//!   only `agents/<agent id>/`. Unlike the file tools these are scoped by the
 //!   store, not the filesystem: every call resolves through one company-scoped
 //!   `tree()` read, so no host path is ever built from agent input.
 //! * **Delegation authority is orchestrator-only; delegation itself is
@@ -773,7 +773,7 @@ pub fn build_agent(
     // (`policy::consequence`); and authorship, since every node records who
     // created it and who last wrote it (#326).
     //
-    // Rename and delete additionally reach only `Agents/<agent id>/`. Read that
+    // Rename and delete additionally reach only `agents/<agent id>/`. Read that
     // as a division of labour, not as a security boundary: the same grant
     // already confers unconfined overwrite, which is the broader power. See the
     // `workspace_tools::lifecycle` module docs.
@@ -805,7 +805,7 @@ pub fn build_agent(
         tools.extend(workspace_tools);
     }
 
-    // Agent-authored internal dashboard pages (`Pages/<slug>/` in the same
+    // Agent-authored internal dashboard pages (`pages/<slug>/` in the same
     // workspace store). Unlike workspace reads vs. writes above, there is no
     // two-tier gate here: per the design, `pages` rides the default `"*"`
     // grant whole, so a single `grants_cover` check on `pages` is enough —

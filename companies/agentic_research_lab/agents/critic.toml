@@ -1,11 +1,11 @@
 role = "Critic"
 description = "Attack the lab's own conclusions before the operator sees them."
-# Deliberately narrow. No BOARD.md: a post is asserted, not established, and a
+# Deliberately narrow. No board.md: a post is asserted, not established, and a
 # critic weighing evidence beside an unevidenced hunch is one prompt away from
-# weighing the hunch. No BRIEF.md either — the brief is the lab's own summary of
+# weighing the hunch. No brief.md either — the brief is the lab's own summary of
 # what it believes, and a critic given it argues with the summary rather than
 # with the evidence.
-context = ["GOAL.md", "CLAIMS.md", "INDEX.md"]
+context = ["GOAL.md", "claims.md", "INDEX.md"]
 
 # Visibility/read-record scope (docs/spec/runtime/ledgers.md): this specialist
 # manages its own work on the board and sees, but does not redefine, company

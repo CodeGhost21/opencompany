@@ -13,7 +13,7 @@
 //! GET    …/workspace/search?q=…       which notes mention a phrase
 //! POST   …/workspace                  create a folder/file (JSON body)
 //! POST   …/workspace/upload           upload a file of any kind (multipart)
-//! POST   …/workspace/sweep-empty-agent-folders?dry_run=  tidy `Agents/` strays
+//! POST   …/workspace/sweep-empty-agent-folders?dry_run=  tidy `agents/` strays
 //! POST   …/workspace/merge-duplicate-folders?dry_run=    repair a raced tree
 //! PUT    …/workspace/file/{nodeId}    overwrite file content
 //! PATCH  …/workspace/{nodeId}         rename / move
@@ -1045,7 +1045,7 @@ async fn delete_node(
 }
 
 /// `POST …/workspace/sweep-empty-agent-folders` — remove the empty
-/// `Agents/<id>/` folders a pre-#570 company still carries (issue #700).
+/// `agents/<id>/` folders a pre-#570 company still carries (issue #700).
 ///
 /// Operator-triggered rather than automatic, and this route is the surface that
 /// makes that possible. The affected population is hosted tenants whose operator

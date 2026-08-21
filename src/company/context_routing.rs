@@ -36,12 +36,12 @@ pub const UNIVERSAL_DOCUMENT: &str = "method.md";
 /// The company's per-workspace working agreement, routed to every role
 /// alongside [`UNIVERSAL_DOCUMENT`].
 ///
-/// Distinct from `METHOD.md`: `METHOD.md` is the company's method policy,
+/// Distinct from `method.md`: `method.md` is the company's method policy,
 /// authored per company; `AGENTS.md` is the bundle-level agreement every
 /// teammate in the roster shares — which files exist and what they are for,
 /// how work is expected to be handed off, conventions a person and every
 /// agent are both bound by. Also asserts nothing about work in progress, so it
-/// is exempt from class exclusions the same way `METHOD.md` is.
+/// is exempt from class exclusions the same way `method.md` is.
 pub const AGENTS_DOC: &str = "agents.md";
 
 /// Every document routed to every role, whatever its tier, classes, or
@@ -226,8 +226,8 @@ pub async fn resolve_routed_documents(
             // the two spellings both occur in a real company: the routing names
             // above are lowercase-dashed like everything else the runtime mints
             // (`crate::company::workspace_names`), while a company that predates
-            // that rule holds `BRIEF.md`, and a manifest written then still says
-            // `BRIEF.md` in its `context` list. Routing a role its brief must
+            // that rule holds `brief.md`, and a manifest written then still says
+            // `brief.md` in its `context` list. Routing a role its brief must
             // not depend on which of those it is looking at.
             //
             // The literal insert wins a collision: `Brief.md` and `brief.md` in

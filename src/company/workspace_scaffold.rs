@@ -1,12 +1,12 @@
-//! The workspace's system roots — `Agents/`, `Desks/`, and `secrets/` — and the
+//! The workspace's system roots — `agents/`, `desks/`, and `secrets/` — and the
 //! content the runtime owns beneath them.
 //!
 //! Before this module an agent had nowhere in the shared tree that was
 //! recognisably *its own*: everything it produced landed in its private
 //! per-agent sandbox or on a task artifact, neither of which the operator or
-//! another agent browses. `Agents/` gives each roster member a named place in
+//! another agent browses. `agents/` gives each roster member a named place in
 //! the one tree both sides read, so "where did the CMO put the launch brief"
-//! has an answer a human can navigate to. `Desks/` is the same idea one level
+//! has an answer a human can navigate to. `desks/` is the same idea one level
 //! up, for work a desk produces rather than one teammate (issue #552 wires the
 //! producer).
 //!
@@ -15,14 +15,14 @@
 //! Provisioning runs on deliberately different schedules, and the line between
 //! them is whether anything actually writes there yet:
 //!
-//! * `Agents/` is scaffolding. [`ensure_workspace_scaffold`] lays it down on
+//! * `agents/` is scaffolding. [`ensure_workspace_scaffold`] lays it down on
 //!   every boot, empty, whether or not the company has a roster — it is part of
 //!   what a workspace *is*, the same way the template-seeded `playbooks/` and
 //!   `standards/` are, and it has a real producer behind it: the persona brief
 //!   steers every agent to write beneath it, so an operator opening the
 //!   Workspace tab on a brand-new company is being shown where things are about
 //!   to appear rather than a void.
-//! * `Desks/` is **not** scaffolded (issue #645). It was, until it turned out
+//! * `desks/` is **not** scaffolded (issue #645). It was, until it turned out
 //!   nothing writes into it: issue #552's publish path is still unwired, so
 //!   [`ensure_desk_folder`] has no callers and every company carried a
 //!   permanently empty root advertising a feature it does not yet have. An
@@ -33,7 +33,7 @@
 //! * `secrets/` is operator-only scaffolding. It is laid down eagerly with a
 //!   `readme.md` explaining that agent workspace tools omit the entire subtree.
 //! * A **member folder** was never scaffolding either; it is a container for
-//!   something. `Agents/<agent-id>/` and `Desks/<desk-id>/` are minted on demand
+//!   something. `agents/<agent-id>/` and `desks/<desk-id>/` are minted on demand
 //!   — by [`ensure_agent_folder`] / [`ensure_desk_folder`], at the moment that
 //!   agent or desk first produces a task, artifact or note. An eager folder per
 //!   roster member fills the tree with empty directories for teammates who have
@@ -52,7 +52,7 @@
 //! any note, and gating *create* while *overwrite* stays free would protect
 //! nothing, since overwriting is the strictly more destructive of the two).
 //! What keeps the tree tidy is steering — the persona brief names
-//! `Agents/<your id>/` as the default home for anything an agent produces —
+//! `agents/<your id>/` as the default home for anything an agent produces —
 //! plus the authorship stamps from issue #326, which make it visible after the
 //! fact who put what where. Containment lives one level up, in company tenancy,
 //! the explicit `workspace` write grant, the CAS token, and policy parking.
@@ -150,7 +150,7 @@ pub const SECRETS_README: &str = "# Workspace secrets\n\nStore private operator 
 
 /// The system roots the runtime lays down eagerly, on every boot.
 ///
-/// Deliberately *not* derived from the manifest: `Agents/` exists because a
+/// Deliberately *not* derived from the manifest: `agents/` exists because a
 /// workspace has it, not because a particular company has agents.
 ///
 /// [`DESKS_ROOT`] is deliberately absent (issue #645). Nothing writes into it
@@ -189,7 +189,7 @@ pub fn is_agent_hidden_path(path: &str) -> bool {
 /// What it creates is stamped [`WorkspaceOrigin::Seed`] — scaffolding the
 /// runtime lays down, authored by no operator and no agent. `secrets/` receives
 /// one explanatory `readme.md`; member folders beneath `agents/` remain lazy
-/// (see [`ensure_agent_folder`]). `Desks/` is not created here at all, and an
+/// (see [`ensure_agent_folder`]). `desks/` is not created here at all, and an
 /// existing one is never even looked at: this walks
 /// [`SYSTEM_ROOTS`] by name, so a legacy company's `Desks/` (from before issue
 /// #645, or hand-made by an operator) is left exactly as it stands, contents
@@ -282,7 +282,7 @@ pub async fn ensure_workspace_scaffold(
     Ok(())
 }
 
-/// Adopt-or-create `Agents/<agent_id>/`, returning its node id.
+/// Adopt-or-create `agents/<agent_id>/`, returning its node id.
 ///
 /// The lazy half of the feature: call this at the moment `agent_id` first
 /// produces something that needs a home, not when it joins the roster. Creates
@@ -312,15 +312,15 @@ pub async fn ensure_agent_folder(
     .await
 }
 
-/// Adopt-or-create `Desks/<desk_id>/`, returning its node id.
+/// Adopt-or-create `desks/<desk_id>/`, returning its node id.
 ///
 /// [`ensure_agent_folder`]'s counterpart for a desk — call it when a desk first
 /// produces an artifact. Nothing calls it yet; issue #552's publish path is the
 /// first producer.
 ///
-/// Unlike `Agents/`, the `Desks/` root is not scaffolded at boot (issue #645),
+/// Unlike `agents/`, the `desks/` root is not scaffolded at boot (issue #645),
 /// so this mints the root as well when it is missing. That is the point rather
-/// than a fallback: `Desks/` appears the first time a desk has something to put
+/// than a fallback: `desks/` appears the first time a desk has something to put
 /// in it, instead of standing empty in every company that never uses one.
 ///
 /// Both the root and the member folder are stamped [`WorkspaceOrigin::Seed`]
@@ -352,7 +352,7 @@ pub async fn ensure_desk_folder(
 ///
 /// [`find`] answering `Free` describes the instant the tree was read, and the
 /// create used to act on it afterwards. Two agents first producing something at
-/// once therefore both saw `Agents/` free — or both saw `Agents/<id>/` free —
+/// once therefore both saw `agents/` free — or both saw `agents/<id>/` free —
 /// and both created, leaving two folders under one name. Nothing repairs that:
 /// [`find`] answers a duplicated name with `Collision` from then on, so a race
 /// lasting microseconds refuses that agent's folder forever.
@@ -442,7 +442,7 @@ fn legacy_alias(
 ///
 /// `pub(crate)` alongside [`find`], for the one other module that has to resolve
 /// a system root: [`workspace_sweep`](crate::company::workspace_sweep). A sweep
-/// that removes folders *under* `Agents/` has to agree with the scaffold about
+/// that removes folders *under* `agents/` has to agree with the scaffold about
 /// which node that root is, and about when there isn't one — a second lookup
 /// with its own idea of "the `Agents` folder" could adopt a node this module
 /// refuses to touch, and then delete beneath it.
@@ -469,7 +469,7 @@ pub(crate) enum Found {
 /// ([`workspace_names`](super::workspace_names)). A case-*sensitive* lookup
 /// would answer `Free` for every company created before that, and the create
 /// beneath it would mint a second root — so one agent's home would be under
-/// `Agents/` and its next deliverable under `agents/`, with neither view
+/// `agents/` and its next deliverable under `agents/`, with neither view
 /// complete and nothing reporting the split. Matching case-insensitively adopts
 /// the folder that is already there, whichever spelling it carries.
 ///
@@ -607,7 +607,7 @@ mod tests {
 
     /// The scaffold has an empty agent root plus the operator-only secrets
     /// folder and its explanatory note. It never creates roster member folders
-    /// or the unused `Desks/` root.
+    /// or the unused `desks/` root.
     #[tokio::test]
     async fn it_provisions_one_empty_system_root() {
         let (_dir, ws) = store().await;
@@ -621,7 +621,7 @@ mod tests {
         assert_eq!(
             paths(&nodes),
             scaffold_paths(),
-            "`Desks/` has no producer, so boot must not lay it down"
+            "`desks/` has no producer, so boot must not lay it down"
         );
         for node in nodes.iter().filter(|node| node.kind == NodeKind::Folder) {
             assert_eq!(
@@ -669,7 +669,7 @@ mod tests {
 
     /// An operator-made `Agents/` folder is adopted as-is rather than
     /// duplicated — identity is by path, so a second root would make every
-    /// `Agents/...` path permanently ambiguous.
+    /// `agents/...` path permanently ambiguous.
     #[tokio::test]
     async fn an_existing_root_folder_is_adopted() {
         let (_dir, ws) = store().await;
@@ -813,7 +813,7 @@ mod tests {
         assert_eq!(first, second, "a second call minted a rival folder");
         assert_eq!(
             tree_paths(&ws, &company).await,
-            vec!["Agents", "Agents/ceo", "secrets", "secrets/README.md"]
+            vec!["Agents", "agents/ceo", "secrets", "secrets/README.md"]
         );
         let nodes = ws.tree(&company).await.unwrap();
         let ceo = nodes.iter().find(|n| n.name == "ceo").unwrap();
@@ -837,13 +837,13 @@ mod tests {
 
         assert_eq!(
             tree_paths(&ws, &company).await,
-            vec!["Agents", "Agents/cmo", "secrets", "secrets/README.md"]
+            vec!["Agents", "agents/cmo", "secrets", "secrets/README.md"]
         );
     }
 
     /// A minter is also its own repair path: it creates the root when the
     /// scaffold never ran, so a boot whose create fail-softed still ends up
-    /// with a usable `Agents/` the first time an agent produces anything.
+    /// with a usable `agents/` the first time an agent produces anything.
     #[tokio::test]
     async fn ensure_agent_folder_creates_the_root_it_needs() {
         let (_dir, ws) = store().await;
@@ -854,7 +854,7 @@ mod tests {
             .unwrap();
 
         let nodes = ws.tree(&company).await.unwrap();
-        assert_eq!(paths(&nodes), vec!["Agents", "Agents/ceo"]);
+        assert_eq!(paths(&nodes), vec!["Agents", "agents/ceo"]);
         let root = nodes.iter().find(|n| n.name == AGENTS_ROOT).unwrap();
         assert_eq!(root.created_by, WorkspaceOrigin::Seed);
         assert_eq!(nodes.iter().find(|n| n.id == id).unwrap().name, "ceo");
@@ -984,7 +984,7 @@ mod tests {
     }
 
     /// The desk minter is the same shape one root over — and since issue #645
-    /// it is the *only* thing that ever creates `Desks/`. Deliberately run with
+    /// it is the *only* thing that ever creates `desks/`. Deliberately run with
     /// no scaffold at all: the first call must mint the root and the member
     /// folder together, which is what lets boot stop laying down an empty root
     /// nothing was filling.
@@ -1008,7 +1008,7 @@ mod tests {
         assert_eq!(first, second, "a second call minted a rival folder");
         assert_eq!(
             tree_paths(&ws, &company).await,
-            vec!["Desks", "Desks/creative_studio"],
+            vec!["Desks", "desks/creative_studio"],
             "the root appears with its first occupant, and brings nothing else"
         );
         let nodes = ws.tree(&company).await.unwrap();
@@ -1025,11 +1025,11 @@ mod tests {
     }
 
     /// The migration story for every company that booted before issue #645: its
-    /// `Desks/` root already exists, and the scaffold must leave it completely
+    /// `desks/` root already exists, and the scaffold must leave it completely
     /// alone rather than notice it is no longer managed and tidy it away.
     ///
     /// The scaffold only ever looks up the names in `SYSTEM_ROOTS`, so a
-    /// `Desks/` node is not even inspected — id, authorship and contents all
+    /// `desks/` node is not even inspected — id, authorship and contents all
     /// survive untouched.
     #[tokio::test]
     async fn a_pre_existing_desks_root_survives_the_scaffold_untouched() {
@@ -1062,7 +1062,7 @@ mod tests {
         assert_eq!(
             paths(&nodes),
             vec!["Agents", "Desks", "secrets", "secrets/README.md"],
-            "dropping `Desks/` from the scaffold must not delete an existing one"
+            "dropping `desks/` from the scaffold must not delete an existing one"
         );
         let desks = nodes.iter().find(|n| n.name == DESKS_ROOT).unwrap();
         assert_eq!(desks.id, "legacy-desks", "the existing root must be kept");
@@ -1101,7 +1101,7 @@ mod tests {
     }
 
     /// The two roots stay independent: minting a desk folder does not reach
-    /// into `Agents/`, and vice versa.
+    /// into `agents/`, and vice versa.
     #[tokio::test]
     async fn the_two_roots_do_not_leak_into_each_other() {
         let (_dir, ws) = store().await;
@@ -1116,7 +1116,7 @@ mod tests {
 
         assert_eq!(
             tree_paths(&ws, &company).await,
-            vec!["Agents", "Agents/shared", "Desks", "Desks/shared"]
+            vec!["Agents", "agents/shared", "Desks", "desks/shared"]
         );
     }
 }

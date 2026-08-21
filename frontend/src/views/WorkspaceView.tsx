@@ -394,7 +394,7 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  // The roster names the `Agents/` folders resolve against (issue #973). Best
+  // The roster names the `agents/` folders resolve against (issue #973). Best
   // effort and never blocking: a host predating the roster route 404s, and the
   // tree simply falls back to the raw ids it has always shown.
   const [rosterNames, setRosterNames] = useState<RosterNames>(() => new Map());
@@ -518,7 +518,7 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
 
   // Best effort, and deliberately separate from `loadTree`: a host with no
   // roster route (or a request that simply fails) must not stop the workspace
-  // itself from loading — it only means the `Agents/` folders keep showing raw
+  // itself from loading — it only means the `agents/` folders keep showing raw
   // ids, exactly as they did before this issue.
   const loadRoster = useCallback(async () => {
     const mine = ++rosterGen.current;
@@ -1149,7 +1149,7 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
   }
 
   /**
-   * Ask the host which `Agents/<id>/` folders are empty, and show them
+   * Ask the host which `agents/<id>/` folders are empty, and show them
    * (issue #700).
    *
    * A preview, always — the deletion is a second call the operator makes from
@@ -1809,7 +1809,7 @@ interface TreeProps {
 }
 
 /**
- * Whether `folder` is the workspace's `Agents/` root — the one folder whose
+ * Whether `folder` is the workspace's `agents/` root — the one folder whose
  * direct children are named by roster id rather than anything an operator
  * chose (issue #973). Root-scoped (`parentId === null`) so a note or folder an
  * operator names "Agents" somewhere else in the tree is never mistaken for it.
@@ -1819,7 +1819,7 @@ function isAgentsFolder(folder: FsNode | undefined): boolean {
 }
 
 /**
- * `Agents/`'s children, sorted by display name rather than the lexical id
+ * `agents/`'s children, sorted by display name rather than the lexical id
  * {@link childrenOf} sorts everywhere else (issue #973). The pre-#686 ULID ids
  * all sort before every readable slug under the plain id ordering, which is
  * not an order an operator can read anything into.
@@ -1828,7 +1828,7 @@ function sortRosterFolders(items: FsNode[], names: RosterNames): FsNode[] {
   return [...items].sort((a, b) => {
     if (a.kind !== b.kind) return a.kind === "folder" ? -1 : 1;
     // Only a roster folder's name is an id worth resolving. A direct file
-    // under `Agents/` is unusual but not impossible, and its raw name could
+    // under `agents/` is unusual but not impossible, and its raw name could
     // coincidentally collide with a roster id — that must not reorder it by
     // a display name it was never given one for.
     return a.kind === "folder"
@@ -1915,11 +1915,11 @@ function TreeRow({ node, ...props }: TreeProps & { node: FsNode }) {
   const isFolder = node.kind === "folder";
   const isOpen = expanded.has(node.id);
   const active = node.id === openId;
-  // A direct child of `Agents/` is named by roster id — its real folder path,
+  // A direct child of `agents/` is named by roster id — its real folder path,
   // and the identity every artifact it holds is stamped with — but an operator
   // recognizes the teammate by name, not by that id (issue #973). The id stays
   // the label everywhere else in the tree: it is only ever a roster id one
-  // level below `Agents/`.
+  // level below `agents/`.
   const isRosterFolder = isFolder && isAgentsFolder(nodeById(nodes, node.parentId));
   const displayName = isRosterFolder ? rosterDisplayName(node.name, rosterNames) : node.name;
   /**
@@ -2466,8 +2466,8 @@ function SweepDialog({
             {done
               ? count === 0
                 ? "Nothing was removed — every folder had gained something by the time the tidy ran."
-                : `Removed ${count} empty folder${count === 1 ? "" : "s"} from Agents/.`
-              : `${count} folder${count === 1 ? "" : "s"} under Agents/ hold nothing at all. Removing them cannot take anything with them — a folder holding any file, note or subfolder is left alone.`}
+                : `Removed ${count} empty folder${count === 1 ? "" : "s"} from agents/.`
+              : `${count} folder${count === 1 ? "" : "s"} under agents/ hold nothing at all. Removing them cannot take anything with them — a folder holding any file, note or subfolder is left alone.`}
           </DialogDescription>
         </DialogHeader>
         <ul

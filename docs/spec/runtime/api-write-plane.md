@@ -35,7 +35,7 @@ POST   …/workspace                          create a folder/file (or upload)
 PUT    …/workspace/file/{nodeId}             write file content
 PATCH  …/workspace/{nodeId}                  rename / move
 DELETE …/workspace/{nodeId}                  delete a node
-POST   …/workspace/sweep-empty-agent-folders?dry_run=  tidy `Agents/` strays (#700)
+POST   …/workspace/sweep-empty-agent-folders?dry_run=  tidy `agents/` strays (#700)
 POST   …/workspace/merge-duplicate-folders?dry_run=    repair a raced tree (#759)
 POST   …/skills                             add a custom skill
 GET    …/skills/registry                     browse the shared skill library
@@ -103,7 +103,7 @@ only: a text read of a payload is empty by the port's definition, and its bytes
 are never scanned or excerpted.
 
 `POST …/workspace/sweep-empty-agent-folders` (#700) removes the empty
-`Agents/<id>/` folders a pre-#570 company still carries. Operator-triggered
+`agents/<id>/` folders a pre-#570 company still carries. Operator-triggered
 rather than automatic — the affected tenants are hosted, so a subcommand would
 be unreachable for the operators who need it, and a boot sweep would change a
 tree on an upgrade nobody asked for. `?dry_run=true` answers
@@ -163,16 +163,16 @@ stamps `operator`; agent writes stamp `agent{id}` from the agent's roster id,
 which is fixed at agent-build time and never taken from tool arguments. Agents
 reach the same tree through `workspace_list` / `workspace_search` /
 `workspace_read` / `workspace_create` / `workspace_write`, and a created note has its default home
-in the reserved `Agents/<agent-id>/` folder (#551) — a convention the persona
+in the reserved `agents/<agent-id>/` folder (#551) — a convention the persona
 brief steers toward, not a boundary the routes enforce. `workspace_rename` and
 `workspace_delete` (#671) are the exception: those two *are* bounded to
-`Agents/<agent-id>/`, checked on the resolved node so an `id` argument refuses
+`agents/<agent-id>/`, checked on the resolved node so an `id` argument refuses
 exactly as its path would. Neither restamps authorship; a delete leaves any
 artifact version that pointed at the node with a dangling `workspaceNodeId`,
 which is the same state the `DELETE` route above produces and is read-guarded
 before reuse. Boot scaffolds the
-`Agents/` root empty; an individual `Agents/<agent-id>/` is minted the first
-time that agent writes into it, and the `Desks/` root is minted whole the first
+`agents/` root empty; an individual `agents/<agent-id>/` is minted the first
+time that agent writes into it, and the `desks/` root is minted whole the first
 time a desk produces something (#645) — so a tree read on a fresh company shows
 exactly one root and no member folders.
 
@@ -188,7 +188,7 @@ id from the display name** (issue #686): "Dana Designer" becomes
 on a hand-authored `[[agent]].id`. They used to mint an opaque
 `{millis}-{counter}` id, which #570/#552/#607 render as a workspace folder and
 in search-hit paths — so half a company's tree read as
-`Agents/019fad5ada20-000000000003/` beside `Agents/backend_engineer/`.
+`agents/019fad5ada20-000000000003/` beside `agents/backend_engineer/`.
 
 - **Collisions suffix, they do not refuse.** A slug already held by a manifest
   agent, another teammate, a desk id or name, or a reserved word (`operator`,

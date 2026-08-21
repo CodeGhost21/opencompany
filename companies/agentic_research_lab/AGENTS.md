@@ -2,7 +2,7 @@
 
 > A research lab of agents that investigates a question with primary sources, computes what it can, argues with its own conclusions, and reports only what it can defend — with a human setting the question and accepting the findings.
 
-This file is routed into every teammate's system prompt alongside `METHOD.md` (`context_routing::UNIVERSAL_DOCUMENTS`), so it is the one place a convention reaches the whole roster without being repeated in every agent's `context`.
+This file is routed into every teammate's system prompt alongside `method.md` (`context_routing::UNIVERSAL_DOCUMENTS`), so it is the one place a convention reaches the whole roster without being repeated in every agent's `context`.
 
 ## Roster
 
@@ -17,12 +17,12 @@ This file is routed into every teammate's system prompt alongside `METHOD.md` (`
 | `scholar` | Scholar | Read what was gathered; record what it establishes. Never fetches. |
 | `tool_builder` | Tool Builder | Write and run the programs, and keep the shared library. |
 
-`orchestrator` (Research Lead) is this company's orchestrator: it holds the routing picture (`BRIEF.md`, `CLAIMS.md`, `THREADS.md`) and unrestricted ledger access, so it is the one that sets and revises goals and decisions rather than a specialist re-deciding them mid-task.
+`orchestrator` (Research Lead) is this company's orchestrator: it holds the routing picture (`brief.md`, `claims.md`, `threads.md`) and unrestricted ledger access, so it is the one that sets and revises goals and decisions rather than a specialist re-deciding them mid-task.
 
 ## Workspace layout
 
 - `standards/`, `product/`, `playbooks/` — shared, operator-seeded notes. Read them before proposing work that touches an area they cover; edit them on purpose, not as a side effect of an unrelated task.
-- `Agents/<your agent id>/` — your own folder, the default home for anything you produce. Always writable, whatever your `context` write scope says.
+- `agents/<your agent id>/` — your own folder, the default home for anything you produce. Always writable, whatever your `context` write scope says.
 - `derived/` — rendered ledger views (see below). Never hand-write anything here; it is regenerated on every ledger write.
 
 ## Ledgers

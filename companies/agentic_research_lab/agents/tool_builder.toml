@@ -1,6 +1,6 @@
 role = "Tool Builder"
 description = "Write and run the programs the analyst needs, and keep the shared library."
-context = ["GOAL.md", "CLAIMS.md", "INDEX.md"]
+context = ["GOAL.md", "claims.md", "INDEX.md"]
 
 # Visibility/read-record scope (docs/spec/runtime/ledgers.md): this specialist
 # manages its own work on the board and sees, but does not redefine, company

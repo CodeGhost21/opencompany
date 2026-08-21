@@ -334,7 +334,7 @@ interface SweepResult {
 }
 
 /**
- * Remove the empty `Agents/<id>/` folders a pre-#570 company still carries
+ * Remove the empty `agents/<id>/` folders a pre-#570 company still carries
  * (issue #700), or — with `dryRun` — find out which ones those are without
  * touching anything.
  *

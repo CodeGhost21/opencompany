@@ -1298,8 +1298,8 @@ impl RuntimeBuilder {
             seed_workspace(ops.workspace.as_ref(), &id, seed_dir).await?;
         }
 
-        // Issue #551: lay down the workspace's system roots — `Agents/` and
-        // `Desks/` — beside the template-seeded top-level folders, so anything
+        // Issue #551: lay down the workspace's system roots — `agents/` and
+        // `desks/` — beside the template-seeded top-level folders, so anything
         // an agent or a desk produces has a named home both the operator and
         // the other agents can navigate to. The roots only; the folder for a
         // given agent or desk is minted the first time that agent or desk
@@ -4818,7 +4818,7 @@ mod test {
             .await
             .unwrap();
         // Seeded: README.md, brand/, brand/voice.md — plus runtime scaffold
-        // (`Agents/` and `secrets/README.md`) which is not what the re-seed
+        // (`agents/` and `secrets/README.md`) which is not what the re-seed
         // gate is about.
         let seeded = |tree: &[crate::ports::WorkspaceNode]| {
             let secrets = tree
@@ -4864,7 +4864,7 @@ mod test {
         assert!(runtime.store().load(&id).await.unwrap().is_some());
     }
 
-    /// Boot lays down `Agents/` and operator-only `secrets/README.md`. `Desks/`
+    /// Boot lays down `agents/` and operator-only `secrets/README.md`. `desks/`
     /// has no producer, so it is minted on first use instead of standing empty.
     ///
     /// The per-agent folder is deliberately absent: it is minted the first time
@@ -4903,7 +4903,7 @@ mod test {
         assert_eq!(
             names,
             vec![AGENTS_ROOT, "README.md", SECRETS_ROOT],
-            "boot provisions the managed roots with no seed dir — no `Desks/`, and no \
+            "boot provisions the managed roots with no seed dir — no `desks/`, and no \
              folder for a teammate that has produced nothing"
         );
         for node in &tree {
@@ -4923,7 +4923,7 @@ mod test {
         // With one managed root, deleting it would leave the tree empty and
         // stop pinning that. A lazily-minted desk folder stands in for the
         // content a real company would have — and doubles as the #645 check
-        // that boot neither re-manages, duplicates nor disturbs a `Desks/` that
+        // that boot neither re-manages, duplicates nor disturbs a `desks/` that
         // already exists.
         crate::company::workspace_scaffold::ensure_desk_folder(
             runtime.workspace().as_ref(),
@@ -4963,7 +4963,7 @@ mod test {
                 "creative_studio",
                 SECRETS_ROOT,
             ],
-            "the deleted root was re-provisioned, and the unmanaged `Desks/` left as it stood"
+            "the deleted root was re-provisioned, and the unmanaged `desks/` left as it stood"
         );
     }
 

@@ -35,7 +35,7 @@ fn manifest() -> CompanyManifest {
 /// The sorted node names in a workspace tree body.
 ///
 /// A freshly-built company is no longer an empty tree: boot scaffolds the
-/// reserved `Agents/` and `Desks/` roots (issue #551), so the tests below name
+/// reserved `agents/` and `desks/` roots (issue #551), so the tests below name
 /// what they expect rather than counting to zero. Nothing is provisioned
 /// *inside* them — a member folder is minted when that agent or desk first
 /// produces something.
@@ -1335,9 +1335,9 @@ async fn workspace_tree_and_file_reads_reflect_writes() {
 
     // A workspace with nothing seeded into it reads as a real tree, not a 404
     // and not a fixture. It is not *empty*, though: boot scaffolds the reserved
-    // `Agents/` root and operator-only `secrets/README.md`. The manifest here has an agent and it gets
+    // `agents/` root and operator-only `secrets/README.md`. The manifest here has an agent and it gets
     // no folder — a member folder is minted on first use, not on joining the
-    // roster. `Desks/` is absent for the same reason since issue #645: nothing
+    // roster. `desks/` is absent for the same reason since issue #645: nothing
     // writes into it, so it is minted on first use rather than scaffolded.
     let (status, tree) = send(&state, "GET", "/api/v1/company/workspace", None).await;
     assert_eq!(status, StatusCode::OK);
@@ -1695,7 +1695,7 @@ async fn workspace_search_returns_hits_with_paths_and_excerpts() {
 }
 
 /// `POST …/workspace/sweep-empty-agent-folders` (issue #700): the operator's
-/// one-time tidy of the empty `Agents/<id>/` folders a pre-#570 company still
+/// one-time tidy of the empty `agents/<id>/` folders a pre-#570 company still
 /// carries.
 ///
 /// The whole route in one test, because the halves only mean something together:
@@ -1713,7 +1713,7 @@ async fn workspace_sweep_previews_then_removes_only_the_empty_agent_folders() {
     let state = state_with_company(&home).await;
     let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
 
-    // Boot already scaffolded `Agents/`; find it rather than making a rival.
+    // Boot already scaffolded `agents/`; find it rather than making a rival.
     let (_, tree) = send(&state, "GET", "/api/v1/company/workspace", None).await;
     let agents_id = tree
         .as_array()

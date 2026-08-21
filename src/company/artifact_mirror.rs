@@ -89,7 +89,7 @@ use super::workspace_scaffold::ensure_agent_folder;
 /// perfectly and file every deliverable in the wrong folder.
 #[derive(Debug, Clone, Copy)]
 pub struct PublishTarget<'a> {
-    /// The agent that published this file — the owner of the `Agents/<id>/`
+    /// The agent that published this file — the owner of the `agents/<id>/`
     /// folder it lands under, and the authorship stamped on every node created
     /// or written along the way.
     pub agent_id: &'a str,
@@ -145,7 +145,7 @@ pub struct Mirrored {
 
 /// Put `target`'s body into the shared tree and return what it left there.
 ///
-/// The layout is `Agents/<agent-id>/<task-id>/<source…>`. The agent's folder is
+/// The layout is `agents/<agent-id>/<task-id>/<source…>`. The agent's folder is
 /// minted on demand by
 /// [`ensure_agent_folder`](super::workspace_scaffold::ensure_agent_folder) —
 /// member folders appear the first time somebody produces something, so this
@@ -814,7 +814,7 @@ mod test {
             Err(OpenCompanyError::InvalidRequest("over quota".to_string()))
         }
         /// Folders are claimed for real, for the same reason `create` lets them
-        /// through: the scaffold walks `Agents/<id>/<task>/` on the way in, and
+        /// through: the scaffold walks `agents/<id>/<task>/` on the way in, and
         /// refusing that would fail the publish before it ever reaches the file
         /// this double exists to refuse.
         async fn adopt_or_create_folder(
@@ -1551,7 +1551,7 @@ mod test {
             },
         )
         .await
-        .expect("seeding `Agents/cmo/`");
+        .expect("seeding `agents/cmo/`");
         let agent_folder = ws
             .tree(&co)
             .await
@@ -1632,7 +1632,7 @@ mod test {
     }
 
     /// The same race one level up, on the folders the *scaffold* mints:
-    /// `Agents/` and `Agents/<agent-id>/`.
+    /// `agents/` and `agents/<agent-id>/`.
     ///
     /// Nothing is seeded, so both publishers read an empty tree and both need
     /// the root and the agent's own folder. Different task ids keep the task
@@ -1971,7 +1971,7 @@ mod test {
         let (_dir, ops, co) = stores();
         let ws: &dyn WorkspaceStore = ops.as_ref();
 
-        // Publish once to lay down `Agents/cmo/t-1/`, then put a folder where
+        // Publish once to lay down `agents/cmo/t-1/`, then put a folder where
         // the next publish's note wants to be.
         let sibling = materialize(ws, &co, target("other.md", "x"))
             .await

@@ -137,7 +137,7 @@ pub enum WorkspaceOrigin {
 /// claim on `(parent, name)` (issue #759).
 ///
 /// The caller almost always wants the node and not the verb — a publish walking
-/// `Agents/<agent>/<task>/` does the same thing either way. The distinction is
+/// `agents/<agent>/<task>/` does the same thing either way. The distinction is
 /// carried anyway because exactly one consumer must be able to tell: the
 /// workspace announcer emits a node-created frame, and a frame for a folder that
 /// was already standing would tell an open console that something appeared when
@@ -530,7 +530,7 @@ pub trait WorkspaceStore: Send + Sync {
     /// **The contract**: when this returns `Ok`, exactly one folder answers to
     /// `(parent, name)` among the nodes this primitive governs, and the returned
     /// node is it. `parent` of `None` is the workspace root, which is why it is
-    /// an `Option` rather than a `&str` — the `Agents/` and `Desks/` roots are
+    /// an `Option` rather than a `&str` — the `agents/` and `desks/` roots are
     /// claimed by the same call as everything beneath them.
     ///
     /// Adoption **preserves the original authorship stamp**: `origin` is used
@@ -549,7 +549,7 @@ pub trait WorkspaceStore: Send + Sync {
     /// `swap_files` stages a payload and makes the loser **fail**, which is
     /// right for a file: its bytes are a content claim with one legitimate
     /// winner. A folder is a payload-free **container** claim — two publishers
-    /// that both want `Agents/cmo/task-42/` want the same thing, so the loser
+    /// that both want `agents/cmo/task-42/` want the same thing, so the loser
     /// must adopt and carry on rather than report a publish failure the operator
     /// can do nothing about. Forcing folders through that CAS would need a
     /// re-read-and-adopt retry loop wrapped around it, and `swap_files` rejects

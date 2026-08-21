@@ -2,7 +2,7 @@
 
 > A software company of agents that designs, builds, ships, and supports an entire SaaS product — with a human owning product direction.
 
-This file is routed into every teammate's system prompt alongside `METHOD.md` (`context_routing::UNIVERSAL_DOCUMENTS`), so it is the one place a convention reaches the whole roster without being repeated in every agent's `context`.
+This file is routed into every teammate's system prompt alongside `method.md` (`context_routing::UNIVERSAL_DOCUMENTS`), so it is the one place a convention reaches the whole roster without being repeated in every agent's `context`.
 
 ## Roster
 
@@ -18,14 +18,14 @@ This file is routed into every teammate's system prompt alongside `METHOD.md` (`
 | `qa_engineer` | QA Engineer | Test features and catch regressions. |
 | `security_engineer` | Security Engineer | Security review, hardening, and response. |
 
-`product_manager` (Product Manager) is this company's orchestrator: it holds the routing picture (`BRIEF.md`, `CLAIMS.md`, `THREADS.md`) and unrestricted ledger access, so it is the one that sets and revises goals and decisions rather than a specialist re-deciding them mid-task.
+`product_manager` (Product Manager) is this company's orchestrator: it holds the routing picture (`brief.md`, `claims.md`, `threads.md`) and unrestricted ledger access, so it is the one that sets and revises goals and decisions rather than a specialist re-deciding them mid-task.
 
 Humans keep **product direction**; everything else here is the roster's to run.
 
 ## Workspace layout
 
 - `standards/`, `product/`, `playbooks/` — shared, operator-seeded notes. Read them before proposing work that touches an area they cover; edit them on purpose, not as a side effect of an unrelated task.
-- `Agents/<your agent id>/` — your own folder, the default home for anything you produce. Always writable, whatever your `context` write scope says.
+- `agents/<your agent id>/` — your own folder, the default home for anything you produce. Always writable, whatever your `context` write scope says.
 - `derived/` — rendered ledger views (see below). Never hand-write anything here; it is regenerated on every ledger write.
 
 ## Ledgers
@@ -38,5 +38,5 @@ This company keeps the three built-in ledgers — `tasks` (the task board), `goa
 
 ## Write scope
 
-Every specialist but `product_manager` declares an explicit `context` confining `workspace_write`/`workspace_create` to `product/billing-v2.md` — this company's one shared active-work document — plus its own `Agents/<id>/` home, which stays writable regardless. `standards/` and `playbooks/` are left out of that grant: governance documents, read by everyone but reserved for the operator and `product_manager` (unconfined) to change.
+Every specialist but `product_manager` declares an explicit `context` confining `workspace_write`/`workspace_create` to `product/billing-v2.md` — this company's one shared active-work document — plus its own `agents/<id>/` home, which stays writable regardless. `standards/` and `playbooks/` are left out of that grant: governance documents, read by everyone but reserved for the operator and `product_manager` (unconfined) to change.
 

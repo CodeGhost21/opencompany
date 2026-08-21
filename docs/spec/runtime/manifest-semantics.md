@@ -291,7 +291,7 @@ each page under the 500-line cap.
     clobbered. `workspace_create` adds one folder or note at a path that is
     **free** and whose parent folder already exists — never an overwrite, never
     a `mkdir -p`. The single exception is the agent's own
-    `Agents/<agent-id>/`, which is created on demand when the agent writes
+    `agents/<agent-id>/`, which is created on demand when the agent writes
     directly into it, because that folder is minted on first use rather than
     provisioned at boot. Since issue #552 this call is one of two paths that
     bring it into existence; publishing a deliverable
@@ -300,7 +300,7 @@ each page under the 500-line cap.
 
     `workspace_rename` and `workspace_delete` (issue #671) are the tidying half.
     Both act on **one node at a time** and both reach only
-    `Agents/<agent-id>/` — the agent's own folder, never the folder itself,
+    `agents/<agent-id>/` — the agent's own folder, never the folder itself,
     never a teammate's, never shared guidance. `workspace_delete` carries the
     same required `expected_updated_at` token as `workspace_write` and refuses a
     folder that still holds anything, so a subtree is removed as N deliberate,
@@ -321,9 +321,9 @@ each page under the 500-line cap.
     Confining other creation while leaving overwrite free would
     protect nothing. What keeps the tree navigable instead is steering plus
     attribution — the persona brief names the agent's own reserved folder
-    `Agents/<agent-id>/` (minted the first time that agent puts something in it;
-    boot scaffolds the empty `Agents/` root plus `secrets/README.md`, and since
-    issue #645 `Desks/` is minted on first use rather than scaffolded) as the default
+    `agents/<agent-id>/` (minted the first time that agent puts something in it;
+    boot scaffolds the empty `agents/` root plus `secrets/README.md`, and since
+    issue #645 `desks/` is minted on first use rather than scaffolded) as the default
     home for what it produces and marks shared
     guidance as something to edit only on purpose, and every node records who
     created it and who last wrote it (issue #326), which the console shows. Both

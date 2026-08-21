@@ -26,7 +26,7 @@ calls it has to think to make.
 > record why each exclusion is an exclusion.
 
 `role_context` MUST decide, per role, which workspace documents enter the system
-prompt. Two documents are universal: the company's method policy (`METHOD.md`)
+prompt. Two documents are universal: the company's method policy (`method.md`)
 and its per-workspace working agreement (`AGENTS.md`) — see
 [`UNIVERSAL_DOCUMENTS`](../../../src/company/context_routing.rs).
 
@@ -39,7 +39,7 @@ OpenCompany's roster comes from `company.toml`, so the routing must too.
 id = "critic"
 role = "Critic"
 description = "Challenge a deliverable before it reaches the operator."
-context = ["GOAL.md", "INDEX.md", "CLAIMS.md"]
+context = ["GOAL.md", "INDEX.md", "claims.md"]
 ```
 
 An omitted `context` key takes a per-tier default. `context = []` means the role
@@ -47,14 +47,14 @@ gets the universal documents and nothing else.
 
 **The per-tier default table**, keyed on the [tier](../../glossary.md) a
 role's `[[agent]]` entry declares (unqualified "context" below means the
-routed-workspace-documents section only, on top of the universal `METHOD.md`
+routed-workspace-documents section only, on top of the universal `method.md`
 and `AGENTS.md` every role always gets):
 
 | Tier | Default `context` | Why |
 | --- | --- | --- |
-| `orchestrator` | `BRIEF.md`, `CLAIMS.md`, `THREADS.md` | Decides what happens next across the whole company; needs the full established/ruled-out picture and both derived ledgers to route work without re-deriving them from raw notes. |
-| `reasoning` | `BRIEF.md`, `CLAIMS.md` | Does the substantive work a demand asks for; needs what is established and what already holds true, not the open-question tracker that is the orchestrator's routing concern. |
-| `frontend` | `BRIEF.md` | Talks to the operator or another company; needs the summarized picture to speak from, not the derivation detail behind it. |
+| `orchestrator` | `brief.md`, `claims.md`, `threads.md` | Decides what happens next across the whole company; needs the full established/ruled-out picture and both derived ledgers to route work without re-deriving them from raw notes. |
+| `reasoning` | `brief.md`, `claims.md` | Does the substantive work a demand asks for; needs what is established and what already holds true, not the open-question tracker that is the orchestrator's routing concern. |
+| `frontend` | `brief.md` | Talks to the operator or another company; needs the summarized picture to speak from, not the derivation detail behind it. |
 | `compress` | *(none)* | Reads and summarizes raw workspace notes directly — routing it the brief it exists to help write would be circular. |
 | `subconscious` | *(none)* | Runs over compressed history between cycles, not the live workspace; a routed document would be stale by construction before the tick that reads it runs. |
 
@@ -167,7 +167,7 @@ implementer guessing, so the mapping is normative:
 | `verify` arm | `judges`, `weighs-evidence` | scratch, assertion board |
 | `critique` arm | `weighs-evidence` | assertion board |
 | `completeness` arm | `weighs-evidence` | assertion board |
-| `director` (acts on a [directive](delegation.md#operator-directives)) | `acts-on-directive` | `CLAIMS.md` |
+| `director` (acts on a [directive](delegation.md#operator-directives)) | `acts-on-directive` | `claims.md` |
 | `curator` (writes the [brief](alignment.md#the-brief)) | *(unclassified)* | nothing |
 
 Two entries carry an argument worth keeping:
@@ -183,7 +183,7 @@ Two entries carry an argument worth keeping:
   not a summary. It is safe precisely because it *renders* rather than judges:
   it ends no loop, closes no demand, and returns no verdict, so there is no
   decision for unevidenced text to corrupt. What it writes is then subject to
-  every exclusion downstream, since `BRIEF.md` is itself a routed document.
+  every exclusion downstream, since `brief.md` is itself a routed document.
 
 The verification suite MUST assert this table directly — one fixture per built-in
 seat — rather than only asserting the exclusions in the abstract. An exclusion
@@ -282,7 +282,7 @@ no bearing on cache-prefix stability.
   - A judging role's assembled prompt does not contain scratch, under the
     same "configured to route it anyway" condition.
   - A directive-acting role's assembled prompt does not contain
-    `CLAIMS.md`, under the same condition.
+    `claims.md`, under the same condition.
   Each fixture MUST configure the forbidden document explicitly (not rely on
   a default that happens to omit it) so the assertion is about enforcement,
   not about a default table nobody tried to override.

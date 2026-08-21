@@ -1181,8 +1181,8 @@ async fn memory_page_reflects_upserts() {
 /// An unpopulated surface resolves to `[]`, never to `null` or an error.
 ///
 /// `workspaceTree` is the exception and states why: since issue #551 a company
-/// is never born with an empty tree — boot scaffolds the reserved `Agents/`
-/// root (and, until issue #645, an empty `Desks/` beside it) — so what it
+/// is never born with an empty tree — boot scaffolds the reserved `agents/`
+/// root (and, until issue #645, an empty `desks/` beside it) — so what it
 /// proves here is that the resolver answers with exactly that and invents
 /// nothing else. A member folder is *not* part of that baseline; this mints one
 /// to pin the authorship projection (#326), which is the only place in the

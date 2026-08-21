@@ -10,7 +10,7 @@
 //!
 //! # Why this is coherence, not containment
 //!
-//! The confinement to `Agents/<self>/` here is **not** a security boundary, and
+//! The confinement to `agents/<self>/` here is **not** a security boundary, and
 //! must not be described as one. The same explicit `workspace` grant already
 //! confers [`WORKSPACE_WRITE_TOOL`](super::WORKSPACE_WRITE_TOOL), which can
 //! overwrite any note in the tree with an empty body — strictly broader
@@ -292,7 +292,7 @@ impl Tool for WorkspaceDeleteTool {
             "properties": {
                 "path": {
                     "type": "string",
-                    "description": "The node's path as shown by workspace_list, e.g. \"Agents/ceo/Old draft.md\". Must be inside your own folder."
+                    "description": "The node's path as shown by workspace_list, e.g. \"agents/ceo/Old draft.md\". Must be inside your own folder."
                 },
                 "id": {
                     "type": "string",
@@ -472,7 +472,7 @@ impl Tool for WorkspaceRenameTool {
             "properties": {
                 "path": {
                     "type": "string",
-                    "description": "The node's path as shown by workspace_list, e.g. \"Agents/ceo/Draft.md\". Must be inside your own folder."
+                    "description": "The node's path as shown by workspace_list, e.g. \"agents/ceo/Draft.md\". Must be inside your own folder."
                 },
                 "id": {
                     "type": "string",
@@ -484,7 +484,7 @@ impl Tool for WorkspaceRenameTool {
                 },
                 "new_parent": {
                     "type": "string",
-                    "description": "The path of an EXISTING folder to move the node into, e.g. \"Agents/ceo/archive\". Must be your own folder or a folder inside it. Omit to leave the node where it is."
+                    "description": "The path of an EXISTING folder to move the node into, e.g. \"agents/ceo/archive\". Must be your own folder or a folder inside it. Omit to leave the node where it is."
                 }
             },
             "additionalProperties": false
