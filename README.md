@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="gitbooks/.gitbook/assets/opencompany-hero.png" alt="OpenCompany — run an entire company with a headcount of one" />
+  <img src="gitbooks/.gitbook/assets/opencompany-hero.gif" alt="OpenCompany — run an entire company with a headcount of one" />
 </p>
 
 <h1 align="center">OpenCompany</h1>
@@ -17,7 +17,7 @@
 <p align="center">
   <a href="https://github.com/tinyhumansai/opencompany/blob/main/LICENSE"><img src="https://img.shields.io/github/license/tinyhumansai/opencompany?style=flat-square" alt="License: GPL-3.0" /></a>
   <a href="https://github.com/tinyhumansai/opencompany/stargazers"><img src="https://img.shields.io/github/stars/tinyhumansai/opencompany?style=flat-square" alt="GitHub stars" /></a>
-  <a href="https://github.com/tinyhumansai/opencompany/issues"><img src="https://img.shields.io/github/issues/tinyhumansai/opencompany?style=flat-square" alt="Open issues" /></a>
+  <a href="https://github.com/tinyhumansai/opencompany/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22"><img src="https://img.shields.io/github/issues/tinyhumansai/opencompany/good%20first%20issue?style=flat-square&label=good%20first%20issues&color=7057ff" alt="Good first issues" /></a>
   <a href="https://github.com/tinyhumansai/opencompany/commits/main"><img src="https://img.shields.io/github/last-commit/tinyhumansai/opencompany?style=flat-square" alt="Last commit" /></a>
   <img src="https://img.shields.io/badge/status-work%20in%20progress-orange?style=flat-square" alt="Work in progress" />
 </p>
