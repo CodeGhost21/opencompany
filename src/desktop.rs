@@ -124,18 +124,25 @@ impl Drop for DesktopRuntime {
     }
 }
 
-/// The manifest a first-run install starts from: a bundled preset, with the
-/// local operator added as a standing admin.
+/// The manifest a first-run install starts from: a bundled preset, unchanged.
 ///
-/// The admin entry is what makes the company signable-into. `eligibility` in
-/// `src/server/users/routes.rs` admits an address only if it is already a user,
-/// is named as a bootstrap admin, or holds a redeemable invite — and a manifest
-/// that names nobody satisfies none of the three, so a company created without
-/// this is a company nobody on this machine can enter (issue #632).
+/// It used to carry one edit — a synthetic `operator@opencompany.local` pushed
+/// into `[users].admins`, because `eligibility` admits an address only if it is
+/// already a user, is named as a bootstrap admin, or holds a redeemable invite,
+/// and a manifest naming nobody satisfies none of the three (issue #632).
 ///
-/// The address is local-only by construction: a desktop install has no mail
-/// transport, so it exists purely for the loopback magic link the shell
-/// redeems. It never leaves the device and grants a network caller nothing.
+/// The desktop no longer asks that question. It runs
+/// [`AuthMode::None`](crate::app::config::AuthMode::None) host-wide, where
+/// `eligibility` consults **no** bootstrap list at all and the single local
+/// owner is materialized from the request rather than admitted from a roster.
+/// An entry here would therefore grant nothing to nobody — and worse, it would
+/// be an entry `validate_users` flags the moment anything writes
+/// `[users].mode = "none"` beside it.
+///
+/// That is also why the mode is set as a *host-wide override* on the desktop's
+/// `AppConfig` rather than written into these manifests: the override leaves
+/// `manifest.users.mode` at its serde default, so nothing is flagged, while
+/// `RuntimeBuilder::with_auth_mode_override` still outranks it at build.
 fn first_run_manifest(preset_id: &str) -> Result<CompanyManifest> {
     let preset = preset(preset_id).ok_or_else(|| {
         crate::OpenCompanyError::Config(format!("unknown desktop preset `{preset_id}`"))
@@ -150,17 +157,6 @@ fn first_run_manifest(preset_id: &str) -> Result<CompanyManifest> {
     let roster = embedded_roster(preset_id)?;
     if !roster.is_empty() {
         manifest.agents = roster;
-    }
-    if !manifest
-        .users
-        .admins
-        .iter()
-        .any(|email| email == DESKTOP_OPERATOR_EMAIL)
-    {
-        manifest
-            .users
-            .admins
-            .push(DESKTOP_OPERATOR_EMAIL.to_string());
     }
     Ok(manifest)
 }
