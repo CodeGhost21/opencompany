@@ -54,6 +54,8 @@ export interface AddMcpServer {
   description?: string;
   allowedTools?: string[];
   disallowedTools?: string[];
+  /** Remote tool names to declare read-only on this server (issue #1124). */
+  readOnlyTools?: string[];
   timeoutSecs?: number;
   token?: string;
   authKind?: McpAuthKind;
@@ -77,6 +79,11 @@ export interface UpdateMcpServer {
   description?: string;
   allowedTools?: string[];
   disallowedTools?: string[];
+  /**
+   * Replace the read-only declaration (issue #1124). Omit to leave it
+   * unchanged; send `[]` to clear it.
+   */
+  readOnlyTools?: string[];
   timeoutSecs?: number;
   /** Rotate the outbound credential (write-only). Omit to leave it unchanged. */
   token?: string;
