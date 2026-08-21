@@ -11,13 +11,20 @@
 // want?") and showing both at once would leave the operator reading a tree that
 // is not what they just asked for.
 
-import { FileText, Folder, Loader2, Lock, Search } from "lucide-react";
+import { EyeOff, FileText, Folder, Loader2, Lock, Search } from "lucide-react";
 
 import { formatBytes, highlightRuns, isBinary, originLabel, type SearchHit } from "@/api/workspace";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
-import { DERIVED_LABEL, DERIVED_REASON, isDerivedPath } from "@/lib/workspace";
+import {
+  DERIVED_LABEL,
+  DERIVED_REASON,
+  isDerivedPath,
+  isSecretPath,
+  SECRETS_LABEL,
+  SECRETS_REASON,
+} from "@/lib/workspace";
 
 interface Props {
   /** The query the results below answer — not the input's live value. */
@@ -101,9 +108,29 @@ export function SearchResults({ query, hits, total, loading, error, onOpen }: Pr
            * explorer has never expanded, so there is no ancestry here to walk.
            */
           const derived = isDerivedPath(hit.path);
+          /**
+           * Whether this hit names a note the company's agents cannot read
+           * (issue #1465).
+           *
+           * Operator search is deliberately unfiltered — `search_workspace`
+           * keeps the whole tree while `search_workspace_for_agent` drops
+           * `secrets/` — which is right, and is also why a private note used to
+           * come back in this list looking exactly like a shared one. A console
+           * on a shared screen leaked it.
+           *
+           * The sibling of `derived` above and never true at the same time: a
+           * path has one first segment, and the two rules read that same
+           * segment against different names.
+           */
+          const secret = isSecretPath(hit.path);
           // `Seeded` on a derived hit is not merely uninformative, it is
           // wrong — see the note above `Authorship` in `WorkspaceView`. The
           // badge slot says the true thing instead of the false one.
+          //
+          // A `secrets/` hit is the other way round and keeps its origin badge:
+          // a `Seeded` note under `secrets/` really was seeded (the host lays
+          // down one README there on first boot), so both badges are true and
+          // say different things (issue #1465).
           const origin = derived ? null : originLabel(hit.updatedBy);
           return (
             <li key={hit.id}>
@@ -147,14 +174,15 @@ export function SearchResults({ query, hits, total, loading, error, onOpen }: Pr
                     notes can share a name, and the tree that would have told
                     them apart is not on screen while a search is showing.
 
-                    It is also where the ledger badge goes, rather than up beside
-                    the name where `Seeded` used to sit. "Written by a ledger" is
-                    wide, the pane is 256px, and on the name line it truncated
-                    the very thing the operator is scanning for — `DECISIONS.md`
-                    became `DECISIONS…`. Down here it costs nothing and lands
-                    next to its own evidence, the `derived/` segment it explains.
-                    The scan-for-locks affordance lives in the tree, which is
-                    the surface people browse. */}
+                    It is also where the folder badge goes, rather than up
+                    beside the name where `Seeded` used to sit. "Written by a
+                    ledger" and "Hidden from agents" are both wide, the pane is
+                    256px, and on the name line either truncated the very thing
+                    the operator is scanning for — `DECISIONS.md` became
+                    `DECISIONS…`. Down here it costs no name width and lands
+                    next to its own evidence, the `derived/` or `secrets/`
+                    segment it explains. The scan-for-glyphs affordance lives in
+                    the tree, which is the surface people browse. */}
                 <span className="mt-0.5 flex items-center gap-1.5 text-2xs text-muted-foreground">
                   <span className="truncate">
                     {hit.path}
@@ -169,6 +197,20 @@ export function SearchResults({ query, hits, total, loading, error, onOpen }: Pr
                     >
                       <Lock className="size-2.5" aria-hidden />
                       {DERIVED_LABEL}
+                    </Badge>
+                  )}
+                  {secret && (
+                    <Badge
+                      variant="outline"
+                      className="shrink-0 gap-1 pl-1 text-3xs font-normal"
+                      title={SECRETS_REASON}
+                      data-testid="workspace-search-secret"
+                    >
+                      {/* An eye-off rather than a lock: a lock in this console
+                          means `derived/`, "you may not write this", and this
+                          rule is the other one. */}
+                      <EyeOff className="size-2.5" aria-hidden />
+                      {SECRETS_LABEL}
                     </Badge>
                   )}
                 </span>

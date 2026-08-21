@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ChevronDown,
   ChevronRight,
+  EyeOff,
   FilePlus2,
   FileText,
   Folder,
@@ -102,13 +103,20 @@ import {
   type FsNode,
   hasLegacyLocal,
   isDerivedNode,
+  isSecretNode,
+  type MoveAudienceChange,
+  type MoveAudienceWarning,
+  moveAudienceWarning,
   nodeById,
   readLegacyLocalNodes,
+  SECRETS_LABEL,
+  SECRETS_REASON,
   subtreeCounts,
   subtreeIds,
   titleOf,
 } from "@/lib/workspace";
 import { useLocalScope } from "@/connections/ConnectionContext";
+import { MoveAudienceConfirm } from "@/views/workspace/MoveAudienceConfirm";
 import { SearchResults } from "@/views/workspace/SearchResults";
 
 /**
@@ -1229,6 +1237,15 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
    * something else asks it to.
    */
   const readOnlyNote = isDerivedNode(nodes, openId);
+  /**
+   * Whether the open note is one the company's agents cannot read (#1465).
+   *
+   * The same folder rule the tree row asks, asked again for the header, because
+   * this is the pane an operator is looking at while typing the credential —
+   * and a note opened from a search hit or a `[[wiki link]]` arrives here with
+   * the tree never scrolled to it.
+   */
+  const secretNote = isSecretNode(nodes, openId);
 
   return (
     <div className="flex flex-1 overflow-hidden">
@@ -1465,6 +1482,22 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
                 <Breadcrumb nodes={nodes} nodeId={openNode.id} onOpenFolder={revealFolder} />
                 <span className="truncate text-sm font-medium">{titleOf(openNode)}</span>
               </span>
+              {/* Said in the header and not only in the tree, because this is
+                  the pane the typing happens in — and unlike the tree, it is
+                  reached from a search hit and a wiki link too (issue #1465).
+                  It sits after the crumb rail rather than inside it: the rail
+                  says where the note is filed, this says who can read it. */}
+              {secretNote && (
+                <Badge
+                  variant="outline"
+                  className="shrink-0 gap-1 font-normal"
+                  title={SECRETS_REASON}
+                  data-testid="workspace-secret"
+                >
+                  <EyeOff className="size-3" />
+                  {SECRETS_LABEL}
+                </Badge>
+              )}
               {/* No authorship on a derived file (#1377). `derived::publish`
                   stamps `WorkspaceOrigin::Seed` — that is how the write guard
                   tells its own derivation from a person — so `originLabel`
@@ -1475,7 +1508,10 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
                   console-authored badges disagreeing about the same file is
                   worse than one, so the chip that IS true says it alone. The
                   breadcrumb above stays either way: where a derived file lives
-                  is the fact that explains which ledger wrote it. */}
+                  is the fact that explains which ledger wrote it.
+
+                  A `secrets/` note keeps its authorship — the README the host
+                  seeds there really was seeded, so both chips are true. */}
               {!readOnlyNote && (
                 <Authorship
                   createdBy={openFile?.createdBy ?? openNode.createdBy}
@@ -1871,6 +1907,25 @@ function TreeRow({ node, ...props }: TreeProps & { node: FsNode }) {
    * nodes at most and is already re-sorted per level on every render.
    */
   const derived = isDerivedNode(nodes, node.id);
+  /**
+   * Whether this row is the `secrets/` folder or something inside it (#1465).
+   *
+   * The tree is where an operator decides where to put a credential, and until
+   * this shipped it was the one place that decision got no help: `secrets`
+   * rendered with the same folder icon, the same weight and the same `…` menu
+   * as `Playbooks`, and sorted in among them. The only statement of the rule
+   * was a README seeded inside the folder — reachable only by someone who had
+   * already found it.
+   *
+   * Recomputed per row rather than threaded down through {@link Tree}, for the
+   * same reason `derived` above is: the rule stays one function, asked by every
+   * surface, against a tree of a few hundred nodes that is already re-sorted
+   * per level on every render.
+   *
+   * Never true at the same time as `derived`: both read the first ancestor, and
+   * a node has one.
+   */
+  const secret = isSecretNode(nodes, node.id);
 
   return (
     <>
@@ -1879,9 +1934,10 @@ function TreeRow({ node, ...props }: TreeProps & { node: FsNode }) {
         className={cn(
           "group flex items-center gap-1 rounded-md px-1.5 py-1 text-sm",
           active ? "bg-accent font-medium" : "hover:bg-accent/50",
-          // Muted whether or not it is the open note: what writes the file does
-          // not change when you select it.
-          derived && "text-muted-foreground",
+          // Muted whether or not it is the open note: neither what writes the
+          // file (#1377) nor who can read it (#1465) changes when you select
+          // it. The glyph after the name is what says which of the two it is.
+          (derived || secret) && "text-muted-foreground",
         )}
         style={{ paddingLeft: 6 + depth * 12 }}
       >
@@ -1900,11 +1956,16 @@ function TreeRow({ node, ...props }: TreeProps & { node: FsNode }) {
           <span className="truncate" title={isRosterFolder ? node.name : undefined}>
             {isFolder ? displayName : titleOf(node)}
           </span>
-          {/* The lock is the whole of the tree-side signal: an icon, not a
+          {/* The glyph is the whole of the tree-side signal: an icon, not a
               badge, because a row in a 256px pane has no width for a phrase and
               the name is the thing being scanned. The label rides along for a
               screen reader, which gets no glyph, and the full reason is on the
-              `title` for a pointer. */}
+              `title` for a pointer.
+
+              A lock means `derived/` — "you may not write this" (#1377). An
+              eye-off means `secrets/` — the other rule: you may write it, and
+              no agent reads it (#1465). Two rules, two glyphs, and no row ever
+              wears both. */}
           {derived && (
             <span
               className="flex shrink-0 items-center"
@@ -1913,6 +1974,16 @@ function TreeRow({ node, ...props }: TreeProps & { node: FsNode }) {
             >
               <Lock className="size-3" aria-hidden />
               <span className="sr-only">{DERIVED_LABEL}</span>
+            </span>
+          )}
+          {secret && (
+            <span
+              className="flex shrink-0 items-center"
+              title={SECRETS_REASON}
+              data-testid="workspace-tree-secret"
+            >
+              <EyeOff className="size-3" aria-hidden />
+              <span className="sr-only">{SECRETS_LABEL}</span>
             </span>
           )}
           {/* Agent-created nodes get a marker in the tree itself, so "what has
@@ -2273,6 +2344,22 @@ function NamePrompt({
   );
 }
 
+/**
+ * Pick a destination for a `Move to…`, and say so when the destination changes
+ * who can read the note (issue #1465).
+ *
+ * Every destination but one is a filing decision. Moving into or out of
+ * `secrets/` is an audience decision, and it was indistinguishable from the
+ * others: one click, a "moved" toast, and a note that either stopped being
+ * readable by every agent in the company or started being. So a destination
+ * that crosses that line does not commit on the click — it swaps the list for
+ * {@link MoveAudienceConfirm}, which names the consequence and asks again.
+ *
+ * Ordinary destinations still commit on one click, deliberately: this adds a
+ * step to the moves that change something and to no others. (Issue #1477 is
+ * about the destination list itself — flat, path-less — and is left alone
+ * here.)
+ */
 function MoveDialog({
   nodes,
   moving,
@@ -2286,20 +2373,67 @@ function MoveDialog({
 }) {
   const blocked = moving ? subtreeIds(nodes, moving.id) : new Set<string>();
   const folders = nodes.filter((x) => x.kind === "folder" && !blocked.has(x.id));
+  /** The destination picked, held back until the warning is acknowledged. */
+  const [pending, setPending] = useState<{ destId: string | null; warning: MoveAudienceWarning } | null>(
+    null,
+  );
+
+  // A second `Move to…` must not open onto the previous one's warning.
+  useEffect(() => {
+    setPending(null);
+  }, [moving]);
+
+  function pick(destId: string | null) {
+    if (!moving) return;
+    const warning = moveAudienceWarning(nodes, moving, destId);
+    if (!warning) {
+      onMove(destId);
+      return;
+    }
+    setPending({ destId, warning });
+  }
 
   return (
     <Dialog open={Boolean(moving)} onOpenChange={(o) => !o && onClose()}>
       <DialogContent className="sm:max-w-sm">
         <DialogHeader>
           <DialogTitle>Move “{moving ? titleOf(moving) : ""}”</DialogTitle>
-          <DialogDescription>Pick a destination folder.</DialogDescription>
+          <DialogDescription>
+            {pending ? "This changes who can read it." : "Pick a destination folder."}
+          </DialogDescription>
         </DialogHeader>
-        <div className="max-h-72 space-y-1 overflow-y-auto">
-          <DestRow label="Workspace root" disabled={moving?.parentId === null} onClick={() => onMove(null)} />
-          {folders.map((f) => (
-            <DestRow key={f.id} label={f.name} disabled={moving?.parentId === f.id} onClick={() => onMove(f.id)} />
-          ))}
-        </div>
+        {pending ? (
+          <MoveAudienceConfirm
+            warning={pending.warning}
+            // Back to the list rather than out of the dialog: the operator who
+            // reads the warning and changes their mind wanted a different
+            // folder, not to abandon the move.
+            onCancel={() => setPending(null)}
+            onConfirm={() => onMove(pending.destId)}
+          />
+        ) : (
+          <div className="max-h-72 space-y-1 overflow-y-auto">
+            <DestRow
+              label="Workspace root"
+              disabled={moving?.parentId === null}
+              // Marked from the same predicate that raises the warning, so the
+              // consequence is legible *before* the click as well as after it.
+              // The root is never `secrets/`, so this row only ever marks the
+              // way out.
+              audience={moving ? moveAudienceWarning(nodes, moving, null)?.change : undefined}
+              onClick={() => pick(null)}
+            />
+            {folders.map((f) => (
+              <DestRow
+                key={f.id}
+                label={f.name}
+                disabled={moving?.parentId === f.id}
+                audience={moving ? moveAudienceWarning(nodes, moving, f.id)?.change : undefined}
+                onClick={() => pick(f.id)}
+              />
+            ))}
+          </div>
+        )}
       </DialogContent>
     </Dialog>
   );
@@ -2547,16 +2681,44 @@ function RepairDialog({
   );
 }
 
-function DestRow({ label, disabled, onClick }: { label: string; disabled?: boolean; onClick: () => void }) {
+function DestRow({
+  label,
+  disabled,
+  audience,
+  onClick,
+}: {
+  label: string;
+  disabled?: boolean;
+  /** Set when picking this destination changes who can read the note (#1465). */
+  audience?: MoveAudienceChange;
+  onClick: () => void;
+}) {
   return (
     <button
       disabled={disabled}
       onClick={onClick}
       className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-sm hover:bg-accent disabled:pointer-events-none disabled:opacity-40"
+      data-audience-change={audience}
     >
       <Folder className="size-4 text-tone-2" />
       <span className="truncate">{label}</span>
       {disabled && <span className="ml-auto text-xs text-muted-foreground">Here</span>}
+      {/* Two words, not the sentence: the row is a choice, and the sentence is
+          on the panel that follows the click. `Shares it` wears the destructive
+          colour because that is the direction there is no undoing — a note the
+          agents have read is read. */}
+      {!disabled && audience && (
+        <span
+          className={cn(
+            "ml-auto flex shrink-0 items-center gap-1 text-xs",
+            audience === "exposed" ? "text-destructive" : "text-muted-foreground",
+          )}
+          data-testid="workspace-move-dest-audience"
+        >
+          <EyeOff className="size-3" aria-hidden />
+          {audience === "hidden" ? "Hides it" : "Shares it"}
+        </span>
+      )}
     </button>
   );
 }
