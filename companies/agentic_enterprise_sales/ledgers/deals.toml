@@ -74,9 +74,7 @@ role = "refs"
 
 [[status]]
 name = "qualifying"
-
-[[status]]
-name = "discovery"
+aliases = ["discovery"]
 
 [[status]]
 name = "proposal"
@@ -93,12 +91,7 @@ needs_reason = true
 name = "lost"
 closed = true
 needs_reason = true
-
-[[status]]
-name = "no_decision"
-label = "No decision"
-closed = true
-needs_reason = true
+aliases = ["no_decision"]
 
 [[section]]
 heading = "Late stage"
@@ -109,7 +102,7 @@ order = "recent"
 [[section]]
 heading = "Early stage"
 blurb = "Qualifying or in discovery. Each should say what would kill it."
-statuses = ["qualifying", "discovery"]
+statuses = ["qualifying"]
 order = "recent"
 
 [[section]]
@@ -119,5 +112,5 @@ Won, lost, or no decision — each with the reason. `no_decision` is a distinct 
 outcome from `lost` and the commonest one in enterprise sales; collapsing the \
 two hides the fact that the competitor was inertia.\
 """
-statuses = ["won", "lost", "no_decision"]
+statuses = ["won", "lost"]
 cap = 20

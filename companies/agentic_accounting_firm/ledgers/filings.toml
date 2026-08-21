@@ -87,15 +87,10 @@ closed = true
 needs_reason = true
 
 [[status]]
-name = "extended"
+name = "not_filed"
 closed = true
 needs_reason = true
-
-[[status]]
-name = "not_required"
-label = "Not required"
-closed = true
-needs_reason = true
+aliases = ["extended", "not_required"]
 
 [[section]]
 heading = "Awaiting a signature"
@@ -122,5 +117,5 @@ Filed, extended, or found not to be required — each with the reason and who \
 signed. This is the firm's own audit trail, and it is read far more often than \
 it is written.\
 """
-statuses = ["filed", "extended", "not_required"]
+statuses = ["filed", "not_filed"]
 cap = 20
