@@ -11,7 +11,12 @@ import {
   resetConnections,
 } from "@/connections/registry";
 import { findProfile, readProfiles } from "@/connections/profileStore";
-import { addressLabel, hostEditable, validAddress } from "@/components/manage-hosts";
+import {
+  addressLabel,
+  canonicalAddress,
+  hostEditable,
+  validAddress,
+} from "@/components/manage-hosts";
 import { scopedKey } from "@/connections/types";
 import type { Connection } from "@/connections/types";
 
@@ -149,5 +154,44 @@ describe("the manage page's own reading of a row", () => {
     expect(validAddress("")).toBe(false);
     // Not a transport this console speaks.
     expect(validAddress("ftp://acme.test")).toBe(false);
+  });
+});
+
+describe("canonicalAddress", () => {
+  // Whether two rows are the same host. Getting it wrong mints a second
+  // connection id for one host, and every browser-local key is scoped by id.
+
+  it("reads the same-origin row as the origin it actually is", () => {
+    // The bootstrap row stores `""`, so the raw comparison called this origin's
+    // own url a different host and offered to add it a second time.
+    expect(canonicalAddress("")).toBe(canonicalAddress(window.location.origin));
+    expect(canonicalAddress("   ")).toBe(canonicalAddress(window.location.origin));
+  });
+
+  it("ignores the spellings a host does not distinguish", () => {
+    const canonical = canonicalAddress("https://acme.test");
+    expect(canonicalAddress("https://acme.test/")).toBe(canonical);
+    expect(canonicalAddress("https://ACME.test")).toBe(canonical);
+    // The scheme's own default port is not part of the address.
+    expect(canonicalAddress("https://acme.test:443")).toBe(canonical);
+    expect(canonicalAddress("  https://acme.test  ")).toBe(canonical);
+    expect(canonicalAddress("http://acme.test:80")).toBe(canonicalAddress("http://acme.test"));
+  });
+
+  it("keeps the differences that are real ones", () => {
+    // A different scheme, a non-default port and a path prefix each name a
+    // different place to send a request.
+    expect(canonicalAddress("http://acme.test")).not.toBe(canonicalAddress("https://acme.test"));
+    expect(canonicalAddress("https://acme.test:8443")).not.toBe(
+      canonicalAddress("https://acme.test"),
+    );
+    expect(canonicalAddress("https://acme.test/oc")).not.toBe(canonicalAddress("https://acme.test"));
+    // …but a bare authority's own trailing slash is not one of them.
+    expect(canonicalAddress("https://acme.test/oc/")).toBe(canonicalAddress("https://acme.test/oc"));
+  });
+
+  it("hands back something comparable for a value that will not parse", () => {
+    // `validAddress` is what refuses these, in the field that names them.
+    expect(canonicalAddress(" acme.test// ")).toBe("acme.test");
   });
 });
