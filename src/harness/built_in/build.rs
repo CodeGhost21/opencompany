@@ -1499,7 +1499,11 @@ mod tests {
         let root = tempfile::tempdir().expect("tempdir");
         let company = CompanyId::new("acme");
 
-        let legacy = root.path().join("acme").join("page_builder").join("workspace");
+        let legacy = root
+            .path()
+            .join("acme")
+            .join("page_builder")
+            .join("workspace");
         std::fs::create_dir_all(&legacy).expect("legacy sandbox");
         std::fs::write(legacy.join("draft.md"), "half-finished").expect("in-flight work");
 
@@ -1520,9 +1524,14 @@ mod tests {
         let root = tempfile::tempdir().expect("tempdir");
         let company = CompanyId::new("acme");
 
-        let canonical = ensure_agent_workspace(root.path(), &company, "page_builder").expect("ensure");
+        let canonical =
+            ensure_agent_workspace(root.path(), &company, "page_builder").expect("ensure");
         std::fs::write(canonical.join("current.md"), "live").expect("live work");
-        let legacy = root.path().join("acme").join("page_builder").join("workspace");
+        let legacy = root
+            .path()
+            .join("acme")
+            .join("page_builder")
+            .join("workspace");
         std::fs::create_dir_all(&legacy).expect("legacy sandbox");
         std::fs::write(legacy.join("stale.md"), "stale").expect("stale work");
 

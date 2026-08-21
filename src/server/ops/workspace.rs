@@ -1018,10 +1018,7 @@ async fn rename_move(
 ) -> Result<Json<FsNode>, ApiError> {
     // As in `create_node`: a rename lands under the naming rule, so renaming
     // cannot walk a node back out of the convention the tree is kept in.
-    let renamed = body
-        .name
-        .as_ref()
-        .map(|name| kebab_name_or(name, name));
+    let renamed = body.name.as_ref().map(|name| kebab_name_or(name, name));
     let node = company
         .runtime
         .workspace()

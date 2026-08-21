@@ -208,8 +208,8 @@ use crate::company::artifact_mirror::{MirrorOutcome, mirror_node_edit};
 // One rule for what a node's path is and what a caller may pass as one, shared
 // with `workspace_search` so search can never offer a node this module's
 // `PathIndex` would then refuse to resolve.
-use crate::company::workspace_paths::{render_path, split_logical_path};
 use crate::company::workspace_names::{kebab_name, kebab_name_or, kebab_path};
+use crate::company::workspace_paths::{render_path, split_logical_path};
 use crate::company::workspace_scaffold::{AGENTS_ROOT, is_agent_hidden_path};
 // The one definition of a workspace match, shared with the REST route and the
 // GraphQL resolver so no two surfaces can answer the same query differently.
@@ -4288,7 +4288,9 @@ mod tests {
         );
         let tree = store.tree(&id).await.unwrap();
         assert_eq!(
-            tree.iter().filter(|n| n.name.eq_ignore_ascii_case("playbooks")).count(),
+            tree.iter()
+                .filter(|n| n.name.eq_ignore_ascii_case("playbooks"))
+                .count(),
             1,
             "no rival folder: {:?}",
             tree.iter().map(|n| &n.name).collect::<Vec<_>>()

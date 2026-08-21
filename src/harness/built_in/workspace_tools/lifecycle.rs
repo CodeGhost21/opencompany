@@ -69,8 +69,8 @@ use serde_json::{Value, json};
 use openhuman_core::openhuman::tools::traits::{PermissionLevel, Tool, ToolResult};
 
 use crate::company::artifact_mirror::published_record_for_node;
-use crate::company::workspace_paths::{is_legal_segment, split_logical_path};
 use crate::company::workspace_names::kebab_name;
+use crate::company::workspace_paths::{is_legal_segment, split_logical_path};
 use crate::company::workspace_scaffold::AGENTS_ROOT;
 use crate::ports::workspace::NodeKind;
 
@@ -535,7 +535,6 @@ impl Tool for WorkspaceRenameTool {
         // The reply below echoes the path it actually landed at.
         let new_name = new_name.map(kebab_name);
         let new_name = new_name.as_deref();
-
 
         let (index, entry) = match resolve_in_index(&self.workspace, path, id).await {
             Ok(pair) => pair,

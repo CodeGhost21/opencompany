@@ -481,9 +481,7 @@ pub(crate) enum Found {
 pub(crate) fn find(nodes: &[WorkspaceNode], parent: Option<&str>, name: &str) -> Found {
     let matches: Vec<&WorkspaceNode> = nodes
         .iter()
-        .filter(|node| {
-            node.parent_id.as_deref() == parent && node.name.eq_ignore_ascii_case(name)
-        })
+        .filter(|node| node.parent_id.as_deref() == parent && node.name.eq_ignore_ascii_case(name))
         .collect();
 
     match matches.as_slice() {
@@ -1231,5 +1229,4 @@ mod tests {
             paths(&nodes)
         );
     }
-
 }

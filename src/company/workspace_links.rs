@@ -144,7 +144,10 @@ mod test {
             .expect("the note exists");
 
         assert_eq!(
-            backlinks.iter().map(|n| n.name.as_str()).collect::<Vec<_>>(),
+            backlinks
+                .iter()
+                .map(|n| n.name.as_str())
+                .collect::<Vec<_>>(),
             vec!["readme.md"],
         );
     }

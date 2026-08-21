@@ -253,10 +253,7 @@ mod test {
 
     #[test]
     fn paths_normalize_segment_by_segment() {
-        assert_eq!(
-            kebab_path("specs/Launch Plan.md"),
-            "specs/launch-plan.md"
-        );
+        assert_eq!(kebab_path("specs/Launch Plan.md"), "specs/launch-plan.md");
         assert_eq!(kebab_path("/Docs//A B/"), "docs/a-b");
     }
 }

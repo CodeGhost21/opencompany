@@ -468,12 +468,13 @@ impl CompanyPages {
             crate::company::workspace_scaffold::Found::Collision(why) => {
                 return Err(crate::error::OpenCompanyError::Conflict(why));
             }
-            crate::company::workspace_scaffold::Found::Free => self
-                .store
-                .adopt_or_create_folder(&self.company, None, PAGES_ROOT, self.origin())
-                .await?
-                .into_node()
-                .id,
+            crate::company::workspace_scaffold::Found::Free => {
+                self.store
+                    .adopt_or_create_folder(&self.company, None, PAGES_ROOT, self.origin())
+                    .await?
+                    .into_node()
+                    .id
+            }
         };
         let claim: FolderClaim = self
             .store
