@@ -58,51 +58,60 @@ import {
 } from "@/lib/company-setup";
 import { cn } from "@/lib/utils";
 
-/** The steps, in order. `fields` names the config keys each one owns. */
 /**
- * The flow, question-first.
+ * The flow, in order. `fields` names the config keys each step owns.
  *
- * The order is the whole design. Three cheap questions about *them* come before
- * anything about the machine, because nobody abandons "what do you sell" and
- * plenty abandon `bind`. The two asks that cost something — an address and a
- * credential — arrive fourth and fifth, after enough investment that their
- * purpose is self-evident rather than a wall on screen one.
+ * The order is the whole design. Cheap questions about *them* come before the
+ * asks that cost something, because nobody abandons "what do you sell" and
+ * plenty abandon `bind` — and everything with a working default stays behind
+ * Advanced, since a knob that already works is not a decision worth a screen.
+ * Two steps are placed against that grain, each for a reason:
  *
- * Everything else that used to be a step is now behind Advanced: sign-in mode,
- * brain, host and tools all have defaults that work, and a knob with a working
- * default is not a decision worth a screen.
- */
-/**
- * The flow, in order.
- *
- * **Model comes first, and it did not used to.** It sat third, after the three
+ * **Model comes first, and it did not used to.** It sat third, after the
  * questions, on the reasoning that cheap interesting questions earn the right to
  * ask for a credential. That reasoning was sound about *motivation* and wrong
  * about *consequence*: the design pass is silent when a credential is missing or
  * bad — it falls back to a curated team — so a wrong key produced a plausible
  * company and an operator found out two screens later, if at all. The one step
- * whose failure invalidates every answer after it belongs before them.
+ * whose failure invalidates every answer after it belongs before them. It is a
+ * gate, not a wall: the step can be skipped outright, and skipping is what the
+ * curated fallback is for.
  *
- * It is a gate, not a wall: the step can be skipped outright, and skipping is
- * what the curated fallback is for.
+ * **Sign-in comes before the address it decides the need for.** It is the other
+ * step whose answer changes what follows: on `none` there is nobody to invite,
+ * so the address screen is not shown at all (see `visibleSteps`). This flow used
+ * to ask the address on step three and offer the choice on step four, buried in
+ * Advanced under copy inviting the operator to press straight past it — so
+ * someone on a laptop was asked for an address they need never have supplied,
+ * by a wizard that already knew it might not want one. It does not move any
+ * further forward than this: it is a question about the machine, and the
+ * questions about *them* are what earn the right to ask one of those.
  */
 const STEPS: readonly (Step & { fields: readonly string[] })[] = [
   { id: "power", label: "Model", fields: ["tinyhumans_api_key"] },
   { id: "business", label: "Business", fields: [] },
+  { id: "signin", label: "Sign-in", fields: ["auth_mode"] },
   { id: "account", label: "You", fields: [] },
   { id: "advanced", label: "Advanced", fields: [] },
   { id: "review", label: "Review", fields: [] },
 ];
 
 /**
- * Advanced, as its own stepped flow rather than a wall of fields.
+ * Advanced: the settings that already work, grouped by subject.
  *
- * These were four screens before the merge, and collapsing them into one
+ * These were separate screens before the merge, and collapsing them into one
  * scrolling accordion made "advanced settings" mean "everything we could not
- * place". They are four different subjects — who may sign in, what thinks, where
- * it runs, what it can reach — and each deserves the same one-subject-per-screen
- * treatment the main flow gets. The difference is that this is opt-in, and
- * leaving it never blocks anything.
+ * place". Each subject keeps a bounded card of its own instead — where it runs,
+ * what it can reach — so the reader can see where one ends. The difference from
+ * the main flow is that this is opt-in, and leaving it never blocks anything.
+ *
+ * Two groups now, not four, and the two that left were not demoted — they were
+ * promoted to steps. What thinks became step one, because a bad credential is
+ * silent everywhere else. Who may sign in became step three, because it is a
+ * *question*, not a knob with a working default, and this flow gives a screen of
+ * its own to every question. What remains here genuinely has a default that
+ * works, which is what earns something a place behind "press on if none of it
+ * matters to you".
  */
 const ADVANCED_GROUPS: readonly {
   id: string;
@@ -111,13 +120,6 @@ const ADVANCED_GROUPS: readonly {
   hint: string;
   fields: readonly string[];
 }[] = [
-  {
-    id: "signin",
-    label: "Sign-in",
-    title: "How people sign in",
-    hint: "This applies to every company this host serves.",
-    fields: ["auth_mode"],
-  },
   {
     id: "host",
     label: "Host",
@@ -165,7 +167,18 @@ interface Props {
 export function SetupWizard({ client, onDone, onCancel }: Props) {
   const [status, setStatus] = useState<SetupStatus | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [step, setStep] = useState(0);
+  /**
+   * Where the operator is, held as a step **id** rather than an index.
+   *
+   * The list of steps can lose one behind their back — choosing "no sign-in"
+   * removes the address screen — and an index silently means a *different
+   * screen* the moment it does. Today's order happens to make that unreachable:
+   * the only step that disappears sits after the only screen that can remove it,
+   * so the position is always before the gap. An id does not rest on that
+   * argument, which is the point — the next person to reorder these will not
+   * think to restate it.
+   */
+  const [stepId, setStepId] = useState<string>(STEPS[0].id);
   const [values, setValues] = useState<Record<string, string>>({});
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -322,6 +335,28 @@ export function SetupWizard({ client, onDone, onCancel }: Props) {
     () => (status ? changedFields(status, values) : {}),
     [status, values],
   );
+
+  /**
+   * The steps this host actually shows. `STEPS` stays the source of order.
+   *
+   * A host that asks nobody to sign in has nobody to invite, so the address step
+   * is absent rather than optional — and an absent step gets no slot in the
+   * progress bar either, or the bar counts a screen that will never arrive.
+   *
+   * `status` is null until the first read lands, and that counts as "show it":
+   * the mode it would be judged against has not been read yet, and a bar that
+   * changes length under someone already looking at it is worse than one that
+   * starts at its longest.
+   */
+  const visibleSteps = useMemo(
+    () => STEPS.filter((s) => s.id !== "account" || !status || requiresSignIn(status, values)),
+    [status, values],
+  );
+
+  // A position whose step is no longer shown falls back to the start. That is
+  // unreachable today for the reason given on `stepId`, and a defined screen
+  // beats a blank one if it ever stops being.
+  const step = Math.max(0, visibleSteps.findIndex((s) => s.id === stepId));
 
   const restartKeys = useMemo(() => {
     if (!status) return [];
@@ -511,8 +546,8 @@ export function SetupWizard({ client, onDone, onCancel }: Props) {
     );
   }
 
-  const current = STEPS[step];
-  const last = step === STEPS.length - 1;
+  const current = visibleSteps[step];
+  const last = step === visibleSteps.length - 1;
   const needsCompany = status.companies.length === 0;
   // The one thing that must never be reachable: a configured instance with
   // nothing to sign in to and no way back into setup.
@@ -550,8 +585,9 @@ export function SetupWizard({ client, onDone, onCancel }: Props) {
     setTouched(false);
     // Designing happens on the way into Review, so the wait sits between two
     // screens rather than in front of one.
-    if (STEPS[step + 1]?.id === "review" && !roster && !designing) void design();
-    setStep((n) => n + 1);
+    if (visibleSteps[step + 1]?.id === "review" && !roster && !designing) void design();
+    const next = visibleSteps[step + 1];
+    if (next) setStepId(next.id);
   };
 
   return (
@@ -575,13 +611,13 @@ export function SetupWizard({ client, onDone, onCancel }: Props) {
               should be felt, and the one thing worth naming is where you are. */}
           <div className="space-y-2">
             <div className="flex gap-1" aria-hidden>
-              {STEPS.map((s, i) => (
+              {visibleSteps.map((s, i) => (
                 <button
                   key={s.id}
                   type="button"
                   tabIndex={-1}
                   disabled={i >= step}
-                  onClick={() => setStep(i)}
+                  onClick={() => setStepId(s.id)}
                   data-testid={`step-${s.id}`}
                   className={cn(
                     "h-1 flex-1 rounded-full transition-colors",
@@ -594,7 +630,7 @@ export function SetupWizard({ client, onDone, onCancel }: Props) {
             </div>
             <p className="text-xs text-muted-foreground">
               <span className="text-foreground">{current.label}</span> · step {step + 1} of{" "}
-              {STEPS.length}
+              {visibleSteps.length}
             </p>
           </div>
         </div>
@@ -609,7 +645,11 @@ export function SetupWizard({ client, onDone, onCancel }: Props) {
             <span />
           )}
           <div className="flex gap-2">
-            <Button variant="outline" disabled={step === 0} onClick={() => setStep((n) => n - 1)}>
+            <Button
+              variant="outline"
+              disabled={step === 0}
+              onClick={() => setStepId(visibleSteps[step - 1].id)}
+            >
               Back
             </Button>
             {last ? (
@@ -633,6 +673,14 @@ export function SetupWizard({ client, onDone, onCancel }: Props) {
       <div className="space-y-6" data-testid="setup-wizard">
         {current.id === "business" && (
           <BusinessStep draft={draft} onChange={setDraft} onEnter={advance} />
+        )}
+
+        {current.id === "signin" && (
+          <SignInStep
+            status={status}
+            value={values.auth_mode ?? ""}
+            onChange={(v) => set("auth_mode", v)}
+          />
         )}
 
         {current.id === "account" && (
@@ -738,12 +786,23 @@ function SignInStep({
   const locked = field !== undefined && !field.editable;
 
   return (
-    <div className="space-y-3">
-      {/* No heading here: inside Advanced the group already carries one, and a
-          second would read as a new section rather than the same one. */}
-      {locked && <LayerLock />}
+    <div>
+      {/* Heading, one-sentence hint, then the control — the rhythm every other
+          question screen keeps. It had none of its own while it lived inside
+          Advanced, where the group header asked the question on its behalf. */}
+      <h2 className="text-base font-medium leading-snug" data-testid="setup-question">
+        How should people sign in?
+      </h2>
+      <p className="mt-0.5 text-sm leading-snug text-muted-foreground">
+        This applies to every company this host serves.
+      </p>
+      {locked && (
+        <div className="mt-2.5">
+          <LayerLock />
+        </div>
+      )}
 
-      <div className="space-y-2">
+      <div className="mt-2.5 space-y-2">
         {status.auth_modes.map((mode) => {
           const copy = AUTH_MODE_COPY[mode] ?? { label: mode, hint: "" };
           const active = (value || field?.value) === mode;
@@ -770,7 +829,7 @@ function SignInStep({
       </div>
 
       {!status.auth_modes.includes("none") && (
-        <p className="text-xs text-muted-foreground">
+        <p className="mt-3 text-xs text-muted-foreground">
           &ldquo;No sign-in&rdquo; isn&apos;t offered because this host binds a routable address,
           where it would serve an unauthenticated admin console to anyone who can reach it.
         </p>
@@ -911,7 +970,10 @@ function AccountStep({
       <p className="mt-0.5 text-sm leading-snug text-muted-foreground">
         {required
           ? "This is how you sign back in, and the only address that can administer the company."
-          : "Optional on this host — you chose no sign-in, so anyone who can reach it is the owner."}
+          : // Not the no-sign-in case: that host does not render this step at
+            // all. What is left is a host that already serves a company, where
+            // the roster it has can already administer it.
+            "Optional on this host — it already serves a company, so this is only how you get back in."}
       </p>
       <Input
         id="setup-email"
@@ -1455,8 +1517,8 @@ function ReviewStep({
  * and skippable by pressing on — which is what "advanced" should mean: present
  * and passed over, not hidden and hunted for.
  *
- * All four groups on one screen, for the same reason the three questions are:
- * they are short, related, and splitting them would be four more Next presses
+ * Both groups on one screen, for the same reason the business questions share
+ * one: they are short, related, and splitting them would be another Next press
  * for settings most people will never touch.
  */
 function AdvancedStep({
@@ -1482,35 +1544,23 @@ function AdvancedStep({
       </div>
 
       {ADVANCED_GROUPS.map((group) => (
-        // Each subject is its own bounded card. Four sections running together
-        // down one scroll is what made this read as a dump — nothing told you
-        // where "how people sign in" ended and "where the thinking runs" began.
+        // Each subject is its own bounded card. Sections running together down
+        // one scroll is what made this read as a dump — nothing told you where
+        // "how this host runs" ended and "what it can reach" began.
         <section key={group.id} className="rounded-xl border">
           <div className="border-b px-4 py-3">
             <h3 className="text-base font-medium leading-snug">{group.title}</h3>
             <p className="mt-0.5 text-sm leading-snug text-muted-foreground">{group.hint}</p>
           </div>
           <div className="space-y-5 px-4 py-4">
-            {group.id === "signin" && (
-              <SignInStep
-                status={status}
-                value={values.auth_mode ?? ""}
-                onChange={(v) => set("auth_mode", v)}
+            {fieldsFor(status, group.fields).map((f) => (
+              <FieldRow
+                key={f.key}
+                field={f}
+                value={values[f.key] ?? ""}
+                onChange={(v) => set(f.key, v)}
               />
-            )}
-            {fieldsFor(status, group.fields)
-              // `auth_mode` is chosen with the three cards above. Rendering its
-              // raw input underneath offered the same setting twice, and the
-              // second one looked like the real control because it was a field.
-              .filter((f) => !(group.id === "signin" && f.key === "auth_mode"))
-              .map((f) => (
-                <FieldRow
-                  key={f.key}
-                  field={f}
-                  value={values[f.key] ?? ""}
-                  onChange={(v) => set(f.key, v)}
-                />
-              ))}
+            ))}
           </div>
         </section>
       ))}
