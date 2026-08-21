@@ -113,8 +113,12 @@ pub fn has_ledger_files(dir: &Path) -> bool {
 /// template author reads the message, not the serde path.
 fn parse_ledger_file(file_name: &str, src: &str) -> std::result::Result<LedgerSpec, Vec<String>> {
     let stem = file_name.trim_end_matches(".toml");
-    let file: LedgerFile = toml::from_str(src)
-        .map_err(|err| vec![format!("`{file_name}` is not valid TOML — {}", err.message())])?;
+    let file: LedgerFile = toml::from_str(src).map_err(|err| {
+        vec![format!(
+            "`{file_name}` is not valid TOML — {}",
+            err.message()
+        )]
+    })?;
 
     // The filename is the identity. A body `slug` is allowed so the file reads
     // as a complete declaration, but a disagreement is refused rather than
@@ -131,8 +135,11 @@ fn parse_ledger_file(file_name: &str, src: &str) -> std::result::Result<LedgerSp
         )]);
     }
 
-    let slug = normalize_slug(stem)
-        .map_err(|err| vec![format!("`{file_name}` is not a usable ledger filename — {err}")])?;
+    let slug = normalize_slug(stem).map_err(|err| {
+        vec![format!(
+            "`{file_name}` is not a usable ledger filename — {err}"
+        )]
+    })?;
 
     let mut spec = LedgerSpec {
         slug,

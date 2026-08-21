@@ -1298,6 +1298,27 @@ impl RuntimeBuilder {
             seed_workspace(ops.workspace.as_ref(), &id, seed_dir).await?;
         }
 
+        // The company's own axes, seeded the same way and for the same reason
+        // the workspace is: a vertical that ships a roster, a workflow graph and
+        // three skills but no matter list, deal pipeline or experiment log is
+        // one whose defining record exists only if some turn thinks to invent
+        // it — and two runs of one template then disagree about what the
+        // company even tracks.
+        //
+        // NOT gated on `seed_dir`, deliberately: a platform-provisioned tenant
+        // carries no bundle, and the *global* ledgers are part of what a company
+        // is, exactly like the `Agents/`/`Desks/` roots below.
+        //
+        // Gated on the store holding no declaration at all rather than on each
+        // slug's absence, so retiring a seeded ledger sticks. The honest limit:
+        // a person who retires *every* declared ledger and restarts gets the
+        // defaults back. That is visible and reversible, and it is a better
+        // failure than a baseline that silently re-asserts one ledger somebody
+        // deliberately dropped.
+        if handover.is_none() {
+            seed_ledgers(&ops, &id, self.seed_dir.as_deref()).await?;
+        }
+
         // Issue #551: lay down the workspace's system roots — `Agents/` and
         // `Desks/` — beside the template-seeded top-level folders, so anything
         // an agent or a desk produces has a named home both the operator and
@@ -3194,6 +3215,68 @@ async fn seed_workspace(
     Ok(())
 }
 
+/// Seeds a company's declared ledgers: the global baseline
+/// ([`crate::globals::ledgers`]) plus whatever its own bundle declares under
+/// `companies/<name>/ledgers/*.toml`.
+///
+/// Runs only on a company that has declared nothing yet — see the call site.
+/// The built-ins (`tasks`, `goals`, `decisions`) are never stored: they ship
+/// with the runtime, and persisting a copy would let a company's version drift
+/// from the code every prompt and route is written against.
+///
+/// A company's own declaration **wins**: it is put last, so a bundle that
+/// declares the same slug as a global replaces it rather than being refused by
+/// the cap behind it. That is the same precedence every other global surface
+/// resolves an id collision by.
+///
+/// Each spec is admitted through [`crate::ledger::Registry`] before it is
+/// stored, which is what enforces the cap and the collision rules against
+/// whatever is already there. A refused declaration is a warning and not a boot
+/// failure: a company must reach the rest of itself when one axis is bad,
+/// exactly as it does for a malformed global.
+async fn seed_ledgers(
+    ops: &OpsStores,
+    id: &CompanyId,
+    seed_dir: Option<&std::path::Path>,
+) -> Result<()> {
+    use crate::ledger::Registry;
+
+    if !ops.ledgers.list_specs(id).await?.is_empty() {
+        return Ok(());
+    }
+
+    let mut specs: Vec<crate::ledger::LedgerSpec> = crate::globals::ledgers().to_vec();
+    if let Some(dir) = seed_dir {
+        match crate::company::load_dir_ledgers(dir) {
+            Ok(bundled) => {
+                for spec in bundled {
+                    specs.retain(|global| global.slug != spec.slug);
+                    specs.push(spec);
+                }
+            }
+            // A bundle whose ledgers do not parse must not stop the company
+            // booting. `content_test` fails CI on a shipped template that has
+            // one, so this arm is for a hand-edited bundle, where reaching the
+            // console to fix it beats refusing to start.
+            Err(err) => {
+                tracing::warn!(company = %id, "company ledgers not seeded ({err})");
+            }
+        }
+    }
+
+    let mut seeded: Vec<crate::ledger::LedgerSpec> = Vec::new();
+    for spec in specs {
+        let registry = Registry::build(seeded.clone());
+        if let Err(err) = registry.admits(&spec) {
+            tracing::warn!(company = %id, ledger = %spec.slug, "ledger not seeded ({err})");
+            continue;
+        }
+        ops.ledgers.put_spec(id, &spec).await?;
+        seeded.push(spec);
+    }
+    Ok(())
+}
+
 /// Auto-wires the tiny.place economy for a discoverable company (feature build).
 ///
 /// Returns `None` unless `[place].discoverable` is set and a `@handle` is
@@ -4862,6 +4945,149 @@ mod test {
         );
         // Sanity: the record store still loads.
         assert!(runtime.store().load(&id).await.unwrap().is_some());
+    }
+
+    /// A declaration file every template author would write, used by the
+    /// seeding tests below.
+    #[cfg(test)]
+    const PIPELINE_LEDGER: &str = r#"
+title = "Deal pipeline"
+purpose = "Every deal in flight and why a lost one was lost."
+
+[[field]]
+name = "deal"
+role = "id"
+required = true
+
+[[field]]
+name = "stage"
+role = "status"
+required = true
+
+[[status]]
+name = "qualifying"
+
+[[status]]
+name = "won"
+closed = true
+needs_reason = true
+"#;
+
+    /// The baseline's ledgers reach a company with no bundle at all — the
+    /// platform-provisioned tenant shape, which is most of them.
+    #[tokio::test]
+    async fn the_baseline_ledgers_are_seeded_without_a_bundle() {
+        let home_dir = tmp_home("oc-ledger-seed-");
+        let manifest = parse("[company]\nname=\"Acme\"\n");
+        let id = CompanyId::new("acme");
+        let runtime = RuntimeBuilder::new(home_dir.path().to_path_buf(), manifest)
+            .with_id(id.clone())
+            .build()
+            .await
+            .unwrap();
+
+        let stored: Vec<String> = runtime
+            .ledgers()
+            .list_specs(&id)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|spec| spec.slug)
+            .collect();
+        for global in crate::globals::ledgers() {
+            assert!(
+                stored.contains(&global.slug),
+                "`{}` was not seeded: {stored:?}",
+                global.slug
+            );
+        }
+        // The built-ins stay in the runtime. Persisting a copy is what lets a
+        // company's stored version drift from the code every prompt is written
+        // against.
+        assert!(!stored.contains(&"tasks".to_string()));
+    }
+
+    /// A bundle's own ledgers are seeded beside the baseline's, and a bundle
+    /// declaration of the same slug replaces the global rather than colliding
+    /// with it.
+    #[tokio::test]
+    async fn a_bundle_ledger_is_seeded_and_supersedes_a_global_of_the_same_slug() {
+        let home_dir = tmp_home("oc-ledger-bundle-");
+        let seed_dir = home_dir.path().join("def");
+        std::fs::create_dir_all(seed_dir.join("ledgers")).unwrap();
+        std::fs::write(seed_dir.join("ledgers/pipeline.toml"), PIPELINE_LEDGER).unwrap();
+        let shadowing_slug = crate::globals::ledgers()[0].slug.clone();
+        std::fs::write(
+            seed_dir.join(format!("ledgers/{shadowing_slug}.toml")),
+            PIPELINE_LEDGER.replace("Deal pipeline", "Ours, not the baseline's"),
+        )
+        .unwrap();
+
+        let manifest = parse("[company]\nname=\"Acme\"\n");
+        let id = CompanyId::new("acme");
+        let runtime = RuntimeBuilder::new(home_dir.path().to_path_buf(), manifest)
+            .with_id(id.clone())
+            .with_seed_dir(seed_dir)
+            .build()
+            .await
+            .unwrap();
+
+        let specs = runtime.ledgers().list_specs(&id).await.unwrap();
+        let slugs: Vec<&str> = specs.iter().map(|spec| spec.slug.as_str()).collect();
+        assert!(slugs.contains(&"pipeline"), "{slugs:?}");
+        assert_eq!(
+            specs
+                .iter()
+                .filter(|spec| spec.slug == shadowing_slug)
+                .count(),
+            1,
+            "the company's own declaration replaces the global, it does not sit beside it"
+        );
+        assert_eq!(
+            specs
+                .iter()
+                .find(|spec| spec.slug == shadowing_slug)
+                .unwrap()
+                .title,
+            "Ours, not the baseline's"
+        );
+    }
+
+    /// Seeded once. Retiring a ledger has to stick across a restart, or
+    /// "only a person retires one" is a rule the next boot takes back.
+    #[tokio::test]
+    async fn ledgers_seed_once_and_a_retirement_sticks() {
+        let home_dir = tmp_home("oc-ledger-once-");
+        let home = home_dir.path().to_path_buf();
+        let manifest = parse("[company]\nname=\"Acme\"\n");
+        let id = CompanyId::new("acme");
+
+        let runtime = RuntimeBuilder::new(home.clone(), manifest.clone())
+            .with_id(id.clone())
+            .build()
+            .await
+            .unwrap();
+        let retired = crate::globals::ledgers()[0].slug.clone();
+        runtime.ledgers().delete_spec(&id, &retired).await.unwrap();
+        drop(runtime);
+
+        let runtime = RuntimeBuilder::new(home, manifest)
+            .with_id(id.clone())
+            .build()
+            .await
+            .unwrap();
+        let slugs: Vec<String> = runtime
+            .ledgers()
+            .list_specs(&id)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|spec| spec.slug)
+            .collect();
+        assert!(
+            !slugs.contains(&retired),
+            "`{retired}` came back after a person retired it: {slugs:?}"
+        );
     }
 
     /// Boot lays down `Agents/` and operator-only `secrets/README.md`. `Desks/`

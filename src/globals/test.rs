@@ -22,6 +22,7 @@ fn the_baseline_is_not_empty() {
     assert!(!agents().is_empty(), "no global agents embedded");
     assert!(!workflows().is_empty(), "no global workflows embedded");
     assert!(!skills().is_empty(), "no global skills embedded");
+    assert!(!ledgers().is_empty(), "no global ledgers embedded");
     assert!(!default_tool_allow().is_empty(), "no default tool belt");
 }
 
@@ -115,9 +116,11 @@ fn has_answers_for_each_kind_and_rejects_junk() {
     let agent = format!("agent:{}", agents()[0].id);
     let workflow = format!("workflow:{}", workflows()[0].id);
     let skill = format!("skill:{}", skills()[0].slug);
+    let ledger = format!("ledger:{}", ledgers()[0].slug);
     assert!(has(&agent), "{agent}");
     assert!(has(&workflow), "{workflow}");
     assert!(has(&skill), "{skill}");
+    assert!(has(&ledger), "{ledger}");
 
     assert!(!has("agent:nobody"));
     assert!(!has("agents:researcher"), "an unknown kind is not a match");
@@ -323,4 +326,81 @@ fn a_disabled_global_workflow_neither_lists_nor_loads() {
         loaded.is_none(),
         "a disabled global must not be runnable by naming it directly"
     );
+}
+
+/// Every `DISABLE_KINDS` entry must be answerable by [`has`], or an operator
+/// writes an opt-out that matches nothing and is told it is a manifest error.
+#[test]
+fn every_disable_kind_has_a_surface_behind_it() {
+    for kind in DISABLE_KINDS {
+        let id = match *kind {
+            "agent" => agents()[0].id.clone(),
+            "workflow" => workflows()[0].id.clone(),
+            "skill" => skills()[0].slug.clone(),
+            "ledger" => ledgers()[0].slug.clone(),
+            other => panic!("`{other}` is a disable kind with no surface behind it"),
+        };
+        assert!(has(&format!("{kind}:{id}")), "{kind}:{id}");
+    }
+}
+
+/// A baseline ledger may not shadow a built-in, and may not be `native`: both
+/// would be refused at seed time, silently, on every company at once.
+#[test]
+fn no_global_ledger_shadows_a_builtin_or_claims_to_be_native() {
+    let (builtins, _) = crate::ledger::builtins();
+    for ledger in ledgers() {
+        assert_eq!(
+            ledger.source,
+            crate::ledger::LedgerSource::Events,
+            "`{}` is not an events ledger",
+            ledger.slug
+        );
+        assert!(!ledger.builtin, "`{}` claims to be built in", ledger.slug);
+        for builtin in &builtins {
+            assert_ne!(ledger.slug, builtin.slug, "shadows a built-in slug");
+            assert_ne!(
+                ledger.derived, builtin.derived,
+                "`{}` claims the built-in `{}`'s derived file",
+                ledger.slug, builtin.slug
+            );
+        }
+    }
+}
+
+/// The baseline plus a company's own declarations must fit under the cap with
+/// room to spare — a baseline that used most of `MAX_DECLARED` would leave a
+/// vertical unable to declare the axis it is actually about.
+#[test]
+fn the_baseline_leaves_most_of_the_ledger_cap_for_the_company() {
+    assert!(
+        ledgers().len() * 2 <= crate::ledger::MAX_DECLARED,
+        "the baseline takes {} of {} ledger slots, leaving too few for a vertical",
+        ledgers().len(),
+        crate::ledger::MAX_DECLARED
+    );
+}
+
+/// Every closing status must demand a reason, and every ledger must have at
+/// least one: a baseline ledger nothing can be finished with quietly becomes a
+/// list that only grows, and one that closes without a reason loses the single
+/// thing a closed row is read for.
+#[test]
+fn every_global_ledger_closes_and_says_why() {
+    for ledger in ledgers() {
+        let closing = ledger.closing_statuses();
+        assert!(
+            !closing.is_empty(),
+            "`{}` declares no closing status",
+            ledger.slug
+        );
+        for name in closing {
+            let status = ledger.status(name).expect("a declared status");
+            assert!(
+                status.needs_reason,
+                "`{}` closes into `{name}` without demanding a reason",
+                ledger.slug
+            );
+        }
+    }
 }

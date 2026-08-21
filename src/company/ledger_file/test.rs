@@ -37,8 +37,9 @@ order = "recent"
 cap = 20
 "#;
 
-fn reader(files: Vec<(&'static str, &'static str)>) -> impl Fn(&str) -> Result<String, std::io::ErrorKind>
-{
+fn reader(
+    files: Vec<(&'static str, &'static str)>,
+) -> impl Fn(&str) -> std::result::Result<String, std::io::ErrorKind> {
     move |name: &str| {
         files
             .iter()
@@ -65,11 +66,8 @@ fn a_declaration_parses_into_the_same_spec_a_run_time_declaration_would() {
 
 #[test]
 fn the_filename_is_the_slug_and_a_body_key_that_disagrees_is_refused() {
-    let problems = parse_ledger_file(
-        "pipeline.toml",
-        &format!("slug = \"deals\"\n{PIPELINE}"),
-    )
-    .expect_err("refused");
+    let problems = parse_ledger_file("pipeline.toml", &format!("slug = \"deals\"\n{PIPELINE}"))
+        .expect_err("refused");
     assert!(
         problems[0].contains("a ledger's slug is its filename"),
         "{problems:?}"
@@ -96,9 +94,8 @@ fn a_declaration_with_no_id_field_is_refused_by_the_shared_validator() {
 
 #[test]
 fn an_unknown_key_is_refused_rather_than_silently_dropped() {
-    let problems =
-        parse_ledger_file("pipeline.toml", &format!("owner = \"sales\"\n{PIPELINE}"))
-            .expect_err("refused");
+    let problems = parse_ledger_file("pipeline.toml", &format!("owner = \"sales\"\n{PIPELINE}"))
+        .expect_err("refused");
     assert!(problems[0].contains("not valid TOML"), "{problems:?}");
 }
 
@@ -151,7 +148,7 @@ fn a_bundle_may_not_declare_more_than_the_cap() {
     let bodies: Vec<(String, String)> = (0..MAX_DECLARED + 2)
         .map(|index| {
             (
-                format!("axis_{index:02}.toml"),
+                format!("axis-{index:02}.toml"),
                 PIPELINE.replace("Deal pipeline", &format!("Axis {index}")),
             )
         })
@@ -173,7 +170,11 @@ fn a_bundle_may_not_declare_more_than_the_cap() {
 fn a_bundle_with_no_ledgers_directory_loads_nothing_and_reports_nothing() {
     let dir = tempfile::tempdir().expect("tempdir");
     assert!(!has_ledger_files(dir.path()));
-    assert!(load_dir_ledgers(dir.path()).expect("no directory is not a problem").is_empty());
+    assert!(
+        load_dir_ledgers(dir.path())
+            .expect("no directory is not a problem")
+            .is_empty()
+    );
 }
 
 #[test]
