@@ -209,6 +209,7 @@ use crate::company::artifact_mirror::{MirrorOutcome, mirror_node_edit};
 // with `workspace_search` so search can never offer a node this module's
 // `PathIndex` would then refuse to resolve.
 use crate::company::workspace_paths::{render_path, split_logical_path};
+use crate::company::workspace_names::{kebab_name, kebab_path};
 use crate::company::workspace_scaffold::{AGENTS_ROOT, is_agent_hidden_path};
 // The one definition of a workspace match, shared with the REST route and the
 // GraphQL resolver so no two surfaces can answer the same query differently.
@@ -512,6 +513,20 @@ struct PathIndex {
     /// Logical path → every node carrying it. More than one entry means the
     /// path is ambiguous and must not be resolved (see [`ResolveError`]).
     by_path: BTreeMap<String, Vec<Entry>>,
+    /// The same entries keyed by their **normalized** path — every segment run
+    /// through [`kebab_name`](crate::company::workspace_names::kebab_name).
+    ///
+    /// The lowercase-dashed rule is what the runtime mints and what the brief
+    /// tells agents to type, but a company that predates it still has
+    /// `Playbooks/Close checklist.md` sitting in its tree. Without this map an
+    /// agent typing the canonical spelling is told the note does not exist, and
+    /// an agent typing the stored spelling is told to use the canonical one —
+    /// a loop with the note visible in the listing the whole time.
+    ///
+    /// A *fallback*, never a replacement: [`lookup`](Self::lookup) tries the
+    /// literal path first, so an exact match still wins and the ambiguity rules
+    /// below are unchanged for a tree that has no legacy names in it.
+    by_canonical: BTreeMap<String, Vec<Entry>>,
     /// Node id → entry.
     by_id: HashMap<String, Entry>,
     /// Nodes omitted from the index because they are not addressable by path:
@@ -581,6 +596,11 @@ impl PathIndex {
                         node: node.clone(),
                     };
                     index.by_id.insert(node.id.clone(), entry.clone());
+                    index
+                        .by_canonical
+                        .entry(kebab_path(&path))
+                        .or_default()
+                        .push(entry.clone());
                     index.by_path.entry(path).or_default().push(entry);
                 }
                 Some(_) => {}
@@ -590,6 +610,9 @@ impl PathIndex {
         // Ambiguous paths get a stable order so an "ambiguous" error names its
         // candidates identically across calls.
         for entries in index.by_path.values_mut() {
+            entries.sort_by(|a, b| a.node.id.cmp(&b.node.id));
+        }
+        for entries in index.by_canonical.values_mut() {
             entries.sort_by(|a, b| a.node.id.cmp(&b.node.id));
         }
         index
@@ -611,6 +634,20 @@ impl PathIndex {
                 _ => true,
             })
             .collect()
+    }
+
+    /// Every entry carrying `path`, matching the literal path first and its
+    /// normalized form second.
+    ///
+    /// The one place the legacy-name fallback lives, so "does this path exist?"
+    /// and "what does this path resolve to?" cannot answer differently — a
+    /// create that checked one and a read that checked the other would let an
+    /// agent mint `q3-report.md` beside the `Q3 Report.md` it had just been
+    /// shown, making the path ambiguous for everyone.
+    fn lookup(&self, path: &str) -> Option<&Vec<Entry>> {
+        self.by_path
+            .get(path)
+            .or_else(|| self.by_canonical.get(&kebab_path(path)))
     }
 
     /// Resolve exactly one of `path` / `id` to an entry in **this company's**
@@ -638,7 +675,7 @@ impl PathIndex {
                 let normalized = split_logical_path(path)
                     .map_err(ResolveError::BadArgs)?
                     .join("/");
-                match self.by_path.get(&normalized) {
+                match self.lookup(&normalized) {
                     None => Err(ResolveError::NotFound(format!("path `{normalized}`"))),
                     Some(entries) if entries.len() == 1 => Ok(&entries[0]),
                     Some(entries) => Err(ResolveError::Ambiguous {
@@ -671,7 +708,8 @@ impl ResolveError {
             Self::BadArgs(why) => format!("Invalid arguments: {why}."),
             Self::NotFound(what) => format!(
                 "No workspace note matches {what}. Call `{WORKSPACE_LIST_TOOL}` to see what \
-                 exists — paths are case-sensitive and include the file extension."
+                 exists — workspace names are lowercase and dashed \
+                 (`playbooks/close-checklist.md`), and include the file extension."
             ),
             Self::Ambiguous { path, ids } => format!(
                 "The path `{path}` is ambiguous — {n} notes share it ({ids}). Re-issue the call \
