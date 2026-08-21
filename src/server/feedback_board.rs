@@ -150,7 +150,7 @@ fn checked_comment(body: &str) -> Result<&str, Response> {
     let trimmed = body.trim();
     if trimmed.is_empty() {
         return Err(
-            ApiError(OpenCompanyError::InvalidInput("comment is empty".to_string()))
+            ApiError(OpenCompanyError::InvalidRequest("comment is empty".to_string()))
                 .into_response(),
         );
     }
