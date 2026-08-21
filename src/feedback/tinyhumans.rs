@@ -348,6 +348,10 @@ mod http {
     use super::{IngestOutcome, IngestRequest, PRODUCT, TinyHumansClient};
     use crate::Result;
     use crate::error::OpenCompanyError;
+    use crate::feedback::board::{
+        BoardComment, BoardDetail, BoardItem, BoardKind, BoardPage, BoardQuery, BoardStatus,
+        VoteValue,
+    };
     use crate::ports::types::SecretValue;
     use async_trait::async_trait;
 
@@ -378,6 +382,115 @@ mod http {
                 code: context.to_string(),
                 message: e.to_string(),
             }
+        }
+
+        /// A request builder carrying the product header and the credential.
+        ///
+        /// Every board call is the same shape as `ingest` — the credential rides
+        /// the header and only the header — so they share one place that knows
+        /// it, rather than each remembering to attach it.
+        fn authed(&self, method: reqwest::Method, path: &str) -> reqwest::RequestBuilder {
+            let (product_header_name, product_header_value) =
+                crate::product::product_identity_header();
+            self.http
+                .request(method, format!("{}{path}", self.api_url))
+                .header(product_header_name, product_header_value)
+                .bearer_auth(self.credential.expose())
+        }
+
+        /// Sends a board request and returns the `data` payload of the hub's
+        /// `{ success, data }` envelope, mapping a failure status onto the
+        /// crate error with the hub's own message.
+        async fn data(&self, request: reqwest::RequestBuilder) -> Result<serde_json::Value> {
+            let resp = request
+                .send()
+                .await
+                .map_err(|e| Self::err("unreachable", e))?;
+            let status = resp.status();
+            let value: serde_json::Value = resp.json().await.map_err(|e| Self::err("decode", e))?;
+            if !status.is_success() {
+                return Err(OpenCompanyError::TinyHumans {
+                    code: format!("http_{}", status.as_u16()),
+                    message: wire_error(&value).unwrap_or_else(|| status.to_string()),
+                });
+            }
+            Ok(value.get("data").cloned().unwrap_or(serde_json::Value::Null))
+        }
+    }
+
+    /// Reads a hub board item out of its camelCase JSON.
+    ///
+    /// Tolerant on purpose: a field the hub adds, renames or omits must not turn
+    /// a whole page of the board into an error page in the console. Only `id` is
+    /// structurally required, because without it no row can be voted on.
+    fn board_item(value: &serde_json::Value) -> Result<BoardItem> {
+        let text = |key: &str| value.get(key).and_then(|v| v.as_str());
+        let count = |key: &str| value.get(key).and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+        let id = text("id")
+            .ok_or_else(|| Self_err("decode", "board item without an id"))?
+            .to_string();
+        let upvotes = count("upvoteCount");
+        let downvotes = count("downvoteCount");
+        Ok(BoardItem {
+            id,
+            kind: text("type")
+                .and_then(BoardKind::parse)
+                .unwrap_or(BoardKind::Feature),
+            title: text("title").unwrap_or_default().to_string(),
+            body: text("body").unwrap_or_default().to_string(),
+            status: text("status")
+                .and_then(BoardStatus::parse)
+                .unwrap_or(BoardStatus::Open),
+            author: text("createdByName").map(str::to_string),
+            upvotes,
+            downvotes,
+            score: value
+                .get("score")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(i64::from(upvotes) - i64::from(downvotes)),
+            comment_count: count("commentCount"),
+            my_vote: value
+                .get("myVote")
+                .and_then(|v| v.as_i64())
+                .and_then(|v| i8::try_from(v).ok())
+                .and_then(|v| VoteValue::try_from(v).ok())
+                .unwrap_or(VoteValue::None),
+            issue_url: value
+                .get("github")
+                .and_then(|g| g.get("issueUrl"))
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
+            created_at: text("createdAt").unwrap_or_default().to_string(),
+        })
+    }
+
+    /// Reads a hub comment out of its camelCase JSON.
+    fn board_comment(value: &serde_json::Value) -> BoardComment {
+        let text = |key: &str| value.get(key).and_then(|v| v.as_str());
+        BoardComment {
+            id: text("id").unwrap_or_default().to_string(),
+            author: text("userName").map(str::to_string),
+            body: text("body").unwrap_or_default().to_string(),
+            created_at: text("createdAt").unwrap_or_default().to_string(),
+        }
+    }
+
+    /// The comments array of a detail payload, skipping anything unreadable.
+    fn board_comments(value: &serde_json::Value) -> Vec<BoardComment> {
+        value
+            .get("comments")
+            .and_then(|v| v.as_array())
+            .map(|items| items.iter().map(board_comment).collect())
+            .unwrap_or_default()
+    }
+
+    /// The same error shape [`HttpTinyHumansClient::err`] builds, for the
+    /// free functions above.
+    #[allow(non_snake_case)]
+    fn Self_err(context: &str, message: impl std::fmt::Display) -> OpenCompanyError {
+        OpenCompanyError::TinyHumans {
+            code: context.to_string(),
+            message: message.to_string(),
         }
     }
 
