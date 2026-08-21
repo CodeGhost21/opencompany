@@ -171,6 +171,9 @@ legible: Tauri reports `Unable to find your web assets … frontendDist is set t
 "../frontend/dist"` with the absolute path it resolved, rather than an `npm
 ENOENT` for a directory nobody named.
 
+Which kinds of host it can hold, and how an operator picks one, is
+[`connectors.md`](connectors.md).
+
 ## N connections, and no active one
 
 `frontend/src/connections/registry.ts` holds a map of connections and
