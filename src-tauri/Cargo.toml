@@ -85,3 +85,29 @@ tauri-build = { version = "2", features = [] }
 
 [dev-dependencies]
 tempfile = "3"
+
+# The host's `[patch]` table, rebased one directory up.
+#
+# A `[patch]` section only takes effect in the workspace root that declares it,
+# and this crate is deliberately its own workspace (see the header). Until the
+# `mcp` feature above put `openhuman_core` in this graph none of these crates
+# were reachable from here, so the table could be omitted; now they are, and
+# without it Cargo resolves `tinycortex-api`, `tinyflows` and friends from
+# crates.io (where some do not exist at all) instead of the vendored checkouts
+# the host is built against — and any that did resolve would be a *second*
+# copy, whose trait identities would not match the ones `opencompany` compiled.
+#
+# Keep this byte-identical to the host's table modulo the `../` prefix. The
+# comments explaining each entry live there; this is the replica.
+[patch."https://github.com/tinyhumansai/tinymemory"]
+tinymemory-api = { path = "../vendor/openhuman/vendor/tinymemory/api" }
+
+[patch.crates-io]
+tinyagents = { path = "../vendor/openhuman/vendor/tinyagents" }
+tinyflows = { path = "../vendor/openhuman/vendor/tinyflows" }
+tinycortex = { path = "../vendor/openhuman/vendor/tinycortex" }
+tinycortex-api = { path = "../vendor/openhuman/vendor/tinycortex/api" }
+tinychannels = { path = "../vendor/openhuman/vendor/tinychannels" }
+tinyplace = { path = "../vendor/openhuman/vendor/tinyplace/sdk/rust" }
+motosan-ai-oauth = { path = "../vendor/openhuman/vendor/motosan-ai-oauth" }
+whisper-rs-sys = { git = "https://github.com/tinyhumansai/whisper-rs-sys.git", branch = "main" }
