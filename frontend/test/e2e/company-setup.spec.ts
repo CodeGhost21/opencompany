@@ -84,14 +84,26 @@ function staffed(roster: RosterRow[]): RosterRow[] {
  *
  * The roster read does not carry it — only the detail read does — and the
  * distinction is what keeps the guard below honest, so it is worth the extra
- * request per staffed row. A host too old to answer is treated as `"overlay"`:
- * that is the deletable case, so an unknown answer fails loudly at the delete
- * rather than quietly skipping the row.
+ * request per staffed row.
+ *
+ * It fails **closed**, which is the whole reason it is a separate function. A
+ * manifest teammate is deletable now, so guessing `"overlay"` on a detail read
+ * that failed or answered without a `source` would tombstone a blueprint
+ * teammate on a host this lane was never meant to touch — and `unstaffCompany`
+ * discards DELETE errors, so nothing would say a word. An unreadable source is
+ * not a deletable one: throw, naming the id, and let the run fail on its own
+ * terms.
  */
 async function sourceOf(request: APIRequestContext, id: string): Promise<string> {
   const res = await request.get(`${COMPANY_SCOPE}/team/${id}`);
-  if (!res.ok()) return "overlay";
-  return ((await res.json()) as { source?: string }).source ?? "overlay";
+  expect(res.ok(), `could not read teammate '${id}' to find out where it came from`).toBeTruthy();
+  const source = ((await res.json()) as { source?: string }).source;
+  expect(
+    source,
+    `the host did not say where teammate '${id}' came from, so this helper cannot tell a ` +
+      "blueprint teammate it must leave alone from an operator-added one it may remove",
+  ).toBeDefined();
+  return source as string;
 }
 
 /**
@@ -110,14 +122,16 @@ async function sourceOf(request: APIRequestContext, id: string): Promise<string>
  *
  * So the sorting happens here instead. Manifest rows are identified and left
  * strictly alone, which keeps the wrong-host assertion below meaningful (#1404)
- * rather than something this helper has already deleted its way past; the
- * overlay rows are removed, and because the baseline stays the last-teammate
- * refusal is never reached and every delete lands.
+ * rather than something this helper has already deleted its way past; only the
+ * rows the host calls `"overlay"` are removed, and because the baseline stays
+ * the last-teammate refusal is never reached and every delete lands.
  */
 async function unstaffCompany(request: APIRequestContext) {
   for (const member of staffed(await hostRoster(request))) {
     if (!member.id) continue;
-    if ((await sourceOf(request, member.id)) === "manifest") continue;
+    // Deleted only on an explicit `"overlay"`. Anything else — a blueprint row,
+    // or a source this spec does not know — is left where it is.
+    if ((await sourceOf(request, member.id)) !== "overlay") continue;
     await request.delete(`${COMPANY_SCOPE}/team/${member.id}`).catch(() => undefined);
   }
 }
