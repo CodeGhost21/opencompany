@@ -2696,7 +2696,7 @@ mod tests {
         let tool = WorkspaceListTool::new(ws(store, CompanyId::new("acme")));
 
         let all = text(&tool.execute(json!({})).await.unwrap());
-        assert!(all.contains("folder\tStandards\tid=f-standards"), "{all}");
+        assert!(all.contains("folder\tstandards\tid=f-standards"), "{all}");
         assert!(
             all.contains("file\tstandards/engineering-standards.md\tid=n-eng\trev=2000"),
             "{all}"
@@ -3282,7 +3282,7 @@ mod tests {
             "{scoped}"
         );
         assert!(!scoped.contains("id=n-readme"), "{scoped}");
-        assert!(scoped.contains("under `Standards`"), "{scoped}");
+        assert!(scoped.contains("under `standards`"), "{scoped}");
 
         for prefix in ["../etc", "standards/../..", "C:\\Windows"] {
             let refused = tool
@@ -4177,7 +4177,7 @@ mod tests {
         let tree = store.tree(&id).await.unwrap();
         let node = tree
             .iter()
-            .find(|n| n.name == "Deploys.md")
+            .find(|n| n.name == "deploys.md")
             .expect("the note is in the tree");
         assert_eq!(node.kind, NodeKind::File);
         let (_, body) = store.read(&id, &node.id).await.unwrap().unwrap();
@@ -4379,7 +4379,7 @@ mod tests {
         );
         assert_eq!(
             tree.iter()
-                .find(|n| n.name == "Retro.md")
+                .find(|n| n.name == "retro.md")
                 .unwrap()
                 .parent_id
                 .as_deref(),
@@ -4654,7 +4654,7 @@ mod tests {
                 .await
                 .unwrap(),
         );
-        assert!(listing.contains("standards/Brand voice.md"), "{listing}");
+        assert!(listing.contains("standards/brand-voice.md"), "{listing}");
 
         let read = text(
             &WorkspaceReadTool::new(reader)
@@ -4687,7 +4687,7 @@ mod tests {
             .await
             .unwrap()
             .into_iter()
-            .find(|n| n.name == "Voice.md")
+            .find(|n| n.name == "voice.md")
             .unwrap();
 
         let out = WorkspaceWriteTool::new(ws(store.clone(), id.clone()))
@@ -4705,7 +4705,7 @@ mod tests {
             .await
             .unwrap()
             .into_iter()
-            .find(|n| n.name == "Voice.md")
+            .find(|n| n.name == "voice.md")
             .unwrap();
         assert_eq!(
             after.created_by,
