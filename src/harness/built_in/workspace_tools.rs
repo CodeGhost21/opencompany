@@ -4214,6 +4214,74 @@ mod tests {
         assert_eq!(node.updated_by, agent_origin());
     }
 
+    /// The name the agent typed is normalized, and the reply names where the
+    /// note actually landed.
+    ///
+    /// The echo is the whole contract: the agent has to be able to read back
+    /// what it just wrote, and an acknowledgement quoting the path it *asked*
+    /// for would send it to a path that does not exist.
+    #[tokio::test]
+    async fn create_normalizes_the_name_and_says_where_it_landed() {
+        let (_dir, store) = seeded("acme").await;
+        let id = CompanyId::new("acme");
+        let tool = WorkspaceCreateTool::new(ws(store.clone(), id.clone()));
+
+        let out = tool
+            .execute(json!({ "path": "standards/Q3 Launch Brief.md", "kind": "file" }))
+            .await
+            .unwrap();
+        assert!(!out.is_error, "{}", text(&out));
+        assert!(
+            text(&out).contains("standards/q3-launch-brief.md"),
+            "the reply must name the stored path: {}",
+            text(&out)
+        );
+
+        let tree = store.tree(&id).await.unwrap();
+        assert!(
+            tree.iter().any(|n| n.name == "q3-launch-brief.md"),
+            "{:?}",
+            tree.iter().map(|n| &n.name).collect::<Vec<_>>()
+        );
+    }
+
+    /// A parent folder stored under a legacy spelling still resolves, and the
+    /// reply names *its* spelling rather than the one the agent typed.
+    ///
+    /// Both halves matter. Refusing would tell an agent that a folder it can
+    /// see in the listing does not exist; echoing the typed spelling would hand
+    /// it a path that resolves only by the same fallback it does not know
+    /// about.
+    #[tokio::test]
+    async fn create_resolves_a_legacy_parent_and_echoes_its_stored_path() {
+        let (_dir, store) = seeded("acme").await;
+        let id = CompanyId::new("acme");
+        store
+            .adopt_or_create_folder(&id, None, "Playbooks", WorkspaceOrigin::Operator)
+            .await
+            .unwrap();
+        let tool = WorkspaceCreateTool::new(ws(store.clone(), id.clone()));
+
+        let out = tool
+            .execute(json!({ "path": "playbooks/Release checklist.md", "kind": "file" }))
+            .await
+            .unwrap();
+
+        assert!(!out.is_error, "{}", text(&out));
+        assert!(
+            text(&out).contains("Playbooks/release-checklist.md"),
+            "the reply must name the folder as it is stored: {}",
+            text(&out)
+        );
+        let tree = store.tree(&id).await.unwrap();
+        assert_eq!(
+            tree.iter().filter(|n| n.name.eq_ignore_ascii_case("playbooks")).count(),
+            1,
+            "no rival folder: {:?}",
+            tree.iter().map(|n| &n.name).collect::<Vec<_>>()
+        );
+    }
+
     /// The steered-for case: the agent's own folder, created as a folder and
     /// then filled.
     #[tokio::test]
