@@ -147,6 +147,28 @@ pub struct StatusSpec {
     /// wire-only DTO instead — see `server::ops::ledgers::LedgerStatusDto`.
     #[serde(default)]
     pub needs_reason: bool,
+    /// Status words a stored row may carry that fold into this one.
+    ///
+    /// The migration seam for a ledger whose vocabulary narrows (issue #1512
+    /// narrowed all three built-ins to three statuses each). A row written
+    /// under `at_risk` is a real row somebody recorded, and a spec that simply
+    /// stopped declaring the word would do two things to it at once: report it
+    /// as a fault, and — because sections select by status — leave it out of
+    /// the rendered file entirely. That is the silent disappearance the derived
+    /// file exists to prevent, arrived at from the declaration's side.
+    ///
+    /// So an alias heals on **read**, exactly as
+    /// [`LEGACY_COLUMN_BACKLOG`](crate::ports::tasks::LEGACY_COLUMN_BACKLOG)
+    /// does for a stored card: the row renders and counts under the surviving
+    /// status, and the next event against it persists the new word. A *write*
+    /// of a retired status is still refused, so a client is told once rather
+    /// than quietly kept on the old vocabulary.
+    ///
+    /// Empty for everything a company declares. Nothing validates that two
+    /// statuses do not claim the same alias, because the resolution is
+    /// first-declaration-wins and the built-ins are the only author.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub aliases: Vec<String>,
 }
 
 /// The order a section lists its rows in.
@@ -358,16 +380,35 @@ impl LedgerSpec {
 
     /// Whether `status` is one this spec declares.
     pub fn knows_status(&self, status: &str) -> bool {
-        self.statuses
-            .iter()
-            .any(|declared| declared.name.eq_ignore_ascii_case(status.trim()))
+        self.status(status).is_some()
     }
 
-    /// The declaration for `status`, if there is one.
+    /// The declaration for `status`, if there is one — by name, or by one of
+    /// the [`aliases`](StatusSpec::aliases) a narrowed vocabulary left behind.
     pub fn status(&self, status: &str) -> Option<&StatusSpec> {
+        let status = status.trim();
         self.statuses
             .iter()
-            .find(|declared| declared.name.eq_ignore_ascii_case(status.trim()))
+            .find(|declared| declared.name.eq_ignore_ascii_case(status))
+            .or_else(|| {
+                self.statuses.iter().find(|declared| {
+                    declared
+                        .aliases
+                        .iter()
+                        .any(|alias| alias.eq_ignore_ascii_case(status))
+                })
+            })
+    }
+
+    /// The status word `status` renders and counts as: itself, or the surviving
+    /// status that adopted it.
+    ///
+    /// The one place a retired word becomes a live one, so a section's
+    /// membership test, a closed count and a rendered heading cannot disagree
+    /// about where a migrated row belongs.
+    pub fn canonical_status<'a>(&'a self, status: &'a str) -> &'a str {
+        self.status(status)
+            .map_or(status, |declared| declared.name.as_str())
     }
 
     /// Whether an entry in `status` is closed.
