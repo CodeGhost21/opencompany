@@ -1816,7 +1816,11 @@ function TreeRow({ node, ...props }: TreeProps & { node: FsNode }) {
           >
             <MoreHorizontal className="size-3.5" />
           </DropdownMenuTrigger>
-          <DropdownMenuContent align="end">
+          {/* `w-auto` for the derived menu only: the popup is pinned to
+              `w-(--anchor-width)` — the width of the tiny `…` button — with a
+              128px floor, and the heading below is wider than that. Every other
+              menu in the tree fits the floor. */}
+          <DropdownMenuContent align="end" className={derived ? "w-auto" : undefined}>
             {/* Exactly the actions the host will accept, which is not the same
                 set the issue asked for (#1377 said drop all three).
                 `DerivedGuardWorkspace::rename_move` refuses both ends — moving a
@@ -1835,7 +1839,7 @@ function TreeRow({ node, ...props }: TreeProps & { node: FsNode }) {
               // Grouped because `DropdownMenuLabel` is Base UI's
               // `Menu.GroupLabel`, which throws outside a `Menu.Group`.
               <DropdownMenuGroup>
-                <DropdownMenuLabel className="flex items-center gap-1.5 font-normal">
+                <DropdownMenuLabel className="flex items-center gap-1.5 font-normal whitespace-nowrap">
                   <Lock className="size-3 shrink-0" />
                   {DERIVED_LABEL}
                 </DropdownMenuLabel>

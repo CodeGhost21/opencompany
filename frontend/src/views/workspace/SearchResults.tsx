@@ -137,7 +137,30 @@ export function SearchResults({ query, hits, total, loading, error, onOpen }: Pr
                       ),
                     )}
                   </span>
-                  {derived ? (
+                  {origin && (
+                    <Badge variant="outline" className="shrink-0 text-3xs">
+                      {origin}
+                    </Badge>
+                  )}
+                </span>
+                {/* The path is the reason a flat hit list is usable at all — two
+                    notes can share a name, and the tree that would have told
+                    them apart is not on screen while a search is showing.
+
+                    It is also where the ledger badge goes, rather than up beside
+                    the name where `Seeded` used to sit. "Written by a ledger" is
+                    wide, the pane is 256px, and on the name line it truncated
+                    the very thing the operator is scanning for — `DECISIONS.md`
+                    became `DECISIONS…`. Down here it costs nothing and lands
+                    next to its own evidence, the `derived/` segment it explains.
+                    The scan-for-locks affordance lives in the tree, which is
+                    the surface people browse. */}
+                <span className="mt-0.5 flex items-center gap-1.5 text-2xs text-muted-foreground">
+                  <span className="truncate">
+                    {hit.path}
+                    {isBinary(hit) && ` · ${hit.mime} · ${formatBytes(hit.size)}`}
+                  </span>
+                  {derived && (
                     <Badge
                       variant="outline"
                       className="shrink-0 gap-1 pl-1 text-3xs font-normal"
@@ -147,20 +170,7 @@ export function SearchResults({ query, hits, total, loading, error, onOpen }: Pr
                       <Lock className="size-2.5" aria-hidden />
                       {DERIVED_LABEL}
                     </Badge>
-                  ) : (
-                    origin && (
-                      <Badge variant="outline" className="shrink-0 text-3xs">
-                        {origin}
-                      </Badge>
-                    )
                   )}
-                </span>
-                {/* The path is the reason a flat hit list is usable at all — two
-                    notes can share a name, and the tree that would have told
-                    them apart is not on screen while a search is showing. */}
-                <span className="mt-0.5 block truncate text-2xs text-muted-foreground">
-                  {hit.path}
-                  {isBinary(hit) && ` · ${hit.mime} · ${formatBytes(hit.size)}`}
                 </span>
                 {hit.excerpt && <Excerpt text={hit.excerpt} query={query} />}
               </button>
