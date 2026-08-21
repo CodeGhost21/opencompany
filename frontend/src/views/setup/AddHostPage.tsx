@@ -73,11 +73,12 @@ export function AddHostPage() {
     close();
   };
 
-  // There is somewhere to go back *to* only once a host is connected. On the
-  // first run — a fresh desktop whose embedded host did not start, or a hub
-  // nobody has added anything to — this screen is the whole application, and a
-  // Back button there points at the dead end it replaced.
-  const canLeave = connections.length > 0;
+  // What leaving lands on. With a host connected it is the console; on a first
+  // run — a fresh desktop whose embedded host did not start, or a hub nobody
+  // has added anything to — it is the empty screen that sent them here. The way
+  // out is offered either way: a screen you can enter and not leave is a trap,
+  // and the dialog this replaced could always be dismissed.
+  const connected = connections.length > 0;
 
   return (
     <OnboardingShell
@@ -94,16 +95,13 @@ export function AddHostPage() {
         </div>
       }
       footer={
-        canLeave ? (
-          <Button variant="ghost" size="sm" data-testid="add-host-back" onClick={close}>
-            <ArrowLeft className="size-4" />
-            Back to the console
-          </Button>
-        ) : (
-          // Nothing to go back to, and nothing to say about it. An empty footer
-          // rule under a form is furniture, so the card simply ends.
-          undefined
-        )
+        // The one way out, in the one place every connector shares. Each panel
+        // below carries only its own primary action, so nothing has to decide
+        // between two buttons that do the same thing.
+        <Button variant="ghost" size="sm" data-testid="add-host-back" onClick={close}>
+          <ArrowLeft className="size-4" />
+          {connected ? "Back to the console" : "Back"}
+        </Button>
       }
     >
       {/*
@@ -132,12 +130,11 @@ export function AddHostPage() {
           </TabsContent>
         ) : null}
         <TabsContent value="cloud">
-          <CloudHost onAdd={(baseUrl) => onAdd(baseUrl, "cloud")} onCancel={close} />
+          <CloudHost onAdd={(baseUrl) => onAdd(baseUrl, "cloud")} />
         </TabsContent>
         <TabsContent value="remote">
           <RemoteHost
             onAdd={(baseUrl) => onAdd(baseUrl, "remote")}
-            onCancel={close}
             desktop={Boolean(onAddLocal)}
           />
         </TabsContent>
@@ -190,13 +187,7 @@ function tenantOf(baseUrl: string): string {
 }
 
 /** A tenant of the hosted platform, at the address it was given. */
-function CloudHost({
-  onAdd,
-  onCancel,
-}: {
-  onAdd: (baseUrl: string) => void;
-  onCancel: () => void;
-}) {
+function CloudHost({ onAdd }: { onAdd: (baseUrl: string) => void }) {
   const [url, setUrl] = useState("");
   return (
     <>
@@ -220,9 +211,6 @@ function CloudHost({
         </p>
       </div>
       <PanelActions>
-        <Button variant="ghost" onClick={onCancel}>
-          Cancel
-        </Button>
         <Button disabled={!url.trim()} onClick={() => onAdd(url.trim())}>
           Add
         </Button>
@@ -234,11 +222,9 @@ function CloudHost({
 /** The address of a host running somewhere this application did not start it. */
 function RemoteHost({
   onAdd,
-  onCancel,
   desktop,
 }: {
   onAdd: (baseUrl: string) => void;
-  onCancel: () => void;
   desktop: boolean;
 }) {
   const [url, setUrl] = useState("");
@@ -268,9 +254,6 @@ function RemoteHost({
         )}
       </div>
       <PanelActions>
-        <Button variant="ghost" onClick={onCancel}>
-          Cancel
-        </Button>
         <Button disabled={!url.trim()} onClick={() => onAdd(url.trim())}>
           Add
         </Button>
@@ -346,9 +329,6 @@ function SshHost({
         {error ? <p className="text-destructive text-xs">{error}</p> : null}
       </div>
       <PanelActions>
-        <Button variant="ghost" onClick={onDone}>
-          Cancel
-        </Button>
         <Button disabled={busy || !destination.trim()} onClick={() => void add()}>
           {busy ? <Loader2 className="size-4 animate-spin" /> : null}
           Connect
