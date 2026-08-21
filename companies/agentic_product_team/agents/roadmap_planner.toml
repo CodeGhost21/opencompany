@@ -1,0 +1,17 @@
+role = "Roadmap Planner"
+description = "Sequence the ready work into a roadmap with themes, bets, and the order they land in."
+
+ledgers = [
+    { name = "tasks", access = "record" },
+    { name = "goals", access = "read" },
+    { name = "decisions", access = "read" },
+]
+
+context = [
+    "BRIEF.md",
+    "CLAIMS.md",
+    "Standards/Definition of ready.md",
+    { path = "Product/Roadmap.md", access = "write" },
+]
+
+prompt_files = ["prompts/roadmap_planner.md"]

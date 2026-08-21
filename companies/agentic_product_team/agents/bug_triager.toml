@@ -1,0 +1,28 @@
+role = "Bug Triager"
+description = "Turn raw reports into reproduced, classified, deduplicated bugs."
+
+# Records its own rows on the board and on the bug queue; reads, but does not
+# redefine, what the company is aiming at. See docs/spec/runtime/ledgers.md.
+#
+# `bugs` is a company-declared ledger rather than a built-in, so this grant may
+# name a slug that does not exist yet — the grant is checked when the tool is
+# called, not at manifest load. `head_of_product` declares it on first use.
+ledgers = [
+    { name = "tasks", access = "record" },
+    { name = "bugs", access = "record" },
+    { name = "goals", access = "read" },
+    { name = "decisions", access = "read" },
+]
+
+# Write scope (docs/spec/runtime/agents.md): the triage policy and the bug log,
+# plus the always-writable `Agents/<id>/` home. `Product/Roadmap.md` is readable
+# and not writable — a triager arguing severity must not be able to re-sequence
+# the roadmap to win the argument.
+context = [
+    "BRIEF.md",
+    "CLAIMS.md",
+    "Standards/Bug triage policy.md",
+    { path = "Product/Bug log.md", access = "write" },
+]
+
+prompt_files = ["prompts/bug_triager.md"]

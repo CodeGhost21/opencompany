@@ -102,12 +102,13 @@ fn every_company_skill_and_workspace_parses() {
 /// Whether a template belongs here is therefore a judgement about its charter —
 /// research, editorial, marketing, legal, product engineering — recorded here
 /// because it cannot be derived from content.
-const SEARCH_GRANTED_COMPANIES: [&str; 8] = [
+const SEARCH_GRANTED_COMPANIES: [&str; 9] = [
     "agentic_consultation_firm",
     "agentic_design_studio",
     "agentic_law_firm",
     "agentic_marketing_agency",
     "agentic_media_company",
+    "agentic_product_team",
     "agentic_research_lab",
     "agentic_software_company",
     "signals_opportunity_studio",
@@ -152,7 +153,9 @@ const SEARCH_UNGRANTED_COMPANIES: [&str; 12] = [
 /// and `agentic_research_lab` is excluded for the same reason — its belt is
 /// `["*", "search"]`, dropping `media` and `composio`, because a research lab
 /// has no use for image generation or third-party OAuth side effects and both
-/// are opt-in spend.
+/// are opt-in spend. `agentic_product_team` is excluded on that same
+/// research-lab argument: it produces documents and ledger rows, so it drops
+/// both opt-in namespaces too.
 const FULL_BELT_PLUS_SEARCH: [&str; 6] = [
     "agentic_consultation_firm",
     "agentic_design_studio",
@@ -696,13 +699,15 @@ fn every_seeded_output_destination_resolves_against_its_own_manifest() {
     // 22 since #1361 added `e2e_harness/long_pipeline.toml`, a ten-node fixture
     // whose only job is to be too long for the canvas to fit legibly. It is a
     // seeded workflow like any other, so its output node is held to the same
-    // destination rule as the twenty #963 enumerated.
+    // destination rule as the twenty #963 enumerated. 25 since
+    // `agentic_product_team` shipped three workflows, each delivering to one of
+    // that company's own desks.
     assert_eq!(
-        checked, 22,
-        "the seeded output-node count changed; this test and #963's list describe 22"
+        checked, 25,
+        "the seeded output-node count changed; this test and #963's list describe 25"
     );
     assert_eq!(
-        with_destination, 21,
+        with_destination, 24,
         "every seeded output except the research lab's deliberate deskless workflow \
          carries a destination"
     );
