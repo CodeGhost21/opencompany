@@ -554,7 +554,7 @@ async fn renaming_your_own_note_keeps_its_body_id_and_authorship() {
     );
 
     let (node, body) = home.read("n-draft").await;
-    assert_eq!(node.name, "Q3 launch brief.md");
+    assert_eq!(node.name, "q3-launch-brief.md");
     assert_eq!(body, "# Draft");
     assert_eq!(node.created_by, agent_origin());
     assert_eq!(node.updated_by, agent_origin());

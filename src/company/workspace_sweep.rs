@@ -625,7 +625,7 @@ mod tests {
         );
         assert_eq!(
             names(&ws, &other).await,
-            vec!["agents", "readme.md", "ceo", "secrets"]
+            vec!["agents", "ceo", "readme.md", "secrets"]
         );
     }
 
