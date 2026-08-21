@@ -2150,7 +2150,9 @@ export function WorkflowCreateDialog({
           <>
             {preflight.status === "refused" && (
               <div role="status" aria-live="polite" data-testid="preflight-refused">
-                <Alert variant="destructive">
+                {/* `Alert` defaults to `role="alert"` (assertive). Nobody asked
+                    for this verdict, so it must not interrupt an edit. */}
+                <Alert variant="destructive" role="status">
                   <AlertDescription>
                     The host would refuse this graph: {preflight.message}
                   </AlertDescription>
