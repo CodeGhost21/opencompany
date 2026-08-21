@@ -30,6 +30,9 @@ pub mod globals;
 /// echo-brained, offline behaviour unchanged.
 #[cfg(feature = "openhuman")]
 pub mod harness;
+/// Turning dropped files and links into memory: extraction, then chunking.
+/// The console's Brain drop zone is the caller; the ports are unchanged.
+pub mod ingest;
 /// Dynamic ledgers: the company's own record — goals, decisions, and whatever
 /// axis a workspace declares — as a folded append-only log rendered into the
 /// `derived/` folder. The task board is registered here as a native ledger so

@@ -419,7 +419,7 @@ fn company_builder(
         builder = builder.with_stores(stores);
     }
     if let Some(overlay) = state.memory_overlay() {
-        builder = builder.with_memory_overlay(overlay);
+        builder = builder.with_memory_overlay(&overlay);
     }
     #[cfg(feature = "smtp")]
     if let Ok(Some(cfg)) = opencompany::server::ops::mailer::TenantMailboxConfig::from_env() {
@@ -1657,6 +1657,12 @@ async fn async_main() -> Result<()> {
             let setup_complete = config_file
                 .as_ref()
                 .is_some_and(|c| c.setup_completed_at.is_some());
+            // Read off the file before it is consumed for `bind` below: the
+            // memory engine is resolved further down, after the state exists.
+            let memory_section = config_file
+                .as_ref()
+                .map(|c| c.memory.clone())
+                .unwrap_or_default();
             let (bind, bind_source) = opencompany::app::config::resolve_serve_bind(
                 bind,
                 &ProcessEnv,
@@ -1700,7 +1706,12 @@ async fn async_main() -> Result<()> {
             // mongodb are opened once here and injected into every company's
             // builder. A selected-but-unavailable backend aborts boot rather
             // than silently falling back to fs.
-            let storage_settings = opencompany::store::StorageSettings::from_env()?;
+            // The environment first, then the instance's own `config.toml`
+            // `[memory]` section under it — the engine an operator chose from
+            // the console. A deployment that injects `OPENCOMPANY_MEMORY` keeps
+            // ownership and the file layer is inert; see `MemorySection`.
+            let storage_settings = opencompany::store::StorageSettings::from_env()?
+                .with_memory_config(&memory_section)?;
             if let Some(handles) =
                 opencompany::store::open_storage(&storage_settings, &home).await?
             {
