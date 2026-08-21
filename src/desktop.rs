@@ -63,8 +63,6 @@ pub const PRESETS: &[DesktopPreset] = &[
 
 /// The preset a first-run desktop install uses.
 pub const DEFAULT_PRESET_ID: &str = "agentic_marketing_agency";
-/// The local standing invite used only to bootstrap the desktop webview session.
-pub const DESKTOP_OPERATOR_EMAIL: &str = "operator@opencompany.local";
 /// The origin used by Tauri v2's desktop webview.
 pub const TAURI_WEBVIEW_ORIGIN: &str = "http://tauri.localhost";
 
@@ -98,12 +96,16 @@ pub fn preset(id: &str) -> Option<&'static DesktopPreset> {
     PRESETS.iter().find(|preset| preset.id == id)
 }
 
-/// Information the webview needs to authenticate to its embedded runtime.
+/// Where the webview should point itself at its embedded runtime.
+///
+/// No credential of any kind, and that is the whole shape of the desktop now:
+/// the host runs `none` mode, so the address and the company are all a caller
+/// needs. It carried an operator mailbox until the shell stopped signing
+/// anybody in.
 #[derive(Clone, Debug, Serialize)]
 pub struct DesktopConfig {
     pub api_url: String,
     pub company: String,
-    pub operator_email: &'static str,
 }
 
 /// A running local OpenCompany API. Dropping it aborts the loopback server.
@@ -455,6 +457,14 @@ async fn register(
 }
 
 /// Starts an offline, loopback-only runtime from a bundled preset.
+///
+/// `none` host-wide, like the packaged shell (`src-tauri/src/embedded.rs`),
+/// and set the same way — as an override on the host's own config rather than
+/// as `[users].mode` in the preset manifests, which would not survive
+/// `validate_users`. The two entry points must agree about the mode: this one
+/// is not what ships, but it is the one whose name reads like it is, and a
+/// company enterable here but not there (or the reverse) is a difference
+/// nothing would report.
 pub async fn start_local(home: impl Into<PathBuf>, preset_id: &str) -> Result<DesktopRuntime> {
     let manifest = first_run_manifest(preset_id)?;
 
@@ -463,6 +473,7 @@ pub async fn start_local(home: impl Into<PathBuf>, preset_id: &str) -> Result<De
     let company_id = company_id_from_name(&manifest.company.name);
     let state = AppState::new(AppConfig {
         bind: address.to_string(),
+        auth_mode_override: Some(crate::app::config::AuthMode::None),
         ..AppConfig::default()
     })
     .with_home(home.into())
@@ -471,6 +482,7 @@ pub async fn start_local(home: impl Into<PathBuf>, preset_id: &str) -> Result<De
     });
     let runtime = RuntimeBuilder::new(state.home().to_path_buf(), manifest)
         .with_id(company_id.clone())
+        .with_auth_mode_override(state.auth_mode_override())
         .build()
         .await?;
     state
@@ -479,16 +491,15 @@ pub async fn start_local(home: impl Into<PathBuf>, preset_id: &str) -> Result<De
 
     // Through the one production serving path, not a bare `axum::serve` — this
     // is where the `none`-mode local-owner peer and proxy-header gates are
-    // wired (see `serve_on`'s doc comment). Harmless today since this always
-    // binds loopback and nothing here sets `[users].mode = "none"`, but this
-    // function's name is the one someone will copy from, so it should not be
-    // the one place those guarantees are missing.
+    // wired (see `serve_on`'s doc comment). No longer merely defensive: this
+    // host *is* `none`-mode, so those two per-request gates are the ones
+    // standing between its owner's company and anything that reached this
+    // socket from somewhere else.
     let server = tokio::spawn(crate::server::serve_on(listener, state));
     Ok(DesktopRuntime {
         config: DesktopConfig {
             api_url: format!("http://{address}"),
             company: company_id.as_ref().to_string(),
-            operator_email: DESKTOP_OPERATOR_EMAIL,
         },
         server,
     })
@@ -657,7 +668,7 @@ mod tests {
             .await
             .unwrap();
         assert!(runtime.config().api_url.starts_with("http://127.0.0.1:"));
-        assert_eq!(runtime.config().operator_email, DESKTOP_OPERATOR_EMAIL);
+        assert_eq!(runtime.config().company, "agentic-marketing-agency");
     }
 
     /// A state over `home`, as an embedded host builds one.
