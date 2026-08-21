@@ -1402,7 +1402,7 @@ impl HarnessPool {
         // stale the same way a budget does — the persona is assembled once per
         // roster, so an edit unseen by any fingerprint would not reach the
         // system prompt until a restart.
-        let override_fp = override_fingerprint(&overlay.overrides);
+        let override_fp = override_fingerprint(&overlay.agent_edits);
         let policy_fp = policy_fingerprint(overlay.policy.as_ref());
         // Desk scoping now decides capability (the middle level of the
         // three-level narrowing), so it joins the staleness check: without this
@@ -1571,12 +1571,6 @@ impl HarnessPool {
         // so installing the live set here is what carries a console budget edit
         // into the roster the very next turn runs on.
         fresh_company.overlay_budgets = overlay.budgets;
-        // Issue #1530: same treatment for the persona overrides — `build_roster`
-        // resolves every agent's instructions through
-        // `fresh_company.effective_instructions`, so installing the live set here
-        // is what carries a console persona edit into the roster the next turn
-        // runs on.
-        fresh_company.overlay_agent_edits = overlay.overrides;
         // The desk axis gets the same treatment, and needs it for the same
         // reason: `build_roster` resolves every teammate's grants through
         // `fresh_company.agent_desk_tools`, so the live desk set, seating and
@@ -1992,7 +1986,6 @@ impl HarnessPool {
                 agent_edits: record.overlay_agent_edits,
                 retired: record.overlay_retired_agents,
                 budgets: record.overlay_budgets,
-                overrides: record.overlay_agent_edits,
                 policy: record.overlay_policy,
                 desks: record.overlay_desks,
                 desk_members: record.overlay_desk_members,
@@ -2003,7 +1996,6 @@ impl HarnessPool {
                 agent_edits: company.overlay_agent_edits.clone(),
                 retired: company.overlay_retired_agents.clone(),
                 budgets: company.overlay_budgets.clone(),
-                overrides: company.overlay_agent_edits.clone(),
                 policy: company.overlay_policy.clone(),
                 desks: company.overlay_desks.clone(),
                 desk_members: company.overlay_desk_members.clone(),
@@ -2862,7 +2854,6 @@ pub(crate) struct EffectiveOverlay {
     /// The ids of manifest teammates the operator has removed.
     pub retired: Vec<String>,
     pub budgets: Vec<BudgetOverride>,
-    pub overrides: Vec<AgentOverride>,
     pub policy: Option<PolicyOverride>,
     pub desks: Vec<OverlayDesk>,
     pub desk_members: Vec<OverlayDeskMember>,
