@@ -61,25 +61,30 @@ test("the lifecycle card offers pause, withholds suspend and archive, and says w
 test("the host really does refuse suspend and archive to this session", async ({
   request,
 }) => {
-  // The company the console is operating, read the way the console reads it —
-  // rather than hard-coding the harness id, so this holds against a
-  // single-company host and a scoped one alike.
-  const status = (await (await request.get("/api/v1/company")).json()) as {
-    id: string;
-    lifecycle: string;
-  };
-  expect(status.id, "the harness host must serve a company").toBeTruthy();
+  // The company this session can see, rather than the harness id hard-coded.
+  // `GET /api/v1/companies` is `CompanyAuth` and filtered by `visible_companies`,
+  // so it answers a signed-in person with exactly the companies they operate —
+  // unlike `/api/v1/company`, which has no status alias and 404s with an empty
+  // body that reads as a JSON parse error rather than as a wrong URL.
+  const list = await request.get("/api/v1/companies");
+  expect(list.ok(), `listing companies failed: ${list.status()}`).toBeTruthy();
+  const companies = (await list.json()) as { id: string; lifecycle: string }[];
+  const company = companies[0];
+  expect(company?.id, "the harness host must serve a company").toBeTruthy();
 
   // The reason the buttons are gone. `request` carries the same signed-in
   // storage state the page does, so these are the exact calls the Archive
   // button used to make *after* taking an operator's confirmation.
   for (const action of ["suspend", "archive"]) {
-    const res = await request.post(`/api/v1/companies/${status.id}/${action}`);
+    const res = await request.post(`/api/v1/companies/${company.id}/${action}`);
     expect(res.status(), `${action} must refuse a human session`).toBe(401);
   }
 
   // And the refusal really was a refusal: nothing above may have archived the
   // company the specs after this one drive.
-  const after = (await (await request.get("/api/v1/company")).json()) as { lifecycle: string };
-  expect(after.lifecycle).toBe(status.lifecycle);
+  const after = (await (await request.get("/api/v1/companies")).json()) as {
+    id: string;
+    lifecycle: string;
+  }[];
+  expect(after.find((c) => c.id === company.id)?.lifecycle).toBe(company.lifecycle);
 });
