@@ -420,10 +420,29 @@ pub(crate) enum Found {
 ///
 /// `pub(crate)` so the fail-closed adoption rule above has exactly one
 /// implementation. See [`Found`].
+///
+/// # The name match is case-insensitive
+///
+/// Because the names this module mints changed case: `Agents` became `agents`
+/// when the lowercase-dashed rule landed
+/// ([`workspace_names`](super::workspace_names)). A case-*sensitive* lookup
+/// would answer `Free` for every company created before that, and the create
+/// beneath it would mint a second root — so one agent's home would be under
+/// `Agents/` and its next deliverable under `agents/`, with neither view
+/// complete and nothing reporting the split. Matching case-insensitively adopts
+/// the folder that is already there, whichever spelling it carries.
+///
+/// It also closes the twin the other way round: a company whose operator made a
+/// `Secrets/` folder by hand no longer gets a rival `secrets/` beside it. Two
+/// nodes whose names differ only in case are now one ambiguous name, which is
+/// [`Found::Collision`] — the fail-closed answer this module gives every
+/// ambiguity, rather than a coin flip between them.
 pub(crate) fn find(nodes: &[WorkspaceNode], parent: Option<&str>, name: &str) -> Found {
     let matches: Vec<&WorkspaceNode> = nodes
         .iter()
-        .filter(|node| node.parent_id.as_deref() == parent && node.name == name)
+        .filter(|node| {
+            node.parent_id.as_deref() == parent && node.name.eq_ignore_ascii_case(name)
+        })
         .collect();
 
     match matches.as_slice() {
