@@ -72,6 +72,7 @@ Object.defineProperties(globalThis.HTMLElement.prototype, {
 
 const { WorkflowsView } = await import("@/views/WorkflowsView");
 const { RunHistoryPanel } = await import("@/views/workflows/RunHistoryPanel");
+const { RunFailurePanel } = await import("@/views/workflows/RunFailurePanel");
 const { runFailureFrom } = await import("@/views/workflows/run-failure");
 const { formatDuration, runDuration } = await import("@/views/workflows/run-health");
 
@@ -319,6 +320,45 @@ describe("what the failure panel is built from", () => {
     expect(runFailureFrom("kaboom", CTX).message).toBe("kaboom");
     expect(runFailureFrom(new Error(""), CTX).message).not.toBe("");
     expect(runFailureFrom(new ApiError(500, "x", "", true), CTX).message).toContain("500");
+  });
+});
+
+describe("failure panel follow-up controls", () => {
+  it("opens the durable row, its failed step, and the existing copilot path", async () => {
+    const openHistory = vi.fn();
+    const showStep = vi.fn();
+    const fixWithCopilot = vi.fn();
+    await act(async () => {
+      root.render(
+        createElement(RunFailurePanel, {
+          failure: {
+            message: "the writer agent has no model",
+            fromHost: true,
+            runId: "run-9",
+            sawRunStart: true,
+            startedAtMillis: 1_000,
+            atMillis: 3_400,
+            request: "",
+            dryRun: false,
+          },
+          onClose: () => {},
+          onOpenHistory: openHistory,
+          failedStepName: "Draft the digest",
+          onShowFailedStep: showStep,
+          onFixWithCopilot: fixWithCopilot,
+        }),
+      );
+    });
+
+    await act(async () => {
+      button("Open Run history").click();
+      button("Show “Draft the digest”").click();
+      button("Fix with copilot").click();
+    });
+
+    expect(openHistory).toHaveBeenCalledOnce();
+    expect(showStep).toHaveBeenCalledOnce();
+    expect(fixWithCopilot).toHaveBeenCalledOnce();
   });
 });
 
