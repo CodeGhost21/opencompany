@@ -36,7 +36,8 @@ use crate::feedback::board::{
 use crate::ports::types::CompanyId;
 use crate::server::error::ApiError;
 use crate::server::feedback::{lookup, sole};
-use crate::server::platform_auth::{CompanyAuth, GqlAuth, authorize_address};
+use crate::server::graphql::auth::GqlAuth;
+use crate::server::platform_auth::{CompanyAuth, authorize_address};
 
 /// Builds the board route fragment, merged into the main router.
 pub fn router() -> Router<AppState> {
