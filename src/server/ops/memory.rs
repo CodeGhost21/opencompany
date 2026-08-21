@@ -126,7 +126,8 @@ struct MemoryEntry {
     kind: Option<FactKind>,
     /// Which backend the row came from; drives editable-vs-read-only rendering.
     origin: MemoryOrigin,
-    /// Whether the operator may edit/delete this row (true only for facts).
+    /// Whether the operator may delete this row: facts, and the documents
+    /// they dropped on the Brain page. Never the agents' own memory.
     editable: bool,
     title: String,
     body: String,
@@ -263,7 +264,12 @@ fn context_entries(chunks: Vec<RawChunk>, query: Option<&str>) -> Vec<MemoryEntr
             id: format!("ctx:{}", chunk.addr),
             kind: None,
             origin,
-            editable: false,
+            // A document is material the operator supplied, so they may take
+            // it back — through `…/memory/document/{slug}`, which forgets the
+            // whole document rather than this one chunk of it. The two agent
+            // origins stay read-only: they are the record of what the company
+            // did, not something anybody typed.
+            editable: matches!(origin, MemoryOrigin::Document),
             title,
             body,
             source,

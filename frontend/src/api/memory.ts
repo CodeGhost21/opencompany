@@ -11,8 +11,9 @@ export type MemoryKind = "fact" | "preference" | "person" | "project" | "referen
 
 /**
  * Where a memory row came from — the host's `MemoryOrigin` discriminator.
- * `fact` rows are operator-authored (editable/deletable); `agent-memory` and
- * `task-outcome` rows are the agents' own runtime memory and are read-only.
+ * `fact` rows are operator-authored and `document` rows are files or links an
+ * operator dropped — both deletable; `agent-memory` and `task-outcome` rows
+ * are the agents' own runtime memory and are read-only.
  */
 export type MemoryOrigin = "fact" | "agent-memory" | "task-outcome" | "document";
 
@@ -23,7 +24,10 @@ export interface MemoryEntry {
   kind?: MemoryKind;
   /** Which backend the row came from; drives editable-vs-read-only rendering. */
   origin: MemoryOrigin;
-  /** Whether the operator may delete this row (true only for `fact` rows). */
+  /**
+   * Whether the operator may delete this row: `fact` rows, and `document`
+   * rows they dropped themselves. The agents' own memory is read-only.
+   */
   editable: boolean;
   title: string;
   body: string;

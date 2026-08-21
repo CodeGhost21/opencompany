@@ -1,22 +1,35 @@
-// The engine panel's decision logic (issue #914 console surfacing) — pure
-// functions, tested over the whole domain because the panel is the operator's
-// only view of a fact the pod log used to keep to itself: which engine is
-// bound, whether the boot probe reached it, and — the loudest case — whether
-// it is the null engine silently discarding every write.
+// The Brain page's engine and drop logic — pure functions, tested over the
+// whole domain because they carry facts the pod log used to keep to itself:
+// which engine is bound, whether an operator may change it, and — the loudest
+// case — whether the bound engine is the null one, silently discarding every
+// write.
+//
+// Replaces the `/spec`-shaped panel tests (issue #914). The panel became a
+// picker when the engine stopped being boot-only, and the state it renders now
+// comes from `GET …/memory/engine` rather than the handshake: `/spec` reports
+// what *boot* bound, which stops being the answer the moment a console change
+// rebinds it live.
 import { describe, expect, it } from "vitest";
 
-import type { MemoryStats } from "@/api/memory";
-import type { MemorySpec } from "@/api/types";
 import {
-  enginePanelMode,
-  isMandatoryOnly,
-  MANDATORY_FAMILIES,
-  probeLabel,
+  documentSlug,
+  type MemoryEngineState,
+  type MemoryStats,
   teammateMemoryCount,
-} from "@/views/MemoryView";
+} from "@/api/memory";
 
-function spec(overrides: Partial<MemorySpec>): MemorySpec {
-  return { backend: "remote", driver_id: "supermemory", capabilities: [], ...overrides };
+function engine(overrides: Partial<MemoryEngineState>): MemoryEngineState {
+  return {
+    active: "store",
+    capabilities: [],
+    selected: "store",
+    apiKeySet: false,
+    layer: "default",
+    editable: true,
+    configPath: "/data/config.toml",
+    options: [],
+    ...overrides,
+  };
 }
 
 function stats(overrides: Partial<MemoryStats>): MemoryStats {
@@ -30,51 +43,56 @@ function stats(overrides: Partial<MemoryStats>): MemoryStats {
   };
 }
 
-describe("enginePanelMode", () => {
-  it("hides on an old host that never sent the field", () => {
-    expect(enginePanelMode(undefined)).toBe("hidden");
+// The one engine state the *writing* half of the page must respect: the null
+// engine takes every write and throws it away, so the page disables both the
+// "New memory" button and the drop zone against it.
+describe("the discarding engine", () => {
+  it("is the null engine, whatever the saved selection says", () => {
+    expect(engine({ active: "null", selected: "mem0" }).active === "null").toBe(true);
   });
 
-  it("hides on the base store backend — memory served by the host's own stores", () => {
-    expect(enginePanelMode(spec({ backend: "store", driver_id: "" }))).toBe("hidden");
-  });
-
-  it("warns on the null engine: bound and probed, but discarding every write", () => {
-    expect(enginePanelMode(spec({ backend: "null", driver_id: "null" }))).toBe("discard");
-  });
-
-  it("renders embedded and remote engines normally", () => {
-    expect(enginePanelMode(spec({ backend: "embedded", driver_id: "namespace" }))).toBe("normal");
-    expect(enginePanelMode(spec({ backend: "remote" }))).toBe("normal");
+  it("is not any engine that actually retains", () => {
+    for (const active of ["store", "embedded", "namespace", "supermemory", "mem0", "cognee"]) {
+      expect(engine({ active }).active === "null").toBe(false);
+    }
   });
 });
 
-describe("probeLabel", () => {
-  it("maps the three states an operator must tell apart", () => {
-    expect(probeLabel(true)).toBe("reachable at boot");
-    expect(probeLabel(false)).toContain("unreachable at boot");
-    expect(probeLabel(undefined)).toBe("not probed");
+// The refusal the console must render rather than work around: a deployment
+// that injects `OPENCOMPANY_MEMORY` owns the choice, and a picker that
+// accepted an edit there would write a file that changes nothing.
+describe("who owns the engine choice", () => {
+  it("is the environment on a hosted tenant, and the console says so", () => {
+    const state = engine({ layer: "env", editable: false });
+    expect(state.editable).toBe(false);
   });
 
-  it("is total: a literal null (absent-on-the-wire) reads as not probed, never blank", () => {
-    expect(probeLabel(null)).toBe("not probed");
+  it("is the console on a self-hosted host with nothing injected", () => {
+    expect(engine({ layer: "default", editable: true }).editable).toBe(true);
+    expect(engine({ layer: "config.toml", editable: true }).editable).toBe(true);
   });
 });
 
-describe("isMandatoryOnly", () => {
-  it("matches exactly the mandatory floor, in any order", () => {
-    expect(isMandatoryOnly([...MANDATORY_FAMILIES])).toBe(true);
-    expect(isMandatoryOnly([...MANDATORY_FAMILIES].reverse())).toBe(true);
+// `documentSlug` is a copy of the host's `ingest::label_for`, and the forget
+// route addresses documents by that slug — so a drift here is a delete that
+// 404s on exactly the documents whose names needed slugging.
+describe("documentSlug", () => {
+  it("matches the host's slug for a folder-dropped path", () => {
+    expect(documentSlug("Contracts/2026/acme msa.pdf")).toBe("contracts-2026-acme-msa.pdf");
   });
 
-  it("rejects subsets, supersets, and the empty (not-negotiated) case", () => {
-    expect(isMandatoryOnly(["core", "recall"])).toBe(false);
-    expect(isMandatoryOnly([...MANDATORY_FAMILIES, "graph"])).toBe(false);
-    expect(isMandatoryOnly([])).toBe(false);
+  it("keeps a plain file name as it is, lower-cased", () => {
+    expect(documentSlug("Handbook.md")).toBe("handbook.md");
   });
 
-  it("rejects a same-length set that swaps a family — length alone is not the test", () => {
-    expect(isMandatoryOnly(["core", "recall", "graph"])).toBe(false);
+  it("never yields an empty slug for a name that is all separators", () => {
+    expect(documentSlug("///")).toBe("document");
+  });
+
+  it("keeps the identifying tail of a very long path", () => {
+    const slug = documentSlug(`${"a/".repeat(80)}report.pdf`);
+    expect(Array.from(slug).length).toBe(96);
+    expect(slug.endsWith("report.pdf")).toBe(true);
   });
 });
 
@@ -84,8 +102,6 @@ describe("isMandatoryOnly", () => {
 // tiles, so the tile has to subtract or it counts the same rows twice.
 describe("teammateMemoryCount", () => {
   it("is zero when every chunk is a task outcome — the shape that shipped the bug", () => {
-    // The seeded company: 13 chunks, all of them outcomes. The strip read
-    // "Teammate memory 13" beside "Task outcomes 13" and "Total items 13".
     expect(teammateMemoryCount(stats({ agentChunks: 13, taskOutcomes: 13 }))).toBe(0);
   });
 
