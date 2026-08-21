@@ -2668,6 +2668,32 @@ impl CompanyRuntime {
             })
     }
 
+    /// The company's display name — what the manifest calls it, falling back to
+    /// its id.
+    ///
+    /// Split out of [`Self::status`] for the one caller that needs the name
+    /// *before* anybody has signed in: `GET …/auth/config`, which draws the
+    /// sign-in heading. That route is public, so it must not be handed a status
+    /// snapshot — the pending-approval count alone is a fact about the company's
+    /// work, and the name is the only field on it a stranger may see.
+    ///
+    /// A store failure yields the id rather than an error: the name decorates a
+    /// screen whose real payload is the mode, and a heading is not worth
+    /// refusing to tell the console how this company signs people in.
+    pub async fn display_name(&self) -> String {
+        let named = self
+            .store
+            .load(&self.id)
+            .await
+            .ok()
+            .flatten()
+            .map(|record| record.manifest.company.name);
+        match named {
+            Some(name) if !name.trim().is_empty() => name.trim().to_string(),
+            _ => self.id.to_string(),
+        }
+    }
+
     /// A status snapshot, loading the company record for name and lifecycle.
     pub async fn status(&self) -> Result<CompanyStatus> {
         let record = self.store.load(&self.id).await?;
