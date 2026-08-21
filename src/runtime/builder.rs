@@ -2746,7 +2746,7 @@ impl RuntimeBuilder {
                                 overlay_desks: overlay_desks.clone(),
                                 overlay_workflows: overlay_workflows.clone(),
                                 overlay_budgets: overlay_budgets.clone(),
-                                                                overlay_policy: overlay_policy.clone(),
+                                overlay_policy: overlay_policy.clone(),
                                 overlay_desk_tools: Default::default(),
                                 disabled_workflows: disabled_workflows.clone(),
                                 template_provenance: template_provenance.clone(),
