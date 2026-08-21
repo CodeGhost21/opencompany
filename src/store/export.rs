@@ -500,6 +500,20 @@ impl BundleContents {
                 meta.id
             )));
         }
+        // The roster edits carry the same invariant for the same reason, and are
+        // checked in the same breath: `CompanyRecord::agent_override` also reads
+        // the first match, so two rows for one teammate would apply whichever the
+        // bundle happened to serialize first — restoring a name the operator
+        // changed, or a tool grant they narrowed, with nothing to say which row
+        // won. Both refusals fire before any port is written, so a rejected
+        // bundle leaves the target untouched.
+        if let Some(agent_id) = AgentOverride::duplicate_agent_id(&meta.overlay_agent_edits) {
+            return Err(OpenCompanyError::Store(format!(
+                "invalid {META_JSON}: {} carries more than one edit for teammate \
+                 '{agent_id}'; at most one is allowed",
+                meta.id
+            )));
+        }
 
         let ledger = read_jsonl::<LedgerEntry>(&src.join(LEDGER_JSONL)).await?;
         // Scrubbed on the way IN as well as on the way out (issue #358), which
