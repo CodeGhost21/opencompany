@@ -251,7 +251,9 @@ impl TinyHumansClient for MockTinyHumansClient {
             // The mock has no time decay to model, so `hot` and `top` agree
             // here. What a route test asserts is that the ordering *travelled*,
             // not that this crate reimplements the hub's ranking.
-            BoardSort::Hot | BoardSort::Top => items.sort_by_key(|item| std::cmp::Reverse(item.score)),
+            BoardSort::Hot | BoardSort::Top => {
+                items.sort_by_key(|item| std::cmp::Reverse(item.score))
+            }
             BoardSort::New => items.sort_by(|a, b| b.created_at.cmp(&a.created_at)),
         }
         let total = items.len() as u32;
@@ -414,7 +416,10 @@ mod http {
                     message: wire_error(&value).unwrap_or_else(|| status.to_string()),
                 });
             }
-            Ok(value.get("data").cloned().unwrap_or(serde_json::Value::Null))
+            Ok(value
+                .get("data")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null))
         }
     }
 
@@ -592,7 +597,9 @@ mod http {
                 .map(parse_item)
                 .collect::<Result<Vec<_>>>()?;
             let number = |key: &str, fallback: u32| {
-                data.get(key).and_then(|v| v.as_u64()).unwrap_or(u64::from(fallback)) as u32
+                data.get(key)
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(u64::from(fallback)) as u32
             };
             Ok(BoardPage {
                 total: number("total", items.len() as u32),

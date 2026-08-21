@@ -54,7 +54,10 @@ pub fn router() -> Router<AppState> {
         )
         .route("/api/v1/company/feedback/board", get(list_single))
         .route("/api/v1/company/feedback/board/{item}", get(detail_single))
-        .route("/api/v1/company/feedback/board/{item}/vote", post(vote_single))
+        .route(
+            "/api/v1/company/feedback/board/{item}/vote",
+            post(vote_single),
+        )
         .route(
             "/api/v1/company/feedback/board/{item}/comments",
             post(comment_single),
@@ -121,11 +124,7 @@ struct CommentRequest {
 /// Resolves the addressed company, enforcing tenant ownership exactly as the
 /// capture routes do — a board call spends this instance's hub credential, so
 /// it is no more anonymous than filing is.
-fn addressed(
-    state: &AppState,
-    auth: &GqlAuth,
-    id: &str,
-) -> Result<Arc<CompanyRuntime>, Response> {
+fn addressed(state: &AppState, auth: &GqlAuth, id: &str) -> Result<Arc<CompanyRuntime>, Response> {
     let company = CompanyId::new(id);
     if let Some(resp) = authorize_address(state, auth, &company) {
         return Err(resp);
@@ -134,10 +133,7 @@ fn addressed(
 }
 
 /// The sole company, authorized the same way.
-fn addressed_sole(
-    state: &AppState,
-    auth: &GqlAuth,
-) -> Result<Arc<CompanyRuntime>, Response> {
+fn addressed_sole(state: &AppState, auth: &GqlAuth) -> Result<Arc<CompanyRuntime>, Response> {
     let runtime = sole(state).map_err(IntoResponse::into_response)?;
     if let Some(resp) = authorize_address(state, auth, runtime.id()) {
         return Err(resp);
@@ -149,15 +145,18 @@ fn addressed_sole(
 fn checked_comment(body: &str) -> Result<&str, Response> {
     let trimmed = body.trim();
     if trimmed.is_empty() {
-        return Err(
-            ApiError(OpenCompanyError::InvalidRequest("comment is empty".to_string()))
-                .into_response(),
-        );
+        return Err(ApiError(OpenCompanyError::InvalidRequest(
+            "comment is empty".to_string(),
+        ))
+        .into_response());
     }
     Ok(trimmed)
 }
 
-async fn page(runtime: Arc<CompanyRuntime>, params: &BoardParams) -> Result<Json<BoardPage>, Response> {
+async fn page(
+    runtime: Arc<CompanyRuntime>,
+    params: &BoardParams,
+) -> Result<Json<BoardPage>, Response> {
     runtime
         .feedback_board(params.to_query())
         .await
@@ -370,7 +369,10 @@ mod test {
             .clone()
             .oneshot(
                 request
-                    .body(body.map(|b| Body::from(b.to_string())).unwrap_or(Body::empty()))
+                    .body(
+                        body.map(|b| Body::from(b.to_string()))
+                            .unwrap_or(Body::empty()),
+                    )
                     .unwrap(),
             )
             .await
@@ -419,7 +421,8 @@ mod test {
         assert_eq!(value["items"][0]["id"], "one");
 
         // Paging past the end is an empty page, not an error.
-        let (status, value) = call(&app, "GET", "/api/v1/company/feedback/board?page=9", None).await;
+        let (status, value) =
+            call(&app, "GET", "/api/v1/company/feedback/board?page=9", None).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(value["items"].as_array().unwrap().len(), 0);
         assert_eq!(value["total"], 2);

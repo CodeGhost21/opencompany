@@ -20,10 +20,12 @@ use tokio::task::JoinHandle;
 use crate::Result;
 use crate::app::config::AuthMode;
 use crate::error::OpenCompanyError;
-use crate::feedback::board::{BoardComment, BoardDetail, BoardItem, BoardPage, BoardQuery, VoteValue};
+use crate::feedback::board::{
+    BoardComment, BoardDetail, BoardItem, BoardPage, BoardQuery, VoteValue,
+};
 use crate::feedback::service::{FeedbackFiler, FeedbackResponse};
-use crate::feedback::tinyhumans::TinyHumansClient;
 use crate::feedback::store::FeedbackStore;
+use crate::feedback::tinyhumans::TinyHumansClient;
 use crate::feedback::types::{FeedbackInput, FeedbackItem, FeedbackSummary};
 use crate::policy::ManifestApprovalGate;
 use crate::ports::now_millis;

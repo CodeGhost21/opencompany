@@ -293,7 +293,11 @@ mod test {
 
     #[test]
     fn vote_values_round_trip_through_the_wire_integer() {
-        for (value, wire) in [(VoteValue::Up, 1), (VoteValue::Down, -1), (VoteValue::None, 0)] {
+        for (value, wire) in [
+            (VoteValue::Up, 1),
+            (VoteValue::Down, -1),
+            (VoteValue::None, 0),
+        ] {
             assert_eq!(value.as_i8(), wire);
             assert_eq!(VoteValue::try_from(wire).unwrap(), value);
         }
