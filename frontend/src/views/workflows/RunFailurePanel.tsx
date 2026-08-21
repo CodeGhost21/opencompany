@@ -16,7 +16,22 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 
 import { formatDuration } from "./run-health";
-import type { RunFailure } from "./run-failure";
+import {
+  failureDisposition,
+  type FailureDisposition,
+  type RunFailure,
+} from "./run-failure";
+
+const DISPOSITION_COPY: Record<FailureDisposition, string> = {
+  transport:
+    "The request didn't complete, so the host may or may not have started this run. Run history is the answer either way.",
+  "refusal-inference":
+    "The host did not start this run because inference needs attention. Update Settings → Inference, then try again.",
+  "refusal-not-wired": "This host cannot run workflows, so it did not start this run.",
+  journaled: "This console saw the run start. Run history has the step it stopped at.",
+  cautious:
+    "The host answered, but this console did not see the run start. Run history may have more detail if it started.",
+};
 
 export function RunFailurePanel({
   failure,
@@ -29,6 +44,7 @@ export function RunFailurePanel({
   // most needs beside it: a run that died in 200ms was refused, and one that
   // died after four minutes got somewhere first.
   const ranFor = Math.max(0, failure.atMillis - failure.startedAtMillis);
+  const disposition = failureDisposition(failure);
   return (
     // Issue #1205: a right rail at `xl`, the bottom strip it used to always be
     // below that — same pattern as `RunResultPanel` next door, which is the
@@ -93,20 +109,14 @@ export function RunFailurePanel({
             {failure.request}
           </p>
         )}
-        {/* Two genuinely different next steps, and collapsing them sends the
-            operator to the wrong place. A host that answered has journaled the
-            run (#228), so its per-node trail is in Run history. Something that
-            gave up in between may have left no run at all — and telling someone
-            to look in History for a row that does not exist is how a transport
-            failure comes to read as a missing feature.
-
-            No positional wording ("below") on purpose: History has been a left
-            rail since #1107, and this panel is itself a right rail since #1205,
-            so neither is spatially "below" the other. */}
-        <p className="mt-2 text-2xs text-muted-foreground">
-          {failure.fromHost
-            ? "The host records failed runs, so this one is in Run history, with the step it stopped at."
-            : "The request didn't complete, so the host may or may not have started this run. Run history is the answer either way."}
+        {/* A host envelope proves only who answered. The structured code proves
+            known pre-execution refusals, and the console's own start frame is
+            the positive evidence needed before saying History has this run. */}
+        <p
+          className="mt-2 text-2xs text-muted-foreground"
+          data-testid="workflow-run-failure-disposition"
+        >
+          {DISPOSITION_COPY[disposition]}
         </p>
       </div>
     </aside>

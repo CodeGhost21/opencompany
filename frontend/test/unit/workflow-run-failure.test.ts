@@ -295,7 +295,13 @@ describe("the history row names the node the operator named", () => {
 });
 
 describe("what the failure panel is built from", () => {
-  const CTX = { startedAtMillis: 1_000, atMillis: 3_400, request: "", dryRun: false };
+  const CTX = {
+    startedAtMillis: 1_000,
+    atMillis: 3_400,
+    request: "",
+    dryRun: false,
+    sawRunStart: false,
+  };
 
   it("keeps the host's code only when the host's own envelope carried it", () => {
     const fromHost = runFailureFrom(new ApiError(409, "engine_failed", "no", true), CTX);

@@ -13,6 +13,20 @@
 
 import { ApiError } from "@/api/types";
 
+import { INFERENCE_RUN_CODES } from "./run-error";
+
+/**
+ * The codes that prove the host refused a run before it could execute.
+ *
+ * Kept beside the failure record rather than derived from HTTP status or an
+ * envelope flag: a host can return an ordinary error envelope after beginning
+ * work, while these codes name the two cases in which it did not start a run.
+ */
+export const PRE_EXECUTION_REFUSAL_CODES: ReadonlySet<string> = new Set([
+  "not_wired",
+  ...INFERENCE_RUN_CODES,
+]);
+
 /** Everything the failure panel renders, captured at the moment of the catch. */
 export interface RunFailure {
   /**
@@ -37,6 +51,10 @@ export interface RunFailure {
   /** Whether the host itself refused, rather than something between it and the
    * browser giving up. Decides which of the two closing sentences is true. */
   fromHost: boolean;
+  /** The id observed in this console's own run-start frame, if it arrived. */
+  runId?: string;
+  /** Whether this console positively saw its own run start before the failure. */
+  sawRunStart: boolean;
   /** When the operator pressed Run, so the panel can say how long it ran for. */
   startedAtMillis: number;
   /** When the failure was caught. */
@@ -53,6 +71,32 @@ export interface RunFailureContext {
   atMillis: number;
   request: string;
   dryRun: boolean;
+  runId?: string;
+  sawRunStart: boolean;
+}
+
+/** What the panel can honestly say about where this failed run went next. */
+export type FailureDisposition =
+  | "transport"
+  | "refusal-inference"
+  | "refusal-not-wired"
+  | "journaled"
+  | "cautious";
+
+/**
+ * Chooses the failure panel's next-step claim.
+ *
+ * A host envelope only proves who answered; it does not prove that a run was
+ * recorded. The structured code proves the known pre-execution refusals, and a
+ * run-start frame is the positive evidence needed before saying History has
+ * this run. Everything else stays deliberately cautious.
+ */
+export function failureDisposition(failure: RunFailure): FailureDisposition {
+  if (!failure.fromHost) return "transport";
+  if (INFERENCE_RUN_CODES.has(failure.code ?? "")) return "refusal-inference";
+  if (failure.code === "not_wired") return "refusal-not-wired";
+  if (failure.sawRunStart) return "journaled";
+  return "cautious";
 }
 
 /**
@@ -69,6 +113,8 @@ export function runFailureFrom(e: unknown, ctx: RunFailureContext): RunFailure {
     atMillis: ctx.atMillis,
     request: ctx.request,
     dryRun: ctx.dryRun,
+    runId: ctx.runId,
+    sawRunStart: ctx.sawRunStart,
   };
   if (e instanceof ApiError) {
     return {
