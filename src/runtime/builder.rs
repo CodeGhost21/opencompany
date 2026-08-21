@@ -4900,22 +4900,29 @@ mod test {
             .build()
             .await
             .unwrap();
-        // Seeded: README.md, brand/, brand/voice.md — plus runtime scaffold
-        // (`agents/` and `secrets/README.md`) which is not what the re-seed
-        // gate is about.
+        // Seeded: readme.md, brand/, brand/voice.md — plus runtime scaffold
+        // (the system roots and the explanatory note under each root that
+        // carries one), which is not what the re-seed gate is about. The
+        // explanatory notes are excluded by their *parent*, not by name: they
+        // are all called `readme.md`, and so is the seeded one this asserts on.
         let seeded = |tree: &[crate::ports::WorkspaceNode]| {
-            let secrets = tree
+            let scaffold_roots: Vec<&str> = tree
                 .iter()
-                .find(|node| {
+                .filter(|node| {
                     node.parent_id.is_none()
-                        && node.name == crate::company::workspace_scaffold::SECRETS_ROOT
+                        && crate::company::workspace_scaffold::SYSTEM_ROOTS
+                            .contains(&node.name.as_str())
                 })
-                .map(|node| node.id.as_str());
+                .map(|node| node.id.as_str())
+                .collect();
             let mut names: Vec<String> = tree
                 .iter()
                 .filter(|node| {
                     !crate::company::workspace_scaffold::SYSTEM_ROOTS.contains(&node.name.as_str())
-                        && node.parent_id.as_deref() != secrets
+                        && !node
+                            .parent_id
+                            .as_deref()
+                            .is_some_and(|parent| scaffold_roots.contains(&parent))
                 })
                 .map(|node| node.name.clone())
                 .collect();
@@ -5159,7 +5166,7 @@ needs_reason = true
     /// an existing company picks the root up.
     #[tokio::test]
     async fn boot_provisions_the_system_roots_and_nothing_inside_them() {
-        use crate::company::workspace_scaffold::{AGENTS_ROOT, SECRETS_ROOT};
+        use crate::company::workspace_scaffold::{AGENTS_ROOT, ARTIFACTS_ROOT, SECRETS_ROOT};
         use crate::ports::workspace::{NodeKind, WorkspaceOrigin};
 
         let home_dir = tmp_home("oc-agents-");
@@ -5184,7 +5191,13 @@ needs_reason = true
         names.sort_unstable();
         assert_eq!(
             names,
-            vec![AGENTS_ROOT, "readme.md", SECRETS_ROOT],
+            vec![
+                AGENTS_ROOT,
+                ARTIFACTS_ROOT,
+                "readme.md",
+                "readme.md",
+                SECRETS_ROOT
+            ],
             "boot provisions the managed roots with no seed dir — no `desks/`, and no \
              folder for a teammate that has produced nothing"
         );
@@ -5195,7 +5208,7 @@ needs_reason = true
             tree.iter()
                 .filter(|node| node.parent_id.is_none() && node.kind == NodeKind::Folder)
                 .count(),
-            2
+            crate::company::workspace_scaffold::SYSTEM_ROOTS.len(),
         );
 
         // An existing, non-empty workspace: an `is_empty` gate would have
@@ -5240,8 +5253,10 @@ needs_reason = true
             names,
             vec![
                 AGENTS_ROOT,
+                ARTIFACTS_ROOT,
                 "creative-studio",
                 "desks",
+                "readme.md",
                 "readme.md",
                 SECRETS_ROOT,
             ],
@@ -5253,7 +5268,7 @@ needs_reason = true
     /// roster: a company with no agents at all still gets it.
     #[tokio::test]
     async fn boot_provisions_the_roots_for_a_company_with_no_agents() {
-        use crate::company::workspace_scaffold::{AGENTS_ROOT, SECRETS_ROOT};
+        use crate::company::workspace_scaffold::{AGENTS_ROOT, ARTIFACTS_ROOT, SECRETS_ROOT};
 
         let home_dir = tmp_home("oc-noagents-");
         let id = CompanyId::new("acme");
@@ -5269,7 +5284,16 @@ needs_reason = true
         let tree = runtime.workspace().tree(&id).await.unwrap();
         let mut names: Vec<&str> = tree.iter().map(|n| n.name.as_str()).collect();
         names.sort_unstable();
-        assert_eq!(names, vec![AGENTS_ROOT, "readme.md", SECRETS_ROOT]);
+        assert_eq!(
+            names,
+            vec![
+                AGENTS_ROOT,
+                ARTIFACTS_ROOT,
+                "readme.md",
+                "readme.md",
+                SECRETS_ROOT
+            ]
+        );
     }
 
     /// Issue #85: the launch path's template provenance is stamped onto the
