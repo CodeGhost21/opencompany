@@ -529,14 +529,13 @@ mod chargebee {
         // Deserialized here rather than in the handler signature so a malformed
         // body is a `400` in this surface's own envelope, next to every other
         // rejection, instead of axum's bare rejection text.
-        let args: SendInvoiceArgs = serde_json::from_value(body).map_err(|e| {
-            FinanceError::Provider {
+        let args: SendInvoiceArgs =
+            serde_json::from_value(body).map_err(|e| FinanceError::Provider {
                 provider: "chargebee",
                 status: 0,
                 code: "invalid_arguments".to_string(),
                 message: e.to_string(),
-            }
-        })?;
+            })?;
         let (client, _) = client(runtime).await?;
         let invoice = crate::chargebee::api::send_invoice(&client, args)
             .await
@@ -927,7 +926,12 @@ mod tests {
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(body["code"], "invalid_arguments");
         assert_eq!(body["providerStatus"], 0);
-        assert!(body["error"].as_str().expect("error").contains("start_date"));
+        assert!(
+            body["error"]
+                .as_str()
+                .expect("error")
+                .contains("start_date")
+        );
     }
 
     #[tokio::test]
@@ -949,17 +953,11 @@ mod tests {
         // One means "get a different build", the other "fill in this form".
         // A surface that merged them would offer the form on a host that cannot
         // use it.
-        let (status, body) = rendered(FinanceError::NotInBuild {
-            provider: "paypal",
-        })
-        .await;
+        let (status, body) = rendered(FinanceError::NotInBuild { provider: "paypal" }).await;
         assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
         assert_eq!(body["code"], "not_in_build");
 
-        let (status, body) = rendered(FinanceError::NotConfigured {
-            provider: "paypal",
-        })
-        .await;
+        let (status, body) = rendered(FinanceError::NotConfigured { provider: "paypal" }).await;
         assert_eq!(status, StatusCode::CONFLICT);
         assert_eq!(body["code"], "not_configured");
     }
@@ -976,9 +974,10 @@ mod tests {
             .await
             .expect("bind");
         let addr = listener.local_addr().expect("addr");
-        let app = axum::Router::new().route(path, axum::routing::get(move || async move {
-            axum::Json(reply)
-        }));
+        let app = axum::Router::new().route(
+            path,
+            axum::routing::get(move || async move { axum::Json(reply) }),
+        );
         tokio::spawn(async move {
             let _ = axum::serve(listener, app).await;
         });
