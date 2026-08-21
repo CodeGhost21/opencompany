@@ -24,7 +24,7 @@ use async_trait::async_trait;
 
 use crate::Result;
 use crate::feedback::board::{
-    BoardComment, BoardDetail, BoardItem, BoardPage, BoardQuery, VoteValue,
+    BoardComment, BoardDetail, BoardItem, BoardPage, BoardQuery, BoardSort, VoteValue,
 };
 use crate::feedback::types::FeedbackCategory;
 
