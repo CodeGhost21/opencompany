@@ -444,13 +444,27 @@ mod chargebee {
         Ok(Json(serde_json::to_value(value).map_err(ApiError::from)?).into_response())
     }
 
+    // Each operation is a pair: the route half, which resolves the company's
+    // credentials, and an `_on` half taking a client. The split is what lets a
+    // test drive the real serialization and the real error classification
+    // against a stub transport (`ChargebeeClient::with_base_url`) without a
+    // secret store standing in the way — and it keeps credential resolution in
+    // exactly one place rather than at the top of five functions.
+
     pub(super) async fn list_invoices(
         runtime: &CompanyRuntime,
         query: InvoiceQuery,
     ) -> Result<Response, FinanceError> {
         let (client, _) = client(runtime).await?;
+        list_invoices_on(&client, query).await
+    }
+
+    pub(super) async fn list_invoices_on(
+        client: &ChargebeeClient,
+        query: InvoiceQuery,
+    ) -> Result<Response, FinanceError> {
         let invoices = crate::chargebee::api::list_invoices(
-            &client,
+            client,
             ListInvoicesArgs {
                 customer_email: query.customer_email,
                 status: query.status,
@@ -467,7 +481,14 @@ mod chargebee {
         invoice_id: String,
     ) -> Result<Response, FinanceError> {
         let (client, _) = client(runtime).await?;
-        let invoice = crate::chargebee::api::get_invoice(&client, GetInvoiceArgs { invoice_id })
+        get_invoice_on(&client, invoice_id).await
+    }
+
+    pub(super) async fn get_invoice_on(
+        client: &ChargebeeClient,
+        invoice_id: String,
+    ) -> Result<Response, FinanceError> {
+        let invoice = crate::chargebee::api::get_invoice(client, GetInvoiceArgs { invoice_id })
             .await
             .map_err(|e| FinanceError::from_provider("chargebee", e))?;
         ok(invoice)
@@ -511,11 +532,18 @@ mod chargebee {
 
     pub(super) async fn test(runtime: &CompanyRuntime) -> Result<Json<TestResult>, FinanceError> {
         let (client, site) = client(runtime).await?;
+        test_on(&client, &site).await
+    }
+
+    pub(super) async fn test_on(
+        client: &ChargebeeClient,
+        site: &str,
+    ) -> Result<Json<TestResult>, FinanceError> {
         // The cheapest authenticated call the API has: one invoice, which
         // proves the key, the site and the network in a single round trip
         // without creating anything.
         let invoices = crate::chargebee::api::list_invoices(
-            &client,
+            client,
             ListInvoicesArgs {
                 limit: Some(1),
                 ..Default::default()
