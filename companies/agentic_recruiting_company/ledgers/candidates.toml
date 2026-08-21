@@ -64,7 +64,8 @@ name = "sourced"
 
 [[status]]
 name = "in_process"
-aliases = ["screening", "offer", "interviewing"]
+label = "In process"
+aliases = ["screening", "interviewing", "offer"]
 
 [[status]]
 name = "hired"

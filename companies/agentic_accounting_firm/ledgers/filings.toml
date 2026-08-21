@@ -88,6 +88,7 @@ needs_reason = true
 
 [[status]]
 name = "not_filed"
+label = "Not filed"
 closed = true
 needs_reason = true
 aliases = ["extended", "not_required"]

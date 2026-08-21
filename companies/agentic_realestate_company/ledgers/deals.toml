@@ -84,6 +84,7 @@ needs_reason = true
 
 [[status]]
 name = "not_bought"
+label = "Not bought"
 closed = true
 needs_reason = true
 aliases = ["passed", "lost"]
