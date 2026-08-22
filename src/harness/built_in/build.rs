@@ -1926,6 +1926,7 @@ mod tests {
             // #238 tool is never built and the pinned belt below is the
             // pre-#238 belt exactly.
             search: None,
+            tenant_search: None,
             // Fail-closed default: with no workspace store wired, the #237
             // tools are never built and the pinned belt below is the
             // pre-#237 belt exactly.
