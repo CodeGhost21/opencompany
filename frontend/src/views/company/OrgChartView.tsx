@@ -40,6 +40,7 @@ import type { OpenCompanyClient } from "@/api/client";
 import { ApiError, type DeskDto, type TeamMemberDto } from "@/api/types";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { TeammateAvatar } from "@/components/teammate-avatar";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -50,7 +51,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Skeleton } from "@/components/ui/skeleton";
-import { roleSubtitle } from "@/lib/team";
+import { avatarFor, roleSubtitle, toneFor, type TeamMember } from "@/lib/team";
 import {
   addMemberFailure,
   addOutcome,
@@ -741,7 +742,7 @@ function DeskNode({
   onDelete,
 }: {
   desk: OrgDesk;
-  addable: { id: string; name: string }[];
+  addable: TeamMember[];
   busy: string | null;
   /** This desk is the one a `#/company/<deskId>` link asked for. */
   focused: boolean;
@@ -992,6 +993,12 @@ function DeskNode({
                         key={member.id}
                         onClick={() => onAdd(member.id)}
                       >
+                        <TeammateAvatar
+                          name={member.name}
+                          avatar={member.avatar}
+                          tone={member.tone}
+                          className="size-5 shrink-0"
+                        />
                         <span className="truncate">{member.name}</span>
                       </DropdownMenuItem>
                     ))}
@@ -1124,6 +1131,12 @@ function Seat({
 
   const label = (
     <>
+      <TeammateAvatar
+        name={seat.name}
+        avatar={avatarFor(seat.id)}
+        tone={toneFor(seat.id)}
+        className="size-5 shrink-0"
+      />
       {seat.lead && (
         <Crown
           role="img"
@@ -1270,8 +1283,14 @@ function Unplaced({ tree }: { tree: OrgTree }) {
                     <a
                       href={href}
                       title={`Open ${member.name}`}
-                      className="flex items-center gap-1 rounded-md border px-2 py-1 text-xs outline-none hover:bg-muted focus-visible:ring-3 focus-visible:ring-ring/50"
+                      className="flex items-center gap-1.5 rounded-md border px-2 py-1 text-xs outline-none hover:bg-muted focus-visible:ring-3 focus-visible:ring-ring/50"
                     >
+                      <TeammateAvatar
+                        name={member.name}
+                        avatar={member.avatar}
+                        tone={member.tone}
+                        className="size-5 shrink-0"
+                      />
                       {member.name}
                       <ChevronRight className="size-3 shrink-0 text-muted-foreground" />
                     </a>
@@ -1280,6 +1299,12 @@ function Unplaced({ tree }: { tree: OrgTree }) {
                     // rather than as a pill: the border is what made the inert
                     // version of this chip a lie.
                     <InertChip title="This teammate has no id, so their page can't be opened.">
+                      <TeammateAvatar
+                        name={member.name}
+                        avatar={member.avatar}
+                        tone={member.tone}
+                        className="size-5 shrink-0"
+                      />
                       {member.name}
                     </InertChip>
                   )}
