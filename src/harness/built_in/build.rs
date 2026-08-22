@@ -593,9 +593,30 @@ pub fn build_agent(
     // always-compiled `openhuman_core` integrations client, and CI's gated lane
     // builds `--features openhuman,tinycortex`. Hiding a real-money tool behind
     // a feature no CI job compiles is how #288 / #281 / #297 each happened.
+    //
+    // A company that configured its **own** provider in the console
+    // (`deps.tenant_search`) gets that provider's family from OpenHuman's search
+    // domain INSTEAD of the managed tool — never as well as. The two would
+    // otherwise sit on one belt under one name, and the model would pick
+    // whichever the prompt happened to mention, which for a company that pasted
+    // a key means quietly spending the platform's money instead of its own. A
+    // BYO belt carries no daily cap and no usage sample either: the calls are
+    // billed by Brave or Exa to the company's own account, and metering a bill
+    // this host does not pay would be a number nobody can reconcile.
     if crate::company::grants_search_explicit(grants) {
-        match &deps.search {
-            Some(backend) => tools.extend(crate::harness::search::search_tools(
+        match (&deps.tenant_search, &deps.search) {
+            (Some(tenant), _) => {
+                let byo = crate::harness::search_byo::byo_search_tools(tenant);
+                tracing::debug!(
+                    company = %company,
+                    agent = %manifest_agent.id,
+                    provider = %tenant.provider(),
+                    tools = byo.len(),
+                    "[build] wiring the company's own search provider in place of managed search"
+                );
+                tools.extend(byo);
+            }
+            (None, Some(backend)) => tools.extend(crate::harness::search::search_tools(
                 backend,
                 crate::harness::search::SearchMetering {
                     company: company.clone(),
@@ -603,10 +624,10 @@ pub fn build_agent(
                     meter: deps.meter.clone(),
                 },
             )),
-            None => tracing::warn!(
+            (None, None) => tracing::warn!(
                 company = %company,
                 agent = %manifest_agent.id,
-                "[build] agent explicitly grants `search` but no managed search backend is configured; web_search NOT wired (fail-closed)"
+                "[build] agent explicitly grants `search` but neither a company search provider nor a managed search backend is configured; web_search NOT wired (fail-closed)"
             ),
         }
     }
