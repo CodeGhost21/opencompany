@@ -102,7 +102,7 @@ pub fn configuration_complete(provider: &str, has_key: bool, has_endpoint: bool)
 /// other's rule would drift the first time a provider was added — leaving one
 /// page saying a company searches through Exa while its agents search through
 /// the platform.
-pub fn effective_provider<'a>(provider: &'a str, has_key: bool, has_endpoint: bool) -> &'a str {
+pub fn effective_provider(provider: &str, has_key: bool, has_endpoint: bool) -> &str {
     if configuration_complete(provider, has_key, has_endpoint) {
         provider
     } else {
