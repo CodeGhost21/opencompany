@@ -228,7 +228,25 @@ function textOf(message) {
  * @returns {any | null} the parsed value, or null if nothing balanced parses
  */
 function readJsonObject(text, from) {
-  const start = text.indexOf("{", from);
+  return readJsonValue(text, from, "{", "}");
+}
+
+/**
+ * The balance scanner both directive payloads are read with: an object for
+ * `__MOCK_TOOL_CALL__`, an array for `__MOCK_PLAN__`.
+ *
+ * Parameterised over the delimiters rather than duplicated, because the string
+ * handling is the part that has to be right and a second copy of it is a second
+ * place for it to be wrong.
+ *
+ * @param {string} text
+ * @param {number} from
+ * @param {string} open
+ * @param {string} close
+ * @returns {any | null} the parsed value, or null if nothing balanced parses
+ */
+function readJsonValue(text, from, open, close) {
+  const start = text.indexOf(open, from);
   if (start < 0) return null;
 
   let depth = 0;
@@ -243,8 +261,8 @@ function readJsonObject(text, from) {
       continue;
     }
     if (ch === '"') inString = true;
-    else if (ch === "{") depth += 1;
-    else if (ch === "}") {
+    else if (ch === open) depth += 1;
+    else if (ch === close) {
       depth -= 1;
       if (depth === 0) {
         try {
