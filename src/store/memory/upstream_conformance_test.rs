@@ -703,6 +703,32 @@ mod cognee {
 /// forget under the `oc-live-test` company's namespace and clean up after
 /// themselves, but a shared production account is the wrong thing to point
 /// them at — use a scratch project or a free tier.
+///
+/// # What the first live run found, and why the split below exists
+///
+/// Run against the real Supermemory API on 2026-08-22, the **provider
+/// contract** failed and the **host ports** passed. Both results are correct,
+/// and the difference between them is the point.
+///
+/// Supermemory strips the NUL character (U+0000) from content, server-side.
+/// That is not inferred from a read-back: posting a two-letter string with a
+/// NUL between the letters to `POST /v4/memories` answers `201` and echoes the
+/// stored memory back as the two letters alone, in the creation response
+/// itself. The conformance suite hands raw content through, so it sees the
+/// character vanish and fails — correctly, because the engine really does
+/// alter what it is given.
+///
+/// It does not reach this host, because this host never sends a raw NUL. The
+/// facades JSON-encode every record into `content` (see `encode`), so a NUL
+/// inside a trace, fact or chunk crosses the wire as the six ASCII characters
+/// of its JSON escape and arrives as text there is nothing to strip.
+/// `facade_round_trip` passing against the live service — label semantics
+/// included — is that reasoning checked rather than argued.
+///
+/// The lesson generalises past this one character: an engine's contract
+/// failures only matter to OpenCompany where the failing shape is a shape the
+/// facades actually produce. Keep the two tests apart so the next divergence
+/// lands on whichever of those questions it belongs to.
 #[cfg(test)]
 mod live_hosted {
     use super::*;
@@ -746,14 +772,9 @@ mod live_hosted {
         }
     }
 
-    /// Drives one live engine through the provider contract AND this host's
-    /// port suite — the same two claims the doubles make, so a divergence
-    /// between a vendor and its documentation shows up as a diff between this
-    /// test and its double-backed twin rather than as a mystery in production.
-    async fn live(engine: &str) {
-        let Some((url, key)) = credentials(engine) else {
-            return;
-        };
+    /// Binds the live engine named by the environment, or `None` to skip.
+    fn live_driver(engine: &str) -> Option<(Arc<dyn MemoryProvider>, DriverClass)> {
+        let (url, key) = credentials(engine)?;
         let config = MemoryDriverConfig {
             mode: MemoryMode::Remote,
             driver_id: Some(engine.into()),
@@ -761,25 +782,68 @@ mod live_hosted {
             api_key: Some(key),
             data_dir: None,
         };
-        let (provider, class) = open_driver(&config)
-            .expect("the live driver binds")
-            .expect("remote with a driver named yields a provider");
-        assert_retains_then_conforms(Arc::clone(&provider)).await;
+        Some(
+            open_driver(&config)
+                .expect("the live driver binds")
+                .expect("remote with a driver named yields a provider"),
+        )
+    }
+
+    /// The **provider contract** against the live service: what the engine
+    /// promises about raw content it is handed.
+    ///
+    /// Kept separate from the port suite below, because the two can disagree
+    /// and the difference decides who has to act. A vendor that alters raw
+    /// content fails here; whether that reaches this host depends on what this
+    /// host actually sends, which is the next test's question.
+    async fn live_provider_contract(engine: &str) {
+        let Some((provider, _)) = live_driver(engine) else {
+            return;
+        };
+        assert_retains_then_conforms(provider).await;
+    }
+
+    /// The **host's ports** against the live service: what OpenCompany itself
+    /// depends on, through the facades it really uses.
+    ///
+    /// This is the claim that decides whether a tenant can run on this engine.
+    /// It is deliberately not the same as the provider contract: the facades
+    /// JSON-encode every record into `content`, so a byte that an engine
+    /// mangles in raw text may never reach it as raw text at all.
+    async fn live_host_ports(engine: &str) {
+        let Some((provider, class)) = live_driver(engine) else {
+            return;
+        };
         facade_round_trip(provider, class).await;
     }
 
     #[tokio::test]
-    async fn the_live_supermemory_service_upholds_the_contract_and_the_ports() {
-        live("supermemory").await;
+    async fn the_live_supermemory_service_upholds_the_provider_contract() {
+        live_provider_contract("supermemory").await;
     }
 
     #[tokio::test]
-    async fn the_live_mem0_service_upholds_the_contract_and_the_ports() {
-        live("mem0").await;
+    async fn the_live_supermemory_service_upholds_the_host_ports() {
+        live_host_ports("supermemory").await;
     }
 
     #[tokio::test]
-    async fn the_live_cognee_service_upholds_the_contract_and_the_ports() {
-        live("cognee").await;
+    async fn the_live_mem0_service_upholds_the_provider_contract() {
+        live_provider_contract("mem0").await;
+    }
+
+    #[tokio::test]
+    async fn the_live_mem0_service_upholds_the_host_ports() {
+        live_host_ports("mem0").await;
+    }
+
+    #[tokio::test]
+    async fn the_live_cognee_service_upholds_the_provider_contract() {
+        live_provider_contract("cognee").await;
+    }
+
+    #[tokio::test]
+    async fn the_live_cognee_service_upholds_the_host_ports() {
+        live_host_ports("cognee").await;
     }
 }
