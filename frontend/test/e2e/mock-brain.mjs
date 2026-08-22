@@ -196,12 +196,11 @@ const SPAWN_DIRECTIVE = "SPAWNONE";
  * message reaches the orchestrator and then every teammate the turn hands work
  * to, each inside its own wrapper — so a plan naming `spawn_task` is in the
  * *engineer's* prompt too, and the engineer has no such tool. A step is
- * therefore served only to a request that could actually make its calls: one
- * whose `tools[]` carries every name ({@link offeredTools}), or one that is the
- * orchestrator's own turn ({@link isOrchestratorTurn}) — because the delegation
- * tools are dispatched through the runtime's own seam and never appear in
- * `tools[]` at all. Otherwise the step is left alone, unconsumed, and the
- * teammate answers with prose like any other turn.
+ * therefore served only when every tool it names is on the belt the request
+ * actually carries ({@link offeredTools}); otherwise it is left alone,
+ * unconsumed, and the teammate answers with prose like any other turn. This is
+ * a check on the request rather than on the prompt's wording, which is the only
+ * form of it that cannot be fooled by a re-wrapping.
  *
  * **A step must not be served twice.** `spawn_task` is serviced by the
  * runtime's delegation seam rather than the agent's own tool loop, so its
@@ -447,32 +446,16 @@ function findPlan(messages) {
 }
 
 /**
- * The sentence the orchestrator's persona opens its charter with
- * (`src/harness/prompt.rs`, visible in `scripts/dump-prompt.sh` output).
+ * The tool names this request actually offers, which is what tells an
+ * orchestrator turn from a teammate's turn on the same operator message.
  *
- * Coupling a fixture to prose is ordinarily a smell, and this file already
- * carries two of them ({@link isTriageRequest}, {@link isPlanningRequest}) for
- * the same reason it carries a third here: there is nothing else to key on.
- * The delegation tools are **intrinsic** — dispatched by name through the
- * runtime's own seam rather than exposed in the request's `tools[]` array — so
- * a request that can open a board card looks, on the wire, exactly like one
- * that cannot. That is not a detail worth being surprised by twice: it is why
- * the belt check below is an *alternative* to this one rather than the whole
- * guard.
- *
- * @param {any[]} messages
- * @returns {boolean}
- */
-function isOrchestratorTurn(messages) {
-  const first = textOf(messages[0]);
-  return typeof first === "string" && first.includes("this company's orchestrator");
-}
-
-/**
- * The tool names this request actually offers.
- *
- * Only the *non*-intrinsic ones appear here — see {@link isOrchestratorTurn} —
- * so an empty intersection is not proof of anything on its own.
+ * The orchestrator's belt really does carry `spawn_task`, `review_task` and the
+ * rest on the wire — 27 tools on the harness company, against the teammate's
+ * fourteen — so this is a sufficient check and not a heuristic. It was worth
+ * confirming rather than assuming: the delegation tools are *intrinsic*, in the
+ * sense that the runtime services them rather than the agent's own tool loop,
+ * and it would have been reasonable to guess they were therefore absent from
+ * `tools[]`.
  *
  * @param {any} body the parsed request
  * @returns {Set<string>}
@@ -735,11 +718,7 @@ function chatCompletion(body) {
     if (calls.length > 0) {
       const offered = offeredTools(body);
       const missing = calls.map((call) => call?.name).filter((name) => !offered.has(name));
-      // Either the request offers every tool the step names, or it is the
-      // orchestrator's own turn — whose delegation tools are intrinsic and
-      // therefore never in `tools[]` at all.
-      const canServe = missing.length === 0 || isOrchestratorTurn(messages);
-      if (!canServe) {
+      if (missing.length > 0) {
         // NOT consumed: this is a teammate reading the operator's message
         // second-hand, not the orchestrator. Answering with prose is the same
         // thing a real model does when it is offered no such tool.
@@ -747,8 +726,8 @@ function chatCompletion(body) {
         // plan was written for" and "the agent lost a tool it should have" are
         // the same line otherwise, and they are opposite bugs.
         process.stderr.write(
-          `[mock brain] plan step ${served} left unserved; not an orchestrator turn and ` +
-            `this belt has no ${missing.join(", ")} — it carries [${[...offered].join(", ")}]\n`,
+          `[mock brain] plan step ${served} left unserved; this belt has no ` +
+            `${missing.join(", ")} — it carries [${[...offered].join(", ")}]\n`,
         );
       } else {
         servedPlans.set(plan.id, served + 1);
