@@ -119,6 +119,46 @@ async fn facade_round_trip(provider: Arc<dyn MemoryProvider>, class: DriverClass
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0].body, "lathe parts come from Initech");
 
+    // Characters a hosted engine sanitises out of `content` (tinymemory#80).
+    // The envelope escapes them precisely so this assertion can hold, and the
+    // assertion lives here — in the shared facade path — rather than beside
+    // the escaping, because the escaping is only worth anything if the record
+    // survives the whole way to an engine and back. Against live Supermemory
+    // this failed before the escape landed: `U+FFFD` came back missing from
+    // the middle of the body, so the record decoded to a string one character
+    // shorter than the one that was stored, with nothing raising an error.
+    //
+    // `U+0000` rides along as the control. JSON already escapes it, so it
+    // survived even before the fix — which is what makes it useful here: if a
+    // later change to the envelope broke escaping wholesale, the two would
+    // fail together, and if only `U+FFFD` fails then the strip is engine-side.
+    for (label, character) in [("nul", '\u{0}'), ("replacement", '\u{FFFD}')] {
+        let body = format!("before{character}after");
+        let id = format!("fact-awkward-{label}");
+        facts
+            .upsert(
+                &company,
+                &FactRecord {
+                    id: id.clone(),
+                    kind: FactKind::Fact,
+                    title: format!("awkward {label}"),
+                    body: body.clone(),
+                    source: "cto".into(),
+                    updated_at_millis: 1_700_000_000_002,
+                },
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{label} fact upsert: {error}"));
+        let listed = facts.list(&company, None, None).await.expect("fact list");
+        let stored = listed.iter().find(|fact| fact.id == id);
+        assert_eq!(
+            stored.map(|fact| fact.body.as_str()),
+            Some(body.as_str()),
+            "{label}: the record must read back as it was written, not with the \
+             character removed from the middle of it"
+        );
+    }
+
     let context = bound.context();
     context
         .put(
@@ -710,25 +750,37 @@ mod cognee {
 /// contract** failed and the **host ports** passed. Both results are correct,
 /// and the difference between them is the point.
 ///
-/// Supermemory strips the NUL character (U+0000) from content, server-side.
-/// That is not inferred from a read-back: posting a two-letter string with a
-/// NUL between the letters to `POST /v4/memories` answers `201` and echoes the
-/// stored memory back as the two letters alone, in the creation response
-/// itself. The conformance suite hands raw content through, so it sees the
-/// character vanish and fails — correctly, because the engine really does
-/// alter what it is given.
+/// Supermemory strips two characters from content, server-side: `U+0000` and
+/// `U+FFFD`. That is not inferred from a read-back — `POST /v4/memories`
+/// answers `201` and echoes the stored memory back already missing them, in
+/// the creation response itself. Everything else offered to it survives,
+/// including every other C0 control, so it is not a control-character policy.
+/// The conformance suite hands raw content through, so it sees them vanish and
+/// fails — correctly, because the engine really does alter what it is given.
+/// Filed and fixed upstream as tinymemory#80; the provider-contract test here
+/// stays red until the vendored pin picks that fix up.
 ///
-/// It does not reach this host, because this host never sends a raw NUL. The
-/// facades JSON-encode every record into `content` (see `encode`), so a NUL
-/// inside a trace, fact or chunk crosses the wire as the six ASCII characters
-/// of its JSON escape and arrives as text there is nothing to strip.
-/// `facade_round_trip` passing against the live service — label semantics
-/// included — is that reasoning checked rather than argued.
+/// Only one of the two was insulated by this host, and the difference is worth
+/// keeping because the wrong half of it is the intuitive one. The facades
+/// JSON-encode every record into `content` (see `encode`), and RFC 8259
+/// requires escaping `U+0000`, so a NUL crosses the wire as the six ASCII
+/// characters of its escape and arrives as text there is nothing to strip.
+/// `U+FFFD` is not a control character, nothing required it to be escaped, and
+/// it therefore crossed as itself and was eaten — every affected record read
+/// back one character shorter than it was written, with no error anywhere.
+/// `encode` now escapes it deliberately for exactly that reason.
 ///
-/// The lesson generalises past this one character: an engine's contract
-/// failures only matter to OpenCompany where the failing shape is a shape the
-/// facades actually produce. Keep the two tests apart so the next divergence
-/// lands on whichever of those questions it belongs to.
+/// So the reasoning "the envelope insulates us" was right in form and wrong in
+/// fact, and it was wrong in the direction that loses data quietly. It held for
+/// the character that had been measured and failed for the one that had only
+/// been argued about. A live lane is what separates those two states; keep the
+/// facade assertions running real characters through it rather than trusting
+/// the shape of the argument.
+///
+/// The split still generalises: an engine's contract failures reach OpenCompany
+/// only where the failing shape is one the facades actually produce. Keep the
+/// two tests apart so the next divergence lands on whichever question it
+/// belongs to — and answer "does this shape reach us?" by sending it.
 #[cfg(test)]
 mod live_hosted {
     use super::*;
