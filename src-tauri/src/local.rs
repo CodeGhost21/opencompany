@@ -277,6 +277,41 @@ impl LocalHosts {
         Ok(())
     }
 
+    /// Permanently removes a desktop-created instance and its data root.
+    ///
+    /// The default instance is deliberately excluded: its root is the
+    /// application's data directory, which also owns the roster and every
+    /// desktop-created instance below it. Only roots minted under
+    /// `instances/` are eligible for recursive deletion.
+    pub async fn delete(&mut self, id: &str) -> Result<(), String> {
+        if id == DEFAULT_INSTANCE_ID {
+            return Err("the instance on this computer cannot be deleted".to_string());
+        }
+        let index = self.index_of(id)?;
+        let Some(relative_root) = self.instances[index].entry.root.as_deref() else {
+            return Err("only desktop-created instances can be deleted".to_string());
+        };
+        if relative_root != format!("{INSTANCES_DIR}/{id}") {
+            return Err("only desktop-created instances can be deleted".to_string());
+        }
+        let root = self.data_dir.join(relative_root);
+
+        // Release the server and root lock before removing anything beneath
+        // it. Keep the roster row until deletion succeeds, so an I/O failure
+        // cannot strand data behind a name the application has forgotten.
+        self.instances[index].host = None;
+        match tokio::fs::remove_dir_all(&root).await {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(format!("could not delete {}: {error}", root.display()));
+            }
+        }
+        self.instances.remove(index);
+        self.persist();
+        Ok(())
+    }
+
     /// Renames an instance. Its id, and therefore its data root, is untouched.
     pub fn rename(&mut self, id: &str, label: &str) -> Result<LocalInstanceInfo, String> {
         let label = label.trim();
@@ -724,6 +759,40 @@ mod test {
 
         assert_eq!(hosts.list().len(), 1);
         assert!(root.exists(), "forgetting is not deleting");
+    }
+
+    #[tokio::test]
+    async fn deleting_removes_a_created_instance_and_its_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut hosts = LocalHosts::load(dir.path().to_path_buf()).await;
+        hosts.create("Acme").await.expect("it starts");
+        let root = dir.path().join("instances/acme");
+        std::fs::write(root.join("company-data"), "valuable").unwrap();
+
+        hosts.delete("acme").await.expect("a created instance");
+
+        assert_eq!(hosts.list().len(), 1);
+        assert!(!root.exists(), "delete removes the instance data root");
+        assert!(
+            hosts.delete(DEFAULT_INSTANCE_ID).await.is_err(),
+            "the application data root is never recursively deleted"
+        );
+    }
+
+    #[tokio::test]
+    async fn deleting_refuses_a_hand_written_root() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(ROSTER_FILE),
+            r#"{"instances":[{"id":"kept","label":"Kept","root":"kept"}]}"#,
+        )
+        .unwrap();
+        let mut hosts = LocalHosts::load(dir.path().to_path_buf()).await;
+        let root = dir.path().join("kept");
+        assert!(root.exists());
+
+        assert!(hosts.delete("kept").await.is_err());
+        assert!(root.exists(), "delete only owns roots it minted under instances");
     }
 
     #[tokio::test]
