@@ -15,6 +15,7 @@ import {
   say,
   settledMarkerCount,
   silenceTour,
+  waitForTurn,
 } from "./orchestration";
 
 /**
@@ -148,6 +149,14 @@ test("a goal becomes delegated cards, the team works them, and review closes the
   });
 
   // ── 2. The board holds the work, unstarted ──────────────────────────────
+  // After the turn has *finished*, not merely after its first card appeared:
+  // delegations are drained at the end of a turn, so a board read taken mid-turn
+  // sees whichever cards exist at that instant. It costs nothing here — the chip
+  // above is already proof the drain ran — and it is what keeps this spec from
+  // teaching the pattern that made `orchestration-live.spec.ts` report on half
+  // a goal.
+  await waitForTurn(page);
+
   await openBoard(page);
   await expect(column(page, PENDING)).toContainText(gather, { timeout: 60_000 });
   await expect(column(page, PENDING)).toContainText(write);
