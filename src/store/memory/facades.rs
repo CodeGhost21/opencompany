@@ -59,13 +59,50 @@ struct Envelope<T> {
     record: T,
 }
 
+/// Characters a hosted engine removes from `content`, escaped on the way out.
+///
+/// Supermemory strips `U+FFFD` server-side (tinymemory#80, measured against
+/// the live API rather than inferred). An engine is within its rights to
+/// sanitise text it is handed; what breaks is that this host does not hand it
+/// text, it hands it a JSON envelope, and a character removed from the middle
+/// of that envelope comes back as a record whose body is quietly one character
+/// shorter than it was written.
+///
+/// `U+0000` is deliberately absent: RFC 8259 requires escaping `U+0000`
+/// through `U+001F`, so `serde_json` already emits it as `\u0000` and it never
+/// reaches an engine as a literal. Measured, not assumed — a NUL survives this
+/// path against live Supermemory today, and a `U+FFFD` does not. Listing it
+/// here would be dead weight implying a protection that JSON already provides.
+const CHARACTERS_ENGINES_STRIP: [char; 1] = ['\u{FFFD}'];
+
 /// Encodes a typed record for the provider's `content` field.
+///
+/// The escaping pass exists because the envelope has to survive engines that
+/// sanitise content. `\ufffd` and a literal `U+FFFD` are the same string to
+/// every JSON reader, so this changes nothing a decoder sees — including for
+/// records already written the other way, which keep decoding unchanged.
+///
+/// Rewriting the serialized text is safe here in a way it would not be in
+/// general: JSON's structural characters are all ASCII, so a character from
+/// [`CHARACTERS_ENGINES_STRIP`] can only ever occur inside a string literal,
+/// and `serde_json` has already escaped any backslash around it. Substituting
+/// its `\uXXXX` form therefore yields an equivalent document and cannot
+/// introduce or terminate an escape sequence.
 fn encode<T: Serialize>(record: &T) -> Result<String> {
-    serde_json::to_string(&Envelope {
+    let json = serde_json::to_string(&Envelope {
         v: ENVELOPE_VERSION,
         record,
     })
-    .map_err(|error| OpenCompanyError::Store(format!("could not encode memory record: {error}")))
+    .map_err(|error| OpenCompanyError::Store(format!("could not encode memory record: {error}")))?;
+    Ok(CHARACTERS_ENGINES_STRIP
+        .iter()
+        .fold(json, |text, character| {
+            if text.contains(*character) {
+                text.replace(*character, &format!("\\u{:04x}", *character as u32))
+            } else {
+                text
+            }
+        }))
 }
 
 /// Decodes one entry, or `None` when it is not ours to read.
@@ -859,6 +896,54 @@ mod test {
         assert_eq!(decoded.body, chunk.body);
         assert_eq!(decoded.stored_at_millis, chunk.stored_at_millis);
         assert_eq!(decoded.labels, chunk.labels);
+    }
+
+    #[test]
+    fn the_encoding_leaves_no_character_a_hosted_engine_would_strip() {
+        // The escape is only worth anything if it removes every literal from
+        // the serialized text; an engine sanitises the bytes it receives, not
+        // the record they represent.
+        let chunk = StoredChunk {
+            label: "notes/one".into(),
+            body: "before\u{FFFD}after".into(),
+            stored_at_millis: 1,
+            labels: vec!["notes/one".into()],
+        };
+        let json = encode(&chunk).unwrap();
+        for character in CHARACTERS_ENGINES_STRIP {
+            assert!(
+                !json.contains(character),
+                "the encoded envelope still carries U+{:04X} as a literal: {json:?}",
+                character as u32
+            );
+        }
+        assert!(
+            json.contains("\\ufffd"),
+            "the character must be escaped rather than dropped: {json:?}"
+        );
+    }
+
+    #[test]
+    fn escaping_preserves_the_record_including_around_a_backslash() {
+        // The escape rewrites serialized JSON rather than the record, which is
+        // safe only because a stripped character can appear solely inside a
+        // string literal and `serde_json` has already escaped any backslash
+        // beside it. A body that puts the two together is where a naive
+        // substitution would corrupt the document, so pin it: this must decode
+        // back to exactly what went in.
+        let context = ns("acme", Scope::Context);
+        let chunk = StoredChunk {
+            label: "notes/one".into(),
+            body: "a\\\u{FFFD}b\u{FFFD}\\u{FFFD}c\u{0}d".into(),
+            stored_at_millis: 7,
+            labels: vec!["notes/one".into()],
+        };
+        let entry = entry_in(&context, &encode(&chunk).unwrap());
+        let decoded: StoredChunk = decode(&entry, &context).unwrap();
+        assert_eq!(
+            decoded.body, chunk.body,
+            "every character must survive the escape and the decode"
+        );
     }
 
     #[test]
