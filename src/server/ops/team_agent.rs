@@ -557,12 +557,6 @@ async fn edit_agent(
             name,
             role,
             tools,
-            instructions: body
-                .instructions
-                .as_ref()
-                .and_then(|value| value.as_ref())
-                .map(|text| text.trim().to_string())
-                .filter(|text| !text.is_empty()),
             ..Default::default()
         };
         // An empty string is the stored form of "cleared" — the write path
