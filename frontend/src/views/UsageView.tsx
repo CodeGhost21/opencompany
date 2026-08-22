@@ -503,7 +503,7 @@ export function mcpDirectoryStatus(caps: CapabilityStatusDto): {
   }
 }
 
-function searchStatus(caps: CapabilityStatusDto): { label: string; variant: BadgeVariant } {
+export function searchStatus(caps: CapabilityStatusDto): { label: string; variant: BadgeVariant } {
   if (caps.searchInBuild === false) return { label: "Not in this build", variant: "outline" };
   if (!caps.searchGranted) return { label: "Not granted", variant: "secondary" };
   // A company on its own provider is working whatever the host's managed
