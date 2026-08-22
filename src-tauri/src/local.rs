@@ -792,7 +792,10 @@ mod test {
         assert!(root.exists());
 
         assert!(hosts.delete("kept").await.is_err());
-        assert!(root.exists(), "delete only owns roots it minted under instances");
+        assert!(
+            root.exists(),
+            "delete only owns roots it minted under instances"
+        );
     }
 
     #[tokio::test]
