@@ -114,6 +114,43 @@ export const LIVE_BRAIN_REASON =
   "(issue #467).";
 
 /**
+ * A host built with the harness features and pointed at a **real model**
+ * (`test/e2e/live-brain-proxy.mjs`) rather than at the scripted mock.
+ *
+ * Set `PW_LIVE_LLM=1`, or run `npm run e2e:live-llm`, which sets it and — when
+ * this config manages the host — starts the proxy and points the host at it.
+ *
+ * ## Why this is a run of its own rather than a flag inside a spec
+ *
+ * The same reason {@link FIRST_RUN} is: the two lanes need different hosts.
+ * Every other spec in this suite asserts on the mock's scripted answers, and a
+ * host whose inference is a real model answers none of them — a `__MOCK_LLM__`
+ * marker no longer appears, a `SPAWNONE` no longer opens exactly one card.
+ * Conversely `orchestration-live.spec.ts` asserts that a model *decided*
+ * something, which is unpassable against a fixture that decides nothing. So
+ * `playwright.config.ts` selects that spec only in this run, and every other
+ * spec only outside one, and neither can be pointed at a host it cannot pass
+ * against.
+ *
+ * The lane is **not** run by CI, and deliberately: it spends real tokens and its
+ * verdict depends on a model's judgement, which is the one thing a required
+ * check must not. It exists to be run by a person — before changing an
+ * orchestrator prompt, a tool description, or the delegation seam — and its
+ * scripted twin, `orchestration-simulation.spec.ts`, is what guards the same
+ * chain on every push.
+ */
+export const LIVE_LLM = process.env.PW_LIVE_LLM === "1";
+
+/** Where `live-brain-proxy.mjs` listens when this run starts it. */
+export const LIVE_LLM_BIND = process.env.PW_LIVE_LLM_BIND || "127.0.0.1:8096";
+
+/** The reason string a `LIVE_LLM` skip carries, so no skip is ever bare. */
+export const LIVE_LLM_REASON =
+  "needs a --features openhuman,tinycortex,mcp host pointed at a real model; " +
+  "run `npm run e2e:live-llm` (which sets PW_LIVE_LLM=1 and starts " +
+  "test/e2e/live-brain-proxy.mjs in front of the configured router).";
+
+/**
  * Whether this run's host serves the **unstaffed first-run fixture**
  * (`companies/e2e_setup`) rather than the suite's usual harness company.
  *

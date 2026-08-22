@@ -232,6 +232,7 @@ statement about that host rather than a debt. Against a gated one they run:
 | `chat-to-card.spec.ts` (card chip) | an orchestrator opens a board card, and the chip survives a reload | a scripted tool choice (`SPAWNONE`) |
 | `workflow-run-history.spec.ts` (durable history) | a run is journaled and outlives the console | the workflow runner |
 | `mcp-agent.spec.ts` | an agent calls a tool on a registered MCP server | `mcp-server.mjs` |
+| `orchestration-simulation.spec.ts` | **the whole loop**: a goal stated in chat is delegated to two teammates, dispatched from the board, worked, and closed out by review | scripted turns (`__MOCK_PLAN__`) |
 
 To run them:
 
@@ -252,8 +253,13 @@ host at them:
   makes it call `spawn_task` **once**, and one carrying `__MOCK_TOOL_CALL__ {…}`
   makes it call exactly the named tool, once. "Once" is the part with teeth: one
   operator message reaches several agents and several model calls, so the server
-  tracks directive identity rather than trusting the transcript. Bind with
-  `PW_MOCK_BRAIN_BIND` (default `127.0.0.1:8099`).
+  tracks directive identity rather than trusting the transcript. A message
+  carrying `__MOCK_PLAN__ [[…],[…]]` scripts a whole **turn** instead of a single
+  call — several calls in one assistant message, and several steps across the
+  turn's tool loop — which is what lets one goal fan out to two teammates and be
+  closed out afterwards. Set `MOCK_BRAIN_DEBUG=1` to have it dump each request
+  it receives, which is the fastest way to find out why an arm stopped matching.
+  Bind with `PW_MOCK_BRAIN_BIND` (default `127.0.0.1:8099`).
 
 * [`test/e2e/mcp-server.mjs`](test/e2e/mcp-server.mjs) — an HTTP MCP server with
   two tools. HTTP, not stdio: this host rejects any MCP declaration carrying a
@@ -263,6 +269,44 @@ host at them:
 Against a host you brought up yourself (`PW_BASE_URL`), the flag still enables
 the four specs, but starting the fixtures and pointing the host at them is
 yours to do — this config will not reconfigure a host it did not launch.
+
+### The lane with a real model in it
+
+```sh
+cargo build --locked --features openhuman,tinycortex,mcp --bin opencompany
+npm --prefix frontend run e2e:live-llm    # PW_LIVE_LLM=1 npm run e2e
+```
+
+One spec, `orchestration-live.spec.ts`, and one claim the scripted lane cannot
+make: that a **model**, handed a goal and this company's real roster and tool
+descriptions, decides to break the goal up, give the pieces to the right people,
+and accept the results afterwards. A prompt that stopped describing the board, a
+tool description that stopped saying what it is for, a roster the orchestrator
+can no longer see — every one of those leaves the scripted lane green, because
+the scripted lane never reads them.
+
+The run narrows itself to that spec, exactly as the first-run lane does and for
+the same reason: every other spec asserts on the mock's answers, and a host
+thinking with a real model gives none of them.
+
+* [`test/e2e/live-brain-proxy.mjs`](test/e2e/live-brain-proxy.mjs) sits between
+  the host and the router. It forwards `/chat/completions` untouched — nothing
+  is scripted, filtered or retried — and supplies the two things a plain
+  upstream will not: `/embeddings`, which those routers answer `404` for and the
+  host validates the width of, and the model name, so the rung is named once
+  here rather than through the host's own `OPENCOMPANY_INFERENCE_MODEL`. It logs
+  one line per turn naming the tool calls the model chose, because "never asked"
+  and "asked and chose nothing" are otherwise the same silence.
+* Point it with `PW_LIVE_LLM_URL` (default `http://127.0.0.1:6969/v1`),
+  `PW_LIVE_LLM_MODEL` (default `flash`) and `PW_LIVE_LLM_KEY` (default
+  `$LADDER_API_KEY`); bind with `PW_LIVE_LLM_BIND` (default `127.0.0.1:8096`).
+
+**CI does not run it**, deliberately: it spends tokens and its verdict is a
+model's judgement, so a model having a bad day would turn unrelated pull
+requests red. Run it by hand before changing an orchestrator prompt, a
+delegation tool's description, or the delegation drain — and let
+`orchestration-simulation.spec.ts`, which asserts the same chain against
+scripted choices, be what guards it on every push.
 
 Some specs skip **the other way**, in the live lane only, and say so where they
 sit: three in `chat-live-events.spec.ts`, which find the reply to their own turn
