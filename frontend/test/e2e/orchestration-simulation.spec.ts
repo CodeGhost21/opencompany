@@ -13,6 +13,7 @@ import {
   openCard,
   openMainLine,
   say,
+  settledMarkerCount,
   silenceTour,
 } from "./orchestration";
 
@@ -168,6 +169,13 @@ test("a goal becomes delegated cards, the team works them, and review closes the
   expect(await stageOf(request, gatherId), "spawn_task must not dispatch").toBe("pending");
   expect(await stageOf(request, writeId), "spawn_task must not dispatch").toBe("pending");
 
+  // The markers this thread already holds, before anything of this test's can
+  // land in it. Counted from a settled reading rather than assumed to be zero:
+  // the suite shares one data root, so a marker an earlier test left in the
+  // main line is legitimately here.
+  await openMainLine(page);
+  const markersBefore = await settledMarkerCount(page);
+
   // ── 3. The operator starts the work ─────────────────────────────────────
   // The real gesture on the real board: entering Working is dispatch.
   await dispatch(page, gather);
@@ -195,8 +203,8 @@ test("a goal becomes delegated cards, the team works them, and review closes the
   // than addressed by card, because this surface renders a marker as a plain
   // system pill — see `markers` in `./orchestration`.
   await openMainLine(page);
-  await expect(markers(page)).toHaveCount(2, { timeout: 120_000 });
-  await expect(markers(page).first()).toHaveText("finished → In review");
+  await expect(markers(page)).toHaveCount(markersBefore + 2, { timeout: 120_000 });
+  await expect(markers(page).last()).toHaveText("finished → In review");
 
   // ── 6. The orchestrator closes the goal out ─────────────────────────────
   // The second half of the loop, and the half nothing else covers: work that

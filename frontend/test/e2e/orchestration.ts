@@ -107,6 +107,32 @@ export function markers(page: Page): Locator {
   return page.getByRole("main").getByText(/^finished → /);
 }
 
+/**
+ * The marker count, once the thread's rehydration has stopped adding to it.
+ *
+ * A thread opens empty and fills from `chat/history` a moment later, so a count
+ * taken on arrival is a count of nothing — and "two new markers appeared" would
+ * be measuring the hydration instead. Waits for two equal readings rather than
+ * for a fixed time, the same shape `chat-dispatch-marker.spec.ts` uses and for
+ * the same reason: this suite shares one host and one data root across tests,
+ * so an earlier test's marker is legitimately in this thread's history.
+ */
+export async function settledMarkerCount(page: Page): Promise<number> {
+  let last = -1;
+  await expect
+    .poll(
+      async () => {
+        const current = await markers(page).count();
+        const settled = current === last;
+        last = current;
+        return settled;
+      },
+      { intervals: [400, 400, 400, 400, 400, 400, 400, 400], timeout: 20_000 },
+    )
+    .toBe(true);
+  return last;
+}
+
 /** The board, with every phase pinned open. */
 export async function openBoard(page: Page) {
   await page.goto(BOARD);
