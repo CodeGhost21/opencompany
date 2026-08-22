@@ -30,6 +30,7 @@
 //! than the single one it replaces.
 
 use std::collections::HashSet;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -296,10 +297,17 @@ impl LocalHosts {
         }
         let root = self.data_dir.join(relative_root);
 
-        // Release the server and root lock before removing anything beneath
-        // it. Keep the roster row until deletion succeeds, so an I/O failure
-        // cannot strand data behind a name the application has forgotten.
+        // Release the server and root lock, then durably disable autostart
+        // before removing anything beneath it. If the final roster write
+        // fails, the stopped row remains safe to retry: a relaunch cannot
+        // recreate an empty root over data that was already deleted.
         self.instances[index].host = None;
+        let was_autostart = self.instances[index].entry.autostart;
+        self.instances[index].entry.autostart = false;
+        if let Err(error) = self.try_persist() {
+            self.instances[index].entry.autostart = was_autostart;
+            return Err(error);
+        }
         match tokio::fs::remove_dir_all(&root).await {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -307,8 +315,11 @@ impl LocalHosts {
                 return Err(format!("could not delete {}: {error}", root.display()));
             }
         }
-        self.instances.remove(index);
-        self.persist();
+        let removed = self.instances.remove(index);
+        if let Err(error) = self.try_persist() {
+            self.instances.insert(index, removed);
+            return Err(error);
+        }
         Ok(())
     }
 
@@ -387,6 +398,17 @@ impl LocalHosts {
     }
 
     fn persist(&self) {
+        if let Err(error) = self.try_persist() {
+            let path = self.data_dir.join(ROSTER_FILE);
+            // Not fatal for reversible state changes: the instances running
+            // right now keep running, and the roster stays at its last
+            // successful write. Permanent deletion uses `try_persist`
+            // directly because it cannot safely suppress this failure.
+            tracing::error!(%error, path = %path.display(), "could not write the instance roster");
+        }
+    }
+
+    fn try_persist(&self) -> Result<(), String> {
         let roster = Roster {
             instances: self
                 .instances
@@ -398,14 +420,16 @@ impl LocalHosts {
         let write = std::fs::create_dir_all(&self.data_dir).and_then(|()| {
             let body = serde_json::to_vec_pretty(&roster)
                 .map_err(|error| std::io::Error::other(error.to_string()))?;
-            std::fs::write(&path, body)
+            let mut file = std::fs::File::create(&path)?;
+            file.write_all(&body)?;
+            file.sync_all()
         });
-        if let Err(error) = write {
-            // Not fatal: the instances running right now keep running, and the
-            // cost is that the roster is what it was at the last successful
-            // write. Failing the operator's action over it would be worse.
-            tracing::error!(%error, path = %path.display(), "could not write the instance roster");
-        }
+        write.map_err(|error| {
+            format!(
+                "could not write the instance roster at {}: {error}",
+                path.display()
+            )
+        })
     }
 }
 
@@ -777,6 +801,32 @@ mod test {
             hosts.delete(DEFAULT_INSTANCE_ID).await.is_err(),
             "the application data root is never recursively deleted"
         );
+    }
+
+    #[tokio::test]
+    async fn deleting_keeps_data_when_the_roster_cannot_be_updated() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut hosts = LocalHosts::load(dir.path().to_path_buf()).await;
+        hosts.create("Acme").await.expect("it starts");
+        let root = dir.path().join("instances/acme");
+        std::fs::write(root.join("company-data"), "valuable").unwrap();
+
+        let roster = dir.path().join(ROSTER_FILE);
+        let saved_roster = dir.path().join("instances.saved.json");
+        std::fs::rename(&roster, &saved_roster).unwrap();
+        std::fs::create_dir(&roster).unwrap();
+
+        let error = hosts
+            .delete("acme")
+            .await
+            .expect_err("an unwritable roster must fail deletion");
+
+        assert!(error.contains("could not write the instance roster"));
+        assert!(root.join("company-data").exists(), "data stays retryable");
+        assert!(hosts.list().iter().any(|instance| instance.id == "acme"));
+
+        std::fs::remove_dir(&roster).unwrap();
+        std::fs::rename(&saved_roster, &roster).unwrap();
     }
 
     #[tokio::test]
