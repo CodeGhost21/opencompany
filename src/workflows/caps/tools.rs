@@ -144,7 +144,7 @@ pub(crate) fn refusal_for(
     }
     match wiring.missing.get(namespace) {
         Some(MissingReason::SearchBackendNotConfigured) => Some(format!(
-            "tool_call '{slug}' is granted, but no search provider is configured: this deployment has no managed search backend, and this company has set no provider of its own in Settings → Search"
+            "tool_call '{slug}' is granted, but no search provider is configured: this deployment has no managed search backend and this company has set none of its own; set one in Settings → Search, ask the platform operator to configure managed search, or remove the node"
         )),
         Some(MissingReason::CapabilityTierFiltered) => Some(format!(
             "tool_call '{slug}' is granted, but the deployment's capability tier filtered it; ask the platform operator to raise the capability tier or remove the node"
@@ -693,6 +693,9 @@ mod tests {
         let provider_message = refusal_for("web_search", &["search".to_string()], &provider)
             .expect("missing provider refuses");
         assert!(provider_message.contains("no managed search backend"));
+        // Both remedies, because either one fixes it: the company can set its
+        // own provider without waiting on the platform.
+        assert!(provider_message.contains("Settings → Search"));
         assert!(provider_message.contains("ask the platform operator"));
 
         let tier = WorkflowToolWiring {
