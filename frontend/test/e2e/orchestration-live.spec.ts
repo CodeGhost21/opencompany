@@ -76,6 +76,27 @@ async function newCards(request: APIRequestContext, before: Set<string>) {
   return (await allCards(request)).filter((task) => !before.has(task.id));
 }
 
+/**
+ * Where a card is, in the one vocabulary that covers every case: the stage when
+ * it has one, the phase otherwise (`stage` is omitted for a pending or done
+ * card, because there is only one way to be either — issue #1512).
+ */
+function landing(card: { column: string; stage?: string }): string {
+  return card.stage ?? card.column;
+}
+
+/**
+ * The landings a run has actually stopped in.
+ *
+ * Written as an allow-list of *stopped* states rather than as "anything but
+ * `in_progress`", which is the same shape `CLAUDE.md` warns about one level up:
+ * a card the orchestrator has not dispatched yet reads `pending`, which is not
+ * `in_progress`, so the loose form let a card that had not started count as one
+ * that had finished. The first run of this spec passed that way — one card
+ * accepted, the other still working, and a green tick over it.
+ */
+const SETTLED = ["in_review", "paused", "done"];
+
 /** The roster ids an orchestrator may hand work to, read from the host. */
 async function roster(request: APIRequestContext): Promise<string[]> {
   const response = await request.get(`${SCOPE}/team`);
@@ -187,7 +208,10 @@ test("a real model takes a goal, gives it to its team, and closes it out", async
       .poll(
         async () => {
           const held = (await allCards(request)).find((row) => row.id === card.id);
-          return held?.stage ?? held?.column ?? "in_progress";
+          // A card that has gone missing keeps the poll waiting rather than
+          // concluding: the alternative reads as "settled" for a card that no
+          // longer exists.
+          return held ? landing(held) : "in_progress";
         },
         {
           message: `card "${card.title}" never settled`,
@@ -195,7 +219,7 @@ test("a real model takes a goal, gives it to its team, and closes it out", async
           intervals: [5_000],
         },
       )
-      .not.toBe("in_progress");
+      .toBeOneOf(SETTLED);
   }
 
   // ── 4. The operator asks for it to be closed out ───────────────────────
@@ -205,7 +229,7 @@ test("a real model takes a goal, gives it to its team, and closes it out", async
   const settled = (await allCards(request)).filter((held) =>
     opened.some((card) => card.id === held.id),
   );
-  const reviewable = settled.filter((card) => (card.stage ?? card.column) === "in_review");
+  const reviewable = settled.filter((card) => landing(card) === "in_review");
   // A hard failure rather than a skip, deliberately. `paused` is a legitimate
   // landing for a single run — a turn that needed a tool it has no credential
   // for, or an approval nobody has decided — but a goal where *nothing* came
@@ -220,7 +244,7 @@ test("a real model takes a goal, gives it to its team, and closes it out", async
   expect(
     reviewable.length,
     `no card came back for acceptance — the run landed as ${settled
-      .map((card) => `"${card.title}": ${card.stage ?? card.column}`)
+      .map((card) => `"${card.title}": ${landing(card)}`)
       .join("; ")}`,
   ).toBeGreaterThan(0);
 
