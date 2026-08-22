@@ -700,8 +700,12 @@ function chatCompletion(body) {
         // NOT consumed: this is a teammate reading the operator's message
         // second-hand, not the orchestrator. Answering with prose is the same
         // thing a real model does when it is offered no such tool.
+        // The belt is named as well as the gap: "this agent is not the
+        // orchestrator" and "the orchestrator lost a tool" are the same line
+        // otherwise, and they are opposite bugs.
         process.stderr.write(
-          `[mock brain] plan step ${served} left unserved; this belt has no ${missing.join(", ")}\n`,
+          `[mock brain] plan step ${served} left unserved; this belt has no ` +
+            `${missing.join(", ")} — it carries [${[...offered].join(", ")}]\n`,
         );
       } else {
         servedPlans.set(plan.id, served + 1);
