@@ -330,8 +330,12 @@ Project Euler problem in the main line, dispatches whatever the orchestrator
 opens, keeps asking until the work settles, and then compares the integer the
 lab reports against the published one. The verdict is that integer, so what
 passes is not "the orchestration ran" but "the orchestration produced the right
-answer". Withholding the network is what makes it evidence: the number cannot
-have been looked up.
+answer" — and the spec additionally requires that the lab actually *ran*
+something, because every published answer is in a model's training data and
+recall would otherwise pass. Withholding `web`/`search` removes the obvious
+shortcut but is not a network boundary (`shell` is granted; see
+`docs/spec/security/agent-isolation.md`), so the program on disk is what
+carries the claim.
 
 * `PW_EULER_PROBLEM` picks the problem (default `100`); the set, each statement
   and each published answer live in [`test/e2e/euler.ts`](test/e2e/euler.ts).

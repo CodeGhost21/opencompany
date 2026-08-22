@@ -47,10 +47,14 @@ import { dispatch, openMainLine, say, silenceTour } from "./orchestration";
  * job done. A lane that failed a correct answer over its bookkeeping would be
  * measuring diligence rather than capability.
  *
- * The one method claim that *is* enforced is enforced by the manifest rather
- * than by an assertion here: `agentic_math_lab` holds no `web` or `search`
- * grant, so the number cannot have been looked up. That is what makes it
- * evidence — see `SEARCH_DENIED_COMPANIES` in `src/company/content_test.rs`.
+ * The one method claim that *is* enforced is `computed()`: the answer has to
+ * have come out of a program the lab ran. That, and not the manifest, is what
+ * makes the number evidence. `agentic_math_lab` holding no `web` or `search`
+ * grant (see `SEARCH_DENIED_COMPANIES` in `src/company/content_test.rs`)
+ * removes the shortcut an agent would reach for first, but it closes no
+ * network — `shell` is granted and there is no sandbox
+ * (`docs/spec/security/agent-isolation.md`) — so "it could not have looked the
+ * answer up" is not something this lane may claim.
  *
  * # Why the operator has to keep asking
  *
@@ -181,14 +185,21 @@ test("the lab takes a Project Euler problem and returns the published answer", a
   // The statement is handed over in full and the *method* is left entirely to
   // the company: which desks, which tools, what order. The only instructions
   // are the two facts the lab could not otherwise know — that the answer is an
-  // exact integer, and that there is no network to look it up on.
+  // exact integer, and that it is to be computed rather than recalled.
+  //
+  // That second one is phrased as the instruction it is, not as a fact about
+  // the environment. An earlier draft told the company it had "no internet
+  // access", which is false: `shell` is granted and nothing sandboxes the
+  // network (`docs/spec/security/agent-isolation.md`). Handing a model a false
+  // premise about its own tools is a poor way to ask for honest work.
   await say(
     page,
     `Project Euler Problem ${problem.id} — ${problem.title}.\n\n` +
       `${problem.statement}\n\n` +
-      "Please have the lab solve this. The answer is one exact integer and it has to be " +
-      "computed here: this company has no internet access, so there is nothing to look " +
-      "up. Use your team. When the answer has been checked, tell me what it is.",
+      "Please have the lab solve this. The answer is one exact integer, and I want it " +
+      "computed here rather than recalled or looked up — a program that runs, with a " +
+      "second route agreeing. Use your team. When the answer has been checked, tell me " +
+      "what it is.",
   );
   await waitQuiet(page, request, approved);
 

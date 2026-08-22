@@ -29,10 +29,15 @@ export interface EulerProblem {
   /**
    * The statement, in full.
    *
-   * Handed over in the operator's message rather than fetched, because this
-   * company holds no `web` grant at all — see `companies/agentic_math_lab`,
-   * where withholding the network is what makes the number evidence. A lane
-   * that let the lab read projecteuler.net would be testing its browsing.
+   * Handed over in the operator's message rather than fetched: this company
+   * holds no `web` grant, so reading projecteuler.net is not a tool call away,
+   * and a lane that let the lab browse for the statement would be testing its
+   * browsing rather than its solving.
+   *
+   * That grant is not a network boundary and this lane does not pretend it is
+   * — `shell` is granted and there is no sandbox
+   * (`docs/spec/security/agent-isolation.md`). What makes the answer evidence
+   * is `computed()` below: it has to have come out of a program that ran.
    */
   statement: string;
   /** The published answer, exactly. Compared as a string of digits. */
