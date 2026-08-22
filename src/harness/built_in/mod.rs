@@ -1573,6 +1573,9 @@ impl HarnessPool {
             fresh_deps.paypal = paypal_config;
         }
         fresh_deps.hosting = hosting_config;
+        // And the company's own search provider, so a key pasted (or cleared) in
+        // the console decides what the rebuilt agents search through.
+        fresh_deps.tenant_search = tenant_search_config;
         // And the freshly-read bindings (issue #245), so a repository bound or
         // revoked in the console is what the rebuilt agents' tools resolve
         // against — including the descriptions that name what is bound.
@@ -1826,6 +1829,41 @@ impl HarnessPool {
                      connection: {err}"
                 );
                 deps.hosting.clone()
+            }
+        }
+    }
+
+    /// The company's own search provider, for the same reasons as `hosting`.
+    ///
+    /// Only companies that **explicitly** grant `search` read at all — the same
+    /// gate the metered managed tool passes, because this is the same namespace
+    /// wearing a different credential. A company that never opted into web
+    /// search does not get a store read per turn for a setting it cannot use.
+    ///
+    /// A transient read error keeps the last known connection with a warning,
+    /// like `hosting`: degrading to `None` would silently move the company's
+    /// searches back onto the platform's metered account — a bill moving between
+    /// two parties because a store hiccuped.
+    async fn resolve_tenant_search(
+        &self,
+        company: &CompanyRecord,
+        deps: &HarnessDeps,
+    ) -> Option<search_byo::TenantSearch> {
+        if !crate::company::grants_search_explicit(&company.manifest.tools.allow) {
+            return None;
+        }
+        let Some(secrets) = &deps.secrets else {
+            return deps.tenant_search.clone();
+        };
+        match search_byo::TenantSearch::resolve(secrets, &company.id).await {
+            Ok(resolved) => resolved,
+            Err(err) => {
+                tracing::warn!(
+                    company = %company.id,
+                    "[search] could not read the company's search provider; keeping the last known \
+                     connection: {err}"
+                );
+                deps.tenant_search.clone()
             }
         }
     }
