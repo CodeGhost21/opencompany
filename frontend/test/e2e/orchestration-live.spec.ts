@@ -7,7 +7,7 @@ import {
   column,
   dispatch,
   openBoard,
-  openChannel,
+  openMainLine,
   say,
   silenceTour,
 } from "./orchestration";
@@ -108,7 +108,7 @@ test("a real model takes a goal, gives it to its team, and closes it out", async
   // Specific about the *outcome* (cards on the board, owned by teammates) and
   // silent about the mechanism, because which tool to reach for is exactly the
   // decision under test.
-  await openChannel(page);
+  await openMainLine(page);
   await say(
     page,
     "I want a short market digest published this week. Break it into two pieces of " +
@@ -198,7 +198,7 @@ test("a real model takes a goal, gives it to its team, and closes it out", async
       "nothing to accept.",
   );
 
-  await openChannel(page);
+  await openMainLine(page);
   await say(
     page,
     `The work is back and it looks good to me. Please review and approve ` +

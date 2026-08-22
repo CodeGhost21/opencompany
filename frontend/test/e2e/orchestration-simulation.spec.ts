@@ -11,7 +11,7 @@ import {
   markers,
   openBoard,
   openCard,
-  openChannel,
+  openMainLine,
   say,
   silenceTour,
 } from "./orchestration";
@@ -114,7 +114,7 @@ test("a goal becomes delegated cards, the team works them, and review closes the
   // One sentence, in the one place an operator says anything. The plan riding
   // on it is the orchestrator's decision, scripted: two cards, one per
   // teammate, each with the brief it should carry.
-  await openChannel(page);
+  await openMainLine(page);
   const goal =
     `Ship a short market digest this week: find what is being said and write it up. ` +
     plan(
@@ -190,14 +190,13 @@ test("a goal becomes delegated cards, the team works them, and review closes the
   }
 
   // ── 5. …and the conversation the goal was stated in is told ─────────────
-  // Addressed by each card's own href rather than by the marker text, so a
-  // marker an earlier test left in this channel cannot be mistaken for one of
-  // these — the harness company's data root outlives a single test.
-  await openChannel(page);
-  await expect(markers(page).first()).toBeVisible({ timeout: 60_000 });
-  for (const id of [gatherId, writeId]) {
-    await expect(page.locator(`a[href="#/tasks/${id}"]`)).toHaveCount(1, { timeout: 60_000 });
-  }
+  // The structural line a reader needs and the relay prose cannot give them:
+  // the run *stopped*, and here is where it landed (issue #377). Counted rather
+  // than addressed by card, because this surface renders a marker as a plain
+  // system pill — see `markers` in `./orchestration`.
+  await openMainLine(page);
+  await expect(markers(page)).toHaveCount(2, { timeout: 120_000 });
+  await expect(markers(page).first()).toHaveText("finished → In review");
 
   // ── 6. The orchestrator closes the goal out ─────────────────────────────
   // The second half of the loop, and the half nothing else covers: work that
