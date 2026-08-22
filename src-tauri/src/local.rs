@@ -63,10 +63,18 @@ struct RosterEntry {
     /// stop button is undone by every quit.
     #[serde(default = "yes")]
     autostart: bool,
+    /// Set only when this application provisions the root. A path shaped like
+    /// one of ours is not proof that the application owns its contents.
+    #[serde(default, skip_serializing_if = "is_false")]
+    desktop_created: bool,
 }
 
 fn yes() -> bool {
     true
+}
+
+fn is_false(value: &bool) -> bool {
+    !value
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -210,6 +218,7 @@ impl LocalHosts {
             id,
             label: label.to_string(),
             autostart: true,
+            desktop_created: true,
         };
         self.instances.push(Instance {
             entry,
@@ -293,6 +302,9 @@ impl LocalHosts {
             return Err("only desktop-created instances can be deleted".to_string());
         };
         if relative_root != format!("{INSTANCES_DIR}/{id}") {
+            return Err("only desktop-created instances can be deleted".to_string());
+        }
+        if !self.instances[index].entry.desktop_created {
             return Err("only desktop-created instances can be deleted".to_string());
         }
         let root = self.data_dir.join(relative_root);
@@ -409,6 +421,13 @@ impl LocalHosts {
     }
 
     fn try_persist(&self) -> Result<(), String> {
+        self.try_persist_with(|| Ok(()))
+    }
+
+    fn try_persist_with<F>(&self, before_replace: F) -> Result<(), String>
+    where
+        F: FnOnce() -> std::io::Result<()>,
+    {
         let roster = Roster {
             instances: self
                 .instances
@@ -420,9 +439,16 @@ impl LocalHosts {
         let write = std::fs::create_dir_all(&self.data_dir).and_then(|()| {
             let body = serde_json::to_vec_pretty(&roster)
                 .map_err(|error| std::io::Error::other(error.to_string()))?;
-            let mut file = std::fs::File::create(&path)?;
-            file.write_all(&body)?;
-            file.sync_all()
+            let mut temporary = tempfile::Builder::new()
+                .prefix(".instances.json.")
+                .tempfile_in(&self.data_dir)?;
+            temporary.as_file_mut().write_all(&body)?;
+            temporary.as_file().sync_all()?;
+            before_replace()?;
+            temporary.persist(&path).map_err(|error| error.error)?;
+            #[cfg(unix)]
+            std::fs::File::open(&self.data_dir)?.sync_all()?;
+            Ok(())
         });
         write.map_err(|error| {
             format!(
@@ -479,6 +505,7 @@ fn read_roster(data_dir: &Path) -> Roster {
                 label: DEFAULT_INSTANCE_LABEL.to_string(),
                 root: None,
                 autostart: true,
+                desktop_created: false,
             },
         );
     }
@@ -830,15 +857,36 @@ mod test {
     }
 
     #[tokio::test]
+    async fn a_failed_atomic_roster_replace_keeps_the_previous_roster() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut hosts = LocalHosts::load(dir.path().to_path_buf()).await;
+        hosts.create("Acme").await.expect("it starts");
+        let roster = dir.path().join(ROSTER_FILE);
+        let before = std::fs::read(&roster).unwrap();
+        hosts.instances[1].entry.label = "Changed only in memory".to_string();
+
+        let error = hosts
+            .try_persist_with(|| Err(std::io::Error::other("injected before replace")))
+            .expect_err("the injected replacement failure must be reported");
+
+        assert!(error.contains("injected before replace"));
+        assert_eq!(
+            std::fs::read(&roster).unwrap(),
+            before,
+            "a failed replacement must not truncate or change the live roster"
+        );
+    }
+
+    #[tokio::test]
     async fn deleting_refuses_a_hand_written_root() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
             dir.path().join(ROSTER_FILE),
-            r#"{"instances":[{"id":"kept","label":"Kept","root":"kept"}]}"#,
+            r#"{"instances":[{"id":"kept","label":"Kept","root":"instances/kept"}]}"#,
         )
         .unwrap();
         let mut hosts = LocalHosts::load(dir.path().to_path_buf()).await;
-        let root = dir.path().join("kept");
+        let root = dir.path().join("instances/kept");
         assert!(root.exists());
 
         assert!(hosts.delete("kept").await.is_err());
