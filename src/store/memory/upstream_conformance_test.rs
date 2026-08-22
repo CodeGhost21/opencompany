@@ -139,6 +139,24 @@ async fn facade_round_trip(provider: Arc<dyn MemoryProvider>, class: DriverClass
         1,
         "context must be recallable through the engine"
     );
+
+    // The port-level `(addr, label)` contract, over whatever engine is bound
+    // (issue #1300). Every backend that implements `ContextStore` directly —
+    // fs, sqlite, mongodb — proves these in its own test module; the engines
+    // reached through `ProviderContextStore` did not, because nothing ran the
+    // HOST's port suite against them. That gap matters precisely for the
+    // hosted drivers: `delete_label` is a read-merge-write over `get`/`put`,
+    // which on supermemory, mem0 and cognee is three HTTP calls against an
+    // engine whose `get` and `list` shapes this host does not control. A
+    // divergence there is a claim silently lost or a body reaped while
+    // another label still points at it — and it would have been invisible
+    // until an operator noticed a memory missing.
+    //
+    // Run against `bound.context()` rather than a fresh binding so the
+    // envelope, namespace and decode path under test are the ones the rest of
+    // this function already exercised.
+    crate::store::conformance::assert_identical_body_two_labels(bound.context()).await;
+    crate::store::conformance::assert_delete_label_scoped(bound.context()).await;
 }
 
 // ── The embedded `namespace` driver, on a real store ─────────────────────────

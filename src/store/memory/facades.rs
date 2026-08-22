@@ -234,6 +234,25 @@ impl Bound {
             .and_then(|entry| decode(&entry, &namespace)))
     }
 
+    /// Whether the engine holds a record at `key` at all, **without decoding
+    /// it**.
+    ///
+    /// [`Self::get`] answers `None` for two different facts: the engine has no
+    /// such record, and the engine has one this build cannot read (a foreign
+    /// envelope version, or the corrupted-write shape #1201 was). Callers that
+    /// only read may treat those alike. A caller that reports "there was
+    /// nothing there" to a user must not — that turns an unreadable record
+    /// into a silent no-op and leaves it serving recall forever.
+    async fn exists(&self, company: &CompanyId, key: &str) -> Result<bool> {
+        let namespace = self.namespace(company);
+        Ok(self
+            .provider
+            .get(namespace.as_str(), key)
+            .await
+            .map_err(store_error)?
+            .is_some())
+    }
+
     /// Lists every typed record in this company's partition.
     async fn list<T: DeserializeOwned>(&self, company: &CompanyId) -> Result<Vec<T>> {
         let namespace = self.namespace(company);
@@ -562,6 +581,26 @@ impl ContextStore for ProviderContextStore {
             .get::<StoredChunk>(company, addr.as_ref())
             .await?
         else {
+            // `get` answering `None` is two different facts, and only one of
+            // them is "nothing to forget". If the engine DOES hold a record
+            // here, this build simply cannot read its envelope — and returning
+            // `Ok(false)` would tell `memory_forget` to reply "already gone"
+            // about a chunk recall keeps serving, with nothing anywhere saying
+            // otherwise. Refuse instead, naming the address, so the operator
+            // gets a report rather than a lie.
+            //
+            // Deliberately NOT a forget-by-key fallback: the envelope is what
+            // says which labels claim this address, so an unreadable one means
+            // an unknown claim set, and removing the record could take a label
+            // this caller never owned.
+            if self.bound.exists(company, addr.as_ref()).await? {
+                return Err(OpenCompanyError::Store(format!(
+                    "context chunk {} exists but its envelope could not be decoded, so its \
+                     label claims are unknown and `{label}` cannot be removed safely; the \
+                     record needs repair or an operator-level delete",
+                    addr.as_ref()
+                )));
+            }
             return Ok(false);
         };
         let mut labels = stored_labels(&existing);
