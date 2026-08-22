@@ -515,6 +515,22 @@ pub struct HarnessDeps {
     /// these deps across a roster gives every agent of the company one budget
     /// rather than one each.
     pub search: Option<search::SearchBackend>,
+    /// The company's **own** search provider connection, when it configured one
+    /// in the console (Brave / Exa / Querit / a self-hosted SearXNG).
+    ///
+    /// `None` — the default at every construction site — means "search through
+    /// the managed surface above", which is the fallback OpenHuman's own
+    /// registry takes for a BYO engine with no key. When `Some` **and** the
+    /// company **explicitly** grants `search`, [`build::build_agent`] wires
+    /// [`search_byo::byo_search_tools`] *instead of* the metered managed tool:
+    /// two "search the web" tools on one belt is how a model comes to spend the
+    /// platform's money by accident.
+    ///
+    /// Resolved from that company's own secret store and re-resolved each turn
+    /// like `composio` / `hosting`, so a key set or rotated in the console takes
+    /// effect on the next turn with no restart. Never from the environment: a
+    /// BYO key is billed to the company that pasted it.
+    pub tenant_search: Option<search_byo::TenantSearch>,
     /// Issue #111 — the shared registry of in-flight, steerable runs. The
     /// [`HarnessBrain`] registers a dispatched task / desk delegation here before
     /// running it (and installs the steer stop-hook over the slot's control), so
@@ -1442,6 +1458,10 @@ impl HarnessPool {
         // The hosting credential is set from the same settings surface and goes
         // stale the same way, so it rides the same axis.
         let hosting_config = self.resolve_hosting(company, deps).await;
+        // The company's own search provider is set from that same settings
+        // surface and goes stale the same way, so it rides the same axis: a key
+        // pasted in the console must reach the next turn, not the next restart.
+        let tenant_search_config = self.resolve_tenant_search(company, deps).await;
         // A build without either feature has no billing axis to go stale on, so
         // the fingerprint is a constant and this company never rebuilds on it.
         let billing_fp = {
@@ -1453,6 +1473,7 @@ impl HarnessPool {
             #[cfg(feature = "paypal")]
             hasher.write_u64(paypal::TenantPaypal::fingerprint(&paypal_config));
             hasher.write_u64(hosting::TenantHosting::fingerprint(&hosting_config));
+            hasher.write_u64(search_byo::TenantSearch::fingerprint(&tenant_search_config));
             hasher.finish()
         };
 
