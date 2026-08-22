@@ -494,7 +494,6 @@ mod test {
         store
             .save(&CompanyRecord {
                 overlay_retired_agents: Vec::new(),
-                overlay_agent_edits: Vec::new(),
                 id: company.clone(),
                 manifest,
                 ledger: Vec::new(),
