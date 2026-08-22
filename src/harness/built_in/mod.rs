@@ -125,6 +125,11 @@ pub mod repo;
 pub mod run_trace;
 pub mod run_turn;
 pub mod search;
+/// A company's **own** search provider (the BYO half of issue #238): Brave,
+/// Exa, Querit or a self-hosted SearXNG, wired from that company's stored key
+/// through OpenHuman's own search tools. Falls back to [`search`]'s metered
+/// managed surface whenever nothing is configured.
+pub mod search_byo;
 /// End-to-end proof that the #238 `web_search` tool is reachable from a real
 /// turn — the harness, the grant gates, the approval policy, the cap and the
 /// meter are all real; only the model's choices and the search backend's
