@@ -188,3 +188,38 @@ export const FIRST_RUN = process.env.PW_FIRST_RUN === "1";
 
 /** The company a first-run run must be serving, relative to the repository root. */
 export const FIRST_RUN_COMPANY = "companies/e2e_setup";
+
+/**
+ * Whether this run is the **Project Euler lane**: the live-LLM host, but
+ * serving `companies/agentic_math_lab` and running the one spec whose verdict
+ * is a published integer rather than a shape on the board.
+ *
+ * Set `PW_EULER=1` alongside `PW_LIVE_LLM=1`, or run `npm run e2e:euler`, which
+ * sets both and — when this config manages the host — points it at that company
+ * and at a data root of its own.
+ *
+ * ## Why a lane rather than one more spec in the live-LLM run
+ *
+ * The same reason {@link FIRST_RUN} and {@link LIVE_LLM} are lanes: it needs a
+ * different host. `orchestration-live.spec.ts` drives the harness company,
+ * whose roster is a CEO, an engineer and a writer; this spec drives a lab whose
+ * roster, tool grants and *withheld* tool grants are the thing being exercised.
+ * Neither company can serve the other's spec.
+ *
+ * It also wants a data root of its own, for the reason the first-run lane does:
+ * the answers ledger is read at the end of a run, and a root still holding the
+ * previous run's rows would let a stale answer pass for a fresh one.
+ *
+ * Like the live-LLM lane it is **not** run by CI — real tokens, tens of
+ * minutes, and a verdict that depends on a model's reasoning.
+ */
+export const EULER = process.env.PW_EULER === "1";
+
+/** The company a Project Euler run must be serving, relative to the repository root. */
+export const EULER_COMPANY = "companies/agentic_math_lab";
+
+/** The reason string a `EULER` skip carries, so no skip is ever bare. */
+export const EULER_REASON =
+  "needs a host serving companies/agentic_math_lab and thinking with a real model; " +
+  "run `npm run e2e:euler` (which sets PW_EULER=1 and PW_LIVE_LLM=1). " +
+  "Point it at another problem with PW_EULER_PROBLEM=<number>.";

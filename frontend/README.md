@@ -308,6 +308,54 @@ delegation tool's description, or the delegation drain — and let
 `orchestration-simulation.spec.ts`, which asserts the same chain against
 scripted choices, be what guards it on every push.
 
+### The lane with a right answer
+
+```sh
+cargo build --locked --features openhuman,tinycortex,mcp --bin opencompany
+npm --prefix frontend run e2e:euler       # PW_LIVE_LLM=1 PW_EULER=1 npm run e2e
+PW_EULER_PROBLEM=61 npm --prefix frontend run e2e:euler   # a different rung
+```
+
+Every other spec in this directory asserts that the machinery *ran*: a card was
+opened, a turn fired, a marker appeared, a column changed. Those are the right
+claims and they share one limit — what the company actually produced is prose,
+and prose has no pass condition. A company that delegated correctly, ran every
+turn, closed every card and reached a confidently wrong conclusion is green
+everywhere else here.
+
+`euler-live.spec.ts` closes that. It serves
+[`companies/agentic_math_lab`](../companies/agentic_math_lab) — a roster split
+into decide / program / break, with no `web` and no `search` grant — states a
+Project Euler problem in the main line, dispatches whatever the orchestrator
+opens, keeps asking until the work settles, and then compares the integer the
+lab reports against the published one. The verdict is that integer, so what
+passes is not "the orchestration ran" but "the orchestration produced the right
+answer" — and the spec additionally requires that the lab actually *ran*
+something, because every published answer is in a model's training data and
+recall would otherwise pass. Withholding `web`/`search` removes the obvious
+shortcut but is not a network boundary (`shell` is granted; see
+`docs/spec/security/agent-isolation.md`), so the program on disk is what
+carries the claim.
+
+* `PW_EULER_PROBLEM` picks the problem (default `100`); the set, each statement
+  and each published answer live in [`test/e2e/euler.ts`](test/e2e/euler.ts).
+  All of them are settled by a program that finishes in seconds once the right
+  program is written, so a red run means the lab could not work out *what* to
+  compute rather than that a sandbox timed out.
+* `PW_EULER_ROUNDS` (default `6`) is how many times the operator says "carry
+  on". A turn ends when the model stops calling tools and a hard problem does
+  not fit in one, so the spec keeps asking — and the loop exits the moment the
+  answer appears.
+* Only the answer is asserted. Which tools were used, how the work was split,
+  how many rounds it took and whether the answer was filed on the `answers`
+  ledger are attached to the run as annotations and never failed on; a lane that
+  failed a correct answer over its bookkeeping would be measuring diligence
+  rather than capability.
+
+It uses the same real-model proxy and the same environment variables as the lane
+above, on a company and a data root of its own, and **CI does not run it** for
+the same reasons plus one more: it takes tens of minutes.
+
 Some specs skip **the other way**, in the live lane only, and say so where they
 sit: three in `chat-live-events.spec.ts`, which find the reply to their own turn
 by the offline brain's `You said: <text>` (precisely how they prove an SSE frame
