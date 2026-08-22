@@ -157,6 +157,14 @@ test("a goal becomes delegated cards, the team works them, and review closes the
   // a goal.
   await waitForTurn(page);
 
+  // The markers this thread already holds, counted **here** — on the transcript
+  // this test has been watching all along, rather than after a fresh navigation
+  // that would have to be waited on again. The suite shares one data root, so a
+  // marker an earlier test left in the main line is legitimately in it, and a
+  // baseline taken before a hydration has landed reads zero for a thread that
+  // holds three.
+  const markersBefore = await settledMarkerCount(page);
+
   await openBoard(page);
   await expect(column(page, PENDING)).toContainText(gather, { timeout: 60_000 });
   await expect(column(page, PENDING)).toContainText(write);
@@ -177,13 +185,6 @@ test("a goal becomes delegated cards, the team works them, and review closes the
   // while having taken the operator's decision away.
   expect(await stageOf(request, gatherId), "spawn_task must not dispatch").toBe("pending");
   expect(await stageOf(request, writeId), "spawn_task must not dispatch").toBe("pending");
-
-  // The markers this thread already holds, before anything of this test's can
-  // land in it. Counted from a settled reading rather than assumed to be zero:
-  // the suite shares one data root, so a marker an earlier test left in the
-  // main line is legitimately here.
-  await openMainLine(page);
-  const markersBefore = await settledMarkerCount(page);
 
   // ── 3. The operator starts the work ─────────────────────────────────────
   // The real gesture on the real board: entering Working is dispatch.
@@ -212,7 +213,21 @@ test("a goal becomes delegated cards, the team works them, and review closes the
   // than addressed by card, because this surface renders a marker as a plain
   // system pill — see `markers` in `./orchestration`.
   await openMainLine(page);
-  await expect(markers(page)).toHaveCount(markersBefore + 2, { timeout: 120_000 });
+  await expect
+    .poll(() => markers(page).count(), {
+      message: "the two settled cards did not mark the thread they were raised in",
+      timeout: 120_000,
+      intervals: [1_000],
+    })
+    .toBeGreaterThanOrEqual(markersBefore + 2);
+  // `at least`, not `exactly`. Both halves of that are deliberate. Two is the
+  // floor because two cards settled and each must say so. It is not a ceiling
+  // because this surface renders a marker as a plain system pill with no card
+  // id on it (see `markers` in `./orchestration`), so a third marker cannot be
+  // told apart from ours — and in a full-suite run there is one: a card an
+  // earlier spec raised in this same thread, settling on its own schedule while
+  // this test runs. An exact count made this spec pass alone and fail in the
+  // suite, which is the worst of both.
   await expect(markers(page).last()).toHaveText("finished → In review");
 
   // ── 6. The orchestrator closes the goal out ─────────────────────────────
