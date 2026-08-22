@@ -371,6 +371,10 @@ export function AgentDetailView({
     setSaving(true);
     try {
       const updated = await client.updateAgent(agentId, { instructions: null }, company);
+      // A slow reset must not clobber the active detail: only fold the response
+      // in when the agent on screen is still the one we asked to reset (the same
+      // identity guard the budget writes and inbox toggle use).
+      if (displayedAgentIdRef.current !== agentId) return;
       setAgent(updated);
       setDraft(draftFrom(updated));
       setEditing(false);
