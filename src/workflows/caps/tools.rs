@@ -41,6 +41,7 @@ use oh::tools::{Tool, ToolResult};
 use openhuman_core::openhuman as oh;
 
 use crate::harness::search::{SearchBackend, SearchMetering};
+use crate::harness::search_byo::TenantSearch;
 use crate::harness::toolbelt::{self, CapabilityFilter};
 
 /// The grant namespaces a workflow `tool_call` can actually reach — the exec
@@ -106,7 +107,13 @@ pub(crate) fn grants_workflow_namespace(grants: &[String], namespace: &str) -> b
 pub(crate) fn workflow_tool_wiring(deps: &crate::harness::HarnessDeps) -> WorkflowToolWiring {
     let mut wiring = WorkflowToolWiring::default();
     for namespace in WORKFLOW_TOOL_NAMESPACES {
-        let missing = if namespace == "search" && deps.search.is_none() {
+        // A company that configured its OWN provider is credentialed for search
+        // even on a deployment with no managed backend at all — the calls go to
+        // its account, not the platform's. Only "neither" is unconfigured.
+        let missing = if namespace == "search"
+            && deps.search.is_none()
+            && deps.tenant_search.is_none()
+        {
             Some(MissingReason::SearchBackendNotConfigured)
         } else if capability_filtered(&deps.capabilities, namespace) {
             Some(MissingReason::CapabilityTierFiltered)
@@ -137,7 +144,7 @@ pub(crate) fn refusal_for(
     }
     match wiring.missing.get(namespace) {
         Some(MissingReason::SearchBackendNotConfigured) => Some(format!(
-            "tool_call '{slug}' is granted, but no managed search backend is configured on this deployment; ask the platform operator to configure search or remove the node"
+            "tool_call '{slug}' is granted, but no search provider is configured: this deployment has no managed search backend, and this company has set no provider of its own in Settings → Search"
         )),
         Some(MissingReason::CapabilityTierFiltered) => Some(format!(
             "tool_call '{slug}' is granted, but the deployment's capability tier filtered it; ask the platform operator to raise the capability tier or remove the node"
@@ -329,6 +336,7 @@ impl WorkflowToolInvoker {
         grants: Vec<String>,
         filter: &CapabilityFilter,
         search: Option<&SearchBackend>,
+        tenant_search: Option<&TenantSearch>,
         search_metering: SearchMetering,
         wiring: WorkflowToolWiring,
     ) -> Self {
@@ -370,16 +378,24 @@ impl WorkflowToolInvoker {
         if grants_workflow_namespace(&grants, "search")
             && wiring.wired_namespaces.contains("search")
         {
-            match search {
-                Some(backend) => {
+            // The company's own provider REPLACES the managed surface here for
+            // the same reason it does on an agent belt: two tools under one
+            // slug is a node that spends the platform's metered budget for a
+            // company that pasted its own key.
+            match (tenant_search, search) {
+                (Some(tenant), _) => {
+                    tools.extend(crate::harness::search_byo::byo_search_tools(tenant));
+                }
+                (None, Some(backend)) => {
                     tools.extend(crate::harness::search::search_tools(
                         backend,
                         search_metering,
                     ));
                 }
-                None => tracing::warn!(
-                    "[workflow] company explicitly grants `search` but no managed search backend \
-                     is configured; web_search NOT wired (fail-closed)"
+                (None, None) => tracing::warn!(
+                    "[workflow] company explicitly grants `search` but neither a company search \
+                     provider nor a managed backend is configured; web_search NOT wired \
+                     (fail-closed)"
                 ),
             }
         }
