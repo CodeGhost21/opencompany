@@ -1199,6 +1199,59 @@ mod tests {
         }
     }
 
+    /// Both DTO construction sites report which provider a company's searches
+    /// actually reach, and it tracks what the Search settings page stored.
+    ///
+    /// Same #567 precedent as the two tests above: a field wired into one branch
+    /// alone tells the truth to a company with no plan and lies to every company
+    /// that has one.
+    #[tokio::test]
+    async fn both_response_paths_carry_the_effective_search_provider() {
+        use crate::company::search::{API_KEY_SECRET, PROVIDER_SECRET};
+        use crate::ports::types::SecretValue;
+
+        let grants_search =
+            "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n[tools]\nallow = [\"search\"]\n";
+        for manifest in [
+            grants_search.to_string(),
+            format!("{grants_search}[plan]\nname = \"starter\"\n"),
+        ] {
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let state = state_with_manifest(&home, &manifest).await;
+            let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
+
+            let (_, dto) = get_capabilities(&state).await;
+            assert_eq!(
+                dto["searchProvider"], "managed",
+                "nothing configured, so the platform's account answers: {dto}"
+            );
+
+            // A provider selected with no key is NOT a connection — the panel
+            // must not report one, because the agents are still on managed.
+            runtime
+                .secrets()
+                .set(runtime.id(), PROVIDER_SECRET, SecretValue("exa".into()))
+                .await
+                .unwrap();
+            let (_, dto) = get_capabilities(&state).await;
+            assert_eq!(dto["searchProvider"], "managed", "{dto}");
+
+            runtime
+                .secrets()
+                .set(runtime.id(), API_KEY_SECRET, SecretValue("exa_key".into()))
+                .await
+                .unwrap();
+            let (_, dto) = get_capabilities(&state).await;
+            assert_eq!(
+                dto["searchProvider"], "exa",
+                "a finished connection is what the company searches through: {dto}"
+            );
+            // And never the key itself, on either path.
+            assert!(!dto.to_string().contains("exa_key"), "{dto}");
+        }
+    }
+
     /// An unreadable secret store **omits** the field rather than reporting
     /// `none`.
     ///
