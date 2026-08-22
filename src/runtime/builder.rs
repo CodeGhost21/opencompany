@@ -2425,6 +2425,28 @@ impl RuntimeBuilder {
                             } else {
                                 None
                             };
+                            // The company's own search provider, resolved from
+                            // the same store for the same reason: a BYO search
+                            // key is billed to the company that pasted it, so
+                            // there is no environment fallback. Absent, the
+                            // agents search through the managed surface below.
+                            let tenant_search_config = if crate::company::grants_search_explicit(
+                                &self.manifest.tools.allow,
+                            ) {
+                                crate::harness::search_byo::TenantSearch::resolve(&secrets, &id)
+                                    .await
+                                    .unwrap_or_else(|err| {
+                                        tracing::warn!(
+                                            company = %id,
+                                            "[search] could not read the company's search \
+                                             provider at boot; falling back to managed search this \
+                                             turn: {err}"
+                                        );
+                                        None
+                                    })
+                            } else {
+                                None
+                            };
                             let composio_config = if crate::company::grants_composio_explicit(
                                 &self.manifest.tools.allow,
                             ) {
@@ -2628,6 +2650,7 @@ impl RuntimeBuilder {
                                 #[cfg(feature = "paypal")]
                                 paypal: paypal_config,
                                 hosting: hosting_config,
+                                tenant_search: tenant_search_config,
                                 steer,
                                 run_supervisor: supervisor,
                                 // Issue #170: the ports an `output` node's
