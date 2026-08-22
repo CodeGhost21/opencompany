@@ -343,6 +343,10 @@ export function AgentDetailView({
     setSaving(true);
     try {
       const updated = await client.updateAgent(agentId, edits, company);
+      // A slow save must not clobber the active detail: only fold the response
+      // in when the agent on screen is still the one we saved (the same guard
+      // the reset and budget writes use).
+      if (displayedAgentIdRef.current !== agentId) return;
       setAgent(updated);
       setDraft(draftFrom(updated));
       setEditing(false);
