@@ -1210,8 +1210,7 @@ mod tests {
         use crate::company::search::{API_KEY_SECRET, PROVIDER_SECRET};
         use crate::ports::types::SecretValue;
 
-        let grants_search =
-            "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n[tools]\nallow = [\"search\"]\n";
+        let grants_search = "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n[tools]\nallow = [\"search\"]\n";
         for manifest in [
             grants_search.to_string(),
             format!("{grants_search}[plan]\nname = \"starter\"\n"),
