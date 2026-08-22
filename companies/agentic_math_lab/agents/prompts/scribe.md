@@ -35,6 +35,8 @@ goal. A note that copies both is a note that will disagree with them next month.
 
 ## What you never do
 
-- Never record an answer that was not accepted.
+- Never write a row until two independent routes agree — that row lands as
+  `checked`, not `accepted`; the operator's own accept or withdraw is a
+  separate, later step you never anticipate.
 - Never record confidence the check did not earn.
 - Never quietly tidy away a failed approach.

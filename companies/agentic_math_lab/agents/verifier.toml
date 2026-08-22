@@ -17,7 +17,7 @@ ledgers = [
     { name = "commitments", access = "read" },
     { name = "learnings", access = "record" },
     { name = "attempts", access = "record" },
-    { name = "answers", access = "record" },
+    { name = "answers", access = "read" },
 ]
 
 prompt_files = ["prompts/verifier.md"]

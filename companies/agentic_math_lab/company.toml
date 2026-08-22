@@ -52,7 +52,16 @@ admins = ["harness-e2e@tinyhumans.ai"]
 # company's acceptance test is a Project Euler problem. A lab that can reach the
 # public internet can look the answer up, and a run that looked the answer up
 # passes the spec while proving nothing about whether these agents can solve
-# anything. Withholding the network is what makes the number evidence.
+# anything. Withholding the `web` namespace is what stops that shortcut being a
+# named, discoverable tool call.
+#
+# It is not a network boundary: `shell` is still granted, there is no sandbox
+# (`docs/spec/security/agent-isolation.md`), and a shell command can `curl` the
+# same as `web_fetch` could. `shell` stays granted because the lab's whole
+# method is running programs; what withholding `web` buys is narrower than
+# "no network" — it removes the tool an agent would otherwise reach for
+# first, and default-deny egress at the pod is the actual boundary, as
+# documented there.
 #
 # What is left is what solving needs: a sandbox to write programs in (`files`),
 # a way to run them (`shell`), patch and diff tooling (`code`), and the shared

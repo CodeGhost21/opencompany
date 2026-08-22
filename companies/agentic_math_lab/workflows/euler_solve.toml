@@ -35,6 +35,12 @@ id = "problem"
 kind = "trigger"
 name = "A problem is stated"
 summary = "An operator states a problem with an exact answer in the main line."
+# The `agree` gate loops a disagreement back to `approach` for another reduction
+# pass. A guarded cycle needs an explicit bound or the engine rejects it
+# (tinyflows `IllegalCycle`): OpenCompany has no `loop` node kind, so the
+# trigger's `recursion_limit` is the sanctioned way to cap the retry passes.
+[node.config]
+recursion_limit = 100
 
 [[node]]
 id = "restate"

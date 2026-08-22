@@ -26,6 +26,12 @@ role = "id"
 required = true
 
 [[field]]
+name = "problem"
+role = "prose"
+required = true
+description = "Which problem this attempt addresses, named the way the operator named it (e.g. \"Project Euler 61\") — matching `answers.toml`'s `problem` field, so an attempt survives the active problem changing."
+
+[[field]]
 name = "approach"
 role = "title"
 required = true
