@@ -655,6 +655,7 @@ mod tests {
             Vec::new(),
             &CapabilityFilter::AllowAll,
             None,
+            None,
             test_metering(),
             WorkflowToolWiring::default(),
         );
@@ -726,6 +727,7 @@ mod tests {
             Vec::new(),
             &CapabilityFilter::AllowAll,
             None,
+            None,
             test_metering(),
             WorkflowToolWiring::default(),
         );
@@ -738,6 +740,7 @@ mod tests {
             Vec::new(),
             vec!["code.*".to_string()],
             &CapabilityFilter::AllowAll,
+            None,
             None,
             test_metering(),
             WorkflowToolWiring {
@@ -774,6 +777,7 @@ mod tests {
             vec!["search".to_string()],
             &CapabilityFilter::AllowAll,
             Some(&backend),
+            None,
             test_metering(),
             WorkflowToolWiring {
                 wired_namespaces: WORKFLOW_TOOL_NAMESPACES.into_iter().collect(),
@@ -791,6 +795,7 @@ mod tests {
             vec!["*".to_string()],
             &CapabilityFilter::AllowAll,
             Some(&backend),
+            None,
             test_metering(),
             WorkflowToolWiring {
                 wired_namespaces: WORKFLOW_TOOL_NAMESPACES.into_iter().collect(),
@@ -807,6 +812,7 @@ mod tests {
             Vec::new(),
             vec!["search".to_string()],
             &CapabilityFilter::AllowAll,
+            None,
             None,
             test_metering(),
             WorkflowToolWiring {
@@ -841,6 +847,7 @@ mod tests {
                 crate::company::credentials::Credential::from_value("managed"),
                 5,
             )),
+            None,
             test_metering(),
             wiring.clone(),
         );
