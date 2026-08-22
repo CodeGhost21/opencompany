@@ -111,9 +111,11 @@ test("a real model takes a goal, gives it to its team, and closes it out", async
   await openMainLine(page);
   await say(
     page,
-    "I want a short market digest published this week. Break it into two pieces of " +
-      "work, open a card on the board for each, and give each one to whichever " +
-      "teammate should own it. Do not do the work yourself in this message.",
+    "Our workspace has a Standards note. I want a short \"How we write\" one-pager " +
+      "for new teammates based on it, saved into the workspace, and then checked by " +
+      "somebody else for clarity. Break that into two pieces of work, give each one " +
+      "to whichever teammate should own it, and do not do the work yourself in this " +
+      "message.",
   );
 
   // The first failure this lane can have: the model was never reached, or was
@@ -129,9 +131,23 @@ test("a real model takes a goal, gives it to its team, and closes it out", async
     })
     .toBeGreaterThanOrEqual(1);
 
-  // Let the turn finish before reading the board: a fan-out arrives one card at
-  // a time, and a run read at the first one would dispatch half a goal.
-  await page.waitForTimeout(5_000);
+  // Let the turn *finish* before reading the board, and wait for it rather than
+  // sleeping through it. A fan-out arrives one card at a time — the first run of
+  // this spec read the board five seconds in, found one of the two cards, and
+  // then reported on half a goal while the other half was still being written.
+  // Two equal readings, the same shape `settledMarkerCount` uses.
+  let last = -1;
+  await expect
+    .poll(
+      async () => {
+        const current = (await newCards(request, before)).length;
+        const settled = current === last;
+        last = current;
+        return settled;
+      },
+      { message: "the orchestrator kept opening cards", timeout: 120_000, intervals: [4_000] },
+    )
+    .toBe(true);
   const opened = await newCards(request, before);
   // The cap is the host's own (`MAX_DELEGATIONS_PER_TURN`), so more than three
   // means something other than this turn wrote to the board.
@@ -190,13 +206,23 @@ test("a real model takes a goal, gives it to its team, and closes it out", async
     opened.some((card) => card.id === held.id),
   );
   const reviewable = settled.filter((card) => (card.stage ?? card.column) === "in_review");
-  test.skip(
-    reviewable.length === 0,
-    `nothing reached review — the run parked instead (${settled
-      .map((card) => `${card.title}: ${card.stage ?? card.column}`)
-      .join("; ")}). That is a legitimate landing, but the close-out below has ` +
-      "nothing to accept.",
-  );
+  // A hard failure rather than a skip, deliberately. `paused` is a legitimate
+  // landing for a single run — a turn that needed a tool it has no credential
+  // for, or an approval nobody has decided — but a goal where *nothing* came
+  // back for acceptance did not close, and that is the whole claim of this
+  // lane. Skipping here would report green over exactly the outcome the spec
+  // exists to notice, which is the pathology `CLAUDE.md` names for Rust targets
+  // ("builds, runs and reports zero without failing anything").
+  //
+  // The landings are named in the message because the next question is always
+  // which one it was: `paused` sends you to the approvals queue, `pending` to a
+  // dispatch that never happened.
+  expect(
+    reviewable.length,
+    `no card came back for acceptance — the run landed as ${settled
+      .map((card) => `"${card.title}": ${card.stage ?? card.column}`)
+      .join("; ")}`,
+  ).toBeGreaterThan(0);
 
   await openMainLine(page);
   await say(
