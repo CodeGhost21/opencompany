@@ -10,6 +10,7 @@ import {
   openMainLine,
   say,
   silenceTour,
+  waitForTurn,
 } from "./orchestration";
 
 /**
@@ -152,23 +153,13 @@ test("a real model takes a goal, gives it to its team, and closes it out", async
     })
     .toBeGreaterThanOrEqual(1);
 
-  // Let the turn *finish* before reading the board, and wait for it rather than
-  // sleeping through it. A fan-out arrives one card at a time — the first run of
-  // this spec read the board five seconds in, found one of the two cards, and
-  // then reported on half a goal while the other half was still being written.
-  // Two equal readings, the same shape `settledMarkerCount` uses.
-  let last = -1;
-  await expect
-    .poll(
-      async () => {
-        const current = (await newCards(request, before)).length;
-        const settled = current === last;
-        last = current;
-        return settled;
-      },
-      { message: "the orchestrator kept opening cards", timeout: 120_000, intervals: [4_000] },
-    )
-    .toBe(true);
+  // Let the turn *finish* before reading the board. This is the assertion two
+  // runs of this spec were quietly wrong without: a turn's delegations are
+  // drained **after** it, so a board read taken while the company is still
+  // answering sees whichever cards happen to exist at that instant. Both runs
+  // then dispatched, settled and closed out one card of a two-card goal — and
+  // reported green over the half they never looked at.
+  await waitForTurn(page);
   const opened = await newCards(request, before);
   // The cap is the host's own (`MAX_DELEGATIONS_PER_TURN`), so more than three
   // means something other than this turn wrote to the board.

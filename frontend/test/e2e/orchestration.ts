@@ -108,6 +108,33 @@ export function markers(page: Page): Locator {
 }
 
 /**
+ * Waits for the turn the last message started to **finish**.
+ *
+ * The one honest "it is done" signal this surface has: the working indicator is
+ * up for exactly as long as the company is answering, and it is the same
+ * component the chat workspace uses (`WorkingIndicator`, issue #787).
+ *
+ * It matters more than it looks. A turn's *delegations are drained after the
+ * turn*, so a board read taken while the indicator is still up sees however
+ * many cards happen to exist at that instant — which is how a run of
+ * `orchestration-live.spec.ts` came to dispatch, settle and close out one card
+ * of a two-card goal and report green: the second card was opened by the drain
+ * a few seconds after the read.
+ *
+ * Both waits are tolerant of a turn that is already over: a fast one can come
+ * and go between the send and the first poll, and that is a finished turn, not
+ * a missing indicator.
+ */
+export async function waitForTurn(page: Page, timeout = 600_000) {
+  const working = page.getByTestId("working-indicator");
+  await working
+    .first()
+    .waitFor({ state: "visible", timeout: 30_000 })
+    .catch(() => {});
+  await expect(working).toHaveCount(0, { timeout });
+}
+
+/**
  * The marker count, once the thread's rehydration has stopped adding to it.
  *
  * A thread opens empty and fills from `chat/history` a moment later, so a count
