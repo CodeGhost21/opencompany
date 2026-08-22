@@ -709,6 +709,7 @@ mod namespace_driver_conformance {
             url: None,
             api_key: None,
             data_dir: Some(dir.path().to_path_buf()),
+            deployment: Default::default(),
         };
         let (provider, class) = crate::store::memory::open_driver(&config)
             .expect("the namespace driver binds")
