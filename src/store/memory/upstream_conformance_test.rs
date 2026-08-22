@@ -34,7 +34,7 @@ use tinymemory::registry::DriverClass;
 use tinymemory_api::provider::MemoryProvider;
 
 use super::BoundMemory;
-use super::driver::{MemoryDriverConfig, MemoryMode, open_driver};
+use super::driver::{MemoryDriverConfig, MemoryMode, RemoteDeployment, open_driver};
 use crate::ports::{CompanyId, CompressedTrace, ContextChunk, FactKind, FactRecord};
 
 /// Opens a driver through the production path and fails the test on refusal.
@@ -132,12 +132,19 @@ async fn facade_round_trip(provider: Arc<dyn MemoryProvider>, class: DriverClass
     // survived even before the fix — which is what makes it useful here: if a
     // later change to the envelope broke escaping wholesale, the two would
     // fail together, and if only `U+FFFD` fails then the strip is engine-side.
+    //
+    // Under its OWN company, and deleted afterwards. A hosted engine retains
+    // what this writes, so a fact left in `acme` is still there on the next
+    // run — and the `listed.len() == 1` above would then fail on a second run
+    // of a suite that passed on the first, blaming the engine for the test's
+    // own litter.
+    let awkward = CompanyId::new("acme-awkward-content");
     for (label, character) in [("nul", '\u{0}'), ("replacement", '\u{FFFD}')] {
         let body = format!("before{character}after");
         let id = format!("fact-awkward-{label}");
         facts
             .upsert(
-                &company,
+                &awkward,
                 &FactRecord {
                     id: id.clone(),
                     kind: FactKind::Fact,
@@ -149,7 +156,7 @@ async fn facade_round_trip(provider: Arc<dyn MemoryProvider>, class: DriverClass
             )
             .await
             .unwrap_or_else(|error| panic!("{label} fact upsert: {error}"));
-        let listed = facts.list(&company, None, None).await.expect("fact list");
+        let listed = facts.list(&awkward, None, None).await.expect("fact list");
         let stored = listed.iter().find(|fact| fact.id == id);
         assert_eq!(
             stored.map(|fact| fact.body.as_str()),
@@ -157,6 +164,10 @@ async fn facade_round_trip(provider: Arc<dyn MemoryProvider>, class: DriverClass
             "{label}: the record must read back as it was written, not with the \
              character removed from the middle of it"
         );
+        facts
+            .delete(&awkward, &id)
+            .await
+            .unwrap_or_else(|error| panic!("{label} cleanup: {error}"));
     }
 
     let context = bound.context();
@@ -212,6 +223,7 @@ mod embedded {
             url: None,
             api_key: None,
             data_dir: Some(dir.to_path_buf()),
+            deployment: Default::default(),
         }
     }
 
@@ -294,6 +306,94 @@ fn remote_config(driver: &str, endpoint: &str) -> MemoryDriverConfig {
         url: Some(endpoint.into()),
         api_key: Some("test-key".into()),
         data_dir: None,
+        // The doubles below speak each vendor's SELF-HOSTED dialect, ported
+        // from the adapters' own tests — un-prefixed paths, `X-API-Key` where
+        // the platform would want `Authorization: Token`. So the config has to
+        // say so: pointing the managed client at them would 404 on paths that
+        // exist only on the platform, and the failure would read as a broken
+        // adapter rather than a mismatched double.
+        //
+        // Managed is what production defaults to, and it is covered against
+        // the real services in `live_hosted` plus, offline, by
+        // `the_managed_deployment_speaks_the_platform_dialect` below.
+        deployment: RemoteDeployment::SelfHosted,
+    }
+}
+
+/// The deployment knob must actually change the wire conversation.
+///
+/// This is the offline guard for a defect the live lane found: OpenCompany
+/// built every remote engine with the self-hosted constructor, so a tenant
+/// pointed at Mem0's or Cognee's managed platform spoke the wrong protocol
+/// entirely — `X-API-Key` and un-prefixed paths at Mem0 (HTTP 404), a bearer
+/// token at Cognee Cloud (HTTP 401 `Invalid header`). Supermemory hid it,
+/// because it serves the same API to both deployments on one bearer
+/// credential, so the one engine anybody tested against kept working.
+///
+/// Asserting on the *credential header* rather than the path is deliberate:
+/// it is the half that cannot be papered over by a permissive router, and it
+/// is what each vendor actually distinguishes its two products by.
+#[tokio::test]
+async fn the_deployment_selects_each_vendors_dialect() {
+    use axum::http::HeaderMap;
+
+    /// Captures the first request's headers, then fails the call.
+    async fn capture(
+        State(seen): State<Arc<Mutex<Vec<String>>>>,
+        headers: HeaderMap,
+    ) -> (axum::http::StatusCode, Json<Value>) {
+        let rendered: Vec<String> = ["authorization", "x-api-key"]
+            .iter()
+            .filter_map(|name| {
+                headers
+                    .get(*name)
+                    .and_then(|v| v.to_str().ok())
+                    .map(|v| format!("{name}: {v}"))
+            })
+            .collect();
+        seen.lock().expect("lock").extend(rendered);
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"detail": "capture double"})),
+        )
+    }
+
+    for (driver, deployment, expected) in [
+        (
+            "mem0",
+            RemoteDeployment::Managed,
+            "authorization: Token test-key",
+        ),
+        ("mem0", RemoteDeployment::SelfHosted, "x-api-key: test-key"),
+        ("cognee", RemoteDeployment::Managed, "x-api-key: test-key"),
+        (
+            "cognee",
+            RemoteDeployment::SelfHosted,
+            "authorization: Bearer test-key",
+        ),
+    ] {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let app = Router::new()
+            .fallback(axum::routing::any(capture))
+            .with_state(seen.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let endpoint = format!("http://{}", listener.local_addr().expect("addr"));
+        tokio::spawn(async move { axum::serve(listener, app).await.expect("serve") });
+
+        let mut config = remote_config(driver, &endpoint);
+        config.deployment = deployment;
+        let (provider, _) = open(&config);
+        // The call is expected to fail — the double refuses everything. What
+        // is under test is the credential it carried getting there.
+        let _ = provider.get("any", "thing").await;
+
+        let headers = seen.lock().expect("lock").clone();
+        assert!(
+            headers.iter().any(|h| h.eq_ignore_ascii_case(expected)),
+            "{driver} as {deployment:?} must authenticate with `{expected}`; sent {headers:?}"
+        );
     }
 }
 
@@ -833,6 +933,10 @@ mod live_hosted {
             url: Some(url),
             api_key: Some(key),
             data_dir: None,
+            // Every engine reachable this way is the vendor's managed
+            // platform; a self-hosted instance is not something this lane can
+            // reach from CI.
+            deployment: RemoteDeployment::Managed,
         };
         Some(
             open_driver(&config)
