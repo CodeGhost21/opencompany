@@ -164,6 +164,54 @@ function slowMillis(messages) {
 const SPAWN_DIRECTIVE = "SPAWNONE";
 
 /**
+ * A whole scripted **turn**, for the orchestration simulation (this is what
+ * `orchestration-simulation.spec.ts` drives).
+ *
+ * `SPAWNONE` and `__MOCK_TOOL_CALL__` can each buy exactly one tool call from
+ * one turn, which is enough to prove a chat message reaches a card and no more.
+ * An orchestrator pursuing a goal does something they cannot express: it fans
+ * out to several teammates in **one** turn, and then keeps going across the
+ * several turns a goal takes to close. So this directive carries a plan —
+ *
+ *   __MOCK_PLAN__ [[{"name":"spawn_task","arguments":{…}},
+ *                   {"name":"spawn_task","arguments":{…}}],
+ *                  []]
+ *
+ * — an array of steps, each step an array of calls to emit together in one
+ * assistant message. Step *n* answers the *n*th time this plan is asked for;
+ * past the end (or on an empty step) the turn falls through to the ordinary
+ * text reply, which is how a turn *ends* rather than looping forever.
+ *
+ * # Two things it must not do, and how each is prevented
+ *
+ * **It must not fire for an agent that cannot make the call.** One operator
+ * message reaches the orchestrator and then every teammate the turn hands work
+ * to, each inside its own wrapper — so a plan naming `spawn_task` is in the
+ * *engineer's* prompt too, and the engineer has no such tool. A step is
+ * therefore served only when every tool it names is on the belt the request
+ * actually carries ({@link offeredTools}); otherwise it is left alone,
+ * unconsumed, and the teammate answers with prose like any other turn. This is
+ * a check on the request rather than on the prompt's wording, which is the only
+ * form of it that cannot be fooled by a re-wrapping.
+ *
+ * **A step must not be served twice.** `spawn_task` is serviced by the
+ * runtime's delegation seam rather than the agent's own tool loop, so its
+ * result never enters the model-visible transcript — the history looks
+ * untouched on the next call of the same turn (the same trap
+ * {@link servedDirectives} exists for). Progress is therefore counted here,
+ * per plan, in {@link servedPlans}. Every plan a spec writes carries a
+ * `Date.now()` marker, so a genuinely new plan is always a new key.
+ */
+const PLAN_DIRECTIVE = "__MOCK_PLAN__";
+
+/**
+ * How many steps of each plan have been served, keyed by the plan's own text.
+ *
+ * @type {Map<string, number>}
+ */
+const servedPlans = new Map();
+
+/**
  * The host's own re-issue instruction, sent to the agent when an operator
  * approves a parked tool call (`src/harness/brain.rs`):
  *
@@ -356,6 +404,52 @@ function findDirective(messages) {
     }
   }
   return null;
+}
+
+/**
+ * The last {@link PLAN_DIRECTIVE} in the thread, or null.
+ *
+ * Scanned from the end so the newest plan wins: a goal takes several operator
+ * messages to close, and each of them carries the plan for the turn it opens.
+ *
+ * @param {any[]} messages
+ * @returns {{id: string, steps: any[][]} | null}
+ */
+function findPlan(messages) {
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const text = textOf(messages[i]);
+    const at = text.indexOf(PLAN_DIRECTIVE);
+    if (at < 0) continue;
+    const steps = readJsonValue(text, at + PLAN_DIRECTIVE.length, "[", "]");
+    if (!Array.isArray(steps)) {
+      // A broken spec, not a plain turn. Say so loudly rather than answering
+      // with text the spec will then fail on obscurely.
+      process.stderr.write(
+        `[mock brain] ${PLAN_DIRECTIVE} found but its JSON payload did not parse\n`,
+      );
+      return null;
+    }
+    // The plan's own text is its identity, so two spec runs — or two goals in
+    // one run — never share a cursor.
+    return { id: JSON.stringify(steps), steps };
+  }
+  return null;
+}
+
+/**
+ * The tool names this request actually offers, which is what tells an
+ * orchestrator turn from a teammate's turn on the same operator message.
+ *
+ * @param {any} body the parsed request
+ * @returns {Set<string>}
+ */
+function offeredTools(body) {
+  const tools = Array.isArray(body?.tools) ? body.tools : [];
+  return new Set(
+    tools
+      .map((tool) => tool?.function?.name ?? tool?.name)
+      .filter((name) => typeof name === "string"),
+  );
 }
 
 /**
