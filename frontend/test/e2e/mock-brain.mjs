@@ -650,6 +650,22 @@ function chatCompletion(body) {
   const messages = Array.isArray(body?.messages) ? body.messages : [];
   const model = typeof body?.model === "string" ? body.model : "mock-brain";
 
+  // `MOCK_BRAIN_DEBUG=1` dumps what actually arrived. Three of the arms below
+  // key on the *shape* of a request — the opening words of a system prompt, the
+  // names in `tools[]` — and when one of them stops matching, the only useful
+  // next question is what the host really sent. Guessing at that from a spec
+  // failure forty seconds downstream is how an afternoon goes.
+  if (process.env.MOCK_BRAIN_DEBUG === "1") {
+    process.stderr.write(
+      `[mock brain] REQUEST roles=[${messages.map((m) => m?.role).join(", ")}] ` +
+        `tools=[${(body?.tools ?? []).map((t) => t?.function?.name).join(", ")}]\n` +
+        messages
+          .map((m, i) => `  [${i}] ${m?.role}: ${textOf(m).slice(0, 400).replace(/\n/g, " ")}`)
+          .join("\n") +
+        "\n",
+    );
+  }
+
   // A triage escalation is a classification, not a turn (issue #678). It is
   // handed the operator's RAW message, so it carries any `__MOCK_TOOL_CALL__`
   // the message carried — and `servedDirectives` is per-process, so serving it
