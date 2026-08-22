@@ -559,7 +559,12 @@ test("#839 creates a teammate with no desk as unplaced", async ({ page }) => {
   await expect(
     page.getByRole("heading", { name: "Not on a desk" }),
   ).toContainText("Not on a desk");
-  await expect(page.getByText("No Desk", { exact: true })).toBeVisible();
+  await expect(
+    page
+      .getByRole("heading", { name: "Not on a desk" })
+      .locator("xpath=following-sibling::ul[1]")
+      .getByRole("link", { name: "No Desk", exact: true }),
+  ).toBeVisible();
   expect(writes.some((write) => write.path.includes("/members"))).toBe(false);
 });
 
