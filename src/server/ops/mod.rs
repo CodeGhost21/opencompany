@@ -51,6 +51,9 @@ pub mod read_state;
 pub mod repos;
 pub mod runs;
 pub mod scope;
+/// Per-company web search settings: which provider the agents search through,
+/// and the write-only key behind it. See [`crate::company::search`].
+pub mod search;
 /// First-run company setup: propose a starting roster from three answers
 /// (`docs/spec/runtime/company-setup.md`). Proposes only — the console creates
 /// each teammate through [`team`], so setup has no second write path.
@@ -194,6 +197,7 @@ pub fn router() -> Router<AppState> {
         .merge(channels::router())
         .merge(billing::router())
         .merge(hosting::router())
+        .merge(search::router())
         .merge(company_key::router())
         .merge(composio::router())
         .merge(domain::router())

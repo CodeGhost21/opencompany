@@ -67,6 +67,10 @@ pub mod prompt;
 // runs, so the default build renders what it can and names the rest.
 pub mod prompt_dump;
 pub mod runtime;
+// Per-company web search configuration: which provider a company's agents
+// search through, and the BYO credential behind it. Keys only — the tools that
+// spend them live behind `openhuman` in `crate::harness::search_byo`.
+pub mod search;
 // First-run company setup (issue: docs/spec/runtime/company-setup.md): the
 // curated starting rosters and the rules a proposed roster obeys. Always
 // compiled and model-free on purpose — it is both the input to the optional

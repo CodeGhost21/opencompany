@@ -593,9 +593,30 @@ pub fn build_agent(
     // always-compiled `openhuman_core` integrations client, and CI's gated lane
     // builds `--features openhuman,tinycortex`. Hiding a real-money tool behind
     // a feature no CI job compiles is how #288 / #281 / #297 each happened.
+    //
+    // A company that configured its **own** provider in the console
+    // (`deps.tenant_search`) gets that provider's family from OpenHuman's search
+    // domain INSTEAD of the managed tool — never as well as. The two would
+    // otherwise sit on one belt under one name, and the model would pick
+    // whichever the prompt happened to mention, which for a company that pasted
+    // a key means quietly spending the platform's money instead of its own. A
+    // BYO belt carries no daily cap and no usage sample either: the calls are
+    // billed by Brave or Exa to the company's own account, and metering a bill
+    // this host does not pay would be a number nobody can reconcile.
     if crate::company::grants_search_explicit(grants) {
-        match &deps.search {
-            Some(backend) => tools.extend(crate::harness::search::search_tools(
+        match (&deps.tenant_search, &deps.search) {
+            (Some(tenant), _) => {
+                let byo = crate::harness::search_byo::byo_search_tools(tenant);
+                tracing::debug!(
+                    company = %company,
+                    agent = %manifest_agent.id,
+                    provider = %tenant.provider(),
+                    tools = byo.len(),
+                    "[build] wiring the company's own search provider in place of managed search"
+                );
+                tools.extend(byo);
+            }
+            (None, Some(backend)) => tools.extend(crate::harness::search::search_tools(
                 backend,
                 crate::harness::search::SearchMetering {
                     company: company.clone(),
@@ -603,10 +624,10 @@ pub fn build_agent(
                     meter: deps.meter.clone(),
                 },
             )),
-            None => tracing::warn!(
+            (None, None) => tracing::warn!(
                 company = %company,
                 agent = %manifest_agent.id,
-                "[build] agent explicitly grants `search` but no managed search backend is configured; web_search NOT wired (fail-closed)"
+                "[build] agent explicitly grants `search` but neither a company search provider nor a managed search backend is configured; web_search NOT wired (fail-closed)"
             ),
         }
     }
@@ -1905,6 +1926,7 @@ mod tests {
             // #238 tool is never built and the pinned belt below is the
             // pre-#238 belt exactly.
             search: None,
+            tenant_search: None,
             // Fail-closed default: with no workspace store wired, the #237
             // tools are never built and the pinned belt below is the
             // pre-#237 belt exactly.
@@ -2019,6 +2041,114 @@ mod tests {
         let mut names: Vec<String> = agent.tools().iter().map(|t| t.name().to_string()).collect();
         names.sort();
         names
+    }
+
+    /// Build one agent under `grants` with BOTH a managed search backend and a
+    /// company's own `provider` connection wired, and return its live tool
+    /// names. The two together is the interesting case: it is what a company
+    /// that pasted a key into the console actually has, and what decides which
+    /// of the two surfaces the model is offered.
+    fn built_tool_names_with_byo_search(grants: &[&str], provider: &str) -> Vec<String> {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut deps = pin_deps(dir.path().to_path_buf());
+        deps.search = Some(crate::harness::search::SearchBackend::new(
+            "https://api.example.test".to_string(),
+            crate::company::credentials::Credential::from_value("managed-platform-token"),
+            crate::company::DEFAULT_SEARCH_DAILY_CALLS,
+        ));
+        deps.tenant_search = Some(crate::harness::search_byo::TenantSearch::for_test(
+            provider,
+            Some("tenant-key"),
+            Some("https://searx.example"),
+        ));
+        let manifest_agent = ManifestAgent {
+            global: false,
+            id: "desk".to_string(),
+            role: "Desk Lead".to_string(),
+            name: None,
+            description: None,
+            tier: None,
+            harness: None,
+            tools: Vec::new(),
+            delegates_to: Vec::new(),
+            context: None,
+            budget_usd_daily: None,
+            prompt: None,
+            prompt_files: Vec::new(),
+            prompt_files_resolved: Vec::new(),
+            classes: Vec::new(),
+            ledgers: None,
+            can_declare_ledgers: true,
+        };
+        let policy = ApprovalPolicy::new(&Policy::default(), None);
+        let grants: Vec<String> = grants.iter().map(|g| g.to_string()).collect();
+        let agent = build_agent(
+            &CompanyId::new("acme"),
+            "Acme",
+            &manifest_agent,
+            policy,
+            &deps,
+            &grants,
+            &[],
+            &[],
+            None,
+            false,
+        )
+        .expect("agent builds");
+        let mut names: Vec<String> = agent.tools().iter().map(|t| t.name().to_string()).collect();
+        names.sort();
+        names
+    }
+
+    /// A company's own provider REPLACES the managed surface rather than
+    /// joining it, and still answers to the one name the skills know.
+    ///
+    /// Both halves matter. Two "search the web" tools on one belt would let the
+    /// model spend the platform's metered budget for a company that pasted its
+    /// own key — the exact bill-swap the BYO surface exists to prevent. And a
+    /// belt where the canonical name changed with the provider would break the
+    /// shipped research skills, which name `web_search` in their instructions.
+    #[test]
+    fn a_company_provider_replaces_the_managed_search_tool_under_the_same_name() {
+        let byo = built_tool_names_with_byo_search(&["search"], "brave");
+
+        assert!(
+            byo.contains(&"web_search".to_string()),
+            "the canonical name must survive the provider switch: {byo:?}"
+        );
+        assert!(
+            byo.contains(&"brave_news_search".to_string()),
+            "the provider's own extras must be wired too: {byo:?}"
+        );
+        // Exactly one tool answers to the canonical name.
+        assert_eq!(
+            byo.iter().filter(|name| *name == "web_search").count(),
+            1,
+            "two search tools under one name: {byo:?}"
+        );
+        // And the managed family's siblings are absent — nothing on this belt
+        // reaches the platform's metered backend.
+        assert!(
+            !byo.contains(&"exa_search".to_string()),
+            "a Brave company must not carry Exa tools: {byo:?}"
+        );
+    }
+
+    /// The BYO surface rides the SAME explicit grant as the metered one. A
+    /// company key does not turn `search` into a wildcard-conferred namespace:
+    /// the queries still leave the building, and which index reads them is a
+    /// decision the manifest makes by name.
+    #[test]
+    fn a_wildcard_grant_confers_no_search_tools_even_with_a_company_provider() {
+        let wildcard = built_tool_names_with_byo_search(&["*"], "exa");
+        assert!(
+            !wildcard.contains(&"web_search".to_string()),
+            "{wildcard:?}"
+        );
+        assert!(
+            !wildcard.contains(&"exa_get_contents".to_string()),
+            "{wildcard:?}"
+        );
     }
 
     // --- Company-workspace wiring gates (issue #237) -----------------------

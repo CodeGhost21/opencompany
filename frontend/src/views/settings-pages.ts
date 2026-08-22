@@ -14,6 +14,7 @@ import {
   Globe,
   Laptop,
   Plug,
+  Search,
   type LucideIcon,
   Settings2,
   Sparkles,
@@ -33,6 +34,10 @@ export const SETTINGS_PAGES = [
   // "where do I put my Vercel token" searches for hosting, so it sits here
   // rather than inside a third-party-accounts drawer.
   { id: "hosting", label: "Hosting", icon: Globe, hint: "Where this company's sites go live" },
+  // Beside Hosting for the same reason: a credential form belongs beside what
+  // it unlocks, and an operator looking for "where do I put my Brave key"
+  // searches for search.
+  { id: "search", label: "Search", icon: Search, hint: "Where teammates look things up" },
   // "What this company knows how to do" read as capability the company performs
   // — the implication issue #569 exists to remove, set here *before* the tab
   // gets a chance to correct it. The siblings describe their content; so does
