@@ -675,6 +675,55 @@ function chatCompletion(body) {
     );
   }
 
+  // The scripted-turn arm, ahead of the single-call directives: a plan is the
+  // whole turn, and a message carrying one carries nothing else.
+  const plan = findPlan(messages);
+  if (plan) {
+    const served = servedPlans.get(plan.id) ?? 0;
+    const step = plan.steps[served];
+    const calls = Array.isArray(step) ? step : [];
+    if (calls.length > 0) {
+      const offered = offeredTools(body);
+      const missing = calls
+        .map((call) => call?.name)
+        .filter((name) => !offered.has(name));
+      if (missing.length > 0) {
+        // NOT consumed: this is a teammate reading the operator's message
+        // second-hand, not the orchestrator. Answering with prose is the same
+        // thing a real model does when it is offered no such tool.
+        process.stderr.write(
+          `[mock brain] plan step ${served} left unserved; this belt has no ${missing.join(", ")}\n`,
+        );
+      } else {
+        servedPlans.set(plan.id, served + 1);
+        process.stderr.write(
+          `[mock brain] plan step ${served}: ${calls.map((c) => c.name).join(" + ")}\n`,
+        );
+        return completion(
+          model,
+          {
+            role: "assistant",
+            content: null,
+            tool_calls: calls.map((call, index) => ({
+              id: `mock-plan-${served}-${index}`,
+              type: "function",
+              function: {
+                name: call.name,
+                arguments: JSON.stringify(call.arguments ?? {}),
+              },
+            })),
+          },
+          "tool_calls",
+        );
+      }
+    } else if (Array.isArray(step)) {
+      // An explicitly empty step: the turn is meant to answer in prose here.
+      // Consumed, so the next call moves on rather than re-reading this one.
+      servedPlans.set(plan.id, served + 1);
+      process.stderr.write(`[mock brain] plan step ${served}: text reply\n`);
+    }
+  }
+
   const directive = findDirective(messages);
 
   if (
