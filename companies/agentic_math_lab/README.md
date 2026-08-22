@@ -11,8 +11,11 @@ answered by one exact integer, hard enough that the answer has to be computed.
 - **The rule** is that an answer is two independent routes agreeing. One
   program's output is a result; the difference is that somebody tried to break
   it.
-- **No network.** The manifest withholds `web` and `search` deliberately — a lab
-  that can look the answer up proves nothing by producing it.
+- **No `web`, no `search`.** Withheld deliberately: a lab that can look the
+  answer up proves nothing by producing it. This is a nudge, not a boundary —
+  `shell` is granted and there is no network sandbox
+  (`docs/spec/security/agent-isolation.md`), so what it removes is the tool an
+  agent reaches for first. The claim is carried by the program on disk.
 
 Run it:
 
