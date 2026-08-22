@@ -122,15 +122,27 @@ async function expandAll(page: Page) {
   // early, and the caller's own `[data-collapsed="true"]` assertion failed five
   // seconds later and forty lines away from the cause — intermittently, on pull
   // requests that touched none of this.
-  for (let attempt = 0; attempt < 8; attempt += 1) {
+  // Bounded twice, because two different things can go wrong and one bound
+  // cannot cover both. The click budget counts CLICKS: each one removes a rail
+  // and the board has three phases, so eight is already generous. Counting
+  // loop passes instead would let a run that never clicked anything exhaust
+  // the budget — eight transient 100 ms waits are eight passes and zero
+  // progress, and the assertion below would then fail on columns this helper
+  // had no chance to expand, which is the same intermittent shape it exists to
+  // remove. The deadline covers what the click budget then cannot: a rail that
+  // never arrives at all, which would otherwise spin here forever.
+  const deadline = Date.now() + 10_000;
+  let clicks = 0;
+  while (clicks < 8 && Date.now() < deadline) {
     if ((await collapsed.count()) === 0) return;
     if ((await rails.count()) === 0) {
       // Collapsed with nothing to click: the render is mid-flight. Give it the
-      // turn it needs rather than spending an attempt clicking nothing.
+      // turn it needs rather than spending click budget on nothing.
       await page.waitForTimeout(100);
       continue;
     }
     await rails.first().click();
+    clicks += 1;
   }
   // The postcondition callers actually depend on, so a genuine failure names
   // the board's state rather than the rails' absence.
