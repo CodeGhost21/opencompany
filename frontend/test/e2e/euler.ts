@@ -360,6 +360,12 @@ export async function approveAll(request: APIRequestContext): Promise<string[]> 
  * is what separates the claim "this company can solve problems" from "this
  * model has seen this problem".
  *
+ * It is also the *only* thing separating them. Withholding the `web` grant
+ * removes the obvious shortcut but closes no network — `shell` is granted and
+ * there is no sandbox (`docs/spec/security/agent-isolation.md`) — so "it
+ * cannot have looked the answer up" is not a claim this lane is entitled to
+ * make. "It produced the answer by running something" is.
+ *
  * Deliberately not stricter than that. *Which* teammate ran it, in what
  * language, after how many attempts, and whether the answer was also filed on a
  * ledger are all left alone.
