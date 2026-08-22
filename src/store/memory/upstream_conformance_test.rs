@@ -672,3 +672,114 @@ mod cognee {
         facade_round_trip(provider, class).await;
     }
 }
+
+// ── The same suites, against the REAL hosted services ────────────────────────
+
+/// Everything above runs against doubles: HTTP servers this repo writes to the
+/// vendors' documented request and response shapes. That is the right default —
+/// `cargo test` stays offline, and a shape change in a vendor's docs is caught
+/// here rather than in a tenant.
+///
+/// It is also not the same claim as "this works against supermemory". A double
+/// agrees with the documentation; a service agrees with itself. The gap between
+/// those is exactly where an integration breaks — pagination that stops early,
+/// a delete that is eventually consistent, a namespace filter the server
+/// applies more loosely than the docs say — and none of it is visible from a
+/// double, because the double was written from the same reading of the docs
+/// that the adapter was.
+///
+/// So the identical suites run against a live endpoint when one is offered:
+///
+/// ```sh
+/// OPENCOMPANY_TEST_SUPERMEMORY_URL=https://api.supermemory.ai \
+/// OPENCOMPANY_TEST_SUPERMEMORY_KEY=sk-... \
+///   cargo test --features tinymemory --lib live_hosted
+/// ```
+///
+/// Same for `MEM0` and `COGNEE`. Without the pair, each test skips, so this
+/// costs an offline run nothing.
+///
+/// **These tests write to the account they are given.** They store, recall and
+/// forget under the `oc-live-test` company's namespace and clean up after
+/// themselves, but a shared production account is the wrong thing to point
+/// them at — use a scratch project or a free tier.
+#[cfg(test)]
+mod live_hosted {
+    use super::*;
+
+    /// Whether a missing endpoint must FAIL rather than skip.
+    ///
+    /// Same shape and same reasoning as the MongoDB suite's
+    /// `OPENCOMPANY_TEST_MONGODB_REQUIRED` (issue #555): the skip is right for
+    /// a laptop with no vendor keys and wrong for a lane whose entire purpose
+    /// is running these. There, an unset pair is a misconfigured job, and the
+    /// skip would report it as a pass — the whole suite silently absent behind
+    /// a green tick.
+    ///
+    /// `0` and the empty string read as unset, so it can be threaded through a
+    /// workflow matrix that always defines it.
+    fn required() -> bool {
+        matches!(
+            std::env::var("OPENCOMPANY_TEST_HOSTED_REQUIRED").as_deref(),
+            Ok(value) if !value.is_empty() && value != "0"
+        )
+    }
+
+    /// The `(url, key)` pair for one engine, or `None` to skip.
+    fn credentials(engine: &str) -> Option<(String, String)> {
+        let upper = engine.to_uppercase();
+        let url = std::env::var(format!("OPENCOMPANY_TEST_{upper}_URL")).ok();
+        let key = std::env::var(format!("OPENCOMPANY_TEST_{upper}_KEY")).ok();
+        match (url, key) {
+            (Some(url), Some(key)) if !url.is_empty() && !key.is_empty() => Some((url, key)),
+            _ => {
+                assert!(
+                    !required(),
+                    "OPENCOMPANY_TEST_HOSTED_REQUIRED is set but \
+                     OPENCOMPANY_TEST_{upper}_URL / _KEY are not. This lane exists to run \
+                     the port suite against the real {engine} service, so a skip here is a \
+                     misconfigured job rather than a pass."
+                );
+                eprintln!("skipping {engine}: OPENCOMPANY_TEST_{upper}_URL / _KEY are not set");
+                None
+            }
+        }
+    }
+
+    /// Drives one live engine through the provider contract AND this host's
+    /// port suite — the same two claims the doubles make, so a divergence
+    /// between a vendor and its documentation shows up as a diff between this
+    /// test and its double-backed twin rather than as a mystery in production.
+    async fn live(engine: &str) {
+        let Some((url, key)) = credentials(engine) else {
+            return;
+        };
+        let config = MemoryDriverConfig {
+            mode: MemoryMode::Remote,
+            driver_id: Some(engine.into()),
+            url: Some(url),
+            api_key: Some(key),
+            data_dir: None,
+        };
+        let (provider, class) = open_driver(&config)
+            .expect("the live driver binds")
+            .expect("remote with a driver named yields a provider");
+        assert_retains_then_conforms(Arc::clone(&provider)).await;
+        facade_round_trip(provider, class).await;
+    }
+
+    #[tokio::test]
+    async fn the_live_supermemory_service_upholds_the_contract_and_the_ports() {
+        live("supermemory").await;
+    }
+
+    #[tokio::test]
+    async fn the_live_mem0_service_upholds_the_contract_and_the_ports() {
+        live("mem0").await;
+    }
+
+    #[tokio::test]
+    async fn the_live_cognee_service_upholds_the_contract_and_the_ports() {
+        live("cognee").await;
+    }
+}
