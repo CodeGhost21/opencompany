@@ -326,6 +326,34 @@ describe("the mock inference backend", () => {
     expect(orchestrator.choices[0].message.tool_calls[0].function.name).toBe("spawn_task");
   });
 
+  it("serves an orchestrator turn whose delegation tools are not in the belt", async () => {
+    // The shape the real host actually sends. `spawn_task` and friends are
+    // **intrinsic** — dispatched through the runtime's own seam rather than
+    // exposed in `tools[]` — so the orchestrator's request carries a belt of
+    // workspace and MCP tools and nothing else, and a guard that only looked at
+    // the belt would leave every plan in this suite unserved. That is not a
+    // hypothesis: it is what the first run of `orchestration-simulation.spec.ts`
+    // did, with the mock logging a nineteen-tool belt holding no `spawn_task`.
+    const directive = plan("p-505", [
+      [{ name: "spawn_task", arguments: { title: "gather" } }],
+    ]);
+
+    const reply = await chat(
+      [
+        {
+          role: "system",
+          content:
+            "You are the Chief Executive of E2E Harness Co. You are also this " +
+            "company's orchestrator: the single point of contact for the operator.",
+        },
+        { role: "user", content: directive },
+      ],
+      ["workspace_read", "mcp_call_tool"],
+    );
+
+    expect(reply.choices[0].message.tool_calls[0].function.name).toBe("spawn_task");
+  });
+
   it("does not let a triage classification consume a plan step", async () => {
     // The same hazard #678 fixed for `__MOCK_TOOL_CALL__`, one directive later.
     const directive = plan("p-303", [
