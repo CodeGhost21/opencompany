@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { ChevronRight, Mail, Pencil, Sparkles, Users, Wallet, Wrench } from "lucide-react";
 import { toast } from "sonner";
 
@@ -116,6 +116,16 @@ export function AgentDetailView({
 }) {
   const [load, setLoad] = useState<Load>("loading");
   const [agent, setAgent] = useState<AgentDetailDto | null>(null);
+  /**
+   * The id of the agent currently on screen, kept current even across a
+   * navigation that happens while an async write is in flight. Guards the
+   * reset/save response handling: a slow response for a previous agent must not
+   * clobber the active detail's draft or flip its editor.
+   */
+  const displayedAgentIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    displayedAgentIdRef.current = agent?.id ?? null;
+  }, [agent]);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState<AgentDraft>(emptyDraft());
   const [saving, setSaving] = useState(false);
