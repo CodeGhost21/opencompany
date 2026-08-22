@@ -111,12 +111,30 @@ const column = (page: Page, index: number) => board(page).getByTestId("board-col
  */
 async function expandAll(page: Page) {
   const rails = board(page).locator("button[aria-label^='Expand ']");
+  const collapsed = board(page).locator('[data-collapsed="true"]');
   // Bounded: each click removes one rail, and the board has three phases.
+  //
+  // The loop exits on COLLAPSED COLUMNS, not on rails. Those are different
+  // conditions, and the difference is why this helper used to return with the
+  // board still collapsed: a column carries `data-collapsed` while its Expand
+  // rail is a separate element that need not be rendered in the same frame.
+  // Waiting for the rails to disappear therefore said "expanded" one render too
+  // early, and the caller's own `[data-collapsed="true"]` assertion failed five
+  // seconds later and forty lines away from the cause — intermittently, on pull
+  // requests that touched none of this.
   for (let attempt = 0; attempt < 8; attempt += 1) {
-    if ((await rails.count()) === 0) return;
+    if ((await collapsed.count()) === 0) return;
+    if ((await rails.count()) === 0) {
+      // Collapsed with nothing to click: the render is mid-flight. Give it the
+      // turn it needs rather than spending an attempt clicking nothing.
+      await page.waitForTimeout(100);
+      continue;
+    }
     await rails.first().click();
   }
-  await expect(rails).toHaveCount(0);
+  // The postcondition callers actually depend on, so a genuine failure names
+  // the board's state rather than the rails' absence.
+  await expect(collapsed).toHaveCount(0);
 }
 
 /** Opens the board and waits for the host's columns to arrive. */
