@@ -35,7 +35,7 @@ use crate::AppState;
 use crate::company::runtime::CompanyRuntime;
 use crate::company::search::{
     API_KEY_SECRET, ENDPOINT_SECRET, MANAGED_PROVIDER, PROVIDER_SECRET, SUPPORTED_PROVIDERS,
-    configuration_complete, provider_requires_endpoint, provider_requires_key, provider_supported,
+    effective_provider, provider_requires_endpoint, provider_requires_key, provider_supported,
 };
 use crate::ports::types::SecretValue;
 use crate::server::error::ApiError;
@@ -145,14 +145,10 @@ async fn status_of(runtime: &CompanyRuntime) -> Result<SearchStatus, ApiError> {
         .unwrap_or_else(|| MANAGED_PROVIDER.to_string());
     let api_key_configured = read(runtime, API_KEY_SECRET).await?.is_some();
     let endpoint = read(runtime, ENDPOINT_SECRET).await?;
-    let complete = configuration_complete(&provider, api_key_configured, endpoint.is_some());
 
     Ok(SearchStatus {
-        effective_provider: if complete {
-            provider.clone()
-        } else {
-            MANAGED_PROVIDER.to_string()
-        },
+        effective_provider: effective_provider(&provider, api_key_configured, endpoint.is_some())
+            .to_string(),
         needs_api_key: provider_requires_key(&provider) && !api_key_configured,
         needs_endpoint: provider_requires_endpoint(&provider) && endpoint.is_none(),
         provider,

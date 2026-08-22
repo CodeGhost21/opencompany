@@ -94,6 +94,46 @@ pub fn configuration_complete(provider: &str, has_key: bool, has_endpoint: bool)
     true
 }
 
+/// The provider that actually answers, given what is stored: the selection when
+/// it is complete, and [`MANAGED_PROVIDER`] otherwise.
+///
+/// The **one** derivation of that answer. The console's Search page and the
+/// capabilities panel both report it, and two surfaces that merely mirrored each
+/// other's rule would drift the first time a provider was added — leaving one
+/// page saying a company searches through Exa while its agents search through
+/// the platform.
+pub fn effective_provider<'a>(provider: &'a str, has_key: bool, has_endpoint: bool) -> &'a str {
+    if configuration_complete(provider, has_key, has_endpoint) {
+        provider
+    } else {
+        MANAGED_PROVIDER
+    }
+}
+
+/// [`effective_provider`] over a company's secret store.
+///
+/// # Errors
+///
+/// Returns an error when the secret store cannot be read.
+pub async fn resolve_effective_provider(
+    company: &crate::ports::types::CompanyId,
+    secrets: &dyn crate::ports::SecretStore,
+) -> crate::Result<String> {
+    let read = async |key: &str| -> crate::Result<Option<String>> {
+        Ok(secrets
+            .get(company, key)
+            .await?
+            .map(|value| value.0.trim().to_string())
+            .filter(|value| !value.is_empty()))
+    };
+    let provider = read(PROVIDER_SECRET)
+        .await?
+        .unwrap_or_else(|| MANAGED_PROVIDER.to_string());
+    let has_key = read(API_KEY_SECRET).await?.is_some();
+    let has_endpoint = read(ENDPOINT_SECRET).await?.is_some();
+    Ok(effective_provider(&provider, has_key, has_endpoint).to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -124,6 +164,15 @@ mod tests {
         assert!(provider_requires_endpoint("searxng"));
         assert!(!configuration_complete("searxng", true, false));
         assert!(configuration_complete("searxng", false, true));
+    }
+
+    #[test]
+    fn the_effective_provider_is_the_selection_only_when_it_is_finished() {
+        assert_eq!(effective_provider("exa", true, false), "exa");
+        assert_eq!(effective_provider("exa", false, false), MANAGED_PROVIDER);
+        assert_eq!(effective_provider("searxng", false, true), "searxng");
+        assert_eq!(effective_provider("searxng", true, false), MANAGED_PROVIDER);
+        assert_eq!(effective_provider("google", true, true), MANAGED_PROVIDER);
     }
 
     #[test]
