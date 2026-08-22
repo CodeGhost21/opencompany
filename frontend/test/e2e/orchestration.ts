@@ -18,7 +18,20 @@ import { expect, type Locator, type Page } from "@playwright/test";
 /** The single-company alias the host answers on. */
 export const SCOPE = "/api/v1/company";
 
-/** The main line — the General desk, which is the orchestrator's thread. */
+/**
+ * The main line's thread id, as both the console and the host spell it.
+ *
+ * It is **not** a channel in the `#/chat/<id>` workspace, and that is the trap
+ * this constant exists to document: that view builds its channels from the
+ * company's real desks (issue #368 deliberately removed the `"main"` literal
+ * from it), so `#/chat/main` resolves to no channel and falls back to the first
+ * desk — whose lead is an ordinary teammate with no delegation tools. A goal
+ * sent there is answered politely and delegates nothing, which reads as the
+ * orchestrator having ignored it.
+ *
+ * The orchestrator's thread is the **conversation** view's main line, which is
+ * where {@link openMainLine} goes.
+ */
 export const MAIN_LINE = "main";
 
 /** The board, now that it is the `tasks` ledger rather than a screen of its own. */
@@ -46,8 +59,27 @@ export async function silenceTour(page: Page) {
   });
 }
 
-/** Opens one channel by id and waits for its composer, i.e. for the view. */
-export async function openChannel(page: Page, channelId: string = MAIN_LINE) {
+/**
+ * Opens the company's main line — the thread the orchestrator answers on.
+ *
+ * The thread is selected by name from the list rather than trusted to be the
+ * default, so a company that grows another thread cannot silently move this.
+ * Scoped to the thread list: the sidebar's company switcher is also a button
+ * carrying the company's name and precedes the list in the DOM, so an unscoped
+ * `.first()` opens the switcher and no thread at all.
+ */
+export async function openMainLine(page: Page) {
+  await page.goto("/#/conversation");
+  await page
+    .getByRole("complementary")
+    .getByRole("button", { name: /Your company/ })
+    .first()
+    .click();
+  await expect(page.getByPlaceholder(/^Message /)).toBeVisible({ timeout: 30_000 });
+}
+
+/** Opens one desk channel by id in the chat workspace, and waits for the view. */
+export async function openChannel(page: Page, channelId: string) {
   await page.goto(`/#/chat/${channelId}`);
   await expect(page.getByPlaceholder(/^Message /)).toBeVisible({ timeout: 30_000 });
 }
@@ -59,16 +91,20 @@ export async function say(page: Page, text: string) {
 }
 
 /**
- * Every dispatch marker in the open transcript, as links.
+ * Every dispatch marker in the open main line.
  *
- * A link rather than any element carrying the text: the channel rail renders a
- * one-line preview of the last message as a *button*, so an unscoped match
- * counts one extra intermittently, depending on which rendered first — the trap
- * `chat-live-events.spec.ts` documents and `chat-dispatch-marker.spec.ts`
- * inherits.
+ * Matched as **text**, not as a link, and that difference is a property of this
+ * surface rather than an oversight: the conversation view renders a system line
+ * as a centred pill of plain text, where the `#/chat` workspace renders the
+ * same marker as an anchor to the card. So a marker here says *that* a card
+ * settled and where it landed, and `chat-dispatch-marker.spec.ts` — which drives
+ * a desk channel — is where the per-card `href` is asserted.
+ *
+ * Scoped to the transcript, because the thread list renders a one-line preview
+ * of each thread's last message and would otherwise be counted too.
  */
 export function markers(page: Page): Locator {
-  return page.getByRole("link", { name: /^finished → / });
+  return page.getByRole("main").getByText(/^finished → /);
 }
 
 /** The board, with every phase pinned open. */
