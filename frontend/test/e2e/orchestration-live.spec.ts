@@ -211,7 +211,10 @@ test("a real model takes a goal, gives it to its team, and closes it out", async
           // A card that has gone missing keeps the poll waiting rather than
           // concluding: the alternative reads as "settled" for a card that no
           // longer exists.
-          return held ? landing(held) : "in_progress";
+          // Reduced to a boolean here rather than asserted with a set matcher,
+          // because `expect.poll` has no `toBeOneOf`. The landing itself is
+          // read back below for the message, so nothing is lost by it.
+          return held ? SETTLED.includes(landing(held)) : false;
         },
         {
           message: `card "${card.title}" never settled`,
@@ -219,7 +222,7 @@ test("a real model takes a goal, gives it to its team, and closes it out", async
           intervals: [5_000],
         },
       )
-      .toBeOneOf(SETTLED);
+      .toBe(true);
   }
 
   // ── 4. The operator asks for it to be closed out ───────────────────────
