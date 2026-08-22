@@ -263,6 +263,7 @@ struct OptInFlags {
     mcp_directory_credential: Option<DirectoryKeySource>,
     search_granted: bool,
     search_daily_call_cap: u32,
+    search_provider: String,
     repo_granted: bool,
     /// Issue #1192. Carried on the flags rather than derived per DTO site for
     /// the reason the `composio_credential_source` note above already states:
@@ -289,6 +290,7 @@ impl OptInFlags {
             mcp_directory_credential: None,
             search_granted: false,
             search_daily_call_cap: crate::company::DEFAULT_SEARCH_DAILY_CALLS,
+            search_provider: crate::company::search::MANAGED_PROVIDER.to_string(),
             repo_granted: false,
             publish_granted: false,
         }
@@ -320,6 +322,7 @@ fn unconfigured(flags: OptInFlags) -> CapabilityStatusDto {
         search_in_build: cfg!(feature = "openhuman"),
         search_credential_configured: search_credential_configured(),
         search_daily_call_cap: flags.search_daily_call_cap,
+        search_provider: flags.search_provider.clone(),
         repo_granted: flags.repo_granted,
         publish_granted: flags.publish_granted,
         publish_in_build: cfg!(feature = "openhuman"),
@@ -471,6 +474,16 @@ async fn effective_status(runtime: &CompanyRuntime) -> Result<CapabilityStatusDt
             .tools
             .search_daily_calls
             .unwrap_or(crate::company::DEFAULT_SEARCH_DAILY_CALLS),
+        // Which provider the company's own settings point at. Degrades to the
+        // managed answer on a transient secret-store error rather than failing
+        // the whole /capabilities response, like the Composio probe above — the
+        // panel's other cards are unrelated to search.
+        search_provider: crate::company::search::resolve_effective_provider(
+            runtime.id(),
+            runtime.secrets().as_ref(),
+        )
+        .await
+        .unwrap_or_else(|_| crate::company::search::MANAGED_PROVIDER.to_string()),
         // Issue #245: opt-in per tool grant like the three above, and read from
         // the same manifest field, so the repositories card can tell an operator
         // which half of the setup is missing.
