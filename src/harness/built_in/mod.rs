@@ -125,6 +125,11 @@ pub mod repo;
 pub mod run_trace;
 pub mod run_turn;
 pub mod search;
+/// A company's **own** search provider (the BYO half of issue #238): Brave,
+/// Exa, Querit or a self-hosted SearXNG, wired from that company's stored key
+/// through OpenHuman's own search tools. Falls back to [`search`]'s metered
+/// managed surface whenever nothing is configured.
+pub mod search_byo;
 /// End-to-end proof that the #238 `web_search` tool is reachable from a real
 /// turn — the harness, the grant gates, the approval policy, the cap and the
 /// meter are all real; only the model's choices and the search backend's
@@ -510,6 +515,22 @@ pub struct HarnessDeps {
     /// these deps across a roster gives every agent of the company one budget
     /// rather than one each.
     pub search: Option<search::SearchBackend>,
+    /// The company's **own** search provider connection, when it configured one
+    /// in the console (Brave / Exa / Querit / a self-hosted SearXNG).
+    ///
+    /// `None` — the default at every construction site — means "search through
+    /// the managed surface above", which is the fallback OpenHuman's own
+    /// registry takes for a BYO engine with no key. When `Some` **and** the
+    /// company **explicitly** grants `search`, [`build::build_agent`] wires
+    /// [`search_byo::byo_search_tools`] *instead of* the metered managed tool:
+    /// two "search the web" tools on one belt is how a model comes to spend the
+    /// platform's money by accident.
+    ///
+    /// Resolved from that company's own secret store and re-resolved each turn
+    /// like `composio` / `hosting`, so a key set or rotated in the console takes
+    /// effect on the next turn with no restart. Never from the environment: a
+    /// BYO key is billed to the company that pasted it.
+    pub tenant_search: Option<search_byo::TenantSearch>,
     /// Issue #111 — the shared registry of in-flight, steerable runs. The
     /// [`HarnessBrain`] registers a dispatched task / desk delegation here before
     /// running it (and installs the steer stop-hook over the slot's control), so
@@ -1437,6 +1458,10 @@ impl HarnessPool {
         // The hosting credential is set from the same settings surface and goes
         // stale the same way, so it rides the same axis.
         let hosting_config = self.resolve_hosting(company, deps).await;
+        // The company's own search provider is set from that same settings
+        // surface and goes stale the same way, so it rides the same axis: a key
+        // pasted in the console must reach the next turn, not the next restart.
+        let tenant_search_config = self.resolve_tenant_search(company, deps).await;
         // A build without either feature has no billing axis to go stale on, so
         // the fingerprint is a constant and this company never rebuilds on it.
         let billing_fp = {
@@ -1448,6 +1473,7 @@ impl HarnessPool {
             #[cfg(feature = "paypal")]
             hasher.write_u64(paypal::TenantPaypal::fingerprint(&paypal_config));
             hasher.write_u64(hosting::TenantHosting::fingerprint(&hosting_config));
+            hasher.write_u64(search_byo::TenantSearch::fingerprint(&tenant_search_config));
             hasher.finish()
         };
 
@@ -1547,6 +1573,9 @@ impl HarnessPool {
             fresh_deps.paypal = paypal_config;
         }
         fresh_deps.hosting = hosting_config;
+        // And the company's own search provider, so a key pasted (or cleared) in
+        // the console decides what the rebuilt agents search through.
+        fresh_deps.tenant_search = tenant_search_config;
         // And the freshly-read bindings (issue #245), so a repository bound or
         // revoked in the console is what the rebuilt agents' tools resolve
         // against — including the descriptions that name what is bound.
@@ -1800,6 +1829,41 @@ impl HarnessPool {
                      connection: {err}"
                 );
                 deps.hosting.clone()
+            }
+        }
+    }
+
+    /// The company's own search provider, for the same reasons as `hosting`.
+    ///
+    /// Only companies that **explicitly** grant `search` read at all — the same
+    /// gate the metered managed tool passes, because this is the same namespace
+    /// wearing a different credential. A company that never opted into web
+    /// search does not get a store read per turn for a setting it cannot use.
+    ///
+    /// A transient read error keeps the last known connection with a warning,
+    /// like `hosting`: degrading to `None` would silently move the company's
+    /// searches back onto the platform's metered account — a bill moving between
+    /// two parties because a store hiccuped.
+    async fn resolve_tenant_search(
+        &self,
+        company: &CompanyRecord,
+        deps: &HarnessDeps,
+    ) -> Option<search_byo::TenantSearch> {
+        if !crate::company::grants_search_explicit(&company.manifest.tools.allow) {
+            return None;
+        }
+        let Some(secrets) = &deps.secrets else {
+            return deps.tenant_search.clone();
+        };
+        match search_byo::TenantSearch::resolve(secrets, &company.id).await {
+            Ok(resolved) => resolved,
+            Err(err) => {
+                tracing::warn!(
+                    company = %company.id,
+                    "[search] could not read the company's search provider; keeping the last known \
+                     connection: {err}"
+                );
+                deps.tenant_search.clone()
             }
         }
     }
@@ -3425,6 +3489,7 @@ pub(crate) fn workflow_wiring_deps(
         hosting: None,
         // The staging shape in issue #874: `searchCredentialConfigured: false`.
         search: None,
+        tenant_search: None,
         steer: crate::company::steer::InflightRegistry::default(),
         run_supervisor: crate::runtime::RunSupervisor::default(),
         delivery: None,
@@ -3998,6 +4063,7 @@ description = "Builds the product."
                 run_supervisor: crate::runtime::RunSupervisor::default(),
                 delivery: None,
                 search: None,
+                tenant_search: None,
                 workspace: None,
                 repos: None,
                 repo_bindings: Vec::new(),
@@ -4212,6 +4278,7 @@ description = "Builds the product."
             run_supervisor: crate::runtime::RunSupervisor::default(),
             delivery: None,
             search: None,
+            tenant_search: None,
             workspace: None,
             repos: None,
             repo_bindings: Vec::new(),
@@ -4979,6 +5046,7 @@ description = "Builds the product."
             run_supervisor: crate::runtime::RunSupervisor::default(),
             delivery: None,
             search: None,
+            tenant_search: None,
             workspace: None,
             repos: None,
             repo_bindings: Vec::new(),
@@ -5166,6 +5234,7 @@ description = "Builds the product."
             run_supervisor: crate::runtime::RunSupervisor::default(),
             delivery: None,
             search: None,
+            tenant_search: None,
             workspace: None,
             repos: None,
             repo_bindings: Vec::new(),
@@ -5839,6 +5908,7 @@ description = "Builds the product."
             run_supervisor: crate::runtime::RunSupervisor::default(),
             delivery: None,
             search: None,
+            tenant_search: None,
             workspace: None,
             repos: None,
             repo_bindings: Vec::new(),
@@ -6023,6 +6093,7 @@ description = "Sets direction."
             run_supervisor: crate::runtime::RunSupervisor::default(),
             delivery: None,
             search: None,
+            tenant_search: None,
             workspace: None,
             repos: None,
             repo_bindings: Vec::new(),
@@ -6183,6 +6254,7 @@ description = "Sets direction."
             run_supervisor: crate::runtime::RunSupervisor::default(),
             delivery: None,
             search: None,
+            tenant_search: None,
             workspace: None,
             repos: None,
             repo_bindings: Vec::new(),
