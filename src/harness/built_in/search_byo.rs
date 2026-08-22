@@ -204,9 +204,8 @@ mod live {
         ExaFindSimilarTool, ExaGetContentsTool, ExaSearchTool, QueritSearchTool, SearxngSearchTool,
     };
     use oh::tools::traits::{
-        PermissionLevel, Tool, ToolCallOptions, ToolCategory, ToolResult, ToolScope,
+        PermissionLevel, Tool, ToolCallOptions, ToolCategory, ToolResult, ToolScope, ToolTimeout,
     };
-    use oh::tools::timeout::ToolTimeout;
 
     use crate::harness::search::WEB_SEARCH_TOOL;
 
