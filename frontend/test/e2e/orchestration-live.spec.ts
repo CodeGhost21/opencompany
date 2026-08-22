@@ -224,16 +224,23 @@ test("a real model takes a goal, gives it to its team, and closes it out", async
       .join("; ")}`,
   ).toBeGreaterThan(0);
 
-  await openMainLine(page);
-  await say(
-    page,
-    `The work is back and it looks good to me. Please review and approve ` +
-      `${reviewable.length === 1 ? "this card" : "these cards"}, so ` +
-      `${reviewable.length === 1 ? "it is" : "they are"} marked done: ` +
-      reviewable.map((card) => `${card.id} ("${card.title}")`).join(", "),
-  );
-
+  // **One card per message**, and that is not fastidiousness. Asked to accept
+  // two cards in one sentence, the model under test approved the first, wrote a
+  // paragraph about both, and never called `review_task` again — so the second
+  // card sat in review while the reply said it was finished. Nothing is broken
+  // there: the host's own cap allows three delegations per turn, and the tool
+  // was reachable the whole time. It is simply not a claim about the product
+  // that a model will always finish a batched instruction, and a lane that
+  // asserted it would be measuring the model's diligence rather than the
+  // company's plumbing.
   for (const card of reviewable) {
+    await openMainLine(page);
+    await say(
+      page,
+      `The work on card ${card.id} ("${card.title}") is back and it looks good to ` +
+        "me. Please review and approve that card so it is marked done.",
+    );
+
     await expect
       .poll(
         async () => {
