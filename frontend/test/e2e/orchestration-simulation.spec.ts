@@ -228,7 +228,13 @@ test("a goal becomes delegated cards, the team works them, and review closes the
   // earlier spec raised in this same thread, settling on its own schedule while
   // this test runs. An exact count made this spec pass alone and fail in the
   // suite, which is the worst of both.
-  await expect(markers(page).last()).toHaveText("finished → In review");
+  // …and they say where the work landed, which is the half the relay prose
+  // cannot carry: "finished" alone would leave a reader with the same wrong
+  // impression issue #377 is about. Counted rather than read off the last pill,
+  // because a straggler from another spec can arrive after ours.
+  await expect(
+    page.getByRole("main").getByText("finished → In review", { exact: true }),
+  ).toHaveCount(2, { timeout: 30_000 });
 
   // ── 6. The orchestrator closes the goal out ─────────────────────────────
   // The second half of the loop, and the half nothing else covers: work that
