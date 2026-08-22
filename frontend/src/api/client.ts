@@ -802,7 +802,18 @@ export class OpenCompanyClient {
    * callers fall back to a local-only add.
    */
   addTeamMember(
-    input: { name: string; role: string; description?: string; budgetUsdDaily?: number },
+    input: {
+      name: string;
+      role: string;
+      description?: string;
+      budgetUsdDaily?: number;
+      /**
+       * Optional persona instructions to give the teammate at birth (issue
+       * #1530). Omitted keys are left off the wire, so a caller that does not
+       * collect instructions changes nothing.
+       */
+      instructions?: string;
+    },
     company?: string | null,
   ): Promise<TeamMemberDto> {
     return this.request<TeamMemberDto>("POST", `${this.scope(company)}/team`, input);
@@ -836,9 +847,11 @@ export class OpenCompanyClient {
    * which is why the two must not be collapsed on the way in.
    *
    * A manifest teammate is editable too: the host stores the change as an
-   * override on the company record and never rewrites `company.toml`. Ask
-   * `getAgent` first — its `editable` list is the host's own statement of which
-   * fields this call will accept, and `tools` is admin-only.
+   * override on the company record and never rewrites `company.toml`, including
+   * persona instructions (issue #1530). `instructions: null` clears that
+   * override and restores the blueprint value. Ask `getAgent` first — its
+   * `editable` list is the host's own statement of which fields this call will
+   * accept, and `tools` is admin-only.
    */
   updateAgent(
     agentId: string,

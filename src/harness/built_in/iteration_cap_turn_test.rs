@@ -295,6 +295,7 @@ async fn company_agent(
         &["docs".to_string()],
         &[],
         &[],
+        None,
         false,
     )
     .expect("agent builds");

@@ -215,8 +215,12 @@ pub fn model_for_tier(tier: Option<&str>) -> String {
 /// harness's existing callers and tests keep one name for "the persona", and so
 /// the composition rules (including the operator's inline `prompt`) are exercised
 /// by the default-build test suite rather than only where this module links.
-pub fn persona_prompt(company_name: &str, agent: &ManifestAgent) -> String {
-    crate::company::prompt::persona_prompt(company_name, agent)
+pub fn persona_prompt(
+    company_name: &str,
+    agent: &ManifestAgent,
+    instructions: Option<&str>,
+) -> String {
+    crate::company::prompt::persona_prompt(company_name, agent, instructions)
 }
 
 /// Build one openhuman [`Agent`] for `manifest_agent` within `company`.
@@ -231,6 +235,14 @@ pub fn persona_prompt(company_name: &str, agent: &ManifestAgent) -> String {
 /// store by the async caller. Passed in rather than fetched here for the same
 /// reason `skill_deltas` is: this function is synchronous and runs on every
 /// roster rebuild, while the `WorkspaceStore` is async.
+///
+/// `instructions` are this agent's **effective** persona text (issue #1530),
+/// resolved by the caller through
+/// [`CompanyRecord::effective_instructions`](crate::ports::types::CompanyRecord::effective_instructions)
+/// — an operator override when one is set, else the manifest `prompt`, else
+/// `None`. Passed in rather than read off `manifest_agent.prompt` so an overlay
+/// teammate (which has no manifest `prompt`) and a console-edited manifest agent
+/// are framed through the one injection point.
 ///
 /// `is_orchestrator` marks the company's orchestrator agent (issue #53): it
 /// additionally receives the delegating-orchestrator persona brief and the
@@ -249,6 +261,7 @@ pub fn build_agent(
     grants: &[String],
     skill_deltas: &[SkillState],
     routed_context: &[(String, String)],
+    instructions: Option<&str>,
     is_orchestrator: bool,
 ) -> crate::Result<Agent> {
     let memory: Arc<dyn Memory> = Arc::new(OcMemory::new(
@@ -842,8 +855,10 @@ pub fn build_agent(
 
     // Persona over openhuman's own identity: `omit_identity = true` drops the
     // "you are OpenHuman" preamble so the agent speaks as its company role.
-    // Includes the operator's inline `prompt`, appended to the generated framing.
-    let mut persona = persona_prompt(company_name, manifest_agent);
+    // Includes the effective persona instructions (issue #1530) — an operator
+    // override when one is set, else the manifest `prompt` — resolved by the
+    // caller and appended to the generated framing.
+    let mut persona = persona_prompt(company_name, manifest_agent, instructions);
 
     // The agent's checked-in briefing documents, placed here — before every
     // tool brief and before the routed workspace documents — because they are
@@ -1733,7 +1748,7 @@ mod tests {
     #[test]
     fn persona_frames_role_company_and_description() {
         let agent = manifest_agent("Chief Executive", Some("Sets direction."));
-        let persona = persona_prompt("Acme", &agent);
+        let persona = persona_prompt("Acme", &agent, None);
         assert!(persona.contains("Chief Executive"), "{persona}");
         assert!(persona.contains("Acme"), "{persona}");
         assert!(persona.contains("first person"), "{persona}");
@@ -1742,7 +1757,7 @@ mod tests {
 
     #[test]
     fn persona_omits_absent_or_blank_description() {
-        let persona = persona_prompt("Acme", &manifest_agent("Engineer", Some("   ")));
+        let persona = persona_prompt("Acme", &manifest_agent("Engineer", Some("   ")), None);
         assert!(persona.contains("Engineer"));
         assert!(!persona.contains("   Engineer"));
         // No trailing description clause.
@@ -1946,6 +1961,7 @@ mod tests {
             &grants,
             &[],
             &[],
+            None,
             is_orchestrator,
         )
         .expect("agent builds");
@@ -1996,6 +2012,7 @@ mod tests {
             &grants,
             &[],
             &[],
+            None,
             false,
         )
         .expect("agent builds");
@@ -2042,6 +2059,7 @@ mod tests {
             &grants,
             &[],
             &[],
+            None,
             false,
         )
         .expect("agent builds");
@@ -2086,6 +2104,7 @@ mod tests {
             &grants,
             &[],
             &[],
+            None,
             false,
         )
         .expect("agent builds");
@@ -2338,6 +2357,7 @@ mod tests {
             &grants,
             &[],
             &[],
+            None,
             false,
         )
         .expect("agent builds");
@@ -2786,6 +2806,7 @@ mod tests {
             &[],
             &[],
             &[],
+            None,
             false,
         )
         .expect("agent builds");
@@ -3053,6 +3074,7 @@ mod tests {
             &grants,
             &[],
             &[],
+            None,
             false,
         )
         .expect("agent builds");
