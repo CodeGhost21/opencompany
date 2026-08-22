@@ -1,0 +1,91 @@
+# Workflow graph: sponsorship_flow
+#
+# Referenced by `[workflows].enabled` in ../company.toml. A brand approach is
+# checked against live obligations *before* it is negotiated, pinned to specific
+# terms, and parked for the operator — because nothing in this roster may
+# promise a brand anything.
+
+id = "sponsorship_flow"
+name = "Sponsorship flow"
+description = "A brand approach is checked against live obligations, pinned to terms, and parked for approval."
+
+[[node]]
+id = "approach"
+kind = "trigger"
+name = "Brand approach"
+summary = "A brand makes contact, or a renewal comes up."
+
+[[node]]
+id = "conflicts"
+kind = "agent"
+name = "Check live obligations"
+summary = "Exclusivity from an earlier deal is the commonest way a new one becomes a breach."
+agent = "sponsorship_outreach"
+
+[[node]]
+id = "clear"
+kind = "condition"
+name = "Clear to take it?"
+summary = "Branch on whether an existing exclusivity or usage term blocks it."
+[node.config]
+field = "=item.no_conflict"
+
+[[node]]
+id = "terms"
+kind = "agent"
+name = "Pin the terms"
+summary = "Counts, formats, dates, usage rights, disclosure. Vagueness is resolved later in the brand's favour."
+agent = "sponsorship_outreach"
+
+[[node]]
+id = "decline"
+kind = "agent"
+name = "Decline with the reason"
+summary = "Recorded, because the same brand comes back and the reason saves the whole negotiation."
+agent = "sponsorship_outreach"
+
+[[node]]
+id = "fit"
+kind = "agent"
+name = "Check it against the voice"
+summary = "A deal the creator cannot stand behind costs more than it pays."
+agent = "scriptwriter"
+
+[[node]]
+id = "approve"
+kind = "output"
+name = "Park for the operator"
+summary = "Terms are the operator's to agree. Nothing here promises a brand anything."
+[node.destination]
+kind = "channel"
+target = "content"
+
+[[edge]]
+from = "approach"
+to = "conflicts"
+
+[[edge]]
+from = "conflicts"
+to = "clear"
+
+[[edge]]
+from = "clear"
+to = "terms"
+label = "yes"
+
+[[edge]]
+from = "clear"
+to = "decline"
+label = "no"
+
+[[edge]]
+from = "terms"
+to = "fit"
+
+[[edge]]
+from = "fit"
+to = "approve"
+
+[[edge]]
+from = "decline"
+to = "approve"

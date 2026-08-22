@@ -1,0 +1,121 @@
+# Client engagements. A consulting firm's unit of everything: what was sold,
+# what is being delivered against it, and where the boundary between the two is.
+#
+# The board cannot hold this. An engagement runs for months, has a fee, a scope,
+# and a client sponsor whose departure changes everything — and the question
+# that sinks consulting firms is not "what work is outstanding" but "is what we
+# are doing still what we were paid for".
+
+title = "Engagements"
+purpose = """
+Every client engagement: what was sold, who sponsors it, what is in scope, what \
+has been asked for since, and how each one ended. Read it before agreeing to \
+anything a client asks for — most scope creep is agreed by somebody who did not \
+know what the scope was.\
+"""
+written_by = "`record_entry` to open or update an engagement, `close_entry` when it concludes"
+checks = ["required-field", "known-status", "closed-needs-reason"]
+
+[[field]]
+name = "id"
+role = "id"
+required = true
+
+[[field]]
+name = "engagement"
+role = "title"
+required = true
+description = "The client and the question, in one line."
+
+[[field]]
+name = "status"
+role = "status"
+required = true
+
+[[field]]
+name = "client"
+role = "prose"
+required = true
+
+[[field]]
+name = "sponsor"
+role = "prose"
+description = "The person inside the client whose problem this is. An engagement whose sponsor leaves is at risk that day."
+
+[[field]]
+name = "scope"
+role = "prose"
+required = true
+description = "What was sold, and what was explicitly not. The second half is what prevents the argument."
+
+[[field]]
+name = "out_of_scope_asks"
+role = "prose"
+description = "What has been asked for since that was not sold. Recorded when it is asked, not when it becomes a problem."
+
+[[field]]
+name = "fee"
+role = "number"
+description = "The engagement value, in its currency."
+
+[[field]]
+name = "owner"
+role = "owner"
+
+[[field]]
+name = "reason"
+role = "prose"
+description = "How it ended — delivered, extended, or stopped. Required when it closes."
+
+[[field]]
+name = "refs"
+role = "refs"
+
+[[status]]
+name = "proposed"
+
+[[status]]
+name = "active"
+aliases = ["at_risk"]
+
+[[status]]
+name = "delivered"
+closed = true
+needs_reason = true
+
+[[status]]
+name = "stopped"
+closed = true
+needs_reason = true
+
+[[status]]
+name = "lost"
+closed = true
+needs_reason = true
+
+[[section]]
+heading = "At risk"
+blurb = "Active and not going to land as sold. Say what the client has been told."
+statuses = ["active"]
+order = "recent"
+
+[[section]]
+heading = "Active"
+blurb = "Being delivered. Check `scope` before agreeing to anything."
+statuses = ["active"]
+order = "recent"
+
+[[section]]
+heading = "Proposed"
+blurb = "Pitched, not won."
+statuses = ["proposed"]
+order = "recent"
+
+[[section]]
+heading = "Closed"
+blurb = """
+Delivered, stopped, or lost — each with the reason. A lost pitch's reason is the \
+most reusable thing in this ledger and the least likely to be written down.\
+"""
+statuses = ["delivered", "stopped", "lost"]
+cap = 20

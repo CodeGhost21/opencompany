@@ -112,20 +112,28 @@ bootstraps its own:
    unconditional: seeding on every launch would hand the operator a second
    starter company per run.
 
-`AppConfig.admin_email` is set to `DESKTOP_OPERATOR_EMAIL` — the same seam the
-hosted control plane fills with `OPENCOMPANY_ADMIN_EMAIL`, and the reason a
-person is eligible to sign in at all (`eligibility` in `src/server/users/`
-admits an existing user, a bootstrap admin, or an invite, and a fresh install
-has none of the three). The seeded manifest names the same address in its own
-`[users].admins`, so the company is self-describing if it is ever served
-elsewhere.
+`AppConfig.auth_mode_override` is `Some(AuthMode::None)`, so **no company on
+this host has a sign-in** — see [sign-in modes](auth-modes.md#none) for what
+that mode is and [the desktop client](desktop.md#no-sign-in-at-all) for why it
+is the right one here. There is no `admin_email`, no bootstrap roster in the
+seeded manifest, and nothing to type on first launch.
 
-Nothing is mailed: the host binds loopback, so `is_local_only` holds and
-`auth/request` returns the login code in its own response (`dev_code`), which
-the console redeems in place. `oc_embedded` carries `operatorEmail` so the
-sign-in form can offer the address — a person cannot guess it, and every other
-address gets the same silent `202`. It is a suggestion, not a lock: the field
-stays editable, which is what an operator who invites someone else needs.
+The mode is a **default, not a ceiling**. `prepare_instance` reports the data
+root's `config.toml` `auth_mode`, and the shell falls back to `none` only when
+the file names nothing — an operator who picks `email` in setup, to share their
+instance with a colleague, keeps that choice across the quit. Without that read
+the shell would build its `AppConfig` by hand and the file could never win,
+which is the "configuration silently ignored" failure the setup surface exists
+to prevent.
+
+Note where the mode is set: on the **host**, not in the preset manifests. Two
+reasons. It reaches every company on the root — the starter preset, one the
+wizard designed, and any left by an install predating this — because
+`RuntimeBuilder::with_auth_mode_override` outranks a manifest's own
+`[users].mode`, so an existing install migrates by relaunching. And
+`validate_users` flags `[users].admins` under `mode = "none"` as granting
+nothing, which both seeding paths treat as a hard error; the override never
+rewrites `manifest.users.mode`, so there is nothing to flag.
 
 ## Running the shell in development
 

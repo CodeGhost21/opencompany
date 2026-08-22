@@ -1,0 +1,95 @@
+# Why the work looks the way it does.
+#
+# Deliberately not the built-in `decisions`, which records what the *company*
+# chose. This records what the *work* chose — a type scale, a colour system, a
+# grid, an interaction pattern — and it exists because design decisions are
+# re-litigated more than any other kind. Six weeks on, somebody asks why the
+# buttons are that shape, nobody remembers, and the answer gets re-derived from
+# taste rather than from the constraint that actually produced it.
+
+title = "Design decisions"
+purpose = """
+Why this studio's work looks and behaves the way it does: the choice, the \
+constraint that produced it, and what was rejected. Read it before changing \
+anything that looks arbitrary — most of it is not.\
+"""
+written_by = "`record_entry` to record or revise a design decision, `close_entry` when it is superseded"
+checks = ["required-field", "known-status", "closed-needs-reason"]
+
+[[field]]
+name = "id"
+role = "id"
+required = true
+
+[[field]]
+name = "decision"
+role = "title"
+required = true
+description = "What the work does, stated concretely — not \"a bolder direction\"."
+
+[[field]]
+name = "status"
+role = "status"
+required = true
+
+[[field]]
+name = "constraint"
+role = "prose"
+required = true
+description = "What forced it — accessibility, a brand rule, a platform, a client's existing system, a user finding."
+
+[[field]]
+name = "rejected"
+role = "prose"
+description = "What was tried and did not work, and why. The half that stops it being tried again."
+
+[[field]]
+name = "applies_to"
+role = "refs"
+description = "The project or system this governs."
+
+[[field]]
+name = "owner"
+role = "owner"
+
+[[field]]
+name = "reason"
+role = "prose"
+description = "Why it closed — superseded, or the constraint went away. Required when it closes."
+
+[[status]]
+name = "proposed"
+
+[[status]]
+name = "settled"
+
+[[status]]
+name = "superseded"
+closed = true
+needs_reason = true
+
+[[status]]
+name = "reversed"
+closed = true
+needs_reason = true
+
+[[section]]
+heading = "Settled"
+blurb = "How the work is. Do not re-derive these from taste; revise them if the constraint changed."
+statuses = ["settled"]
+order = "recent"
+
+[[section]]
+heading = "Proposed"
+blurb = "Put forward, not settled."
+statuses = ["proposed"]
+order = "recent"
+
+[[section]]
+heading = "No longer in force"
+blurb = """
+Superseded or reversed, with the reason. Kept because a reversed design decision \
+is exactly the one somebody proposes again as a fresh idea.\
+"""
+statuses = ["superseded", "reversed"]
+cap = 20

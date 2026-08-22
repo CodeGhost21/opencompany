@@ -1,0 +1,105 @@
+# Every change to prices, drop rates, currencies and offers.
+#
+# A live game's economy is the one system where a change cannot be quietly
+# reverted: players have already spent, already earned, already formed an
+# expectation about what something is worth. The record is not for tidiness — it
+# is the only way to answer "what did we change three weeks ago" when a metric
+# moves and five things shipped that fortnight.
+
+title = "Economy changes"
+purpose = """
+Every change to pricing, drop rates, currency sinks and sources: what changed, \
+why, and what it did to spend and retention. Read it before touching a number \
+in the economy, and before explaining any metric that moved.\
+"""
+written_by = "`record_entry` to record a change, `close_entry` when it is kept or rolled back"
+writers = ["monetization_designer", "user_acquisition", "analytics_analyst"]
+checks = ["required-field", "known-status", "closed-needs-reason"]
+
+[[field]]
+name = "id"
+role = "id"
+required = true
+
+[[field]]
+name = "change"
+role = "title"
+required = true
+description = "What changed, with the old and new values."
+
+[[field]]
+name = "status"
+role = "status"
+required = true
+
+[[field]]
+name = "why"
+role = "prose"
+required = true
+description = "The problem it is meant to fix, as a player or business outcome."
+
+[[field]]
+name = "segment"
+role = "prose"
+description = "Who it affects. A change that lands on paying players and new players alike usually should not."
+
+[[field]]
+name = "shipped_on"
+role = "date"
+
+[[field]]
+name = "effect"
+role = "prose"
+description = "What it did to spend, retention and sentiment. All three — economy changes rarely move only the one they aimed at."
+
+[[field]]
+name = "owner"
+role = "owner"
+
+[[field]]
+name = "reason"
+role = "prose"
+description = "Why it closed — kept or rolled back. Required when it closes."
+
+[[field]]
+name = "refs"
+role = "refs"
+
+[[status]]
+name = "proposed"
+
+[[status]]
+name = "live"
+
+[[status]]
+name = "kept"
+closed = true
+needs_reason = true
+
+[[status]]
+name = "rolled_back"
+label = "Rolled back"
+closed = true
+needs_reason = true
+
+[[section]]
+heading = "Live"
+blurb = "In the game and not yet judged. This is the list to read when a metric moves."
+statuses = ["live"]
+order = "recent"
+
+[[section]]
+heading = "Proposed"
+blurb = "Put forward, not shipped. Anything touching price goes past the operator."
+statuses = ["proposed"]
+order = "recent"
+
+[[section]]
+heading = "Settled"
+blurb = """
+Kept or rolled back, with what it actually did. Players remember an economy \
+change that was reverted; the record of why is what makes the next \
+communication about it credible.\
+"""
+statuses = ["kept", "rolled_back"]
+cap = 20

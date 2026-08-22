@@ -192,8 +192,8 @@ use crate::harness::orchestrator::DelegationQueue;
 use crate::harness::policy::{ApprovalPolicy, ApprovalRequestQueue};
 use crate::ports::skills_state::{SkillState, SkillStateStore};
 use crate::ports::types::{
-    BudgetOverride, CompanyId, CompanyRecord, OverlayAgent, OverlayDesk, OverlayDeskMember,
-    PolicyOverride, TurnStep,
+    AgentOverride, BudgetOverride, CompanyId, CompanyRecord, OverlayAgent, OverlayDesk,
+    OverlayDeskMember, PolicyOverride, TurnStep,
 };
 use crate::ports::{
     ArtifactStore, CompanyStore, ContextStore, EventLog, FactStore, SecretStore, TaskStore,
@@ -1216,6 +1216,20 @@ pub struct HarnessPool {
     /// A company that never sets an override keeps an empty set and a stable
     /// fingerprint — no rebuild, byte-identical to the pre-#343 behaviour.
     budget_fingerprints: RwLock<HashMap<CompanyId, u64>>,
+    /// Fingerprint of the operator per-agent persona-override set the cached
+    /// roster was built from, keyed by company (issue #1530). Drives persona
+    /// freshness: [`ensure`](Self::ensure) re-resolves the overrides from
+    /// [`HarnessDeps::store`] on every call and rebuilds the roster whenever a
+    /// persona is edited, cleared or reset — so an instructions edit on the
+    /// console Team page reaches the agent's system prompt on the company's
+    /// **next** turn, with no restart and no redeploy. Needed for the same reason
+    /// as [`Self::budget_fingerprints`]: the persona is assembled once per roster,
+    /// not once per call, so without this axis every other fingerprint is stable
+    /// on a persona-only change and the fast path would keep serving the old
+    /// instructions until the process restarted. A company that never edits a
+    /// persona keeps an empty set and a stable fingerprint — no rebuild,
+    /// byte-identical to the pre-#1530 behaviour.
+    override_fingerprints: RwLock<HashMap<CompanyId, u64>>,
     /// Per-company fingerprint of the operator `[policy]` override (issue #562),
     /// so a console tier change rebuilds the roster instead of waiting for a
     /// restart. Without this axis the override persists and is silently ignored:
@@ -1293,6 +1307,7 @@ impl HarnessPool {
             repo_fingerprints: RwLock::new(HashMap::new()),
             skill_fingerprints: RwLock::new(HashMap::new()),
             budget_fingerprints: RwLock::new(HashMap::new()),
+            override_fingerprints: RwLock::new(HashMap::new()),
             policy_fingerprints: RwLock::new(HashMap::new()),
             desk_fingerprints: RwLock::new(HashMap::new()),
             context_fingerprints: RwLock::new(HashMap::new()),
@@ -1380,8 +1395,14 @@ impl HarnessPool {
         // Re-resolve + fingerprint the live overlay-agent set the same way, and
         // the operator budget overrides riding the same store read (issue #343).
         let overlay = self.resolve_effective_overlay(company, deps).await;
-        let overlay_fp = overlay_fingerprint(&overlay.agents);
+        let overlay_fp =
+            overlay_fingerprint(&overlay.agents, &overlay.agent_edits, &overlay.retired);
         let budget_fp = budget_fingerprint(&overlay.budgets);
+        // Issue #1530: the persona overrides ride the same store read, and go
+        // stale the same way a budget does — the persona is assembled once per
+        // roster, so an edit unseen by any fingerprint would not reach the
+        // system prompt until a restart.
+        let override_fp = override_fingerprint(&overlay.agent_edits);
         let policy_fp = policy_fingerprint(overlay.policy.as_ref());
         // Desk scoping now decides capability (the middle level of the
         // three-level narrowing), so it joins the staleness check: without this
@@ -1482,6 +1503,7 @@ impl HarnessPool {
             let repo_fingerprints = self.repo_fingerprints.read().await;
             let skill_fingerprints = self.skill_fingerprints.read().await;
             let budget_fingerprints = self.budget_fingerprints.read().await;
+            let override_fingerprints = self.override_fingerprints.read().await;
             let policy_fingerprints = self.policy_fingerprints.read().await;
             let desk_fingerprints = self.desk_fingerprints.read().await;
             let context_fingerprints = self.context_fingerprints.read().await;
@@ -1494,6 +1516,7 @@ impl HarnessPool {
                 && repo_fingerprints.get(&company.id) == Some(&repo_fp)
                 && skill_fingerprints.get(&company.id) == Some(&skill_fp)
                 && budget_fingerprints.get(&company.id) == Some(&budget_fp)
+                && override_fingerprints.get(&company.id) == Some(&override_fp)
                 && policy_fingerprints.get(&company.id) == Some(&policy_fp)
                 && desk_fingerprints.get(&company.id) == Some(&desk_fp)
                 && context_fingerprints.get(&company.id) == Some(&context_fp)
@@ -1533,6 +1556,16 @@ impl HarnessPool {
         // built from the live-resolved overlay set, not `company.overlay_agents`.
         let mut fresh_company = company.clone();
         fresh_company.overlay_agents = overlay.agents;
+        // And the operator's edits of the manifest teammates, for exactly the
+        // reason the budget overrides below are installed: `build_roster`
+        // resolves every manifest row through `fresh_company.effective_agent`,
+        // so the live edit set has to be the one it reads — otherwise a console
+        // rename would reach the roster only after a restart.
+        fresh_company.overlay_agent_edits = overlay.agent_edits;
+        // And the tombstones, for the same reason: `build_roster` filters the
+        // manifest roster through `fresh_company.effective_agents`, so the live
+        // removal set has to be the one it reads.
+        fresh_company.overlay_retired_agents = overlay.retired;
         // Same treatment for the budget overrides (issue #343): `build_roster`
         // resolves every agent's cap through `fresh_company.effective_budget`,
         // so installing the live set here is what carries a console budget edit
@@ -1558,9 +1591,9 @@ impl HarnessPool {
         // console's `add_member`, the orchestrator's `add_agent`) all land here
         // as a moved overlay fingerprint and boot could not have known about
         // them. That justification is gone: a member folder is no longer a
-        // function of the roster. `Agents/` and `Desks/` are laid down once at
+        // function of the roster. `agents/` and `desks/` are laid down once at
         // boot ([`RuntimeBuilder::build`]) and depend on nothing a rebuild can
-        // change, and `Agents/<id>/` is minted by
+        // change, and `agents/<id>/` is minted by
         // [`ensure_agent_folder`](crate::company::workspace_scaffold::ensure_agent_folder)
         // at the moment that agent first produces something — which is also the
         // repair path if boot's create ever fail-softed, since the minter
@@ -1602,6 +1635,10 @@ impl HarnessPool {
             .write()
             .await
             .insert(company.id.clone(), budget_fp);
+        self.override_fingerprints
+            .write()
+            .await
+            .insert(company.id.clone(), override_fp);
         self.policy_fingerprints
             .write()
             .await
@@ -1946,6 +1983,8 @@ impl HarnessPool {
         match deps.store.load(&company.id).await {
             Ok(Some(record)) => EffectiveOverlay {
                 agents: record.overlay_agents,
+                agent_edits: record.overlay_agent_edits,
+                retired: record.overlay_retired_agents,
                 budgets: record.overlay_budgets,
                 policy: record.overlay_policy,
                 desks: record.overlay_desks,
@@ -1954,6 +1993,8 @@ impl HarnessPool {
             },
             _ => EffectiveOverlay {
                 agents: company.overlay_agents.clone(),
+                agent_edits: company.overlay_agent_edits.clone(),
+                retired: company.overlay_retired_agents.clone(),
                 budgets: company.overlay_budgets.clone(),
                 policy: company.overlay_policy.clone(),
                 desks: company.overlay_desks.clone(),
@@ -2010,6 +2051,19 @@ impl HarnessPool {
     #[cfg(test)]
     pub async fn budget_fingerprint_of(&self, company: &CompanyId) -> Option<u64> {
         self.budget_fingerprints.read().await.get(company).copied()
+    }
+
+    /// The current persona-override fingerprint for a company (test-only), so a
+    /// persona-freshness test can assert the roster was actually rebuilt after a
+    /// console instructions edit rather than inferring it (issue #1530). This is
+    /// the observable that makes "no restart" testable.
+    #[cfg(test)]
+    pub async fn override_fingerprint_of(&self, company: &CompanyId) -> Option<u64> {
+        self.override_fingerprints
+            .read()
+            .await
+            .get(company)
+            .copied()
     }
 
     /// The current billing-connection fingerprint for a company (test-only), so
@@ -2666,15 +2720,48 @@ async fn refresh_oauth_decls(
 ) {
 }
 
-/// A stable fingerprint of an overlay-agent set (issue #71), used to detect a
-/// teammate add/remove/edit between [`HarnessPool::ensure`] calls. Mirrors
-/// [`mcp_fingerprint`]'s shape; no secrets are involved here so there is
-/// nothing to scrub — an [`OverlayAgent`] is display data.
-fn overlay_fingerprint(agents: &[OverlayAgent]) -> u64 {
+/// A stable fingerprint of the roster overlay — the operator-added teammates
+/// (issue #71) **and** the operator's edits of the manifest-declared ones —
+/// used to detect a teammate add/remove/edit between [`HarnessPool::ensure`]
+/// calls. Mirrors [`mcp_fingerprint`]'s shape; no secrets are involved here so
+/// there is nothing to scrub — both are display data.
+///
+/// The edits share this axis rather than taking one of their own because they
+/// answer the same question it does: *who is on this roster, and as what*. They
+/// have to move something — a persona and a tool belt are assembled once per
+/// roster, so a console rename that moved no fingerprint would persist, read
+/// back correctly on the Team page, and be invisible to every turn the teammate
+/// took until the process restarted.
+fn overlay_fingerprint(
+    agents: &[OverlayAgent],
+    edits: &[crate::ports::types::AgentOverride],
+    retired: &[String],
+) -> u64 {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
 
     let mut hasher = DefaultHasher::new();
+    // A removal has to move this too, and it is the sharpest case of all: a
+    // retired teammate that stayed in a cached roster would still take turns
+    // and still receive delegations after the console said it was gone.
+    // Order-stable for the same reason the edits are — `retire_agent` appends
+    // and never re-appends an id it already holds.
+    retired.len().hash(&mut hasher);
+    for id in retired {
+        id.hash(&mut hasher);
+    }
+    // Hashed in stored order, which `upsert_agent_override` keeps stable: it
+    // replaces an existing entry in place and only ever appends a new one, so a
+    // repeated edit of one teammate does not permute the list and drop every
+    // live session for a change that touched nobody else.
+    edits.len().hash(&mut hasher);
+    for edit in edits {
+        edit.agent_id.hash(&mut hasher);
+        edit.name.hash(&mut hasher);
+        edit.role.hash(&mut hasher);
+        edit.description.hash(&mut hasher);
+        edit.tools.hash(&mut hasher);
+    }
     agents.len().hash(&mut hasher);
     for agent in agents {
         agent.id.hash(&mut hasher);
@@ -2762,6 +2849,10 @@ fn policy_fingerprint(override_: Option<&PolicyOverride>) -> u64 {
 /// wrong tool belt with nothing to catch it.
 pub(crate) struct EffectiveOverlay {
     pub agents: Vec<OverlayAgent>,
+    /// The operator's edits of the manifest-declared teammates.
+    pub agent_edits: Vec<crate::ports::types::AgentOverride>,
+    /// The ids of manifest teammates the operator has removed.
+    pub retired: Vec<String>,
     pub budgets: Vec<BudgetOverride>,
     pub policy: Option<PolicyOverride>,
     pub desks: Vec<OverlayDesk>,
@@ -2884,6 +2975,40 @@ fn budget_fingerprint(overrides: &[BudgetOverride]) -> u64 {
     // Attribution is deliberately NOT hashed: who set the cap and when changes
     // nothing an agent can act on, and folding it in would rebuild the roster
     // (discarding live sessions) every time the same value was re-saved.
+    hasher.finish()
+}
+
+/// A stable fingerprint of a company's operator persona-override set (issue
+/// #1530), used to detect a persona set / changed / cleared / reset between
+/// [`HarnessPool::ensure`] calls. Mirrors [`budget_fingerprint`]'s shape; an
+/// [`AgentOverride`] holds no secret.
+///
+/// **Sorted by `agent_id`** first, for the reason [`budget_fingerprint`]
+/// documents: the write routes push and retain rather than maintain an order, so
+/// an order-sensitive hash would rebuild the roster (dropping live agent
+/// sessions) on a save that changed nothing an agent can observe. The
+/// instructions text is hashed as an `Option` discriminant plus its bytes, so a
+/// stored `Some("")` stays distinct from `None` — the same distinction the
+/// resolver's reset-to-blueprint contract depends on.
+fn override_fingerprint(overrides: &[AgentOverride]) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let mut ordered: Vec<&AgentOverride> = overrides.iter().collect();
+    ordered.sort_by(|a, b| a.agent_id.cmp(&b.agent_id));
+
+    let mut hasher = DefaultHasher::new();
+    ordered.len().hash(&mut hasher);
+    for entry in ordered {
+        entry.agent_id.hash(&mut hasher);
+        match &entry.instructions {
+            Some(text) => {
+                1u8.hash(&mut hasher);
+                text.hash(&mut hasher);
+            }
+            None => 0u8.hash(&mut hasher),
+        }
+    }
     hasher.finish()
 }
 
@@ -3026,12 +3151,28 @@ pub(crate) fn build_roster(
     let allow = &company.manifest.tools.allow;
     // The orchestrator agent (tier `orchestrator`, else the first agent) receives
     // the delegating-orchestrator persona + tools (issue #53).
-    let orchestrator = orchestrator::orchestrator_id(&company.manifest.agents);
+    // Resolved over the roster as it effectively stands, not the blueprint's:
+    // a company whose first declared agent has since been removed still has an
+    // orchestrator, and it is the next one — not a teammate that is not built.
+    let live_roster = company.effective_agents();
+    let orchestrator = orchestrator::orchestrator_id(&live_roster);
+
+    // Issue #1124: the company's per-server read-only MCP declaration, resolved
+    // once and installed on every agent's policy so a server-declared read-only
+    // bridge call does not park under `auto`. Built from the same effective MCP
+    // servers the harness wires tools from, so the gate and the toolbelt cannot
+    // disagree about which server declared what.
+    let mcp_reads = crate::company::mcp::mcp_read_set(&deps.mcp_servers);
 
     let mut roster =
         Vec::with_capacity(company.manifest.agents.len() + company.overlay_agents.len());
 
-    for manifest_agent in &company.manifest.agents {
+    // The roster as it effectively stands: `company.toml` says who this company
+    // was launched with, the operator's stored edits say who each teammate is
+    // now, and its tombstones say who is no longer here. The harness builds the
+    // second — a teammate an operator removed is not built at all, which is what
+    // makes it undispatchable rather than merely hidden from the Team page.
+    for manifest_agent in &live_roster {
         // When these deps serve one named harness, build only the agents bound
         // to it — every other agent is another pool's, holding another
         // provider. Skipping here rather than filtering afterwards is what keeps
@@ -3045,11 +3186,20 @@ pub(crate) fn build_roster(
         // built below — the `ApprovalPolicy` arm and `CompanyAgent`'s copy that
         // the L1 dispatch gate reads — from this one call.
         let effective_budget = company.effective_budget(&manifest_agent.id);
+        // Issue #1530: the persona in force, not the one the manifest shipped
+        // with. `effective_instructions` is an operator override when one is
+        // stored and the manifest `prompt` otherwise, so a console persona edit
+        // reaches the system prompt this agent is built with — and it wins over
+        // the blueprint without cloning the borrowed `&ManifestAgent`.
+        let effective_instructions = company.effective_instructions(&manifest_agent.id);
         let mut agent_policy = ApprovalPolicy::new(policy, effective_budget)
             .with_requests(deps.approval_requests.clone())
             // Issue #243: stamp who the parked effect belongs to, so approving it
             // can hand the grant back to this agent rather than to nobody.
-            .with_agent(manifest_agent.id.clone());
+            .with_agent(manifest_agent.id.clone())
+            // Issue #1124: the per-server read-only MCP declaration, so a
+            // server-declared read-only bridge call does not park under `auto`.
+            .with_mcp_reads(mcp_reads.clone());
         // Issue #304: give the policy something to measure `budget_usd_daily`
         // against. Only wired when the host has a meter — without one the cap
         // arm stays inert and warns once, rather than parking every priced call
@@ -3077,6 +3227,7 @@ pub(crate) fn build_roster(
                 .get(&manifest_agent.id)
                 .map(Vec::as_slice)
                 .unwrap_or(&[]),
+            effective_instructions.as_deref(),
             is_orchestrator,
         )?;
         roster.push(Arc::new(CompanyAgent {
@@ -3109,11 +3260,19 @@ pub(crate) fn build_roster(
         // limitation" this lifts. `effective_budget` gives it a stored cap when
         // an operator set one, and `None` (as before) when nobody has.
         let effective_budget = company.effective_budget(&manifest_agent.id);
+        // Issue #1530: the same persona resolution as the manifest loop. A bare
+        // overlay teammate has no manifest `prompt`, so this is `None` unless an
+        // operator set an override for it — and an override wins uniformly, the
+        // one reason `overlay_agent_to_manifest` can keep `prompt: None`.
+        let effective_instructions = company.effective_instructions(&manifest_agent.id);
         let mut agent_policy = ApprovalPolicy::new(policy, effective_budget)
             .with_requests(deps.approval_requests.clone())
             // An overlay teammate is a real roster agent and re-dispatches the
             // same way a manifest one does (issue #243).
-            .with_agent(manifest_agent.id.clone());
+            .with_agent(manifest_agent.id.clone())
+            // Issue #1124: the same per-server read-only MCP declaration the
+            // manifest agents get — an overlay teammate calls the same servers.
+            .with_mcp_reads(mcp_reads.clone());
         if let Some(meter) = deps.meter.as_ref() {
             agent_policy = agent_policy.with_spend(meter.clone(), company.id.clone());
         }
@@ -3135,6 +3294,7 @@ pub(crate) fn build_roster(
                 .get(&manifest_agent.id)
                 .map(Vec::as_slice)
                 .unwrap_or(&[]),
+            effective_instructions.as_deref(),
             /* is_orchestrator */ false,
         )?;
         roster.push(Arc::new(CompanyAgent {
@@ -3186,6 +3346,11 @@ fn overlay_agent_to_manifest(overlay: &OverlayAgent) -> ManifestAgent {
         delegates_to: Vec::new(),
         context: None,
         budget_usd_daily: None,
+        // Issue #1530: still `None`, and deliberately so. An overlay teammate's
+        // persona is carried by the record's per-agent override (resolved through
+        // `effective_instructions` and threaded into `build_agent` by the caller),
+        // not by this synthetic `ManifestAgent` — the same shape the budget cap
+        // takes, where the override rather than a manifest field is the source.
         prompt: None,
         prompt_files: Vec::new(),
         prompt_files_resolved: Vec::new(),
@@ -3428,7 +3593,7 @@ mod tests {
         let manifest = overlay_agent_to_manifest(&overlay);
         assert_eq!(manifest.name.as_deref(), Some("Alex"));
         // And it reaches the one place it has to: the persona the model reads.
-        let persona = crate::company::prompt::persona_prompt("Acme", &manifest);
+        let persona = crate::company::prompt::persona_prompt("Acme", &manifest, None);
         assert!(
             persona.contains("You are Alex, the Content Writer at Acme"),
             "{persona}"
@@ -3455,19 +3620,76 @@ mod tests {
         let scoped_more = one(vec!["docs.*".into(), "email".into()]);
 
         assert_ne!(
-            overlay_fingerprint(&standard),
-            overlay_fingerprint(&scoped),
+            overlay_fingerprint(&standard, &[], &[]),
+            overlay_fingerprint(&scoped, &[], &[]),
             "adding a grant must move the fingerprint or the re-grant is ignored until restart"
         );
         assert_ne!(
-            overlay_fingerprint(&scoped),
-            overlay_fingerprint(&scoped_more),
+            overlay_fingerprint(&scoped, &[], &[]),
+            overlay_fingerprint(&scoped_more, &[], &[]),
             "widening the grant list must move it too"
         );
         // Identical grants → identical fingerprint (no spurious rebuild).
         assert_eq!(
-            overlay_fingerprint(&scoped),
-            overlay_fingerprint(&one(vec!["docs.*".into()]))
+            overlay_fingerprint(&scoped, &[], &[]),
+            overlay_fingerprint(&one(vec!["docs.*".into()]), &[], &[])
+        );
+    }
+
+    /// An edit of a **manifest** teammate has to move the same axis, and for the
+    /// same reason: a persona is assembled once per roster, so a rename that
+    /// moved nothing would read back correctly on the Team page and be invisible
+    /// to every turn the teammate took until the process restarted.
+    #[test]
+    fn overlay_fingerprint_moves_on_an_edit_of_a_manifest_teammate() {
+        let edit = |role: &str| {
+            vec![crate::ports::types::AgentOverride {
+                agent_id: "ceo".into(),
+                role: Some(role.to_string()),
+                ..Default::default()
+            }]
+        };
+        let none: Vec<crate::ports::types::AgentOverride> = Vec::new();
+
+        assert_ne!(
+            overlay_fingerprint(&[], &none, &[]),
+            overlay_fingerprint(&[], &edit("Chief Vibes"), &[]),
+            "a console rename must move the fingerprint or it is ignored until restart"
+        );
+        assert_ne!(
+            overlay_fingerprint(&[], &edit("Chief Vibes"), &[]),
+            overlay_fingerprint(&[], &edit("Chief Executive"), &[]),
+            "and re-editing it must move it again"
+        );
+        // The same edit twice → the same fingerprint, so a save that changed
+        // nothing does not drop every live session.
+        assert_eq!(
+            overlay_fingerprint(&[], &edit("Chief Vibes"), &[]),
+            overlay_fingerprint(&[], &edit("Chief Vibes"), &[])
+        );
+    }
+
+    /// A removal has to move the same axis: a retired teammate left in a cached
+    /// roster would keep taking turns and keep receiving delegations after the
+    /// console said it was gone — the sharpest form of the staleness this axis
+    /// exists to prevent.
+    #[test]
+    fn overlay_fingerprint_moves_when_a_teammate_is_retired() {
+        assert_ne!(
+            overlay_fingerprint(&[], &[], &[]),
+            overlay_fingerprint(&[], &[], &["ceo".to_string()]),
+            "removing a teammate must move the fingerprint or it keeps running until restart"
+        );
+        assert_ne!(
+            overlay_fingerprint(&[], &[], &["ceo".to_string()]),
+            overlay_fingerprint(&[], &[], &["ceo".to_string(), "engineer".to_string()]),
+            "and removing a second one must move it again"
+        );
+        // Re-recording the same removal changes nothing, which is what
+        // `retire_agent`'s idempotence buys: no rebuild, no dropped sessions.
+        assert_eq!(
+            overlay_fingerprint(&[], &[], &["ceo".to_string()]),
+            overlay_fingerprint(&[], &[], &["ceo".to_string()])
         );
     }
 
@@ -3697,6 +3919,8 @@ description = "Builds the product."
 
     fn record() -> CompanyRecord {
         CompanyRecord {
+            overlay_retired_agents: Vec::new(),
+            overlay_agent_edits: Vec::new(),
             id: CompanyId::new("acme"),
             manifest: manifest(),
             ledger: Vec::new(),
@@ -3821,8 +4045,8 @@ description = "Builds the product."
         /// name-only hash would leave the edit invisible until a restart.
         #[test]
         fn the_fingerprint_moves_when_a_documents_body_changes() {
-            let before = routed_context_fingerprint(&docs(&[("ceo", &[("BRIEF.md", "old")])]));
-            let after = routed_context_fingerprint(&docs(&[("ceo", &[("BRIEF.md", "new")])]));
+            let before = routed_context_fingerprint(&docs(&[("ceo", &[("brief.md", "old")])]));
+            let after = routed_context_fingerprint(&docs(&[("ceo", &[("brief.md", "new")])]));
             assert_ne!(
                 before, after,
                 "an edited routed note must rebuild the roster"
@@ -3834,12 +4058,12 @@ description = "Builds the product."
         #[test]
         fn the_fingerprint_is_stable_across_map_iteration_order() {
             let one = docs(&[
-                ("ceo", &[("BRIEF.md", "b")]),
-                ("engineer", &[("CLAIMS.md", "c")]),
+                ("ceo", &[("brief.md", "b")]),
+                ("engineer", &[("claims.md", "c")]),
             ]);
             let two = docs(&[
-                ("engineer", &[("CLAIMS.md", "c")]),
-                ("ceo", &[("BRIEF.md", "b")]),
+                ("engineer", &[("claims.md", "c")]),
+                ("ceo", &[("brief.md", "b")]),
             ]);
             assert_eq!(
                 routed_context_fingerprint(&one),
@@ -3851,7 +4075,7 @@ description = "Builds the product."
         /// the persona quotes the path as the section heading.
         #[test]
         fn the_fingerprint_moves_when_a_document_is_renamed() {
-            let before = routed_context_fingerprint(&docs(&[("ceo", &[("BRIEF.md", "same")])]));
+            let before = routed_context_fingerprint(&docs(&[("ceo", &[("brief.md", "same")])]));
             let after = routed_context_fingerprint(&docs(&[("ceo", &[("GOAL.md", "same")])]));
             assert_ne!(before, after);
         }
@@ -3885,7 +4109,7 @@ description = "Builds the product."
                 &company,
                 &WorkspaceNode {
                     id: "n-brief".to_string(),
-                    name: "BRIEF.md".to_string(),
+                    name: "brief.md".to_string(),
                     kind: NodeKind::File,
                     parent_id: None,
                     updated_at_millis: 1,
@@ -3916,7 +4140,7 @@ description = "Builds the product."
                 assert_eq!(
                     documents,
                     &vec![(
-                        "BRIEF.md".to_string(),
+                        "brief.md".to_string(),
                         "What the company established.".to_string()
                     )],
                     "{agent}"
@@ -4033,6 +4257,49 @@ description = "Builds the product."
             .find(|a| a.agent_id == "growth")
             .expect("overlay teammate present in roster");
         assert_eq!(overlay_agent.role, "Growth Lead");
+    }
+
+    /// The roster is built from the teammate an operator has since edited, not
+    /// from the row `company.toml` declared. Without this the console would save
+    /// a rename that nothing running ever heard about — the edit would be
+    /// visible on the Team page and absent from every turn the agent took.
+    #[tokio::test]
+    async fn a_console_edit_of_a_manifest_teammate_reaches_the_built_roster() {
+        let fx = fixture();
+        let mut rec = record();
+        rec.upsert_agent_override(crate::ports::types::AgentOverride {
+            agent_id: "ceo".into(),
+            role: Some("Chief Vibes".into()),
+            ..Default::default()
+        });
+
+        let roster = build_roster(&rec, &fx.deps, &[], &HashMap::new()).expect("roster builds");
+        let ceo = roster
+            .iter()
+            .find(|a| a.agent_id == "ceo")
+            .expect("the ceo is still on the roster");
+        assert_eq!(ceo.role, "Chief Vibes");
+    }
+
+    /// A teammate the operator removed is not built at all — which is what makes
+    /// the delete real rather than cosmetic: an agent left in the roster keeps
+    /// taking turns and keeps receiving delegations however the Team page reads.
+    /// And when the removed teammate was the orchestrator, the role moves to the
+    /// next one rather than to somebody who is no longer here.
+    #[tokio::test]
+    async fn a_retired_manifest_teammate_is_not_built() {
+        let fx = fixture();
+        let mut rec = record();
+        rec.retire_agent("ceo");
+
+        let roster = build_roster(&rec, &fx.deps, &[], &HashMap::new()).expect("roster builds");
+        let ids: Vec<_> = roster.iter().map(|a| a.agent_id.as_str()).collect();
+        assert_eq!(ids, vec!["engineer"], "got {ids:?}");
+        assert_eq!(
+            orchestrator::orchestrator_id(&rec.effective_agents()).as_deref(),
+            Some("engineer"),
+            "the orchestrator must be somebody who is actually on the roster"
+        );
     }
 
     /// A manifest agent always wins an id collision with an overlay teammate —
@@ -4191,7 +4458,7 @@ description = "Builds the product."
         let tree = ws.tree(&rec.id).await.expect("tree");
         let mut names: Vec<&str> = tree.iter().map(|n| n.name.as_str()).collect();
         names.sort_unstable();
-        assert_eq!(names, vec!["Agents", "designer"]);
+        assert_eq!(names, vec!["agents", "designer"]);
         assert_eq!(
             tree.iter().find(|n| n.id == minted).unwrap().created_by,
             crate::ports::WorkspaceOrigin::Agent {
@@ -4934,6 +5201,7 @@ description = "Builds the product."
                 command: None,
                 allowed_tools: Vec::new(),
                 disallowed_tools: Vec::new(),
+                read_only_tools: Vec::new(),
                 timeout_secs: 30,
                 enabled: true,
                 auth_secret: None,
@@ -5661,6 +5929,8 @@ description = "Sets direction."
 
     fn granting_record() -> CompanyRecord {
         CompanyRecord {
+            overlay_retired_agents: Vec::new(),
+            overlay_agent_edits: Vec::new(),
             id: CompanyId::new("acme"),
             manifest: granting_manifest(),
             ledger: Vec::new(),
@@ -6440,6 +6710,132 @@ description = "Builds the product."
         assert_eq!(pool.budget_fingerprint_of(&rec.id).await, Some(fp_cleared));
     }
 
+    /// `override_fingerprint` detects a persona edit, keeps `Some("")` distinct
+    /// from `None` (the reset-to-blueprint distinction), and does not depend on
+    /// the stored order — the `HashMap` the overrides come from has none, so an
+    /// order-sensitive hash would rebuild the roster (dropping live sessions) on
+    /// a save that changed nothing (issue #1530).
+    #[test]
+    fn override_fingerprint_detects_edits_and_ignores_order() {
+        use crate::ports::types::AgentOverride;
+        let entry = |id: &str, text: Option<&str>| AgentOverride {
+            agent_id: id.to_string(),
+            instructions: text.map(str::to_string),
+            ..Default::default()
+        };
+
+        assert_ne!(
+            override_fingerprint(&[]),
+            override_fingerprint(&[entry("ceo", Some("x"))]),
+            "adding an override must move the fingerprint"
+        );
+        assert_ne!(
+            override_fingerprint(&[entry("ceo", Some("a"))]),
+            override_fingerprint(&[entry("ceo", Some("b"))]),
+            "editing the text must move the fingerprint"
+        );
+        assert_ne!(
+            override_fingerprint(&[entry("ceo", Some(""))]),
+            override_fingerprint(&[entry("ceo", None)]),
+            "an empty-string override and a cleared one must not hash alike"
+        );
+        let ab = [entry("ceo", Some("a")), entry("eng", Some("b"))];
+        let ba = [entry("eng", Some("b")), entry("ceo", Some("a"))];
+        assert_eq!(
+            override_fingerprint(&ab),
+            override_fingerprint(&ba),
+            "the fingerprint must not depend on the stored order"
+        );
+    }
+
+    /// A persona override written through the store reaches the roster on the
+    /// next dispatch — the cache-invalidation the whole feature turns on (#1530).
+    /// The pool is never reconstructed (`resident_companies()` stays 1), so the
+    /// only thing carrying the edit is `override_fingerprint` flipping and
+    /// `ensure` rebuilding the roster in place. Reset-to-blueprint returns the
+    /// fingerprint to its pre-edit value, proving the clear is a real change the
+    /// roster picks up too.
+    #[tokio::test]
+    async fn a_persona_override_written_through_the_store_rebuilds_the_roster() {
+        use crate::ports::types::AgentOverride;
+
+        let dir = tempfile::tempdir().unwrap();
+        let context = Arc::new(MockContext::default());
+        let rec = capped_record();
+
+        // A live store, so `ensure` re-resolves the overrides as production does.
+        let live_store = Arc::new(LiveStore::default());
+        live_store.save(&rec).await.unwrap();
+
+        let mut deps = deps_with_plan(dir.path(), context.clone(), None, None);
+        deps.store = live_store.clone();
+
+        // ONE pool for the whole test — nothing below reconstructs it, so nothing
+        // below can smuggle in a restart.
+        let pool = HarnessPool::new();
+
+        fn with_instructions(base: &CompanyRecord, text: Option<&str>) -> CompanyRecord {
+            let mut next = base.clone();
+            next.overlay_agent_edits = match text {
+                Some(text) => vec![AgentOverride {
+                    agent_id: "ceo".to_string(),
+                    instructions: Some(text.to_string()),
+                    ..Default::default()
+                }],
+                None => Vec::new(),
+            };
+            next
+        }
+
+        // A. Blueprint — the CEO runs on its manifest persona, no override.
+        pool.ensure(&rec, &deps).await.expect("ensure A");
+        let fp_blueprint = pool
+            .override_fingerprint_of(&rec.id)
+            .await
+            .expect("fingerprinted");
+
+        // B. An operator edits the CEO's persona from the console.
+        live_store
+            .save(&with_instructions(&rec, Some("Answer only in haiku.")))
+            .await
+            .unwrap();
+        pool.ensure(&rec, &deps).await.expect("ensure B");
+        let fp_edited = pool
+            .override_fingerprint_of(&rec.id)
+            .await
+            .expect("fingerprinted");
+        assert_ne!(
+            fp_blueprint, fp_edited,
+            "editing a persona must move the override fingerprint, or the cached \
+             roster is reused and the edit never reaches the next turn"
+        );
+        assert_eq!(
+            pool.resident_companies().await,
+            1,
+            "the same company, rebuilt in place — not a new process"
+        );
+
+        // C. Reset-to-blueprint clears the override; the persona returns to seed.
+        live_store
+            .save(&with_instructions(&rec, None))
+            .await
+            .unwrap();
+        pool.ensure(&rec, &deps).await.expect("ensure C");
+        let fp_reset = pool
+            .override_fingerprint_of(&rec.id)
+            .await
+            .expect("fingerprinted");
+        assert_ne!(fp_edited, fp_reset, "clearing the override is a change");
+        assert_eq!(
+            fp_reset, fp_blueprint,
+            "reset-to-blueprint must return to the pre-edit fingerprint"
+        );
+
+        // An unchanged `ensure` is a no-op: the axis is not thrashing the roster.
+        pool.ensure(&rec, &deps).await.expect("ensure idempotent");
+        assert_eq!(pool.override_fingerprint_of(&rec.id).await, Some(fp_reset));
+    }
+
     /// An **overlay** teammate — one added from the console, with no manifest
     /// row — can be capped through the same override, and is refused when it has
     /// spent it. Before #343 an overlay teammate was unconditionally uncapped
@@ -6693,6 +7089,7 @@ budget_usd_daily = 0.0
                 description: None,
                 allowed_tools: Vec::new(),
                 disallowed_tools: Vec::new(),
+                read_only_tools: Vec::new(),
                 timeout_secs: 30,
                 enabled: true,
                 source: crate::company::mcp::McpSource::Runtime,
@@ -6729,6 +7126,7 @@ budget_usd_daily = 0.0
             &grants,
             &[],
             &[],
+            None,
             is_orchestrator,
         )
         .expect("agent builds");
@@ -6848,6 +7246,7 @@ budget_usd_daily = 0.0
             &["*".to_string()],
             &[],
             &[],
+            None,
             true,
         )
         .expect("agent builds");

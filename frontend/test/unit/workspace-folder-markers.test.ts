@@ -180,7 +180,9 @@ describe("the two marked folders, side by side in one tree", () => {
   it("leaves an ordinary folder its whole menu", async () => {
     await render();
     const items = await menuItemsFor("Playbooks");
-    expect(items).toEqual(["Rename", "Move to…", "Delete"]);
+    // The two "New … here" entries are issue #1477's — a folder is a place to
+    // put something, and this menu is where that is decided.
+    expect(items).toEqual(["New note here", "New folder here", "Rename", "Move to…", "Delete"]);
   });
 });
 
@@ -211,10 +213,10 @@ describe("renaming the secrets root", () => {
     await act(async () => {
       // React tracks the last value it wrote, so a bare `input.value =` is
       // swallowed as "unchanged"; the native setter is how a test types.
-      Object.getOwnPropertyDescriptor(
-        window.HTMLInputElement.prototype,
-        "value",
-      )!.set!.call(input, next);
+      Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")!.set!.call(
+        input,
+        next,
+      );
       input.dispatchEvent(new Event("input", { bubbles: true }));
     });
     const confirm = Array.from(document.querySelectorAll("button")).find(

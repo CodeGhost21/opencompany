@@ -1,0 +1,105 @@
+# Client design projects: what was briefed, what round it is on, and how it
+# landed.
+#
+# A studio's real unit. The board holds the work; this holds the *relationship*
+# — a brief that has drifted, a third round that was supposed to be the last,
+# and a client whose feedback contradicts what they approved in round one. None
+# of that is a card, and all of it decides whether the project is profitable.
+
+title = "Projects"
+purpose = """
+Every design project: what was briefed, how many rounds it has had, what has \
+been approved, and how it ended. Read it before starting a round — the \
+commonest failure here is round four addressing feedback that contradicts an \
+approval from round one.\
+"""
+written_by = "`record_entry` to open or advance a project, `close_entry` when it ships or stops"
+checks = ["required-field", "known-status", "closed-needs-reason"]
+
+[[field]]
+name = "id"
+role = "id"
+required = true
+
+[[field]]
+name = "project"
+role = "title"
+required = true
+description = "The client and the piece of work, in one line."
+
+[[field]]
+name = "status"
+role = "status"
+required = true
+
+[[field]]
+name = "brief"
+role = "prose"
+required = true
+description = "What was actually asked for, and what success looks like. Not the mood board."
+
+[[field]]
+name = "rounds"
+role = "number"
+description = "How many revision rounds have been used. The number that quietly decides profitability."
+
+[[field]]
+name = "approved"
+role = "prose"
+description = "What the client has signed off, per round. This is what makes contradictory feedback visible."
+
+[[field]]
+name = "owner"
+role = "owner"
+
+[[field]]
+name = "reason"
+role = "prose"
+description = "How it ended — shipped, stopped, or abandoned. Required when it closes."
+
+[[field]]
+name = "refs"
+role = "refs"
+
+[[status]]
+name = "briefed"
+
+[[status]]
+name = "exploring"
+aliases = ["refining"]
+
+[[status]]
+name = "awaiting_review"
+label = "Awaiting client review"
+
+[[status]]
+name = "shipped"
+closed = true
+needs_reason = true
+
+[[status]]
+name = "stopped"
+closed = true
+needs_reason = true
+
+[[section]]
+heading = "In flight"
+blurb = "Being worked. Check `approved` and `rounds` before starting anything new on one of these."
+statuses = ["exploring"]
+order = "recent"
+
+[[section]]
+heading = "With the client"
+blurb = "Waiting on review. Nothing moves here without somebody outside the studio."
+statuses = ["awaiting_review", "briefed"]
+order = "recent"
+
+[[section]]
+heading = "Closed"
+blurb = """
+Shipped or stopped, each with the reason and the round count. A project that \
+took seven rounds is the most useful row in this ledger, because it says what \
+the brief left out.\
+"""
+statuses = ["shipped", "stopped"]
+cap = 20

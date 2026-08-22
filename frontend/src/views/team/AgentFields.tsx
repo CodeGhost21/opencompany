@@ -47,7 +47,7 @@ export function AgentFields({
             {field.kind === "prose" ? (
               <Textarea
                 id={id}
-                rows={4}
+                rows={field.rows ?? 4}
                 value={draft[field.key]}
                 readOnly={locked}
                 onChange={(e) => onChange(field.key, e.target.value)}

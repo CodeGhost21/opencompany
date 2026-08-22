@@ -17,7 +17,13 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { catalogWarning } from "@/lib/composio-catalog";
 import { toolkitSlug, type ComposioReach } from "@/lib/connections";
-import { buildGridProviders, disconnectRouteFor, type GridProvider } from "@/lib/provider-grid";
+import { classifyLoadFailure } from "@/lib/section-load";
+import {
+  buildGridProviders,
+  connectedProviderCount,
+  disconnectRouteFor,
+  type GridProvider,
+} from "@/lib/provider-grid";
 import { ProviderDetail, type ConnectionSubject } from "@/views/connections/ProviderDetail";
 import { InferenceSection } from "@/views/connections/InferenceSection";
 import { McpServersSection } from "@/views/connections/McpServersSection";
@@ -43,6 +49,13 @@ type Load = "loading" | "ready" | "unavailable";
  * and a page that paints honestly beats a page that never paints.
  */
 const COMPOSIO_PROBE_TIMEOUT_MS = 5_000;
+
+/**
+ * The value the probe race resolves when the timeout wins (issue #1478). A
+ * unique sentinel, so "the probe timed out" is distinguishable from "the probe
+ * answered `null`" — the two are different facts and must render differently.
+ */
+const PROBE_TIMED_OUT = Symbol("composio-probe-timed-out");
 
 /** Wire the third-party accounts your company can act through. */
 export function ConnectionsView({ client, company }: Props) {
@@ -92,6 +105,12 @@ export function ConnectionsView({ client, company }: Props) {
   // `reach` reads "Not available on this host" — so every tile would flash that
   // and then flip to Connect a moment later.
   const [reachSettled, setReachSettled] = useState(false);
+  // Whether the Composio probe LOST ITS RACE against the timeout (issue #1478).
+  // Distinct from `status === null`, which is also what a genuine "no Composio
+  // surface" answer sets — collapsing the two rendered a timed-out probe as a
+  // confident "this host has no providers to offer yet". A slow host is the
+  // common case here: the probe reaches an external catalog.
+  const [probeFailed, setProbeFailed] = useState(false);
   // Poll timers for Composio sign-ins in flight, keyed by toolkit, so a company
   // switch or unmount cannot leave one running.
   const pollTimers = useRef<Record<string, number>>({});
@@ -151,25 +170,43 @@ export function ConnectionsView({ client, company }: Props) {
   useEffect(() => {
     let live = true;
     setReachSettled(false);
+    setProbeFailed(false);
     void (async () => {
       try {
         // Bounded: the shared client has no abort or timeout, and the grid now
         // waits on this call before painting — so a host that accepts the
-        // connection and never answers would hold the page on skeletons
-        // forever. Losing the race is not an error, it is "no Composio route
-        // we can confirm", which is what a null `reach` already means.
+        // connection and never answers would hold the page on skeletons forever.
+        // The timeout resolves a distinct SENTINEL rather than `null`, because a
+        // null answer and a request that never answered are different facts: the
+        // former is "no Composio surface", the latter is "we could not check",
+        // and rendering the second as the first is the #1478 defect.
         const probed = await Promise.race([
           getComposioStatus(client, company),
-          new Promise<null>((resolve) => window.setTimeout(() => resolve(null), COMPOSIO_PROBE_TIMEOUT_MS)),
+          new Promise<typeof PROBE_TIMED_OUT>((resolve) =>
+            window.setTimeout(() => resolve(PROBE_TIMED_OUT), COMPOSIO_PROBE_TIMEOUT_MS),
+          ),
         ]);
         if (!live) return;
-        setStatus(probed);
-        setAttested(probed?.credentialSource === "attested");
-      } catch {
-        // No Composio surface on this host — not an error for this page.
+        if (probed === PROBE_TIMED_OUT) {
+          // Could not check — say so downstream rather than assembling a
+          // confident empty state from a request that never answered.
+          setStatus(null);
+          setAttested(false);
+          setProbeFailed(true);
+        } else {
+          setStatus(probed);
+          setAttested(probed?.credentialSource === "attested");
+        }
+      } catch (err) {
+        // A 404 is the honest "no Composio surface on this host" (issue #822):
+        // leave the page in its no-route state. Anything else — a 5xx, an
+        // offline network, an expired session — is UNKNOWN, not absent, so it
+        // takes the same `probeFailed` path as the timeout above. Collapsing it
+        // to a confident empty catalog is the #1478 defect one level down.
         if (live) {
           setStatus(null);
           setAttested(false);
+          if (classifyLoadFailure(err) === "error") setProbeFailed(true);
         }
       } finally {
         if (live) setReachSettled(true);
@@ -476,8 +513,10 @@ export function ConnectionsView({ client, company }: Props) {
   // Counted off the rendered grid, not off the raw host rows. The badge used to
   // count every row `GET …/connections` returned while the grid below drew only
   // the eleven tiles the console had metadata for — so the header could read "3
-  // connected" above a grid showing none of them (issue #582).
-  const connectedCount = providers.filter((p) => p.connected).length;
+  // connected" above a grid showing none of them (issue #582). Derived through
+  // the shared helper so this and the section heading's own count cannot drift
+  // (issue #1407).
+  const connectedCount = connectedProviderCount(providers);
 
   return (
     <div className="flex-1 overflow-y-auto">
@@ -568,7 +607,8 @@ export function ConnectionsView({ client, company }: Props) {
           canManage={canManage && load !== "unavailable"}
           busy={busy}
           noCredential={status?.credentialSource === "none"}
-          granted={status?.granted !== false}
+          granted={status?.granted}
+          probeFailed={probeFailed}
           openMode={status?.openMode === true}
           degraded={status ? catalogWarning(status) : null}
           loading={load === "loading" || !reachSettled}

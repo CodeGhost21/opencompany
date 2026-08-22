@@ -59,6 +59,39 @@ enum Command {
         #[arg(default_value = ".")]
         path: PathBuf,
     },
+    /// Print the system prompt each of a company's agents would be built with.
+    ///
+    /// A brief (`agents/prompts/*.md`, an inline `prompt`, a routed `context`
+    /// entry) is the most editable thing in a bundle and used to be the least
+    /// inspectable: seeing it meant running the company and reading a provider
+    /// trace. This renders the same composition from the manifest alone, names
+    /// every section's origin, and says plainly which sections need a live
+    /// runtime instead of guessing at them.
+    ///
+    /// Build with `--features openhuman` to include the harness's own tool
+    /// briefs (workspace, ledgers, deliverables, delegation); the default build
+    /// renders the persona and the checked-in briefs and reports the rest as
+    /// deferred. `scripts/dump-prompt.sh` is the wrapper that gets the feature
+    /// flag right.
+    Prompt {
+        /// Company bundle directory, or a manifest file.
+        #[arg(long = "company", value_name = "DIR", default_value = ".")]
+        company: PathBuf,
+        /// Only this agent id. Repeat for several.
+        #[arg(long = "agent", value_name = "ID")]
+        agents: Vec<String>,
+        /// Print the prompt body verbatim, with no report around it — the bytes
+        /// to diff against a provider trace. Requires exactly one agent.
+        #[arg(long)]
+        raw: bool,
+        /// Print the report as JSON instead of Markdown.
+        #[arg(long)]
+        json: bool,
+        /// Write one `<agent-id>.prompt.md` per agent into this directory
+        /// instead of printing.
+        #[arg(long = "out", value_name = "DIR")]
+        out: Option<PathBuf>,
+    },
     /// Report the effective runtime configuration, which layer set each value,
     /// and what is missing per optional capability.
     Doctor {
@@ -245,6 +278,78 @@ impl From<ModeArg> for LaunchMode {
 /// file inside it (`companies/<name>/company.toml`); the file form is normalized
 /// to its parent so workspace seeding and the skill/workflow read resolvers look
 /// under the company directory rather than under `company.toml/…`.
+/// `opencompany prompt`: render each agent's composed system prompt.
+///
+/// Selection is by id and is **fail-loud** — a `--agent` naming nobody is an
+/// error listing the roster, not an empty report. A typo'd id that printed
+/// nothing would read exactly like an agent whose prompt is empty, which is the
+/// one thing this command exists to distinguish.
+fn run_prompt(
+    company: &std::path::Path,
+    agents: &[String],
+    raw: bool,
+    json: bool,
+    out: Option<&std::path::Path>,
+) -> Result<()> {
+    let manifest = CompanyManifest::from_path(company)?;
+    let all = opencompany::company::prompt_dump::dump(&manifest);
+
+    let selected: Vec<_> = if agents.is_empty() {
+        all
+    } else {
+        for wanted in agents {
+            if !all.iter().any(|agent| &agent.agent_id == wanted) {
+                let roster: Vec<&str> = all.iter().map(|a| a.agent_id.as_str()).collect();
+                return Err(opencompany::error::OpenCompanyError::Config(format!(
+                    "no agent `{wanted}` in {} — the roster is {roster:?}",
+                    company.display()
+                )));
+            }
+        }
+        all.into_iter()
+            .filter(|agent| agents.contains(&agent.agent_id))
+            .collect()
+    };
+
+    if raw {
+        // One agent, because raw output has no framing to say whose prompt is
+        // whose: concatenating two would produce a document that looks like one
+        // agent's prompt and is not.
+        let [agent] = &selected[..] else {
+            return Err(opencompany::error::OpenCompanyError::Config(format!(
+                "`--raw` prints one prompt with no framing around it, so it needs exactly one \
+                 `--agent` (got {})",
+                selected.len()
+            )));
+        };
+        print!("{}", agent.body());
+        return Ok(());
+    }
+
+    if let Some(dir) = out {
+        std::fs::create_dir_all(dir)?;
+        for agent in &selected {
+            let path = dir.join(format!("{}.prompt.md", agent.agent_id));
+            std::fs::write(&path, agent.to_markdown())?;
+            println!("wrote {}", path.display());
+        }
+        return Ok(());
+    }
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&selected)?);
+        return Ok(());
+    }
+
+    for (index, agent) in selected.iter().enumerate() {
+        if index > 0 {
+            println!("---\n");
+        }
+        print!("{}", agent.to_markdown());
+    }
+    Ok(())
+}
+
 fn company_source_dir(path: &std::path::Path) -> std::path::PathBuf {
     if path.is_file() {
         path.parent()
@@ -419,7 +524,7 @@ fn company_builder(
         builder = builder.with_stores(stores);
     }
     if let Some(overlay) = state.memory_overlay() {
-        builder = builder.with_memory_overlay(overlay);
+        builder = builder.with_memory_overlay(&overlay);
     }
     #[cfg(feature = "smtp")]
     if let Ok(Some(cfg)) = opencompany::server::ops::mailer::TenantMailboxConfig::from_env() {
@@ -677,62 +782,13 @@ fn attach_openhuman(builder: RuntimeBuilder) -> RuntimeBuilder {
 
 /// Attaches the embedded OpenHuman harness under the `openhuman` feature.
 ///
-/// The harness pool is **always** attached, so cognition routes through a live
-/// company agent whenever *any* inference source is configured — the managed
-/// env default (`TINYHUMANS_API_KEY` / `OPENCOMPANY_INFERENCE_*`), a manifest
-/// `[inference]` section, or a runtime console override (issue #56 — BYOK).
-/// Attaching the pool unconditionally is what unblocks a BYOK-only tenant that
-/// has no platform credential: the builder still constructs the harness brain
-/// from its manifest/runtime config. Without any source, the runtime keeps its
-/// hosted/echo brain.
-///
-/// Without the feature this is the identity function, so the default build is
-/// unaffected.
-#[cfg(not(feature = "openhuman"))]
+/// One line, because the sequence itself lives in the library
+/// ([`opencompany::app::attach_harness`]) — the desktop shell builds companies
+/// through `desktop::register` rather than through this binary, and a second
+/// copy of the wiring here is exactly how that path came to build companies
+/// with no harness at all.
 fn attach_harness(builder: RuntimeBuilder) -> RuntimeBuilder {
-    builder
-}
-
-#[cfg(feature = "openhuman")]
-fn attach_harness(builder: RuntimeBuilder) -> RuntimeBuilder {
-    use opencompany::app::config::ProcessEnv;
-    use opencompany::harness::HarnessPool;
-    use opencompany::harness::provider::{
-        PlatformCredentialStatus, harness_inference_from_env, media_backend_from_env,
-        search_backend_from_env,
-    };
-
-    // Issue #879: every managed surface below fails closed and says nothing at
-    // boot, so a tenant provisioned without its platform token comes up looking
-    // healthy and only reveals the gap when an agent is built or a workflow node
-    // 500s. Say it once, here, where an operator reading the pod's first lines
-    // will see it.
-    if let Some(warning) = PlatformCredentialStatus::resolve(&ProcessEnv).boot_warning() {
-        tracing::warn!("[boot] {warning}");
-    }
-
-    let builder = builder.with_harness(Arc::new(HarnessPool::new()));
-    // Issue #109: the MANAGED media-generation backend, resolved from the
-    // environment only (never a tenant secret). Absent ⇒ media tools stay unwired
-    // even for a company that grants `media` (fail-closed).
-    let builder = match media_backend_from_env(&ProcessEnv) {
-        Some(media_backend) => builder.with_media_backend(media_backend),
-        None => builder,
-    };
-    // Issue #238: the MANAGED web-search backend, on the same platform identity
-    // as managed inference and resolved from the environment only. Absent ⇒
-    // `web_search` stays unwired even for a company that grants `search`.
-    let builder = match search_backend_from_env(&ProcessEnv) {
-        Some(search_backend) => builder.with_search_backend(search_backend),
-        None => builder,
-    };
-    // The managed env default is an *optional*, lowest-precedence source; a
-    // BYOK-only tenant supplies none and still gets a harness brain from its
-    // manifest/runtime config.
-    match harness_inference_from_env(&ProcessEnv) {
-        Some((config, model_override)) => builder.with_harness_inference(config, model_override),
-        None => builder,
-    }
+    opencompany::app::attach_harness(builder)
 }
 
 /// Routes feedback to the TinyHumans hub when this instance is provisioned with
@@ -1706,6 +1762,12 @@ async fn async_main() -> Result<()> {
             let setup_complete = config_file
                 .as_ref()
                 .is_some_and(|c| c.setup_completed_at.is_some());
+            // Read off the file before it is consumed for `bind` below: the
+            // memory engine is resolved further down, after the state exists.
+            let memory_section = config_file
+                .as_ref()
+                .map(|c| c.memory.clone())
+                .unwrap_or_default();
             let (bind, bind_source) = opencompany::app::config::resolve_serve_bind(
                 bind,
                 &ProcessEnv,
@@ -1749,7 +1811,12 @@ async fn async_main() -> Result<()> {
             // mongodb are opened once here and injected into every company's
             // builder. A selected-but-unavailable backend aborts boot rather
             // than silently falling back to fs.
-            let storage_settings = opencompany::store::StorageSettings::from_env()?;
+            // The environment first, then the instance's own `config.toml`
+            // `[memory]` section under it — the engine an operator chose from
+            // the console. A deployment that injects `OPENCOMPANY_MEMORY` keeps
+            // ownership and the file layer is inert; see `MemorySection`.
+            let storage_settings = opencompany::store::StorageSettings::from_env()?
+                .with_memory_config(&memory_section)?;
             if let Some(handles) =
                 opencompany::store::open_storage(&storage_settings, &home).await?
             {
@@ -2022,6 +2089,13 @@ async fn async_main() -> Result<()> {
                 std::process::exit(1);
             }
         }
+        Some(Command::Prompt {
+            company,
+            agents,
+            raw,
+            json,
+            out,
+        }) => run_prompt(&company, &agents, raw, json, out.as_deref()),
         Some(Command::Doctor { company, json }) => {
             let env = ProcessEnv;
             // Locate config.toml under the resolved data dir (env override or

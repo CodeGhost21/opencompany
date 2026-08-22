@@ -1,0 +1,108 @@
+# Lines of inquiry: what this lab is actually trying to find out, and where each
+# line got to.
+#
+# Not `goals` and not the board. A goal is an outcome the company wants; a line
+# of inquiry is a *question with a state* — open, answered, or abandoned because
+# it turned out to be the wrong question. The abandoned ones are the point: a
+# lab with no record of the lines it dropped will re-open them, confidently,
+# every time somebody new looks at the problem.
+
+title = "Questions"
+purpose = """
+Every line of inquiry this lab has opened: what is being asked, what would \
+count as an answer, where it got to, and why the dead ends were dead. Read it \
+before opening a line — a question already tried and abandoned is the cheapest \
+mistake available here.\
+"""
+written_by = "`record_entry` to open or advance a line of inquiry, `close_entry` when it is answered or abandoned"
+checks = ["required-field", "known-status", "closed-needs-reason"]
+
+[[field]]
+name = "id"
+role = "id"
+required = true
+
+[[field]]
+name = "question"
+role = "title"
+required = true
+description = "The question, stated so somebody could tell whether it had been answered."
+
+[[field]]
+name = "status"
+role = "status"
+required = true
+
+[[field]]
+name = "would_answer_it"
+role = "prose"
+required = true
+description = "What evidence would settle this. A question with no answerable form is a topic."
+
+[[field]]
+name = "owner"
+role = "owner"
+
+[[field]]
+name = "parent"
+role = "refs"
+description = "The question this one was split out of, if any."
+
+[[field]]
+name = "state"
+role = "prose"
+description = "Where the line has got to, in a line or two. The thing a reader arriving mid-investigation needs."
+
+[[field]]
+name = "reason"
+role = "prose"
+description = "How it closed — answered, or abandoned and why. Required when it closes."
+
+[[field]]
+name = "refs"
+role = "refs"
+description = "Findings, sources and runs that carry the work."
+
+[[status]]
+name = "open"
+
+[[status]]
+name = "blocked"
+
+[[status]]
+name = "answered"
+closed = true
+needs_reason = true
+
+[[status]]
+name = "abandoned"
+closed = true
+needs_reason = true
+
+[[status]]
+name = "wrong_question"
+label = "Wrong question"
+closed = true
+needs_reason = true
+
+[[section]]
+heading = "Open lines"
+blurb = "Being worked now. Most recently advanced first — record against a line to raise it."
+statuses = ["open"]
+order = "recent"
+
+[[section]]
+heading = "Blocked"
+blurb = "Waiting on something nameable. Each should say what."
+statuses = ["blocked"]
+order = "recent"
+
+[[section]]
+heading = "Closed"
+blurb = """
+Answered, abandoned, or found to be the wrong question — each with the reason. \
+This section is the lab's most valuable output after the findings themselves: \
+without it, every new reader re-opens the same dead line with confidence.\
+"""
+statuses = ["answered", "abandoned", "wrong_question"]
+cap = 20

@@ -78,7 +78,7 @@ pub fn guard(registry: &Registry, path: &str) -> Result<()> {
     Ok(())
 }
 
-/// The file name a derived path ends in (`derived/GOALS.md` → `GOALS.md`).
+/// The file name a derived path ends in (`derived/goals.md` → `goals.md`).
 fn file_name(spec: &LedgerSpec) -> &str {
     spec.derived
         .rsplit('/')
@@ -110,10 +110,19 @@ pub async fn publish(
         .adopt_or_create_folder(company, None, DERIVED_DIR, WorkspaceOrigin::Seed)
         .await?;
     let name = file_name(spec);
+    // Matched on the normalized name, not the literal one. The derived file is
+    // `derived/tasks.md` under the workspace naming rule
+    // ([`crate::company::workspace_names`]) and was `derived/tasks.md` before
+    // it — so a literal match would leave the old file in place, untouched and
+    // stale, while a second one appeared beside it carrying the live rows. Two
+    // files claiming to be one ledger is exactly the ambiguity `derived/` exists
+    // to prevent.
+    let canonical = crate::company::workspace_names::kebab_name(name);
     let existing = workspace.tree(company).await?.into_iter().find(|node| {
         node.kind == NodeKind::File
             && node.parent_id.as_deref() == Some(folder.node().id.as_str())
-            && node.name == name
+            && (node.name == name
+                || crate::company::workspace_names::kebab_name(&node.name) == canonical)
     });
     match existing {
         Some(node) => {
@@ -151,16 +160,16 @@ mod test {
 
     #[test]
     fn the_whole_folder_is_guarded_not_the_files_in_it() {
-        assert!(is_derived_path("derived/GOALS.md"));
-        assert!(is_derived_path("/derived/GOALS.md"));
+        assert!(is_derived_path("derived/goals.md"));
+        assert!(is_derived_path("/derived/goals.md"));
         assert!(is_derived_path("derived"));
         // A ledger declared next week renders a file no guard has heard of.
         assert!(is_derived_path("derived/SOMETHING-NOBODY-HAS-DECLARED.md"));
         // Case is not a way around it.
-        assert!(is_derived_path("Derived/GOALS.md"));
-        assert!(!is_derived_path("notes/derived/GOALS.md"));
-        assert!(!is_derived_path("derivedish/GOALS.md"));
-        assert!(!is_derived_path("GOALS.md"));
+        assert!(is_derived_path("Derived/goals.md"));
+        assert!(!is_derived_path("notes/derived/goals.md"));
+        assert!(!is_derived_path("derivedish/goals.md"));
+        assert!(!is_derived_path("goals.md"));
     }
 
     /// The refusal has to name a remedy the caller can actually follow. The
@@ -169,13 +178,13 @@ mod test {
     #[test]
     fn the_refusal_names_the_owning_ledgers_real_write_path() {
         let registry = Registry::build([]);
-        let board = refusal(&registry, "derived/TASKS.md");
+        let board = refusal(&registry, "derived/tasks.md");
         assert!(board.contains("tasks"), "{board}");
         assert!(
             !board.contains("`record_entry` to add"),
             "the board does not take record_entry: {board}"
         );
-        let goals = refusal(&registry, "derived/GOALS.md");
+        let goals = refusal(&registry, "derived/goals.md");
         assert!(goals.contains("record_entry"), "{goals}");
     }
 

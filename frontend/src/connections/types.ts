@@ -107,14 +107,124 @@ export interface InstanceIdentity {
 /**
  * Where a connection came from, when that is not "someone typed an address".
  *
- * Only `embedded` so far: the host running inside this application. It is
- * singular in a way no other connection is — there is exactly one per client,
- * this client both starts it and knows its identity without asking, and its
- * address is regenerated on every launch. That last property is why the
- * marker has to be durable: recognising last launch's row as *this* host is
- * what stops a dead one accumulating per run.
+ * Superseded by {@link Connector}, and kept only as the shape older profiles
+ * were written in — `origin: "embedded"` is what a build predating connectors
+ * left in `localStorage`, and `connectorOf` is what reads it forward.
+ *
+ * @deprecated Read `Connection.connector`.
  */
 export type ConnectionOrigin = "embedded";
+
+/**
+ * Where a runtime runs, and how this client gets to it.
+ *
+ * The four answers an operator can give to "where does my company live", and
+ * the reason this is a durable property of a connection rather than something
+ * derived from its address when it is needed:
+ *
+ * - a `local` host binds an **ephemeral port on purpose** — a fixed one
+ *   collides with a dev server — so its address is different on every launch;
+ * - an `ssh` connection's address is a loopback port this client chose when it
+ *   opened the tunnel, so it is different on every launch too, and is nobody's
+ *   address once the tunnel closes;
+ * - `cloud` and `remote` are both `https://…` and are told apart by nothing
+ *   whatsoever in the url.
+ *
+ * Recognising last launch's row as *this* host is what stops a dead one
+ * accumulating per run (issue #615), and only a persisted marker can do it.
+ *
+ * See `docs/spec/runtime/connectors.md`.
+ */
+export type Connector =
+  /**
+   * A host running inside this application, over a data root it owns.
+   *
+   * Desktop only, and the one connector where nothing has to be typed: the
+   * core starts the host and reports its address over IPC.
+   */
+  | { kind: "local" }
+  /**
+   * A tenant of the hosted control plane.
+   *
+   * Distinguished from {@link Connector} `remote` by behaviour rather than by
+   * address. A tenant container is woken on request by the manager's proxy, so
+   * its first request after an idle period takes seconds — see
+   * `wakingWindow` in `registry.ts`, which is why a cold tenant reads as
+   * "Waking…" instead of as a host that is gone.
+   */
+  | { kind: "cloud"; tenant: string }
+  /** A host someone else's process is serving, addressed directly. */
+  | { kind: "remote" }
+  /**
+   * A host bound to loopback on another machine, reached through a tunnel this
+   * application opens and supervises.
+   *
+   * Desktop only: a browser cannot start a process.
+   */
+  | { kind: "ssh"; target: SshTarget };
+
+export type ConnectorKind = Connector["kind"];
+
+/** Where the far end of an SSH tunnel is, and how to reach it. */
+export interface SshTarget {
+  /**
+   * `user@host`, or a `Host` alias out of `~/.ssh/config`.
+   *
+   * An alias is the form to prefer. Anyone with a bastion, a jump host or a
+   * non-default key has already written that file, and re-asking for its
+   * contents in a dialog is asking to be told them wrong.
+   */
+  destination: string;
+  /** The SSH port, when it is not 22. */
+  port?: number;
+  /** Where the host is listening on the far side. */
+  remotePort: number;
+  /**
+   * A keychain handle for a key passphrase or password — **never the secret**.
+   *
+   * The same rule as `{ kind: "device"; ref }` above, for the same reason:
+   * connection records are persisted and passed around the UI.
+   */
+  secretRef?: string;
+}
+
+/**
+ * Where a host listens on the far side of a tunnel, when nobody says otherwise.
+ *
+ * The port `opencompany serve` binds. Kept in step with `DEFAULT_REMOTE_PORT`
+ * in the shell's `ssh.rs`, which is what applies it when the console omits it.
+ */
+export const DEFAULT_REMOTE_PORT = 8080;
+
+/** The connector a host typed into "Add a host" gets. */
+export const DEFAULT_CONNECTOR: Connector = { kind: "remote" };
+
+/**
+ * Which connectors this runtime can offer.
+ *
+ * `local` and `ssh` both need a process started on this machine, which only
+ * the desktop shell can do. Offering them in a browser would put a tab on
+ * screen that cannot be honoured — and the browser build has no core to
+ * report the failure through, so it would simply do nothing.
+ */
+export function availableConnectors(desktop: boolean): ConnectorKind[] {
+  return desktop ? ["local", "cloud", "remote", "ssh"] : ["cloud", "remote"];
+}
+
+/**
+ * What each connector is called wherever one has to be named to an operator.
+ *
+ * Beside {@link ConnectorKind} rather than in either surface that prints it:
+ * "Add a host" names the connector an operator is choosing between, and
+ * "Manage hosts" names the one a row already has. Two copies would drift, and
+ * a host would be offered under one word and then listed under another.
+ */
+export const CONNECTOR_LABELS: Record<ConnectorKind, string> = {
+  local: "On this computer",
+  cloud: "TinyHumans Cloud",
+  remote: "Another gateway",
+  ssh: "Over SSH",
+};
 
 export interface Connection {
   id: ConnectionId;
@@ -138,7 +248,16 @@ export interface Connection {
   companies: string[];
   /** Why it is `down` or `unauthenticated`, for the connection's own row. */
   error?: string;
-  origin?: ConnectionOrigin;
+  /** Where this host runs. See {@link Connector}. */
+  connector: Connector;
+  /**
+   * Whether `connecting` means "waking a hibernating tenant" rather than
+   * "contacting a host".
+   *
+   * Session state, never persisted: it says what this probe is doing right
+   * now. Only a `cloud` connection is ever `true`.
+   */
+  waking?: boolean;
 }
 
 /** The fields needed to construct a connection's client. */

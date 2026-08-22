@@ -1,0 +1,93 @@
+# What this newsroom got wrong, and what it did about it.
+#
+# A correction ledger is a publication's credibility made auditable. The failure
+# it prevents is not the error — errors happen — but the quiet edit: a published
+# claim changed without a note, which is indistinguishable from having never
+# made the claim, and which a reader who saw the original will notice.
+
+title = "Corrections"
+purpose = """
+Every error this newsroom has published, how it happened, and what was done \
+about it. Read it before publishing anything similar; write to it the moment an \
+error is confirmed, before deciding how to handle it.\
+"""
+written_by = "`record_entry` to log or update a correction, `close_entry` when it is published or found unfounded"
+checks = ["required-field", "known-status", "closed-needs-reason"]
+
+[[field]]
+name = "id"
+role = "id"
+required = true
+
+[[field]]
+name = "error"
+role = "title"
+required = true
+description = "What was published that was wrong, quoted rather than characterised."
+
+[[field]]
+name = "status"
+role = "status"
+required = true
+
+[[field]]
+name = "story"
+role = "refs"
+required = true
+description = "The story it appeared in."
+
+[[field]]
+name = "how"
+role = "prose"
+description = "How it got through — a single source, a misread document, a transcription error. This is the field that changes practice."
+
+[[field]]
+name = "severity"
+role = "prose"
+description = "Whether it changes the meaning of the piece. A wrong middle initial and a wrong allegation are not the same class."
+
+[[field]]
+name = "action"
+role = "prose"
+description = "Correction note, update, or retraction — and where it appears. A silent edit is not one of the options."
+
+[[field]]
+name = "owner"
+role = "owner"
+
+[[field]]
+name = "reason"
+role = "prose"
+description = "How it closed — corrected and published, or found not to be an error. Required when it closes."
+
+[[status]]
+name = "reported"
+
+[[status]]
+name = "confirmed"
+
+[[status]]
+name = "corrected"
+closed = true
+needs_reason = true
+
+[[status]]
+name = "unfounded"
+closed = true
+needs_reason = true
+
+[[section]]
+heading = "Open"
+blurb = "Reported or confirmed and not yet corrected. Nothing here waits on convenience."
+statuses = ["reported", "confirmed"]
+order = "recent"
+
+[[section]]
+heading = "Closed"
+blurb = """
+Corrected and published, or found unfounded — each with the reason and how the \
+error got through. The `how` field is what makes this ledger change practice \
+rather than merely record failure.\
+"""
+statuses = ["corrected", "unfounded"]
+cap = 20

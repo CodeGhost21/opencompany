@@ -50,7 +50,7 @@ model = "llama3"
 allow = ["workspace", "files"]
 
 [users]
-admins = ["operator@opencompany.local"]
+admins = ["ada@example.com"]
 
 [[agent]]
 id = "ceo"

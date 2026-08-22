@@ -1,0 +1,119 @@
+# The pipeline. Every deal in flight, what stage it is at, and why a lost one
+# was lost.
+#
+# A board cannot be a pipeline. A card is work somebody does; a deal is a
+# *forecast* — it has a value, a close date, a champion who may leave, and a
+# stage that means something specific about what has been proved rather than
+# what has been done. Running a pipeline off a task board produces the
+# characteristic failure of agentic sales: everything looks active and nothing
+# is qualified.
+
+title = "Deals"
+purpose = """
+Every deal in flight: its value, its stage, who is championing it inside the \
+account, what would kill it, and why the lost ones were lost. Read it before \
+any outreach or proposal — half of what gets pitched has been pitched to this \
+account before.\
+"""
+written_by = "`record_entry` to open or advance a deal, `close_entry` when it is won or lost"
+checks = ["required-field", "known-status", "closed-needs-reason"]
+
+[[field]]
+name = "id"
+role = "id"
+required = true
+
+[[field]]
+name = "deal"
+role = "title"
+required = true
+description = "The account and what they would be buying."
+
+[[field]]
+name = "status"
+role = "status"
+required = true
+
+[[field]]
+name = "value"
+role = "number"
+description = "Annual value, in the account's currency. A deal with no value is not forecastable."
+
+[[field]]
+name = "champion"
+role = "prose"
+description = "The person inside the account who wants this to happen. A deal with no champion is a conversation."
+
+[[field]]
+name = "economic_buyer"
+role = "prose"
+description = "Who can actually sign. Frequently not the champion, and the commonest reason a deal stalls at the end."
+
+[[field]]
+name = "close_date"
+role = "date"
+description = "When it would close. Moved deliberately, with a reason — a date that quietly slips twice was never real."
+
+[[field]]
+name = "what_would_kill_it"
+role = "prose"
+description = "The honest risk. A pipeline where nothing could go wrong is a pipeline nobody has qualified."
+
+[[field]]
+name = "owner"
+role = "owner"
+
+[[field]]
+name = "reason"
+role = "prose"
+description = "Why it closed — won, lost to whom, or no decision. Required when it closes."
+
+[[field]]
+name = "refs"
+role = "refs"
+
+[[status]]
+name = "qualifying"
+aliases = ["discovery"]
+
+[[status]]
+name = "proposal"
+aliases = ["negotiation"]
+
+[[status]]
+name = "won"
+closed = true
+needs_reason = true
+
+[[status]]
+name = "lost"
+closed = true
+needs_reason = true
+
+[[status]]
+name = "no_decision"
+label = "No decision"
+closed = true
+needs_reason = true
+
+[[section]]
+heading = "Late stage"
+blurb = "Proposal or negotiation. Check the economic buyer — this is where deals with only a champion stall."
+statuses = ["proposal"]
+order = "recent"
+
+[[section]]
+heading = "Early stage"
+blurb = "Qualifying or in discovery. Each should say what would kill it."
+statuses = ["qualifying"]
+order = "recent"
+
+[[section]]
+heading = "Closed"
+blurb = """
+Won, lost, or no decision — each with the reason. `no_decision` is kept distinct \
+from `lost`, and is the commonest outcome in enterprise sales; collapsing the \
+two would hide the fact that the competitor was inertia.\
+"""
+statuses = ["won", "lost", "no_decision"]
+cap = 20

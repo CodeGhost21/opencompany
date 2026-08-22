@@ -24,12 +24,19 @@ import {
   mayCarryACredential,
 } from "@/api/transport";
 import type { Transport } from "@/api/transport";
-import { forgetConnection, registerConnection } from "@/api/transport/desktop";
+import {
+  closeSshTunnel,
+  forgetConnection,
+  openSshTunnel,
+  registerConnection,
+} from "@/api/transport/desktop";
 import {
   EMBEDDED_LABEL,
   type ConnectionProfile,
-  embeddedProfiles,
+  localProfiles,
+  connectorOf,
   findProfile,
+  findSshProfile,
   forgetProfile,
   readProfiles,
   saveProfile,
@@ -37,11 +44,13 @@ import {
 import {
   type Connection,
   type ConnectionId,
-  type ConnectionOrigin,
+  type Connector,
   type Credential,
   type InstanceIdentity,
+  DEFAULT_CONNECTOR,
   connectionConfig,
 } from "./types";
+import { keepWaking, wakeRetryDelay } from "./waking";
 
 /** The alphabet a generated connection id uses. Excludes `:` — see `scopedKey`. */
 const ID_ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789";
@@ -90,6 +99,11 @@ let snapshot: Connection[] = [];
  * connection list and looking for `connecting` fires again — probing forever
  * and taking the tab down with it. Making the guard a property of the registry
  * rather than of the caller means every future caller inherits it.
+ *
+ * Probes are additionally versioned by the address they are working against:
+ * `reseat` swaps in a new client when a connection moves, so a probe that
+ * captured the previous address must discard its writes (`stale`) and the
+ * `probe` finalizer starts the replacement client's probe it suppressed.
  */
 const probing = new Set<ConnectionId>();
 
@@ -117,6 +131,21 @@ function patch(id: ConnectionId, change: Partial<Connection>): void {
     return { ...entry, connection: { ...entry.connection, ...change } };
   });
   if (touched) emit();
+}
+
+/**
+ * True when a probe working against `address` is describing a connection that
+ * has since moved on.
+ *
+ * `reseat` swaps in a new `OpenCompanyClient` (built from a new address) for
+ * the same id, so a probe that captured the previous one would otherwise patch
+ * identity, companies, and status fetched from the *old* address over the new
+ * connection's row. Discarding by address rather than by client identity lets
+ * a label-only `reseat` keep its in-flight probe's writes, which are still
+ * describing the same host.
+ */
+function stale(id: ConnectionId, address: string | undefined): boolean {
+  return clientFor(id)?.baseUrl !== address;
 }
 
 /** Every connection, for rendering. */
@@ -165,7 +194,8 @@ export interface AddConnection {
    * the host's own fuller answer.
    */
   identity?: InstanceIdentity;
-  origin?: ConnectionOrigin;
+  /** Where this host runs. Defaults to `remote` — a url someone supplied. */
+  connector?: Connector;
 }
 
 /**
@@ -182,7 +212,13 @@ export interface AddConnection {
 export function addConnection(input: AddConnection): ConnectionId {
   const baseUrl = input.baseUrl.replace(/\/$/, "");
   const defaultCompany = input.defaultCompany ?? null;
-  const remembered = findProfile(baseUrl, defaultCompany);
+  // An `ssh` host is recognised by where its tunnel goes, not by the loopback
+  // port this launch happened to bind — see `findSshProfile`. Every other
+  // connector's address is what it is remembered by.
+  const remembered =
+    input.connector?.kind === "ssh"
+      ? findSshProfile(input.connector.target)
+      : findProfile(baseUrl, defaultCompany);
 
   // Already registered this session (StrictMode double-invokes, and the web
   // build adds its bootstrap connection from a `useMemo`). Hand back the
@@ -211,7 +247,7 @@ export function addConnection(input: AddConnection): ConnectionId {
     status: "connecting",
     identity: input.identity ?? null,
     companies: [],
-    origin: input.origin,
+    connector: input.connector ?? DEFAULT_CONNECTOR,
   };
   // The desktop routes this connection through its own core; the browser
   // build keeps `fetch`. `defaultTransport` decides, so neither the registry
@@ -244,7 +280,10 @@ function profileOf(connection: Connection): ConnectionProfile {
     defaultCompany: connection.defaultCompany,
     credential: connection.credential,
     instanceId: connection.identity?.instanceId,
-    origin: connection.origin,
+    connector: connection.connector,
+    // Written beside it for one release so a rolled-back build still
+    // recognises a local host; see `ConnectionProfile.origin`.
+    origin: connection.connector.kind === "local" ? "embedded" : undefined,
   };
 }
 
@@ -340,7 +379,7 @@ export function restoreConnections(
         defaultCompany: profile.defaultCompany,
         credential: profile.credential,
         identity: profile.instanceId ? { instanceId: profile.instanceId } : undefined,
-        origin: profile.origin,
+        connector: connectorOf(profile),
         transport,
       }),
     );
@@ -479,7 +518,7 @@ export function adoptLocalHosts(
     .map((host) => host.instanceId)
     .filter((id): id is string => id !== undefined),
 ): ConnectionId[] {
-  const known = embeddedProfiles();
+  const known = localProfiles();
   const rostered = new Set(knownInstanceIds);
   // Matched first, all of them, before anything is removed. `thisHost` falls
   // back to an id-less profile — the one an older version wrote — and two
@@ -544,7 +583,7 @@ function adoptOne(
     // it forever.
     label: host.label ?? mine?.label ?? EMBEDDED_LABEL,
     identity,
-    origin: "embedded",
+    connector: { kind: "local" },
     transport: host.transport,
   });
 }
@@ -580,7 +619,7 @@ function reseatEmbedded(
 ): ConnectionId {
   if (
     connection.baseUrl === baseUrl &&
-    connection.origin === "embedded" &&
+    connection.connector.kind === "local" &&
     (label === undefined || connection.label === label)
   ) {
     // The same host at the same address: a second call in one session, which
@@ -591,7 +630,7 @@ function reseatEmbedded(
     ...connection,
     baseUrl,
     label: label ?? connection.label,
-    origin: "embedded",
+    connector: { kind: "local" },
     identity: identity ?? connection.identity,
     // Whatever the last probe concluded, it concluded about the old address.
     status: "connecting",
@@ -658,10 +697,79 @@ export function adoptSession(id: ConnectionId, session: string): void {
   adoptCredential(id, { kind: "session", value: session });
 }
 
+/** What "modify a host" may change about one. See {@link editConnection}. */
+export interface HostEdit {
+  /** What this connection is called in the switcher. Blank keeps the old name. */
+  label?: string;
+  /** Where the host is. Only honoured where {@link hostAddressEditable} is true. */
+  baseUrl?: string;
+}
+
+/**
+ * Whether an operator may retype a connection's address.
+ *
+ * `local` and `ssh` addresses are **assigned by this application**, not typed:
+ * a local host binds an ephemeral port on purpose, and a tunnel's address is a
+ * loopback port this client chose when it opened it. Both are different on
+ * every launch, so an address edited here would be overwritten by the next one
+ * — and in the meantime it would point the console at a port nothing is
+ * serving. Their names stay editable; their addresses belong to whatever is
+ * managing the process.
+ */
+export function hostAddressEditable(connector: Connector): boolean {
+  return connector.kind === "remote" || connector.kind === "cloud";
+}
+
+/**
+ * Renames a connection, or points it at a different address.
+ *
+ * Re-seats rather than patches, because the client bakes `baseUrl` into its
+ * config at construction — see {@link reseat} — and the desktop core keeps its
+ * own copy to resolve proxied requests against. A patched connection would
+ * render the new address beside a client still talking to the old one.
+ *
+ * A move re-probes, and drops everything the last probe concluded: the
+ * identity, the company list and the error all describe the host that *was* at
+ * the old address, and leaving them in place is how a console ends up naming
+ * one host while addressing another.
+ */
+export function editConnection(id: ConnectionId, change: HostEdit): void {
+  const existing = getConnection(id);
+  if (!existing) return;
+  const label = change.label?.trim() || existing.label;
+  const baseUrl =
+    change.baseUrl !== undefined && hostAddressEditable(existing.connector)
+      ? change.baseUrl.trim().replace(/\/$/, "")
+      : existing.baseUrl;
+  const moved = baseUrl !== existing.baseUrl;
+  if (!moved && label === existing.label) return;
+  reseat(id, {
+    ...existing,
+    label,
+    baseUrl,
+    ...(moved
+      ? {
+          status: "connecting" as const,
+          error: undefined,
+          identity: null,
+          companies: [],
+          waking: false,
+        }
+      : {}),
+  });
+  if (moved) void probe(id);
+}
+
 export function removeConnection(id: ConnectionId): void {
+  const going = getConnection(id);
   entries = entries.filter((e) => e.connection.id !== id);
   forgetProfile(id);
-  if (isDesktopRuntime()) forgetConnection(id);
+  if (isDesktopRuntime()) {
+    forgetConnection(id);
+    // A tunnel outliving the connection it was opened for is an `ssh` process
+    // nothing lists and nobody can stop from the application.
+    if (going?.connector.kind === "ssh") void closeSshTunnel(going.connector.target);
+  }
   emit();
 }
 
@@ -698,46 +806,162 @@ export function resetConnections(): void {
  * the other connections carry on regardless.
  */
 export async function probe(id: ConnectionId): Promise<void> {
-  const client = clientFor(id);
-  if (!client || probing.has(id)) return;
-  const insecure = insecurelyCredentialed(getConnection(id));
-  if (insecure) {
-    // Refused here rather than left to fail at the core, because this is the
-    // one function that owns a row's status — and the core's refusal arrives
-    // as an IPC rejection that `client.ts` has already flattened into "cannot
-    // reach the company host". Saying it here is what makes the row name the
-    // reason instead of blaming a network that is working (issue #731).
-    patch(id, { status: "down", error: insecure });
-    return;
-  }
+  if (!clientFor(id) || probing.has(id)) return;
   probing.add(id);
-  patch(id, { status: "connecting", error: undefined });
+  patch(id, { status: "connecting", error: undefined, waking: false });
+  // The address this probe is working against, so the finalizer below can tell
+  // whether the connection moved under it.
+  let address: string | undefined = clientFor(id)?.baseUrl;
   try {
-    await runProbe(id, client);
+    if (!(await ensureTunnel(id))) return;
+    const insecure = insecurelyCredentialed(getConnection(id));
+    if (insecure) {
+      // Refused here rather than left to fail at the core, because this is the
+      // one function that owns a row's status — and the core's refusal arrives
+      // as an IPC rejection that `client.ts` has already flattened into "cannot
+      // reach the company host". Saying it here is what makes the row name the
+      // reason instead of blaming a network that is working (issue #731).
+      patch(id, { status: "down", error: insecure });
+      return;
+    }
+    // Re-read: `ensureTunnel` may have moved this connection to a new address,
+    // which replaces its client. The probe works against the client it finds
+    // here; a `reseat` after this point makes its writes stale.
+    const client = clientFor(id);
+    if (!client) return;
+    address = client.baseUrl;
+    await probeUntilAwake(id, client, address);
   } finally {
     probing.delete(id);
+    // The connection moved while this probe was in flight, so its own
+    // `void probe(id)` was suppressed by the in-flight guard and the
+    // replacement client never got a probe. Pick it up now that the stale
+    // work has cleared.
+    const current = clientFor(id);
+    if (current && current.baseUrl !== address) void probe(id);
   }
 }
 
-async function runProbe(id: ConnectionId, client: OpenCompanyClient): Promise<void> {
+/**
+ * Makes sure an `ssh` connection has a tunnel under it, and that its address is
+ * this launch's rather than last launch's.
+ *
+ * Every other connector is already reachable or is not, so this answers `true`
+ * immediately for them.
+ *
+ * Done here rather than at startup because the address is the problem. A
+ * tunnel binds an ephemeral loopback port, so the url a restored `ssh`
+ * connection comes back holding belonged to a tunnel that closed when the
+ * application last quit — and probing it would report an unreachable host for
+ * a machine that is fine. Opening is idempotent per target on the core's side,
+ * so asking on every probe costs one IPC round trip and needs no separate idea
+ * of which tunnels are up.
+ *
+ * A tunnel that cannot be opened is the connection's own failure, carrying
+ * `ssh`'s words: "Permission denied (publickey)" is a row an operator can act
+ * on, where "could not be reached" is one they cannot.
+ */
+async function ensureTunnel(id: ConnectionId): Promise<boolean> {
+  const connection = getConnection(id);
+  if (!connection || connection.connector.kind !== "ssh") return true;
+  if (!isDesktopRuntime()) {
+    patch(id, { status: "down", error: "reaching a host over ssh needs the desktop application" });
+    return false;
+  }
+  try {
+    const tunnel = await openSshTunnel(connection.connector.target);
+    if (tunnel.baseUrl !== connection.baseUrl) {
+      reseat(id, { ...connection, baseUrl: tunnel.baseUrl, error: undefined });
+    }
+    return true;
+  } catch (err) {
+    patch(id, { status: "down", error: err instanceof Error ? err.message : String(err) });
+    return false;
+  }
+}
 
+/**
+ * Probes, and keeps probing for as long as the connector says a failure might
+ * still be a host on its way up.
+ *
+ * One attempt for every connector but `cloud`, where the loop is what turns a
+ * hibernating tenant into "Waking…" rather than into a red row nothing would
+ * ever re-probe — see `waking.ts`. The in-flight guard in {@link probe} is what
+ * keeps the loop singular: a second call while this one is waiting returns
+ * immediately rather than starting a competing chain.
+ */
+async function probeUntilAwake(
+  id: ConnectionId,
+  client: OpenCompanyClient,
+  address: string | undefined,
+): Promise<void> {
+  const startedAt = Date.now();
+  for (let attempt = 0; ; attempt += 1) {
+    const failure = await runProbe(id, client, address);
+    if (!failure) return;
+    // Removed or retired while the request was in flight — including by
+    // `resetConnections`, which is how a test escapes this loop.
+    const connection = getConnection(id);
+    if (!connection) return;
+    // Moved to a new address while this probe was in flight: its writes would
+    // describe a different host, so stop here — the `probe` finalizer starts
+    // the replacement client's probe.
+    if (stale(id, address)) return;
+    const status = failure.status ?? "down";
+    if (!keepWaking(connection.connector, status, Date.now() - startedAt)) {
+      patch(id, { ...failure, waking: false });
+      return;
+    }
+    patch(id, { status: "connecting", error: undefined, waking: true });
+    await sleep(wakeRetryDelay(attempt));
+    if (!getConnection(id)) return;
+    if (stale(id, address)) return;
+  }
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * One attempt: patches what it found, and answers with the failure it did not
+ * record as final.
+ *
+ * Returning the failure rather than patching it is what lets the caller decide
+ * whether `down` is the end of the story. Success is patched here, because
+ * there is nothing to decide about it.
+ */
+async function runProbe(
+  id: ConnectionId,
+  client: OpenCompanyClient,
+  address: string | undefined,
+): Promise<Partial<Connection> | null> {
+  // The connection moved while this attempt was in flight: everything below
+  // would describe the old address. Answer `null` (the stop signal) so the
+  // caller ends without writing; the `probe` finalizer starts the replacement
+  // client's probe.
+  if (stale(id, address)) return null;
   const identity = await readIdentity(client);
-  if (identity) patch(id, { identity, label: identity.displayName ?? labelOf(id) });
+  if (identity && !stale(id, address)) {
+    patch(id, { identity, label: identity.displayName ?? labelOf(id) });
+  }
 
   try {
     const companies = await client.listCompanies();
-    patch(id, { status: "live", companies: companies.map((c) => c.id) });
-    return;
+    if (stale(id, address)) return null;
+    patch(id, { status: "live", companies: companies.map((c) => c.id), waking: false });
+    return null;
   } catch (listErr) {
     // A single-company (prosumer) host has no `/api/v1/companies`; its sole
     // company answers on the alias instead. Falling back rather than failing is
     // what lets one client hold a platform host and a prosumer host at once.
     try {
       await client.status(null);
-      patch(id, { status: "live", companies: [] });
-      return;
+      if (stale(id, address)) return null;
+      patch(id, { status: "live", companies: [], waking: false });
+      return null;
     } catch (statusErr) {
-      patch(id, statusFromError(statusErr ?? listErr));
+      return statusFromError(statusErr ?? listErr);
     }
   }
 }
