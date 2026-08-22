@@ -146,9 +146,19 @@ struct CapabilityStatusDto {
     /// tests it rather than a real-money surface shipping untested.
     search_in_build: bool,
     /// Whether a MANAGED search credential is resolvable from the environment on
-    /// this build. Never reflects a tenant secret — search runs only on the
-    /// platform identity.
+    /// this build. Never reflects a tenant secret: it answers "can this
+    /// deployment search on the platform's account", which is a different
+    /// question from [`search_provider`](Self::search_provider) below.
     search_credential_configured: bool,
+    /// The provider this company's searches actually go to — `managed`, or the
+    /// slug it configured in Settings → Search and finished configuring.
+    ///
+    /// Reported beside the managed flag rather than folded into it because the
+    /// two can disagree in both directions: a deployment with no platform
+    /// credential still searches for a company that brought its own key, and a
+    /// company that selected Exa and pasted nothing is still on managed. Never
+    /// the key — only the slug, which is not a secret.
+    search_provider: String,
     /// The company's daily `web_search` call ceiling
     /// (`[tools].search_daily_calls`, else the built-in default). Reaching it
     /// makes the tool refuse loudly rather than return an empty result set.
@@ -553,6 +563,7 @@ async fn effective_status(runtime: &CompanyRuntime) -> Result<CapabilityStatusDt
         search_in_build: cfg!(feature = "openhuman"),
         search_credential_configured: search_credential_configured(),
         search_daily_call_cap: flags.search_daily_call_cap,
+        search_provider: flags.search_provider.clone(),
         repo_granted: flags.repo_granted,
         publish_granted: flags.publish_granted,
         publish_in_build: cfg!(feature = "openhuman"),
