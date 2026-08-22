@@ -129,8 +129,25 @@ it. Responses mirror the TypeScript models in `src/lib/*` and `src/api/types.ts`
 - **Note:** overlay teammates are **roster-only in v1** — they show in the
   roster and get an inbox, but no harness agent is built for them yet.
 
-### Conversation threads — `src/views/Conversation.tsx`, `src/lib/threads.ts`
+### Conversation threads — `src/views/Conversation.tsx`, `src/views/conversation/`, `src/lib/threads.ts`
 - WhatsApp-style two-pane; left list = the company's **desks** (group chats).
+- **The transcript half runs on `@assistant-ui/react`**, through its
+  **external-store** runtime (`src/views/conversation/runtime.ts`). The library
+  owns the composer, the scroll viewport and the run state; `AppShell` keeps
+  owning the transcripts, which is why that runtime and not one of the others:
+  a reply can arrive over SSE while this view is unmounted, and a turn can
+  outlive the request that started it (issue #983), so the message array cannot
+  move into the library. **The transport is unchanged** — still `POST …/chat`
+  and the company event stream, never a data-stream protocol.
+- Everything around the transcript stays this console's own. The left list is
+  the company's desks and teammates rather than an assistant's saved
+  conversations, so it is not a `ThreadListPrimitive`; the strip above the
+  composer steers **named** in-flight runs (issue #111), which is why the
+  runtime is handed no `onCancel`.
+- assistant-ui renders one message at a time, so who a line is from, how
+  consecutive lines group and where a day separator falls are decided up front
+  by a pure `decorate` pass in `src/views/conversation/model.ts` — covered by
+  `test/unit/conversation-model.test.ts` rather than only by a browser.
 - **Source:** ✅ real — `Company.chats` / `Company.chat(id)` (GraphQL) list the
   desks from `[[group_chat]]` and page their history; send uses the `chat`
   endpoint. Desk-scoped routing of replies is single-responder in v1 (the full
