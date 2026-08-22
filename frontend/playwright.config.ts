@@ -6,6 +6,8 @@ import { fileURLToPath } from "node:url";
 import {
   COMPOSIO,
   COMPOSIO_FIXTURE_BIND,
+  EULER,
+  EULER_COMPANY,
   FIRST_RUN,
   FIRST_RUN_COMPANY,
   LIVE_BRAIN,
@@ -92,6 +94,13 @@ const FIRST_RUN_SPEC = /company-setup\.spec\.ts$/;
  */
 const LIVE_LLM_SPEC = /orchestration-live\.spec\.ts$/;
 
+/**
+ * The one spec whose verdict is a **published integer** rather than a shape on
+ * the board, and which therefore needs a host serving the lab that computes it
+ * (`companies/agentic_math_lab`). See `EULER` in `test/e2e/capabilities.ts`.
+ */
+const EULER_SPEC = /euler-live\.spec\.ts$/;
+
 const providedBaseURL = process.env.PW_BASE_URL;
 
 /** Whether this config is responsible for the host, as opposed to driving yours. */
@@ -110,11 +119,15 @@ const storageState =
   (managesHost
     ? resolve(
         here,
-        // A path of its own for the first-run run: it signs into a different
-        // company on a different data root, so a shared file would hand one run
-        // the other's session — which reads as a mysterious sign-in loop rather
-        // than as the collision it is.
-        FIRST_RUN ? "../target/e2e/first-run-storage-state.json" : "../target/e2e/storage-state.json",
+        // A path of its own per lane that signs into a different company on a
+        // different data root: a shared file would hand one run the other's
+        // session, which reads as a mysterious sign-in loop rather than as the
+        // collision it is.
+        FIRST_RUN
+          ? "../target/e2e/first-run-storage-state.json"
+          : EULER
+            ? "../target/e2e/euler-storage-state.json"
+            : "../target/e2e/storage-state.json",
       )
     : undefined);
 
@@ -193,11 +206,32 @@ const firstRunEnv: Record<string, string> =
       }
     : {};
 
+/**
+ * What a Project Euler run tells `test/e2e/host.sh` to serve.
+ *
+ * The company is the point: `companies/agentic_math_lab` is the roster whose
+ * split — decide, program, break — and whose *withheld* grants (no `web`, no
+ * `search`) are what the spec's verdict rests on. The data root is separate so
+ * the answers ledger read at the end of a run cannot be holding the previous
+ * run's row.
+ *
+ * Both are read by `host.sh` itself rather than by the host binary, so they do
+ * not go through `PW_HOST_PASSTHROUGH`.
+ */
+const eulerEnv: Record<string, string> =
+  managesHost && EULER
+    ? {
+        PW_HOST_COMPANY: resolve(here, "..", EULER_COMPANY),
+        PW_HOST_DATA_DIR: resolve(here, "../target/e2e/euler-data"),
+      }
+    : {};
+
 const passthrough = [...Object.keys(inferenceEnv), ...Object.keys(composioEnv)];
 const hostEnv: Record<string, string> = {
   ...inferenceEnv,
   ...composioEnv,
   ...firstRunEnv,
+  ...eulerEnv,
   ...(passthrough.length > 0 ? { PW_HOST_PASSTHROUGH: passthrough.join(" ") } : {}),
 };
 
@@ -274,11 +308,17 @@ export default defineConfig({
   // pointed at a host it cannot pass against. Playwright exits non-zero when a
   // selection matches nothing, so an empty one is a failure rather than a
   // silent zero (issue #1404).
+  //
+  // Four disjoint selections now: the Project Euler lane is a live-LLM run
+  // against a different company, so it is checked *before* `LIVE_LLM` — both
+  // flags are set for it, and the more specific lane wins.
   ...(FIRST_RUN
     ? { testMatch: FIRST_RUN_SPEC }
-    : LIVE_LLM
-      ? { testMatch: LIVE_LLM_SPEC }
-      : { testIgnore: [FIRST_RUN_SPEC, LIVE_LLM_SPEC] }),
+    : EULER
+      ? { testMatch: EULER_SPEC }
+      : LIVE_LLM
+        ? { testMatch: LIVE_LLM_SPEC }
+        : { testIgnore: [FIRST_RUN_SPEC, LIVE_LLM_SPEC, EULER_SPEC] }),
   globalSetup: storageState ? "./test/e2e/global-setup.ts" : undefined,
   fullyParallel: false,
   workers: 1,
