@@ -799,6 +799,15 @@ mod tests {
             "composio_authorize",
             "composio_execute",
             "web_search",
+            // The BYO search extras (issue #238 follow-up). Listed by name
+            // rather than spliced in from `BYO_SEARCH_TOOLS` so this test keeps
+            // saying what it checks: every tool a belt can carry is mapped onto
+            // a gateable namespace.
+            "exa_find_similar",
+            "exa_get_contents",
+            "brave_news_search",
+            "brave_image_search",
+            "brave_video_search",
             "repo_checkout",
             "repo_pr",
         ];
