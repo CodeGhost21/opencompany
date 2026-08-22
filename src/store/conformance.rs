@@ -2695,6 +2695,17 @@ pub async fn assert_delete_label_scoped(context: Arc<dyn ContextStore>) {
 /// transaction, or a conditional delete). This drives both operations
 /// concurrently, many times, and demands the second writer's claim and body
 /// survive every round.
+///
+/// What it can and cannot prove, stated plainly: the backends that serialise
+/// the two calls against each other (fs on its index lock, sqlite on its
+/// connection, the facade and the engine on their own locks) satisfy this
+/// whatever the interleaving, so here it is a **regression lock** — it fails
+/// if someone removes that serialisation. Only mongodb runs the two against a
+/// server that can genuinely interleave them, and it is the backend whose
+/// atomicity rests on a conditional delete rather than a lock, which is the
+/// case most worth driving. The tasks are spawned rather than awaited in
+/// order, so they interleave at every `.await` even on a current-thread
+/// runtime.
 pub async fn assert_delete_label_survives_a_concurrent_identical_put(
     context: Arc<dyn ContextStore>,
 ) {
