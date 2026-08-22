@@ -211,7 +211,6 @@ mod live {
     use async_trait::async_trait;
     use serde_json::Value;
 
-    use openhuman_core::openhuman as oh;
     use oh::search::tools::{
         BraveImageSearchTool, BraveNewsSearchTool, BraveVideoSearchTool, BraveWebSearchTool,
         ExaFindSimilarTool, ExaGetContentsTool, ExaSearchTool, QueritSearchTool, SearxngSearchTool,
@@ -219,6 +218,7 @@ mod live {
     use oh::tools::traits::{
         PermissionLevel, Tool, ToolCallOptions, ToolCategory, ToolResult, ToolScope, ToolTimeout,
     };
+    use openhuman_core::openhuman as oh;
 
     use crate::harness::search::WEB_SEARCH_TOOL;
 
@@ -488,25 +488,37 @@ mod tests {
     async fn nothing_configured_managed_and_a_missing_key_all_fall_back_to_managed() {
         let empty = MemSecrets::with(&[]);
         assert!(
-            TenantSearch::resolve(&empty, &company()).await.unwrap().is_none(),
+            TenantSearch::resolve(&empty, &company())
+                .await
+                .unwrap()
+                .is_none(),
             "an unconfigured company must fall back to managed"
         );
 
         let managed = MemSecrets::with(&[(PROVIDER_SECRET, "managed")]);
         assert!(
-            TenantSearch::resolve(&managed, &company()).await.unwrap().is_none(),
+            TenantSearch::resolve(&managed, &company())
+                .await
+                .unwrap()
+                .is_none(),
             "`managed` is the fallback, never a BYO connection"
         );
 
         let keyless = MemSecrets::with(&[(PROVIDER_SECRET, "brave")]);
         assert!(
-            TenantSearch::resolve(&keyless, &company()).await.unwrap().is_none(),
+            TenantSearch::resolve(&keyless, &company())
+                .await
+                .unwrap()
+                .is_none(),
             "a BYO provider with no key must fall back rather than wire a keyless tool"
         );
 
         let unknown = MemSecrets::with(&[(PROVIDER_SECRET, "google"), (API_KEY_SECRET, "k")]);
         assert!(
-            TenantSearch::resolve(&unknown, &company()).await.unwrap().is_none(),
+            TenantSearch::resolve(&unknown, &company())
+                .await
+                .unwrap()
+                .is_none(),
             "an unknown slug is not a connection"
         );
     }
@@ -523,7 +535,10 @@ mod tests {
     async fn searxng_resolves_on_an_endpoint_alone_and_not_on_a_key() {
         let key_only = MemSecrets::with(&[(PROVIDER_SECRET, "searxng"), (API_KEY_SECRET, "k")]);
         assert!(
-            TenantSearch::resolve(&key_only, &company()).await.unwrap().is_none(),
+            TenantSearch::resolve(&key_only, &company())
+                .await
+                .unwrap()
+                .is_none(),
             "a SearXNG instance is addressed by URL; a key is not the missing half"
         );
 

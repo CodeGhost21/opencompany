@@ -50,10 +50,10 @@ pub mod read_state;
 /// behind it â no grant, no tool. See [`repos`].
 pub mod repos;
 pub mod runs;
+pub mod scope;
 /// Per-company web search settings: which provider the agents search through,
 /// and the write-only key behind it. See [`crate::company::search`].
 pub mod search;
-pub mod scope;
 /// First-run company setup: propose a starting roster from three answers
 /// (`docs/spec/runtime/company-setup.md`). Proposes only — the console creates
 /// each teammate through [`team`], so setup has no second write path.

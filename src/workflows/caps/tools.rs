@@ -110,16 +110,14 @@ pub(crate) fn workflow_tool_wiring(deps: &crate::harness::HarnessDeps) -> Workfl
         // A company that configured its OWN provider is credentialed for search
         // even on a deployment with no managed backend at all — the calls go to
         // its account, not the platform's. Only "neither" is unconfigured.
-        let missing = if namespace == "search"
-            && deps.search.is_none()
-            && deps.tenant_search.is_none()
-        {
-            Some(MissingReason::SearchBackendNotConfigured)
-        } else if capability_filtered(&deps.capabilities, namespace) {
-            Some(MissingReason::CapabilityTierFiltered)
-        } else {
-            None
-        };
+        let missing =
+            if namespace == "search" && deps.search.is_none() && deps.tenant_search.is_none() {
+                Some(MissingReason::SearchBackendNotConfigured)
+            } else if capability_filtered(&deps.capabilities, namespace) {
+                Some(MissingReason::CapabilityTierFiltered)
+            } else {
+                None
+            };
         if let Some(reason) = missing {
             wiring.missing.insert(namespace, reason);
         } else {
