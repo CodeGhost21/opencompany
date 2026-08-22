@@ -130,6 +130,8 @@
 
 import { createServer } from "node:http";
 
+import { embeddings } from "./embedding.mjs";
+
 /** The marker every text reply carries, so a spec can prove the reply is ours. */
 const MARKER = "__MOCK_LLM__";
 
@@ -205,8 +207,10 @@ const SPAWN_DIRECTIVE = "SPAWNONE";
  * result never enters the model-visible transcript — the history looks
  * untouched on the next call of the same turn (the same trap
  * {@link servedDirectives} exists for). Progress is therefore counted here,
- * per plan, in {@link servedPlans}. Every plan a spec writes carries a
- * `Date.now()` marker, so a genuinely new plan is always a new key.
+ * per plan, in {@link servedPlans}, keyed by the directive and the rest of its
+ * line. So a spec writes its `Date.now()` marker AFTER the payload —
+ * `__MOCK_PLAN__ [[…]] goal-1787…` — and two plans holding identical steps
+ * stay two plans rather than sharing one cursor.
  */
 const PLAN_DIRECTIVE = "__MOCK_PLAN__";
 
@@ -238,13 +242,6 @@ const servedPlans = new Map();
  */
 const REISSUE_PATTERN =
   /Operator approved your `([^`]+)` call\. Re-issue it now with EXACTLY these arguments: /;
-
-/**
- * Width of every vector `/embeddings` returns. `HostedEmbeddings` compares this
- * against its declared dimensionality and errors on a mismatch rather than
- * truncating, and its default is 1024 (`embedding-v1`'s only allowed size).
- */
-const EMBEDDING_DIM = 1024;
 
 /** How much of a tool result is quoted back in the reply that follows it. */
 const TOOL_ECHO_LIMIT = 2000;
@@ -435,9 +432,15 @@ function findPlan(messages) {
       );
       return null;
     }
-    // The plan's own text is its identity, so two spec runs — or two goals in
-    // one run — never share a cursor.
-    return { id: JSON.stringify(steps), steps };
+    // Identity is the directive and the rest of its LINE — the same key shape
+    // `SPAWNONE` uses, and for both of its reasons. It is stable across the
+    // wrappers each agent's prompt puts in FRONT of the message, and it keeps
+    // two plans that happen to hold identical steps apart, because the marker a
+    // spec writes after the payload is part of the key. Keying on the parsed
+    // steps alone would have made "the same two cards, opened by a later goal"
+    // share a cursor with the first goal and silently start half way through.
+    const line = text.slice(at).split("\n")[0].trim();
+    return { id: `plan:${line}`, steps };
   }
   return null;
 }
@@ -784,47 +787,6 @@ function completion(model, message, finishReason) {
     model,
     choices: [{ index: 0, message, finish_reason: finishReason }],
     usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
-  };
-}
-
-/**
- * A deterministic unit-ish vector for one input. Never random: two runs of the
- * suite must not disagree about what a note means.
- *
- * @param {string} input
- * @returns {number[]}
- */
-function embedding(input) {
-  let seed = 2166136261;
-  for (let i = 0; i < input.length; i += 1) {
-    seed = Math.imul(seed ^ input.charCodeAt(i), 16777619) >>> 0;
-  }
-  const vector = new Array(EMBEDDING_DIM);
-  for (let i = 0; i < EMBEDDING_DIM; i += 1) {
-    seed = (Math.imul(seed, 1103515245) + 12345) >>> 0;
-    vector[i] = seed / 4294967295 - 0.5;
-  }
-  return vector;
-}
-
-/**
- * The embeddings reply for one request, in input order.
- *
- * @param {any} body
- * @returns {any}
- */
-function embeddings(body) {
-  const raw = body?.input;
-  const inputs = Array.isArray(raw) ? raw : [raw ?? ""];
-  return {
-    object: "list",
-    model: typeof body?.model === "string" ? body.model : "mock-embedding",
-    data: inputs.map((input, index) => ({
-      object: "embedding",
-      index,
-      embedding: embedding(String(input)),
-    })),
-    usage: { prompt_tokens: 0, total_tokens: 0 },
   };
 }
 

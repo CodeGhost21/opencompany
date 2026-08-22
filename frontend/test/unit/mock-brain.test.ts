@@ -82,9 +82,16 @@ async function chat(messages: unknown[], tools: string[] = []): Promise<any> {
   return response.json();
 }
 
-/** The plan directive for `steps`, with a marker so each test owns its cursor. */
+/**
+ * The plan directive for `steps`, with a marker so each test owns its cursor.
+ *
+ * The marker goes AFTER the payload, which is where the fixture keys off it:
+ * two of the tests below script the same single `spawn_task`, and a key taken
+ * from the parsed steps alone would hand the second one the first one's spent
+ * cursor.
+ */
 function plan(marker: string, steps: unknown[][]): string {
-  return `close this out ${marker} __MOCK_PLAN__ ${JSON.stringify(steps)}`;
+  return `close this out __MOCK_PLAN__ ${JSON.stringify(steps)} ${marker}`;
 }
 
 describe("the mock inference backend", () => {
