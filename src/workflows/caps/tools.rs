@@ -826,6 +826,63 @@ mod tests {
         assert!(!uncredentialed.tools.contains_key("web_search"));
     }
 
+    /// A workflow node searches through the company's own provider when it has
+    /// one — and reaches it on a deployment with no managed backend at all,
+    /// which is exactly the self-hosted case the BYO surface exists for.
+    #[test]
+    fn a_company_provider_serves_workflow_search_and_replaces_the_managed_tool() {
+        let dir = tempfile::tempdir().unwrap();
+        let audit = tempfile::tempdir().unwrap();
+        let security = Arc::new(toolbelt::exec_security(
+            dir.path(),
+            crate::harness::policy::PolicyMode::Supervised,
+        ));
+        let tenant = TenantSearch::for_test("exa", Some("tenant-key"), None);
+        let backend = SearchBackend::new(
+            "https://api.example.test".to_string(),
+            crate::company::credentials::Credential::from_value("managed"),
+            5,
+        );
+
+        // No managed backend, a company provider → search still works.
+        let byo_only = WorkflowToolInvoker::new(
+            security.clone(),
+            dir.path(),
+            audit.path(),
+            Vec::new(),
+            vec!["search".to_string()],
+            &CapabilityFilter::AllowAll,
+            None,
+            Some(&tenant),
+            test_metering(),
+            WorkflowToolWiring {
+                wired_namespaces: WORKFLOW_TOOL_NAMESPACES.into_iter().collect(),
+                missing: BTreeMap::new(),
+            },
+        );
+        assert!(byo_only.tools.contains_key("web_search"));
+        assert!(byo_only.tools.contains_key("exa_get_contents"));
+
+        // Both configured → the company's own provider wins, and the node can
+        // no longer reach the platform's metered surface at all.
+        let both = WorkflowToolInvoker::new(
+            security,
+            dir.path(),
+            audit.path(),
+            Vec::new(),
+            vec!["search".to_string()],
+            &CapabilityFilter::AllowAll,
+            Some(&backend),
+            Some(&tenant),
+            test_metering(),
+            WorkflowToolWiring {
+                wired_namespaces: WORKFLOW_TOOL_NAMESPACES.into_iter().collect(),
+                missing: BTreeMap::new(),
+            },
+        );
+        assert!(both.tools.contains_key("exa_find_similar"));
+    }
+
     #[test]
     fn wiring_namespaces_match_constructed_tool_namespaces() {
         let dir = tempfile::tempdir().unwrap();
