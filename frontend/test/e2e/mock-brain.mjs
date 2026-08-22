@@ -57,12 +57,18 @@
 //      emit the named call with the arguments the instruction dictates. The
 //      directive that produced the parked call has already been served, so
 //      without this arm no approval-gated tool can run in this lane at all.
-//   3. a message carrying `__MOCK_TOOL_CALL__ {"name":…,"arguments":{…}}` —
+//   3. a message carrying `__MOCK_PLAN__ [[{…},{…}],[…]]` — a whole scripted
+//      turn: several calls in one assistant message, and several steps across
+//      one turn's tool loop. `orchestration-simulation.spec.ts` drives a goal
+//      to completion with it. Served only when the request's own `tools` carry
+//      every name the step uses, which is what stops a teammate reading the
+//      operator's message second-hand from honouring the orchestrator's plan.
+//   4. a message carrying `__MOCK_TOOL_CALL__ {"name":…,"arguments":{…}}` —
 //      emit exactly that tool call, once. `mcp.spec.ts` uses it to make an
 //      agent call a named MCP tool without a model that might decide not to.
-//   4. a message carrying `SPAWNONE` — call `spawn_task` once, which is what
+//   5. a message carrying `SPAWNONE` — call `spawn_task` once, which is what
 //      `chat-to-card.spec.ts` needs an orchestrator to do.
-//   5. anything else — a fixed line carrying the `__MOCK_LLM__` marker.
+//   6. anything else — a fixed line carrying the `__MOCK_LLM__` marker.
 //
 // # Why the plain reply quotes nothing
 //
