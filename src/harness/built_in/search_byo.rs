@@ -168,6 +168,19 @@ impl TenantSearch {
         &self.provider
     }
 
+    /// A connection assembled directly, for tests that need one without a
+    /// secret store behind it — the roster-build and `build_agent` tests, which
+    /// are about what a *resolved* connection wires rather than about how it
+    /// resolved.
+    #[cfg(test)]
+    pub fn for_test(provider: &str, api_key: Option<&str>, endpoint: Option<&str>) -> Self {
+        Self {
+            provider: provider.to_string(),
+            api_key: api_key.map(str::to_string),
+            endpoint: endpoint.map(str::to_string),
+        }
+    }
+
     /// A stable hash of the connection, for the roster staleness check.
     ///
     /// Covers the key as well as the provider and endpoint, so rotating a key
