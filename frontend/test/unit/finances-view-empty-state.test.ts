@@ -69,10 +69,25 @@ describe("FinancesView empty data", () => {
   });
 
   it("says when the host does not expose finances instead of rendering a zero ledger", async () => {
-    await render(Promise.reject(new ApiError(404, "not_found", "no finances route", true)));
+    await render(Promise.reject(new ApiError(404, "http_404", "no finances route", false)));
 
     expect(container.textContent).toContain("Finances unavailable");
     expect(container.textContent).toContain("This host doesn't expose finances");
     expect(container.textContent).not.toContain("Wallet balance");
+  });
+
+  it("distinguishes a deleted company from an unwired route", async () => {
+    await render(Promise.reject(new ApiError(404, "company_not_found", "acme", true)));
+
+    expect(container.textContent).toContain("Could not load finances");
+    expect(container.textContent).not.toContain("This host doesn't expose finances");
+  });
+
+  it("labels an explicit zero-dollar cap rather than claiming no budget is set", async () => {
+    await render(Promise.resolve({ ...EMPTY_LEDGER, budgetUsd: 0 }));
+
+    expect(container.textContent).toContain("Spending is capped at $0.00 this month.");
+    expect(container.textContent).not.toContain("No monthly budget is set.");
+    expect(container.textContent).not.toContain("0% of budget used");
   });
 });
