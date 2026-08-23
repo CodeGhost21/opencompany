@@ -231,6 +231,10 @@ async fn spawn_interleaved_publish_script() -> String {
                         }]
                     }),
                     2 => {
+                        // Both tool calls have executed and their refusals are
+                        // queued; releasing one run before the other would let
+                        // the first drain a bucket that had only one entry, and
+                        // a reverted shared-bucket implementation would pass.
                         barrier.wait().await;
                         json!({ "role": "assistant", "content": "could not publish" })
                     }
