@@ -936,7 +936,7 @@ async fn hub_providers(
             providers: Vec::new(),
         });
     }
-    let redirect_uri = console_redirect_uri(&state, company.runtime.id());
+    let redirect_uri = console_redirect_uri(&state, company.runtime.id(), query.from.as_deref());
     // The same judgement one step earlier in the flow. A hosted console's
     // `https` origin is refused by the hub's redirect gate with a `400` raised
     // before the provider handshake begins (issue #512), so the button is not
