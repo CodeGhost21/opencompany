@@ -64,6 +64,26 @@ const STATUS: PolicyStatus = {
 
 const WIRED = ["shell", "apply_patch", "git_operations", "web_fetch", "http_request"];
 
+/**
+ * The complete gateable registry the policy response carries (`knownTools`) —
+ * the workflow set plus agent tools the gate matches that cannot be workflow
+ * nodes (`publish_artifact`, the `hosting_*` family). The note must not call
+ * any of these a mistake.
+ */
+const KNOWN_TOOLS = [
+  ...WIRED,
+  "curl",
+  "csv_export",
+  "image_info",
+  "web_search",
+  "publish_artifact",
+  "hosting_launch_site",
+  "hosting_add_domain",
+  "hosting_set_env",
+  "repo_publish",
+  "workspace_write",
+];
+
 /** A client serving the policy and, optionally, the wired tool slugs. */
 function makeClient({
   slugs,
