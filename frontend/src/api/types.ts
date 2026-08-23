@@ -1765,6 +1765,27 @@ export interface ReadStateResponse {
   markers: ReadMarker[];
 }
 
+/** Response of `GET {scope}/presence`. */
+export interface PresenceListResponse {
+  /**
+   * Present people, most recently seen first.
+   *
+   * **This replica's view.** A second host serving the same tenant keeps its
+   * own map, so somebody connected there is simply absent here — which is why
+   * an absence reads as "no live signal" and never as a grey "offline" dot.
+   */
+  people: PresenceDto[];
+}
+
+/** One person's live presence. */
+export interface PresenceDto {
+  /** The user id, as `GET {scope}/chat/mentionables` already names them. */
+  userId: string;
+  status: "online" | "away" | "offline";
+  /** When their lease was last renewed, epoch millis. */
+  atMillis: number;
+}
+
 /**
  * Response of `GET {scope}/chat/mentionables` — everything an `@` can name.
  *

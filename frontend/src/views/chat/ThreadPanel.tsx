@@ -7,6 +7,7 @@ import type { MessageIntent } from "@/api/tasks";
 import type { ChatMessage } from "@/lib/chat";
 import type { TeamMember } from "@/lib/team";
 import { MessageComposer } from "./MessageComposer";
+import { TypingLine } from "./TypingLine";
 import { channelTitle, formatTime, senderOf, type Channel } from "./model";
 import { type Mention, type Mentionable } from "./mentions";
 
@@ -36,6 +37,16 @@ interface Props {
   channelMemberIds?: string[];
   onSend: (text: string, intent?: MessageIntent, mentions?: Mention[]) => void;
   onClose: () => void;
+  /**
+   * Who is typing *in this thread* — scoped by the parent's own id, never the
+   * channel's. Without this the thread panel had no typing signal at all: the
+   * wire and `useTyping` already carry `parentId`, but nothing upstream of
+   * this component filtered by it or rendered a line for it.
+   */
+  typingNames?: string[];
+  /** This console is typing here. Distinct from the main composer's callback
+   * so the ping this thread sends carries the thread's own `parentId`. */
+  onTyping?: () => void;
 }
 
 /**
@@ -45,7 +56,19 @@ interface Props {
  * channel apart. The parent message sits at the top under a rule, and the
  * panel carries its own composer scoped to the thread.
  */
-export function ThreadPanel({ channel, members, parent, replies, sending, mentionables, channelMemberIds, onSend, onClose }: Props) {
+export function ThreadPanel({
+  channel,
+  members,
+  parent,
+  replies,
+  sending,
+  mentionables,
+  channelMemberIds,
+  onSend,
+  onClose,
+  typingNames = [],
+  onTyping,
+}: Props) {
   return (
     <aside className="flex w-96 shrink-0 flex-col border-l bg-background">
       <header className="flex h-13 shrink-0 items-center gap-2 border-b px-3">
@@ -71,6 +94,7 @@ export function ThreadPanel({ channel, members, parent, replies, sending, mentio
         ))}
       </div>
 
+      <TypingLine names={typingNames} />
       <MessageComposer
         compact
         placeholder="Reply…"
@@ -78,6 +102,7 @@ export function ThreadPanel({ channel, members, parent, replies, sending, mentio
         mentionables={mentionables}
         channelMemberIds={channelMemberIds}
         onSend={onSend}
+        onTyping={onTyping}
       />
     </aside>
   );

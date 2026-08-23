@@ -40,6 +40,7 @@ import {
   SidebarTrigger,
   useSidebar,
 } from "@/components/ui/sidebar";
+import { AgentProfileProvider } from "@/components/agent-profile-sheet";
 import { ContentSurface } from "@/components/content-surface";
 import { FeedbackDialog } from "@/components/feedback-dialog";
 import { HostSwitcher } from "@/components/host-switcher";
@@ -56,6 +57,9 @@ import { startVisiblePolling } from "@/lib/visible-poll";
 import { mergeOpenTurns, openTurnsFromRuns, PendingSyncPosts, type OpenTurn } from "@/lib/live-reply";
 import { type AgentReplyEvent, type CompanyStreamEvent, useEvents } from "@/hooks/use-events";
 import { useLedgerNav } from "@/hooks/use-ledger-nav";
+import { usePresence } from "@/hooks/use-presence";
+import { useTyping } from "@/hooks/use-typing";
+import { typersIn } from "@/lib/awareness";
 import type { WorkspaceEvent } from "@/views/WorkspaceView";
 import { useHashView } from "@/hooks/use-hash-view";
 import { BOARD_LEDGER } from "@/lib/board-columns";
@@ -1600,6 +1604,78 @@ export function AppShell({
   // upserts a `running` row keyed by `toolCallId`; a `tool_result` flips that row
   // to `ok`/`error` in place (FIFO fallback when no id pairs), mirroring
   // OpenHuman's `toolCallReceived` / `toolResultReceived`.
+  // Who is here, and who is typing. Both are shell-level because the SSE
+  // subscription is: the frames arrive on one stream for the whole console, so
+  // the state they feed has to live where that stream is read.
+  const presence = usePresence(client, company);
+  const typing = useTyping(client, company);
+  /**
+   * The company's people, id → label.
+   *
+   * Presence and typing frames carry a user id and no label — deliberately, so
+   * the wire does not repeat a name the console already holds — which means
+   * something has to hold it. This is that. Read from the mention directory
+   * rather than the admin user route, because it is the one people-listing a
+   * *member* may read.
+   *
+   * A host without the route leaves this empty, which degrades cleanly: the
+   * People section does not render and a typing line falls back to naming
+   * nobody rather than naming a raw id.
+   */
+  const [companyPeople, setCompanyPeople] = useState<Array<{ id: string; label: string }>>(
+    [],
+  );
+  useEffect(() => {
+    let live = true;
+    void client
+      .mentionables(company)
+      .then((d) => {
+        // `d.people` is trusted by the types and not by reality: a host that
+        // answers this route with a different shape — an older one, a proxy, a
+        // stub that returns `[]` for anything it does not recognise — makes
+        // this `undefined`, and `.map` on it throws during render. That blanks
+        // the WHOLE console, not just the presence roster.
+        //
+        // Not hypothetical: it took out every test in
+        // chat-channel-membership.spec.ts, a file with nothing to do with
+        // presence, because its mock returns `[]` for unmatched routes.
+        if (!live) return;
+        const people = Array.isArray(d?.people) ? d.people : [];
+        setCompanyPeople(people.map((p) => ({ id: p.id, label: p.label })));
+      })
+      .catch(() => {
+        if (live) setCompanyPeople([]);
+      });
+    return () => {
+      live = false;
+    };
+  }, [client, company]);
+
+  /**
+   * Who to name in the typing line for a given channel (and, when a thread
+   * is open, that thread) — a resolver rather than one precomputed array,
+   * because `ChatView` needs two independent lines: the main composer's
+   * (`parentId` unset) and the open thread panel's (`parentId` set to the
+   * parent message's id). A single array could only ever answer one of them,
+   * which is why thread typing indicators never worked before this: the wire
+   * and `useTyping` already carried `parentId`, but everything upstream threw
+   * it away.
+   *
+   * Resolved here rather than in the view because the label map is here.
+   * Somebody the directory does not name is dropped rather than shown as a raw
+   * id — "u_01H4… is typing" is worse than saying nothing. Reuses `typersIn`
+   * — the same filter+sort `TypingLine`'s stable ordering already relies on —
+   * rather than re-deriving it here.
+   */
+  const resolveTypingNames = useCallback(
+    (chatId: string, parentId?: string) => {
+      const byId = new Map(companyPeople.map((p) => [p.id, p.label]));
+      return typersIn(typing.typers, chatId, parentId, Date.now())
+        .map((t) => byId.get(t.userId))
+        .filter((label): label is string => Boolean(label));
+    },
+    [typing.typers, companyPeople],
+  );
   const onTurnEvent = useCallback((event: CompanyStreamEvent) => {
     // Route by the frame's own thread id so concurrent turns (even from the same
     // desk member) never cross-attribute; fall back to the in-flight ref only
@@ -1802,6 +1878,20 @@ export function AppShell({
       }));
     }, []),
     onTurnEvent,
+    onPresenceEvent: useCallback(
+      (event: CompanyStreamEvent) => {
+        if (event.type !== "presence") return;
+        presence.onFrame(event);
+      },
+      [presence],
+    ),
+    onTypingEvent: useCallback(
+      (event: CompanyStreamEvent) => {
+        if (event.type !== "typing") return;
+        typing.onFrame(event);
+      },
+      [typing],
+    ),
     onWorkflowRunEvent: useCallback((event: CompanyStreamEvent) => {
       // Both halves. The tick refreshes the durable history; the frames drive
       // the live canvas. Progress frames are far more frequent than outcomes,
@@ -1931,6 +2021,12 @@ export function AppShell({
             #1178). A `div`, not `main` — `SidebarInset` above is already the
             console's one `<main>` landmark, and a second nested one gave every
             page two identical "skip to content" destinations (issue #1221). */}
+        {/* Every teammate's face in here is a way into who they are (issue
+            #1653): the panel is mounted once around the whole surface so a
+            click on an avatar in a transcript, a member list or a channel
+            header opens the same summary, over the page rather than instead of
+            it. */}
+        <AgentProfileProvider client={client} company={company}>
         <ContentSurface>
           {view === "overview" && (
             <Overview client={client} company={company} companyName={feed.status.name} />
@@ -1970,6 +2066,10 @@ export function AppShell({
               client={client}
               company={company}
               sub={sub}
+              presence={presence.peers}
+              companyPeople={companyPeople}
+              resolveTypingNames={resolveTypingNames}
+              onTyping={typing.announce}
               onNavigate={(channelId) => navigate("chat", channelId)}
               onReply={() => void feed.refresh()}
               transcripts={transcripts}
@@ -2257,6 +2357,7 @@ export function AppShell({
           )}
           {view === "feedback" && <FeedbackView client={client} company={company} />}
         </ContentSurface>
+        </AgentProfileProvider>
 
         {/* Mobile only: dedicated chrome for the way back to navigation, not an
             overlay on top of it. A `fixed` trigger here used to float over

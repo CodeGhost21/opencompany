@@ -35,6 +35,16 @@ interface Props {
   disabled?: boolean;
   onSend: (text: string, intent?: MessageIntent, mentions?: Mention[]) => void;
   /**
+   * Called as the box is typed in, so the company can show a typing
+   * indicator.
+   *
+   * Fired on **every** change rather than on a timer: throttling is the
+   * caller's job, because it is per channel and this component does not know
+   * which channel it is in. Absent on the composers where a typing indicator
+   * would be noise.
+   */
+  onTyping?: () => void;
+  /**
    * The ids of the teammates on this channel, for the outside-channel warning.
    * Absent when membership is unknown.
    */
@@ -131,6 +141,7 @@ export function MessageComposer({
   channelMemberIds,
   deliverableChoice,
   mentionables,
+  onTyping,
 }: Props) {
   const [draft, setDraft] = useState("");
   // What the draft currently resolves to. Reconciled on every edit, so editing
@@ -195,6 +206,7 @@ export function MessageComposer({
     // Trailing the text, so a mention whose span was edited away goes with it.
     setMentions((current) => reconcileMentions(text, current));
     syncQuery(text, e.target.selectionStart);
+    onTyping?.();
   }
 
   function pick(entry: Mentionable) {
