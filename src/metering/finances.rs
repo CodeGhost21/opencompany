@@ -94,7 +94,7 @@ pub fn finances_from(
 
     Finances {
         balance_usd,
-        budget_usd: budget.monthly_usd.unwrap_or(0.0),
+        budget_usd: budget.monthly_usd,
         spent_usd,
         revenue_usd,
         net_usd: revenue_usd - spent_usd,
@@ -157,9 +157,21 @@ mod tests {
         assert_eq!(f.revenue_usd, 0.0);
         assert_eq!(f.net_usd, 0.0);
         assert_eq!(f.balance_usd, 0.0);
-        assert_eq!(f.budget_usd, 0.0);
+        assert_eq!(f.budget_usd, None);
         assert!(f.by_category.is_empty());
         assert!(f.transactions.is_empty());
+    }
+
+    #[test]
+    fn zero_cap_is_distinct_from_no_cap() {
+        let now = at(2026, 7, 16);
+        // A manifest that sets `monthly_usd = 0` is a hard cap, not an absent
+        // budget: it survives as `Some(0.0)` so the console can say "capped at
+        // zero" rather than "no budget is set".
+        let capped = finances_from(&[], &budget(Some(0.0)), None, now);
+        assert_eq!(capped.budget_usd, Some(0.0));
+        let uncapped = finances_from(&[], &budget(None), None, now);
+        assert_eq!(uncapped.budget_usd, None);
     }
 
     #[test]
@@ -176,7 +188,7 @@ mod tests {
         assert!((f.spent_usd - 20.0).abs() < 1e-9);
         assert!((f.revenue_usd - 30.0).abs() < 1e-9);
         assert!((f.net_usd - 10.0).abs() < 1e-9);
-        assert_eq!(f.budget_usd, 2000.0);
+        assert_eq!(f.budget_usd, Some(2000.0));
         // Bookkeeping net across all time: 30 - 12 - 8 - 100 = -90.
         assert!((f.balance_usd - (-90.0)).abs() < 1e-9);
     }
