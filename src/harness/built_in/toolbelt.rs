@@ -407,6 +407,90 @@ pub fn shell_tools(
     ]
 }
 
+/// The sandbox brief: what the agent's own working directory is, which tools
+/// reach it, and that the shell is confined to it.
+///
+/// # Why this exists
+///
+/// Every other granted surface on this belt names itself in the prompt —
+/// [`workspace_brief`](crate::harness::workspace_tools::workspace_brief) for the
+/// shared note tree, [`ledger_brief`](crate::harness::ledger_tools::ledger_brief)
+/// for the company's own records,
+/// [`publish_brief`](crate::harness::publish::publish_brief) for handing a file
+/// over. The agent's **sandbox** did not. `publish_brief` mentioned it in
+/// passing, as the place a deliverable comes from, and only when an artifact
+/// store happened to be wired; it named no tool, and it said nothing at all
+/// about `shell`.
+///
+/// The observed failure is the one issue #237's brief exists to prevent, one
+/// surface over: asked to *write* something, an agent that has never been told
+/// it holds `file_write` records a task about writing it instead. It is not
+/// refusing — it is picking the surface it was told about. A granted tool that
+/// goes unmentioned is, for prompt purposes, a tool that was never granted, and
+/// the `shell` namespace was in exactly that state: wired since Cell A, named
+/// nowhere.
+///
+/// # Why it is assembled from flags rather than written once
+///
+/// `files`, `shell` and `code` are three independent grant namespaces
+/// ([`build_agent`](crate::harness::build::build_agent) gates each separately),
+/// so a single fixed paragraph would describe tools some agents do not hold —
+/// the precise mistake `publish_brief`'s own comment warns about, and one that
+/// costs a turn per hallucinated call. Each clause is therefore emitted only
+/// under the flag that wired its tools, and an agent holding none of the three
+/// gets the empty string and no section at all.
+///
+/// The confinement sentence is not decoration. [`exec_security`] sets
+/// `workspace_only`, so an absolute path or a `../` escape is refused by the
+/// policy rather than by the model's judgement; an agent that does not know
+/// this spends its turns discovering it one refusal at a time.
+pub fn sandbox_brief(files: bool, shell: bool, code: bool) -> String {
+    if !files && !shell && !code {
+        return String::new();
+    }
+    let mut brief = String::from(
+        "\n\n## Your sandbox\n\
+         You have a real working directory of your own — a private folder on disk, separate from \
+         the company workspace (the shared note tree the `workspace_*` tools read). It is where \
+         your own files live.\n\
+         Every path you give these tools is relative to that directory, and nothing outside it is \
+         reachable: an absolute path or a `../` escape is refused, so write `report.md` or \
+         `drafts/report.md`, never `/tmp/report.md` or `~/report.md`. Subdirectories are created \
+         for you on write.\n",
+    );
+    if files {
+        brief.push_str(
+            "Read and write it with `file_read`, `file_write`, `edit`, `list`, `glob` and \
+             `grep`.\n",
+        );
+    }
+    if shell {
+        brief.push_str(
+            "Run commands with `shell`. It executes inside that same directory and cannot leave \
+             it, so a command is written against relative paths like any other tool call. \
+             `read_workspace_state` gives you a read-only overview of what is there. Every \
+             command is recorded to an audit log the operator can read.\n",
+        );
+    }
+    if code {
+        brief.push_str(
+            "`apply_patch` applies a structured multi-file edit, `git_operations` runs \
+             status/diff/log/commit inside the directory, and `csv_export` writes a CSV into \
+             `exports/`.\n",
+        );
+    }
+    brief.push_str(
+        "When you are asked to write, produce, build or run something, do it here — actually \
+         write the file, actually run the command. Recording a task about the work, or pasting \
+         the finished text into your reply, is not the same as producing it, and leaves nothing \
+         on disk for anyone to open.\n\
+         A command or write that touches something consequential may be held for operator \
+         approval before it runs. That is a pause, not a failure: you will be told the outcome. \
+         Until you are, do not report the work as done.",
+    );
+    brief
+}
+
 /// The `code` namespace tools, sharing the exec-grade `security` policy and
 /// pinned to the agent's `workspace`. Disjoint from [`shell_tools`] (see there
 /// for why the split is a security boundary, not just cosmetics). Unlike shell,
