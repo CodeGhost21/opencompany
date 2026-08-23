@@ -374,7 +374,9 @@ describe("the consolidated approval card", () => {
       agent: "seo",
       thread: "desk-marketing",
       batch: "turn-1",
-      broadly_grantable: true,
+      // A spend stays a per-call decision, so the full card offers no standing
+      // scope — and the compact row must render the same way.
+      broadly_grantable: false,
       payload: { to: "vendor@example.test", amount_usd: 42.5 },
     };
     await render([PAYMENT], {}, {}, new Map(), true);
@@ -394,7 +396,7 @@ describe("the consolidated approval card", () => {
       agent: "seo",
       thread: "desk-marketing",
       batch: "turn-1",
-      broadly_grantable: true,
+      broadly_grantable: false,
       payload: null,
       contents_hidden: true,
     };
