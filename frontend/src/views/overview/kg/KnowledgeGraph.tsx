@@ -85,11 +85,6 @@ const EDGE_COLOR: Record<string, string> = {
   reports: 'var(--accent)',
 };
 
-// Task titles are whole jobs ("Broadcast directives across the fleet") — trim
-// for the on-canvas label; the full title lives in the hover tooltip + card.
-const shortLabel = (n: KGNode) =>
-  n.kind === 'task' && n.label.length > 20 ? `${n.label.slice(0, 18).trimEnd()}…` : n.label;
-
 // On-screen label size per tier, in px. Quoted at rest and held there at every
 // camera depth by `fixedLabel`, which is why the declutter can measure in px.
 const labelFontPx = (kind: KGNodeKind): number =>
@@ -1517,7 +1512,7 @@ export function KnowledgeGraph({
   // compact legend for the fullscreen wheel: color + icon per kind, with the
   // Notes core in its vault orange
   const compactLegend = (
-    <div className="flex items-center gap-3 rounded-sm-t border border-os-border-strong bg-os-bg/85 px-2.5 py-1.5 backdrop-blur">
+    <div className="flex max-w-full flex-wrap items-center gap-x-3 gap-y-1 rounded-sm-t border border-os-border-strong bg-os-bg/85 px-2.5 py-1.5 backdrop-blur">
       {(
         [
           { label: 'Notes', color: HUB_COLOR, Icon: CAT.self.Icon },
@@ -1529,7 +1524,7 @@ export function KnowledgeGraph({
           { label: 'SOP task', color: CAT.task.color, Icon: CAT.task.Icon },
         ] as const
       ).map(({ label, color, Icon }) => (
-        <span key={label} className="flex items-center gap-1.5 font-mono text-3xs text-os-muted">
+        <span key={label} className="flex whitespace-nowrap items-center gap-1.5 font-mono text-3xs text-os-muted">
           <Icon className="h-3 w-3" style={{ color }} strokeWidth={2} />
           {label}
         </span>
@@ -1544,7 +1539,7 @@ export function KnowledgeGraph({
           Since issue #601 the notice names the one thing left: where a flow
           sits on the wheel. Departments, tools and stages are the company's own
           answers now, so claiming otherwise here would understate them. */}
-      <span className="flex items-center gap-1 border-l border-os-border pl-3 font-mono text-3xs text-os-dim" title={DERIVED_NOTICE}>
+      <span className="flex whitespace-nowrap items-center gap-1 border-l border-os-border pl-3 font-mono text-3xs text-os-dim" title={DERIVED_NOTICE}>
         <Info className="h-3 w-3 shrink-0" strokeWidth={2} />
         flow placement
       </span>
@@ -1884,7 +1879,7 @@ export function KnowledgeGraph({
     const degree = (adjacency.get(n.id)?.size ?? 1) - 1;
     labelCandidates.push({
       id: n.id,
-      text: shortLabel(n),
+      text: n.label,
       x: n.x,
       y: n.y,
       dy: v.r + 11 + (labelDy.get(n.id) ?? 0),
@@ -2318,7 +2313,7 @@ export function KnowledgeGraph({
                   fill={hoverId === n.id ? 'var(--text)' : n.kind === 'team' ? color : 'var(--text-2)'}
                   style={fixedLabel(labelFontPx(n.kind))}
                 >
-                  {shortLabel(n)}
+                  {n.label}
                 </text>
               )}
             </g>
