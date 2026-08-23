@@ -2750,7 +2750,7 @@ impl CompanyRuntime {
                 return Vec::new();
             }
         };
-        let users = self.users().list_users(&self.id).await.unwrap_or_else(|err| {
+        let mut users = self.users().list_users(&self.id).await.unwrap_or_else(|err| {
             tracing::warn!(
                 company = %self.id,
                 error = %err,
@@ -2758,6 +2758,16 @@ impl CompanyRuntime {
             );
             Vec::new()
         });
+        // Suspended users are retained only for attribution and are refused on
+        // every request — they must not be a live mention target here either.
+        users.retain(|u| u.status == crate::ports::users::UserStatus::Active);
+        // Sorted by the same stable key `GET .../chat/mentionables` uses before
+        // it mints slugs (`user_slugs`), so a collision between two same-named
+        // users gets the same `-2`/`-3` suffix here that the picker advertised —
+        // an unsorted `UserStore` order (most-recently-created first) could
+        // otherwise resolve `@sam-2` to a different person than the one the
+        // picker showed under that label.
+        users.sort_by(|a, b| a.id.cmp(&b.id));
         crate::runtime::mentions::resolve(text, supplied, sender, &record, &users)
     }
 

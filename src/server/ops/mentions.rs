@@ -134,17 +134,19 @@ async fn list_mentionables(company: ScopedCompany) -> Result<Json<MentionablesDt
                 .into_response()
         })?;
 
+    // `effective_agents()` rather than the raw manifest: an operator-renamed
+    // manifest teammate's stored name lives in an override, and reading the
+    // manifest directly would ignore it and advertise the authored id forever.
     let mut agents: Vec<MentionableAgentDto> = record
-        .manifest
-        .agents
-        .iter()
-        .filter(|a| !record.is_retired(&a.id))
+        .effective_agents()
+        .into_iter()
         .map(|a| MentionableAgentDto {
             id: a.id.clone(),
             // A manifest teammate's id is human-authored (`engineer`, `ceo`),
-            // so it is already the best label there is for one.
-            name: a.name.clone().unwrap_or_else(|| a.id.clone()),
-            role: a.role.clone(),
+            // so it is already the best label there is for one absent an
+            // override.
+            name: a.name.clone().unwrap_or(a.id),
+            role: a.role,
         })
         .collect();
     agents.extend(
@@ -185,6 +187,13 @@ async fn list_mentionables(company: ScopedCompany) -> Result<Json<MentionablesDt
         .list_users(company.id())
         .await
         .map_err(|e| ApiError(e).into_response())?;
+    // `Suspended` is retained only for attribution and is refused on every
+    // request (see `UserStatus::Suspended`) — advertising a suspended user
+    // here would offer a mention target that can never sign back in to see
+    // it, and the same list feeds mention resolution's "live" check below, so
+    // an unfiltered list would also let a removed collaborator keep accepting
+    // non-quiet direct mentions and `@everyone`.
+    users.retain(|u| u.status == crate::ports::users::UserStatus::Active);
     users.sort_by(|a, b| a.id.cmp(&b.id));
     let slugs = user_slugs(&users);
     let people = users
@@ -380,5 +389,85 @@ mod tests {
         let (status, body) = call(&state, false).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
         assert_eq!(body["code"], "unauthorized");
+    }
+
+    /// A suspended user is retained only for attribution and is refused on
+    /// every request (`UserStatus::Suspended`) — advertising one here would
+    /// offer a mention target that can never sign back in, and the same list
+    /// backs live mention resolution, so a stale collaborator must not keep
+    /// accepting non-quiet direct mentions or `@everyone` either.
+    #[tokio::test]
+    async fn a_suspended_user_is_not_offered_as_a_mention_target() {
+        use crate::ports::CompanyId;
+        use crate::ports::users::{UserRecord, UserRole, UserStatus};
+
+        let home = home();
+        let state = state(home.path()).await;
+        let id = CompanyId::new("acme");
+        let runtime = state.registry().get(&id).expect("registered");
+        runtime
+            .users()
+            .upsert_user(
+                &id,
+                &UserRecord {
+                    id: "gone".to_string(),
+                    email: "gone@acme.test".to_string(),
+                    display_name: Some("Gone Guy".to_string()),
+                    role: UserRole::Member,
+                    status: UserStatus::Suspended,
+                    password_hash: None,
+                    must_change_password: false,
+                    created_at_millis: 0,
+                    last_seen_at_millis: None,
+                    updated_at_millis: 0,
+                },
+            )
+            .await
+            .expect("upsert suspended user");
+
+        let (status, body) = call(&state, true).await;
+        assert_eq!(status, StatusCode::OK);
+        let people = body["people"].as_array().expect("people");
+        assert_eq!(
+            people.len(),
+            1,
+            "only the seeded active admin is offered: {people:?}"
+        );
+        assert!(
+            people.iter().all(|p| p["id"] != "gone"),
+            "a suspended user must not be a mention target: {people:?}"
+        );
+    }
+
+    /// A manifest teammate's operator-set display name is a stored override,
+    /// applied through `effective_agents()` — the picker must show it, not the
+    /// authored roster id, and future edits must not be silently ignored.
+    #[tokio::test]
+    async fn a_renamed_manifest_agent_is_offered_by_its_effective_name() {
+        use crate::ports::types::AgentOverride;
+
+        let home = home();
+        let state = state(home.path()).await;
+        let id = CompanyId::new("acme");
+        let store = FsCompanyStore::new(home.path().to_path_buf());
+        let mut record = store.load(&id).await.unwrap().expect("record");
+        record.overlay_agent_edits.push(AgentOverride {
+            agent_id: "ceo".to_string(),
+            name: Some("Ada".to_string()),
+            role: None,
+            description: None,
+            tools: None,
+            instructions: None,
+        });
+        store.save(&record).await.expect("save");
+
+        let (status, body) = call(&state, true).await;
+        assert_eq!(status, StatusCode::OK);
+        let agents = body["agents"].as_array().expect("agents");
+        let ceo = agents
+            .iter()
+            .find(|a| a["id"] == "ceo")
+            .expect("ceo present");
+        assert_eq!(ceo["name"], "Ada", "{agents:?}");
     }
 }

@@ -91,15 +91,20 @@ pub fn directory(record: &CompanyRecord, users: &[UserRecord]) -> Vec<MentionAli
 
     // Teammates. The id is the authored, typable handle (`engineer`); the
     // display name is what an operator who never read the manifest will type.
-    for agent in &record.manifest.agents {
-        if record.is_retired(&agent.id) {
-            continue;
+    // Read through `effective_agents()` rather than the raw manifest so an
+    // operator-renamed teammate is addressable by the name actually shown —
+    // `id = "ceo", name = "Ada"` must resolve `@Ada`, not just `@ceo`.
+    for agent in record.effective_agents() {
+        let mut aliases = vec![agent.id.to_lowercase()];
+        if let Some(name) = agent.name.as_deref() {
+            let name = name.to_lowercase();
+            if !aliases.contains(&name) {
+                aliases.push(name);
+            }
         }
         out.push(MentionAlias {
-            target: MentionTarget::Agent {
-                id: agent.id.clone(),
-            },
-            aliases: vec![agent.id.to_lowercase()],
+            target: MentionTarget::Agent { id: agent.id },
+            aliases,
         });
     }
     for overlay in &record.overlay_agents {
@@ -603,6 +608,25 @@ pub fn normalize(mut mentions: Vec<Mention>, sender: Option<&Actor>) -> Vec<Ment
     out
 }
 
+/// Whether a client-supplied mention's typed text is a real spelling of its
+/// claimed target, per the same [`directory`] the extraction path matches
+/// against.
+///
+/// The comparison strips the leading `@` (or `#` — [`directory`] aliases carry
+/// neither) and folds ASCII case, mirroring [`extract_with_known`]'s own
+/// matching rule so a span the extractor would have accepted is never rejected
+/// here. `Everyone` and `Desk` targets are covered the same way, since a
+/// caller can misclaim those exactly as easily as an agent or a user.
+fn is_valid_alias_for(mention: &Mention, dir: &[MentionAlias]) -> bool {
+    let body = mention
+        .text
+        .strip_prefix(['@', '#'])
+        .unwrap_or(&mention.text);
+    let body = body.to_lowercase();
+    dir.iter()
+        .any(|entry| entry.target == mention.target && entry.aliases.iter().any(|a| a == &body))
+}
+
 fn is_sender(target: &MentionTarget, sender: Option<&Actor>) -> bool {
     let Some(sender) = sender else {
         return false;
@@ -630,6 +654,20 @@ fn is_sender(target: &MentionTarget, sender: Option<&Actor>) -> bool {
 /// Spans that do not actually appear at their claimed offset are dropped
 /// outright — that is a malformed body rather than a stale one, and honouring
 /// it would let a caller draw a chip over text that says something else.
+///
+/// A span whose text is not actually a spelling of the claimed target is
+/// demoted the same way a stale target is. Matching the byte span alone only
+/// proves the caller copied real text out of the message; it does not prove
+/// that text names the target it claims — a caller could otherwise pair
+/// arbitrary text (`"hello"`, no `@` and no alias at all) with any live agent
+/// id and have it persisted as a non-quiet mention, drawing a chip and a
+/// routing decision over prose that never named anyone. The picker is still
+/// trusted to pick *which* of several genuinely ambiguous aliases a click
+/// meant — this only checks that the typed span is *a* valid spelling of the
+/// target it was paired with. Checked only when the target is otherwise live:
+/// a target that is already being demoted for having left the roster is not
+/// in `dir` at all (it is built from the same live company and user list),
+/// so it would fail this check for the wrong reason.
 pub fn revalidate(
     text: &str,
     mentions: Vec<Mention>,
@@ -637,6 +675,7 @@ pub fn revalidate(
     users: &[UserRecord],
 ) -> Vec<Mention> {
     let user_ids: HashSet<&str> = users.iter().map(|u| u.id.as_str()).collect();
+    let dir = directory(record, users);
     mentions
         .into_iter()
         .filter(|m| text.get(m.offset..m.offset + m.text.len()) == Some(m.text.as_str()))
@@ -647,6 +686,7 @@ pub fn revalidate(
                 MentionTarget::Desk { id } => record.resolve_desk_id(id).is_some(),
                 MentionTarget::Everyone => true,
             };
+            let live = live && is_valid_alias_for(&m, &dir);
             if !live {
                 m.quiet = true;
             }
@@ -803,7 +843,7 @@ pub fn mentioned_users(users: &[UserRecord], mentions: &[Mention]) -> Vec<String
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ports::types::{CompanyId, CompanyRecord};
+    use crate::ports::types::{AgentOverride, CompanyId, CompanyRecord};
     use crate::ports::users::{UserRole, UserStatus};
 
     const MANIFEST: &str = r#"
@@ -1384,5 +1424,65 @@ members = ["engineer", "ceo"]
         record.overlay_retired_agents.push("engineer".to_string());
         let found = resolve("@engineer hello", None, None, &record, &people());
         assert!(found.is_empty(), "{found:?}");
+    }
+
+    /// Issue: a manifest teammate's operator-set display name (an
+    /// `AgentOverride`, applied through `effective_agents()`) must be a real
+    /// alias, not just its authored roster id — an operator who renamed
+    /// `ceo` to "Ada" expects `@Ada` to reach them.
+    #[test]
+    fn an_operator_renamed_manifest_agent_is_mentionable_by_the_new_name() {
+        let mut record = acme();
+        record.overlay_agent_edits.push(AgentOverride {
+            agent_id: "ceo".to_string(),
+            name: Some("Ada".to_string()),
+            role: None,
+            description: None,
+            tools: None,
+            instructions: None,
+        });
+        let found = resolve("hey @Ada, got a sec?", None, None, &record, &people());
+        assert_eq!(targets(&found), vec![&agent("ceo")], "{found:?}");
+        // The authored id must keep working too — a rename is additive.
+        let found = resolve("hey @ceo, got a sec?", None, None, &record, &people());
+        assert_eq!(targets(&found), vec![&agent("ceo")], "{found:?}");
+    }
+
+    // -----------------------------------------------------------------------
+    // Client-supplied mentions must actually name their claimed target
+    // -----------------------------------------------------------------------
+
+    /// A caller cannot pair arbitrary text with a live target's id and have it
+    /// persisted as a real, notifying mention — the span must actually be a
+    /// spelling of that target.
+    #[test]
+    fn a_supplied_mention_whose_text_does_not_name_its_target_is_demoted() {
+        let supplied = vec![Mention {
+            target: agent("engineer"),
+            text: "hello".to_string(),
+            offset: 0,
+            quiet: false,
+        }];
+        let out = resolve("hello there", Some(supplied), None, &acme(), &people());
+        assert_eq!(out.len(), 1, "the span survives so the text still matches");
+        assert!(
+            out[0].quiet,
+            "text that never named the target must not ping it: {out:?}"
+        );
+    }
+
+    /// The picker is still trusted to disambiguate — a genuinely valid alias
+    /// for the claimed target stays a real, notifying mention.
+    #[test]
+    fn a_supplied_mention_whose_text_does_name_its_target_still_notifies() {
+        let supplied = vec![Mention {
+            target: agent("engineer"),
+            text: "@engineer".to_string(),
+            offset: 0,
+            quiet: false,
+        }];
+        let out = resolve("@engineer hello", Some(supplied), None, &acme(), &people());
+        assert_eq!(out.len(), 1);
+        assert!(!out[0].quiet, "{out:?}");
     }
 }
