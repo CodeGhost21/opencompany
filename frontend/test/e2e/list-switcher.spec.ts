@@ -144,7 +144,7 @@ test("List is a navigable view that survives a task-detail round trip", async ({
   await page.goto("/#/ledgers/tasks");
   await dismissTour(page);
 
-  await page.getByRole("button", { name: "List" }).click();
+  await page.getByRole("button", { name: "List", exact: true }).click();
   await expect.poll(() => new URL(page.url()).hash).toBe("#/ledgers/tasks?view=list");
 
   const detailLink = page.locator(`a[href="#/tasks/${id}?view=list"]`);
@@ -164,7 +164,7 @@ test("Back after choosing List returns to Board before leaving Work", async ({ p
   await page.locator('[data-tour="nav-ledgers"]').getByRole("button").click();
   await expect.poll(() => new URL(page.url()).hash).toBe("#/ledgers/tasks");
 
-  await page.getByRole("button", { name: "List" }).click();
+  await page.getByRole("button", { name: "List", exact: true }).click();
   await expect.poll(() => new URL(page.url()).hash).toBe("#/ledgers/tasks?view=list");
 
   await page.goBack();
