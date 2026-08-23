@@ -399,18 +399,19 @@ export function useApprovalThreadLinks(
     if (!threadKey) return;
     let live = true;
     void Promise.all([
-      client.listDesks(company).catch(() => []),
+      // Same empty-response fallback as ChatView and AppShell: a company with
+      // no declared `[[group_chat]]` entries still has the default desks, and
+      // an approval raised in one of those (e.g. the `main` thread) must be
+      // resolvable even though `/desks` came back empty. The fallback lives in
+      // the success handler on purpose — a failed read must not be guessed at.
+      client
+        .listDesks(company)
+        .then((dtos) => (dtos.length ? dtos.map(deskFromDto) : defaultDesks()))
+        .catch(() => []),
       client.listTeam(company).catch(() => []),
-    ]).then(([deskDtos, roster]) => {
+    ]).then(([desks, roster]) => {
       if (!live) return;
-      setTopology({
-        // Same empty-response fallback as ChatView and AppShell: a company with
-        // no declared `[[group_chat]]` entries still has the default desks, and
-        // an approval raised in one of those (e.g. the `main` thread) must be
-        // resolvable even though `/desks` came back empty.
-        desks: deskDtos.length ? deskDtos.map(deskFromDto) : defaultDesks(),
-        members: roster.map(fromDto),
-      });
+      setTopology({ desks, members: roster.map(fromDto) });
     });
     return () => {
       live = false;
