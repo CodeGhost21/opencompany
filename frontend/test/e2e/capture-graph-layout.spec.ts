@@ -99,7 +99,9 @@ test("capture settled graph layout + API data", async ({ page }) => {
         }
       }
       const early = (window as unknown as { __kgCounts?: Array<{ t: number; n: number }> }).__kgCounts ?? [];
-      return { count: groups.length, positions, data, trajectory, early };
+      const simLog = (window as unknown as { __simLog?: Array<object> }).__simLog ?? [];
+      const alphaLog = (window as unknown as { __alphaLog?: Array<object> }).__alphaLog ?? [];
+      return { count: groups.length, positions, data, trajectory, early, simLog, alphaLog };
     },
     trajectory,
   );
