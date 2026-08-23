@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   activeMentionQuery,
+  aliasSet,
   insertMention,
   mentionablesFor,
   mentionRegex,
@@ -70,6 +71,47 @@ describe("activeMentionQuery", () => {
 
   it("is null when the caret is not in a mention at all", () => {
     expect(activeMentionQuery("just talking", 12)).toBeNull();
+  });
+
+  /**
+   * Without this the picker reopens the instant you pick somebody: inserting
+   * `@engineer ` leaves the caret after a trailing space, the backward scan
+   * still finds the `@`, and the list re-renders over the message you are now
+   * trying to write.
+   */
+  it("closes once a known name is finished and followed by a space", () => {
+    const known = aliasSet([engineer, jane]);
+    expect(activeMentionQuery("hey @engineer ", 14, known)).toBeNull();
+  });
+
+  /** A space is also how a two-word name gets typed, so it cannot just close. */
+  it("stays open through the space of a name still being typed", () => {
+    const known = aliasSet([engineer, jane]);
+    expect(activeMentionQuery("hi @Jane ", 9, known)).toEqual({
+      start: 3,
+      query: "Jane ",
+    });
+  });
+
+  it("stays open on a finished name with no trailing space", () => {
+    const known = aliasSet([engineer, jane]);
+    expect(activeMentionQuery("hey @engineer", 13, known)).toEqual({
+      start: 4,
+      query: "engineer",
+    });
+  });
+
+  /** With no directory to check against, the old behaviour is kept. */
+  it("cannot close on a finished name when it has no aliases to check", () => {
+    expect(activeMentionQuery("hey @engineer ", 14)).not.toBeNull();
+  });
+});
+
+describe("aliasSet", () => {
+  it("carries every spelling, plus the label", () => {
+    const set = aliasSet([jane]);
+    expect(set.has("jane doe")).toBe(true);
+    expect(set.has("jane-doe")).toBe(true);
   });
 });
 

@@ -19,6 +19,7 @@ import { cn } from "@/lib/utils";
 import { MentionPicker } from "@/views/chat/MentionPicker";
 import {
   activeMentionQuery,
+  aliasSet,
   insertMention,
   rankMentionables,
   reconcileMentions,
@@ -112,6 +113,11 @@ export function MessageComposer({
     () => (query && mentionables ? rankMentionables(mentionables, query.query) : []),
     [query, mentionables],
   );
+  // Built once per directory, not per keystroke.
+  const aliases = useMemo(
+    () => (mentionables ? aliasSet(mentionables) : undefined),
+    [mentionables],
+  );
   const pickerOpen = query !== null && rows.length > 0;
 
   function closePicker() {
@@ -125,7 +131,7 @@ export function MessageComposer({
       closePicker();
       return;
     }
-    const next = activeMentionQuery(text, caret);
+    const next = activeMentionQuery(text, caret, aliases);
     setQuery(next);
     setActiveRow(0);
   }

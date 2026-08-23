@@ -83,15 +83,46 @@ function opensMention(text: string, i: number): boolean {
 export function activeMentionQuery(
   text: string,
   caret: number,
+  knownAliases?: ReadonlySet<string>,
 ): { start: number; query: string } | null {
   for (let i = caret - 1; i >= 0 && caret - i <= MAX_QUERY; i--) {
     const ch = text[i];
     if (ch === "\n") return null;
     if (ch !== "@") continue;
     if (!opensMention(text, i)) return null;
-    return { start: i, query: text.slice(i + 1, caret) };
+    const query = text.slice(i + 1, caret);
+    // A finished name followed by a space closes the query.
+    //
+    // Without this the picker reopens the instant you pick somebody: inserting
+    // `@engineer ` leaves the caret after a trailing space, the scan above
+    // still finds the `@`, and the query becomes `"engineer "` — which matches
+    // and re-renders the list over the message you are now trying to write.
+    //
+    // Gated on an EXACT alias rather than on any trailing space, because a
+    // space is also how a two-word name is typed: `@Jane ` must stay open on
+    // the way to `@Jane Doe`. `block/buzz` draws the line in the same place,
+    // and for the same reason — a longer name sharing a prefix must not hold
+    // the query open once a shorter one is complete.
+    if (knownAliases && /\s$/.test(query)) {
+      if (knownAliases.has(query.trim().toLowerCase())) return null;
+    }
+    return { start: i, query };
   }
   return null;
+}
+
+/**
+ * Every spelling in `entries`, for {@link activeMentionQuery}'s close rule.
+ *
+ * Built by the caller once per directory rather than per keystroke.
+ */
+export function aliasSet(entries: readonly Mentionable[]): Set<string> {
+  const out = new Set<string>();
+  for (const entry of entries) {
+    out.add(entry.label.toLowerCase());
+    for (const alias of entry.aliases) out.add(alias);
+  }
+  return out;
 }
 
 /**
