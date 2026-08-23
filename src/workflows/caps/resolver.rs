@@ -1133,7 +1133,7 @@ to = "fetch"
     /// to reach the grandchild's own classification.
     #[tokio::test]
     async fn a_two_level_child_gate_resolves_through_the_registry() {
-        let (resolver, registry) = gated_resolver_with_grants(
+        let (resolver, _unused_registry) = gated_resolver_with_grants(
             vec![
                 // `a` runs `b` from a node named `nested`.
                 overlay("a", parent_of("a", "b")),
