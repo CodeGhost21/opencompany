@@ -921,7 +921,8 @@ export function LedgersView({
                   indistinguishably — the read is filtered server-side. The two
                   are not the same claim, and saying the stronger one over a
                   ledger the nav is counting 14 rows for is simply false. */}
-              {read &&
+              {mode === "list" &&
+                read &&
                 read.entries.length === 0 &&
                 !reading &&
                 (emptyNotice ? (
@@ -1284,40 +1285,62 @@ function EntryCard({
   onDelete: () => void;
 }) {
   const writable = isWritable(ledger);
+  const columns = columnsOf(ledger);
   return (
     <Card className={cn(entry.closed && "opacity-75")}>
-      <CardContent className="space-y-2 p-4">
+      <CardContent
+        className="space-y-2 p-4"
+        data-testid={`ledger-entry-${entry.id}`}
+      >
         <div className="flex flex-wrap items-start gap-2">
-          <code className="text-xs text-muted-foreground">{entry.id}</code>
-          {entry.status && (
-            <Badge variant={entry.closed ? "secondary" : "default"}>
-              {entry.closed && <CheckCircle2 className="mr-1 size-3" />}
-              {entry.status}
-            </Badge>
-          )}
           {onOpen ? (
             <button
               type="button"
-              className="flex-1 text-left font-medium hover:underline"
+              className="min-w-0 flex-1 text-left font-medium hover:underline"
               onClick={onOpen}
+              data-testid="ledger-entry-title"
             >
               {entry.title}
             </button>
           ) : (
-            <span className="flex-1 font-medium">{entry.title}</span>
+            <span
+              className="min-w-0 flex-1 font-medium"
+              data-testid="ledger-entry-title"
+            >
+              {entry.title}
+            </span>
           )}
+          {entry.status && (
+            <Badge variant="secondary" data-testid="ledger-entry-status">
+              {entry.closed && <CheckCircle2 className="mr-1 size-3" />}
+              {labelFor(columns, entry.status)}
+            </Badge>
+          )}
+          <code
+            className="text-xs text-muted-foreground"
+            data-testid="ledger-entry-id"
+          >
+            {entry.id}
+          </code>
         </div>
 
-        <dl className="grid gap-x-4 gap-y-1 text-sm sm:grid-cols-[10rem_1fr]">
+        <dl className="grid max-w-3xl gap-x-4 gap-y-1 text-sm sm:grid-cols-[8rem_minmax(0,1fr)]">
           {ledger.fields
-            .filter((field) => field.role !== "id" && field.role !== "title")
+            .filter(
+              (field) =>
+                field.role !== "id" &&
+                field.role !== "title" &&
+                field.role !== "status",
+            )
             .map((field) => {
               const value = entry.fields[field.name];
               if (!value) return null;
               return (
                 <div key={field.name} className="contents">
                   <dt className="text-muted-foreground">{field.name}</dt>
-                  <dd className="whitespace-pre-wrap">{value}</dd>
+                  <dd className="whitespace-pre-wrap">
+                    {compactFieldValue(value)}
+                  </dd>
                 </div>
               );
             })}
@@ -1353,6 +1376,16 @@ function EntryCard({
       </CardContent>
     </Card>
   );
+}
+
+/** Keep an empty paragraph from turning a compact list row into a document.
+    Only the blank lines go: indentation and aligned columns inside a line are
+    part of what was recorded, so the row still renders with `pre-wrap`. */
+function compactFieldValue(value: string): string {
+  return value
+    .split(/\r?\n/)
+    .filter((line) => line.trim())
+    .join("\n");
 }
 
 function ComposeDialog({

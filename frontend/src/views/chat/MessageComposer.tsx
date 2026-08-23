@@ -206,7 +206,7 @@ export function MessageComposer({
                   className={cn(
                     "rounded-md px-2 py-1 text-2xs font-medium transition-colors",
                     intent === option.value
-                      ? "bg-primary text-primary-foreground"
+                      ? "bg-primary/10 text-brand-700 dark:text-brand-300"
                       : "text-muted-foreground hover:text-foreground",
                   )}
                 >
