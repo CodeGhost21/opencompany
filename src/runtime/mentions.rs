@@ -407,7 +407,7 @@ fn leading_spaces(bytes: &[u8], from: usize) -> usize {
 /// The condition that keeps `jane@acme.com` from reading as a mention of
 /// `acme`: an `@` counts only at the start of the text or after whitespace or
 /// an opening bracket, and only when something word-like follows it.
-fn opens_mention(bytes: &[u8], idx: usize) -> bool {
+fn opens_mention(text: &str, bytes: &[u8], idx: usize) -> bool {
     if bytes[idx] != b'@' {
         return false;
     }
@@ -420,14 +420,23 @@ fn opens_mention(bytes: &[u8], idx: usize) -> bool {
     };
     // `@#engineering` is the documented desk spelling (`MentionTarget::Desk`'s
     // own doc comment). The `#` is not itself word-like, so it needs its own
-    // branch: either the byte right after `@` is word-like, or it is `#` and
-    // the byte after THAT is — an `@#` with nothing nameable following it
+    // branch: either the char right after `@` is word-like, or it is `#` and
+    // the char after THAT is — an `@#` with nothing nameable following it
     // opens nothing.
-    let after_ok = match bytes.get(idx + 1) {
-        Some(b'#') => bytes
-            .get(idx + 2)
-            .is_some_and(|b| b.is_ascii_alphanumeric() || *b == b'_'),
-        Some(b) => b.is_ascii_alphanumeric() || *b == b'_',
+    //
+    // Unicode-aware (`char::is_alphanumeric`), not the ASCII-only byte
+    // predicate this used to be: a label like "Élodie" is a real alias
+    // `directory` offers verbatim (see its people loop), and `@Élodie` must
+    // open a mention exactly as `@engineer` does. `idx` is `@`'s byte offset
+    // and `@` is one byte, so `idx + 1` is always a char boundary to slice
+    // from; that only fails if `idx + 1` also needs a second character (the
+    // `@#` arm), which re-slices from `idx + 1` rather than assuming `#` is
+    // one byte at some other fixed offset — it is, but the slice makes that
+    // true by construction instead of by charset assumption.
+    let mut after_chars = text[idx + 1..].chars();
+    let after_ok = match after_chars.next() {
+        Some('#') => after_chars.next().is_some_and(|c| c.is_alphanumeric() || c == '_'),
+        Some(c) => c.is_alphanumeric() || c == '_',
         None => false,
     };
     before_ok && after_ok
