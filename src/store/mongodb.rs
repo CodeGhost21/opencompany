@@ -4430,6 +4430,135 @@ mod test {
         drop_db(&store).await;
     }
 
+    /// Issue #1573: the backfill copies `agentId` out of `run_json` for rows
+    /// written before the mirror column existed, and does so in bounded batches
+    /// that re-probe between passes rather than holding the whole collection.
+    ///
+    /// Seeded directly into the `runs` collection with no `agent_id` field —
+    /// the exact shape a row predating the upgrade has — because it is not
+    /// reachable through the port: `create_run`/`put_run` always write the
+    /// mirror. The store is built as a bare struct, not through `connect`, so
+    /// no background backfill task shares the database with this one's
+    /// assertions.
+    #[tokio::test]
+    async fn backfill_fills_legacy_run_rows_in_bounded_batches() {
+        let uri = match std::env::var("OPENCOMPANY_TEST_MONGODB_URI") {
+            Ok(uri) => uri,
+            Err(_) => {
+                assert!(
+                    !required(),
+                    "OPENCOMPANY_TEST_MONGODB_REQUIRED is set but \
+                     OPENCOMPANY_TEST_MONGODB_URI is not"
+                );
+                eprintln!("skipping: OPENCOMPANY_TEST_MONGODB_URI is not set");
+                return;
+            }
+        };
+        let client = Client::with_uri_str(&uri).await.unwrap();
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_millis();
+        let db_name = format!(
+            "oc_test_{}_{}_{}",
+            std::process::id(),
+            nonce,
+            DB_COUNTER.fetch_add(1, Ordering::Relaxed)
+        );
+        let store = MongoStore {
+            db: client.database(&db_name),
+            senders: Arc::new(StdMutex::new(HashMap::new())),
+        };
+
+        let company = CompanyId::new("legacy-co");
+        let runs = store.collection("runs");
+        // More than one batch, so the re-probe loop is exercised — the rows past
+        // the first `BACKFILL_BATCH_SIZE` must be picked up by a later pass.
+        for i in 0..BACKFILL_BATCH_SIZE + 3 {
+            let agent = if i % 2 == 0 { "engineer" } else { "designer" };
+            let record = crate::ports::runs::RunRecord {
+                id: format!("legacy-{i}"),
+                company: company.clone(),
+                task_id: None,
+                agent_id: agent.to_string(),
+                chat_id: None,
+                attempt: 1,
+                status: crate::ports::runs::RunStatus::Succeeded,
+                trigger_event_seq: None,
+                created_at_millis: 1_700_000_000_000,
+                started_at_millis: None,
+                finished_at_millis: None,
+                error: None,
+                usage: Default::default(),
+                step_count: 1,
+            };
+            runs.insert_one(doc! {
+                "company_id": company.as_ref(),
+                "run_id": &record.id,
+                "run_json": serde_json::to_string(&record).unwrap(),
+            })
+            .await
+            .unwrap();
+        }
+        // A row that already carries the mirror (written through the port after
+        // the upgrade) must be neither touched nor counted.
+        let fresh = crate::ports::runs::RunRecord {
+            id: "fresh".to_string(),
+            company: company.clone(),
+            task_id: None,
+            agent_id: "engineer".to_string(),
+            chat_id: None,
+            attempt: 1,
+            status: crate::ports::runs::RunStatus::Pending,
+            trigger_event_seq: None,
+            created_at_millis: 1_700_000_000_000,
+            started_at_millis: None,
+            finished_at_millis: None,
+            error: None,
+            usage: Default::default(),
+            step_count: 0,
+        };
+        runs.insert_one(doc! {
+            "company_id": company.as_ref(),
+            "run_id": &fresh.id,
+            "agent_id": "engineer",
+            "status": "pending",
+            "attempt": 1i64,
+            "created_ms": 1_700_000_000_000i64,
+            "run_json": serde_json::to_string(&fresh).unwrap(),
+        })
+        .await
+        .unwrap();
+
+        let filled = store.backfill_run_agent_ids().await.unwrap();
+        assert_eq!(
+            filled,
+            BACKFILL_BATCH_SIZE + 3,
+            "every legacy row is filled; the fresh row is not counted"
+        );
+
+        // The mirror landed on disk, not just in the return value — one row from
+        // each batch's worth of desks.
+        let migrated = runs
+            .find_one(doc! {"run_id": "legacy-0"})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(get_str(&migrated, "agent_id").unwrap(), "engineer");
+        let later = runs
+            .find_one(doc! {"run_id": "legacy-1"})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(get_str(&later, "agent_id").unwrap(), "designer");
+
+        // A second pass has nothing left to do — the `$exists: false` probe is
+        // exhausted.
+        assert_eq!(store.backfill_run_agent_ids().await.unwrap(), 0);
+
+        drop_db(&store).await;
+    }
+
     async fn drop_db(store: &MongoStore) {
         let _ = store.db.drop().await;
     }
