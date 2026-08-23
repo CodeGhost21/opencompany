@@ -291,6 +291,25 @@ async fn a_policy_gated_child_tool_call_parks_and_resumes_through_its_parent() {
         .effect;
     assert_eq!(card.payload[PAYLOAD_WORKFLOW_ID], "parent");
     assert_eq!(card.payload[PAYLOAD_NODE_ID], "sub::work");
+    // Issue #617: the card must name the child's call — the same tool, reason
+    // and arguments a top-level policy gate carries — not just the namespaced
+    // node id the parent graph cannot resolve.
+    assert_eq!(
+        card.payload[PAYLOAD_TOOL], "shell",
+        "the card must name the child's tool, not just the node id"
+    );
+    assert!(
+        card.payload[PAYLOAD_REASON]
+            .as_str()
+            .is_some_and(|reason| reason.contains("shell")),
+        "the card must carry the policy's own reason: {:?}",
+        card.payload[PAYLOAD_REASON]
+    );
+    assert_eq!(
+        card.payload[PAYLOAD_ARGS]["command"], "echo ran > marker.txt",
+        "the card must carry the child call's arguments: {:?}",
+        card.payload[PAYLOAD_ARGS]
+    );
 
     let continuation =
         crate::runtime::workflow_resume::continuation_input(&card, &["sub::work".to_string()], &[])
