@@ -1,0 +1,145 @@
+// @vitest-environment jsdom
+
+import { act, createElement } from "react";
+import { createRoot, type Root } from "react-dom/client";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+
+import type { ApprovalSummary, GrantScope, Verdict } from "@/api/types";
+import { ApprovalRow } from "@/views/chat/ApprovalRow";
+
+/**
+ * A batch does not lose the consequence the single card shows (#1426).
+ *
+ * Consolidating three parked calls into one card with one Approve (#842) is
+ * the common shape for exactly the calls that carry a consequence — a research
+ * turn parks several fetches, an outreach turn several sends — so a batch that
+ * dropped the warning would hide it precisely where it is most often earned,
+ * while the Approvals page went on showing it for the same parks. Two surfaces
+ * disagreeing about what a call does is the drift this work exists to remove.
+ *
+ * Rendered rather than tested as a pure function for the same reason
+ * `approval-batch-card` earns its exception: the claim is about what reaches
+ * the operator's eye, and the grouping helper cannot see whether the card drew
+ * it.
+ */
+
+const T0 = new Date("2026-03-02T10:00:00Z").getTime();
+
+function approval(id: string, group: ApprovalSummary["group"], kind = "web_fetch"): ApprovalSummary {
+  return {
+    id,
+    kind,
+    group,
+    amount_usd: null,
+    at_millis: T0,
+    agent: "seo",
+    thread: "desk-marketing",
+    batch: "turn-1",
+    broadly_grantable: true,
+    payload: { url: `https://example.com/${id}` },
+  };
+}
+
+let container: HTMLDivElement;
+let root: Root;
+
+async function render(approvals: ApprovalSummary[], decided: Record<string, Verdict> = {}) {
+  await act(async () => {
+    root.render(
+      createElement(ApprovalRow, {
+        approvals,
+        now: T0 + 60_000,
+        askerNames: new Map([["seo", "SEO Specialist"]]),
+        deciding: new Map(),
+        decided,
+        failed: {},
+        onDecide: (_a: ApprovalSummary, _v: Verdict, _s: GrantScope) => {},
+      }),
+    );
+  });
+}
+
+/** Every consequence badge on the card, headline and item lines alike. */
+function badges(): string[] {
+  return [...container.querySelectorAll<HTMLElement>("[data-approval-consequence]")].map(
+    (el) => el.dataset.approvalConsequence ?? "",
+  );
+}
+
+/** The headline's icon tile, whose tint carries a uniform batch's consequence. */
+function iconTile(): HTMLElement {
+  const tile = container.querySelector<HTMLElement>(".size-10");
+  if (!tile) throw new Error(`no icon tile on the card: ${container.innerHTML}`);
+  return tile;
+}
+
+beforeEach(() => {
+  container = document.createElement("div");
+  document.body.append(container);
+  root = createRoot(container);
+});
+
+afterEach(() => {
+  act(() => root.unmount());
+  container.remove();
+});
+
+describe("the consequence on a batched approval card", () => {
+  it("marks a batch whose calls all carry the same consequence", async () => {
+    await render([approval("a1", "send"), approval("a2", "send"), approval("a3", "send")]);
+
+    expect(container.textContent).toContain("Leaves the company");
+    // Once in the headline for the batch, once per line for attribution.
+    expect(badges()).toEqual([
+      "Leaves the company",
+      "Leaves the company",
+      "Leaves the company",
+      "Leaves the company",
+    ]);
+  });
+
+  it("tints a uniform batch's icon with its consequence", async () => {
+    await render([approval("a1", "spend"), approval("a2", "spend")]);
+
+    expect(iconTile().className).toContain("bg-tone-4/15");
+  });
+
+  it("names every distinct consequence in a mixed batch", async () => {
+    await render([approval("a1", "spend"), approval("a2", "send"), approval("a3", "spend")]);
+
+    const headline = badges().slice(0, 2);
+    expect(headline).toEqual(["Spends money", "Leaves the company"]);
+  });
+
+  it("leaves a mixed batch's icon neutral rather than letting one item speak", async () => {
+    await render([approval("a1", "spend"), approval("a2", "send")]);
+
+    const tile = iconTile();
+    expect(tile.className).toContain("bg-muted");
+    expect(tile.className).not.toContain("bg-tone-");
+  });
+
+  it("attributes each consequence to the call that carries it", async () => {
+    await render([approval("a1", "spend"), approval("a2", "send")]);
+
+    const lines = [...container.querySelectorAll<HTMLElement>("[data-approval-item]")];
+    expect(lines).toHaveLength(2);
+    expect(lines[0].textContent).toContain("Spends money");
+    expect(lines[1].textContent).toContain("Leaves the company");
+  });
+
+  it("stays unmarked for a batch of internal calls", async () => {
+    await render([approval("a1", "other"), approval("a2", undefined)]);
+
+    expect(badges()).toEqual([]);
+    expect(iconTile().className).toContain("bg-muted");
+  });
+
+  it("drops a settled line's warning, which no longer informs a decision", async () => {
+    await render([approval("a1", "spend"), approval("a2", "send")], { a1: "approve" });
+
+    const lines = [...container.querySelectorAll<HTMLElement>("[data-approval-item]")];
+    expect(lines[0].textContent).not.toContain("Spends money");
+    expect(lines[1].textContent).toContain("Leaves the company");
+  });
+});
