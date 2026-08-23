@@ -1161,21 +1161,6 @@ pub struct HarnessPool {
     /// again to notice it. That was live for both integrations until the tools
     /// were observed missing from an agent whose settings page said "Connected".
     billing_fingerprints: RwLock<HashMap<CompanyId, u64>>,
-    /// Fingerprint of the company's bound-repository set the cached roster was
-    /// built from, keyed by company (issue #245). Drives repository freshness:
-    /// [`ensure`](Self::ensure) re-reads the binding index from the
-    /// [`SecretStore`] on every call and rebuilds the roster whenever it moves —
-    /// so a bind, a credential rotation and a revoke each reach the agent on the
-    /// company's **next** turn with no restart.
-    ///
-    /// All three have to move it, which is why the fingerprint is over
-    /// `(key, token_fingerprint, branches)` rather than over the key alone: a
-    /// rotation changes nothing about *which* repositories exist, and a roster
-    /// that kept a tool description naming a binding whose credential has since
-    /// been revoked would offer an agent a checkout that can no longer fetch.
-    /// With no secret store wired the set is the static
-    /// [`HarnessDeps::repo_bindings`], whose fingerprint never moves.
-    repo_fingerprints: RwLock<HashMap<CompanyId, u64>>,
     /// Fingerprint of the operator skill-delta set the cached roster was built
     /// from, keyed by company (issue #41). Drives skill-delta freshness:
     /// [`ensure`](Self::ensure) re-fetches the deltas from the
@@ -1290,7 +1275,6 @@ impl HarnessPool {
             capability_fingerprints: RwLock::new(HashMap::new()),
             composio_fingerprints: RwLock::new(HashMap::new()),
             billing_fingerprints: RwLock::new(HashMap::new()),
-            repo_fingerprints: RwLock::new(HashMap::new()),
             skill_fingerprints: RwLock::new(HashMap::new()),
             budget_fingerprints: RwLock::new(HashMap::new()),
             override_fingerprints: RwLock::new(HashMap::new()),
@@ -1482,7 +1466,6 @@ impl HarnessPool {
             let capability_fingerprints = self.capability_fingerprints.read().await;
             let composio_fingerprints = self.composio_fingerprints.read().await;
             let billing_fingerprints = self.billing_fingerprints.read().await;
-            let repo_fingerprints = self.repo_fingerprints.read().await;
             let skill_fingerprints = self.skill_fingerprints.read().await;
             let budget_fingerprints = self.budget_fingerprints.read().await;
             let override_fingerprints = self.override_fingerprints.read().await;
@@ -1495,7 +1478,6 @@ impl HarnessPool {
                 && capability_fingerprints.get(&company.id) == Some(&capability_fp)
                 && composio_fingerprints.get(&company.id) == Some(&composio_fp)
                 && billing_fingerprints.get(&company.id) == Some(&billing_fp)
-                && repo_fingerprints.get(&company.id) == Some(&repo_fp)
                 && skill_fingerprints.get(&company.id) == Some(&skill_fp)
                 && budget_fingerprints.get(&company.id) == Some(&budget_fp)
                 && override_fingerprints.get(&company.id) == Some(&override_fp)
@@ -1604,10 +1586,6 @@ impl HarnessPool {
             .write()
             .await
             .insert(company.id.clone(), billing_fp);
-        self.repo_fingerprints
-            .write()
-            .await
-            .insert(company.id.clone(), repo_fp);
         self.skill_fingerprints
             .write()
             .await
@@ -2008,14 +1986,6 @@ impl HarnessPool {
             .await
             .get(company)
             .copied()
-    }
-
-    /// The current bound-repository fingerprint for a company (test-only), so a
-    /// bind / rotate / revoke freshness test can assert the roster was actually
-    /// rebuilt rather than inferring it (issue #245).
-    #[cfg(test)]
-    pub async fn repo_fingerprint_of(&self, company: &CompanyId) -> Option<u64> {
-        self.repo_fingerprints.read().await.get(company).copied()
     }
 
     /// The current skill-delta fingerprint for a company (test-only), so a
