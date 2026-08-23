@@ -100,23 +100,19 @@ function isRelayMessage(value: unknown): value is RelayMessage {
  */
 const relayPressTargets = new Map<number, Element>();
 
-/** How far a relayed press may move before it counts as a drag rather than a click. */
-const DRAG_THRESHOLD_PX = 10;
+/** The elements a relayed press last ended on, keyed by pointer id. */
+const lastPressTargets = new Map<number, Element>();
 
-/** Where each relayed press started, keyed by pointer id, for the drag test. */
-const pressOrigins = new Map<number, { x: number; y: number }>();
-
-/** The most recently ended press for each pointer id, used to suppress drag clicks. */
-const lastPressEnds = new Map<number, { x: number; y: number; dragged: boolean }>();
-
-/** Close a relayed press out, recording whether it was a drag for the click test. */
-function endRelayedPress(pointerId: number, x: number, y: number, canceled: boolean): void {
-  const origin = pressOrigins.get(pointerId);
-  pressOrigins.delete(pointerId);
-  const dragged =
-    canceled ||
-    (origin !== undefined && Math.hypot(x - origin.x, y - origin.y) > DRAG_THRESHOLD_PX);
-  lastPressEnds.set(pointerId, { x, y, dragged });
+/**
+ * Remember the element that owned a completed press for its compatibility click.
+ *
+ * The parent relay includes the pointer id on pointer-originated click events.
+ * Keeping the target after `pointerup` preserves pointer-capture semantics: a
+ * release over a sibling must not make the compatibility click activate that
+ * sibling instead of the element that took the press.
+ */
+function rememberPressTarget(pointerId: number, target: Element): void {
+  lastPressTargets.set(pointerId, target);
 }
 
 function dispatchRelayedPointer(message: RelayMessage, target: Element): void {
