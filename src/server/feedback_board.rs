@@ -124,7 +124,11 @@ struct CommentRequest {
 /// Resolves the addressed company, enforcing tenant ownership exactly as the
 /// capture routes do — a board call spends this instance's hub credential, so
 /// it is no more anonymous than filing is.
-fn addressed(state: &AppState, auth: &GqlAuth, id: &str) -> Result<Arc<CompanyRuntime>, Response> {
+fn addressed(
+    state: &AppState,
+    auth: &GqlAuth,
+    id: &str,
+) -> Result<Arc<CompanyRuntime>, crate::server::Rejection> {
     let company = CompanyId::new(id);
     if let Some(resp) = authorize_address(state, auth, &company) {
         return Err(resp);
@@ -133,7 +137,10 @@ fn addressed(state: &AppState, auth: &GqlAuth, id: &str) -> Result<Arc<CompanyRu
 }
 
 /// The sole company, authorized the same way.
-fn addressed_sole(state: &AppState, auth: &GqlAuth) -> Result<Arc<CompanyRuntime>, Response> {
+fn addressed_sole(
+    state: &AppState,
+    auth: &GqlAuth,
+) -> Result<Arc<CompanyRuntime>, crate::server::Rejection> {
     let runtime = sole(state).map_err(IntoResponse::into_response)?;
     if let Some(resp) = authorize_address(state, auth, runtime.id()) {
         return Err(resp);
@@ -142,7 +149,7 @@ fn addressed_sole(state: &AppState, auth: &GqlAuth) -> Result<Arc<CompanyRuntime
 }
 
 /// Refuses an empty comment before it costs a hub round trip.
-fn checked_comment(body: &str) -> Result<&str, Response> {
+fn checked_comment(body: &str) -> Result<&str, crate::server::Rejection> {
     let trimmed = body.trim();
     if trimmed.is_empty() {
         return Err(ApiError(OpenCompanyError::InvalidRequest(
@@ -156,7 +163,7 @@ fn checked_comment(body: &str) -> Result<&str, Response> {
 async fn page(
     runtime: Arc<CompanyRuntime>,
     params: &BoardParams,
-) -> Result<Json<BoardPage>, Response> {
+) -> Result<Json<BoardPage>, crate::server::Rejection> {
     runtime
         .feedback_board(params.to_query())
         .await
@@ -170,7 +177,7 @@ async fn list(
     State(state): State<AppState>,
     Path(id): Path<String>,
     Query(params): Query<BoardParams>,
-) -> Result<Json<BoardPage>, Response> {
+) -> Result<Json<BoardPage>, crate::server::Rejection> {
     page(addressed(&state, &auth, &id)?, &params).await
 }
 
@@ -179,7 +186,7 @@ async fn list_single(
     CompanyAuth(auth): CompanyAuth,
     State(state): State<AppState>,
     Query(params): Query<BoardParams>,
-) -> Result<Json<BoardPage>, Response> {
+) -> Result<Json<BoardPage>, crate::server::Rejection> {
     page(addressed_sole(&state, &auth)?, &params).await
 }
 
@@ -188,7 +195,7 @@ async fn detail(
     CompanyAuth(auth): CompanyAuth,
     State(state): State<AppState>,
     Path((id, item)): Path<(String, String)>,
-) -> Result<Json<BoardDetail>, Response> {
+) -> Result<Json<BoardDetail>, crate::server::Rejection> {
     addressed(&state, &auth, &id)?
         .feedback_board_item(&item)
         .await
@@ -201,7 +208,7 @@ async fn detail_single(
     CompanyAuth(auth): CompanyAuth,
     State(state): State<AppState>,
     Path(item): Path<String>,
-) -> Result<Json<BoardDetail>, Response> {
+) -> Result<Json<BoardDetail>, crate::server::Rejection> {
     addressed_sole(&state, &auth)?
         .feedback_board_item(&item)
         .await
@@ -215,7 +222,7 @@ async fn vote(
     State(state): State<AppState>,
     Path((id, item)): Path<(String, String)>,
     Json(body): Json<VoteRequest>,
-) -> Result<Json<BoardItem>, Response> {
+) -> Result<Json<BoardItem>, crate::server::Rejection> {
     addressed(&state, &auth, &id)?
         .vote_feedback_board(&item, body.value)
         .await
@@ -229,7 +236,7 @@ async fn vote_single(
     State(state): State<AppState>,
     Path(item): Path<String>,
     Json(body): Json<VoteRequest>,
-) -> Result<Json<BoardItem>, Response> {
+) -> Result<Json<BoardItem>, crate::server::Rejection> {
     addressed_sole(&state, &auth)?
         .vote_feedback_board(&item, body.value)
         .await
@@ -243,7 +250,7 @@ async fn comment(
     State(state): State<AppState>,
     Path((id, item)): Path<(String, String)>,
     Json(body): Json<CommentRequest>,
-) -> Result<Json<BoardComment>, Response> {
+) -> Result<Json<BoardComment>, crate::server::Rejection> {
     let runtime = addressed(&state, &auth, &id)?;
     let text = checked_comment(&body.body)?;
     runtime
@@ -259,7 +266,7 @@ async fn comment_single(
     State(state): State<AppState>,
     Path(item): Path<String>,
     Json(body): Json<CommentRequest>,
-) -> Result<Json<BoardComment>, Response> {
+) -> Result<Json<BoardComment>, crate::server::Rejection> {
     let runtime = addressed_sole(&state, &auth)?;
     let text = checked_comment(&body.body)?;
     runtime
