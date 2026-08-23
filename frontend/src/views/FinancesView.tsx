@@ -178,31 +178,31 @@ export function FinancesView({ client, company }: Props) {
                 <EmptyCard icon={ArrowDownLeft} message="No transactions have been recorded yet." />
               ) : (
                 <ul className="divide-y">
-                {data.transactions.map((t) => {
-                  const inflow = t.direction === "in";
-                  return (
-                    <li key={t.id} className="flex items-center gap-3 py-2.5 first:pt-0 last:pb-0">
-                      <span
-                        className={cn(
-                          "flex size-8 shrink-0 items-center justify-center rounded-full",
-                          inflow ? "bg-status-done-soft text-status-done-text" : "bg-muted text-muted-foreground",
-                        )}
-                      >
-                        {inflow ? <ArrowDownLeft className="size-4" /> : <ArrowUpRight className="size-4" />}
-                      </span>
-                      <div className="min-w-0 flex-1">
-                        <p className="truncate text-sm font-medium">{t.description}</p>
-                        <p className="text-xs text-muted-foreground">
-                          {new Date(t.date).toLocaleDateString(undefined, { month: "short", day: "numeric" })} · {t.category}
-                        </p>
-                      </div>
-                      <span className={cn("shrink-0 text-sm font-medium tabular-nums", inflow ? "text-status-done-text" : "text-foreground")}>
-                        {inflow ? "+" : "−"}
-                        {usd(t.amountUsd)}
-                      </span>
-                    </li>
-                  );
-                })}
+                  {data.transactions.map((t) => {
+                    const inflow = t.direction === "in";
+                    return (
+                      <li key={t.id} className="flex items-center gap-3 py-2.5 first:pt-0 last:pb-0">
+                        <span
+                          className={cn(
+                            "flex size-8 shrink-0 items-center justify-center rounded-full",
+                            inflow ? "bg-status-done-soft text-status-done-text" : "bg-muted text-muted-foreground",
+                          )}
+                        >
+                          {inflow ? <ArrowDownLeft className="size-4" /> : <ArrowUpRight className="size-4" />}
+                        </span>
+                        <div className="min-w-0 flex-1">
+                          <p className="truncate text-sm font-medium">{t.description}</p>
+                          <p className="text-xs text-muted-foreground">
+                            {new Date(t.date).toLocaleDateString(undefined, { month: "short", day: "numeric" })} · {t.category}
+                          </p>
+                        </div>
+                        <span className={cn("shrink-0 text-sm font-medium tabular-nums", inflow ? "text-status-done-text" : "text-foreground")}>
+                          {inflow ? "+" : "−"}
+                          {usd(t.amountUsd)}
+                        </span>
+                      </li>
+                    );
+                  })}
                 </ul>
               )}
             </CardContent>
