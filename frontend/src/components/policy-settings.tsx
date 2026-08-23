@@ -391,21 +391,26 @@ export function PolicySettings({ client, company }: Props) {
               className="space-y-2"
               role="radiogroup"
               aria-labelledby="approvals-heading"
+              onKeyDown={handleTierKeyDown}
             >
               <div className="flex justify-between px-1 text-xs text-muted-foreground">
                 <span>More oversight</span>
                 <span>More autonomy</span>
               </div>
-              {status.tiers.map((tier) => {
+              {status.tiers.map((tier, index) => {
                 const active = tier.value === status.mode;
                 return (
                   <button
                     key={tier.value}
+                    ref={(el) => {
+                      tierButtons.current[index] = el;
+                    }}
                     type="button"
                     disabled={saving}
                     onClick={() => chooseTier(tier)}
                     role="radio"
                     aria-checked={active}
+                    tabIndex={active ? 0 : -1}
                     className={cn(
                       "w-full rounded-md border p-3 text-left transition-colors",
                       "disabled:cursor-not-allowed disabled:opacity-60",
