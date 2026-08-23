@@ -694,10 +694,9 @@ impl GrantSet {
         let state = self.inner.lock().expect("grant set poisoned");
         let names_task = |t: &Option<String>| t.as_deref() == Some(task);
         state.live.values().any(|g| names_task(&g.origin_task))
-            || state
-                .standing
-                .values()
-                .any(|g| g.verdict == crate::ports::types::Verdict::Approve && names_task(&g.origin_task))
+            || state.standing.values().any(|g| {
+                g.verdict == crate::ports::types::Verdict::Approve && names_task(&g.origin_task)
+            })
             || state.pending.values().any(|t| t == task)
     }
 
