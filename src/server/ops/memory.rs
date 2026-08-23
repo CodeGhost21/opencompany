@@ -465,7 +465,11 @@ async fn list_facts(
         entries.extend(context_entries(chunks, query.as_deref()));
     }
 
-    Ok(Json(entries))
+    Ok(Json(MemoryList {
+        items: entries,
+        total_context,
+        context_truncated: total_context > MAX_CONTEXT_ENTRIES,
+    }))
 }
 
 /// Drops the operator-fact mirrors, then keeps the newest `cap` chunks.
