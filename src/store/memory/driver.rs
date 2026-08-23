@@ -19,6 +19,8 @@ pub enum MemoryMode {
     Null,
 }
 
+pub use crate::store::select::RemoteDeployment;
+
 #[derive(Clone)]
 pub struct MemoryDriverConfig {
     pub mode: MemoryMode,
@@ -27,6 +29,8 @@ pub struct MemoryDriverConfig {
     pub api_key: Option<String>,
     /// Retained for the migration command's common configuration shape.
     pub data_dir: Option<PathBuf>,
+    /// Which hosted deployment's protocol and authentication to use.
+    pub deployment: RemoteDeployment,
 }
 
 impl std::fmt::Debug for MemoryDriverConfig {
@@ -36,6 +40,7 @@ impl std::fmt::Debug for MemoryDriverConfig {
             .field("driver_id", &self.driver_id)
             .field("url", &self.url.as_ref().map(|_| "<set>"))
             .field("api_key", &self.api_key.as_ref().map(|_| "<set>"))
+            .field("deployment", &self.deployment)
             .finish()
     }
 }
@@ -84,7 +89,7 @@ pub fn open_driver(
                 "OPENCOMPANY_MEMORY=remote requires OPENCOMPANY_MEMORY_API_KEY",
             )?;
             (
-                remote_provider(driver_id, url, key)?,
+                remote_provider(driver_id, url, key, config.deployment)?,
                 admit(driver_id, DriverClass::External)?,
             )
         }
@@ -127,16 +132,32 @@ fn admit(driver_id: &str, expected: DriverClass) -> Result<DriverClass> {
     }
     Ok(admission.class)
 }
-fn remote_provider(driver_id: &str, url: &str, key: &str) -> Result<Arc<dyn MemoryProvider>> {
+fn remote_provider(
+    driver_id: &str,
+    url: &str,
+    key: &str,
+    deployment: RemoteDeployment,
+) -> Result<Arc<dyn MemoryProvider>> {
+    let managed = deployment == RemoteDeployment::Managed;
     let provider: Arc<dyn MemoryProvider> = match driver_id {
         SUPERMEMORY_DRIVER_ID => Arc::new(tinymemory_remote::supermemory_provider(
-            tinymemory_remote::SupermemoryMemory::new(url, Some(key)).map_err(open_failed)?,
+            tinymemory_remote::SupermemoryMemory::api(url, key).map_err(open_failed)?,
         )),
         MEM0_DRIVER_ID => Arc::new(tinymemory_remote::mem0_provider(
-            tinymemory_remote::Mem0Memory::new(url, Some(key)).map_err(open_failed)?,
+            if managed {
+                tinymemory_remote::Mem0Memory::api(url, key)
+            } else {
+                tinymemory_remote::Mem0Memory::self_hosted(url, Some(key))
+            }
+            .map_err(open_failed)?,
         )),
         COGNEE_DRIVER_ID => Arc::new(tinymemory_remote::cognee_provider(
-            tinymemory_remote::CogneeMemory::new(url, Some(key)).map_err(open_failed)?,
+            if managed {
+                tinymemory_remote::CogneeMemory::api(url, key)
+            } else {
+                tinymemory_remote::CogneeMemory::self_hosted(url, Some(key))
+            }
+            .map_err(open_failed)?,
         )),
         other => {
             return Err(MemoryDriverError(format!(

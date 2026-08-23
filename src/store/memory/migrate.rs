@@ -266,6 +266,7 @@ pub fn resolve_migrate_configs(
         url: settings.memory_url.clone(),
         api_key: settings.memory_api_key.clone(),
         data_dir: settings.data_dir.clone(),
+        deployment: settings.memory_deployment,
     };
 
     let to_config = match to {
@@ -288,6 +289,7 @@ pub fn resolve_migrate_configs(
                 url: to_url,
                 api_key: to_api_key,
                 data_dir: None,
+                deployment: Default::default(),
             }
         }
         "null" => {
