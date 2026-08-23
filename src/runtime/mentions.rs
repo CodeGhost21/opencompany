@@ -726,6 +726,18 @@ fn is_sender(target: &MentionTarget, sender: Option<&Actor>) -> bool {
 /// a target that is already being demoted for having left the roster is not
 /// in `dir` at all (it is built from the same live company and user list),
 /// so it would fail this check for the wrong reason.
+///
+/// A span whose text is a real alias but sits somewhere `opens_mention`/
+/// `closes_mention` would refuse — mid-word (`jane@engineer`), or inside a
+/// fenced or inline code span — is dropped outright too, same as a span that
+/// does not match its claimed text at all. Matching alias text is not enough
+/// on its own: fallback extraction deliberately never treats either shape as
+/// a mention, and a structured caller must not be able to manufacture a chip,
+/// and — once mention routing is wired — a routing decision, from text that
+/// reads as something else to every other path through this module. Checked
+/// against a **masked** copy (`strip_code_regions`), which preserves every
+/// offset, so a span the mask blanked out (inside a code region) fails the
+/// open check exactly as one that was never `@`-shaped at all.
 pub fn revalidate(
     text: &str,
     mentions: Vec<Mention>,
@@ -734,9 +746,17 @@ pub fn revalidate(
 ) -> Vec<Mention> {
     let user_ids: HashSet<&str> = users.iter().map(|u| u.id.as_str()).collect();
     let dir = directory(record, users);
+    let masked = strip_code_regions(text);
+    let masked_bytes = masked.as_bytes();
     mentions
         .into_iter()
         .filter(|m| text.get(m.offset..m.offset + m.text.len()) == Some(m.text.as_str()))
+        .filter(|m| {
+            let end = m.offset + m.text.len();
+            end <= masked_bytes.len()
+                && opens_mention(&masked, masked_bytes, m.offset)
+                && closes_mention(masked_bytes, end)
+        })
         .map(|mut m| {
             let live = match &m.target {
                 MentionTarget::Agent { id } => record.is_roster_agent(id),
