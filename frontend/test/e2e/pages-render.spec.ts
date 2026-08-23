@@ -72,6 +72,14 @@ test("an agent-authored page bundle loads and paints in its sandboxed iframe", a
     expect(bundleResponse.status()).toBe(200);
     expect(bundleResponse.headers()["access-control-allow-origin"]).toBe("null");
     expect(bundleResponse.headers()["access-control-allow-credentials"]).toBe("true");
+    // TEMP diagnostic: dump the iframe DOM after the module graph settles.
+    const frame = page.frames().find((f) => f.url().includes(`/pages/${slug}`));
+    console.log(`[diag iframe url] ${frame?.url()}`);
+    if (frame) {
+      const html = await frame.evaluate(() => document.documentElement.outerHTML);
+      console.log(`[diag iframe html len] ${html.length}`);
+      console.log(`[diag iframe html] ${html.slice(0, 3000)}`);
+    }
     await expect(page.frameLocator("iframe").getByRole("heading", { name: painted })).toBeVisible({
       timeout: 30_000,
     });
