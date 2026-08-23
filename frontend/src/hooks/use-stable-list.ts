@@ -37,6 +37,15 @@ import type { FocusEvent } from "react";
 export interface StableList<T> {
   /** The rows to render, in a pointer-stable order. */
   items: T[];
+  /**
+   * True while the list is held — the pointer is over the container or focus is
+   * inside it. A caller that renders other content ABOVE the held rows (the
+   * standing-permissions section above the Approvals queue) reads this to defer
+   * layout changes of its own for the same reason the rows are frozen: a section
+   * that appears above the queue shifts every approve/decline control while the
+   * pointer is already aiming at one (#1593).
+   */
+  holding: boolean;
   /** Handlers (and a `ref`) for the queue container that detect operator interaction. */
   containerProps: {
     onPointerEnter: () => void;
