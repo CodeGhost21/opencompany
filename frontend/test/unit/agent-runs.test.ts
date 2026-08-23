@@ -64,14 +64,17 @@ function makeClient(routes: Record<string, unknown>) {
 let container: HTMLDivElement;
 let root: Root;
 
-async function mount(client: OpenCompanyClient) {
+async function mount(
+  client: OpenCompanyClient,
+  props: { agentId?: string; agentName?: string } = {},
+) {
   await act(async () => {
     root.render(
       createElement(AgentRuns, {
         client,
         company: null,
-        agentId: "engineer",
-        agentName: "Robin",
+        agentId: props.agentId ?? "engineer",
+        agentName: props.agentName ?? "Robin",
       }),
     );
   });
