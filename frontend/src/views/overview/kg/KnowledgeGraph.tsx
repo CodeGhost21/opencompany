@@ -1270,9 +1270,13 @@ export function KnowledgeGraph({
                     if (el) nodeRefs.current.set(key, el);
                     else nodeRefs.current.delete(key);
                   }}
-                  role="button"
-                  aria-label={`Memory note: ${m.label}. Press Enter or Space to open.`}
-                  tabIndex={activeNodeId === `memory:${m.id}` ? 0 : -1}
+                  // Collapsed, the notes are backdrop for the core's single
+                  // click target; only the opened vault exposes them as buttons.
+                  role={coreExpanded ? 'button' : undefined}
+                  aria-label={
+                    coreExpanded ? `Memory note: ${m.label}. Press Enter or Space to open.` : undefined
+                  }
+                  tabIndex={coreExpanded && activeNodeId === `memory:${m.id}` ? 0 : -1}
                   className={coreExpanded && !restIds.has(m.id) ? 'kg-mem-node kg-mem-in' : 'kg-mem-node'}
                   transform={`translate(${p.x},${p.y})`}
                   style={{ pointerEvents: coreExpanded ? 'auto' : 'none', cursor: 'pointer' }}
