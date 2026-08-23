@@ -231,16 +231,30 @@ pub fn user_label(user: &UserRecord) -> String {
 /// person gets does not move under them between two reads.
 pub fn user_slugs(users: &[UserRecord]) -> Vec<String> {
     let mut seen: HashMap<String, usize> = HashMap::new();
+    // Every slug actually handed out so far, natural or generated. A natural
+    // label can already carry a `-2`-shaped suffix (`"Sam-2"` is a real
+    // display name, not a disambiguation this function made up), so counting
+    // per base alone can mint the same slug twice — `"Sam"`, `"Sam"`,
+    // `"Sam-2"` would otherwise emit `sam`, `sam-2`, `sam-2`. Checking against
+    // every emitted slug, not just this base's own counter, is what catches
+    // that collision.
+    let mut emitted: HashSet<String> = HashSet::new();
     let mut out = Vec::with_capacity(users.len());
     for user in users {
         let base = mention_slug(&user_label(user));
-        let count = seen.entry(base.clone()).or_insert(0);
-        *count += 1;
-        out.push(if *count == 1 {
-            base
-        } else {
-            format!("{base}-{count}")
-        });
+        loop {
+            let count = seen.entry(base.clone()).or_insert(0);
+            *count += 1;
+            let candidate = if *count == 1 {
+                base.clone()
+            } else {
+                format!("{base}-{count}")
+            };
+            if emitted.insert(candidate.clone()) {
+                out.push(candidate);
+                break;
+            }
+        }
     }
     out
 }
@@ -404,9 +418,18 @@ fn opens_mention(bytes: &[u8], idx: usize) -> bool {
             b' ' | b'\t' | b'\n' | b'\r' | b'(' | b'[' | b'{'
         ),
     };
-    let after_ok = bytes
-        .get(idx + 1)
-        .is_some_and(|b| b.is_ascii_alphanumeric() || *b == b'_');
+    // `@#engineering` is the documented desk spelling (`MentionTarget::Desk`'s
+    // own doc comment). The `#` is not itself word-like, so it needs its own
+    // branch: either the byte right after `@` is word-like, or it is `#` and
+    // the byte after THAT is — an `@#` with nothing nameable following it
+    // opens nothing.
+    let after_ok = match bytes.get(idx + 1) {
+        Some(b'#') => bytes
+            .get(idx + 2)
+            .is_some_and(|b| b.is_ascii_alphanumeric() || *b == b'_'),
+        Some(b) => b.is_ascii_alphanumeric() || *b == b'_',
+        None => false,
+    };
     before_ok && after_ok
 }
 
@@ -532,10 +555,21 @@ pub fn extract_with_known(text: &str, dir: &[MentionAlias]) -> Vec<Mention> {
             i += 1;
             continue;
         }
-        let after = i + 1;
+        // `@#engineering` is the desk-only spelling `opens_mention` also
+        // accepts (see its doc comment): the `#` is not part of any alias in
+        // `dir`, so it is consumed here and the match is narrowed to desk
+        // targets only, rather than asking every alias to carry a `#` twin.
+        let (after, desk_only) = if bytes.get(i + 1) == Some(&b'#') {
+            (i + 2, true)
+        } else {
+            (i + 1, false)
+        };
         let mut matched: Option<(usize, &MentionTarget)> = None;
         let mut ambiguous = false;
         for (alias, target) in &by_alias {
+            if desk_only && !matches!(target, MentionTarget::Desk { .. }) {
+                continue;
+            }
             let end = after + alias.len();
             if end > lowered.len() {
                 continue;
@@ -618,10 +652,13 @@ pub fn normalize(mut mentions: Vec<Mention>, sender: Option<&Actor>) -> Vec<Ment
 /// here. `Everyone` and `Desk` targets are covered the same way, since a
 /// caller can misclaim those exactly as easily as an agent or a user.
 fn is_valid_alias_for(mention: &Mention, dir: &[MentionAlias]) -> bool {
-    let body = mention
-        .text
-        .strip_prefix(['@', '#'])
-        .unwrap_or(&mention.text);
+    // Strips `@` and, for the desk spelling `opens_mention`/`extract_with_known`
+    // both accept, the `#` right after it too — `@#engineering` must compare
+    // against the same `"engineering"` alias `@engineering` does, not against
+    // `"#engineering"`, which is nobody's alias and would fail every desk
+    // mention the console's own picker can produce for that spelling.
+    let body = mention.text.strip_prefix('@').unwrap_or(&mention.text);
+    let body = body.strip_prefix('#').unwrap_or(body);
     let body = body.to_lowercase();
     dir.iter()
         .any(|entry| entry.target == mention.target && entry.aliases.iter().any(|a| a == &body))
@@ -1106,6 +1143,25 @@ members = ["engineer", "ceo"]
         assert_eq!(user_slugs(&users), vec!["sam", "sam-2", "sam-3"]);
     }
 
+    /// A natural display name can already look like a generated
+    /// disambiguation (`"Sam-2"` is a real name someone can type at signup),
+    /// and the counter must still notice it collided with the second `Sam`
+    /// rather than handing both people the same slug.
+    #[test]
+    fn a_natural_label_matching_a_generated_suffix_does_not_collide() {
+        let users = vec![
+            user("u1", "a@acme.test", Some("Sam")),
+            user("u2", "b@acme.test", Some("Sam")),
+            user("u3", "c@acme.test", Some("Sam-2")),
+        ];
+        let slugs = user_slugs(&users);
+        assert_eq!(
+            slugs.len(),
+            slugs.iter().collect::<std::collections::HashSet<_>>().len(),
+            "every emitted slug must be unique: {slugs:?}"
+        );
+    }
+
     #[test]
     fn a_label_with_nothing_typable_yields_an_empty_slug() {
         assert_eq!(mention_slug("!!!"), "");
@@ -1128,6 +1184,49 @@ members = ["engineer", "ceo"]
                 "text: {text}"
             );
         }
+    }
+
+    /// `MentionTarget::Desk`'s own doc comment advertises `@#engineering` as
+    /// the desk spelling; extraction must actually accept it, and a
+    /// client-supplied mention using it must revalidate as live rather than
+    /// being demoted for a text/target mismatch.
+    #[test]
+    fn a_hash_prefixed_desk_mention_resolves() {
+        let found = resolve_text("@#engineering please");
+        assert_eq!(
+            targets(&found),
+            vec![&MentionTarget::Desk {
+                id: "engineering".to_string()
+            }]
+        );
+        assert_eq!(found[0].text, "@#engineering");
+
+        let supplied = vec![Mention {
+            target: MentionTarget::Desk {
+                id: "engineering".to_string(),
+            },
+            text: "@#engineering".to_string(),
+            offset: 0,
+            quiet: false,
+        }];
+        let out = resolve(
+            "@#engineering please",
+            Some(supplied),
+            None,
+            &acme(),
+            &people(),
+        );
+        assert_eq!(out.len(), 1);
+        assert!(!out[0].quiet, "{out:?}");
+    }
+
+    /// `@#` naming a non-desk alias must not resolve — the `#` is desk-only,
+    /// so `@#engineer` (an agent id) must stay literal text rather than
+    /// silently falling back to the unprefixed match.
+    #[test]
+    fn a_hash_prefixed_non_desk_alias_does_not_resolve() {
+        let found = resolve_text("@#engineer please");
+        assert!(found.is_empty(), "{found:?}");
     }
 
     #[test]
