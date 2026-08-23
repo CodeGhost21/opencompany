@@ -1517,6 +1517,9 @@ async fn park_pending_gates(
         // gate's card can carry the verbatim upstream content awaiting sign-off.
         output,
         edges,
+        // Issue #617: the resolver's per-child gate record, for a namespaced
+        // child gate's card.
+        child_gates,
     } = paused;
     if pending.is_empty() {
         return;
