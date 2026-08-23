@@ -135,12 +135,16 @@ export const DELIVERABLE_OPTIONS: { value: TaskDeliverable; label: string; hint:
  * the transcript's "Add to board" relies on, keeping the human drag into In
  * progress the only thing that spends an agent turn.
  *
- * Two fields are collected beyond the prompt.
+ * Three fields are collected beyond the prompt.
  *
  * The **deliverable** (issue #580): once versus workflow is a decision about
  * *what kind of thing* the card produces, not a default the host can pick, so
  * the operator states it here. It still lands in To-do like any card — the
  * builder pass fires only on the drag into In progress.
+ *
+ * The **priority** (issue #1357): a card's priority is its most prominent
+ * visual signal, so an operator who knows the urgency states it when creating
+ * the card. It defaults to medium, preserving the host's historical default.
  *
  * The **owner** (issue #1106). Assignee was moved out by #301 on the reasoning
  * that the host defaults it and the card edits it. What that missed is what the
