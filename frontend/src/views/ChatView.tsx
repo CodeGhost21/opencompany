@@ -1192,6 +1192,7 @@ export function ChatView({
               // thread and copilot composers below go without.
               deliverableChoice={offersDeliverableChoice(active.kind)}
               mentionables={mentionables}
+              channelMemberIds={inChannel?.map((m) => m.id)}
             />
           </div>
 
