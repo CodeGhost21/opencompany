@@ -140,6 +140,9 @@ test("an empty board leaves its column affordances to explain the empty state", 
   try {
     await page.goto(`/#/ledgers/${slug}`);
     await dismissTour(page);
+    // Declared ledgers open as rows by default (issue #1351); the affordances
+    // this test is about are the board's, so switch to it before asserting.
+    await page.getByRole("button", { name: "Board", exact: true }).click();
     await expect(page.getByTestId("ledger-board")).toBeVisible({ timeout: 15_000 });
 
     // Board columns already say what an empty board is for. A second status
