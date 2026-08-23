@@ -178,9 +178,9 @@ export function ApprovalsView({
    * branch below reads `rows` rather than `visible` so the count, the empty
    * state and the list all agree on the one frozen view.
    */
-  const { items: rows, containerProps: queueHold } = useStableList(orderedVisible);
+  const { items: rows, containerProps: queueHold, holding } = useStableList(orderedVisible);
   const askerNames = useAskerNames(client, company, approvals);
-  const { grants, granterNames, refreshGrants } = useStandingGrants(client, company);
+  const { grants, granterNames, refreshGrants } = useStandingGrants(client, company, holding);
   /**
    * How many rows each turn's batch still has waiting (#842).
    *
