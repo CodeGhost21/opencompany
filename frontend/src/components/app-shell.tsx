@@ -315,7 +315,7 @@ interface Props {
   onBackToPicker?: () => void;
 }
 
-/** The dashboard shell: sidebar nav + topbar around one company's views. */
+/** The dashboard shell: sidebar navigation and content around one company's views. */
 export function AppShell({
   client,
   company,

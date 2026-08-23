@@ -68,10 +68,11 @@ const EMPTY: Sources = {
 /**
  * The command centre: the company's knowledge graph, and nothing else.
  *
- * The page is the graph — no header, no strip, no top bar (the shell hides its
- * own for this view). The company sits at the core, its desks are the pillars,
- * the jobs hang off each pillar, the teammate who does each job sits above it,
- * and their tools are the outer ring.
+ * The page is the graph — no header or strip. The shell does not render a top
+ * bar for any view; its remaining controls live in the sidebar. The company
+ * sits at the core, its desks are the pillars, the jobs hang off each pillar,
+ * the teammate who does each job sits above it, and their tools are the outer
+ * ring.
  *
  * Every ring is **declared** now: the pillars are the company's own desks
  * (issue #486), the outer ring is the grants the host resolved for each

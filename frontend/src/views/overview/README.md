@@ -1,8 +1,8 @@
 # Overview — the knowledge graph
 
-`#/overview` is the graph and nothing else: no page header, no strip, and the
-console's own top bar is hidden for this view (see `app-shell.tsx`). It fills
-the viewport beside the sidebar.
+`#/overview` is the graph and nothing else: no page header or strip. No view
+has a top bar; its remaining controls live in the sidebar. The graph fills the
+shell's content surface beside the sidebar.
 
 ## What it draws
 
