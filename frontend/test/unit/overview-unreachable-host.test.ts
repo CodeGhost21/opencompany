@@ -20,15 +20,15 @@ import type { DeskDto, TeamMemberDto } from "@/api/types";
  * `KnowledgeGraph` — the lazy-loaded graph itself — is mocked out below. It
  * drives a force simulation off `requestAnimationFrame` and reads
  * `window.matchMedia`, neither of which jsdom provides, and none of that
- * machinery is under test here: what is under test is the snapshot corner
- * `Overview` renders around it.
+ * machinery is under test here: what is under test is the outage state
+ * `Overview` renders over it.
  */
 
 vi.mock("@/views/overview/kg/KnowledgeGraph", () => ({
   // The snapshot corner is a slot the graph's shell positions (issue #1307),
   // because only the shell knows how wide the detail rail is. The stand-in
-  // therefore has to render that slot — a mock that dropped it would take the
-  // whole surface under test with it and pass by drawing nothing.
+  // therefore has to render that slot; the outage itself is owned by Overview
+  // and deliberately covers that chrome (issue #1314).
   KnowledgeGraph: ({ statusSlot }: { statusSlot?: unknown }) => statusSlot ?? null,
 }));
 
@@ -128,17 +128,38 @@ function clickRefresh() {
   button?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
 }
 
+function retryButton(): HTMLButtonElement | undefined {
+  return container.querySelector('[aria-label="Retry loading the company overview"]') ?? undefined;
+}
+
 describe("a host that cannot be reached at all", () => {
-  it("says so, and does not draw an empty company", async () => {
+  it("covers the empty graph with a centered, actionable outage state", async () => {
     const unreachable = fakeClient();
     goUnreachable(unreachable);
     await render(unreachable.client);
 
     expect(alertText()).toContain("Could not reach the company");
+    expect(container.querySelector('[data-testid="overview-outage"]')).not.toBeNull();
+    expect(retryButton()?.textContent).toContain("Try again");
     // Never a company with nothing in it: the corner says there was no
     // snapshot to draw, not that one was taken and came back empty.
     expect(snapshotText()).not.toContain("Snapshot");
     expect(snapshotText()).toContain("No snapshot yet");
+  });
+
+  it("retries from the outage state", async () => {
+    const unreachable = fakeClient();
+    goUnreachable(unreachable);
+    await render(unreachable.client);
+    const readsBeforeRetry = unreachable.get.mock.calls.length;
+
+    await act(async () => {
+      retryButton()?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await act(async () => {});
+    await act(async () => {});
+
+    expect(unreachable.get.mock.calls.length).toBeGreaterThan(readsBeforeRetry);
   });
 
   it("keeps the previous snapshot's time rather than re-stamping it", async () => {

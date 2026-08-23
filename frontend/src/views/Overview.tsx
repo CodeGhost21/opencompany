@@ -254,43 +254,29 @@ export function Overview({ client, company, companyName }: Props) {
    * shell is what places this.
    */
   const statusSlot = (
-    <>
-      {/* Every source failed at once (issue #1219): a host that could not be
-          reached, said out loud, in the same corner that already owns the
-          staleness signal — rather than a graph redrawn empty with no
-          explanation. */}
-      {loadError && (
-        <div
-          role="alert"
-          className="max-w-64 rounded-md border border-destructive/40 bg-destructive/10 px-2 py-1 text-2xs text-destructive shadow-sm backdrop-blur"
-        >
-          {loadError}
-        </div>
-      )}
-      <div className="flex items-center gap-1.5 rounded-md border bg-background/90 px-2 py-1 text-2xs text-muted-foreground shadow-sm backdrop-blur">
-        <span className="truncate">
-          {sources.fetchedAt === null
-            ? loading
-              ? "Loading…"
-              : "No snapshot yet"
-            : `Snapshot ${new Date(sources.fetchedAt).toLocaleTimeString([], {
-                hour: "2-digit",
-                minute: "2-digit",
-              })}`}
-        </span>
-        <button
-          type="button"
-          onClick={refresh}
-          disabled={loading}
-          title="This page is a snapshot, not a live view. Re-read the company."
-          aria-label="Refresh the graph"
-          className="inline-flex items-center gap-1 rounded px-1 py-0.5 hover:bg-muted disabled:opacity-50"
-        >
-          <RefreshCw className={`size-3 ${loading ? "animate-spin" : ""}`} aria-hidden />
-          Refresh
-        </button>
-      </div>
-    </>
+    <div className="flex items-center gap-1.5 rounded-md border bg-background/90 px-2 py-1 text-2xs text-muted-foreground shadow-sm backdrop-blur">
+      <span className="truncate">
+        {sources.fetchedAt === null
+          ? loading
+            ? "Loading…"
+            : "No snapshot yet"
+          : `Snapshot ${new Date(sources.fetchedAt).toLocaleTimeString([], {
+              hour: "2-digit",
+              minute: "2-digit",
+            })}`}
+      </span>
+      <button
+        type="button"
+        onClick={refresh}
+        disabled={loading}
+        title="This page is a snapshot, not a live view. Re-read the company."
+        aria-label="Refresh the graph"
+        className="inline-flex items-center gap-1 rounded px-1 py-0.5 hover:bg-muted disabled:opacity-50"
+      >
+        <RefreshCw className={`size-3 ${loading ? "animate-spin" : ""}`} aria-hidden />
+        Refresh
+      </button>
+    </div>
   );
 
   return (
@@ -311,6 +297,30 @@ export function Overview({ client, company, companyName }: Props) {
           #1221) — this names it for a screen reader the same way every other
           view's title does. */}
       <h1 className="sr-only">Company overview</h1>
+      {/* A complete read failure is the page's state, not a detail in the
+          snapshot chrome. The opaque canvas keeps an unreachable host from
+          looking like a genuinely empty company, and puts the retry beside the
+          explanation instead of asking an operator to find it in a corner. */}
+      {loadError && (
+        <div
+          data-testid="overview-outage"
+          className="absolute inset-0 z-50 grid place-items-center bg-os-bg/95 px-5"
+        >
+          <div role="alert" className="max-w-md text-center">
+            <p className="text-lg font-semibold text-os-text">{loadError}</p>
+            <button
+              type="button"
+              onClick={refresh}
+              disabled={loading}
+              aria-label="Retry loading the company overview"
+              className="mt-4 inline-flex items-center gap-2 rounded-md border border-os-border-strong bg-os-surface px-3 py-2 text-sm font-medium text-os-text shadow-sm transition-colors hover:bg-os-hover disabled:opacity-50"
+            >
+              <RefreshCw className={`size-4 ${loading ? "animate-spin" : ""}`} aria-hidden />
+              Try again
+            </button>
+          </div>
+        </div>
+      )}
       <Suspense
         fallback={
           // The graph's chunk is still in flight, so there is no shell to slot
