@@ -183,6 +183,12 @@ describe("resetting to the manifest's policy", () => {
     expect(document.body.textContent).toContain(
       "The agents act without asking",
     );
+    expect(document.body.textContent).toContain(
+      "This also replaces the current always-ask list",
+    );
+    expect(document.body.textContent).toContain(
+      "Reset replaces the whole policy override",
+    );
 
     await act(async () => {
       document
