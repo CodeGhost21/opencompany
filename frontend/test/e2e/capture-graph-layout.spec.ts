@@ -39,6 +39,18 @@ test("capture settled graph layout + API data", async ({ page }) => {
   await page.addInitScript(() => {
     window.localStorage.setItem("theme", "dark");
   });
+  // Catch any uncaught error that might kill d3-timer's rAF loop (a throw in
+  // one timer callback stalls every timer behind it in the same flush).
+  await page.addInitScript(() => {
+    const errs: string[] = [];
+    (window as unknown as { __pageErrors: string[] }).__pageErrors = errs;
+    window.addEventListener("error", (e) => {
+      errs.push(`error: ${e.error instanceof Error ? e.error.stack : e.message}`);
+    });
+    window.addEventListener("unhandledrejection", (e) => {
+      errs.push(`rejection: ${String(e.reason)}`);
+    });
+  });
   // Capture the graph's node-count trajectory from the very first DOM appearance
   // (before "visible"), so an empty→full growth at mount is caught even if the
   // empty state flashes for a single frame.
