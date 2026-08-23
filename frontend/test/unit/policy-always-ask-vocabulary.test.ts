@@ -481,22 +481,21 @@ describe("policy tier changes", () => {
     const auto = radios.find((button) =>
       button.textContent?.includes("Auto"),
     )!;
-    const full = radios.find((button) =>
-      button.textContent?.includes("Full"),
-    )!;
     // Auto is the first tier and selected. ArrowUp has no neighbour above it,
     // so the group wraps to Full — an escalation, which parks in the
-    // confirmation dialog instead of persisting.
+    // confirmation dialog instead of persisting. The dialog's focus trap owns
+    // focus once it opens, so the wrap target is read off what the dialog says
+    // (Full's description) rather than `document.activeElement`.
     auto.focus();
     await act(async () => {
       auto.dispatchEvent(
         new KeyboardEvent("keydown", { key: "ArrowUp", bubbles: true }),
       );
     });
-    expect(document.activeElement).toBe(full);
     expect(document.body.textContent).toContain(
       "Give teammates more autonomy?",
     );
+    expect(document.body.textContent).toContain("Acts without asking.");
     expect((client.put as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled();
   });
 
