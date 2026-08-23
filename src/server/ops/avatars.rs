@@ -157,7 +157,7 @@ async fn upload(
         .to_string();
     let id = generate_id();
     let node = WorkspaceNode {
-        name: format!("{}-{}", kebab_name_or(&stem, "avatar"), &id),
+        name: format!("{}-{}", kebab_name_or(&stem, "avatar"), id),
         id: id.clone(),
         kind: NodeKind::File,
         parent_id: Some(folder.id().to_string()),
