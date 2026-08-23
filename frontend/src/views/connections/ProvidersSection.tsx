@@ -234,9 +234,10 @@ export function ProvidersSection({
             className="grid gap-2"
             style={{
               // Uniform rows so a grid of 123 tiles reads as a grid and not as
-              // ragged masonry — the tile is a fixed slot, and the label clamps.
+              // ragged masonry — the tile is a fixed slot, and both the label
+              // and the access disclosure clamp (issue #1474).
               gridTemplateColumns: "repeat(auto-fill, minmax(8.5rem, 1fr))",
-              gridAutoRows: "5.5rem",
+              gridAutoRows: "8.5rem",
             }}
           >
             {visible.map((row) => (
