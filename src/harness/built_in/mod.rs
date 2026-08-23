@@ -238,6 +238,14 @@ pub struct HarnessDeps {
     /// Root under which per-agent workspace directories are created
     /// (`{root}/{company}/{agent}/workspace`).
     pub workspace_root: PathBuf,
+    /// The company home's MCP store directory — `<home>/mcp`, the same one
+    /// [`McpRuntime`](crate::harness::mcp::McpRuntime) is built over.
+    ///
+    /// Carried because OpenHuman's `mcp_registry_*` tools take a config now
+    /// instead of reading a process global, and the toolbelt has to hand them
+    /// the config that selects *this* company's store. `None` leaves those two
+    /// tools off the belt, which is what a caller with no MCP home should get.
+    pub mcp_home: Option<PathBuf>,
     /// Whether each private agent workspace is initialized as a Git repository
     /// and checkpointed after tool calls. Host-level `[workspace]` config owns
     /// this switch; false preserves the pre-checkpoint behavior exactly.
