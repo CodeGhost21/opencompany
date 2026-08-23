@@ -689,6 +689,23 @@ mod test {
     }
 
     #[test]
+    fn secret_filenames_distinguish_letter_case() {
+        let bundle = Bundle::new("/root", &CompanyId::new("acme"));
+
+        // `validate_servers` treats `Acme` and `acme` as two distinct valid MCP
+        // server names, so their credential keys must stay apart even on
+        // filesystems that fold case (the macOS and Windows default). Upper-case
+        // letters are percent-encoded while lower-case ones pass through, so
+        // the two filenames differ byte-wise and stay distinct once a
+        // case-insensitive filesystem lower-cases them.
+        let upper = bundle.secret("mcp/Acme/auth");
+        let lower = bundle.secret("mcp/acme/auth");
+        assert_ne!(upper, lower);
+        assert!(upper.ends_with("%k-mcp%2F%41cme%2Fauth"));
+        assert!(lower.ends_with("%k-mcp%2Facme%2Fauth"));
+    }
+
+    #[test]
     fn canonical_filenames_are_disjoint_from_legacy_slugs() {
         let bundle = Bundle::new("/root", &CompanyId::new("acme"));
 
