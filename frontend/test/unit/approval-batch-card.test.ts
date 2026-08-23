@@ -361,6 +361,6 @@ describe("the consolidated approval card", () => {
 
     const approve = button("Approve");
     expect(approve.className).toContain("hover:bg-primary");
-    expect(approve.className).not.toContain("bg-primary ");
+    expect(approve.className.split(" ")).not.toContain("bg-primary");
   });
 });
