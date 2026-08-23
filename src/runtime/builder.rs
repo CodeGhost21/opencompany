@@ -3675,13 +3675,13 @@ mod test {
         let context = tempfile::tempdir().unwrap();
         let scratch = tempfile::tempdir().unwrap();
         let scoped = tempfile::tempdir().unwrap();
-        let plain: Arc<dyn ContextStore> = Arc::new(FsContextStore::new(context.path().into()));
-        let scratch: Arc<dyn ContextStore> = Arc::new(FsContextStore::new(scratch.path().into()));
+        let plain: Arc<dyn ContextStore> = Arc::new(FsContextStore::new(context.path().to_path_buf()));
+        let scratch: Arc<dyn ContextStore> = Arc::new(FsContextStore::new(scratch.path().to_path_buf()));
         let scopes: Arc<dyn crate::store::MemoryScopes> = Arc::new(TestMemoryScopes {
-            context: Arc::new(FsContextStore::new(scoped.path().into())),
+            context: Arc::new(FsContextStore::new(scoped.path().to_path_buf())),
         });
         let mut overlay = MemoryOverlay::test_with_ports(
-            Arc::new(FsMemoryStore::new(memory.path().into())),
+            Arc::new(FsMemoryStore::new(memory.path().to_path_buf())),
             plain,
             None,
         );
