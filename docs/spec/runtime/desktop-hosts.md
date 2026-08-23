@@ -141,7 +141,8 @@ the console renders the permission prompt but must never be the thing that
 enforces the answer. A renderer decides what a person sees; it must not decide
 what a model can reach.
 
-The server half (`src/server/acp/`, `src/harness/acp_run_turn.rs`) is behind the
-`acp` feature and **not yet mounted on any router**. `/acp` is a reserved prefix
-either way, so a build without it answers a protocol probe with a 404 rather
-than the console shell with a `200`.
+The server half (`src/server/acp/`) is behind the `acp` feature and mounts the
+authenticated HTTP JSON-RPC transport at `/acp` — the endpoint and its session
+model are described in `src/server/acp/mod.rs`. `/acp` is a reserved prefix
+either way, so a build without the feature answers a protocol probe with a 404
+rather than the console shell with a `200`.

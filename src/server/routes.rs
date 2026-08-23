@@ -122,6 +122,8 @@ fn router_with_console(state: AppState, console_dir: Option<PathBuf>) -> Router 
         .merge(crate::server::users::router())
         .merge(crate::server::users::admin::router())
         .merge(crate::server::graphql::router());
+    #[cfg(feature = "acp")]
+    let router = router.merge(crate::server::acp::router());
     // tiny.place A2A inbound + discovery routes, only when the feature is on.
     #[cfg(feature = "tinyplace")]
     let router = router.merge(crate::server::a2a::router());

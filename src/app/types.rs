@@ -516,6 +516,10 @@ pub struct AppState {
     /// [`rebuilder`](Self::rebuilder) above is: the desktop supplies it, this
     /// crate only defines the seam.
     acp_agents: Option<Arc<dyn crate::ports::acp::AcpAgentFactory>>,
+    /// Live inbound ACP sessions. Kept on the host, rather than on a company,
+    /// because one ACP connection may open sessions for several companies.
+    #[cfg(feature = "acp")]
+    acp_sessions: Arc<crate::server::acp::SessionRegistry>,
     /// The boot-only builder inputs recorded per company at registration, so a
     /// rebuild configures the successor exactly as boot configured its
     /// predecessor. See [`BootInputs`](crate::runtime::BootInputs) for why
@@ -567,6 +571,8 @@ impl AppState {
             oauth_pending: Arc::new(std::sync::Mutex::new(HashMap::new())),
             rebuilder: None,
             acp_agents: None,
+            #[cfg(feature = "acp")]
+            acp_sessions: Arc::new(crate::server::acp::SessionRegistry::new()),
             boot_inputs: Arc::new(RwLock::new(HashMap::new())),
         }
     }
@@ -586,6 +592,12 @@ impl AppState {
     /// This host's local-transport ACP agent factory, when one is wired.
     pub fn acp_agents(&self) -> Option<Arc<dyn crate::ports::acp::AcpAgentFactory>> {
         self.acp_agents.clone()
+    }
+
+    /// Sessions opened through the host's ACP HTTP transport.
+    #[cfg(feature = "acp")]
+    pub fn acp_sessions(&self) -> Arc<crate::server::acp::SessionRegistry> {
+        Arc::clone(&self.acp_sessions)
     }
 
     /// This host's in-place runtime rebuilder, when one is wired.
