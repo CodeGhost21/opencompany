@@ -98,7 +98,9 @@ export function FinancesView({ client, company }: Props) {
     );
   }
 
-  const budgetPct = data.budgetUsd > 0 ? Math.min(100, Math.round((data.spentUsd / data.budgetUsd) * 100)) : 0;
+  const budgetUsd = data.budgetUsd;
+  const hasBudget = budgetUsd !== null && budgetUsd > 0;
+  const budgetPct = hasBudget ? Math.min(100, Math.round((data.spentUsd / budgetUsd) * 100)) : 0;
   const netSign = data.netUsd > 0 ? "+" : data.netUsd < 0 ? "−" : "";
 
   return (
