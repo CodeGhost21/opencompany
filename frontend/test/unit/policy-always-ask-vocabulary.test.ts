@@ -321,4 +321,164 @@ describe("policy tier changes", () => {
       { mode: "auto" },
     );
   });
+
+  it("roves the tab order and moves among tiers with the arrow keys", async () => {
+    const client = makeClient();
+    await mount(client);
+    const radios = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('[role="radio"]'),
+    );
+    const auto = radios.find((button) => button.textContent?.includes("Auto"))!;
+    const full = radios.find((button) => button.textContent?.includes("Full"))!;
+    // Only the checked tier is in the Tab order.
+    expect(auto.tabIndex).toBe(0);
+    expect(full.tabIndex).toBe(-1);
+
+    // Arrow-down onto Full is an escalation: focus moves, but the change waits
+    // on the confirmation instead of persisting straight away.
+    auto.focus();
+    await act(async () => {
+      auto.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }),
+      );
+    });
+    expect(document.body.textContent).toContain("Give teammates more autonomy?");
+    expect((client.put as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled();
+  });
+
+  it("lets the arrow keys select a lower tier directly", async () => {
+    const client = makeClient({ status: { ...STATUS, mode: "full" } });
+    await mount(client);
+    const full = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('[role="radio"]'),
+    ).find((button) => button.textContent?.includes("Full"))!;
+    full.focus();
+    await act(async () => {
+      full.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "ArrowUp", bubbles: true }),
+      );
+    });
+    expect((client.put as ReturnType<typeof vi.fn>)).toHaveBeenCalledWith(
+      "/api/v1/acme/policy",
+      { mode: "auto" },
+    );
+  });
+
+  it("keeps the escalation confirmation open when saving fails", async () => {
+    const failingPut = vi.fn(async () => {
+      throw new Error("host refused");
+    });
+    const client = {
+      scopeFor: (company: string | null) => `/api/v1/${company ?? "company"}`,
+      get: async (path: string) => {
+        if (path.includes("/workflows/tool-slugs")) {
+          return { slugs: WIRED, unwired: [] };
+        }
+        if (path.endsWith("/policy")) return STATUS;
+        return null;
+      },
+      put: failingPut,
+      del: vi.fn(async () => STATUS),
+    } as unknown as OpenCompanyClient;
+
+    await mount(client);
+    const full = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('[role="radio"]'),
+    ).find((button) => button.textContent?.includes("Full"));
+    await act(async () => {
+      full?.click();
+    });
+    expect(document.body.textContent).toContain("Give teammates more autonomy?");
+
+    const confirm = Array.from(
+      document.body.querySelectorAll<HTMLButtonElement>("button"),
+    ).find((button) => button.textContent === "Give more autonomy");
+    await act(async () => {
+      confirm?.click();
+    });
+    // A rejected PUT must not dismiss the dialog: the operator retries without
+    // re-selecting the tier.
+    expect(failingPut).toHaveBeenCalledWith("/api/v1/acme/policy", {
+      mode: "full",
+    });
+    expect(document.body.textContent).toContain("Give teammates more autonomy?");
+    expect(toasts.error).toHaveBeenCalled();
+  });
+});
+
+describe("manifest resets", () => {
+  it("confirms a reset that would escalate to the manifest's tier", async () => {
+    const client = makeClient({
+      status: {
+        ...STATUS,
+        mode: "auto",
+        manifestMode: "full",
+        overridden: true,
+        setBy: "alice@acme",
+      },
+      resetStatus: {
+        ...STATUS,
+        mode: "full",
+        manifestMode: "full",
+        overridden: false,
+      },
+    });
+    await mount(client);
+    const resetButton = Array.from(
+      container.querySelectorAll<HTMLButtonElement>("button"),
+    ).find((button) =>
+      button.textContent?.includes("Use the manifest's policy"),
+    );
+    expect(resetButton).toBeDefined();
+
+    await act(async () => {
+      resetButton?.click();
+    });
+    // Nothing persisted yet; the escalation confirmation is up instead.
+    expect((client.del as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled();
+    expect(document.body.textContent).toContain("Give teammates more autonomy?");
+    expect(document.body.textContent).toContain("manifest's Full setting");
+
+    const confirm = Array.from(
+      document.body.querySelectorAll<HTMLButtonElement>("button"),
+    ).find((button) => button.textContent === "Revert and give more autonomy");
+    await act(async () => {
+      confirm?.click();
+    });
+    expect((client.del as ReturnType<typeof vi.fn>)).toHaveBeenCalledWith(
+      "/api/v1/acme/policy",
+    );
+  });
+
+  it("resets immediately when the manifest's tier is not higher", async () => {
+    const client = makeClient({
+      status: {
+        ...STATUS,
+        mode: "full",
+        manifestMode: "auto",
+        overridden: true,
+      },
+      resetStatus: {
+        ...STATUS,
+        mode: "auto",
+        manifestMode: "auto",
+        overridden: false,
+      },
+    });
+    await mount(client);
+    const resetButton = Array.from(
+      container.querySelectorAll<HTMLButtonElement>("button"),
+    ).find((button) =>
+      button.textContent?.includes("Use the manifest's policy"),
+    );
+    await act(async () => {
+      resetButton?.click();
+    });
+    expect((client.del as ReturnType<typeof vi.fn>)).toHaveBeenCalledWith(
+      "/api/v1/acme/policy",
+    );
+    expect(document.body.textContent).not.toContain(
+      "Give teammates more autonomy?",
+    );
+  });
 });
