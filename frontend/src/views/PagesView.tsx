@@ -271,7 +271,11 @@ export function PagesView({ client, company }: Props) {
       <section className="flex flex-1 flex-col overflow-hidden">
         {active ? (
           <iframe
-            key={active.slug}
+            // The key is the iframe document's complete identity: a distinct
+            // page, or the same slug under a different company, is a distinct
+            // document and must remount so its first load is granted a fresh
+            // bridge rather than treated as a navigation of the old one.
+            key={`${company ?? ""}:${active.slug}`}
             ref={iframeRef}
             onLoad={handleLoad}
             sandbox="allow-scripts"
