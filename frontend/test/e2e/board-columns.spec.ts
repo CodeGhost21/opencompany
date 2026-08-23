@@ -148,7 +148,10 @@ test("new work enters through one prompt box and lands in Pending", async ({ pag
   const long = `${marker} — and then a great deal more detail that runs well past the eighty character title cap so the note has to carry it`;
   await page.locator("#new-prompt").fill(long);
   await page.getByTestId("create-priority").click();
-  await page.getByRole("option", { name: "High", exact: true }).click();
+  // The option's accessible name is the raw wire value ("high"), not the
+  // rendered "High" — the picker capitalises with CSS `text-transform`, which
+  // never reaches the accessibility tree (same as the edit dialog's picker).
+  await page.getByRole("option", { name: "high", exact: true }).click();
   await page.getByRole("button", { name: "Create", exact: true }).click();
 
   type Row = { title: string; note?: string; column: string; priority: string; assignee: string };
