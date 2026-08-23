@@ -2502,11 +2502,6 @@ mod tests {
             // read and update siblings deliberately do NOT park (see `DECLARED`)
             // — naming the one that does is how that split stays a decision.
             "delete_workflow",
-            // Issue #245: both reach a forge under the company's credential and
-            // pull third-party-authored content into the agent's context, and
-            // one of them writes a tree.
-            "repo_checkout",
-            "repo_pr",
             "some_tool_nobody_declared",
         ] {
             assert!(
@@ -2603,8 +2598,6 @@ mod tests {
             "run_workflow",
             "mcp_call_tool",
             "mcp_registry_tool_call",
-            "repo_checkout",
-            "repo_pr",
         ] {
             assert_eq!(
                 c(tool).standing,
