@@ -60,7 +60,13 @@ if [[ "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null 
   sandbox_args=(--chromeArg=--no-sandbox)
 fi
 
-exec npx -y chrome-devtools-mcp@latest \
+# The version is pinned rather than `@latest`, the same way `.mcp.json` pins
+# `@playwright/mcp`: `npx` resolves the tag on every launch, so a fresh release
+# would be downloaded and executed on a checkout that never changed — a release
+# that broke the CLI, or a compromised one, would become the repository's MCP
+# integration without any deliberate move. `@1.7.0` is the version these flags
+# were verified against; bump it on purpose, and re-verify.
+exec npx -y chrome-devtools-mcp@1.7.0 \
   --executablePath "$executable" \
   --headless=true \
   --isolated=true \
