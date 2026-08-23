@@ -120,6 +120,13 @@ fn the_default_tool_belt_carries_every_namespace_the_wildcard_excludes() {
 }
 
 #[test]
+fn the_default_tool_belt_grants_workspace_writes_explicitly() {
+    assert!(crate::company::grants_workspace_write_explicit(
+        &default_tool_allow()
+    ));
+}
+
+#[test]
 fn an_absent_default_tool_belt_falls_back_rather_than_grants_nothing() {
     // The fallback matters more than it looks: a company whose manifest has no
     // `[tools]` section takes this value, so an empty answer would ship a
