@@ -42,11 +42,14 @@ describe("resolving an address", () => {
   let container: HTMLDivElement;
   let root: Root;
   let seen: [View, string | null];
+  let rewrite: typeof REWRITE_RETIRED | undefined;
 
-  // The shell's rewrite policy gets first refusal for retired and unknown
-  // addresses; the allow-list resolves every other head.
+  // Most assertions exercise the allow-list alone. The unknown-address case
+  // opts into the shell's policy below; bare Tasks and Team are deliberately
+  // rewritten retired routes, so applying it to every view would make this
+  // table assert the opposite of their contracts.
   function Probe() {
-    const [view, sub] = useHashView<View>(VIEWS, "overview", REWRITE_RETIRED);
+    const [view, sub] = useHashView<View>(VIEWS, "overview", rewrite);
     seen = [view, sub];
     return null;
   }
@@ -70,6 +73,7 @@ describe("resolving an address", () => {
     container = document.createElement("div");
     document.body.appendChild(container);
     root = createRoot(container);
+    rewrite = undefined;
   });
 
   afterEach(async () => {
@@ -99,6 +103,7 @@ describe("resolving an address", () => {
     // The route remains safe — an unknown head is never accepted as a real
     // page — but it now reaches a named explanation rather than pretending the
     // operator asked for Overview.
+    rewrite = REWRITE_RETIRED;
     await visit("#/nope");
     expect(seen).toEqual(["not-found", "nope"]);
     expect(window.location.hash).toBe("#/not-found/nope");
