@@ -76,8 +76,26 @@ pub struct UserRecord {
     /// for every identity that has no mailbox to send to.
     pub email: String,
     /// An optional human-readable name for the console to render.
+    ///
+    /// `None` means **this person has not named themselves**, and is never
+    /// filled in with a guess: the console derives a readable name from the
+    /// login identity at render time (`steven.enamakel@…` reads as "Steven
+    /// Enamakel"), which keeps a guess looking like a guess and leaves this
+    /// field meaning "what they actually chose". Storing the derivation would
+    /// make the two indistinguishable — and would freeze a guess about somebody
+    /// into the record the moment they first signed in.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
+    /// The face this person wears, when they have chosen one — a
+    /// `tiny:<flavour>` mascot or a `blob:<nodeId>` upload
+    /// (`docs/spec/runtime/avatars.md`).
+    ///
+    /// `None` is the same "nobody has chosen" state [`Self::display_name`]
+    /// carries, and for the same reason: the console draws the mascot it hashes
+    /// from this user's id, so a person always has a face, and clearing this
+    /// field is how they get that default back.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avatar: Option<String>,
     /// What the user may do.
     pub role: UserRole,
     /// Whether the user may currently authenticate.
