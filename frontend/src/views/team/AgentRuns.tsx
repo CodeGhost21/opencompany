@@ -230,6 +230,7 @@ export function AgentRuns({
 
   useEffect(() => {
     setRuns(null);
+    openIdRef.current = null;
     setOpenId(null);
     void read().catch(() => setFailed(true));
     return startVisiblePolling(() => void read().catch(() => setFailed(true)), POLL_MS);
