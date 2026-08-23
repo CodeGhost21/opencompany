@@ -39,17 +39,13 @@ test("capture settled graph layout", async ({ page }) => {
   const dump = await page.evaluate(() => {
     const svg = document.querySelector('svg[aria-label="Operating knowledge graph"]');
     if (!svg) return { error: "no svg" };
-    // Every node is a <g> carrying transform="translate(x,y)" plus an id.
+    // Every node is a <g> carrying transform="translate(x,y)" and a text label.
     const positions: Record<string, number[]> = {};
     for (const el of svg.querySelectorAll("g[transform]")) {
       const m = el.getAttribute("transform")?.match(/translate\((-?[\d.]+)\s*[, ]\s*(-?[\d.]+)\)/);
       if (m) {
-        const id =
-          el.getAttribute("id") ||
-          el.getAttribute("data-id") ||
-          el.querySelector("[id]")?.getAttribute("id") ||
-          `anon-${el.querySelectorAll("*").length}-${m[1]},${m[2]}`;
-        positions[id] = [Math.round(+m[1] * 10) / 10, Math.round(+m[2] * 10) / 10];
+        const label = (el.textContent || "").trim().slice(0, 40) || el.getAttribute("id") || "?";
+        positions[label] = [Math.round(+m[1] * 10) / 10, Math.round(+m[2] * 10) / 10];
       }
     }
     return { count: Object.keys(positions).length, positions };
