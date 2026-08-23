@@ -48,6 +48,7 @@ import {
   SidebarControls,
 } from "@/components/sidebar-controls";
 import { SetupController } from "@/setup/SetupController";
+import { arrivedViaSetupHandoff, clearSetupHandoff } from "@/setup/state";
 import { TourController } from "@/tour/TourController";
 import { useCompany } from "@/hooks/use-company";
 import { getRun, listRuns } from "@/api/runs";
@@ -428,6 +429,16 @@ export function AppShell({
    * not immediately cover the roster it leads to with the tour welcome.
    */
   const [setupCompleted, setSetupCompleted] = useState(false);
+  // A setup that had to sign in hands off with a full-page navigation
+  // (`window.location.href`), so `onCompleted` never fires in this mount. The
+  // link carries a one-shot marker (`#/company?from=setup`); consume it here so
+  // this fresh mount applies the same welcome suppression a same-mount
+  // completion gets, and so a reload cannot re-apply it.
+  useEffect(() => {
+    if (!arrivedViaSetupHandoff()) return;
+    setSetupCompleted(true);
+    clearSetupHandoff();
+  }, []);
   // The shell owns every channel's transcript, not `ChatView` — the shell
   // mounts and unmounts `ChatView` per route, so component-local state there
   // would be discarded on every trip away from Chat and back.

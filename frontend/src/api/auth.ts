@@ -141,8 +141,16 @@ export async function requestCode(
   client: OpenCompanyClient,
   company: string | null,
   email: string,
+  redirect?: string,
 ): Promise<RequestCodeResult> {
-  return client.post<RequestCodeResult>(`${client.scopeFor(company)}/auth/request`, { email });
+  return client.post<RequestCodeResult>(`${client.scopeFor(company)}/auth/request`, {
+    email,
+    // The landing fragment a *mailed* link should carry (setup's hand-off
+    // passes `#/company?from=setup`). Absent for a normal sign-in, which lands
+    // wherever it always did. `undefined` is dropped by JSON.stringify, so the
+    // body is unchanged unless a redirect was actually asked for.
+    redirect,
+  });
 }
 
 /** Redeems a magic link for a session. */

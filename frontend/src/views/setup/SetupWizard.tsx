@@ -28,6 +28,7 @@ import { AlertTriangle, Check, Loader2, Lock, RotateCw } from "lucide-react";
 
 import { requestCode } from "@/api/auth";
 import type { OpenCompanyClient } from "@/api/client";
+import { SETUP_HANDOFF_FRAGMENT } from "@/setup/state";
 import {
   changedFields,
   fieldsFor,
@@ -356,17 +357,18 @@ export function SetupWizard({ client, onDone, onCancel }: Props) {
     }
 
     setHandoff({ kind: "arranging" });
-    requestCode(client, company, address)
+    requestCode(client, company, address, SETUP_HANDOFF_FRAGMENT)
       .then((result) => {
         if (result.dev_code) {
           // The only branch holding the code, and so the only one that can hand
-          // over a link rather than describe one.
+          // over a link rather than describe one. The same fragment is passed to
+          // the host above, so a *mailed* link (this host never echoes) carries
+          // the same destination; the magic-link landing preserves the router
+          // hash while it strips the single-use code, so sign-in reaches the
+          // roster setup just created rather than the stale Overview graph.
           setHandoff({
             kind: "link",
-            // The magic-link landing preserves this router hash while it
-            // strips the single-use code, so sign-in reaches the roster setup
-            // just created rather than the stale Overview graph.
-            url: `/login?company=${encodeURIComponent(company)}&code=${encodeURIComponent(result.dev_code)}#/company`,
+            url: `/login?company=${encodeURIComponent(company)}&code=${encodeURIComponent(result.dev_code)}${SETUP_HANDOFF_FRAGMENT}`,
           });
         } else {
           setHandoff(status.mail.wired ? { kind: "mailed" } : { kind: "unmailable" });

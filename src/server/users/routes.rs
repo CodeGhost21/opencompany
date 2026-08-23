@@ -99,6 +99,13 @@ pub fn router() -> Router<AppState> {
 #[derive(Debug, Deserialize)]
 struct RequestCode {
     email: String,
+    /// Where the console should land after this magic-link sign-in, carried as
+    /// a URL fragment (`#/company`). Only setup's hand-off asks for one today;
+    /// a normal sign-in omits it and lands wherever it always did. The value is
+    /// mailed inside the login link, so it is validated to a conservative
+    /// fragment subset — see [`redirect_fragment`].
+    #[serde(default)]
+    redirect: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -659,7 +666,14 @@ async fn request_code(
 
     // Deliver. A send failure must not change the response — it would report
     // that the address exists.
-    let delivered = deliver_code(&state, &runtime, &email, &plaintext).await;
+    let delivered = deliver_code(
+        &state,
+        &runtime,
+        &email,
+        &plaintext,
+        body.redirect.as_deref(),
+    )
+    .await;
 
     // Echoing the code makes local development work with no mail server. It is
     // also, literally, returning a credential in an HTTP response — so it is
@@ -718,8 +732,37 @@ pub(crate) fn echoes_code_in_response(state: &AppState) -> bool {
     state.config().is_local_only() && !mail_transport_wired(state)
 }
 
+/// The safe subset of a URL fragment a mailed login link may carry.
+///
+/// Only the fragment part of a link is ever client-supplied, and a value that
+/// cannot be honoured is dropped rather than refused — a malformed redirect
+/// must not block sign-in. The set is deliberately small: fragment characters
+/// that route the console (`#/company`), with nothing that could break the
+/// link out of a mail client's linkification (`@`, whitespace, control
+/// characters).
+fn redirect_fragment(redirect: &str) -> Option<String> {
+    let safe = redirect.starts_with('#')
+        && redirect.len() <= 128
+        && redirect.bytes().all(|b| {
+            b.is_ascii_alphanumeric()
+                || matches!(b, b'#' | b'/' | b'?' | b'&' | b'=' | b'-' | b'_' | b'.')
+        });
+    safe.then(|| redirect.to_string())
+}
+
 /// Mails the magic link. Returns whether it was actually sent.
-async fn deliver_code(state: &AppState, runtime: &CompanyRuntime, email: &str, code: &str) -> bool {
+///
+/// `redirect`, when present, is appended to the link so the console lands on
+/// the fragment the requester asked for (setup's `#/company`, for example)
+/// rather than its default view. Sanitized by [`redirect_fragment`]: an
+/// invalid value means the link is mailed without it, never refused.
+async fn deliver_code(
+    state: &AppState,
+    runtime: &CompanyRuntime,
+    email: &str,
+    code: &str,
+    redirect: Option<&str>,
+) -> bool {
     // Asked through the shared predicate so "can this host mail at all" has one
     // answer: the throttle and the dev echo both branch on it, and a second
     // spelling here is how those three drift apart.
@@ -731,7 +774,10 @@ async fn deliver_code(state: &AppState, runtime: &CompanyRuntime, email: &str, c
         return false;
     };
     let base = state.config().host_base_url();
-    let link = format!("{base}/login?company={}&code={code}", runtime.id().as_ref());
+    let mut link = format!("{base}/login?company={}&code={code}", runtime.id().as_ref());
+    if let Some(fragment) = redirect.and_then(redirect_fragment) {
+        link.push_str(&fragment);
+    }
     let company_name = load_manifest(runtime)
         .await
         .ok()

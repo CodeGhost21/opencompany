@@ -68,3 +68,48 @@ export function clearSetupSkipped(scope: LocalScope): void {
     /* nothing to clear */
   }
 }
+
+// ---------------------------------------------------------------------------
+// The sign-in hand-off marker
+// ---------------------------------------------------------------------------
+
+/**
+ * The hash-query key a setup hand-off link carries, so a sign-in that
+ * navigates the whole document away (setup's button sets `window.location.href`)
+ * still lands knowing setup just finished: `…code=…#/company?from=setup`.
+ *
+ * `useHashView`'s segment parsing strips everything from `?` onward, so the
+ * flag never reaches the router; AppShell consumes it on the landing mount to
+ * apply the same welcome suppression a same-mount completion gets, then removes
+ * it so a reload or a copied link cannot re-apply it.
+ */
+export const SETUP_HANDOFF_FLAG = "from";
+
+/**
+ * The landing fragment a setup hand-off link carries. The wizard hands this to
+ * the host so a *mailed* link lands the same way the loopback link does.
+ */
+export const SETUP_HANDOFF_FRAGMENT = `#/company?${SETUP_HANDOFF_FLAG}=setup`;
+
+/** Whether the current address arrived from setup's sign-in hand-off. */
+export function arrivedViaSetupHandoff(): boolean {
+  const [, query = ""] = window.location.hash.split("?");
+  return new URLSearchParams(query).get(SETUP_HANDOFF_FLAG) === "setup";
+}
+
+/**
+ * Removes the hand-off flag from the address.
+ *
+ * One-shot: the suppression it enables belongs to the arrival it rode in on,
+ * not to a later reload. Other hash-query keys (`?host=`, for instance) are
+ * preserved.
+ */
+export function clearSetupHandoff(): void {
+  const [path, query = ""] = window.location.hash.replace(/^#/, "").split("?");
+  const params = new URLSearchParams(query);
+  if (!params.has(SETUP_HANDOFF_FLAG)) return;
+  params.delete(SETUP_HANDOFF_FLAG);
+  const qs = params.toString().replace(/=(?=&|$)/g, "");
+  const next = `#${path}${qs ? `?${qs}` : ""}`;
+  if (next !== window.location.hash) window.history.replaceState(null, "", next);
+}
