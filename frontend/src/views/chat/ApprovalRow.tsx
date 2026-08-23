@@ -232,20 +232,36 @@ export function ApprovalRow({
         )}{" "}
         Decline
       </Button>
-      <Button
-        variant={compact ? "ghost" : "default"}
-        size="sm"
-        className={compact ? COMPACT_ACTION_CLASS : undefined}
-        disabled={busy}
-        onClick={() => decideAll("approve")}
-      >
-        {awaiting("approve") ? (
-          <Loader2 className="size-4 animate-spin" />
-        ) : (
-          <Check className="size-4" />
-        )}{" "}
-        Approve
-      </Button>
+      {needsFullReview ? (
+        // The row's label is a preview, not the payload: a body cut to fit the
+        // compact lead is not something the operator may authorize on. Decline
+        // is always safe and stays inline; Approve is replaced by a path to the
+        // detailed view, where the complete host-bounded payload is on the card
+        // (#1330 review).
+        <Button
+          variant={compact ? "ghost" : "default"}
+          size="sm"
+          className={compact ? COMPACT_ACTION_CLASS : undefined}
+          render={<a href="#/approvals" />}
+        >
+          Review in Approvals
+        </Button>
+      ) : (
+        <Button
+          variant={compact ? "ghost" : "default"}
+          size="sm"
+          className={compact ? COMPACT_ACTION_CLASS : undefined}
+          disabled={busy}
+          onClick={() => decideAll("approve")}
+        >
+          {awaiting("approve") ? (
+            <Loader2 className="size-4 animate-spin" />
+          ) : (
+            <Check className="size-4" />
+          )}{" "}
+          Approve
+        </Button>
+      )}
     </>
   );
 
