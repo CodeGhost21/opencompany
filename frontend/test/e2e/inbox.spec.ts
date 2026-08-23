@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 
 /**
  * Regression proof for issue #173: the Inbox surface must read the host's real
@@ -33,11 +33,24 @@ const FIXTURE_SENDERS = ["Priya Sharma", "Stripe", "Weekly Digest", "Figma"];
  */
 const FIXTURE_SUBJECTS = ["Re: Spring campaign timeline"];
 
+/** The first-run tour's overlay intercepts clicks on the roster beneath it. */
+async function dismissTour(page: Page) {
+  const skip = page.getByRole("button", { name: "Skip for now" });
+  try {
+    await skip.waitFor({ state: "visible", timeout: 10_000 });
+  } catch {
+    return;
+  }
+  await skip.click();
+  await expect(skip).toBeHidden();
+}
+
 test("Inbox is reachable, explains that it is parked, and reads the host's per-agent store", async ({ page }) => {
   // Switch on the first teammate's inbox from that teammate's own page — the
   // control moved off the roster card in issue #1190. It writes to the host
   // keyed by agent id, the same key the ingest webhook files mail under.
   await page.goto("/#/company");
+  await dismissTour(page);
   await page.getByTestId("team-card-open").first().click();
   const toggle = page.getByTestId("agent-inbox-toggle");
   await expect(toggle).toBeVisible({ timeout: 30_000 });
