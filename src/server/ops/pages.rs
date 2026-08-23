@@ -363,10 +363,15 @@ async fn list_pages(company: ScopedCompany) -> Result<Response, ApiError> {
 
 /// The fixed HTML shell that mounts a page's compiled module (not agent
 /// content). Extracted from the route so the shell's load-bearing invariants
-/// — the React namespace import, the slug-relative bundle path, the absolute
-/// SDK CSS link, the import map — are unit-testable instead of living only in
-/// a route that needs a full workspace to exercise.
-fn page_shell_html(slug: &str) -> String {
+/// — the React namespace import, the slug-relative bootstrap path, the
+/// shell-minted capability, the import map — are unit-testable instead of
+/// living only in a route that needs a full workspace to exercise.
+///
+/// `cap` is the short-lived capability minted by the authenticated shell route
+/// ([`mint_module_cap`]); it rides the bootstrap module's URL so the module
+/// graph, which the opaque-origin iframe fetches without a session cookie, can
+/// still be authorized server-side.
+fn page_shell_html(slug: &str, cap: &str) -> String {
     format!(
         r#"<!doctype html>
 <html>
@@ -388,25 +393,35 @@ fn page_shell_html(slug: &str) -> String {
 </head>
 <body>
 <div id="root"></div>
-<script type="module" src="./{slug}/bootstrap.mjs" crossorigin="use-credentials"></script>
+<script type="module" src="./{slug}/bootstrap.mjs?oc_cap={cap}"></script>
 </body>
 </html>
 "#,
         slug = slug,
+        cap = cap,
     )
 }
 
 /// The fixed external module that mounts one page bundle.
 ///
-/// This must be a module response rather than an inline script: only an
-/// external module's `crossorigin="use-credentials"` setting propagates to
-/// its static import of the authenticated bundle.
-const PAGE_BOOTSTRAP: &str = r#"import * as React from "react";
+/// Served from the [`page_bootstrap`] route with the shell-minted capability
+/// interpolated into the bundle's own import URL. The shell is the only
+/// authenticated party in the load chain; the capability it mints is what lets
+/// the opaque-origin module graph fetch the authenticated bundle — a static
+/// import's URL is resolved against the importing module's own URL, so the
+/// `?oc_cap` query has to be threaded here explicitly or the bundle request
+/// would drop it.
+fn page_bootstrap_body(cap: &str) -> String {
+    format!(
+        r#"import * as React from "react";
 import * as ReactDOM from "react-dom/client";
-import Page from "./bundle.mjs";
+import Page from "./bundle.mjs?oc_cap={cap}";
 const root = ReactDOM.createRoot(document.getElementById("root"));
 root.render(React.createElement(Page));
-"#;
+"#,
+        cap = cap
+    )
+}
 
 async fn page_bootstrap(
     company: ScopedCompany,
