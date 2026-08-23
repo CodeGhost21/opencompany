@@ -147,6 +147,7 @@ export function TaskItem({
           type="button"
           onClick={onOpen}
           className="-m-1 min-w-0 rounded-sm p-1 text-left text-sm font-medium leading-snug hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          data-testid="task-card-open"
         >
           {task.title}
         </button>
