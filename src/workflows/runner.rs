@@ -1008,6 +1008,7 @@ async fn run_workflow_inner(
             &graph,
             &outcome.pending_approvals,
             &child_gates,
+            &trigger_input,
         ));
     }
     for call in &unreplayable {
