@@ -146,6 +146,15 @@ const SEARCH_DENIED_COMPANIES: [&str; 4] = [
 /// path — nobody has decided their roster needs the web. Moving one into
 /// [`SEARCH_GRANTED_COMPANIES`] is an ordinary product call, not a violation.
 ///
+/// **Empty, and kept anyway.** `search` is in the global `default_allow` now,
+/// so a company that declares no `[tools]` section inherits it: the twelve
+/// templates that used to sit here were never *deciding* against search, they
+/// had simply never been edited, and their agents reported the tool as not
+/// enabled. They moved to the granted list unchanged. The bucket stays because
+/// the partition is the mechanism — the next template that genuinely wants to
+/// leave search off, without the hermetic-fixture argument that puts a company
+/// in [`SEARCH_DENIED_COMPANIES`], is declared here.
+///
 /// This list exists so the posture is a *partition* rather than an allow-list.
 /// An allow-list asserts a decision someone remembered, so it cannot notice a
 /// company nobody remembered: `agentic_software_company` shipped with nine
@@ -357,19 +366,27 @@ fn every_company_declares_a_search_posture() {
 }
 
 /// The footgun this suite exists to catch: `[tools].allow` **replaces** the
-/// default (`["*", "media", "composio"]`), it never extends it. A reviewer
-/// "simplifying" a grant to `allow = ["search"]` would silently strip
-/// files/docs/shell/code/web/subagent, `media` and `composio` from every agent
-/// in the company — no parse error, no warning, just a company that quietly
-/// lost its tool belt. This asserts both halves: the shipped form keeps the
-/// inherited entries, and the reduced form provably loses them.
+/// default (`globals/globals.toml`'s `default_allow`), it never extends it. A
+/// reviewer "simplifying" a grant to `allow = ["search"]` would silently strip
+/// files/docs/shell/code/web/subagent, workspace writes, `media`, `composio`
+/// and the MCP grants from every agent in the company — no parse error, no
+/// warning, just a company that quietly lost its tool belt. This asserts both
+/// halves: the shipped form keeps the inherited entries, and the reduced form
+/// provably loses them.
+///
+/// It used to open by asserting the default belt was search-free, which is no
+/// longer true — `search` ships in `default_allow`, so these templates now
+/// restate the default rather than restating-and-extending it. The invariant
+/// that mattered survives the change untouched: whatever the default carries,
+/// a template that writes its own `allow` must carry all of it.
 #[test]
 fn granting_search_never_strips_the_inherited_default_belt() {
     let default_allow = Tools::default().allow;
     assert!(
-        !grants_search_explicit(&default_allow),
-        "the default belt is expected to stay search-free (opt-in per #238); \
-         if that changed, these templates no longer need to restate it"
+        grants_search_explicit(&default_allow),
+        "`search` is expected to ship in the default belt now; if it was made \
+         opt-in again, these templates have to restate-and-extend once more \
+         and this test's premise needs rewriting rather than deleting"
     );
 
     for name in FULL_BELT_PLUS_SEARCH {
