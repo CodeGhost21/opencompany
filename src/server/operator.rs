@@ -2841,6 +2841,7 @@ impl From<crate::runtime::grants::StandingGrant> for StandingGrantDto {
             at_millis: g.at_millis,
             expires_at_millis: g.expires_at_millis,
             scope: g.scope,
+            workflow: g.workflow,
         }
     }
 }
