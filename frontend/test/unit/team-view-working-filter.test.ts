@@ -251,4 +251,44 @@ describe("the Working filter survives a workload outage (issue #1436)", () => {
     expect(after?.getAttribute("data-disabled")).not.toBeNull();
     expect(after?.getAttribute("data-checked")).toBeNull();
   });
+
+  it("ignores a superseded workload read, so a later read's map is the one that filters", async () => {
+    api.fetchMe.mockResolvedValue({ role: "admin" });
+    api.listPeople.mockResolvedValue([]);
+    api.fetchBoardColumns.mockResolvedValue(COLUMNS);
+
+    // Two task reads, resolved out of order: the first starts earlier but lands
+    // after the second. The stale one must not overwrite the newer map.
+    const resolveTask: Array<(tasks: Task[]) => void> = [];
+    api.listTasks.mockImplementation(
+      () =>
+        new Promise<Task[]>((resolve) => {
+          resolveTask.push(resolve);
+        }),
+    );
+
+    const client = fakeClient();
+    await render(client, 0); // read 1 (older) starts, stays in flight
+    await render(client, 1); // read 2 (newer) starts, read 1 still in flight
+    expect(resolveTask).toHaveLength(2);
+
+    // The newer read lands first: Maya working.
+    await act(async () => {
+      resolveTask[1](TASKS);
+    });
+    // The older read lands second with nobody working: it must be ignored.
+    await act(async () => {
+      resolveTask[0]([]);
+    });
+
+    // With the filter on, only Maya — the newer read's answer — remains. If
+    // the stale read had overwritten the map, Maya would read as idle and the
+    // roster would empty out behind the filter.
+    await act(async () => {
+      workingSwitch()?.click();
+    });
+    expect(card("Maya")).not.toBeNull();
+    expect(card("Ravi")).toBeNull();
+    expect(card("Priya")).toBeNull();
+  });
 });
