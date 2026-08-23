@@ -364,4 +364,46 @@ describe("the consolidated approval card", () => {
     expect(approve.className).toContain("hover:bg-primary");
     expect(approve.className.split(" ")).not.toContain("bg-primary");
   });
+
+  it("shows the amount beside a monetary approval in the compact chat row", async () => {
+    const PAYMENT: ApprovalSummary = {
+      id: "a4",
+      kind: "payment.send",
+      amount_usd: 42.5,
+      at_millis: T0,
+      agent: "seo",
+      thread: "desk-marketing",
+      batch: "turn-1",
+      broadly_grantable: true,
+      payload: { to: "vendor@example.test", amount_usd: 42.5 },
+    };
+    await render([PAYMENT], {}, {}, new Map(), true);
+
+    const row = container.querySelector<HTMLElement>('[data-approval-inline="compact"]');
+    // An operator approving a payment must see its value beside the Approve
+    // button, not just the recipient the first payload line happens to name.
+    expect(row?.textContent).toContain(`Send a payment — vendor@example.test · ${money(42.5)}`);
+  });
+
+  it("names a hidden approval once in the compact chat row", async () => {
+    const HIDDEN: ApprovalSummary = {
+      id: "a5",
+      kind: "payment.send",
+      amount_usd: null,
+      at_millis: T0,
+      agent: "seo",
+      thread: "desk-marketing",
+      batch: "turn-1",
+      broadly_grantable: true,
+      payload: null,
+      contents_hidden: true,
+    };
+    await render([HIDDEN], {}, {}, new Map(), true);
+
+    const row = container.querySelector<HTMLElement>('[data-approval-inline="compact"]');
+    // #618's flag reads as "not shown to you", never as an empty card — and the
+    // action must not be printed twice.
+    expect(row?.textContent).toContain("Send a payment — details hidden by your role");
+    expect(row?.textContent ?? "").not.toContain("Send a payment — Send a payment");
+  });
 });
