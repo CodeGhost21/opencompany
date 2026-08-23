@@ -1,0 +1,364 @@
+// The composer's half of @-mentions: what the caret is currently typing, what
+// to insert when a row is picked, and which mentions a draft still carries.
+//
+// Pure by design — the repo keeps chat logic in `model.ts`/`lib` with a unit
+// test rather than inline in a component, and every rule below is one that is
+// much easier to get wrong in a keydown handler than in a function.
+//
+// The server has a twin of this in `src/runtime/mentions.rs`. It is the
+// authority: whatever the picker resolves here is re-validated there against
+// the live roster, and a target that no longer exists is demoted rather than
+// trusted. This side exists to make the *typing* good, not to be believed.
+
+/** How many mentions one message may carry as pings. Mirrors `MENTION_CAP`. */
+export const MENTION_CAP = 50;
+
+/** A regular expression that matches nothing, ever. */
+const NEVER_MATCH = /(?!)/g;
+
+/** Longest `@query` the picker will keep open before giving up. */
+const MAX_QUERY = 32;
+
+import type { ChatMentionInput, MentionTarget } from "@/api/types";
+
+// The composer produces a wire value, so the shape it builds is the API's, not
+// a parallel one that would have to be kept in step with it.
+export type { MentionTarget };
+
+/** One resolved mention, as the composer sends it. */
+export type Mention = ChatMentionInput;
+
+/** One row the picker can offer. */
+export interface Mentionable {
+  target: MentionTarget;
+  /** What to render, and what gets inserted after the `@`. */
+  label: string;
+  /** Every spelling that reaches this row, lowercase. */
+  aliases: string[];
+  /** A line of context under the label — a job title, a slug, a member count. */
+  hint?: string;
+  /** Whether this row is on the channel being composed in. Ranks first. */
+  inChannel?: boolean;
+}
+
+/** Whether `ch` is word-like, for the mention boundary rules. */
+function isWord(ch: string | undefined): boolean {
+  return ch !== undefined && /[A-Za-z0-9_]/.test(ch);
+}
+
+/**
+ * Whether the `@` at `i` opens a mention.
+ *
+ * The condition that keeps `jane@acme.com` from opening a picker mid-address:
+ * an `@` counts only at the start or after whitespace or an opening bracket,
+ * and never immediately after a `<`.
+ */
+function opensMention(text: string, i: number): boolean {
+  if (text[i] !== "@") return false;
+  const before = text[i - 1];
+  // Start of text always opens.
+  if (before === undefined) return true;
+  // Never inside an existing `<@id>` token.
+  if (before === "<") return false;
+  // Anything word-like before it means this `@` is part of something else —
+  // overwhelmingly an email address. This is `vercel/chat`'s accept condition
+  // minus its `isWord(text[i + 1])` half, which a picker cannot have: the
+  // first keystroke of a mention is a bare `@` with nothing after it yet.
+  return !isWord(before);
+}
+
+/**
+ * The `@query` the caret is currently inside, or `null` when it is not in one.
+ *
+ * Scans backwards from the caret to the nearest mention-opening `@`, giving up
+ * at a newline, a second `@`, or {@link MAX_QUERY} characters — so a stray `@`
+ * earlier in a long paragraph cannot hold the picker open while somebody types
+ * an unrelated sentence.
+ *
+ * The query may contain spaces, because a person's label often does
+ * (`@Jane Doe`). That is what makes the multi-word case reachable at all, and
+ * why the give-up conditions above have to be real rather than "stop at a
+ * space".
+ */
+export function activeMentionQuery(
+  text: string,
+  caret: number,
+  knownAliases?: ReadonlySet<string>,
+): { start: number; query: string } | null {
+  for (let i = caret - 1; i >= 0 && caret - i <= MAX_QUERY; i--) {
+    const ch = text[i];
+    if (ch === "\n") return null;
+    if (ch !== "@") continue;
+    if (!opensMention(text, i)) return null;
+    const query = text.slice(i + 1, caret);
+    // A finished name followed by a space closes the query.
+    //
+    // Without this the picker reopens the instant you pick somebody: inserting
+    // `@engineer ` leaves the caret after a trailing space, the scan above
+    // still finds the `@`, and the query becomes `"engineer "` — which matches
+    // and re-renders the list over the message you are now trying to write.
+    //
+    // Gated on an EXACT alias rather than on any trailing space, because a
+    // space is also how a two-word name is typed: `@Jane ` must stay open on
+    // the way to `@Jane Doe`. `block/buzz` draws the line in the same place,
+    // and for the same reason — a longer name sharing a prefix must not hold
+    // the query open once a shorter one is complete.
+    if (knownAliases && /\s$/.test(query)) {
+      if (knownAliases.has(query.trim().toLowerCase())) return null;
+    }
+    return { start: i, query };
+  }
+  return null;
+}
+
+/**
+ * Every spelling in `entries`, for {@link activeMentionQuery}'s close rule.
+ *
+ * Built by the caller once per directory rather than per keystroke.
+ */
+export function aliasSet(entries: readonly Mentionable[]): Set<string> {
+  const out = new Set<string>();
+  for (const entry of entries) {
+    out.add(entry.label.toLowerCase());
+    for (const alias of entry.aliases) out.add(alias);
+  }
+  return out;
+}
+
+/**
+ * Blanks fenced and inline code spans, preserving every offset.
+ *
+ * Each masked byte becomes a space, so the result is the same length as the
+ * input and an index computed against it is valid against the original.
+ * Stripping instead would shift every later match.
+ */
+export function stripCodeRegions(text: string): string {
+  const out = text.split("");
+  const blank = (from: number, to: number) => {
+    for (let i = from; i < Math.min(to, out.length); i++) {
+      if (out[i] !== "\n") out[i] = " ";
+    }
+  };
+
+  // Fenced blocks first, so a backtick inside one is never read as a span.
+  const fence = /^([`~]{3,})[^\n]*\n?([\s\S]*?)(?:^\1[`~]*[^\n]*$|$)/gm;
+  for (const m of text.matchAll(fence)) {
+    if (m.index !== undefined) blank(m.index, m.index + m[0].length);
+  }
+
+  const masked = out.join("");
+  // Inline spans, closed by a backtick run of equal length.
+  const span = /(`+)(?:(?!\1)[\s\S])*?\1/g;
+  for (const m of masked.matchAll(span)) {
+    if (m.index !== undefined) blank(m.index, m.index + m[0].length);
+  }
+  return out.join("");
+}
+
+/**
+ * Orders the picker's rows for `query`.
+ *
+ * Two levels, following the shape `block/buzz` settled on: a group rank first,
+ * so people you are actually talking to come before the long tail, then a
+ * match score, then the original order. Sorting by score alone buries a channel
+ * member under a better-spelled stranger.
+ */
+export function rankMentionables(
+  entries: Mentionable[],
+  query: string,
+): Mentionable[] {
+  const q = query.trim().toLowerCase();
+  const groupRank = (e: Mentionable): number => {
+    if (e.inChannel) return 0;
+    if (e.target.kind === "everyone") return 1;
+    if (e.target.kind === "user") return 2;
+    if (e.target.kind === "desk") return 3;
+    return 4;
+  };
+  const score = (e: Mentionable): number => {
+    if (!q) return 0;
+    let best = Number.MAX_SAFE_INTEGER;
+    for (const alias of e.aliases) {
+      if (alias === q) best = Math.min(best, 0);
+      else if (alias.startsWith(q)) best = Math.min(best, 1);
+      else if (alias.split(/[\s\-_.]+/).some((w) => w === q))
+        best = Math.min(best, 2);
+      else if (alias.split(/[\s\-_.]+/).some((w) => w.startsWith(q)))
+        best = Math.min(best, 3);
+      else if (alias.includes(q)) best = Math.min(best, 4);
+    }
+    return best;
+  };
+
+  return entries
+    .map((entry, index) => ({ entry, index, s: score(entry) }))
+    .filter((row) => row.s !== Number.MAX_SAFE_INTEGER)
+    .sort(
+      (a, b) =>
+        // An exact match outranks the group preference, and only an exact
+        // match does. Otherwise typing a teammate's whole name still hands you
+        // the desk that merely starts with it — `@engineer` offering
+        // `engineering` first — which is precisely the case where the person
+        // has already told you exactly who they mean.
+        (a.s === 0 ? 0 : 1) - (b.s === 0 ? 0 : 1) ||
+        groupRank(a.entry) - groupRank(b.entry) ||
+        a.s - b.s ||
+        a.index - b.index,
+    )
+    .map((row) => row.entry);
+}
+
+/**
+ * Replaces the active `@query` with `entry`, and says where the caret lands.
+ *
+ * A trailing space is appended so the next word does not extend the mention —
+ * without it, typing straight on after picking would grow the span and the
+ * reconcile below would drop it.
+ */
+export function insertMention(
+  draft: string,
+  range: { start: number; end: number },
+  entry: Mentionable,
+): { text: string; caret: number; mention: Mention } {
+  const span = `@${entry.label}`;
+  const text = `${draft.slice(0, range.start)}${span} ${draft.slice(range.end)}`;
+  return {
+    text,
+    caret: range.start + span.length + 1,
+    mention: { target: entry.target, text: span, offset: range.start },
+  };
+}
+
+/**
+ * Drops every mention whose span no longer sits where it was recorded, and
+ * shifts the ones that merely moved.
+ *
+ * This is what makes backspacing through a chip un-mention it: edit the text of
+ * `@Jane Doe` and the recorded span stops matching, so the mention goes with
+ * it. Without this the composer would keep pinging somebody whose name is no
+ * longer in the message.
+ *
+ * A mention that still exists verbatim but has shifted — because text was
+ * inserted before it — is re-anchored rather than dropped, so typing at the
+ * start of a draft does not silently unresolve everything after the caret.
+ */
+export function reconcileMentions(text: string, mentions: Mention[]): Mention[] {
+  const used: Array<[number, number]> = [];
+  const out: Mention[] = [];
+  for (const mention of mentions) {
+    if (text.slice(mention.offset, mention.offset + mention.text.length) === mention.text) {
+      used.push([mention.offset, mention.offset + mention.text.length]);
+      out.push(mention);
+      continue;
+    }
+    // Re-anchor to the first occurrence not already claimed by another mention,
+    // so two mentions of the same person do not collapse onto one span.
+    let from = 0;
+    for (;;) {
+      const at = text.indexOf(mention.text, from);
+      if (at === -1) break;
+      const overlaps = used.some(([s, e]) => at < e && at + mention.text.length > s);
+      if (!overlaps) {
+        used.push([at, at + mention.text.length]);
+        out.push({ ...mention, offset: at });
+        break;
+      }
+      from = at + 1;
+    }
+  }
+  return out.sort((a, b) => a.offset - b.offset);
+}
+
+/**
+ * A pattern matching exactly the spans in `mentions`, and nothing else.
+ *
+ * Returns {@link NEVER_MATCH} for an empty list, which is the point: an
+ * `@word` is highlighted **only** when it corresponds to a mention the host
+ * actually delivered. A chip is a claim that somebody was notified, so drawing
+ * one over unresolved text would be a lie the reader cannot check.
+ */
+export function mentionRegex(mentions: Array<{ text: string }>): RegExp {
+  if (mentions.length === 0) return NEVER_MATCH;
+  const escaped = [...new Set(mentions.map((m) => m.text))]
+    // Longest first, so `@Ann` cannot match inside `@Ann Lee`.
+    .sort((a, b) => b.length - a.length)
+    .map((t) => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+  return new RegExp(`(${escaped.join("|")})`, "g");
+}
+
+/**
+ * Turns the host's directory into picker rows for one channel.
+ *
+ * `inChannel` is what puts the people you are actually talking to at the top of
+ * the list, and it is derived from the channel's own membership — which the
+ * host only knows for teammates. Every signed-in person can see every desk, so
+ * people are never "outside" a channel and are not marked either way.
+ *
+ * The `@everyone` row carries the host's spellings rather than a hard-coded
+ * set, so the picker cannot offer a token the host would fail to resolve.
+ */
+export function mentionablesFor(
+  directory: {
+    agents: Array<{ id: string; name: string; role: string }>;
+    people: Array<{ id: string; label: string; slug: string }>;
+    desks: Array<{ id: string; name: string; memberIds: string[] }>;
+    everyone: { label: string; aliases: string[] };
+  },
+  channelMemberIds?: string[],
+): Mentionable[] {
+  const inChannel = new Set(channelMemberIds ?? []);
+  const agents: Mentionable[] = directory.agents.map((a) => ({
+    target: { kind: "agent", id: a.id },
+    label: a.id,
+    aliases: [...new Set([a.id.toLowerCase(), a.name.toLowerCase()])],
+    hint: a.role,
+    inChannel: inChannel.has(a.id),
+  }));
+  const people: Mentionable[] = directory.people.map((p) => ({
+    target: { kind: "user", id: p.id },
+    label: p.label,
+    aliases: [...new Set([p.label.toLowerCase(), p.slug])],
+    hint: "Person",
+  }));
+  const desks: Mentionable[] = directory.desks.map((d) => ({
+    target: { kind: "desk", id: d.id },
+    label: d.id,
+    aliases: [...new Set([d.id.toLowerCase(), d.name.toLowerCase()])],
+    hint:
+      d.memberIds.length === 1
+        ? `${d.name} — 1 teammate`
+        : `${d.name} — ${d.memberIds.length} teammates`,
+  }));
+  const everyone: Mentionable = {
+    target: { kind: "everyone" },
+    label: directory.everyone.label,
+    aliases: directory.everyone.aliases.map((a) => a.toLowerCase()),
+    hint: "Notify everyone here",
+  };
+  return [...agents, ...people, ...desks, everyone];
+}
+
+/**
+ * The teammates a draft would address who are **not** on this channel.
+ *
+ * Mentioning somebody who cannot see the channel is a real mistake and a silent
+ * one: the message sends, the chip renders, and the person never appears. The
+ * composer warns before the send rather than after.
+ *
+ * People are never returned. Every signed-in person can see every desk, so
+ * "outside this channel" does not apply to them — only to teammates, whose desk
+ * membership is real.
+ */
+export function mentionsOutsideChannel(
+  mentions: Mention[],
+  channelMemberIds: string[] | undefined,
+): string[] {
+  // Unknown membership is not empty membership: a DM and a fallback desk both
+  // report none, and warning about every mention there would be noise.
+  if (!channelMemberIds) return [];
+  const members = new Set(channelMemberIds);
+  return mentions
+    .filter((m) => m.target.kind === "agent" && !members.has(m.target.id))
+    .map((m) => (m.target.kind === "agent" ? m.target.id : ""))
+    .filter((id, i, all) => id && all.indexOf(id) === i);
+}

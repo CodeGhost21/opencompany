@@ -49,6 +49,11 @@ import { ChannelRail } from "./chat/ChannelRail";
 import { ChatHeader } from "./chat/ChatHeader";
 import { MembersPane } from "./chat/MembersPane";
 import { MessageComposer } from "./chat/MessageComposer";
+import {
+  mentionablesFor,
+  type Mention,
+  type Mentionable,
+} from "./chat/mentions";
 import { MessageTimeline } from "./chat/MessageTimeline";
 import { ThreadPanel } from "./chat/ThreadPanel";
 import { useLocalScope } from "@/connections/ConnectionContext";
@@ -482,6 +487,49 @@ export function ChatView({
     return channelMembers(channel, members);
   }, [channel, members]);
 
+  /**
+   * Everything an `@` can name in this company.
+   *
+   * Fetched once per company rather than per channel: the directory is
+   * company-wide, and only the `inChannel` ranking below is per channel.
+   *
+   * A host that predates the route answers 404, which lands here as `null` —
+   * read as "no picker", so typing an `@` stays plain text and the host still
+   * extracts what it can. An older host therefore degrades to the composer's
+   * previous behaviour rather than to a broken one.
+   */
+  const [directory, setDirectory] = useState<Mentionable[] | null>(null);
+  useEffect(() => {
+    let live = true;
+    void client
+      .mentionables(company)
+      .then((d) => {
+        if (live) setDirectory(mentionablesFor(d));
+      })
+      .catch(() => {
+        if (live) setDirectory(null);
+      });
+    return () => {
+      live = false;
+    };
+  }, [client, company]);
+
+  /**
+   * The directory with this channel's teammates marked, so they rank first.
+   *
+   * Re-marked rather than re-fetched on a channel switch — the rows are the
+   * same, only their ordering hint changes.
+   */
+  const mentionables = useMemo(() => {
+    if (!directory) return undefined;
+    const inside = new Set((inChannel ?? []).map((m) => m.id));
+    return directory.map((entry) =>
+      entry.target.kind === "agent"
+        ? { ...entry, inChannel: inside.has(entry.target.id) }
+        : entry,
+    );
+  }, [directory, inChannel]);
+
   const outsideChannel = useMemo(() => {
     if (!inChannel) return members;
     const inside = new Set(inChannel.map((m) => m.id));
@@ -663,7 +711,12 @@ export function ChatView({
    * cannot resolve — the row's own actions are disabled in that window, so this
    * is the belt to that brace.
    */
-  async function send(text: string, intent?: MessageIntent, parentId?: string) {
+  async function send(
+    text: string,
+    intent?: MessageIntent,
+    parentId?: string,
+    mentions?: Mention[],
+  ) {
     if (sending) return;
     const target = active.id;
     const chatId = activeThreadId;
@@ -693,6 +746,10 @@ export function ChatView({
         // field ignores this and answers synchronously, which is why the branch
         // below reads the response's shape and never this argument.
         true,
+        // Who the picker resolved. The host re-validates every entry and
+        // demotes what no longer exists, so this is a suggestion; omitting it
+        // asks the host to extract from the text instead.
+        mentions,
       );
       // Reconcile the optimistic id first, for BOTH shapes. On the detached one
       // this is strictly better than what came before: since #983 the message is
@@ -1058,13 +1115,16 @@ export function ChatView({
             <MessageComposer
               placeholder={`Message ${channelTitle(channel)}`}
               disabled={sending}
-              onSend={(text, intent) => void send(text, intent)}
+              onSend={(text, intent, mentions) =>
+                void send(text, intent, undefined, mentions)
+              }
               // Channel *and* DM composers offer "just chatting" / "do it once" /
               // "build me the workflow" (issues #580, #845, #1152) — see
               // `offersDeliverableChoice`, which owns the rule and is unchanged:
               // the new position inherits the same channel+DM gating. Only the
               // thread and copilot composers below go without.
               deliverableChoice={offersDeliverableChoice(active.kind)}
+              mentionables={mentionables}
             />
           </div>
 

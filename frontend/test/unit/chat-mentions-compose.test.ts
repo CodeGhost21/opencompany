@@ -1,0 +1,339 @@
+import { describe, expect, it } from "vitest";
+
+import {
+  activeMentionQuery,
+  aliasSet,
+  insertMention,
+  mentionablesFor,
+  mentionRegex,
+  mentionsOutsideChannel,
+  rankMentionables,
+  reconcileMentions,
+  stripCodeRegions,
+  type Mention,
+  type Mentionable,
+} from "@/views/chat/mentions";
+
+/**
+ * The composer half of @-mentions.
+ *
+ * Every rule here is one that is easy to get subtly wrong in a keydown handler
+ * and hard to notice afterwards: a picker that opens inside an email address, a
+ * chip that keeps pinging somebody whose name has been backspaced away, an
+ * `@word` highlighted although it resolved to nobody. The server re-validates
+ * what this produces, but it cannot fix any of those — by the time a message is
+ * sent, the wrong person is already in the list.
+ */
+
+const engineer: Mentionable = {
+  target: { kind: "agent", id: "engineer" },
+  label: "engineer",
+  aliases: ["engineer"],
+  inChannel: true,
+};
+const jane: Mentionable = {
+  target: { kind: "user", id: "u1" },
+  label: "Jane Doe",
+  aliases: ["jane doe", "jane-doe"],
+};
+const everyone: Mentionable = {
+  target: { kind: "everyone" },
+  label: "everyone",
+  aliases: ["everyone", "channel", "here"],
+};
+
+describe("activeMentionQuery", () => {
+  it("opens on an @ at the start or after whitespace", () => {
+    expect(activeMentionQuery("@eng", 4)).toEqual({ start: 0, query: "eng" });
+    expect(activeMentionQuery("hey @eng", 8)).toEqual({ start: 4, query: "eng" });
+    expect(activeMentionQuery("(@eng", 5)).toEqual({ start: 1, query: "eng" });
+  });
+
+  it("does not open inside an email address", () => {
+    expect(activeMentionQuery("jane@acme", 9)).toBeNull();
+  });
+
+  it("keeps the query open across a space, so a two-word name is reachable", () => {
+    expect(activeMentionQuery("hi @Jane Do", 11)).toEqual({
+      start: 3,
+      query: "Jane Do",
+    });
+  });
+
+  it("gives up at a newline rather than holding open across lines", () => {
+    expect(activeMentionQuery("@eng\nnext", 9)).toBeNull();
+  });
+
+  it("gives up once the query gets implausibly long", () => {
+    const long = `@${"x".repeat(40)}`;
+    expect(activeMentionQuery(long, long.length)).toBeNull();
+  });
+
+  it("is null when the caret is not in a mention at all", () => {
+    expect(activeMentionQuery("just talking", 12)).toBeNull();
+  });
+
+  /**
+   * Without this the picker reopens the instant you pick somebody: inserting
+   * `@engineer ` leaves the caret after a trailing space, the backward scan
+   * still finds the `@`, and the list re-renders over the message you are now
+   * trying to write.
+   */
+  it("closes once a known name is finished and followed by a space", () => {
+    const known = aliasSet([engineer, jane]);
+    expect(activeMentionQuery("hey @engineer ", 14, known)).toBeNull();
+  });
+
+  /** A space is also how a two-word name gets typed, so it cannot just close. */
+  it("stays open through the space of a name still being typed", () => {
+    const known = aliasSet([engineer, jane]);
+    expect(activeMentionQuery("hi @Jane ", 9, known)).toEqual({
+      start: 3,
+      query: "Jane ",
+    });
+  });
+
+  it("stays open on a finished name with no trailing space", () => {
+    const known = aliasSet([engineer, jane]);
+    expect(activeMentionQuery("hey @engineer", 13, known)).toEqual({
+      start: 4,
+      query: "engineer",
+    });
+  });
+
+  /** With no directory to check against, the old behaviour is kept. */
+  it("cannot close on a finished name when it has no aliases to check", () => {
+    expect(activeMentionQuery("hey @engineer ", 14)).not.toBeNull();
+  });
+});
+
+describe("aliasSet", () => {
+  it("carries every spelling, plus the label", () => {
+    const set = aliasSet([jane]);
+    expect(set.has("jane doe")).toBe(true);
+    expect(set.has("jane-doe")).toBe(true);
+  });
+});
+
+describe("stripCodeRegions", () => {
+  it("preserves length, so offsets computed against it stay valid", () => {
+    const text = "a `code` b";
+    const masked = stripCodeRegions(text);
+    expect(masked).toHaveLength(text.length);
+    expect(masked).not.toContain("code");
+    expect(masked.startsWith("a ")).toBe(true);
+  });
+
+  it("masks fenced blocks and keeps the newlines", () => {
+    const text = "before\n```\n@engineer\n```\nafter";
+    const masked = stripCodeRegions(text);
+    expect(masked).toHaveLength(text.length);
+    expect(masked).not.toContain("@engineer");
+    expect(masked.split("\n")).toHaveLength(text.split("\n").length);
+  });
+});
+
+describe("rankMentionables", () => {
+  it("puts channel members before everyone else", () => {
+    const ranked = rankMentionables([jane, everyone, engineer], "e");
+    expect(ranked[0]).toBe(engineer);
+  });
+
+  it("scores an exact match above a mere substring", () => {
+    const other: Mentionable = {
+      target: { kind: "agent", id: "senior_engineer" },
+      label: "senior_engineer",
+      aliases: ["senior_engineer"],
+      inChannel: true,
+    };
+    const ranked = rankMentionables([other, engineer], "engineer");
+    expect(ranked[0]).toBe(engineer);
+  });
+
+  it("drops rows that do not match at all", () => {
+    expect(rankMentionables([engineer, jane], "zzz")).toEqual([]);
+  });
+
+  it("keeps everything, in order, for an empty query", () => {
+    expect(rankMentionables([engineer, jane, everyone], "")).toHaveLength(3);
+  });
+});
+
+describe("insertMention", () => {
+  it("replaces the query and leaves the caret past a trailing space", () => {
+    const draft = "hey @eng";
+    const range = { start: 4, end: 8 };
+    const { text, caret, mention } = insertMention(draft, range, engineer);
+    expect(text).toBe("hey @engineer ");
+    expect(caret).toBe(text.length);
+    expect(mention).toEqual({
+      target: { kind: "agent", id: "engineer" },
+      text: "@engineer",
+      offset: 4,
+    });
+    // The recorded span must actually be at the recorded offset, or the chip
+    // renders over the wrong characters.
+    expect(text.slice(mention.offset, mention.offset + mention.text.length)).toBe(
+      "@engineer",
+    );
+  });
+
+  it("keeps whatever followed the caret", () => {
+    const { text } = insertMention("hey @eng please", { start: 4, end: 8 }, engineer);
+    expect(text).toBe("hey @engineer  please");
+  });
+});
+
+describe("reconcileMentions", () => {
+  const mention: Mention = {
+    target: { kind: "agent", id: "engineer" },
+    text: "@engineer",
+    offset: 4,
+  };
+
+  it("keeps a mention whose span is untouched", () => {
+    expect(reconcileMentions("hey @engineer ok", [mention])).toEqual([mention]);
+  });
+
+  /** Backspacing through a chip has to un-mention it. */
+  it("drops a mention whose text has been edited away", () => {
+    expect(reconcileMentions("hey @engine ok", [mention])).toEqual([]);
+  });
+
+  it("re-anchors a mention that merely shifted", () => {
+    const shifted = reconcileMentions("well hey @engineer ok", [mention]);
+    expect(shifted).toHaveLength(1);
+    expect(shifted[0].offset).toBe(9);
+  });
+
+  it("does not collapse two mentions of the same person onto one span", () => {
+    const twice: Mention[] = [
+      { ...mention, offset: 0 },
+      { ...mention, offset: 10 },
+    ];
+    const out = reconcileMentions("@engineer @engineer", twice);
+    expect(out.map((m) => m.offset)).toEqual([0, 10]);
+  });
+
+  it("returns them in reading order", () => {
+    const out = reconcileMentions("@engineer and @engineer", [
+      { ...mention, offset: 14 },
+      { ...mention, offset: 0 },
+    ]);
+    expect(out.map((m) => m.offset)).toEqual([0, 14]);
+  });
+});
+
+describe("mentionRegex", () => {
+  /**
+   * The rule that keeps a chip honest: it is a claim that somebody was
+   * notified, so it is drawn only where the host actually delivered a mention.
+   */
+  it("matches nothing when there are no mentions", () => {
+    const re = mentionRegex([]);
+    expect("@engineer and @everyone".match(re)).toBeNull();
+  });
+
+  it("matches only the delivered spans", () => {
+    const re = mentionRegex([{ text: "@engineer" }]);
+    const hits = "@engineer told @nobody".match(re);
+    expect(hits).toEqual(["@engineer"]);
+  });
+
+  it("prefers the longer span when one name prefixes another", () => {
+    const re = mentionRegex([{ text: "@Ann" }, { text: "@Ann Lee" }]);
+    expect("@Ann Lee".match(re)).toEqual(["@Ann Lee"]);
+  });
+
+  it("escapes regex metacharacters in a label", () => {
+    const re = mentionRegex([{ text: "@a.b(c)" }]);
+    expect("@a.b(c)".match(re)).toEqual(["@a.b(c)"]);
+    expect("@axbyc".match(re)).toBeNull();
+  });
+});
+
+describe("mentionablesFor", () => {
+  const directory = {
+    agents: [
+      { id: "engineer", name: "Ada", role: "Backend Engineer" },
+      { id: "ceo", name: "Rae", role: "Chief Executive" },
+    ],
+    people: [{ id: "u1", label: "Jane Doe", slug: "jane-doe" }],
+    desks: [{ id: "engineering", name: "Engineering", memberIds: ["engineer"] }],
+    everyone: { label: "everyone", aliases: ["everyone", "channel", "here"] },
+  };
+
+  it("marks only the teammates on this channel", () => {
+    const rows = mentionablesFor(directory, ["engineer"]);
+    const byLabel = Object.fromEntries(rows.map((r) => [r.label, r]));
+    expect(byLabel.engineer.inChannel).toBe(true);
+    expect(byLabel.ceo.inChannel).toBe(false);
+    // Everyone can see every desk, so a person is never "outside" one.
+    expect(byLabel["Jane Doe"].inChannel).toBeUndefined();
+  });
+
+  it("reaches a teammate by id or by display name", () => {
+    const rows = mentionablesFor(directory, []);
+    expect(rankMentionables(rows, "ada")[0].label).toBe("engineer");
+  });
+
+  /**
+   * A desk called `engineering` and a teammate called `engineer` both match
+   * "engineer", and the desk outranks an off-channel teammate by group. The
+   * exact match has to win anyway: the person has already typed exactly who
+   * they mean.
+   */
+  it("puts an exact match above a better-ranked partial one", () => {
+    const rows = mentionablesFor(directory, []);
+    expect(rankMentionables(rows, "engineer")[0].label).toBe("engineer");
+    // And the desk is still offered, just second.
+    expect(rankMentionables(rows, "engineer")[1].label).toBe("engineering");
+  });
+
+  it("takes the broadcast spellings from the host, not from a constant", () => {
+    const rows = mentionablesFor(
+      { ...directory, everyone: { label: "all", aliases: ["all"] } },
+      [],
+    );
+    const broadcast = rows.find((r) => r.target.kind === "everyone");
+    expect(broadcast?.label).toBe("all");
+    expect(broadcast?.aliases).toEqual(["all"]);
+  });
+
+  it("says how many teammates a desk would address", () => {
+    const rows = mentionablesFor(directory, []);
+    expect(rows.find((r) => r.target.kind === "desk")?.hint).toContain("1 teammate");
+  });
+});
+
+describe("mentionsOutsideChannel", () => {
+  const onChannel: Mention = {
+    target: { kind: "agent", id: "engineer" },
+    text: "@engineer",
+    offset: 0,
+  };
+  const offChannel: Mention = {
+    target: { kind: "agent", id: "ceo" },
+    text: "@ceo",
+    offset: 10,
+  };
+
+  it("names a teammate who cannot see this channel", () => {
+    expect(mentionsOutsideChannel([onChannel, offChannel], ["engineer"])).toEqual([
+      "ceo",
+    ]);
+  });
+
+  it("is silent when membership is unknown, not noisy", () => {
+    expect(mentionsOutsideChannel([offChannel], undefined)).toEqual([]);
+  });
+
+  it("never warns about a person, who can see every desk", () => {
+    const person: Mention = {
+      target: { kind: "user", id: "u1" },
+      text: "@Jane Doe",
+      offset: 0,
+    };
+    expect(mentionsOutsideChannel([person], ["engineer"])).toEqual([]);
+  });
+});

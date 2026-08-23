@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import {
   ArrowUp,
   AtSign,
@@ -16,11 +16,30 @@ import {
 import type { MessageIntent } from "@/api/tasks";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
+import { MentionPicker } from "@/views/chat/MentionPicker";
+import {
+  activeMentionQuery,
+  aliasSet,
+  insertMention,
+  rankMentionables,
+  reconcileMentions,
+  type Mention,
+  type Mentionable,
+} from "@/views/chat/mentions";
 
 interface Props {
   placeholder: string;
   disabled?: boolean;
-  onSend: (text: string, intent?: MessageIntent) => void;
+  onSend: (text: string, intent?: MessageIntent, mentions?: Mention[]) => void;
+  /**
+   * Everything an `@` can name here, from `GET {scope}/chat/mentionables`.
+   *
+   * Absent — a host that predates the route, or a surface with no roster
+   * loaded — simply means no picker opens; typing an `@` is then plain text
+   * and the host still extracts what it can from it. So the composer degrades
+   * to exactly its previous behaviour rather than to a broken one.
+   */
+  mentionables?: Mentionable[];
   /** Compact form, for the narrower thread panel. */
   compact?: boolean;
   /**
@@ -63,8 +82,18 @@ export function MessageComposer({
   onSend,
   compact,
   deliverableChoice,
+  mentionables,
 }: Props) {
   const [draft, setDraft] = useState("");
+  // What the draft currently resolves to. Reconciled on every edit, so editing
+  // or backspacing through a chip un-mentions it rather than leaving a ping
+  // for somebody whose name is no longer in the message.
+  const [mentions, setMentions] = useState<Mention[]>([]);
+  // Where the caret is in an `@query`, or null when it is not in one. Held in
+  // state (not derived at render) because it has to survive the mouse leaving
+  // the textarea to click a row.
+  const [query, setQuery] = useState<{ start: number; query: string } | null>(null);
+  const [activeRow, setActiveRow] = useState(0);
   // What the NEXT line is for, and only the next one. It resets to "once"
   // after every send so neither a workflow request nor a "just chatting" mark
   // silently carries into the message after it — each is an explicit, per-line
@@ -80,15 +109,101 @@ export function MessageComposer({
   const [formatting, setFormatting] = useState(false);
   const input = useRef<HTMLTextAreaElement>(null);
 
+  const rows = useMemo(
+    () => (query && mentionables ? rankMentionables(mentionables, query.query) : []),
+    [query, mentionables],
+  );
+  // Built once per directory, not per keystroke.
+  const aliases = useMemo(
+    () => (mentionables ? aliasSet(mentionables) : undefined),
+    [mentionables],
+  );
+  const pickerOpen = query !== null && rows.length > 0;
+
+  function closePicker() {
+    setQuery(null);
+    setActiveRow(0);
+  }
+
+  /** Re-read the caret's mention query after any edit or caret move. */
+  function syncQuery(text: string, caret: number | null) {
+    if (!mentionables || caret === null) {
+      closePicker();
+      return;
+    }
+    const next = activeMentionQuery(text, caret, aliases);
+    setQuery(next);
+    setActiveRow(0);
+  }
+
+  function onChange(e: React.ChangeEvent<HTMLTextAreaElement>) {
+    const text = e.target.value;
+    setDraft(text);
+    // Trailing the text, so a mention whose span was edited away goes with it.
+    setMentions((current) => reconcileMentions(text, current));
+    syncQuery(text, e.target.selectionStart);
+  }
+
+  function pick(entry: Mentionable) {
+    const el = input.current;
+    if (!query || !el) return;
+    const range = { start: query.start, end: el.selectionStart ?? query.start };
+    const result = insertMention(draft, range, entry);
+    setDraft(result.text);
+    setMentions((current) =>
+      reconcileMentions(result.text, [...current, result.mention]),
+    );
+    closePicker();
+    // After React repaints, same as `wrap` below.
+    requestAnimationFrame(() => {
+      el.focus();
+      el.setSelectionRange(result.caret, result.caret);
+    });
+  }
+
   function send() {
     const text = draft.trim();
     if (!text || disabled) return;
+    // The trim can shift every span, so the list is re-anchored against exactly
+    // what is being sent — never against the untrimmed draft.
+    const sending = reconcileMentions(text, mentions);
     setDraft("");
-    onSend(text, deliverableChoice ? intent : undefined);
+    setMentions([]);
+    closePicker();
+    onSend(
+      text,
+      deliverableChoice ? intent : undefined,
+      sending.length ? sending : undefined,
+    );
     setIntent("once");
   }
 
   function onKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
+    // While the picker is open it owns these keys. Enter in particular PICKS
+    // and does not send — a person mid-`@name` is choosing somebody, not
+    // finishing a message, and sending there is unrecoverable.
+    if (pickerOpen) {
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        setActiveRow((i) => (i + 1) % rows.length);
+        return;
+      }
+      if (e.key === "ArrowUp") {
+        e.preventDefault();
+        setActiveRow((i) => (i - 1 + rows.length) % rows.length);
+        return;
+      }
+      if (e.key === "Enter" || e.key === "Tab") {
+        e.preventDefault();
+        pick(rows[activeRow]);
+        return;
+      }
+      if (e.key === "Escape") {
+        e.preventDefault();
+        closePicker();
+        return;
+      }
+    }
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       send();
@@ -116,7 +231,15 @@ export function MessageComposer({
       // compact copy stays unlabelled so the tour can't anchor on the wrong one.
       data-tour={compact ? undefined : "chat-composer"}
     >
-      <div className="rounded-xl border bg-card shadow-sm focus-within:ring-2 focus-within:ring-ring/40">
+      <div className="relative rounded-xl border bg-card shadow-sm focus-within:ring-2 focus-within:ring-ring/40">
+        {pickerOpen && (
+          <MentionPicker
+            entries={rows}
+            active={activeRow}
+            onPick={pick}
+            onHover={setActiveRow}
+          />
+        )}
         {!compact && formatting && (
           <div className="flex items-center gap-0.5 border-b px-2 py-1">
             {WRAPS.map((w) => (
@@ -162,8 +285,18 @@ export function MessageComposer({
         <textarea
           ref={input}
           value={draft}
-          onChange={(e) => setDraft(e.target.value)}
+          onChange={onChange}
           onKeyDown={onKeyDown}
+          // A click or an arrow can move the caret into (or out of) an existing
+          // `@name` without changing the text, so the query is re-read on
+          // selection changes too, not only on edits.
+          onSelect={(e) => {
+            const el = e.currentTarget;
+            syncQuery(el.value, el.selectionStart);
+          }}
+          onBlur={closePicker}
+          aria-controls={pickerOpen ? "mention-picker" : undefined}
+          aria-expanded={pickerOpen}
           placeholder={placeholder}
           rows={1}
           className="field-sizing-content max-h-48 min-h-10 w-full resize-none bg-transparent px-3 py-2 text-sm outline-none placeholder:text-muted-foreground"
@@ -220,7 +353,25 @@ export function MessageComposer({
             className="size-7 text-muted-foreground"
             aria-label="Mention someone"
             title="Mention someone"
-            onClick={() => wrap("@")}
+            // Types the `@` and lets the ordinary path take over, rather than
+            // opening the picker directly: one code path decides when a picker
+            // is open, so the button and the keyboard can never disagree.
+            onClick={() => {
+              const el = input.current;
+              if (!el) return;
+              const at = el.selectionStart ?? draft.length;
+              // A separator first when the caret is mid-word, or the `@` would
+              // land inside another token and open nothing.
+              const lead = at > 0 && !/[\s([{]/.test(draft[at - 1] ?? " ") ? " " : "";
+              const next = `${draft.slice(0, at)}${lead}@${draft.slice(at)}`;
+              const caret = at + lead.length + 1;
+              setDraft(next);
+              requestAnimationFrame(() => {
+                el.focus();
+                el.setSelectionRange(caret, caret);
+                syncQuery(next, caret);
+              });
+            }}
           >
             <AtSign className="size-4" />
           </Button>
