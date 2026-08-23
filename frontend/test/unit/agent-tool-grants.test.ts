@@ -68,14 +68,39 @@ describe("toolGlobsDiffer", () => {
 });
 
 describe("companyCovers", () => {
-  it("treats the catch-all as covering anything", () => {
+  it("treats the catch-all as covering the ordinary families", () => {
     expect(companyCovers(["*"], "docs.*")).toBe(true);
-    expect(companyCovers(["*"], "search")).toBe(true);
+    expect(companyCovers(["*"], "workspace.read")).toBe(true);
+    expect(companyCovers(["*"], "workspace.write")).toBe(true);
+  });
+
+  it("does not let the catch-all cover the explicit opt-in namespaces", () => {
+    // The host's `allow_covers` rejects these under a bare `*`, and the hint
+    // must agree or it would promise a grant that never lands.
+    expect(companyCovers(["*"], "search")).toBe(false);
+    expect(companyCovers(["*"], "media")).toBe(false);
+    expect(companyCovers(["*"], "composio")).toBe(false);
+    expect(companyCovers(["*"], "repo")).toBe(false);
+    expect(companyCovers(["*"], "mcp:*")).toBe(false);
+    expect(companyCovers(["*"], "mcp:notion")).toBe(false);
+  });
+
+  it("covers an explicit opt-in only from a grant that names it", () => {
+    expect(companyCovers(["search"], "search")).toBe(true);
+    expect(companyCovers(["search.*"], "search.web")).toBe(true);
+    expect(companyCovers(["media"], "media")).toBe(true);
+    expect(companyCovers(["media.*"], "media")).toBe(true);
+    expect(companyCovers(["composio"], "composio")).toBe(true);
+    expect(companyCovers(["repo.read"], "repo")).toBe(true);
+    expect(companyCovers(["mcp:*"], "mcp:notion")).toBe(true);
+    expect(companyCovers(["mcp:notion"], "mcp:notion")).toBe(true);
+    // …but a sibling grant does not confer the bare namespace.
+    expect(companyCovers(["media.generation"], "composio")).toBe(false);
+    expect(companyCovers(["search.web"], "search")).toBe(false);
   });
 
   it("covers a sub-grant from a starred namespace", () => {
     expect(companyCovers(["workspace.*"], "workspace.read")).toBe(true);
-    expect(companyCovers(["mcp:*"], "mcp:notion")).toBe(true);
   });
 
   it("does not cover a bare namespace from its starred form", () => {
@@ -96,10 +121,9 @@ describe("companyCovers", () => {
   });
 
   it("reports an uncovered ask, which is the whole warning", () => {
-    // `*` is not a narrowing: a company allowing it lets a teammate ask for
-    // anything, `search` included. What is uncovered is what the company
-    // actually left out.
-    expect(companyCovers(["*", "media"], "search")).toBe(true);
+    // `*` covers the ordinary families but not the opt-ins, so a company
+    // allowing it still has to name `search` before a teammate can hold it.
+    expect(companyCovers(["*", "media"], "search")).toBe(false);
     expect(companyCovers(["docs.*", "files.*"], "search")).toBe(false);
     expect(companyCovers([], "docs.*")).toBe(false);
   });
