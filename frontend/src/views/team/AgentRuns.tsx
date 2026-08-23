@@ -201,22 +201,29 @@ export function AgentRuns({
   // history has nothing that changes second to second.
   const [now, setNow] = useState(() => Date.now());
 
+  // The statuses the active bucket asks for, `undefined` for "all". Sent to the
+  // host, not applied here: a desk's history is fetched at `RUN_PAGE`, and
+  // filtering a truncated page would make the empty state claim "no attempt
+  // matches" while older matching runs sat past the cut (issue #1671).
+  const wanted = FILTERS.find((f) => f.key === filter)?.statuses;
+
   const read = useCallback(async () => {
     const rows = await listRuns(client, company, {
       agent: agentId,
+      ...(wanted ? { status: wanted } : {}),
       limit: RUN_PAGE,
     });
-    // Belt and braces against a host that predates `?agent=`: an unrecognised
-    // selector is *ignored* rather than refused, so such a host answers with the
-    // whole company's newest attempts. Every row would be real and the page
-    // would still be a lie. Filtering here costs nothing and makes the section
-    // under-report on that host instead of misattributing — which is the right
-    // way round.
+    // Belt and braces against a host that predates `?agent=` (and so, being
+    // older still, `?status=`): an unrecognised selector is *ignored* rather
+    // than refused, so such a host answers with the whole company's newest
+    // attempts. Every row would be real and the page would still be a lie.
+    // Filtering here costs nothing and makes the section under-report on that
+    // host instead of misattributing — which is the right way round.
     setRuns(
       Array.isArray(rows) ? rows.filter((run) => run.agentId === agentId) : [],
     );
     setFailed(false);
-  }, [client, company, agentId]);
+  }, [client, company, agentId, wanted]);
 
   useEffect(() => {
     setRuns(null);
