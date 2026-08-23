@@ -70,8 +70,13 @@ test("an agent-authored page bundle loads and paints in its sandboxed iframe", a
 
     const bundleResponse = await bundle;
     expect(bundleResponse.status()).toBe(200);
-    // TEMP diagnostic: dump the actual headers the browser received.
-    console.log(`[diag bundle headers] ${JSON.stringify(bundleResponse.headers())}`);
+    // TEMP diagnostic: probe the server directly (no browser CORS check) and
+    // dump what it actually sends for the bundle.
+    const bundleUrl = bundleResponse.url();
+    const probe = await request.get(bundleUrl, { headers: { Origin: "null" } });
+    console.log(`[diag probe] status=${probe.status()} url=${bundleUrl}`);
+    console.log(`[diag probe headers] ${JSON.stringify(probe.headers())}`);
+    console.log(`[diag bundle headers (browser)] ${JSON.stringify(bundleResponse.headers())}`);
     expect(bundleResponse.headers()["access-control-allow-origin"]).toBe("null");
     expect(bundleResponse.headers()["access-control-allow-credentials"]).toBe("true");
     // TEMP diagnostic: dump the iframe DOM after the module graph settles.
