@@ -35,11 +35,9 @@
 # deployment into a boot failure. A company on MongoDB storage that wants it
 # adds `repo.*` to its own `[tools].allow`.
 #
-# All of them are on by default, and the way to turn one off is this list. A
-# company's own `[tools].allow` **replaces** this default rather than extending
-# it, so dropping `search` (or `media`, or `repo.*`) means writing the rest of
-# the list out and leaving that one entry off — and every teammate in that
-# company loses it at once, whatever its own `tools` line asks for.
+# `workspace.write` is explicit because the host recognizes `workspace.*` as
+# read/sub-grant coverage but only the bare `workspace` or exact
+# `workspace.write` token as write authority.
 #
 # The previous default withheld `search`, `repo.*`, `mcp:*` and workspace
 # writes. What that bought was a first-run company whose teammates reported
