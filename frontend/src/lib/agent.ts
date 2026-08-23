@@ -224,11 +224,23 @@ export function companyCovers(allow: string[], glob: string): boolean {
   // The metered, credentialed, and third-party namespaces are explicit opt-ins
   // on the host: a catch-all `*` never covers them here, even though
   // `grantMatches` treats `*` as a generic match. A belt cannot reintroduce a
-  // capability the company intentionally omitted.
-  if (literal === "media") return grantsExplicit(allow, "media");
-  if (literal === "composio") return grantsExplicit(allow, "composio");
-  if (literal === "search") return grantsExplicit(allow, "search");
-  if (literal === "repo") return grantsExplicit(allow, "repo");
+  // capability the company intentionally omitted. A dotted descendant ask
+  // (`search.web`, `media.image`) is as much an opt-in as the bare namespace,
+  // so it must not fall through to the generic matcher below either, or a
+  // wildcard would look like it covers a grant the host rejects. Likewise a
+  // bare `search` grant covers its sub-grant asks, matching `grants_search_explicit`.
+  if (literal === "media" || literal.startsWith("media.")) {
+    return grantsExplicit(allow, "media");
+  }
+  if (literal === "composio" || literal.startsWith("composio.")) {
+    return grantsExplicit(allow, "composio");
+  }
+  if (literal === "search" || literal.startsWith("search.")) {
+    return grantsExplicit(allow, "search");
+  }
+  if (literal === "repo" || literal.startsWith("repo.")) {
+    return grantsExplicit(allow, "repo");
+  }
 
   // MCP grants use a colon namespace, so `mcp:*` is the explicit opt-in for an
   // agent asking for all company servers. A bare `*` must not confer it.
