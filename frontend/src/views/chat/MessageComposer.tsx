@@ -24,6 +24,8 @@ import {
   mentionsOutsideChannel,
   rankMentionables,
   reconcileMentions,
+  resolvableMentions,
+  stripCodeRegions,
   type Mention,
   type Mentionable,
 } from "@/views/chat/mentions";
