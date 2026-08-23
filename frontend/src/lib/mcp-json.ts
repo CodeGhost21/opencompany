@@ -87,7 +87,7 @@ export function parseMcpConfig(text: string): McpJsonParse {
     }
     const clean = { ...entry } as Record<string, unknown>;
     for (const field of ECHOED_FIELDS) delete clean[field];
-    out[name] = clean as McpConfigEntry;
+    out[name] = clean as unknown as McpConfigEntry;
   }
   return { ok: true, doc: { mcpServers: out } };
 }
