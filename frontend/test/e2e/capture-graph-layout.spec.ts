@@ -41,7 +41,7 @@ test("capture settled graph layout + API data", async ({ page }) => {
   await page.goto("/#/overview");
   await page.locator(CONTENT_SURFACE).waitFor({ state: "visible", timeout: 30_000 });
   await page.evaluate(() => document.fonts.ready);
-  await settleKnowledgeGraph(page);
+  const trajectory = await settleKnowledgeGraph(page);
 
   const dump = await page.evaluate(async () => {
     const svg = document.querySelector('svg[aria-label="Operating knowledge graph"]');
