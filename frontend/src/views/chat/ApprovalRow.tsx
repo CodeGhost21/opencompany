@@ -254,6 +254,7 @@ export function ApprovalRow({
           {approvals.length > 1 ? (
             <BatchHeadline
               approvals={approvals}
+              pending={pending}
               askerNames={askerNames}
               actions={actions}
             />
@@ -384,10 +385,13 @@ function SettledApprovalReceipt({
  */
 function BatchHeadline({
   approvals,
+  pending,
   askerNames,
   actions,
 }: {
   approvals: ApprovalSummary[];
+  /** The subset one Approve would actually act on. */
+  pending: ApprovalSummary[];
   askerNames: Map<string, string>;
   actions?: React.ReactNode;
 }) {
@@ -413,7 +417,15 @@ function BatchHeadline({
   // spends money. Either way every distinct label is listed, so nothing is
   // lost to the mixed case — and `BatchItem` repeats each line's own label, so
   // a mixed batch still says *which* call is the one that spends.
-  const consequences = batchConsequences(approvals);
+  //
+  // Derived from `pending`, not from every item the card was raised with, for
+  // the same reason `decideAll` iterates `pending`: the badge describes what
+  // the next Approve authorises. An item settled on the Approvals page while
+  // this card sat open is no longer part of that, so a batch whose only spend
+  // has already been approved elsewhere must stop claiming the remaining
+  // internal call spends money — that warning would be attached to a decision
+  // nobody is about to make.
+  const consequences = batchConsequences(pending);
   const uniform = consequences.length === 1 ? consequences[0] : null;
 
   return (
