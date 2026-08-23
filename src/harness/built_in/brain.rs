@@ -492,10 +492,6 @@ impl HarnessBrain {
             tool: String,
             instruction: String,
             origin_thread: Option<String>,
-            /// The task this approval was parked from (issue #796), so the
-            /// re-issue turn can reclaim its held-across-park checkout and stamp
-            /// the ledger so `repo_publish` can name the task branch.
-            origin_task: Option<String>,
         }
 
         let grants = self.deps.approval_requests.grants();
@@ -514,7 +510,6 @@ impl HarnessBrain {
                 tool: grant.tool,
                 agent: grant.agent,
                 origin_thread: grant.origin_thread,
-                origin_task: grant.origin_task,
             }
         } else if let Some(standing) = grants.peek_standing_by_approval(approval_id) {
             // No exact-arguments pin, and deliberately so: a standing grant
@@ -531,7 +526,6 @@ impl HarnessBrain {
                 tool: standing.tool,
                 agent: standing.agent,
                 origin_thread: standing.origin_thread,
-                origin_task: standing.origin_task,
             }
         } else {
             return Ok(None);
