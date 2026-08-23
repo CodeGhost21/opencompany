@@ -13,15 +13,11 @@ import {
   useRef,
   useState,
   type ReactElement,
-  type ReactNode,
 } from "react";
 import {
   AlertCircle,
   ArrowLeft,
   Ban,
-  Brain,
-  CheckCircle2,
-  ChevronDown,
   ChevronRight,
   ClipboardList,
   Clock,
@@ -32,18 +28,14 @@ import {
   Hourglass,
   Layers,
   Loader2,
-  MessageSquare,
   MessagesSquare,
   Pencil,
   Play,
   Send,
-  ShieldCheck,
   Square,
-  StickyNote,
   Trash2,
   UserCog,
   Workflow,
-  Wrench,
 } from "lucide-react";
 
 import {
@@ -57,14 +49,11 @@ import {
   type DiscussionMessage,
   type InflightRun,
   type IrreversibleEffect,
-  type StepStatus,
   type SteerAction,
   type Task,
   type TaskApproval,
   type TaskDetail,
   type TaskPlan,
-  type TimelineEntry,
-  type TimelineKind,
 } from "@/api/tasks";
 import {
   getRun,
@@ -72,13 +61,10 @@ import {
   runElapsedMillis,
   RUN_STATUS_LABEL,
   type RunDetail,
-  type RunStatus,
   type RunSummary,
 } from "@/api/runs";
 import {
-  AWAITING_APPROVAL_LABEL,
   ApiError,
-  STEP_FAILURE_LABEL,
   type ApprovalSummary,
 } from "@/api/types";
 import type { OpenCompanyClient } from "@/api/client";
