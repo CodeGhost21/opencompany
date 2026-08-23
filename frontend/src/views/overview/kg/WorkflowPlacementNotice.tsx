@@ -10,6 +10,11 @@ import { DERIVED_NOTICE } from "./adapter";
  * A native disclosure gives the caveat a visible affordance and lets pointer,
  * keyboard, and touch users keep its canonical explanation open while they
  * read the wheel.
+ *
+ * The panel opens UPWARD (`bottom-full`). Its only caller is the compact
+ * legend, which the fullscreen field pins at `bottom-5` inside an
+ * `overflow-hidden` container — a downward panel would be clipped after a few
+ * pixels, which is exactly the unreadable caveat this component exists to fix.
  */
 export function WorkflowPlacementNotice() {
   return (
@@ -18,7 +23,7 @@ export function WorkflowPlacementNotice() {
         <Info className="h-3 w-3 shrink-0" aria-hidden="true" strokeWidth={2} />
         workflow placement is inferred
       </summary>
-      <p className="absolute right-0 top-full z-50 mt-1 hidden w-72 rounded-sm-t border border-os-border-strong bg-os-bg px-2 py-1.5 font-sans text-2xs leading-relaxed text-os-text shadow-lg group-open:block">
+      <p className="absolute bottom-full right-0 z-50 mb-1 hidden w-72 rounded-sm-t border border-os-border-strong bg-os-bg px-2 py-1.5 font-sans text-2xs leading-relaxed text-os-text shadow-lg group-open:block">
         {DERIVED_NOTICE}
       </p>
     </details>
