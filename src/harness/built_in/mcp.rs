@@ -786,8 +786,7 @@ impl McpRuntime {
         // Same per-config service as `disconnect`, for the same reason.
         let host = self.host()?;
         host.dynamic().connections().disconnect(server_id).await;
-        host
-            .dynamic()
+        host.dynamic()
             .store()
             .delete_server(server_id)
             .map_err(store_error)

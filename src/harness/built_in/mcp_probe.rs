@@ -268,20 +268,23 @@ fn classify_kind(err: &anyhow::Error, auth_configured: bool, in_call_context: bo
 
     // 3. String arms over the upstream bail! messages (whole chain).
     let full = format!("{err:#}");
+    // 3. Typed non-success status. Read the variant rather than the rendered
+    //    text: the transport's own `Display` is `mcp http {status} from …`,
+    //    which the string rule below only catches because it is spelled
+    //    case-insensitively. A caller holding the error itself should not
+    //    depend on that.
+    if let Some(status) =
+        err.chain()
+            .find_map(|cause| match cause.downcast_ref::<tinymcp::Error>() {
+                Some(tinymcp::Error::Http { status, .. }) => Some(*status),
+                _ => None,
+            })
+    {
+        return status_kind(status, auth_configured);
+    }
+
     if let Some(code) = http_status_in(&full) {
-        return match code {
-            401 => {
-                if auth_configured {
-                    FailureKind::TokenRejected
-                } else {
-                    FailureKind::CredentialRequired
-                }
-            }
-            403 => FailureKind::TokenRejected,
-            404 => FailureKind::NotMcp,
-            500..=599 => FailureKind::ServerError,
-            _ => FailureKind::Unknown,
-        };
+        return status_kind(code, auth_configured);
     }
     if full.contains("Failed to parse MCP JSON response") {
         return FailureKind::NotMcp;
@@ -295,11 +298,37 @@ fn classify_kind(err: &anyhow::Error, auth_configured: bool, in_call_context: bo
     FailureKind::Unknown
 }
 
+/// What an HTTP status code means for a server we were trying to reach.
+fn status_kind(code: u16, auth_configured: bool) -> FailureKind {
+    match code {
+        401 => {
+            if auth_configured {
+                FailureKind::TokenRejected
+            } else {
+                FailureKind::CredentialRequired
+            }
+        }
+        403 => FailureKind::TokenRejected,
+        404 => FailureKind::NotMcp,
+        500..=599 => FailureKind::ServerError,
+        _ => FailureKind::Unknown,
+    }
+}
+
 /// The HTTP status code embedded in an upstream `MCP HTTP {status} — …` message,
 /// if present.
+///
+/// Matched case-insensitively: the extracted client renders the same fact as
+/// `mcp http {status} from …`, and this is the path that classifies an error
+/// which has crossed an RPC boundary and arrived as text with no variant left
+/// to read.
 fn http_status_in(text: &str) -> Option<u16> {
-    let after = text.split("MCP HTTP ").nth(1)?;
-    let digits: String = after.chars().take_while(char::is_ascii_digit).collect();
+    let lowered = text.to_ascii_lowercase();
+    let offset = lowered.find("mcp http ")? + "mcp http ".len();
+    let digits: String = text[offset..]
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect();
     digits.parse().ok()
 }
 
