@@ -204,66 +204,66 @@ export function InboxView({ client, company }: Props) {
             mobilePane === "list" ? "flex" : "hidden",
           )}
         >
-        <div className="flex items-center gap-2 border-b px-3 py-2.5">
-          <Select
-            value={active?.key}
-            onValueChange={(v) => v && (setActiveKey(v), setOpenId(null))}
-            items={Object.fromEntries(listed.map((i) => [i.key, i.name]))}
-          >
-            <SelectTrigger className="h-8 flex-1" data-testid="inbox-select">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              {listed.map((i) => (
-                <SelectItem key={i.key} value={i.key}>
-                  {i.name}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-          {active && active.unread > 0 && <Badge variant="secondary">{active.unread}</Badge>}
-        </div>
-        <div className="flex-1 overflow-y-auto" data-testid="inbox-list">
-          {messagesLoading ? (
-            <div className="space-y-2 p-3">
-              {Array.from({ length: 4 }).map((_, i) => (
-                <Skeleton key={i} className="h-14 rounded-lg" />
-              ))}
-            </div>
-          ) : messagesError ? (
-            <div
-              className="flex flex-col items-center gap-3 p-8 text-center text-sm text-muted-foreground"
-              data-testid="inbox-messages-error"
+          <div className="flex items-center gap-2 border-b px-3 py-2.5">
+            <Select
+              value={active?.key}
+              onValueChange={(v) => v && (setActiveKey(v), setOpenId(null))}
+              items={Object.fromEntries(listed.map((i) => [i.key, i.name]))}
             >
-              <Mail className="size-6" />
-              <div className="space-y-1">
-                <p className="font-medium text-foreground">Couldn't load this inbox</p>
-                <p className="max-w-xs">{messagesError}</p>
+              <SelectTrigger className="h-8 flex-1" data-testid="inbox-select">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {listed.map((i) => (
+                  <SelectItem key={i.key} value={i.key}>
+                    {i.name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            {active && active.unread > 0 && <Badge variant="secondary">{active.unread}</Badge>}
+          </div>
+          <div className="flex-1 overflow-y-auto" data-testid="inbox-list">
+            {messagesLoading ? (
+              <div className="space-y-2 p-3">
+                {Array.from({ length: 4 }).map((_, i) => (
+                  <Skeleton key={i} className="h-14 rounded-lg" />
+                ))}
               </div>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => setMessagesReload((n) => n + 1)}
+            ) : messagesError ? (
+              <div
+                className="flex flex-col items-center gap-3 p-8 text-center text-sm text-muted-foreground"
+                data-testid="inbox-messages-error"
               >
-                Try again
-              </Button>
-            </div>
-          ) : messages.length > 0 ? (
-            messages.map((m) => (
-              <MessageRow
-                key={m.id}
-                message={m}
-                active={m.id === openId}
-                onClick={() => active && void openMessage(active.key, m)}
-              />
-            ))
-          ) : (
-            <div className="p-8 text-center text-sm text-muted-foreground" data-testid="inbox-empty">
-              No messages yet. Mail sent to{" "}
-              <span className="font-medium">{active?.address || active?.key}</span> lands here.
-            </div>
-          )}
-        </div>
+                <Mail className="size-6" />
+                <div className="space-y-1">
+                  <p className="font-medium text-foreground">Couldn't load this inbox</p>
+                  <p className="max-w-xs">{messagesError}</p>
+                </div>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setMessagesReload((n) => n + 1)}
+                >
+                  Try again
+                </Button>
+              </div>
+            ) : messages.length > 0 ? (
+              messages.map((m) => (
+                <MessageRow
+                  key={m.id}
+                  message={m}
+                  active={m.id === openId}
+                  onClick={() => active && void openMessage(active.key, m)}
+                />
+              ))
+            ) : (
+              <div className="p-8 text-center text-sm text-muted-foreground" data-testid="inbox-empty">
+                No messages yet. Mail sent to{" "}
+                <span className="font-medium">{active?.address || active?.key}</span> lands here.
+              </div>
+            )}
+          </div>
         </section>
 
         {/* Reading pane */}
