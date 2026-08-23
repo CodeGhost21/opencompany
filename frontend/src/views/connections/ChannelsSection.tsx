@@ -151,9 +151,9 @@ export function ChannelsSection({ client, company, canManage }: Props) {
   return (
     <section className="space-y-3">
       <div className="flex items-center justify-between gap-3">
-        <h3 className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
+        <h2 className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
           Channels
-        </h3>
+        </h2>
         {/* The badge asserts a working channel, so it must agree with the
             "can neither collect nor reply" notice below (issue #1467): a stored
             token alone is not delivery. `telegramDelivery` is the one decision

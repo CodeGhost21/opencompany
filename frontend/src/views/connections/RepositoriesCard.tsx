@@ -160,9 +160,9 @@ export function RepositoriesCard({ client, company, canManage }: Props) {
   return (
     <section className="space-y-3">
       <div className="flex items-center justify-between gap-3">
-        <h3 className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
+        <h2 className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
           Repositories
-        </h3>
+        </h2>
         {load === "ready" && repos.length > 0 && (
           <Badge variant="secondary" className="gap-1">
             <Check className="size-3" /> {repos.length} bound
