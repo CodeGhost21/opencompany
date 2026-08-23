@@ -159,6 +159,14 @@ async fn list_mentionables(company: ScopedCompany) -> Result<Json<MentionablesDt
             }),
     );
 
+    // The caller's own rows are dropped, for both kinds. A self-mention can
+    // never survive sending — `normalize` refuses it — so offering a row that
+    // names the caller would look pickable and then silently un-chip on
+    // reload. An operator token's id matches no user and no agent, so the
+    // filter is a no-op for it.
+    let self_id = company.actor.as_ref().map(|a| a.id.clone());
+    agents.retain(|a| self_id.as_ref().is_none_or(|s| a.id != *s));
+
     let mut desks: Vec<MentionableDeskDto> = record
         .manifest
         .group_chats
