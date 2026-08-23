@@ -95,15 +95,41 @@ struct Peer {
     last_beat_millis: u64,
 }
 
+/// The most present of two statuses — the aggregation rule for a person with
+/// more than one open console.
+///
+/// `Online` beats `Away` beats nothing at all, so a person reading in one tab
+/// while idle in another still shows as present: the honest answer to "is this
+/// person here" is "yes, in at least one of their consoles," never the
+/// gloomiest tab's guess.
+fn most_present(a: PresenceStatus, b: PresenceStatus) -> PresenceStatus {
+    use PresenceStatus::*;
+    match (a, b) {
+        (Online, _) | (_, Online) => Online,
+        (Away, _) | (_, Away) => Away,
+        _ => Offline,
+    }
+}
+
 /// Who is currently present, per company.
 ///
 /// Peer state is deliberately thin — a status and a timestamp, nothing else.
 /// No cursor, no current room, no last-read: which channel somebody is looking
 /// at is not a fact their colleagues need, and carrying it would turn a
 /// presence dot into activity tracking.
+///
+/// # A lease is per console, not per person
+///
+/// The same signed-in human commonly has more than one tab open. Keying solely
+/// on `(company, user)` made closing *any one* of them delete the lease every
+/// other tab was still renewing, so the person flapped offline until their next
+/// heartbeat healed it (up to a full [`PRESENCE_HEARTBEAT_MILLIS`]). The inner
+/// map keys on `(company, user)` as before; the value is now every console that
+/// user currently has open, so a departure only ever removes the console that
+/// actually left.
 #[derive(Debug, Default)]
 pub struct PresenceRegistry {
-    people: Mutex<HashMap<(CompanyId, String), Peer>>,
+    people: Mutex<HashMap<(CompanyId, String), HashMap<String, Peer>>>,
 }
 
 /// One person's presence, as a reader sees it.
@@ -124,14 +150,15 @@ impl PresenceRegistry {
         Self::default()
     }
 
-    /// Records a heartbeat, and says whether it changed anything a watcher
-    /// would care about.
+    /// Records one console's heartbeat, and says whether it changed anything a
+    /// watcher would care about.
     ///
     /// Returning "did this change" is what keeps the bus quiet: a console beats
     /// every minute whether or not anything moved, and republishing an
     /// unchanged `online` to every other console once a minute per person is
-    /// pure noise. A frame goes out when somebody *arrives* or *changes state*,
-    /// which is exactly when a dot would move.
+    /// pure noise. A frame goes out when the person's *aggregate* status
+    /// — [`most_present`] across every console they have open — arrives or
+    /// changes, which is exactly when a dot would move.
     ///
     /// An expired lease counts as an arrival, so somebody who was away long
     /// enough to lapse is re-announced rather than silently reappearing on the
@@ -140,37 +167,49 @@ impl PresenceRegistry {
         &self,
         company: &CompanyId,
         user: &str,
+        console: &str,
         status: PresenceStatus,
         now_millis: u64,
     ) -> bool {
         let mut people = self.people.lock().expect("presence registry poisoned");
         let key = (company.clone(), user.to_string());
-        let changed = match people.get(&key) {
-            Some(peer) => peer.status != status || expired(peer.last_beat_millis, now_millis),
-            None => true,
-        };
-        people.insert(
-            key,
+        let consoles = people.entry(key).or_default();
+        let before = aggregate(consoles, now_millis);
+        consoles.insert(
+            console.to_string(),
             Peer {
                 status,
                 last_beat_millis: now_millis,
             },
         );
-        changed
+        let after = aggregate(consoles, now_millis);
+        before != after
     }
 
-    /// Drops a lease immediately — a clean disconnect.
+    /// Drops one console's lease immediately — a clean disconnect.
     ///
     /// Worth having even though the TTL would get there eventually: a person
     /// who closes a tab should not linger as online for three minutes, and the
-    /// browser can say so on the way out. Returns whether anything was actually
-    /// removed, so a duplicate teardown publishes nothing.
-    pub fn detach(&self, company: &CompanyId, user: &str) -> bool {
-        self.people
-            .lock()
-            .expect("presence registry poisoned")
-            .remove(&(company.clone(), user.to_string()))
-            .is_some()
+    /// browser can say so on the way out. Only removes the departing console —
+    /// a colleague's other open tabs keep their own leases, so closing one does
+    /// not drop the others. Returns whether the person's aggregate status
+    /// actually changed (i.e. that was their last console), so a duplicate
+    /// teardown, or a departure that leaves another console still live,
+    /// publishes nothing.
+    pub fn detach(&self, company: &CompanyId, user: &str, console: &str, now_millis: u64) -> bool {
+        let mut people = self.people.lock().expect("presence registry poisoned");
+        let key = (company.clone(), user.to_string());
+        let Some(consoles) = people.get_mut(&key) else {
+            return false;
+        };
+        if consoles.remove(console).is_none() {
+            return false;
+        }
+        let still_present = aggregate(consoles, now_millis).is_some();
+        if consoles.is_empty() {
+            people.remove(&key);
+        }
+        !still_present
     }
 
     /// Everyone whose lease is still good, newest first.
@@ -178,16 +217,37 @@ impl PresenceRegistry {
     /// Expired entries are filtered here rather than swept on a timer: reads
     /// are the only thing that cares, so a lapsed lease costs a comparison
     /// instead of a background task. [`Self::sweep`] exists for the memory,
-    /// not for the correctness.
+    /// not for the correctness. A person with several open consoles is one row
+    /// here — [`most_present`] across them, timestamped by whichever renewed
+    /// most recently.
     pub fn list(&self, company: &CompanyId, now_millis: u64) -> Vec<PresenceView> {
         let people = self.people.lock().expect("presence registry poisoned");
         let mut out: Vec<PresenceView> = people
             .iter()
-            .filter(|((id, _), peer)| id == company && !expired(peer.last_beat_millis, now_millis))
-            .map(|((_, user), peer)| PresenceView {
-                user_id: user.clone(),
-                status: peer.status,
-                at_millis: peer.last_beat_millis,
+            .filter(|((id, _), _)| id == company)
+            .filter_map(|((_, user), consoles)| {
+                let live: Vec<&Peer> = consoles
+                    .values()
+                    .filter(|peer| !expired(peer.last_beat_millis, now_millis))
+                    .collect();
+                if live.is_empty() {
+                    return None;
+                }
+                let status = live
+                    .iter()
+                    .map(|peer| peer.status)
+                    .reduce(most_present)
+                    .expect("checked non-empty above");
+                let at_millis = live
+                    .iter()
+                    .map(|peer| peer.last_beat_millis)
+                    .max()
+                    .expect("checked non-empty above");
+                Some(PresenceView {
+                    user_id: user.clone(),
+                    status,
+                    at_millis,
+                })
             })
             .collect();
         out.sort_by(|a, b| {
@@ -202,13 +262,28 @@ impl PresenceRegistry {
     ///
     /// Purely to bound memory on a long-lived host — [`Self::list`] already
     /// ignores what this removes, so nothing observable changes. Returns how
-    /// many went, for a log line.
+    /// many console leases went, for a log line.
     pub fn sweep(&self, now_millis: u64) -> usize {
         let mut people = self.people.lock().expect("presence registry poisoned");
-        let before = people.len();
-        people.retain(|_, peer| !expired(peer.last_beat_millis, now_millis));
-        before - people.len()
+        let mut removed = 0;
+        people.retain(|_, consoles| {
+            let before = consoles.len();
+            consoles.retain(|_, peer| !expired(peer.last_beat_millis, now_millis));
+            removed += before - consoles.len();
+            !consoles.is_empty()
+        });
+        removed
     }
+}
+
+/// The aggregate status across every live console a person currently has open,
+/// or `None` when none of them are (an empty map, or every lease expired).
+fn aggregate(consoles: &HashMap<String, Peer>, now_millis: u64) -> Option<PresenceStatus> {
+    consoles
+        .values()
+        .filter(|peer| !expired(peer.last_beat_millis, now_millis))
+        .map(|peer| peer.status)
+        .reduce(most_present)
 }
 
 /// Whether a lease taken at `last_beat` has lapsed by `now`.
@@ -232,7 +307,7 @@ mod tests {
     #[test]
     fn a_beat_makes_somebody_present() {
         let reg = PresenceRegistry::new();
-        assert!(reg.beat(&acme(), "u1", PresenceStatus::Online, 0));
+        assert!(reg.beat(&acme(), "u1", "tab-1", PresenceStatus::Online, 0));
         let live = reg.list(&acme(), 0);
         assert_eq!(live.len(), 1);
         assert_eq!(live[0].user_id, "u1");
@@ -244,7 +319,7 @@ mod tests {
     #[test]
     fn one_missed_beat_does_not_flap_somebody_offline() {
         let reg = PresenceRegistry::new();
-        reg.beat(&acme(), "u1", PresenceStatus::Online, 0);
+        reg.beat(&acme(), "u1", "tab-1", PresenceStatus::Online, 0);
         assert_eq!(
             reg.list(&acme(), PRESENCE_HEARTBEAT_MILLIS * 2).len(),
             1,
@@ -255,7 +330,7 @@ mod tests {
     #[test]
     fn a_lapsed_lease_stops_being_present() {
         let reg = PresenceRegistry::new();
-        reg.beat(&acme(), "u1", PresenceStatus::Online, 0);
+        reg.beat(&acme(), "u1", "tab-1", PresenceStatus::Online, 0);
         assert!(reg.list(&acme(), PRESENCE_TTL_MILLIS + 1).is_empty());
     }
 
@@ -263,7 +338,7 @@ mod tests {
     #[test]
     fn a_crashed_console_needs_no_cleanup() {
         let reg = PresenceRegistry::new();
-        reg.beat(&acme(), "u1", PresenceStatus::Online, 0);
+        reg.beat(&acme(), "u1", "tab-1", PresenceStatus::Online, 0);
         // No detach — the tab is simply gone.
         assert!(reg.list(&acme(), PRESENCE_TTL_MILLIS + 1).is_empty());
     }
@@ -271,13 +346,51 @@ mod tests {
     #[test]
     fn a_clean_disconnect_drops_the_lease_at_once() {
         let reg = PresenceRegistry::new();
-        reg.beat(&acme(), "u1", PresenceStatus::Online, 0);
-        assert!(reg.detach(&acme(), "u1"));
+        reg.beat(&acme(), "u1", "tab-1", PresenceStatus::Online, 0);
+        assert!(reg.detach(&acme(), "u1", "tab-1", 0));
         assert!(reg.list(&acme(), 0).is_empty());
         assert!(
-            !reg.detach(&acme(), "u1"),
+            !reg.detach(&acme(), "u1", "tab-1", 0),
             "a second teardown changes nothing"
         );
+    }
+
+    /// The bug this module's header now calls out by name: the same person
+    /// with two tabs open must not have one tab's departure log the other one
+    /// out. Closing tab 1 must not touch tab 2's lease, and only closing the
+    /// last open tab is a real departure worth a frame.
+    #[test]
+    fn closing_one_tab_does_not_disconnect_another() {
+        let reg = PresenceRegistry::new();
+        reg.beat(&acme(), "u1", "tab-1", PresenceStatus::Online, 0);
+        reg.beat(&acme(), "u1", "tab-2", PresenceStatus::Online, 0);
+
+        assert!(
+            !reg.detach(&acme(), "u1", "tab-1", 0),
+            "tab 2 is still open, so this is not a real departure"
+        );
+        let live = reg.list(&acme(), 0);
+        assert_eq!(live.len(), 1, "still present through tab 2");
+        assert_eq!(live[0].status, PresenceStatus::Online);
+
+        assert!(
+            reg.detach(&acme(), "u1", "tab-2", 0),
+            "the last open tab leaving is a real departure"
+        );
+        assert!(reg.list(&acme(), 0).is_empty());
+    }
+
+    /// Two open tabs disagreeing about status — one idle, one active — must
+    /// read as the more present of the two: a person reading in one tab while
+    /// away in another is still here.
+    #[test]
+    fn the_most_present_tab_wins_the_aggregate_status() {
+        let reg = PresenceRegistry::new();
+        reg.beat(&acme(), "u1", "tab-1", PresenceStatus::Away, 0);
+        reg.beat(&acme(), "u1", "tab-2", PresenceStatus::Online, 0);
+        let live = reg.list(&acme(), 0);
+        assert_eq!(live.len(), 1);
+        assert_eq!(live[0].status, PresenceStatus::Online);
     }
 
     /// The bus stays quiet while nothing moves: a console beats every minute
@@ -287,13 +400,14 @@ mod tests {
     fn an_unchanged_beat_reports_no_change() {
         let reg = PresenceRegistry::new();
         assert!(
-            reg.beat(&acme(), "u1", PresenceStatus::Online, 0),
+            reg.beat(&acme(), "u1", "tab-1", PresenceStatus::Online, 0),
             "arrival"
         );
         assert!(
             !reg.beat(
                 &acme(),
                 "u1",
+                "tab-1",
                 PresenceStatus::Online,
                 PRESENCE_HEARTBEAT_MILLIS
             ),
@@ -303,6 +417,7 @@ mod tests {
             reg.beat(
                 &acme(),
                 "u1",
+                "tab-1",
                 PresenceStatus::Away,
                 PRESENCE_HEARTBEAT_MILLIS
             ),
@@ -313,11 +428,12 @@ mod tests {
     #[test]
     fn a_beat_after_the_lease_lapsed_is_an_arrival_again() {
         let reg = PresenceRegistry::new();
-        reg.beat(&acme(), "u1", PresenceStatus::Online, 0);
+        reg.beat(&acme(), "u1", "tab-1", PresenceStatus::Online, 0);
         assert!(
             reg.beat(
                 &acme(),
                 "u1",
+                "tab-1",
                 PresenceStatus::Online,
                 PRESENCE_TTL_MILLIS + 1
             ),
@@ -329,8 +445,14 @@ mod tests {
     #[test]
     fn presence_does_not_leak_between_companies() {
         let reg = PresenceRegistry::new();
-        reg.beat(&acme(), "u1", PresenceStatus::Online, 0);
-        reg.beat(&CompanyId::new("other"), "u2", PresenceStatus::Online, 0);
+        reg.beat(&acme(), "u1", "tab-1", PresenceStatus::Online, 0);
+        reg.beat(
+            &CompanyId::new("other"),
+            "u2",
+            "tab-1",
+            PresenceStatus::Online,
+            0,
+        );
         let live = reg.list(&acme(), 0);
         assert_eq!(live.len(), 1);
         assert_eq!(live[0].user_id, "u1");
@@ -339,8 +461,14 @@ mod tests {
     #[test]
     fn the_sweep_frees_only_what_list_already_ignores() {
         let reg = PresenceRegistry::new();
-        reg.beat(&acme(), "u1", PresenceStatus::Online, 0);
-        reg.beat(&acme(), "u2", PresenceStatus::Online, PRESENCE_TTL_MILLIS);
+        reg.beat(&acme(), "u1", "tab-1", PresenceStatus::Online, 0);
+        reg.beat(
+            &acme(),
+            "u2",
+            "tab-1",
+            PresenceStatus::Online,
+            PRESENCE_TTL_MILLIS,
+        );
         let now = PRESENCE_TTL_MILLIS + 1;
         let visible_before = reg.list(&acme(), now);
         assert_eq!(reg.sweep(now), 1);

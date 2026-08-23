@@ -28,7 +28,7 @@
 //! renewal *is* the stop signal. A console that closes mid-word therefore
 //! clears itself with no teardown to get wrong.
 
-use axum::extract::State;
+use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -70,7 +70,31 @@ struct AnnounceBody {
     /// What to appear as. Note there is deliberately no `userId`: see the
     /// module header.
     status: PresenceStatus,
+    /// Which of this person's open tabs is announcing (issue: multi-tab
+    /// detach). An opaque value the console mints once per tab and holds for
+    /// its lifetime — never a second identity, just a second dimension of the
+    /// same authenticated one, so it carries no impersonation risk the module
+    /// header's rule would need to police.
+    ///
+    /// Missing on an older console: every tab from one falls onto
+    /// [`DEFAULT_CONSOLE`], which reproduces today's one-lease-per-user
+    /// behaviour for a client that predates this field.
+    #[serde(default)]
+    console_id: Option<String>,
 }
+
+/// `DELETE {scope}/presence` — a clean disconnect, naming which tab left.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DisconnectQuery {
+    #[serde(default)]
+    console_id: Option<String>,
+}
+
+/// The lease key an older console's requests — ones with no `consoleId` at
+/// all — collapse onto, so every tab from one that predates this field keeps
+/// sharing a single lease exactly as before.
+const DEFAULT_CONSOLE: &str = "default";
 
 /// `POST {scope}/chat/typing` — one ping.
 #[derive(Debug, Deserialize)]
@@ -103,11 +127,30 @@ async fn announce(
     let Some(user) = actor_id(&company) else {
         return Err(unauthorized());
     };
+    // An "offline" announcement is a disconnect, not a lease to store. `list`
+    // only ever reads live leases, so an `Offline` entry inserted here would
+    // still answer present to `GET /presence` — a viewer refreshing mid-TTL
+    // would see somebody the live stream just told them left. Route it through
+    // the same `detach` the DELETE takes so the registry and the wire agree.
+    let console = body.console_id.as_deref().unwrap_or(DEFAULT_CONSOLE);
+    if body.status == PresenceStatus::Offline {
+        return disconnect(
+            State(state),
+            company,
+            Query(DisconnectQuery {
+                console_id: body.console_id,
+            }),
+        )
+        .await;
+    }
     let at = now_millis();
     // Published on a *change* only. A console beats every minute whether or not
     // anything moved, so announcing every renewal would put one frame per
     // person per minute on every open console for no visible difference.
-    if state.presence().beat(company.id(), &user, body.status, at) {
+    if state
+        .presence()
+        .beat(company.id(), &user, console, body.status, at)
+    {
         crate::turn_stream::publish(
             company.id(),
             PresenceFrame {
@@ -124,14 +167,20 @@ async fn announce(
 async fn disconnect(
     State(state): State<AppState>,
     company: ScopedCompany,
+    Query(query): Query<DisconnectQuery>,
 ) -> Result<StatusCode, Response> {
     let Some(user) = actor_id(&company) else {
         return Err(unauthorized());
     };
-    // Only announce a departure that actually happened, so a duplicate teardown
-    // — `pagehide` and `visibilitychange` both firing, which they do — puts one
-    // frame on the bus rather than two.
-    if state.presence().detach(company.id(), &user) {
+    let console = query.console_id.as_deref().unwrap_or(DEFAULT_CONSOLE);
+    // Only announce a departure that actually happened — a duplicate teardown
+    // (`pagehide` and `visibilitychange` both firing, which they do) or a tab
+    // closing while another the same person has open is still live — publishes
+    // nothing.
+    if state
+        .presence()
+        .detach(company.id(), &user, console, now_millis())
+    {
         crate::turn_stream::publish(
             company.id(),
             PresenceFrame {
@@ -410,5 +459,79 @@ mod tests {
             );
             assert_eq!(body["code"], "unauthorized", "{method} {path}");
         }
+    }
+
+    /// Announcing `offline` must behave exactly like `DELETE`: the caller
+    /// disappears from `GET /presence` at once, not just after its lease
+    /// lapses. See the module header's "the wire and the registry must agree"
+    /// note on `announce`.
+    #[tokio::test]
+    async fn announcing_offline_disconnects_like_a_delete_would() {
+        let home = home();
+        let state = state(home.path()).await;
+
+        let (status, _) = call(
+            &state,
+            "PUT",
+            "/presence",
+            Some(json!({"status": "online"})),
+            true,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let (_, listed) = call(&state, "GET", "/presence", None, true).await;
+        assert_eq!(listed["people"].as_array().unwrap().len(), 1);
+
+        let (status, _) = call(
+            &state,
+            "PUT",
+            "/presence",
+            Some(json!({"status": "offline"})),
+            true,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let (_, listed) = call(&state, "GET", "/presence", None, true).await;
+        assert_eq!(
+            listed["people"].as_array().unwrap().len(),
+            0,
+            "an offline announcement must drop the lease, not store it"
+        );
+    }
+
+    /// The multi-tab fix: two consoles for the same signed-in person, and
+    /// closing one must not disconnect the other.
+    #[tokio::test]
+    async fn closing_one_tab_leaves_the_other_open() {
+        let home = home();
+        let state = state(home.path()).await;
+
+        for console in ["tab-1", "tab-2"] {
+            let (status, _) = call(
+                &state,
+                "PUT",
+                "/presence",
+                Some(json!({"status": "online", "consoleId": console})),
+                true,
+            )
+            .await;
+            assert_eq!(status, StatusCode::NO_CONTENT);
+        }
+        let (_, listed) = call(&state, "GET", "/presence", None, true).await;
+        assert_eq!(listed["people"].as_array().unwrap().len(), 1);
+
+        let (status, _) = call(&state, "DELETE", "/presence?consoleId=tab-1", None, true).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let (_, listed) = call(&state, "GET", "/presence", None, true).await;
+        assert_eq!(
+            listed["people"].as_array().unwrap().len(),
+            1,
+            "tab-2 is still open"
+        );
+
+        let (status, _) = call(&state, "DELETE", "/presence?consoleId=tab-2", None, true).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let (_, listed) = call(&state, "GET", "/presence", None, true).await;
+        assert_eq!(listed["people"].as_array().unwrap().len(), 0);
     }
 }
