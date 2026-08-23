@@ -541,11 +541,6 @@ async fn memory_stats(company: ScopedCompany) -> Result<Json<MemoryStats>, ApiEr
         teammate_memory,
         document_memory,
         task_outcomes,
-        // The list route caps the same non-mirror context population at
-        // `MAX_CONTEXT_ENTRIES`; reporting the flag here keeps the console's
-        // truncation notice on ONE snapshot instead of comparing the list and
-        // stats responses that a write between them can disagree on.
-        context_truncated: teammate_memory + task_outcomes + document_memory > MAX_CONTEXT_ENTRIES,
     }))
 }
 
