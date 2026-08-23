@@ -48,7 +48,7 @@ test("a list row leads with its title and shows one readable status", async ({
         fields: {
           title,
           column: "todo",
-          note: "First line\n\nSecond line",
+          note: "First line\n\n    indented line\nSecond line",
         },
       },
     });
@@ -63,7 +63,15 @@ test("a list row leads with its title and shows one readable status", async ({
     await expect(row.getByTestId("ledger-entry-status")).toHaveText("To-do");
     await expect(row.getByTestId("ledger-entry-id")).toHaveText(id);
     await expect(row.getByText("column", { exact: true })).toHaveCount(0);
-    await expect(row.locator("dd")).toHaveText("First line\nSecond line");
+    // The blank paragraph goes, but the indentation inside a line is part of
+    // what was recorded — `pre-line` would have collapsed it.
+    const note = row.locator("dd");
+    expect(await note.evaluate((el) => el.textContent)).toBe(
+      "First line\n    indented line\nSecond line",
+    );
+    expect(await note.evaluate((el) => getComputedStyle(el).whiteSpace)).toBe(
+      "pre-wrap",
+    );
 
     const order = await row.locator(":scope > div").first().evaluate((header) =>
       Array.from(header.children).map((child) => child.getAttribute("data-testid")),
