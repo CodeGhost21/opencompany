@@ -86,7 +86,9 @@ pub struct FeedbackInput {
 /// A durable snapshot of one piece of feedback.
 ///
 /// The `operator_words` field stays local and unscrubbed; a scrubbed candidate
-/// body is derived from it only at filing time.
+/// body is derived from it at preview time and frozen in [`Self::scrubbed_body`]
+/// so a later confirm of the same item posts exactly the bytes the operator
+/// approved.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct FeedbackItem {
     /// A process-unique id.
