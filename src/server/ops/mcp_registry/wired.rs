@@ -183,7 +183,7 @@ pub(super) async fn search(company: ScopedCompany, Query(query): Query<SearchQue
     let Some(mcp) = company.runtime.mcp() else {
         return not_wired("mcp registry");
     };
-    match mcp.search(None, query.q, query.page, query.page_size).await {
+    match mcp.search(query.q, query.page, query.page_size).await {
         Ok(raw) => Json(catalogue_search(&raw)).into_response(),
         Err(error) => ApiError(error).into_response(),
     }
@@ -204,7 +204,7 @@ pub(super) async fn entry(company: ScopedCompany, Query(query): Query<EntryQuery
         .into_response();
     }
     let raw = match mcp
-        .registry_get(None, qualified_name.clone())
+        .registry_get(qualified_name.clone())
         .await
     {
         Ok(raw) => raw,
@@ -244,7 +244,7 @@ pub(super) async fn install(
     }
 
     let raw = match mcp
-        .registry_get(None, qualified_name.clone())
+        .registry_get(qualified_name.clone())
         .await
     {
         Ok(raw) => raw,
@@ -261,7 +261,7 @@ pub(super) async fn install(
     }
 
     let server = match mcp
-        .install_from_directory(None, qualified_name, body.env)
+        .install_from_directory(qualified_name, body.env)
         .await
     {
         Ok(server) => server,
