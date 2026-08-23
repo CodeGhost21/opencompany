@@ -313,7 +313,7 @@ export function UsageView({ client, company }: Props) {
                   <CapabilityRow key={tier.namespace} tier={tier} />
                 ))}
               </div>
-            ) : capsLoaded && caps?.configured && caps.total ? null : (
+            ) : capsLoaded && caps?.configured && caps.total ? null : capsUnavailable ? null : (
               <p className="py-2 text-sm text-muted-foreground">
                 {capsLoaded ? "No token plan configured." : "Loading budgets…"}
               </p>
