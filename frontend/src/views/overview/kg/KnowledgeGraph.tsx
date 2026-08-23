@@ -1903,6 +1903,39 @@ export function KnowledgeGraph({
   // from under a neighbour's icon, so it hands back the `dy` to draw it at
   const labelPlan = planLabels(labelCandidates, { x: camRectRef.current.x, y: camRectRef.current.y, w: camK * W }, W, labelIcons);
 
+  // A roving tab stop keeps the graph reachable without inserting every node
+  // between the console's ordinary controls. Nodes hidden behind the focused
+  // tree are excluded, because focus must never move somewhere a reader cannot
+  // see or operate.
+  const navigableNodes = nodes.filter((n) => !visuals.get(n.id)?.hidden);
+  useEffect(() => {
+    if (navigableNodes.some((n) => n.id === activeNodeId)) return;
+    setActiveNodeId(navigableNodes[0]?.id ?? null);
+  }, [activeNodeId, navigableNodes]);
+  const moveActiveNode = (direction: number) => {
+    if (navigableNodes.length === 0) return;
+    const current = navigableNodes.findIndex((n) => n.id === activeNodeId);
+    const next = navigableNodes[(current + direction + navigableNodes.length) % navigableNodes.length];
+    setActiveNodeId(next.id);
+    nodeRefs.current.get(next.id)?.focus();
+  };
+  const onNodeKeyDown = (e: React.KeyboardEvent<SVGGElement>, n: KGNode) => {
+    if (e.key === 'ArrowRight' || e.key === 'ArrowDown') {
+      e.preventDefault();
+      e.stopPropagation();
+      moveActiveNode(1);
+    } else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      e.stopPropagation();
+      moveActiveNode(-1);
+    } else if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      e.stopPropagation();
+      onNodeClick(n);
+    }
+  };
+  const nodeAriaLabel = (n: KGNode) => `${CAT[n.kind].label}: ${n.label}. Press Enter or Space to select.`;
+
   // ── the graph itself (reused inline + fullscreen) ───────────────────────────
   const graphInner = (
     <>
@@ -1911,8 +1944,8 @@ export function KnowledgeGraph({
         ref={svgRef}
         viewBox={`0 0 ${W} ${H}`}
         className="h-full w-full cursor-grab touch-none active:cursor-grabbing"
-        role="img"
-        aria-label="Operating knowledge graph"
+        role="application"
+        aria-label="Operating knowledge graph. Use arrow keys to move between nodes, then Enter or Space to select one."
         onPointerDown={onCanvasPointerDown}
         onPointerMove={onCanvasPointerMove}
         onPointerUp={onCanvasPointerUp}
@@ -2127,7 +2160,15 @@ export function KnowledgeGraph({
             return (
               <g
                 key={n.id}
-                ref={coreGRef}
+                ref={(el) => {
+                  coreGRef.current = el;
+                  if (el) nodeRefs.current.set(n.id, el);
+                  else nodeRefs.current.delete(n.id);
+                }}
+                role="button"
+                aria-label={nodeAriaLabel(n)}
+                tabIndex={activeNodeId === n.id ? 0 : -1}
+                className="kg-node"
                 transform={`translate(${n.x},${n.y})`}
                 opacity={dim ? 0.15 : 1}
                 style={{ cursor: dragRef.current?.id === n.id ? 'grabbing' : 'grab', transition: 'opacity 0.25s' }}
@@ -2142,6 +2183,8 @@ export function KnowledgeGraph({
                 onPointerDown={(e) => onNodePointerDown(e, n.id)}
                 onPointerMove={(e) => onNodePointerMove(e, n.id)}
                 onPointerUp={(e) => onNodePointerUp(e, n.id)}
+                onFocus={() => setActiveNodeId(n.id)}
+                onKeyDown={(e) => onNodeKeyDown(e, n)}
                 onClick={(e) => {
                   e.stopPropagation();
                   if (suppressClickRef.current) {
@@ -2279,9 +2322,18 @@ export function KnowledgeGraph({
           }
 
           return (
-            <g
-              key={n.id}
-              transform={`translate(${n.x},${n.y})`}
+              <g
+                key={n.id}
+                ref={(el) => {
+                  if (el) nodeRefs.current.set(n.id, el);
+                  else nodeRefs.current.delete(n.id);
+                }}
+                role="button"
+                aria-label={nodeAriaLabel(n)}
+                aria-hidden={hidden || undefined}
+                tabIndex={activeNodeId === n.id ? 0 : -1}
+                className="kg-node"
+                transform={`translate(${n.x},${n.y})`}
               opacity={nodeOpacity}
               style={{
                 cursor: dragRef.current?.id === n.id ? 'grabbing' : 'grab',
@@ -2295,6 +2347,8 @@ export function KnowledgeGraph({
               onPointerDown={(e) => onNodePointerDown(e, n.id)}
               onPointerMove={(e) => onNodePointerMove(e, n.id)}
               onPointerUp={(e) => onNodePointerUp(e, n.id)}
+              onFocus={() => setActiveNodeId(n.id)}
+              onKeyDown={(e) => onNodeKeyDown(e, n)}
               onClick={(e) => {
                 e.stopPropagation();
                 if (suppressClickRef.current) {
@@ -2390,6 +2444,9 @@ export function KnowledgeGraph({
 .kg-fade { opacity: 0; animation: kg-fade-in 0.7s ease 0.25s forwards; }
 .kg-leaf { transform-box: fill-box; transform-origin: center; opacity: 0; animation: kg-leaf-in 0.6s ease 0.2s forwards; }
 .kg-glow { opacity: 0; animation: kg-glow-in 0.9s ease forwards; }
+/* SVG groups have no useful browser focus outline, so keep the keyboard
+   position visible on the node itself rather than around its whole subtree. */
+.kg-node:focus-visible > circle:first-of-type { stroke: var(--focus-ring); stroke-width: 3px; }
 
 /* detail cards glide in with the camera instead of popping */
 @keyframes kg-panel-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
