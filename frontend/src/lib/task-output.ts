@@ -234,6 +234,20 @@ export function taskTabHref(hash: string, tab: TaskTab): string {
   return `${path}?${params.toString()}`;
 }
 
+/**
+ * Which tab an address asks the task detail to open (issue #339).
+ *
+ * `timeline` for everything else — including a focus that names nothing, which
+ * is every navigation that existed before this, and every lineage hop, whose
+ * plain `#/tasks/<id>` claims the default and must therefore land on it.
+ */
+export function tabForFocus(focus?: TaskFocus): TaskTab {
+  if (focus?.tab) return focus.tab;
+  if (focus?.artifactId) return "artifacts";
+  if (focus?.runId) return "attempts";
+  return "timeline";
+}
+
 /** Whether a focus asks for anything at all. */
 export function hasFocus(focus: TaskFocus): boolean {
   return Boolean(focus.tab || focus.artifactId || focus.runId);
