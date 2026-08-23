@@ -16,6 +16,13 @@ interface Props {
   onOpenRail?: () => void;
   channelsCollapsed: boolean;
   onToggleChannels: () => void;
+  /**
+   * Where the shell restores focus after this header's own toggle unmounts the
+   * compact rail's expand button (issue #1340). The header toggle is mounted on
+   * both density states, so it is the one control the shell can count on to
+   * carry focus across the switch.
+   */
+  channelsToggleRef?: Ref<HTMLButtonElement>;
 }
 
 /**
