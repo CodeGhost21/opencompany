@@ -222,6 +222,14 @@ mod test {
         assert!(!grant_matches("composio_list*", "composio_execute"));
     }
 
+    #[test]
+    fn wildcard_does_not_cover_mcp_servers() {
+        assert!(!grants_cover_server(&["*".into()], "notion"));
+        assert!(grants_cover_server(&["mcp:*".into()], "notion"));
+        assert!(grants_cover_server(&["mcp:notion".into()], "notion"));
+        assert!(!grants_cover_server(&["mcp:notion".into()], "linear"));
+    }
+
     /// Every grant shape the shipped `companies/*/company.toml` manifests use
     /// keeps working exactly as before — the fix must be invisible to them.
     #[test]
