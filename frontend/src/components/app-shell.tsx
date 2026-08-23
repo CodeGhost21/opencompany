@@ -1322,7 +1322,7 @@ export function AppShell({
       // …and into the Chat workspace's transcripts, which is a *different*
       // store (issue #367). Chat became the nav-listed surface in #361 while
       // this injection kept writing only to the parked Conversation's threads,
-      // so anything the console did not POST for — an inbound Telegram turn, a
+      // so anything the console did not POST for — an inbound channel turn, a
       // background desk turn — reached Chat only on a page reload.
       //
       // The event names a thread; `chatChannelByThread` is the only thing that
