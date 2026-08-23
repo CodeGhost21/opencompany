@@ -1797,9 +1797,9 @@ mod tests {
         assert_eq!(status, StatusCode::OK, "an admin reaches authorization: {raw}");
         #[cfg(feature = "composio")]
         assert_eq!(
-            _body["connectUrl"],
+            body["connectUrl"],
             "https://composio.test/connect/gmail",
-            "the handler returns the loopback backend's authorization URL: {_body}"
+            "the handler returns the loopback backend's authorization URL: {body}"
         );
         #[cfg(not(feature = "composio"))]
         assert_eq!(
