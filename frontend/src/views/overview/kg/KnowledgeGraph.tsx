@@ -48,7 +48,7 @@ const RIM_DELTA_DEG = (WHEEL_GEOM.delta * 180) / Math.PI;
 // connection count (see nodeRadius / TIER_OPACITY).
 const CAT: Record<KGNodeKind, { color: string; Icon: LucideIcon; label: string; r: number }> = {
   self: { color: 'var(--text)', Icon: Sparkles, label: 'Notes', r: 18 },
-  team: { color: 'var(--brain-1)', Icon: Users, label: 'Pillars', r: 15 },
+  team: { color: 'var(--brain-1)', Icon: Users, label: 'Desks', r: 15 },
   workflow: { color: 'var(--brain-2)', Icon: WorkflowIcon, label: 'Workflows', r: 8.5 },
   step: { color: 'var(--brain-2)', Icon: Milestone, label: 'Stages', r: 6 },
   task: { color: 'var(--muted)', Icon: ClipboardList, label: 'SOP tasks', r: 7 },

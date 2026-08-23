@@ -13,7 +13,7 @@ import { KnowledgeGraphFullscreen } from "@/views/overview/kg/KnowledgeGraphFull
  * The rail is an absolute `z-30` overlay 300px wide, on purpose — resizing the
  * canvas under it reflowed the graph on every open and close. The two controls
  * that live on the right edge were left at `right-2` / `right-3` and `z-20` /
- * `z-10` underneath it, so opening any node's card hid the "Next pillar"
+ * `z-10` underneath it, so opening any node's card hid the "Next desk"
  * paddle, the snapshot clock, the Refresh button and the total-outage alert,
  * and made every one of them unclickable behind an opaque panel.
  *
@@ -65,8 +65,8 @@ function statusColumn(): HTMLElement {
   return slot!.parentElement as HTMLElement;
 }
 
-function nextPillar(): HTMLElement {
-  const el = host.querySelector('[aria-label="Next department"]');
+function nextDesk(): HTMLElement {
+  const el = host.querySelector('[aria-label="Next desk"]');
   expect(el).not.toBeNull();
   return el as HTMLElement;
 }
@@ -90,15 +90,15 @@ describe("the right-edge chrome and the detail rail", () => {
     render(false);
     expect(statusColumn().className).toContain("right-5");
     expect(statusColumn().className).not.toContain(RAIL_CLEARANCE);
-    expect(nextPillar().className).toContain("right-2");
-    expect(nextPillar().className).not.toContain(RAIL_CLEARANCE);
+    expect(nextDesk().className).toContain("right-2");
+    expect(nextDesk().className).not.toContain(RAIL_CLEARANCE);
   });
 
   it("steps clear of the rail when a card opens", () => {
     render(true);
     expect(host.querySelector('[data-testid="card"]')).not.toBeNull();
     expect(statusColumn().className).toContain(RAIL_CLEARANCE);
-    expect(nextPillar().className).toContain(RAIL_CLEARANCE);
+    expect(nextDesk().className).toContain(RAIL_CLEARANCE);
   });
 
   it("stays above the rail rather than merely beside it", () => {
@@ -108,13 +108,13 @@ describe("the right-edge chrome and the detail rail", () => {
     // thing that re-buries them.
     render(true);
     expect(statusColumn().className).toContain("z-40");
-    expect(nextPillar().className).toContain("z-40");
+    expect(nextDesk().className).toContain("z-40");
   });
 
   it("returns to the edge when the card closes", () => {
     render(true);
     render(false);
     expect(statusColumn().className).not.toContain(RAIL_CLEARANCE);
-    expect(nextPillar().className).not.toContain(RAIL_CLEARANCE);
+    expect(nextDesk().className).not.toContain(RAIL_CLEARANCE);
   });
 });
