@@ -2034,7 +2034,7 @@ mod tests {
         for focus in AgentFocus::ALL {
             for grant in focus.tools() {
                 assert!(
-                    crate::company::tool_catalog::company_allows(&allow, &grant),
+                    crate::runtime::builder::allow_covers(&allow, &grant),
                     "{} asks for `{grant}`, which the default allow-list {allow:?} \
                      does not cover — it would be dropped on every company minted \
                      by this flow",
