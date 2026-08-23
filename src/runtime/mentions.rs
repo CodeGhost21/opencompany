@@ -1609,9 +1609,31 @@ members = ["engineer", "ceo"]
 
     /// A caller cannot pair arbitrary text with a live target's id and have it
     /// persisted as a real, notifying mention — the span must actually be a
-    /// spelling of that target.
+    /// spelling of that target. `@hello` is syntactically a mention (starts
+    /// with `@`, closes at the space), so this isolates the alias-mismatch
+    /// path from the syntax check covered separately below.
     #[test]
     fn a_supplied_mention_whose_text_does_not_name_its_target_is_demoted() {
+        let supplied = vec![Mention {
+            target: agent("engineer"),
+            text: "@hello".to_string(),
+            offset: 0,
+            quiet: false,
+        }];
+        let out = resolve("@hello there", Some(supplied), None, &acme(), &people());
+        assert_eq!(out.len(), 1, "the span survives so the text still matches");
+        assert!(
+            out[0].quiet,
+            "text that never named the target must not ping it: {out:?}"
+        );
+    }
+
+    /// Text that never had `@`-shape at all (no `@`, nowhere) is dropped
+    /// outright rather than kept and demoted — the same treatment a
+    /// mid-word or in-code-span match gets, and consistent with fallback
+    /// extraction, which would never have produced a mention here either.
+    #[test]
+    fn a_supplied_mention_with_no_at_sign_at_all_is_dropped() {
         let supplied = vec![Mention {
             target: agent("engineer"),
             text: "hello".to_string(),
@@ -1619,11 +1641,7 @@ members = ["engineer", "ceo"]
             quiet: false,
         }];
         let out = resolve("hello there", Some(supplied), None, &acme(), &people());
-        assert_eq!(out.len(), 1, "the span survives so the text still matches");
-        assert!(
-            out[0].quiet,
-            "text that never named the target must not ping it: {out:?}"
-        );
+        assert!(out.is_empty(), "{out:?}");
     }
 
     /// The picker is still trusted to disambiguate — a genuinely valid alias
