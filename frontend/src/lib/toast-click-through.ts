@@ -27,9 +27,9 @@ export function relayToastClick(event: MouseEvent): void {
 
   // `elementFromPoint` can hand back any element, not just an `HTMLElement`:
   // the workflow minimap is an SVG sitting under the bottom-right toaster, and
-  // an `SVGElement` must be as reachable as a button. Both types carry `closest`,
-  // `focus` and `click`, so requiring the narrower one would leave every
-  // SVG-backed control blocked for nothing.
+  // an `SVGElement` must be as reachable as a button. Both types carry `closest`
+  // and `focus`, so requiring the narrower one would leave every SVG-backed
+  // control blocked for nothing.
   if (
     !(beneath instanceof HTMLElement || beneath instanceof SVGElement) ||
     beneath.closest("[data-sonner-toaster]")
@@ -39,5 +39,12 @@ export function relayToastClick(event: MouseEvent): void {
   event.preventDefault();
   event.stopPropagation();
   beneath.focus({ preventScroll: true });
-  beneath.click();
+  // `HTMLElement.click()` also runs the element's default action (link
+  // navigation, form submission); `SVGElement` has no `click()` in the DOM, so
+  // the event is dispatched to reach its handlers instead.
+  if (beneath instanceof HTMLElement) {
+    beneath.click();
+  } else {
+    beneath.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+  }
 }
