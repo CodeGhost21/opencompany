@@ -1012,10 +1012,7 @@ mod tests {
     fn granted_secrets_follows_effective_grants() {
         let mut server = decl("fixture", "http://127.0.0.1:1/mcp");
         server.auth = AuthMaterial::Bearer("inherited-canary".into());
-        let inherited = granted_secrets(
-            std::slice::from_ref(&server),
-            &grants(&["*", "mcp:*"]),
-        );
+        let inherited = granted_secrets(std::slice::from_ref(&server), &grants(&["*", "mcp:*"]));
         assert_eq!(inherited, vec!["inherited-canary"]);
 
         let omitted = granted_secrets(std::slice::from_ref(&server), &grants(&["*"]));
