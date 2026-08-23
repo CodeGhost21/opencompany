@@ -296,7 +296,10 @@ const REWRITE_RETIRED = (
   // detail sub-page (issue #264), it is what the org chart's rows and the chat
   // pane's chips link to, and it is deliberately a page so it can be linked.
   if (head === "team" && !sub) return ["company", null];
-  if (head === "connections") return ["settings", "connections"];
+  // `#/connections` predates the split into OAuth / MCP / Inference; the
+  // accounts it named are the OAuth page.
+  if (head === "connections") return ["settings", "oauth"];
+  if (head === "oauth") return ["settings", "oauth"];
   if (head === "mcp") return ["settings", "mcp"];
   if (head === "people") return ["settings", "people"];
   return null;
@@ -747,14 +750,14 @@ export function AppShell({
   const pending = feed.status.pending_approvals;
 
   // A legacy native OAuth callback may have left `connected` or `connect_error`
-  // in a bookmarked URL. Land the operator on Connections, say what happened,
+  // in a bookmarked URL. Land the operator on the OAuth page, say what happened,
   // then strip the params so a refresh does not re-fire them. The #838 callback
   // itself now terminates on its explanatory page and never writes a credential.
   // Runs once; StrictMode's double invoke is harmless because the first run
   // clears the params the second reads.
   //
-  // Connections is a page of the Settings section now (`#/settings/connections`),
-  // so the bounce-back lands there rather than on a top-level view.
+  // The accounts page is `#/settings/oauth` since the Connections split, so the
+  // bounce-back lands there rather than on a top-level view.
   //
   // Before issue #300 the host answered a cancelled or expired handshake with a
   // JSON body, which the browser rendered as the page — a dead end with no way
@@ -777,7 +780,7 @@ export function AppShell({
       "",
       window.location.pathname + (query ? `?${query}` : "") + stripLegacyConnectParams(window.location.hash),
     );
-    setView("settings", "connections");
+    setView("settings", "oauth");
     // The callback param carries the raw provider id (e.g. "slack"); show the
     // catalog display name ("Slack") when we know it, falling back to the id.
     const providerName = providerId

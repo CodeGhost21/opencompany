@@ -2710,7 +2710,7 @@ export function WorkflowsView({
               </span>
               {runRefusal.code === "inference_required" && (
                 <a
-                  href="#/settings/connections"
+                  href="#/settings/oauth"
                   className={cn(buttonVariants({ variant: "outline", size: "sm" }))}
                   data-testid="workflow-run-inference-cta"
                 >
