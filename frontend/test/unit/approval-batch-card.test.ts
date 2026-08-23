@@ -425,6 +425,26 @@ describe("the consolidated approval card", () => {
     expect(approve.className.split(" ")).not.toContain("bg-primary");
   });
 
+  it("links the compact chat row back to its conversation when the thread resolves", async () => {
+    // The compact branch used to return before the `ApprovalMeta` call that
+    // receives `thread`, so the value MessageTimeline constructs for it was
+    // discarded and an inline card never said where the request was asked
+    // (#1419). Forwarding it keeps the compact row linked too.
+    await render(
+      [ESPN],
+      {},
+      {},
+      new Map(),
+      true,
+      { channelId: "marketing", label: "#marketing" },
+    );
+
+    const row = container.querySelector<HTMLElement>('[data-approval-inline="compact"]');
+    expect(row?.textContent).toContain("Asked in");
+    const link = row?.querySelector<HTMLAnchorElement>('a[href="#/chat/marketing"]');
+    expect(link?.textContent).toBe("#marketing");
+  });
+
   it("shows the amount beside a monetary approval in the compact chat row", async () => {
     const PAYMENT: ApprovalSummary = {
       id: "a4",
