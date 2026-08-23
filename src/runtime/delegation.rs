@@ -1138,10 +1138,27 @@ impl<'a> DelegationRunner<'a> {
         // delegation tools it already has. Nothing here dispatches.
         let with_mentions;
         let message = if operator_turn && !self.also_mentioned.is_empty() {
-            with_mentions = format!(
-                "{message}\n\n[Also mentioned in this message: {}. They have not been asked to answer — you have. Hand work to them only if it genuinely needs them.]",
-                self.also_mentioned.join(", ")
-            );
+            // A responder with no hand-off tool at all (an overlay teammate,
+            // or a manifest member with an empty `delegates_to`) cannot act on
+            // "hand work to them" — see `responder_can_delegate`. Telling it
+            // to anyway is not a harmless nudge: it is an instruction the
+            // model has no tool to follow, for a name it now believes should
+            // be receiving work it never will.
+            with_mentions = if self.responder_can_delegate(responder) {
+                format!(
+                    "{message}
+
+[Also mentioned in this message: {}. They have not been asked to answer — you have. Hand work to them only if it genuinely needs them.]",
+                    self.also_mentioned.join(", ")
+                )
+            } else {
+                format!(
+                    "{message}
+
+[Also mentioned in this message: {}. They have not been asked to answer — you have. You have no way to hand this off to them, so answer it yourself, or say so if it genuinely needs them.]",
+                    self.also_mentioned.join(", ")
+                )
+            };
             with_mentions.as_str()
         } else {
             message
@@ -2720,6 +2737,25 @@ impl<'a> DelegationRunner<'a> {
         orchestrator::orchestrator_id(&self.record.effective_agents()).unwrap_or_default()
     }
 
+    /// Whether `responder` has any way to hand work to somebody else — the
+    /// orchestrator always does, and an ordinary teammate does only when its
+    /// manifest row names a `delegates_to` allowlist (`build.rs` wires
+    /// `spawn_task`/`delegate_to_desk`/`delegate_to_teammate` on exactly that
+    /// condition; an overlay teammate has no `delegates_to` field at all and
+    /// so never qualifies here either).
+    ///
+    /// Read before the "also mentioned" turn context is worded (see
+    /// [`Self::run`]): telling a responder with no hand-off tool at all to
+    /// "hand work to them" is an instruction it cannot follow, and the honest
+    /// phrasing differs.
+    fn responder_can_delegate(&self, responder: &str) -> bool {
+        responder == self.orchestrator_id()
+            || self
+                .record
+                .effective_agent(responder)
+                .is_some_and(|agent| !agent.delegates_to.is_empty())
+    }
+
     /// The voice a note this drain appends is recorded under.
     ///
     /// The orchestrator on every chat and task path, unchanged. On a **workflow
@@ -3856,6 +3892,56 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
     /// promised really executed. A test with only the second half would pass on
     /// a path that drains but never claims — which is not the invariant, because
     /// the next such path written would inherit nothing.
+    /// A responder who cannot delegate (an ordinary manifest member with no
+    /// `delegates_to`) must not be told to "hand work to them" — it has no
+    /// tool to do that with. The orchestrator, who always can, keeps the
+    /// original phrasing.
+    #[tokio::test]
+    async fn also_mentioned_wording_matches_the_responders_own_delegation_reach() {
+        let fx = Fixture::new();
+        let turns = ScriptedTurns::new(&fx, vec![Turn::reply("on it")]);
+
+        fx.runner(&turns)
+            .also_mentioned(vec!["chief".to_string()])
+            .handle_operator_message("engineer", "look into this", Some("eng_desk"))
+            .await
+            .expect("operator message handled");
+
+        let calls = turns.calls();
+        assert_eq!(calls.len(), 1);
+        let (agent, message) = &calls[0];
+        assert_eq!(agent, "engineer");
+        assert!(
+            message.contains("You have no way to hand this off"),
+            "a non-delegating responder must be told plainly, not asked to do the impossible: {message}"
+        );
+        assert!(!message.contains("Hand work to them only if it genuinely needs them"));
+    }
+
+    /// The orchestrator always carries the hand-off tools, so it gets the
+    /// original "hand work to them" phrasing.
+    #[tokio::test]
+    async fn also_mentioned_wording_trusts_the_orchestrator_to_delegate() {
+        let fx = Fixture::new();
+        let turns = ScriptedTurns::new(&fx, vec![Turn::reply("on it")]);
+
+        fx.runner(&turns)
+            .also_mentioned(vec!["engineer".to_string()])
+            .handle_operator_message("chief", "look into this", Some("general"))
+            .await
+            .expect("operator message handled");
+
+        let calls = turns.calls();
+        assert_eq!(calls.len(), 1);
+        let (agent, message) = &calls[0];
+        assert_eq!(agent, "chief");
+        assert!(
+            message.contains("Hand work to them only if it genuinely needs them"),
+            "the orchestrator can always delegate: {message}"
+        );
+        assert!(!message.contains("You have no way to hand this off"));
+    }
+
     #[tokio::test]
     async fn an_operator_turn_approval_actually_lands_the_card() {
         let fx = Fixture::new();
