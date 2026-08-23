@@ -223,7 +223,7 @@ both fill a 6px dot and set legible 11px text.
 | **idle** | `#8C8C9E` 3.22:1 | `#6E6E80` 4.87:1 | `#9797A8` 6.80:1 |
 | **running** | `#008DD0` 3.08:1 | `#0A6E9C` 5.50:1 | `#38BDF8` 9.12:1 |
 | **blocked** | `#BF7200` 3.14:1 | `#A16207` 4.80:1 | `#FFC53D` 12.38:1 |
-| **done** | `#12A150` 3.08:1 | `#0A7D3E` 5.10:1 | `#35C77F` 8.95:1 |
+| **done** | `#009A49` 3.08:1 | `#0A7D3E` 5.10:1 | `#35C77F` 8.95:1 |
 | **failed** | `#E5484D` 3.29:1 | `#C62A2F` 5.43:1 | `#FF6369` 6.73:1 |
 
 The light marks clear 3:1 against every surface where they render, including

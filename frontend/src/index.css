@@ -164,7 +164,7 @@
        canvas), `-text` sets words (needs 4.5:1, so it is materially darker
        in light mode), and `-soft` is the tinted background a badge sits on.
        Every ratio is measured, not eyeballed — see docs/design-system/color.md. */
-    --green-mark: oklch(0.6221 0.1627 151.05); /* #12A150  3.28:1 */
+    --green-mark: oklch(0.60 0.1627 151.05); /* #009A49  3.08:1 on light active */
     --green-text: oklch(0.5175 0.1343 151.56); /* #0A7D3E  5.10:1 */
     --green-bright: oklch(0.7369 0.1603 156.57); /* #35C77F  dark mode */
 
