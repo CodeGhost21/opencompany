@@ -39,7 +39,8 @@ pub fn router() -> Router<AppState> {
         )
 }
 
-/// The feedback submission body: the capture input plus a `preview` flag.
+/// The feedback submission body: the capture input plus a `preview` flag and an
+/// optional `item_id` confirming a previewed item.
 #[derive(Debug, Deserialize)]
 struct FeedbackRequest {
     /// The capture fields (category, note, work_ref, template).
@@ -48,6 +49,10 @@ struct FeedbackRequest {
     /// When true, return the exact final body instead of filing.
     #[serde(default)]
     preview: bool,
+    /// When confirming (Send after Preview), the previewed item's id — finalize
+    /// that item instead of capturing a second one.
+    #[serde(default)]
+    item_id: Option<String>,
 }
 
 /// Resolves a company runtime by id. Shared with the board routes in
