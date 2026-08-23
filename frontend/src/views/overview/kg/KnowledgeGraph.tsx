@@ -753,7 +753,6 @@ export function KnowledgeGraph({
         alphaLog.push({ t: performance.now(), a: Math.round(a * 1000) / 1000 });
       }
     };
-    const sim = forceSimulation(nodes)
       // extra friction + a slow cool-down → nodes drift floatily into place
       // instead of snapping or overshooting
       .velocityDecay(0.62)
