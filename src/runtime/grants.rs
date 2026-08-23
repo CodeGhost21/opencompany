@@ -1401,7 +1401,7 @@ mod test {
         deny.verdict = crate::ports::types::Verdict::Deny;
         set.grant_standing(deny);
 
-        let drained = set.drain_opposite_polarity(
+        let drained = set.opposite_polarity(
             &GrantSubject::agent("ops"),
             "web_fetch",
             Some("https://docs.rs"),
@@ -1436,7 +1436,7 @@ mod test {
             10_000,
         ));
 
-        let drained = set.drain_opposite_polarity(
+        let drained = set.opposite_polarity(
             &GrantSubject::agent("ops"),
             "web_fetch",
             Some("https://docs.rs"),
@@ -1445,6 +1445,7 @@ mod test {
         );
         assert_eq!(drained.len(), 1);
         assert_eq!(drained[0].id, GrantId::new("grant-1"));
+        set.revoke_standing(&drained[0].id);
         assert_eq!(set.standing().len(), 0);
     }
 
@@ -1471,7 +1472,7 @@ mod test {
         deny.verdict = crate::ports::types::Verdict::Deny;
         set.grant_standing(deny);
 
-        let drained = set.drain_opposite_polarity(
+        let drained = set.opposite_polarity(
             &GrantSubject::agent("ops"),
             "web_fetch",
             Some("https://docs.rs"),
@@ -1495,7 +1496,7 @@ mod test {
         deny.verdict = crate::ports::types::Verdict::Deny;
         set.grant_standing(deny);
 
-        let drained = set.drain_opposite_polarity(
+        let drained = set.opposite_polarity(
             &GrantSubject::agent("ops"),
             "web_fetch",
             Some("https://docs.rs"),
@@ -1513,7 +1514,7 @@ mod test {
         let set = GrantSet::default();
         set.grant_standing(scoped("g1", "ops", "web_fetch", "https://docs.rs", 10_000));
 
-        let drained = set.drain_opposite_polarity(
+        let drained = set.opposite_polarity(
             &GrantSubject::agent("ops"),
             "web_fetch",
             Some("https://docs.rs"),
@@ -1533,7 +1534,7 @@ mod test {
         deny.verdict = crate::ports::types::Verdict::Deny;
         set.grant_standing(deny);
 
-        let drained = set.drain_opposite_polarity(
+        let drained = set.opposite_polarity(
             &GrantSubject::agent("ops"),
             "web_fetch",
             Some("https://docs.rs"),
