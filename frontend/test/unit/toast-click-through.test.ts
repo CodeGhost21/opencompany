@@ -43,6 +43,21 @@ describe("toast click-through", () => {
     expect(clicked).toHaveBeenCalledOnce();
   });
 
+  it("relays a click on toast text to an SVG control below", () => {
+    const below = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    const clicked = vi.fn();
+    below.addEventListener("click", clicked);
+    document.body.append(below);
+    mockElementFromPoint(below);
+
+    const text = document.createElement("span");
+    toast().append(text);
+    text.addEventListener("click", relayToastClick);
+    text.click();
+
+    expect(clicked).toHaveBeenCalledOnce();
+  });
+
   it("leaves a toast action button as its own click target", () => {
     const below = document.createElement("button");
     const belowClicked = vi.fn();
