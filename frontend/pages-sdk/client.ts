@@ -87,14 +87,43 @@ function isRelayMessage(value: unknown): value is RelayMessage {
 // file input, `showPicker()`, `window.open()` — is therefore not reachable
 // through an overlay; the relay targets ordinary click- and pointer-driven
 // controls, which is what a toast-over-page gesture is for.
+
+/**
+ * The elements a relayed press is currently on, keyed by pointer id.
+ *
+ * The parent relays a whole press: `pointerdown` followed by the
+ * `pointermove`/`pointerup`/`pointercancel` that land in its own document.
+ * Each continuation is routed to the element that took the press, not the one
+ * under the point now — the same retargeting pointer capture gives a
+ * same-document control, so a drag keeps tracking its handle when the pointer
+ * moves over a sibling element. The entry is cleared when the press ends.
+ */
+const relayPressTargets = new Map<number, Element>();
+
+function dispatchRelayedPointer(message: RelayMessage, target: Element): void {
+  target.dispatchEvent(
+    new PointerEvent(message.type.slice("oc:relay-".length), {
+      clientX: message.x,
+      clientY: message.y,
+      pointerId: message.pointerId ?? 0,
+      pointerType: message.pointerType ?? "mouse",
+      isPrimary: message.isPrimary ?? true,
+      button: message.button ?? 0,
+      buttons: message.buttons ?? 1,
+      detail: message.detail ?? 1,
+      bubbles: true,
+      cancelable: true,
+    }),
+  );
+}
+
 window.addEventListener("message", function onRelay(event: MessageEvent) {
   if (event.source !== window.parent) return;
   if (!isRelayMessage(event.data)) return;
 
-  const element = document.elementFromPoint(event.data.x, event.data.y);
-  if (!(element instanceof HTMLElement || element instanceof SVGElement)) return;
-
   if (event.data.type === "oc:relay-click") {
+    const element = document.elementFromPoint(event.data.x, event.data.y);
+    if (!(element instanceof HTMLElement || element instanceof SVGElement)) return;
     // Mirror the parent relay's own handling (`toast-click-through.ts`):
     // `HTMLElement.click()` runs default actions, and an `SVGElement` has no
     // `click()` in the DOM, so the event is dispatched to reach its handlers.
@@ -107,20 +136,37 @@ window.addEventListener("message", function onRelay(event: MessageEvent) {
     return;
   }
 
-  element.dispatchEvent(
-    new PointerEvent("pointerdown", {
-      clientX: event.data.x,
-      clientY: event.data.y,
-      pointerId: event.data.pointerId ?? 0,
-      pointerType: event.data.pointerType ?? "mouse",
-      isPrimary: event.data.isPrimary ?? true,
-      button: event.data.button ?? 0,
-      buttons: event.data.buttons ?? 1,
-      detail: event.data.detail ?? 1,
-      bubbles: true,
-      cancelable: true,
-    }),
-  );
+  const pointerId = event.data.pointerId ?? 0;
+
+  // The remainder of a press goes to the element that took the press, mirroring
+  // pointer capture; a stale target (the page re-rendered mid-gesture) falls
+  // back to the point, and pointerup/pointercancel close the press out either
+  // way so a later gesture with the same id starts from `elementFromPoint`.
+  const pressed = relayPressTargets.get(pointerId);
+  if (event.data.type !== "oc:relay-pointerdown" && pressed?.isConnected) {
+    dispatchRelayedPointer(event.data, pressed);
+    if (
+      event.data.type === "oc:relay-pointerup" ||
+      event.data.type === "oc:relay-pointercancel"
+    ) {
+      relayPressTargets.delete(pointerId);
+    }
+    return;
+  }
+  if (
+    event.data.type === "oc:relay-pointerup" ||
+    event.data.type === "oc:relay-pointercancel"
+  ) {
+    relayPressTargets.delete(pointerId);
+  }
+
+  const element = document.elementFromPoint(event.data.x, event.data.y);
+  if (!(element instanceof HTMLElement || element instanceof SVGElement)) return;
+
+  if (event.data.type === "oc:relay-pointerdown") {
+    relayPressTargets.set(pointerId, element);
+  }
+  dispatchRelayedPointer(event.data, element);
 });
 
 /** The shape a GraphQL round trip resolves to, mirroring the server's own envelope. */
