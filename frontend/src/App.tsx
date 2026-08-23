@@ -390,7 +390,15 @@ function Console() {
   // Now that any credential is captured in state, take it out of the URL.
   useEffect(() => {
     if (magicLink) clearMagicLinkFromUrl();
-    if (hubToken || hubFailed) clearHubResultFromUrl();
+    if (hubToken || hubFailed) {
+      clearHubResultFromUrl();
+      // A hub sign-in that was asked to land on setup's destination carries it
+      // as a query parameter (`?from=setup`) — the host put it there so the
+      // OAuth round trip could carry it. Translate it into the hash marker the
+      // shell consumes, so the sign-in lands on the roster setup just built
+      // with the welcome suppressed, exactly as a setup link would have.
+      absorbHubSetupHandoff();
+    }
   }, [magicLink, hubToken, hubFailed]);
 
   /**
