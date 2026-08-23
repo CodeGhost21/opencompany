@@ -113,6 +113,12 @@ function formatUpdated(ms: number): string {
 export function MemoryView({ client, company }: Props) {
   const [entries, setEntries] = useState<MemoryEntry[]>([]);
   const [stats, setStats] = useState<MemoryStats | null>(null);
+  // The truncation metadata that rode in with the last list read, kept beside
+  // `entries` because the banner's "newest N of M" must describe the SAME read
+  // as the rows it counts — a write between two requests would let N and M
+  // silently disagree.
+  const [totalContext, setTotalContext] = useState(0);
+  const [contextTruncated, setContextTruncated] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
