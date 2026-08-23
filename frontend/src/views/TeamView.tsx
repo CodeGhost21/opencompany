@@ -233,6 +233,13 @@ export function TeamView({
 
   useEffect(() => {
     setLoad("loading");
+    // Drop the previous read's workload before the new reads start. A stale
+    // non-null map must never filter a roster it does not describe: on a
+    // `refreshKey` re-run the new roster can land while `loadWorkload` is still
+    // in flight, and one company's board cannot determine another's visible
+    // roster. `null` also disables the Working switch, so the filter cannot
+    // strand the roster mid-re-read.
+    setWorkload(null);
     void boot();
     void loadViewer();
     void loadWorkload();
