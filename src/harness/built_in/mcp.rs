@@ -276,6 +276,9 @@ impl Tool for OcMcpListServersTool {
                     // gitbooks-specific. The wire value is unchanged so an
                     // operator's existing filters keep matching.
                     McpRegistrySource::Host => "legacy_gitbooks",
+                    // `#[non_exhaustive]`: a source this build does not know
+                    // still has to render as something.
+                    _ => "unknown",
                 };
                 let auth = if matches!(server.auth, tinymcp::McpAuthConfig::None) {
                     "none"
@@ -502,7 +505,7 @@ impl Tool for OcMcpCallTool {
                 }
                 Ok(result)
             }
-            Err(err) => Ok(self.handle_failure(&server, &tool, &err)),
+            Err(err) => Ok(self.handle_failure(&server, &tool, &anyhow::Error::new(err))),
         }
     }
 

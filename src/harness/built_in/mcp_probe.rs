@@ -388,6 +388,11 @@ pub async fn probe_server(decl: &McpServerDecl) -> McpHealth {
             }
         }
         Err(err) => {
+            // The transport reports its own error type now. Wrap it so the
+            // classifier keeps seeing one `anyhow::Error` chain — it downcasts
+            // through that chain for both the typed 401 and the typed reqwest
+            // transport failure, and `anyhow` preserves `source()`.
+            let err = anyhow::Error::new(err);
             let class = classify_mcp_error(&err, auth_configured, false);
             // Issue #1260: "wants OAuth" and "we can sign in" are two different
             // questions, and only the second decides whether the console should
