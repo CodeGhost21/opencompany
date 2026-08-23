@@ -203,9 +203,14 @@ function extendsOnBoundary(name: string, prefix: string): boolean {
  * A trailing `*` is stripped from the *request* first (asking for `docs.*` is
  * asking about `docs`), then an allow entry matches if it is the catch-all, an
  * exact hit, or a `*`-suffixed prefix that stops on a namespace boundary. The
- * two asymmetries worth knowing, because both look like bugs and are not:
+ * asymmetries worth knowing, because all of them look like bugs and are not:
  * `workspace.*` does **not** cover a bare `workspace` request (which is why
- * manifests list both), and a grant with no trailing `*` matches only itself.
+ * manifests list both); a grant with no trailing `*` matches only itself; and
+ * `media`, `composio`, `search`, `repo` and the whole `mcp:` namespace are
+ * explicit opt-ins that a catch-all `*` never confers — the host's
+ * `allow_covers` rejects them under a bare `*`, so this hint must too, or the
+ * editor would suppress its "will not apply" warning and save a request the
+ * returned detail immediately renders as ineffective.
  *
  * This is a *hint*, shown while an operator types. The host stays the
  * authority: it re-derives `effective` on every read, so a disagreement here
@@ -214,11 +219,38 @@ function extendsOnBoundary(name: string, prefix: string): boolean {
  */
 export function companyCovers(allow: string[], glob: string): boolean {
   const literal = glob.endsWith("*") ? glob.slice(0, -1) : glob;
-  return allow.some((grant) => {
-    if (grant === "*") return true;
-    if (grant.endsWith("*")) return extendsOnBoundary(literal, grant.slice(0, -1));
-    return grant === literal;
-  });
+
+  // The metered, credentialed, and third-party namespaces are explicit opt-ins
+  // on the host: a catch-all `*` never covers them here, even though
+  // `grantMatches` treats `*` as a generic match. A belt cannot reintroduce a
+  // capability the company intentionally omitted.
+  if (literal === "media") return grantsExplicit(allow, "media");
+  if (literal === "composio") return grantsExplicit(allow, "composio");
+  if (literal === "search") return grantsExplicit(allow, "search");
+  if (literal === "repo") return grantsExplicit(allow, "repo");
+
+  // MCP grants use a colon namespace, so `mcp:*` is the explicit opt-in for an
+  // agent asking for all company servers. A bare `*` must not confer it.
+  if (literal === "mcp:" || literal.startsWith("mcp:")) {
+    return allow.some((grant) => grant !== "*" && grantMatches(grant, literal));
+  }
+
+  return allow.some((grant) => grantMatches(grant, literal));
+}
+
+/** The host's `grant_matches`: exact, or a trailing-`*` prefix on a boundary. */
+function grantMatches(grant: string, tool: string): boolean {
+  if (grant === "*") return true;
+  if (grant.endsWith("*")) return extendsOnBoundary(tool, grant.slice(0, -1));
+  return grant === tool;
+}
+
+/**
+ * The host's `grants_<ns>_explicit` family: the bare namespace or any of its
+ * sub-grants. A catch-all `*` never confers these.
+ */
+function grantsExplicit(grants: string[], ns: string): boolean {
+  return grants.some((grant) => grant === ns || grant.startsWith(`${ns}.`));
 }
 
 export function parseToolGlobs(input: string): string[] {
