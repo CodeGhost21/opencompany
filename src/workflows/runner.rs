@@ -1575,7 +1575,15 @@ async fn park_pending_gates(
         let gate = match gated.iter().find(|gate| gate.node_id == *node_id) {
             Some(gate) => Some(gate),
             None => {
-                described = super::gate::describe_call(graph, node_id);
+                // Issue #617: a namespaced id (`sub::work`) names a gate inside
+                // a child the resolver ran. The parent graph has no node with
+                // that id, so describe it from the child's own gate record —
+                // the child's tool and reason reach the card the way a
+                // top-level policy gate's do. Falls back to the parent-graph
+                // read for every other gate (an authored child gate, which the
+                // registry never sees, keeps its pre-existing behaviour).
+                described = super::caps::resolver::child_gate_call(child_gates, graph, node_id)
+                    .or_else(|| super::gate::describe_call(graph, node_id));
                 described.as_ref()
             }
         };
