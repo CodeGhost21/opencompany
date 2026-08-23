@@ -1062,7 +1062,7 @@ mod test {
             ("Meta Ads Specialist", "operations", &[0]),
             ("SEO Specialist", "analysis", &[]),
             ("Logistics Coordinator", "operations", &[1]),
-            ("Operations Manager", "operations", &[]),
+            ("Fulfillment Manager", "operations", &[]),
             ("Accountant", "analysis", &[]),
         ]);
         let model = SequencedModel::new(&[&echoed]);

@@ -166,7 +166,7 @@ Creating your team…
   ✓ Meta Ads Specialist — campaigns, budgets, creative testing
   ✓ SEO Specialist — product listings, organic traffic
   ✓ Logistics Coordinator — dispatch, tracking, returns
-  ✓ Operations Manager — keeps the others moving
+  ✓ Fulfillment Manager — suppliers, stock levels, and what the shop needs to keep selling
   ✓ Accountant — reconciliation, margins, spend
 
 Setting up their desks…
@@ -202,7 +202,7 @@ Someone answers:
 | Meta Ads Specialist | Campaigns, budgets, creative testing |
 | SEO Specialist | Product listings, organic traffic |
 | Logistics Coordinator | Dispatch, tracking, returns |
-| Operations Manager | Keeps the other four moving |
+| Fulfillment Manager | Suppliers, stock levels, and what the shop needs to keep selling |
 | Accountant | Reconciliation, margins, spend |
 | Customer Support | *(added by the user at question 2)* |
 
