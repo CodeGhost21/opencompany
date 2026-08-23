@@ -232,15 +232,17 @@ pub(crate) async fn sweep_company(
 mod test {
     use std::sync::Arc;
 
-    use super::MaintenanceTicker;
+    use super::{MaintenanceTicker, TRACE_RETENTION_LIMIT};
     use crate::company::CompanyManifest;
     use crate::policy::ManifestApprovalGate;
     use crate::ports::now_millis;
     use crate::ports::types::{
-        Actor, ActorKind, ApprovalId, CompanyEvent, CompanyId, Effect, EffectGroup, Verdict,
+        Actor, ActorKind, ApprovalId, CompanyEvent, CompanyId, CompressedTrace, Effect,
+        EffectGroup, Verdict,
     };
     use crate::runtime::scheduler::FakeClock;
     use crate::runtime::{CompanyRegistry, RuntimeBuilder};
+    use crate::ports::MemoryStore;
     use crate::{CompanyRuntime, Result};
 
     fn tmp_home() -> tempfile::TempDir {
@@ -572,6 +574,44 @@ mod test {
         // by a stale id, which is what an archive between the two calls leaves.
         assert!(registry.get(&CompanyId::new("gone")).is_none());
         assert_eq!(ticker.tick().await, 0);
+    }
+
+    /// Trace summaries are not recalled yet, but the maintenance loop must
+    /// bound their durable window for companies with and without schedules.
+    #[tokio::test]
+    async fn maintenance_retains_only_the_newest_cycle_traces() {
+        let home_dir = tmp_home();
+        let (runtime, ticker) =
+            given_an_unscheduled_company_with_an_overdue_gate(home_dir.path()).await;
+
+        for i in 0..=TRACE_RETENTION_LIMIT {
+            runtime
+                .memory
+                .save_trace(
+                    runtime.id(),
+                    CompressedTrace {
+                        cycle_id: format!("cycle-{i}"),
+                        summary: format!("summary-{i}"),
+                        at_millis: i as u64,
+                    },
+                )
+                .await
+                .expect("trace saves");
+        }
+
+        ticker.tick().await;
+
+        let traces = runtime
+            .memory
+            .recent_traces(runtime.id(), TRACE_RETENTION_LIMIT + 1)
+            .await
+            .expect("traces read");
+        assert_eq!(traces.len(), TRACE_RETENTION_LIMIT);
+        assert_eq!(traces.first().unwrap().cycle_id, "cycle-1");
+        assert_eq!(
+            traces.last().unwrap().cycle_id,
+            format!("cycle-{TRACE_RETENTION_LIMIT}")
+        );
     }
 
     /// Recursively lists files under `root`. Test-only; the journal's on-disk
