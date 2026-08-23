@@ -106,6 +106,7 @@ export function useStableList<T>(live: T[]): StableList<T> {
    */
   const focusInsideNow = useCallback(() => {
     const active = document.activeElement;
+    if (active instanceof HTMLElement && active.matches(":disabled")) return false;
     return active !== null && containerRef.current !== null && containerRef.current.contains(active);
   }, []);
 
