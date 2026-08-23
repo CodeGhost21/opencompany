@@ -235,30 +235,55 @@ export function insertMention(
  * A mention that still exists verbatim but has shifted — because text was
  * inserted before it — is re-anchored rather than dropped, so typing at the
  * start of a draft does not silently unresolve everything after the caret.
+ *
+ * Two mentions with the **same literal** are matched by their recorded order,
+ * not greedily by text. When `@Sam @Sam` names two people and the first span
+ * is deleted, the remaining text is the second Sam's — but a forward scan sees
+ * the first Sam's old span still sitting at offset 0, keeps it, and drops the
+ * survivor as overlapping. Processing from the last mention back lets the
+ * survivor claim the freed occurrence first, and a displaced mention re-anchors
+ * to the free occurrence closest to where it was rather than to the earliest.
  */
 export function reconcileMentions(text: string, mentions: Mention[]): Mention[] {
   const used: Array<[number, number]> = [];
   const out: Mention[] = [];
-  for (const mention of mentions) {
-    if (text.slice(mention.offset, mention.offset + mention.text.length) === mention.text) {
-      used.push([mention.offset, mention.offset + mention.text.length]);
-      out.push(mention);
+  const overlaps = (at: number, len: number) =>
+    used.some(([s, e]) => at < e && at + len > s);
+  const claim = (mention: Mention, at: number) => {
+    used.push([at, at + mention.text.length]);
+    out.push({ ...mention, offset: at });
+  };
+
+  for (let i = mentions.length - 1; i >= 0; i--) {
+    const mention = mentions[i];
+    // The span is exactly where it was recorded: keep it as-is.
+    if (
+      !overlaps(mention.offset, mention.text.length) &&
+      text.slice(mention.offset, mention.offset + mention.text.length) ===
+        mention.text
+    ) {
+      claim(mention, mention.offset);
       continue;
     }
-    // Re-anchor to the first occurrence not already claimed by another mention,
-    // so two mentions of the same person do not collapse onto one span.
+    // Re-anchor to the free occurrence closest to where it was. Editing shifts
+    // a mention's home by the edit's size, so the nearest same-text span is
+    // the one most likely to be it — greedy first-free would hand a displaced
+    // later mention an occurrence that still belongs to an intact earlier one.
+    let nearest: number | undefined;
     let from = 0;
     for (;;) {
       const at = text.indexOf(mention.text, from);
       if (at === -1) break;
-      const overlaps = used.some(([s, e]) => at < e && at + mention.text.length > s);
-      if (!overlaps) {
-        used.push([at, at + mention.text.length]);
-        out.push({ ...mention, offset: at });
-        break;
+      if (
+        !overlaps(at, mention.text.length) &&
+        (nearest === undefined ||
+          Math.abs(at - mention.offset) < Math.abs(nearest - mention.offset))
+      ) {
+        nearest = at;
       }
       from = at + 1;
     }
+    if (nearest !== undefined) claim(mention, nearest);
   }
   return out.sort((a, b) => a.offset - b.offset);
 }
