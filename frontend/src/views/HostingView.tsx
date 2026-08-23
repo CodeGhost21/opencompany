@@ -12,6 +12,17 @@ import type { OpenCompanyClient } from "@/api/client";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from "@/components/ui/alert-dialog";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -250,14 +261,30 @@ export function HostingView({ client, company }: Props) {
                 Save
               </Button>
               {status.apiKeyConfigured ? (
-                <Button
-                  variant="outline"
-                  onClick={() => void onClear()}
-                  disabled={busy}
-                  data-testid="hosting-clear"
-                >
-                  Disconnect
-                </Button>
+                <AlertDialog>
+                  <AlertDialogTrigger
+                    render={
+                      <Button variant="outline" disabled={busy} data-testid="hosting-clear">
+                        Disconnect
+                      </Button>
+                    }
+                  />
+                  <AlertDialogContent>
+                    <AlertDialogHeader>
+                      <AlertDialogTitle>Disconnect {status.provider}?</AlertDialogTitle>
+                      <AlertDialogDescription>
+                        This clears the write-only hosting token and team setting. They cannot be
+                        recovered; reconnect with a new token before teammates can deploy again.
+                      </AlertDialogDescription>
+                    </AlertDialogHeader>
+                    <AlertDialogFooter>
+                      <AlertDialogCancel>Cancel</AlertDialogCancel>
+                      <AlertDialogAction variant="destructive" onClick={() => void onClear()}>
+                        Disconnect hosting
+                      </AlertDialogAction>
+                    </AlertDialogFooter>
+                  </AlertDialogContent>
+                </AlertDialog>
               ) : null}
             </div>
           </CardContent>
