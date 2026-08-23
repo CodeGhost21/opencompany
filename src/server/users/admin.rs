@@ -385,23 +385,22 @@ async fn send_invite_mail(
 
 /// How to name the person who sent an invite, in mail the invitee reads.
 ///
-/// A display name if they set one, otherwise the **local part** of their
-/// address — never the full address. Same rule as chat attribution (see
+/// A display name if they set one, otherwise one derived from the **local part**
+/// of their address — never the full address. Same rule as chat attribution (see
 /// `docs/spec/runtime/users.md`): being invited somewhere should not hand you
 /// an admin's mailbox. Falls back to a role noun if the inviter cannot be
-/// resolved, which is what a manifest- or platform-bootstrapped id looks like.
+/// resolved, or has no name to derive — which is what a manifest- or
+/// platform-bootstrapped id, and every wallet identity, looks like.
+///
+/// Through [`UserRecord::display_label`] rather than a local copy of the rule,
+/// so an admin is called the same thing in this mail as on the console surfaces
+/// the invitee will meet them on a minute later.
 async fn inviter_label(runtime: &CompanyRuntime, user_id: &str) -> String {
     let found = runtime.users().get_user(runtime.id(), user_id).await.ok();
-    let Some(user) = found.flatten() else {
-        return "An admin".to_string();
-    };
-    if let Some(name) = user.display_name.filter(|n| !n.trim().is_empty()) {
-        return name;
-    }
-    match user.email.split('@').next() {
-        Some(local) if !local.is_empty() => local.to_string(),
-        _ => "An admin".to_string(),
-    }
+    found
+        .flatten()
+        .and_then(|user| user.display_label())
+        .unwrap_or_else(|| "An admin".to_string())
 }
 
 /// `POST …/users/invites` — invite an address.
