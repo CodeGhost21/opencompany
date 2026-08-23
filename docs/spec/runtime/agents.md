@@ -177,9 +177,14 @@ It is not cosmetic. A granted tool the prompt never names is, in practice, a
 tool the agent does not use: asked to *write* something, an agent that had never
 been told it holds `file_write` recorded a task about writing it instead, and
 `shell` — wired since the exec cell — was named in no brief at all. The brief
-also states the confinement the belt already enforces (`exec_security` sets
-`workspace_only`, so an absolute path or a `../` escape is refused), because an
-agent that does not know it spends turns rediscovering it one refusal at a time.
+also states the path confinement the belt already enforces for the file/code
+tools (`exec_security` sets `workspace_only`, so an absolute path or a `../`
+escape is refused), because an agent that does not know it spends turns
+rediscovering it one refusal at a time. The shell clause is deliberately not
+framed that way: `action_dir` only sets the command's working directory, and a
+same-uid command can read anywhere the server can
+([agent-isolation.md](../security/agent-isolation.md)), so the brief describes
+the directory as where shell commands *start*, never as a jail.
 
 The `shell` clause tracks what was **wired**, not what was granted:
 `toolbelt::shell_tools` withholds the whole namespace when the per-agent audit
