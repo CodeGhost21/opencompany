@@ -240,7 +240,10 @@ describe("policy tier changes", () => {
     await mount(client);
     await act(async () => {
       await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
     });
+    expect(options()).toEqual(WIRED);
 
     const auto = Array.from(container.querySelectorAll<HTMLButtonElement>('[role="radio"]')).find(
       (button) => button.textContent?.includes("Auto"),
