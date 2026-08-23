@@ -220,6 +220,44 @@ async fn the_start_url_points_at_the_hub_and_returns_to_this_console() {
 }
 
 #[tokio::test]
+async fn a_setup_handoff_asks_the_hub_to_return_to_the_setup_destination() {
+    // A dead setup link that falls back to the form and continues through an
+    // ecosystem button has to arrive on the same roster the link promised. The
+    // destination rides in the return URI as a query parameter (`&from=setup`):
+    // the console's own fragment cannot cross the OAuth round trip — the hub
+    // appends `token=…&key=auth` to whatever it was given, and anything after a
+    // `#` there would swallow them.
+    let home = home();
+    let state = state_with(home.path(), Some(Arc::new(MockHubIdentityExchange::new()))).await;
+
+    let body = providers_from(&state, "from=setup").await;
+    let start = body["providers"][0]["startUrl"].as_str().unwrap();
+
+    assert!(
+        start.ends_with("redirectUri=http%3A%2F%2F127.0.0.1%3A8080%2F%3Fcompany%3Dacme%26from%3Dsetup"),
+        "the redirect must carry the setup destination: {start}"
+    );
+}
+
+#[tokio::test]
+async fn a_malformed_from_is_dropped_not_obeyed() {
+    // `from` rides the return URI through an external service and back into the
+    // address bar, so a value that could escape it — a fragment that would
+    // capture the hub's token, say — must be ignored, and the buttons must
+    // still come back.
+    let home = home();
+    let state = state_with(home.path(), Some(Arc::new(MockHubIdentityExchange::new()))).await;
+
+    let body = providers_from(&state, "from=https%3A%2F%2Fevil.example%0A").await;
+    let start = body["providers"][0]["startUrl"].as_str().unwrap();
+
+    assert!(
+        start.ends_with("redirectUri=http%3A%2F%2F127.0.0.1%3A8080%2F%3Fcompany%3Dacme"),
+        "the malformed destination must be dropped: {start}"
+    );
+}
+
+#[tokio::test]
 async fn a_hosted_console_offers_no_providers_while_the_hub_refuses_its_origin() {
     let home = home();
     let state = state_with_public_url(
