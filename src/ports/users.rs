@@ -789,4 +789,64 @@ mod test {
         assert_eq!(json["mustChangePassword"], true);
         assert_eq!(serde_json::from_value::<UserRecord>(json).unwrap(), user);
     }
+
+    #[test]
+    fn a_name_is_guessed_from_the_local_part() {
+        for (identity, expected) in [
+            ("steven.enamakel@acme.com", "Steven Enamakel"),
+            ("steven_enamakel@acme.com", "Steven Enamakel"),
+            ("steven-enamakel@acme.com", "Steven Enamakel"),
+            // A routing tag is plumbing, not a middle name.
+            ("steven+board@acme.com", "Steven"),
+            ("stevent95@acme.com", "Stevent95"),
+            // Already-capitalised local parts are left as written: lower-casing
+            // the rest would turn McDonald into Mcdonald.
+            ("McDonald@acme.com", "McDonald"),
+            // The domain is dropped — it names the mailbox, not the person.
+            ("ada@a.very.long.domain.example", "Ada"),
+        ] {
+            assert_eq!(
+                derive_display_name(identity).as_deref(),
+                Some(expected),
+                "{identity}"
+            );
+        }
+    }
+
+    /// "Cannot say" is a real answer, and has to stay distinguishable from a
+    /// guess: a base58 key title-cased would *look* like a name.
+    #[test]
+    fn nothing_is_guessed_where_there_is_no_name() {
+        for identity in [
+            "wallet:7cVfgArCheMR6Cs29HGxwPFXhAxrJ6UP3TcTZqSKz8bE",
+            "local:owner",
+            "123.456@acme.com",
+            "@acme.com",
+        ] {
+            assert_eq!(derive_display_name(identity), None, "{identity}");
+        }
+    }
+
+    /// A chosen name always wins the guess, and a blank one is not a name.
+    #[test]
+    fn display_label_prefers_what_the_person_chose() {
+        let mut user = UserRecord {
+            id: "u1".to_string(),
+            email: "steven.enamakel@acme.com".to_string(),
+            display_name: Some("Steve".to_string()),
+            avatar: None,
+            role: UserRole::Member,
+            status: UserStatus::Active,
+            password_hash: None,
+            must_change_password: false,
+            created_at_millis: 1,
+            last_seen_at_millis: None,
+            updated_at_millis: 1,
+        };
+        assert_eq!(user.display_label().as_deref(), Some("Steve"));
+        user.display_name = Some("   ".to_string());
+        assert_eq!(user.display_label().as_deref(), Some("Steven Enamakel"));
+        user.display_name = None;
+        assert_eq!(user.display_label().as_deref(), Some("Steven Enamakel"));
+    }
 }
