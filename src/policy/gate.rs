@@ -1184,7 +1184,9 @@ mod test {
         let id = gate.park(&company(), eff.clone()).await.unwrap();
         assert_eq!(
             gate.resolve_outcome(&id, Verdict::Deny, operator(), now_millis()),
-            ResolveOutcome::Denied
+            ResolveOutcome::Denied(eff.clone()),
+            "a deny must carry the parked effect so a standing denial can be \
+             scoped to what the operator actually refused (issue #1458)"
         );
 
         // Expired: past the TTL, an approve still resolves to a default-deny,
