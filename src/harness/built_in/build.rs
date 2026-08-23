@@ -591,7 +591,7 @@ pub fn build_agent(
     //
     // NOT feature-gated, unlike `media` and `composio`: it needs only the
     // always-compiled `openhuman_core` integrations client, and CI's gated lane
-    // builds `--features openhuman,tinycortex`. Hiding a real-money tool behind
+    // builds `--features openhuman,tinymemory`. Hiding a real-money tool behind
     // a feature no CI job compiles is how #288 / #281 / #297 each happened.
     //
     // A company that configured its **own** provider in the console

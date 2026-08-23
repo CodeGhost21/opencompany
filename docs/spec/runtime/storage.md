@@ -95,14 +95,12 @@ Moved to [`workspace-layout.md`](workspace-layout.md) — this file was over the
 
 Moved to [`memory-engine.md`](memory-engine.md) — this file was over the repository's 500-line limit. See that page for the full detail.
 
-`OPENCOMPANY_MEMORY` selects `store` (default), `embedded` (formerly, and still,
-`tinycortex`), `remote`, or `null`. A hosted engine additionally needs
+`OPENCOMPANY_MEMORY` selects `store` (default), `remote`, or `null`. A hosted engine additionally needs
 `OPENCOMPANY_MEMORY_DRIVER`, `OPENCOMPANY_MEMORY_URL` and
 `OPENCOMPANY_MEMORY_API_KEY`; each refuses at boot when missing, naming the
-knob, and never falls back to the embedded engine. `embedded` with
-`OPENCOMPANY_MEMORY_DRIVER=namespace` binds the contract's own durable in-pod
-store through the provider seam instead of the engine overlay
-(`tinymemory-embedded` feature). The credential and the
+knob, and never falls back to the base store's memory. The in-pod
+`embedded`/`tinycortex` engine and its `namespace` provider-store mode were
+removed in #1568 and refuse at boot if still selected. The credential and the
 endpoint never appear in logs, `/healthz`, `/spec`, status output, or an export
 — `/spec` reports the engine's `driver_id` and negotiated capabilities only.
 

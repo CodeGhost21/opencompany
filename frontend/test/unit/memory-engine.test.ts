@@ -6,9 +6,9 @@
 //
 // Replaces the `/spec`-shaped panel tests (issue #914). The panel became a
 // picker when the engine stopped being boot-only, and the state it renders now
-// comes from `GET …/memory/engine` rather than the handshake: `/spec` reports
-// what *boot* bound, which stops being the answer the moment a console change
-// rebinds it live.
+// comes from `GET …/memory/engine` rather than the unauthenticated handshake:
+// an operator can change the binding live, and the engine endpoint refreshes
+// the provider's health for every read.
 import { describe, expect, it } from "vitest";
 
 import { documentSlug, type MemoryEngineState } from "@/api/memory";

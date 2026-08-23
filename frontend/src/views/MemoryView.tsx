@@ -325,12 +325,13 @@ export function MemoryView({ client, company }: Props) {
             <Input
               value={query}
               onChange={(e) => setQuery(e.target.value)}
+              aria-label="Search memory"
               placeholder="Search memory…"
               className="pl-8"
             />
           </div>
           <Select value={kind} onValueChange={(v) => v && setKind(v)} items={TYPE_FILTER_LABELS}>
-            <SelectTrigger className="w-40">
+            <SelectTrigger className="w-40" aria-label="Filter by memory type">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
