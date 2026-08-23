@@ -176,7 +176,7 @@ mod tests {
         assert!((f.spent_usd - 20.0).abs() < 1e-9);
         assert!((f.revenue_usd - 30.0).abs() < 1e-9);
         assert!((f.net_usd - 10.0).abs() < 1e-9);
-        assert_eq!(f.budget_usd, 2000.0);
+        assert_eq!(f.budget_usd, Some(2000.0));
         // Bookkeeping net across all time: 30 - 12 - 8 - 100 = -90.
         assert!((f.balance_usd - (-90.0)).abs() < 1e-9);
     }
