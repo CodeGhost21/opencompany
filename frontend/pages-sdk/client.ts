@@ -34,6 +34,75 @@ window.addEventListener("message", function onInit(event: MessageEvent) {
   }
 });
 
+/**
+ * A gesture the console relayed into this frame (issue #1303): a click (or a
+ * press) on one of its own toasts that a page control underneath would have
+ * received, forwarded because DOM events cannot cross the sandboxed-frame
+ * boundary from the parent document. The parent shifted the coordinates into
+ * this document's viewport, so `elementFromPoint` here sees the page's own
+ * tree.
+ */
+interface RelayMessage {
+  type: "oc:relay-click" | "oc:relay-pointerdown";
+  x: number;
+  y: number;
+  pointerId?: number;
+  pointerType?: string;
+  isPrimary?: boolean;
+  button?: number;
+  buttons?: number;
+  detail?: number;
+}
+
+function isRelayMessage(value: unknown): value is RelayMessage {
+  if (typeof value !== "object" || value === null) return false;
+  const message = value as Record<string, unknown>;
+  return (
+    (message.type === "oc:relay-click" || message.type === "oc:relay-pointerdown") &&
+    typeof message.x === "number" &&
+    typeof message.y === "number"
+  );
+}
+
+// Only the console frame that hosts this page may relay gestures into it. The
+// source check is what makes that true: a frame the page embeds itself would
+// surface with `event.source` set to its own window, not `window.parent`.
+window.addEventListener("message", function onRelay(event: MessageEvent) {
+  if (event.source !== window.parent) return;
+  if (!isRelayMessage(event.data)) return;
+
+  const element = document.elementFromPoint(event.data.x, event.data.y);
+  if (!element) return;
+
+  if (event.data.type === "oc:relay-click") {
+    // Mirror the parent relay's own handling (`toast-click-through.ts`):
+    // `HTMLElement.click()` runs default actions, and an `SVGElement` has no
+    // `click()` in the DOM, so the event is dispatched to reach its handlers.
+    element.focus({ preventScroll: true });
+    if (element instanceof HTMLElement) {
+      element.click();
+    } else {
+      element.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    }
+    return;
+  }
+
+  element.dispatchEvent(
+    new PointerEvent("pointerdown", {
+      clientX: event.data.x,
+      clientY: event.data.y,
+      pointerId: event.data.pointerId ?? 0,
+      pointerType: event.data.pointerType ?? "mouse",
+      isPrimary: event.data.isPrimary ?? true,
+      button: event.data.button ?? 0,
+      buttons: event.data.buttons ?? 1,
+      detail: event.data.detail ?? 1,
+      bubbles: true,
+      cancelable: true,
+    }),
+  );
+});
+
 /** The shape a GraphQL round trip resolves to, mirroring the server's own envelope. */
 export interface GraphQLResult<T = unknown> {
   data?: T;
