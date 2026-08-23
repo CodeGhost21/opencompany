@@ -150,8 +150,11 @@ test("a chat POST killed in flight still shows the reply the host went on to wri
   // while the POST's fate was unknown and released when it turned out to have
   // died. Before the outcome split this assertion failed: the throw was
   // reported as `onSendEnd`, which discarded the frame, and the reply was gone
-  // for good short of a reload.
-  await expect(reply(page, marker)).toBeVisible({ timeout: 30_000 });
+  // for good short of a reload. Sixty seconds rather than the suite default:
+  // a saturated CI runner can delay the SSE frame well past the echo brain's
+  // millisecond answer, and the reply either appears in that window (proving
+  // the release) or the test fails all the same — the wait is slack, not grace.
+  await expect(reply(page, marker)).toBeVisible({ timeout: 60_000 });
   await expect(reply(page, marker)).toHaveCount(1);
 
   // Releasing must not be a licence to double-render: nothing else is going to
