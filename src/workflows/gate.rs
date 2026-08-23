@@ -283,15 +283,7 @@ pub(crate) async fn apply_policy_gates_with_policy(
     run_id: &str,
     grants: &GrantSet,
 ) -> Vec<GatedCall> {
-    let gated = policy_gates(
-        graph,
-        policy,
-        company,
-        workflow_id,
-        run_id,
-        Some(grants),
-    )
-    .await;
+    let gated = policy_gates(graph, policy, company, workflow_id, run_id, Some(grants)).await;
 
     // Written LAST and unconditionally: the policy's gate outranks an authored
     // `requires_approval`, in both directions. An author may add a gate the

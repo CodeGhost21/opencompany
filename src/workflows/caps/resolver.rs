@@ -675,10 +675,7 @@ to = "run"
         )
     }
 
-    fn gated_resolver(
-        overlays: Vec<OverlayWorkflow>,
-        mode: &str,
-    ) -> StoreWorkflowResolver {
+    fn gated_resolver(overlays: Vec<OverlayWorkflow>, mode: &str) -> StoreWorkflowResolver {
         let policy: crate::company::Policy =
             toml::from_str(&format!("mode = \"{mode}\"\nalways_approve = []\n"))
                 .expect("valid [policy]");
@@ -721,10 +718,7 @@ to = "run"
     /// A company whose policy does not park the call leaves the child runnable.
     #[tokio::test]
     async fn a_child_the_policy_would_not_park_is_not_marked() {
-        let resolver = gated_resolver(
-            vec![overlay("child", child_with_shell("child"))],
-            "full",
-        );
+        let resolver = gated_resolver(vec![overlay("child", child_with_shell("child"))], "full");
 
         let graph = resolver.resolve("child").await.expect("child resolves");
         let run = graph

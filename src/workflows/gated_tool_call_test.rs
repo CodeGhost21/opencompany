@@ -257,8 +257,7 @@ async fn a_policy_gated_child_tool_call_parks_and_resumes_through_its_parent() {
     let source = dir.path().join("company");
     let workflows = source.join("workflows");
     std::fs::create_dir_all(&workflows).expect("create child workflow directory");
-    std::fs::write(workflows.join("child.toml"), SUB_WORKFLOW_CHILD)
-        .expect("write child workflow");
+    std::fs::write(workflows.join("child.toml"), SUB_WORKFLOW_CHILD).expect("write child workflow");
 
     let (mut deps, journal) =
         super::gated_tool_turn_test::deps("http://127.0.0.1:1/unused".to_string(), dir.path());
@@ -293,12 +292,9 @@ async fn a_policy_gated_child_tool_call_parks_and_resumes_through_its_parent() {
     assert_eq!(card.payload[PAYLOAD_WORKFLOW_ID], "parent");
     assert_eq!(card.payload[PAYLOAD_NODE_ID], "sub::work");
 
-    let continuation = crate::runtime::workflow_resume::continuation_input(
-        &card,
-        &["sub::work".to_string()],
-        &[],
-    )
-    .expect("the namespaced child gate is a valid continuation");
+    let continuation =
+        crate::runtime::workflow_resume::continuation_input(&card, &["sub::work".to_string()], &[])
+            .expect("the namespaced child gate is a valid continuation");
     let second = super::runner::run_workflow(
         pool,
         deps,
