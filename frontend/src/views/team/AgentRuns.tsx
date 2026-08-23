@@ -197,6 +197,11 @@ export function AgentRuns({
   const [filter, setFilter] = useState("all");
   const [openId, setOpenId] = useState<string | null>(null);
   const openIdRef = useRef<string | null>(null);
+  // Incremented whenever the list effect restarts (teammate switch, filter
+  // change). A `read` that started before the change captures the old value
+  // and discards its answer once it resolves, so rows fetched for one teammate
+  // can never be committed beneath another's name (issue #1671).
+  const generationRef = useRef(0);
   // A 1s clock, so a live attempt's elapsed time ticks rather than jumping on
   // the 4s poll. Only mounted while something is actually open — a settled
   // history has nothing that changes second to second.
