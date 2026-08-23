@@ -703,6 +703,22 @@ pub fn filter_by_capabilities(
     }
 }
 
+/// Whether a [`CapabilityFilter`] denies a given namespace — the same test
+/// [`filter_by_capabilities`] applies per tool, exposed standalone so a
+/// caller that needs the outcome without a tool vector in hand (the sandbox
+/// brief, built before tools are filtered) can ask it directly.
+///
+/// [`CapabilityFilter::AllowAll`] denies nothing; a name outside
+/// [`GATEABLE_NAMESPACES`] cannot be denied by construction (`DenyNamespaces`
+/// is only ever populated from that set), so this returns `false` for those
+/// too rather than requiring the caller to special-case them.
+pub fn namespace_denied(filter: &CapabilityFilter, namespace: &str) -> bool {
+    match filter {
+        CapabilityFilter::AllowAll => false,
+        CapabilityFilter::DenyNamespaces(denied) => denied.contains(namespace),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
