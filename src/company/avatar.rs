@@ -87,6 +87,48 @@ pub fn is_supported_image(mime: &str) -> bool {
     )
 }
 
+/// The largest an uploaded avatar may be.
+///
+/// Four mebibytes is generous for a square somebody will see at 32px and mean
+/// for a phone photo, which is the trade being made: it has to fit an animated
+/// GIF with enough frames to be worth animating, and it must not let the roster
+/// become a place to park a video. The console shrinks a still image before it
+/// uploads; an animated one cannot be shrunk without transcoding it, so this
+/// ceiling is what an animation is actually held to.
+pub const MAX_AVATAR_BYTES: usize = 4 * 1024 * 1024;
+
+/// The media type these bytes actually are, read from their signature.
+///
+/// **Not** the type the upload declared. A declared type is a claim by whoever
+/// is uploading, and an avatar is stored once and then served back to every
+/// member of the company for as long as the teammate exists — so the type it is
+/// served under has to be a fact about the bytes rather than a claim about them.
+/// The four accepted formats all begin with an unambiguous signature, so this
+/// costs a dozen bytes to answer honestly.
+///
+/// `None` means "not one of the four", which the upload route refuses. In
+/// particular an SVG, an HTML document and a PDF all land here as `None`
+/// whatever they were labelled as.
+pub fn sniff_image(bytes: &[u8]) -> Option<&'static str> {
+    const PNG: &[u8] = b"\x89PNG\r\n\x1a\n";
+    if bytes.starts_with(PNG) {
+        return Some("image/png");
+    }
+    if bytes.starts_with(b"\xff\xd8\xff") {
+        return Some("image/jpeg");
+    }
+    if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        return Some("image/gif");
+    }
+    // RIFF....WEBP — the four size bytes in between are part of the container,
+    // so both ends of the signature have to be checked for this to mean WebP
+    // rather than "some RIFF file", of which .wav is the commonest.
+    if bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP" {
+        return Some("image/webp");
+    }
+    None
+}
+
 /// Parses a stored or submitted avatar reference.
 ///
 /// Returns [`OpenCompanyError::InvalidRequest`] naming both accepted forms,
@@ -212,6 +254,33 @@ mod test {
     #[test]
     fn trims_on_the_way_in() {
         assert_eq!(normalize("  tiny:teal \n").unwrap(), "tiny:teal");
+    }
+
+    #[test]
+    fn sniffs_the_four_accepted_formats() {
+        assert_eq!(sniff_image(b"\x89PNG\r\n\x1a\nrest"), Some("image/png"));
+        assert_eq!(sniff_image(b"\xff\xd8\xff\xe0rest"), Some("image/jpeg"));
+        assert_eq!(sniff_image(b"GIF89a...."), Some("image/gif"));
+        assert_eq!(sniff_image(b"GIF87a...."), Some("image/gif"));
+        assert_eq!(sniff_image(b"RIFF\x20\x00\x00\x00WEBPVP8 "), Some("image/webp"));
+    }
+
+    /// The point of sniffing rather than trusting the declared type: each of
+    /// these arrives labelled `image/png` by anyone who wants it to be.
+    #[test]
+    fn sniffing_refuses_what_only_claims_to_be_an_image() {
+        for bytes in [
+            &b"<svg xmlns=\"http://www.w3.org/2000/svg\"><script/></svg>"[..],
+            &b"<!doctype html><script>fetch('/')</script>"[..],
+            &b"%PDF-1.7"[..],
+            // A RIFF container that is not WebP — the near-miss the second half
+            // of the WebP check exists for.
+            &b"RIFF\x20\x00\x00\x00WAVEfmt "[..],
+            &b""[..],
+            &b"RIFF"[..],
+        ] {
+            assert_eq!(sniff_image(bytes), None, "{:?}", &bytes[..bytes.len().min(16)]);
+        }
     }
 
     /// GIF is accepted deliberately (a moving face is more recognisable, not
