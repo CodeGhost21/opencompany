@@ -131,10 +131,12 @@ name = "Start"
 id = "fetch"
 kind = "http_request"
 name = "Fetch"
+# `on_error` is a first-class node field, not a `config` key; the validator
+# rejects reserved keys inside `[node.config]`.
+on_error = "continue"
 [node.config]
 method = "POST"
 url = "http://127.0.0.1:9/notify"
-on_error = "continue"
 [[node]]
 id = "work"
 kind = "tool_call"
