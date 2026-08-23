@@ -22,10 +22,14 @@
  * it lives in another *document* (a sandboxed `allow-scripts` iframe), and
  * events dispatched here cannot cross the browsing-context boundary into it.
  * `elementFromPoint` answers with the frame host, and clicking the host does
- * nothing to what is mounted inside — so for a frame the gesture is handed to
- * the frame itself over the existing postMessage bridge, and the page SDK
- * turns it back into a click on the element beneath the point (see
- * `pages-sdk/client.ts`).
+ * nothing to what is mounted inside — so for a frame the whole gesture is
+ * handed to the frame itself over the existing postMessage bridge, and the
+ * page SDK turns it back into events on the element beneath the point (see
+ * `pages-sdk/client.ts`). Pointer capture cannot reach into another document,
+ * so a press relayed into a frame keeps relaying its tail — the
+ * `pointermove`, `pointerup` and `pointercancel` that land back here — until
+ * the press ends, which is what lets a frame-side drag or press-state control
+ * complete the gesture instead of getting stuck.
  */
 
 /** Can this part of a toast handle its own pointer rather than passing it through? */
