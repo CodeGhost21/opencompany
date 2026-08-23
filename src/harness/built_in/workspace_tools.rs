@@ -2694,6 +2694,170 @@ mod tests {
         );
     }
 
+    /// A [`WorkspaceStore`] returning a fixed tree, for ownership-gate shapes
+    /// the `fs` backend refuses to create: a name carrying a separator has no
+    /// renderable path, yet a parent-id rename still moves it, so the gate has
+    /// to decide on nodes no `FsOps`-seeded test can reach.
+    #[derive(Clone)]
+    struct FixedTree(Vec<WorkspaceNode>);
+
+    #[async_trait]
+    impl WorkspaceStore for FixedTree {
+        async fn tree(&self, _company: &CompanyId) -> crate::Result<Vec<WorkspaceNode>> {
+            Ok(self.0.clone())
+        }
+        async fn read(
+            &self,
+            _company: &CompanyId,
+            _id: &str,
+        ) -> crate::Result<Option<(WorkspaceNode, String)>> {
+            unreachable!("the ownership gate only reads the tree")
+        }
+        async fn write(
+            &self,
+            _company: &CompanyId,
+            _id: &str,
+            _content: &str,
+            _author: WorkspaceOrigin,
+        ) -> crate::Result<WorkspaceNode> {
+            unreachable!("the ownership gate only reads the tree")
+        }
+        async fn create(
+            &self,
+            _company: &CompanyId,
+            _node: &WorkspaceNode,
+            _content: Option<&str>,
+        ) -> crate::Result<()> {
+            unreachable!("the ownership gate only reads the tree")
+        }
+        async fn adopt_or_create_folder(
+            &self,
+            _company: &CompanyId,
+            _parent: Option<&str>,
+            _name: &str,
+            _origin: WorkspaceOrigin,
+        ) -> crate::Result<crate::ports::workspace::FolderClaim> {
+            unreachable!("the ownership gate only reads the tree")
+        }
+        async fn create_binary(
+            &self,
+            _company: &CompanyId,
+            _node: &WorkspaceNode,
+            _bytes: &[u8],
+        ) -> crate::Result<WorkspaceNode> {
+            unreachable!("the ownership gate only reads the tree")
+        }
+        async fn write_binary(
+            &self,
+            _company: &CompanyId,
+            _id: &str,
+            _bytes: &[u8],
+            _mime: Option<&str>,
+            _author: WorkspaceOrigin,
+        ) -> crate::Result<WorkspaceNode> {
+            unreachable!("the ownership gate only reads the tree")
+        }
+        async fn read_bytes(
+            &self,
+            _company: &CompanyId,
+            _id: &str,
+        ) -> crate::Result<Option<(WorkspaceNode, crate::ports::workspace::BlobStream)>> {
+            unreachable!("the ownership gate only reads the tree")
+        }
+        async fn rename_move(
+            &self,
+            _company: &CompanyId,
+            _id: &str,
+            _name: Option<&str>,
+            _parent: Option<Option<&str>>,
+        ) -> crate::Result<WorkspaceNode> {
+            unreachable!("the ownership gate only reads the tree")
+        }
+        async fn swap_files(
+            &self,
+            _company: &CompanyId,
+            _expected_id: Option<&str>,
+            _replacement_id: &str,
+            _name: &str,
+        ) -> crate::Result<Option<WorkspaceNode>> {
+            unreachable!("the ownership gate only reads the tree")
+        }
+        async fn delete(&self, _company: &CompanyId, _id: &str) -> crate::Result<bool> {
+            unreachable!("the ownership gate only reads the tree")
+        }
+        async fn is_empty(&self, _company: &CompanyId) -> crate::Result<bool> {
+            unreachable!("the ownership gate only reads the tree")
+        }
+    }
+
+    /// The rename half of the auto-tier exception must fail closed on an
+    /// unaddressable descendant. A folder holding an operator-authored node
+    /// whose name the path rules exclude (creatable through the sqlite and
+    /// mongodb backends, which do not run `reject_unsafe_name`) would still be
+    /// relocated by a parent-id `rename_move`, so the gate must park even
+    /// though `entries_under` cannot see the node.
+    #[tokio::test]
+    async fn rename_of_a_folder_with_an_unaddressable_operator_descendant_parks() {
+        let company = CompanyId::new("acme");
+        let own = WorkspaceOrigin::Agent {
+            id: TEST_AGENT.to_string(),
+        };
+        let mut agent_folder = folder("f", "archive", None);
+        agent_folder.created_by = own.clone();
+        agent_folder.updated_by = own.clone();
+        // Name carries a separator: no renderable path, operator-authored.
+        let mut operator_hidden = file("hidden", "quarterly/report.md", Some("f"));
+        operator_hidden.created_by = WorkspaceOrigin::Operator;
+        operator_hidden.updated_by = WorkspaceOrigin::Operator;
+        let store: Arc<dyn WorkspaceStore> =
+            Arc::new(FixedTree(vec![agent_folder, operator_hidden]));
+
+        let owned = mutation_is_owned_by_agent(
+            &store,
+            &company,
+            TEST_AGENT,
+            WORKSPACE_RENAME_TOOL,
+            &serde_json::json!({ "id": "f" }),
+        )
+        .await;
+        assert!(
+            !owned,
+            "an unaddressable operator-authored child must restore the approval gate"
+        );
+    }
+
+    /// The same shape with the hidden child agent-authored stays inside the
+    /// exception — an agent's own tidying runs unattended even when one of its
+    /// notes has a name no path can render.
+    #[tokio::test]
+    async fn rename_of_a_folder_with_an_unaddressable_agent_descendant_runs() {
+        let company = CompanyId::new("acme");
+        let own = WorkspaceOrigin::Agent {
+            id: TEST_AGENT.to_string(),
+        };
+        let mut agent_folder = folder("f", "archive", None);
+        agent_folder.created_by = own.clone();
+        agent_folder.updated_by = own.clone();
+        let mut agent_hidden = file("hidden", "quarterly/report.md", Some("f"));
+        agent_hidden.created_by = own.clone();
+        agent_hidden.updated_by = own;
+        let store: Arc<dyn WorkspaceStore> =
+            Arc::new(FixedTree(vec![agent_folder, agent_hidden]));
+
+        let owned = mutation_is_owned_by_agent(
+            &store,
+            &company,
+            TEST_AGENT,
+            WORKSPACE_RENAME_TOOL,
+            &serde_json::json!({ "id": "f" }),
+        )
+        .await;
+        assert!(
+            owned,
+            "an unaddressable descendant the agent itself authored stays within the exception"
+        );
+    }
+
     #[test]
     fn a_dangling_or_cyclic_ancestor_chain_is_not_path_addressable() {
         // Parent id names a node that is not in the tree.
