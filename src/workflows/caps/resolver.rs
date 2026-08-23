@@ -1255,7 +1255,7 @@ to = "sub"
         let described = child_gate_call(
             &registry,
             &parent,
-            "sub::work",
+            "sub::run",
             Some(&serde_json::json!({ "target": "child" })),
         )
         .expect("an expression-bound child gate resolves through the registry");
