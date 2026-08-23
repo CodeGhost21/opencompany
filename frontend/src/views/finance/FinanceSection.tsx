@@ -101,9 +101,7 @@ export function FinanceSection({ client, company, sub, onNavigate }: Props) {
             reader and broke the document outline: the rail renders before the
             sub-page, so heading navigation met a section-level heading ahead of
             the page's own `h1` (issue #1392). */}
-        <div className="px-2 pb-2 pt-1 text-xs font-medium text-muted-foreground">
-          Finance
-        </div>
+        <h2 className="px-2 pb-2 pt-1 text-xs font-medium text-muted-foreground">Finance</h2>
         {FINANCE_PAGES.map((item) => (
           <button
             key={item.id}
