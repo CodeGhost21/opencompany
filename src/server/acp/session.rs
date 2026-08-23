@@ -299,7 +299,7 @@ mod test {
         registry.insert("conn-b", session("s2", "acme"));
 
         assert!(registry.remove("conn-a", "s1"));
-        let by_connection = registry.by_connection.lock().unwrap();
+        let by_connection = registry.by_connection.lock().expect("session registry poisoned");
         assert!(
             !by_connection.contains_key("conn-a"),
             "the emptied connection key is pruned, not left as an empty map"
