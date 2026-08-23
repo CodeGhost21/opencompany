@@ -282,8 +282,15 @@ impl AgentFocus {
             Self::Operations => &["workspace.write", "composio", "subagent"],
             // Moves work between people; delegating is the job.
             Self::Coordination => &["workspace.write", "subagent"],
-            // The only shape that reaches code, a shell and a bound repository.
-            Self::Build => &["workspace.write", "shell", "code", "repo.*"],
+            // The only shape that reaches code and a shell. Deliberately not
+            // `repo`: a host on filesystem storage refuses to boot a company
+            // whose allow-list names it (a repository credential would sit on
+            // that filesystem in plaintext), so the default company grant
+            // cannot carry it — and a belt asking for what the company cannot
+            // allow is exactly the "asked for but not granted" line this
+            // change exists to remove. A MongoDB-backed company that wants it
+            // adds `repo.*` to `[tools].allow` and to this teammate.
+            Self::Build => &["workspace.write", "shell", "code"],
             // Answers customers, which means reaching the mailbox/helpdesk
             // account the company connected.
             Self::Support => &["workspace.write", "composio"],
