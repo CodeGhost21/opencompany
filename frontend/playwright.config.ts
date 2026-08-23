@@ -106,7 +106,25 @@ const providedBaseURL = process.env.PW_BASE_URL;
 /** Whether this config is responsible for the host, as opposed to driving yours. */
 const managesHost = !providedBaseURL;
 
-const baseURL = providedBaseURL || "http://127.0.0.1:8080";
+/**
+ * Where a host *we* manage listens.
+ *
+ * `PW_HOST_BIND` is already `host.sh`'s name for this, and until now the only
+ * way to reach it was to stop managing the host at all: `PW_BASE_URL` moved the
+ * port and switched off the `webServer` and the sign-in in the same breath.
+ * That made the default port a hard constraint, and a repository whose
+ * developers work in several worktrees at once has more than one suite wanting
+ * it — with `reuseExistingServer` true outside CI, the second run does not fail
+ * on the busy port. It silently *adopts* the other worktree's host, tests code
+ * that is not its own, and then goes red on `ERR_CONNECTION_REFUSED` the moment
+ * that run finishes and takes its host with it.
+ *
+ * So: name the bind and keep everything else. `PW_HOST_BIND=127.0.0.1:8123 npm
+ * run e2e` is a run that cannot collide with anyone.
+ */
+const managedBind = process.env.PW_HOST_BIND || "127.0.0.1:8080";
+
+const baseURL = providedBaseURL || `http://${managedBind}`;
 
 /**
  * Where the shared signed-in session lands. Defaulted only when we manage the

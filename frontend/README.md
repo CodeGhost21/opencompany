@@ -372,6 +372,14 @@ strand the suite in bootstrap. Name anything else it should receive, such as a
 feature-gated build's inference credentials, in `PW_HOST_PASSTHROUGH` (a
 space-separated list of variable names).
 
+`PW_HOST_BIND` moves the managed host off `127.0.0.1:8080` — one suite per
+worktree, and no run can adopt another's host. It matters because
+`reuseExistingServer` is on outside CI, so a second run on the default port does
+not fail on it: it drives the *other* worktree's host, reports on code that is
+not its own, and then goes red on `ERR_CONNECTION_REFUSED` the moment that run
+finishes. `PW_BASE_URL` moves the port too, but by handing the host over to you
+entirely.
+
 `PW_HOST_DATA_DIR` is wiped at the start of each run, so a run only ever deletes
 inside `../target/e2e`. Point it anywhere else and it is reused as it stands,
 with a line saying so — a mistyped or inherited value cannot take a directory
