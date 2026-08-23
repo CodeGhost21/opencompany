@@ -3563,3 +3563,1450 @@
 2815 http fetch GET https://registry.npmjs.org/lru-cache/-/lru-cache-11.5.2.tgz attempt 2 failed with EAI_AGAIN
 2816 http fetch GET https://registry.npmjs.org/lru-cache/-/lru-cache-11.5.2.tgz attempt 2 failed with EAI_AGAIN
 2817 http fetch GET https://registry.npmjs.org/@assistant-ui/core/-/core-0.3.15.tgz attempt 2 failed with EAI_AGAIN
+2818 http fetch GET https://registry.npmjs.org/npm attempt 3 failed with EAI_AGAIN
+2819 http fetch GET https://registry.npmjs.org/zwitch/-/zwitch-2.0.4.tgz attempt 3 failed with EAI_AGAIN
+2820 http fetch GET https://registry.npmjs.org/zustand/-/zustand-4.5.7.tgz attempt 3 failed with EAI_AGAIN
+2821 http fetch GET https://registry.npmjs.org/zod-to-json-schema/-/zod-to-json-schema-3.25.2.tgz attempt 3 failed with EAI_AGAIN
+2822 http fetch GET https://registry.npmjs.org/zod/-/zod-3.25.76.tgz attempt 3 failed with EAI_AGAIN
+2823 http fetch GET https://registry.npmjs.org/yoctocolors/-/yoctocolors-2.1.2.tgz attempt 3 failed with EAI_AGAIN
+2824 http fetch GET https://registry.npmjs.org/yocto-spinner/-/yocto-spinner-1.2.1.tgz attempt 3 failed with EAI_AGAIN
+2825 http fetch GET https://registry.npmjs.org/yallist/-/yallist-3.1.1.tgz attempt 3 failed with EAI_AGAIN
+2826 http fetch GET https://registry.npmjs.org/xmlchars/-/xmlchars-2.2.0.tgz attempt 3 failed with EAI_AGAIN
+2827 http fetch GET https://registry.npmjs.org/xml-name-validator/-/xml-name-validator-5.0.0.tgz attempt 3 failed with EAI_AGAIN
+2828 http fetch GET https://registry.npmjs.org/wsl-utils/-/wsl-utils-0.3.1.tgz attempt 3 failed with EAI_AGAIN
+2829 http fetch GET https://registry.npmjs.org/ws/-/ws-8.21.2.tgz attempt 3 failed with EAI_AGAIN
+2830 http fetch GET https://registry.npmjs.org/wrappy/-/wrappy-1.0.2.tgz attempt 3 failed with EAI_AGAIN
+2831 http fetch GET https://registry.npmjs.org/why-is-node-running/-/why-is-node-running-2.3.0.tgz attempt 3 failed with EAI_AGAIN
+2832 http fetch GET https://registry.npmjs.org/which/-/which-4.0.0.tgz attempt 3 failed with EAI_AGAIN
+2833 http fetch GET https://registry.npmjs.org/whatwg-url/-/whatwg-url-15.1.0.tgz attempt 3 failed with EAI_AGAIN
+2834 http fetch GET https://registry.npmjs.org/whatwg-mimetype/-/whatwg-mimetype-4.0.0.tgz attempt 3 failed with EAI_AGAIN
+2835 http fetch GET https://registry.npmjs.org/whatwg-encoding/-/whatwg-encoding-3.1.1.tgz attempt 3 failed with EAI_AGAIN
+2836 http fetch GET https://registry.npmjs.org/webidl-conversions/-/webidl-conversions-8.0.1.tgz attempt 3 failed with EAI_AGAIN
+2837 http fetch GET https://registry.npmjs.org/w3c-xmlserializer/-/w3c-xmlserializer-5.0.0.tgz attempt 3 failed with EAI_AGAIN
+2838 http fetch GET https://registry.npmjs.org/vitest/-/vitest-3.2.7.tgz attempt 3 failed with EAI_AGAIN
+2839 http fetch GET https://registry.npmjs.org/vite-node/-/vite-node-3.2.4.tgz attempt 3 failed with EAI_AGAIN
+2840 http fetch GET https://registry.npmjs.org/vite/-/vite-5.4.21.tgz attempt 3 failed with EAI_AGAIN
+2841 http fetch GET https://registry.npmjs.org/victory-vendor/-/victory-vendor-37.3.6.tgz attempt 3 failed with EAI_AGAIN
+2842 http fetch GET https://registry.npmjs.org/vfile-message/-/vfile-message-4.0.3.tgz attempt 3 failed with EAI_AGAIN
+2843 http fetch GET https://registry.npmjs.org/vfile/-/vfile-6.0.3.tgz attempt 3 failed with EAI_AGAIN
+2844 http fetch GET https://registry.npmjs.org/vary/-/vary-1.1.2.tgz attempt 3 failed with EAI_AGAIN
+2845 http fetch GET https://registry.npmjs.org/validate-npm-package-name/-/validate-npm-package-name-7.0.2.tgz attempt 3 failed with EAI_AGAIN
+2846 http fetch GET https://registry.npmjs.org/util-deprecate/-/util-deprecate-1.0.2.tgz attempt 3 failed with EAI_AGAIN
+2847 http fetch GET https://registry.npmjs.org/use-sync-external-store/-/use-sync-external-store-1.6.0.tgz attempt 3 failed with EAI_AGAIN
+2848 http fetch GET https://registry.npmjs.org/use-sidecar/-/use-sidecar-1.1.3.tgz attempt 3 failed with EAI_AGAIN
+2849 http fetch GET https://registry.npmjs.org/use-latest/-/use-latest-1.3.0.tgz attempt 3 failed with EAI_AGAIN
+2850 http fetch GET https://registry.npmjs.org/use-isomorphic-layout-effect/-/use-isomorphic-layout-effect-1.2.1.tgz attempt 3 failed with EAI_AGAIN
+2851 http fetch GET https://registry.npmjs.org/use-composed-ref/-/use-composed-ref-1.4.0.tgz attempt 3 failed with EAI_AGAIN
+2852 http fetch GET https://registry.npmjs.org/use-callback-ref/-/use-callback-ref-1.3.3.tgz attempt 3 failed with EAI_AGAIN
+2853 http fetch GET https://registry.npmjs.org/update-browserslist-db/-/update-browserslist-db-1.2.3.tgz attempt 3 failed with EAI_AGAIN
+2854 http fetch GET https://registry.npmjs.org/unpipe/-/unpipe-1.0.0.tgz attempt 3 failed with EAI_AGAIN
+2855 http fetch GET https://registry.npmjs.org/universalify/-/universalify-2.0.1.tgz attempt 3 failed with EAI_AGAIN
+2856 http fetch GET https://registry.npmjs.org/unist-util-visit-parents/-/unist-util-visit-parents-6.0.2.tgz attempt 3 failed with EAI_AGAIN
+2857 http fetch GET https://registry.npmjs.org/unist-util-visit/-/unist-util-visit-5.1.0.tgz attempt 3 failed with EAI_AGAIN
+2858 http fetch GET https://registry.npmjs.org/unist-util-stringify-position/-/unist-util-stringify-position-4.0.0.tgz attempt 3 failed with EAI_AGAIN
+2859 http fetch GET https://registry.npmjs.org/unist-util-position/-/unist-util-position-5.0.0.tgz attempt 3 failed with EAI_AGAIN
+2860 http fetch GET https://registry.npmjs.org/unist-util-is/-/unist-util-is-6.0.1.tgz attempt 3 failed with EAI_AGAIN
+2861 http fetch GET https://registry.npmjs.org/unified/-/unified-11.0.5.tgz attempt 3 failed with EAI_AGAIN
+2862 http fetch GET https://registry.npmjs.org/unicorn-magic/-/unicorn-magic-0.3.0.tgz attempt 3 failed with EAI_AGAIN
+2863 http fetch GET https://registry.npmjs.org/undici-types/-/undici-types-6.21.0.tgz attempt 3 failed with EAI_AGAIN
+2864 http fetch GET https://registry.npmjs.org/undici/-/undici-7.28.0.tgz attempt 3 failed with EAI_AGAIN
+2865 http fetch GET https://registry.npmjs.org/typescript/-/typescript-5.9.3.tgz attempt 3 failed with EAI_AGAIN
+2866 http fetch GET https://registry.npmjs.org/type-is/-/type-is-2.1.0.tgz attempt 3 failed with EAI_AGAIN
+2867 http fetch GET https://registry.npmjs.org/type-fest/-/type-fest-4.41.0.tgz attempt 3 failed with EAI_AGAIN
+2868 http fetch GET https://registry.npmjs.org/tw-animate-css/-/tw-animate-css-1.4.0.tgz attempt 3 failed with EAI_AGAIN
+2869 http fetch GET https://registry.npmjs.org/tslib/-/tslib-2.8.1.tgz attempt 3 failed with EAI_AGAIN
+2870 http fetch GET https://registry.npmjs.org/tsconfig-paths/-/tsconfig-paths-4.2.0.tgz attempt 3 failed with EAI_AGAIN
+2871 http fetch GET https://registry.npmjs.org/ts-morph/-/ts-morph-26.0.0.tgz attempt 3 failed with EAI_AGAIN
+2872 http fetch GET https://registry.npmjs.org/trough/-/trough-2.2.0.tgz attempt 3 failed with EAI_AGAIN
+2873 http fetch GET https://registry.npmjs.org/trim-lines/-/trim-lines-3.0.1.tgz attempt 3 failed with EAI_AGAIN
+2874 http fetch GET https://registry.npmjs.org/tr46/-/tr46-6.0.0.tgz attempt 3 failed with EAI_AGAIN
+2875 http fetch GET https://registry.npmjs.org/tough-cookie/-/tough-cookie-6.0.2.tgz attempt 3 failed with EAI_AGAIN
+2876 http fetch GET https://registry.npmjs.org/toidentifier/-/toidentifier-1.0.1.tgz attempt 3 failed with EAI_AGAIN
+2877 http fetch GET https://registry.npmjs.org/to-regex-range/-/to-regex-range-5.0.1.tgz attempt 3 failed with EAI_AGAIN
+2878 http fetch GET https://registry.npmjs.org/tldts/-/tldts-7.4.10.tgz attempt 3 failed with EAI_AGAIN
+2879 http fetch GET https://registry.npmjs.org/tldts-core/-/tldts-core-7.4.10.tgz attempt 3 failed with EAI_AGAIN
+2880 http fetch GET https://registry.npmjs.org/tinyspy/-/tinyspy-4.0.4.tgz attempt 3 failed with EAI_AGAIN
+2881 http fetch GET https://registry.npmjs.org/tinyrainbow/-/tinyrainbow-2.0.0.tgz attempt 3 failed with EAI_AGAIN
+2882 http fetch GET https://registry.npmjs.org/tinypool/-/tinypool-1.1.1.tgz attempt 3 failed with EAI_AGAIN
+2883 http fetch GET https://registry.npmjs.org/tinyexec/-/tinyexec-0.3.2.tgz attempt 3 failed with EAI_AGAIN
+2884 http fetch GET https://registry.npmjs.org/tinybench/-/tinybench-2.9.0.tgz attempt 3 failed with EAI_AGAIN
+2885 http fetch GET https://registry.npmjs.org/tinyglobby/-/tinyglobby-0.2.17.tgz attempt 3 failed with EAI_AGAIN
+2886 http fetch GET https://registry.npmjs.org/tiny-invariant/-/tiny-invariant-1.3.3.tgz attempt 3 failed with EAI_AGAIN
+2887 http fetch GET https://registry.npmjs.org/tapable/-/tapable-2.3.3.tgz attempt 3 failed with EAI_AGAIN
+2888 http fetch GET https://registry.npmjs.org/tailwindcss/-/tailwindcss-4.3.2.tgz attempt 3 failed with EAI_AGAIN
+2889 http fetch GET https://registry.npmjs.org/tailwind-merge/-/tailwind-merge-3.6.0.tgz attempt 3 failed with EAI_AGAIN
+2890 http fetch GET https://registry.npmjs.org/systeminformation/-/systeminformation-5.31.17.tgz attempt 3 failed with EAI_AGAIN
+2891 http fetch GET https://registry.npmjs.org/symbol-tree/-/symbol-tree-3.2.4.tgz attempt 3 failed with EAI_AGAIN
+2892 http fetch GET https://registry.npmjs.org/style-to-object/-/style-to-object-1.0.14.tgz attempt 3 failed with EAI_AGAIN
+2893 http fetch GET https://registry.npmjs.org/style-to-js/-/style-to-js-1.1.21.tgz attempt 3 failed with EAI_AGAIN
+2894 http fetch GET https://registry.npmjs.org/strip-final-newline/-/strip-final-newline-4.0.0.tgz attempt 3 failed with EAI_AGAIN
+2895 http fetch GET https://registry.npmjs.org/strip-literal/-/strip-literal-3.1.0.tgz attempt 3 failed with EAI_AGAIN
+2896 http fetch GET https://registry.npmjs.org/strip-bom/-/strip-bom-3.0.0.tgz attempt 3 failed with EAI_AGAIN
+2897 http fetch GET https://registry.npmjs.org/strip-ansi/-/strip-ansi-6.0.1.tgz attempt 3 failed with EAI_AGAIN
+2898 http fetch GET https://registry.npmjs.org/stringify-object/-/stringify-object-5.0.0.tgz attempt 3 failed with EAI_AGAIN
+2899 http fetch GET https://registry.npmjs.org/stringify-entities/-/stringify-entities-4.0.4.tgz attempt 3 failed with EAI_AGAIN
+2900 http fetch GET https://registry.npmjs.org/string-width/-/string-width-7.2.0.tgz attempt 3 failed with EAI_AGAIN
+2901 http fetch GET https://registry.npmjs.org/stdin-discarder/-/stdin-discarder-0.2.2.tgz attempt 3 failed with EAI_AGAIN
+2902 http fetch GET https://registry.npmjs.org/std-env/-/std-env-3.10.0.tgz attempt 3 failed with EAI_AGAIN
+2903 http fetch GET https://registry.npmjs.org/statuses/-/statuses-2.0.2.tgz attempt 3 failed with EAI_AGAIN
+2904 http fetch GET https://registry.npmjs.org/space-separated-tokens/-/space-separated-tokens-2.0.2.tgz attempt 3 failed with EAI_AGAIN
+2905 http fetch GET https://registry.npmjs.org/stackback/-/stackback-0.0.2.tgz attempt 3 failed with EAI_AGAIN
+2906 http fetch GET https://registry.npmjs.org/source-map-js/-/source-map-js-1.2.1.tgz attempt 3 failed with EAI_AGAIN
+2907 http fetch GET https://registry.npmjs.org/sonner/-/sonner-2.0.7.tgz attempt 3 failed with EAI_AGAIN
+2908 http fetch GET https://registry.npmjs.org/source-map/-/source-map-0.6.1.tgz attempt 3 failed with EAI_AGAIN
+2909 http fetch GET https://registry.npmjs.org/sisteransi/-/sisteransi-1.0.5.tgz attempt 3 failed with EAI_AGAIN
+2910 http fetch GET https://registry.npmjs.org/signal-exit/-/signal-exit-4.1.0.tgz attempt 3 failed with EAI_AGAIN
+2911 http fetch GET https://registry.npmjs.org/side-channel-weakmap/-/side-channel-weakmap-1.0.2.tgz attempt 3 failed with EAI_AGAIN
+2912 http fetch GET https://registry.npmjs.org/siginfo/-/siginfo-2.0.0.tgz attempt 3 failed with EAI_AGAIN
+2913 http fetch GET https://registry.npmjs.org/side-channel-map/-/side-channel-map-1.0.1.tgz attempt 3 failed with EAI_AGAIN
+2914 http fetch GET https://registry.npmjs.org/side-channel-list/-/side-channel-list-1.0.1.tgz attempt 3 failed with EAI_AGAIN
+2915 http fetch GET https://registry.npmjs.org/side-channel/-/side-channel-1.1.1.tgz attempt 3 failed with EAI_AGAIN
+2916 http fetch GET https://registry.npmjs.org/shebang-regex/-/shebang-regex-3.0.0.tgz attempt 3 failed with EAI_AGAIN
+2917 http fetch GET https://registry.npmjs.org/shebang-command/-/shebang-command-2.0.0.tgz attempt 3 failed with EAI_AGAIN
+2918 http fetch GET https://registry.npmjs.org/shadcn/-/shadcn-4.13.0.tgz attempt 3 failed with EAI_AGAIN
+2919 http fetch GET https://registry.npmjs.org/setprototypeof/-/setprototypeof-1.2.0.tgz attempt 3 failed with EAI_AGAIN
+2920 http fetch GET https://registry.npmjs.org/serve-static/-/serve-static-2.2.1.tgz attempt 3 failed with EAI_AGAIN
+2921 http fetch GET https://registry.npmjs.org/send/-/send-1.2.1.tgz attempt 3 failed with EAI_AGAIN
+2922 http fetch GET https://registry.npmjs.org/semver/-/semver-6.3.1.tgz attempt 3 failed with EAI_AGAIN
+2923 http fetch GET https://registry.npmjs.org/secure-json-parse/-/secure-json-parse-4.1.0.tgz attempt 3 failed with EAI_AGAIN
+2924 http fetch GET https://registry.npmjs.org/scrollparent/-/scrollparent-2.1.0.tgz attempt 3 failed with EAI_AGAIN
+2925 http fetch GET https://registry.npmjs.org/scroll/-/scroll-3.0.1.tgz attempt 3 failed with EAI_AGAIN
+2926 http fetch GET https://registry.npmjs.org/scheduler/-/scheduler-0.23.2.tgz attempt 3 failed with EAI_AGAIN
+2927 http fetch GET https://registry.npmjs.org/saxes/-/saxes-6.0.0.tgz attempt 3 failed with EAI_AGAIN
+2928 http fetch GET https://registry.npmjs.org/safer-buffer/-/safer-buffer-2.1.2.tgz attempt 3 failed with EAI_AGAIN
+2929 http fetch GET https://registry.npmjs.org/safe-content-frame/-/safe-content-frame-0.0.27.tgz attempt 3 failed with EAI_AGAIN
+2930 http fetch GET https://registry.npmjs.org/run-parallel/-/run-parallel-1.2.0.tgz attempt 3 failed with EAI_AGAIN
+2931 http fetch GET https://registry.npmjs.org/run-applescript/-/run-applescript-7.1.0.tgz attempt 3 failed with EAI_AGAIN
+2932 http fetch GET https://registry.npmjs.org/rrweb-cssom/-/rrweb-cssom-0.8.0.tgz attempt 3 failed with EAI_AGAIN
+2933 http fetch GET https://registry.npmjs.org/router/-/router-2.2.0.tgz attempt 3 failed with EAI_AGAIN
+2934 http fetch GET https://registry.npmjs.org/rollup/-/rollup-4.62.2.tgz attempt 3 failed with EAI_AGAIN
+2935 http fetch GET https://registry.npmjs.org/reusify/-/reusify-1.1.0.tgz attempt 3 failed with EAI_AGAIN
+2936 http fetch GET https://registry.npmjs.org/restore-cursor/-/restore-cursor-5.1.0.tgz attempt 3 failed with EAI_AGAIN
+2937 http fetch GET https://registry.npmjs.org/resolve-from/-/resolve-from-4.0.0.tgz attempt 3 failed with EAI_AGAIN
+2938 http fetch GET https://registry.npmjs.org/reselect/-/reselect-5.2.0.tgz attempt 3 failed with EAI_AGAIN
+2939 http fetch GET https://registry.npmjs.org/require-from-string/-/require-from-string-2.0.2.tgz attempt 3 failed with EAI_AGAIN
+2940 http fetch GET https://registry.npmjs.org/remark-stringify/-/remark-stringify-11.0.0.tgz attempt 3 failed with EAI_AGAIN
+2941 http fetch GET https://registry.npmjs.org/remark-rehype/-/remark-rehype-11.1.2.tgz attempt 3 failed with EAI_AGAIN
+2942 http fetch GET https://registry.npmjs.org/remark-parse/-/remark-parse-11.0.0.tgz attempt 3 failed with EAI_AGAIN
+2943 http fetch GET https://registry.npmjs.org/remark-gfm/-/remark-gfm-4.0.1.tgz attempt 3 failed with EAI_AGAIN
+2944 http fetch GET https://registry.npmjs.org/redux-thunk/-/redux-thunk-3.1.0.tgz attempt 3 failed with EAI_AGAIN
+2945 http fetch GET https://registry.npmjs.org/redux/-/redux-5.0.1.tgz attempt 3 failed with EAI_AGAIN
+2946 http fetch GET https://registry.npmjs.org/recharts/-/recharts-3.8.0.tgz attempt 3 failed with EAI_AGAIN
+2947 http fetch GET https://registry.npmjs.org/recast/-/recast-0.23.12.tgz attempt 3 failed with EAI_AGAIN
+2948 http fetch GET https://registry.npmjs.org/react-textarea-autosize/-/react-textarea-autosize-8.5.9.tgz attempt 3 failed with EAI_AGAIN
+2949 http fetch GET https://registry.npmjs.org/react-style-singleton/-/react-style-singleton-2.2.3.tgz attempt 3 failed with EAI_AGAIN
+2950 http fetch GET https://registry.npmjs.org/react-remove-scroll-bar/-/react-remove-scroll-bar-2.3.8.tgz attempt 3 failed with EAI_AGAIN
+2951 http fetch GET https://registry.npmjs.org/react-remove-scroll/-/react-remove-scroll-2.7.2.tgz attempt 3 failed with EAI_AGAIN
+2952 http fetch GET https://registry.npmjs.org/react-refresh/-/react-refresh-0.17.0.tgz attempt 3 failed with EAI_AGAIN
+2953 http fetch GET https://registry.npmjs.org/react-redux/-/react-redux-9.3.0.tgz attempt 3 failed with EAI_AGAIN
+2954 http fetch GET https://registry.npmjs.org/react-markdown/-/react-markdown-10.1.0.tgz attempt 3 failed with EAI_AGAIN
+2955 http fetch GET https://registry.npmjs.org/react-joyride/-/react-joyride-3.2.0.tgz attempt 3 failed with EAI_AGAIN
+2956 http fetch GET https://registry.npmjs.org/react-is/-/react-is-19.2.7.tgz attempt 3 failed with EAI_AGAIN
+2957 http fetch GET https://registry.npmjs.org/react-innertext/-/react-innertext-1.1.5.tgz attempt 3 failed with EAI_AGAIN
+2958 http fetch GET https://registry.npmjs.org/react-dom/-/react-dom-18.3.1.tgz attempt 3 failed with EAI_AGAIN
+2959 http fetch GET https://registry.npmjs.org/react/-/react-18.3.1.tgz attempt 3 failed with EAI_AGAIN
+2960 http fetch GET https://registry.npmjs.org/raw-body/-/raw-body-3.0.2.tgz attempt 3 failed with EAI_AGAIN
+2961 http fetch GET https://registry.npmjs.org/range-parser/-/range-parser-1.3.0.tgz attempt 3 failed with EAI_AGAIN
+2962 http fetch GET https://registry.npmjs.org/radix-ui/-/radix-ui-1.6.7.tgz attempt 3 failed with EAI_AGAIN
+2963 http fetch GET https://registry.npmjs.org/queue-microtask/-/queue-microtask-1.2.3.tgz attempt 3 failed with EAI_AGAIN
+2964 http fetch GET https://registry.npmjs.org/qs/-/qs-6.15.3.tgz attempt 3 failed with EAI_AGAIN
+2965 http fetch GET https://registry.npmjs.org/punycode/-/punycode-2.3.1.tgz attempt 3 failed with EAI_AGAIN
+2966 http fetch GET https://registry.npmjs.org/proxy-addr/-/proxy-addr-2.0.7.tgz attempt 3 failed with EAI_AGAIN
+2967 http fetch GET https://registry.npmjs.org/property-information/-/property-information-7.2.0.tgz attempt 3 failed with EAI_AGAIN
+2968 http fetch GET https://registry.npmjs.org/prompts/-/prompts-2.4.2.tgz attempt 3 failed with EAI_AGAIN
+2969 http fetch GET https://registry.npmjs.org/pretty-ms/-/pretty-ms-9.3.0.tgz attempt 3 failed with EAI_AGAIN
+2970 http fetch GET https://registry.npmjs.org/powershell-utils/-/powershell-utils-0.1.0.tgz attempt 3 failed with EAI_AGAIN
+2971 http fetch GET https://registry.npmjs.org/postcss-selector-parser/-/postcss-selector-parser-7.1.4.tgz attempt 3 failed with EAI_AGAIN
+2972 http fetch GET https://registry.npmjs.org/postcss/-/postcss-8.5.16.tgz attempt 3 failed with EAI_AGAIN
+2973 http fetch GET https://registry.npmjs.org/playwright-core/-/playwright-core-1.61.1.tgz attempt 3 failed with EAI_AGAIN
+2974 http fetch GET https://registry.npmjs.org/playwright/-/playwright-1.61.1.tgz attempt 3 failed with EAI_AGAIN
+2975 http fetch GET https://registry.npmjs.org/pkg-up/-/pkg-up-3.1.0.tgz attempt 3 failed with EAI_AGAIN
+2976 http fetch GET https://registry.npmjs.org/pkce-challenge/-/pkce-challenge-5.0.1.tgz attempt 3 failed with EAI_AGAIN
+2977 http fetch GET https://registry.npmjs.org/picomatch/-/picomatch-4.0.5.tgz attempt 3 failed with EAI_AGAIN
+2978 http fetch GET https://registry.npmjs.org/picocolors/-/picocolors-1.1.1.tgz attempt 3 failed with EAI_AGAIN
+2979 http fetch GET https://registry.npmjs.org/pathval/-/pathval-2.0.1.tgz attempt 3 failed with EAI_AGAIN
+2980 http fetch GET https://registry.npmjs.org/pathe/-/pathe-2.0.3.tgz attempt 3 failed with EAI_AGAIN
+2981 http fetch GET https://registry.npmjs.org/path-to-regexp/-/path-to-regexp-8.4.2.tgz attempt 3 failed with EAI_AGAIN
+2982 http fetch GET https://registry.npmjs.org/path-key/-/path-key-3.1.1.tgz attempt 3 failed with EAI_AGAIN
+2983 http fetch GET https://registry.npmjs.org/path-exists/-/path-exists-3.0.0.tgz attempt 3 failed with EAI_AGAIN
+2984 http fetch GET https://registry.npmjs.org/path-browserify/-/path-browserify-1.0.1.tgz attempt 3 failed with EAI_AGAIN
+2985 http fetch GET https://registry.npmjs.org/parseurl/-/parseurl-1.3.3.tgz attempt 3 failed with EAI_AGAIN
+2986 http fetch GET https://registry.npmjs.org/parse5/-/parse5-8.0.1.tgz attempt 3 failed with EAI_AGAIN
+2987 http fetch GET https://registry.npmjs.org/parse-ms/-/parse-ms-4.0.0.tgz attempt 3 failed with EAI_AGAIN
+2988 http fetch GET https://registry.npmjs.org/parse-json/-/parse-json-5.2.0.tgz attempt 3 failed with EAI_AGAIN
+2989 http fetch GET https://registry.npmjs.org/parse-entities/-/parse-entities-4.0.2.tgz attempt 3 failed with EAI_AGAIN
+2990 http fetch GET https://registry.npmjs.org/parent-module/-/parent-module-1.0.1.tgz attempt 3 failed with EAI_AGAIN
+2991 http fetch GET https://registry.npmjs.org/p-try/-/p-try-2.2.0.tgz attempt 3 failed with EAI_AGAIN
+2992 http fetch GET https://registry.npmjs.org/p-locate/-/p-locate-3.0.0.tgz attempt 3 failed with EAI_AGAIN
+2993 http fetch GET https://registry.npmjs.org/p-limit/-/p-limit-2.3.0.tgz attempt 3 failed with EAI_AGAIN
+2994 http fetch GET https://registry.npmjs.org/ora/-/ora-8.2.0.tgz attempt 3 failed with EAI_AGAIN
+2995 http fetch GET https://registry.npmjs.org/open/-/open-11.0.0.tgz attempt 3 failed with EAI_AGAIN
+2996 http fetch GET https://registry.npmjs.org/onetime/-/onetime-5.1.2.tgz attempt 3 failed with EAI_AGAIN
+2997 http fetch GET https://registry.npmjs.org/once/-/once-1.4.0.tgz attempt 3 failed with EAI_AGAIN
+2998 http fetch GET https://registry.npmjs.org/object-treeify/-/object-treeify-1.1.33.tgz attempt 3 failed with EAI_AGAIN
+2999 http fetch GET https://registry.npmjs.org/on-finished/-/on-finished-2.4.1.tgz attempt 3 failed with EAI_AGAIN
+3000 http fetch GET https://registry.npmjs.org/object-inspect/-/object-inspect-1.13.4.tgz attempt 3 failed with EAI_AGAIN
+3001 http fetch GET https://registry.npmjs.org/object-assign/-/object-assign-4.1.1.tgz attempt 3 failed with EAI_AGAIN
+3002 http fetch GET https://registry.npmjs.org/npm-run-path/-/npm-run-path-6.0.0.tgz attempt 3 failed with EAI_AGAIN
+3003 http fetch GET https://registry.npmjs.org/node-releases/-/node-releases-2.0.51.tgz attempt 3 failed with EAI_AGAIN
+3004 http fetch GET https://registry.npmjs.org/next-themes/-/next-themes-0.4.6.tgz attempt 3 failed with EAI_AGAIN
+3005 http fetch GET https://registry.npmjs.org/negotiator/-/negotiator-1.0.0.tgz attempt 3 failed with EAI_AGAIN
+3006 http fetch GET https://registry.npmjs.org/nanoid/-/nanoid-3.3.15.tgz attempt 3 failed with EAI_AGAIN
+3007 http fetch GET https://registry.npmjs.org/ms/-/ms-2.1.3.tgz attempt 3 failed with EAI_AGAIN
+3008 http fetch GET https://registry.npmjs.org/minimist/-/minimist-1.2.8.tgz attempt 3 failed with EAI_AGAIN
+3009 http fetch GET https://registry.npmjs.org/minimatch/-/minimatch-10.2.5.tgz attempt 3 failed with EAI_AGAIN
+3010 http fetch GET https://registry.npmjs.org/mimic-function/-/mimic-function-5.0.1.tgz attempt 3 failed with EAI_AGAIN
+3011 http fetch GET https://registry.npmjs.org/mime-types/-/mime-types-3.0.2.tgz attempt 3 failed with EAI_AGAIN
+3012 http fetch GET https://registry.npmjs.org/mime-db/-/mime-db-1.54.0.tgz attempt 3 failed with EAI_AGAIN
+3013 http fetch GET https://registry.npmjs.org/mimic-fn/-/mimic-fn-3.1.0.tgz attempt 3 failed with EAI_AGAIN
+3014 http fetch GET https://registry.npmjs.org/micromark-util-types/-/micromark-util-types-2.0.2.tgz attempt 3 failed with EAI_AGAIN
+3015 http fetch GET https://registry.npmjs.org/micromark-util-symbol/-/micromark-util-symbol-2.0.1.tgz attempt 3 failed with EAI_AGAIN
+3016 http fetch GET https://registry.npmjs.org/micromatch/-/micromatch-4.0.8.tgz attempt 3 failed with EAI_AGAIN
+3017 http fetch GET https://registry.npmjs.org/micromark-util-subtokenize/-/micromark-util-subtokenize-2.1.0.tgz attempt 3 failed with EAI_AGAIN
+3018 http fetch GET https://registry.npmjs.org/micromark-util-sanitize-uri/-/micromark-util-sanitize-uri-2.0.1.tgz attempt 3 failed with EAI_AGAIN
+3019 http fetch GET https://registry.npmjs.org/micromark-util-resolve-all/-/micromark-util-resolve-all-2.0.1.tgz attempt 3 failed with EAI_AGAIN
+3020 http fetch GET https://registry.npmjs.org/micromark-util-normalize-identifier/-/micromark-util-normalize-identifier-2.0.1.tgz attempt 3 failed with EAI_AGAIN
+3021 http fetch GET https://registry.npmjs.org/micromark-util-html-tag-name/-/micromark-util-html-tag-name-2.0.1.tgz attempt 3 failed with EAI_AGAIN
+3022 http fetch GET https://registry.npmjs.org/micromark-util-encode/-/micromark-util-encode-2.0.1.tgz attempt 3 failed with EAI_AGAIN
+3023 http fetch GET https://registry.npmjs.org/micromark-util-decode-string/-/micromark-util-decode-string-2.0.1.tgz attempt 3 failed with EAI_AGAIN
+3024 http fetch GET https://registry.npmjs.org/micromark-util-decode-numeric-character-reference/-/micromark-util-decode-numeric-character-reference-2.0.2.tgz attempt 3 failed with EAI_AGAIN
+3025 http fetch GET https://registry.npmjs.org/micromark-util-combine-extensions/-/micromark-util-combine-extensions-2.0.1.tgz attempt 3 failed with EAI_AGAIN
+3026 http fetch GET https://registry.npmjs.org/micromark-util-classify-character/-/micromark-util-classify-character-2.0.1.tgz attempt 3 failed with EAI_AGAIN
+3027 http fetch GET https://registry.npmjs.org/micromark-util-chunked/-/micromark-util-chunked-2.0.1.tgz attempt 3 failed with EAI_AGAIN
+3028 http fetch GET https://registry.npmjs.org/micromark-util-character/-/micromark-util-character-2.1.1.tgz attempt 3 failed with EAI_AGAIN
+3029 http fetch GET https://registry.npmjs.org/micromark-factory-whitespace/-/micromark-factory-whitespace-2.0.1.tgz attempt 3 failed with EAI_AGAIN
+3030 http fetch GET https://registry.npmjs.org/micromark-factory-title/-/micromark-factory-title-2.0.1.tgz attempt 3 failed with EAI_AGAIN
+3031 http fetch GET https://registry.npmjs.org/micromark-factory-space/-/micromark-factory-space-2.0.1.tgz attempt 3 failed with EAI_AGAIN
+3032 http fetch GET https://registry.npmjs.org/micromark-factory-label/-/micromark-factory-label-2.0.1.tgz attempt 3 failed with EAI_AGAIN
+3033 http fetch GET https://registry.npmjs.org/micromark-factory-destination/-/micromark-factory-destination-2.0.1.tgz attempt 3 failed with EAI_AGAIN
+3034 http fetch GET https://registry.npmjs.org/micromark-extension-gfm-task-list-item/-/micromark-extension-gfm-task-list-item-2.1.0.tgz attempt 3 failed with EAI_AGAIN
+3035 http fetch GET https://registry.npmjs.org/micromark-extension-gfm-tagfilter/-/micromark-extension-gfm-tagfilter-2.0.0.tgz attempt 3 failed with EAI_AGAIN
+3036 http fetch GET https://registry.npmjs.org/micromark-extension-gfm-table/-/micromark-extension-gfm-table-2.1.1.tgz attempt 3 failed with EAI_AGAIN
+3037 http fetch GET https://registry.npmjs.org/micromark-extension-gfm-strikethrough/-/micromark-extension-gfm-strikethrough-2.1.0.tgz attempt 3 failed with EAI_AGAIN
+3038 http fetch GET https://registry.npmjs.org/micromark-extension-gfm-footnote/-/micromark-extension-gfm-footnote-2.1.0.tgz attempt 3 failed with EAI_AGAIN
+3039 http fetch GET https://registry.npmjs.org/micromark-extension-gfm-autolink-literal/-/micromark-extension-gfm-autolink-literal-2.1.0.tgz attempt 3 failed with EAI_AGAIN
+3040 http fetch GET https://registry.npmjs.org/micromark-core-commonmark/-/micromark-core-commonmark-2.0.3.tgz attempt 3 failed with EAI_AGAIN
+3041 http fetch GET https://registry.npmjs.org/micromark-extension-gfm/-/micromark-extension-gfm-3.0.0.tgz attempt 3 failed with EAI_AGAIN
+3042 http fetch GET https://registry.npmjs.org/micromark/-/micromark-4.0.2.tgz attempt 3 failed with EAI_AGAIN
+3043 http fetch GET https://registry.npmjs.org/merge2/-/merge2-1.4.1.tgz attempt 3 failed with EAI_AGAIN
+3044 http fetch GET https://registry.npmjs.org/merge-stream/-/merge-stream-2.0.0.tgz attempt 3 failed with EAI_AGAIN
+3045 http fetch GET https://registry.npmjs.org/merge-descriptors/-/merge-descriptors-2.0.0.tgz attempt 3 failed with EAI_AGAIN
+3046 http fetch GET https://registry.npmjs.org/media-typer/-/media-typer-1.1.0.tgz attempt 3 failed with EAI_AGAIN
+3047 http fetch GET https://registry.npmjs.org/mdn-data/-/mdn-data-2.27.1.tgz attempt 3 failed with EAI_AGAIN
+3048 http fetch GET https://registry.npmjs.org/mdast-util-to-string/-/mdast-util-to-string-4.0.0.tgz attempt 3 failed with EAI_AGAIN
+3049 http fetch GET https://registry.npmjs.org/mdast-util-to-markdown/-/mdast-util-to-markdown-2.1.2.tgz attempt 3 failed with EAI_AGAIN
+3050 http fetch GET https://registry.npmjs.org/mdast-util-to-hast/-/mdast-util-to-hast-13.2.1.tgz attempt 3 failed with EAI_AGAIN
+3051 http fetch GET https://registry.npmjs.org/mdast-util-phrasing/-/mdast-util-phrasing-4.1.0.tgz attempt 3 failed with EAI_AGAIN
+3052 http fetch GET https://registry.npmjs.org/mdast-util-mdxjs-esm/-/mdast-util-mdxjs-esm-2.0.1.tgz attempt 3 failed with EAI_AGAIN
+3053 http fetch GET https://registry.npmjs.org/mdast-util-mdx-jsx/-/mdast-util-mdx-jsx-3.2.0.tgz attempt 3 failed with EAI_AGAIN
+3054 http fetch GET https://registry.npmjs.org/mdast-util-mdx-expression/-/mdast-util-mdx-expression-2.0.1.tgz attempt 3 failed with EAI_AGAIN
+3055 http fetch GET https://registry.npmjs.org/mdast-util-gfm-task-list-item/-/mdast-util-gfm-task-list-item-2.0.0.tgz attempt 3 failed with EAI_AGAIN
+3056 http fetch GET https://registry.npmjs.org/mdast-util-gfm-table/-/mdast-util-gfm-table-2.0.0.tgz attempt 3 failed with EAI_AGAIN
+3057 http fetch GET https://registry.npmjs.org/mdast-util-gfm-strikethrough/-/mdast-util-gfm-strikethrough-2.0.0.tgz attempt 3 failed with EAI_AGAIN
+3058 http fetch GET https://registry.npmjs.org/mdast-util-gfm-footnote/-/mdast-util-gfm-footnote-2.1.0.tgz attempt 3 failed with EAI_AGAIN
+3059 http fetch GET https://registry.npmjs.org/mdast-util-gfm-autolink-literal/-/mdast-util-gfm-autolink-literal-2.0.1.tgz attempt 3 failed with EAI_AGAIN
+3060 http fetch GET https://registry.npmjs.org/mdast-util-gfm/-/mdast-util-gfm-3.1.0.tgz attempt 3 failed with EAI_AGAIN
+3061 http fetch GET https://registry.npmjs.org/mdast-util-from-markdown/-/mdast-util-from-markdown-2.0.3.tgz attempt 3 failed with EAI_AGAIN
+3062 http fetch GET https://registry.npmjs.org/mdast-util-find-and-replace/-/mdast-util-find-and-replace-3.0.2.tgz attempt 3 failed with EAI_AGAIN
+3063 http fetch GET https://registry.npmjs.org/math-intrinsics/-/math-intrinsics-1.1.0.tgz attempt 3 failed with EAI_AGAIN
+3064 http fetch GET https://registry.npmjs.org/markdown-table/-/markdown-table-3.0.4.tgz attempt 3 failed with EAI_AGAIN
+3065 http fetch GET https://registry.npmjs.org/magic-string/-/magic-string-0.30.21.tgz attempt 3 failed with EAI_AGAIN
+3066 http fetch GET https://registry.npmjs.org/lucide-react/-/lucide-react-1.24.0.tgz attempt 3 failed with EAI_AGAIN
+3067 http fetch GET https://registry.npmjs.org/lru-cache/-/lru-cache-5.1.1.tgz attempt 3 failed with EAI_AGAIN
+3068 http fetch GET https://registry.npmjs.org/loupe/-/loupe-3.2.1.tgz attempt 3 failed with EAI_AGAIN
+3069 http fetch GET https://registry.npmjs.org/loose-envify/-/loose-envify-1.4.0.tgz attempt 3 failed with EAI_AGAIN
+3070 http fetch GET https://registry.npmjs.org/longest-streak/-/longest-streak-3.1.0.tgz attempt 3 failed with EAI_AGAIN
+3071 http fetch GET https://registry.npmjs.org/log-symbols/-/log-symbols-6.0.0.tgz attempt 3 failed with EAI_AGAIN
+3072 http fetch GET https://registry.npmjs.org/locate-path/-/locate-path-3.0.0.tgz attempt 3 failed with EAI_AGAIN
+3073 http fetch GET https://registry.npmjs.org/lines-and-columns/-/lines-and-columns-1.2.4.tgz attempt 3 failed with EAI_AGAIN
+3074 http fetch GET https://registry.npmjs.org/lightningcss-linux-x64-musl/-/lightningcss-linux-x64-musl-1.32.0.tgz attempt 3 failed with EAI_AGAIN
+3075 verbose reify failed optional dependency /home/enamakel/work/workflow-opencompany/opencompany/worktrees/issue-1317/frontend/node_modules/lightningcss-linux-x64-musl
+3076 silly reify mark deleted [
+3076 silly reify   '/home/enamakel/work/workflow-opencompany/opencompany/worktrees/issue-1317/frontend/node_modules/lightningcss-linux-x64-musl'
+3076 silly reify ]
+3077 http fetch GET https://registry.npmjs.org/lightningcss-linux-x64-gnu/-/lightningcss-linux-x64-gnu-1.32.0.tgz attempt 3 failed with EAI_AGAIN
+3078 verbose reify failed optional dependency /home/enamakel/work/workflow-opencompany/opencompany/worktrees/issue-1317/frontend/node_modules/lightningcss-linux-x64-gnu
+3079 silly reify mark deleted [
+3079 silly reify   '/home/enamakel/work/workflow-opencompany/opencompany/worktrees/issue-1317/frontend/node_modules/lightningcss-linux-x64-gnu'
+3079 silly reify ]
+3080 http fetch GET https://registry.npmjs.org/lightningcss/-/lightningcss-1.32.0.tgz attempt 3 failed with EAI_AGAIN
+3081 http fetch GET https://registry.npmjs.org/kleur/-/kleur-4.1.5.tgz attempt 3 failed with EAI_AGAIN
+3082 http fetch GET https://registry.npmjs.org/jsonfile/-/jsonfile-6.2.1.tgz attempt 3 failed with EAI_AGAIN
+3083 http fetch GET https://registry.npmjs.org/json5/-/json5-2.2.3.tgz attempt 3 failed with EAI_AGAIN
+3084 http fetch GET https://registry.npmjs.org/json-schema-typed/-/json-schema-typed-8.0.2.tgz attempt 3 failed with EAI_AGAIN
+3085 http fetch GET https://registry.npmjs.org/json-parse-even-better-errors/-/json-parse-even-better-errors-2.3.1.tgz attempt 3 failed with EAI_AGAIN
+3086 http fetch GET https://registry.npmjs.org/json-schema-traverse/-/json-schema-traverse-1.0.0.tgz attempt 3 failed with EAI_AGAIN
+3087 http fetch GET https://registry.npmjs.org/jsesc/-/jsesc-3.1.0.tgz attempt 3 failed with EAI_AGAIN
+3088 http fetch GET https://registry.npmjs.org/jsdom/-/jsdom-27.0.1.tgz attempt 3 failed with EAI_AGAIN
+3089 http fetch GET https://registry.npmjs.org/js-yaml/-/js-yaml-4.3.0.tgz attempt 3 failed with EAI_AGAIN
+3090 http fetch GET https://registry.npmjs.org/js-tokens/-/js-tokens-4.0.0.tgz attempt 3 failed with EAI_AGAIN
+3091 http fetch GET https://registry.npmjs.org/jiti/-/jiti-2.7.0.tgz attempt 3 failed with EAI_AGAIN
+3092 http fetch GET https://registry.npmjs.org/jose/-/jose-6.2.3.tgz attempt 3 failed with EAI_AGAIN
+3093 http fetch GET https://registry.npmjs.org/isexe/-/isexe-3.1.5.tgz attempt 3 failed with EAI_AGAIN
+3094 http fetch GET https://registry.npmjs.org/is-wsl/-/is-wsl-3.1.1.tgz attempt 3 failed with EAI_AGAIN
+3095 http fetch GET https://registry.npmjs.org/is-unicode-supported/-/is-unicode-supported-2.1.0.tgz attempt 3 failed with EAI_AGAIN
+3096 http fetch GET https://registry.npmjs.org/is-stream/-/is-stream-4.0.1.tgz attempt 3 failed with EAI_AGAIN
+3097 http fetch GET https://registry.npmjs.org/is-regexp/-/is-regexp-3.1.0.tgz attempt 3 failed with EAI_AGAIN
+3098 http fetch GET https://registry.npmjs.org/is-promise/-/is-promise-4.0.0.tgz attempt 3 failed with EAI_AGAIN
+3099 http fetch GET https://registry.npmjs.org/is-potential-custom-element-name/-/is-potential-custom-element-name-1.0.1.tgz attempt 3 failed with EAI_AGAIN
+3100 http fetch GET https://registry.npmjs.org/is-plain-obj/-/is-plain-obj-4.1.0.tgz attempt 3 failed with EAI_AGAIN
+3101 http fetch GET https://registry.npmjs.org/is-obj/-/is-obj-2.0.0.tgz attempt 3 failed with EAI_AGAIN
+3102 http fetch GET https://registry.npmjs.org/is-number/-/is-number-7.0.0.tgz attempt 3 failed with EAI_AGAIN
+3103 http fetch GET https://registry.npmjs.org/is-lite/-/is-lite-2.0.0.tgz attempt 3 failed with EAI_AGAIN
+3104 http fetch GET https://registry.npmjs.org/is-interactive/-/is-interactive-2.0.0.tgz attempt 3 failed with EAI_AGAIN
+3105 http fetch GET https://registry.npmjs.org/is-inside-container/-/is-inside-container-1.0.0.tgz attempt 3 failed with EAI_AGAIN
+3106 http fetch GET https://registry.npmjs.org/is-in-ssh/-/is-in-ssh-1.0.0.tgz attempt 3 failed with EAI_AGAIN
+3107 http fetch GET https://registry.npmjs.org/is-hexadecimal/-/is-hexadecimal-2.0.1.tgz attempt 3 failed with EAI_AGAIN
+3108 http fetch GET https://registry.npmjs.org/is-extglob/-/is-extglob-2.1.1.tgz attempt 3 failed with EAI_AGAIN
+3109 http fetch GET https://registry.npmjs.org/is-glob/-/is-glob-4.0.3.tgz attempt 3 failed with EAI_AGAIN
+3110 http fetch GET https://registry.npmjs.org/is-docker/-/is-docker-3.0.0.tgz attempt 3 failed with EAI_AGAIN
+3111 http fetch GET https://registry.npmjs.org/is-decimal/-/is-decimal-2.0.1.tgz attempt 3 failed with EAI_AGAIN
+3112 http fetch GET https://registry.npmjs.org/is-arrayish/-/is-arrayish-0.2.1.tgz attempt 3 failed with EAI_AGAIN
+3113 http fetch GET https://registry.npmjs.org/is-alphanumerical/-/is-alphanumerical-2.0.1.tgz attempt 3 failed with EAI_AGAIN
+3114 http fetch GET https://registry.npmjs.org/is-alphabetical/-/is-alphabetical-2.0.1.tgz attempt 3 failed with EAI_AGAIN
+3115 http fetch GET https://registry.npmjs.org/ipaddr.js/-/ipaddr.js-1.9.1.tgz attempt 3 failed with EAI_AGAIN
+3116 http fetch GET https://registry.npmjs.org/ip-address/-/ip-address-10.2.0.tgz attempt 3 failed with EAI_AGAIN
+3117 http fetch GET https://registry.npmjs.org/internmap/-/internmap-2.0.3.tgz attempt 3 failed with EAI_AGAIN
+3118 http fetch GET https://registry.npmjs.org/inherits/-/inherits-2.0.4.tgz attempt 3 failed with EAI_AGAIN
+3119 http fetch GET https://registry.npmjs.org/inline-style-parser/-/inline-style-parser-0.2.7.tgz attempt 3 failed with EAI_AGAIN
+3120 http fetch GET https://registry.npmjs.org/import-fresh/-/import-fresh-3.3.1.tgz attempt 3 failed with EAI_AGAIN
+3121 http fetch GET https://registry.npmjs.org/immer/-/immer-10.2.0.tgz attempt 3 failed with EAI_AGAIN
+3122 http fetch GET https://registry.npmjs.org/ignore/-/ignore-5.3.2.tgz attempt 3 failed with EAI_AGAIN
+3123 http fetch GET https://registry.npmjs.org/iconv-lite/-/iconv-lite-0.7.3.tgz attempt 3 failed with EAI_AGAIN
+3124 http fetch GET https://registry.npmjs.org/human-signals/-/human-signals-8.0.1.tgz attempt 3 failed with EAI_AGAIN
+3125 http fetch GET https://registry.npmjs.org/https-proxy-agent/-/https-proxy-agent-7.0.6.tgz attempt 3 failed with EAI_AGAIN
+3126 http fetch GET https://registry.npmjs.org/http-proxy-agent/-/http-proxy-agent-7.0.2.tgz attempt 3 failed with EAI_AGAIN
+3127 http fetch GET https://registry.npmjs.org/http-errors/-/http-errors-2.0.1.tgz attempt 3 failed with EAI_AGAIN
+3128 http fetch GET https://registry.npmjs.org/html-url-attributes/-/html-url-attributes-3.0.1.tgz attempt 3 failed with EAI_AGAIN
+3129 http fetch GET https://registry.npmjs.org/html-encoding-sniffer/-/html-encoding-sniffer-4.0.0.tgz attempt 3 failed with EAI_AGAIN
+3130 http fetch GET https://registry.npmjs.org/hono/-/hono-4.12.30.tgz attempt 3 failed with EAI_AGAIN
+3131 http fetch GET https://registry.npmjs.org/hast-util-whitespace/-/hast-util-whitespace-3.0.0.tgz attempt 3 failed with EAI_AGAIN
+3132 http fetch GET https://registry.npmjs.org/hast-util-to-jsx-runtime/-/hast-util-to-jsx-runtime-2.3.6.tgz attempt 3 failed with EAI_AGAIN
+3133 http fetch GET https://registry.npmjs.org/hasown/-/hasown-2.0.4.tgz attempt 3 failed with EAI_AGAIN
+3134 http fetch GET https://registry.npmjs.org/has-symbols/-/has-symbols-1.1.0.tgz attempt 3 failed with EAI_AGAIN
+3135 http fetch GET https://registry.npmjs.org/graceful-fs/-/graceful-fs-4.2.11.tgz attempt 3 failed with EAI_AGAIN
+3136 http fetch GET https://registry.npmjs.org/gopd/-/gopd-1.2.0.tgz attempt 3 failed with EAI_AGAIN
+3137 http fetch GET https://registry.npmjs.org/glob-parent/-/glob-parent-5.1.2.tgz attempt 3 failed with EAI_AGAIN
+3138 http fetch GET https://registry.npmjs.org/get-stream/-/get-stream-9.0.1.tgz attempt 3 failed with EAI_AGAIN
+3139 http fetch GET https://registry.npmjs.org/get-proto/-/get-proto-1.0.1.tgz attempt 3 failed with EAI_AGAIN
+3140 http fetch GET https://registry.npmjs.org/get-own-enumerable-keys/-/get-own-enumerable-keys-1.0.0.tgz attempt 3 failed with EAI_AGAIN
+3141 http fetch GET https://registry.npmjs.org/get-nonce/-/get-nonce-1.0.1.tgz attempt 3 failed with EAI_AGAIN
+3142 http fetch GET https://registry.npmjs.org/get-intrinsic/-/get-intrinsic-1.3.0.tgz attempt 3 failed with EAI_AGAIN
+3143 http fetch GET https://registry.npmjs.org/get-east-asian-width/-/get-east-asian-width-1.6.0.tgz attempt 3 failed with EAI_AGAIN
+3144 http fetch GET https://registry.npmjs.org/gensync/-/gensync-1.0.0-beta.2.tgz attempt 3 failed with EAI_AGAIN
+3145 http fetch GET https://registry.npmjs.org/fuzzysort/-/fuzzysort-3.1.0.tgz attempt 3 failed with EAI_AGAIN
+3146 http fetch GET https://registry.npmjs.org/function-bind/-/function-bind-1.1.2.tgz attempt 3 failed with EAI_AGAIN
+3147 http fetch GET https://registry.npmjs.org/fresh/-/fresh-2.0.0.tgz attempt 3 failed with EAI_AGAIN
+3148 http fetch GET https://registry.npmjs.org/fs-extra/-/fs-extra-11.3.6.tgz attempt 3 failed with EAI_AGAIN
+3149 http fetch GET https://registry.npmjs.org/forwarded/-/forwarded-0.2.0.tgz attempt 3 failed with EAI_AGAIN
+3150 http fetch GET https://registry.npmjs.org/find-up/-/find-up-3.0.0.tgz attempt 3 failed with EAI_AGAIN
+3151 http fetch GET https://registry.npmjs.org/finalhandler/-/finalhandler-2.1.1.tgz attempt 3 failed with EAI_AGAIN
+3152 http fetch GET https://registry.npmjs.org/fill-range/-/fill-range-7.1.1.tgz attempt 3 failed with EAI_AGAIN
+3153 http fetch GET https://registry.npmjs.org/figures/-/figures-6.1.0.tgz attempt 3 failed with EAI_AGAIN
+3154 http fetch GET https://registry.npmjs.org/fdir/-/fdir-6.5.0.tgz attempt 3 failed with EAI_AGAIN
+3155 http fetch GET https://registry.npmjs.org/fastq/-/fastq-1.20.1.tgz attempt 3 failed with EAI_AGAIN
+3156 http fetch GET https://registry.npmjs.org/fast-uri/-/fast-uri-3.1.3.tgz attempt 3 failed with EAI_AGAIN
+3157 http fetch GET https://registry.npmjs.org/fast-glob/-/fast-glob-3.3.3.tgz attempt 3 failed with EAI_AGAIN
+3158 http fetch GET https://registry.npmjs.org/fast-deep-equal/-/fast-deep-equal-3.1.3.tgz attempt 3 failed with EAI_AGAIN
+3159 http fetch GET https://registry.npmjs.org/extend/-/extend-3.0.2.tgz attempt 3 failed with EAI_AGAIN
+3160 http fetch GET https://registry.npmjs.org/express/-/express-5.2.1.tgz attempt 3 failed with EAI_AGAIN
+3161 http fetch GET https://registry.npmjs.org/expect-type/-/expect-type-1.4.0.tgz attempt 3 failed with EAI_AGAIN
+3162 http fetch GET https://registry.npmjs.org/execa/-/execa-9.6.1.tgz attempt 3 failed with EAI_AGAIN
+3163 http fetch GET https://registry.npmjs.org/eventsource-parser/-/eventsource-parser-3.1.0.tgz attempt 3 failed with EAI_AGAIN
+3164 http fetch GET https://registry.npmjs.org/express-rate-limit/-/express-rate-limit-8.5.2.tgz attempt 3 failed with EAI_AGAIN
+3165 http fetch GET https://registry.npmjs.org/eventsource/-/eventsource-3.0.7.tgz attempt 3 failed with EAI_AGAIN
+3166 http fetch GET https://registry.npmjs.org/eventemitter3/-/eventemitter3-5.0.4.tgz attempt 3 failed with EAI_AGAIN
+3167 http fetch GET https://registry.npmjs.org/estree-walker/-/estree-walker-3.0.3.tgz attempt 3 failed with EAI_AGAIN
+3168 http fetch GET https://registry.npmjs.org/etag/-/etag-1.8.1.tgz attempt 3 failed with EAI_AGAIN
+3169 http fetch GET https://registry.npmjs.org/estree-util-is-identifier-name/-/estree-util-is-identifier-name-3.0.0.tgz attempt 3 failed with EAI_AGAIN
+3170 http fetch GET https://registry.npmjs.org/esprima/-/esprima-4.0.1.tgz attempt 3 failed with EAI_AGAIN
+3171 http fetch GET https://registry.npmjs.org/escape-string-regexp/-/escape-string-regexp-5.0.0.tgz attempt 3 failed with EAI_AGAIN
+3172 http fetch GET https://registry.npmjs.org/escape-html/-/escape-html-1.0.3.tgz attempt 3 failed with EAI_AGAIN
+3173 http fetch GET https://registry.npmjs.org/escalade/-/escalade-3.2.0.tgz attempt 3 failed with EAI_AGAIN
+3174 http fetch GET https://registry.npmjs.org/esbuild/-/esbuild-0.21.5.tgz attempt 3 failed with EAI_AGAIN
+3175 http fetch GET https://registry.npmjs.org/es-toolkit/-/es-toolkit-1.49.0.tgz attempt 3 failed with EAI_AGAIN
+3176 http fetch GET https://registry.npmjs.org/es-object-atoms/-/es-object-atoms-1.1.2.tgz attempt 3 failed with EAI_AGAIN
+3177 http fetch GET https://registry.npmjs.org/es-module-lexer/-/es-module-lexer-1.7.0.tgz attempt 3 failed with EAI_AGAIN
+3178 http fetch GET https://registry.npmjs.org/es-errors/-/es-errors-1.3.0.tgz attempt 3 failed with EAI_AGAIN
+3179 http fetch GET https://registry.npmjs.org/es-define-property/-/es-define-property-1.0.1.tgz attempt 3 failed with EAI_AGAIN
+3180 http fetch GET https://registry.npmjs.org/error-ex/-/error-ex-1.3.4.tgz attempt 3 failed with EAI_AGAIN
+3181 http fetch GET https://registry.npmjs.org/env-paths/-/env-paths-2.2.1.tgz attempt 3 failed with EAI_AGAIN
+3182 http fetch GET https://registry.npmjs.org/entities/-/entities-8.0.0.tgz attempt 3 failed with EAI_AGAIN
+3183 http fetch GET https://registry.npmjs.org/enquirer/-/enquirer-2.4.1.tgz attempt 3 failed with EAI_AGAIN
+3184 http fetch GET https://registry.npmjs.org/enhanced-resolve/-/enhanced-resolve-5.21.6.tgz attempt 3 failed with EAI_AGAIN
+3185 http fetch GET https://registry.npmjs.org/encodeurl/-/encodeurl-2.0.0.tgz attempt 3 failed with EAI_AGAIN
+3186 http fetch GET https://registry.npmjs.org/emoji-regex/-/emoji-regex-10.6.0.tgz attempt 3 failed with EAI_AGAIN
+3187 http fetch GET https://registry.npmjs.org/electron-to-chromium/-/electron-to-chromium-1.5.389.tgz attempt 3 failed with EAI_AGAIN
+3188 http fetch GET https://registry.npmjs.org/ee-first/-/ee-first-1.1.1.tgz attempt 3 failed with EAI_AGAIN
+3189 http fetch GET https://registry.npmjs.org/dunder-proto/-/dunder-proto-1.0.1.tgz attempt 3 failed with EAI_AGAIN
+3190 http fetch GET https://registry.npmjs.org/dotenv/-/dotenv-17.4.2.tgz attempt 3 failed with EAI_AGAIN
+3191 http fetch GET https://registry.npmjs.org/dot-prop/-/dot-prop-6.0.1.tgz attempt 3 failed with EAI_AGAIN
+3192 http fetch GET https://registry.npmjs.org/diff/-/diff-8.0.4.tgz attempt 3 failed with EAI_AGAIN
+3193 http fetch GET https://registry.npmjs.org/devlop/-/devlop-1.1.0.tgz attempt 3 failed with EAI_AGAIN
+3194 http fetch GET https://registry.npmjs.org/detect-node-es/-/detect-node-es-1.1.0.tgz attempt 3 failed with EAI_AGAIN
+3195 http fetch GET https://registry.npmjs.org/detect-libc/-/detect-libc-2.1.2.tgz attempt 3 failed with EAI_AGAIN
+3196 http fetch GET https://registry.npmjs.org/dequal/-/dequal-2.0.3.tgz attempt 3 failed with EAI_AGAIN
+3197 http fetch GET https://registry.npmjs.org/depd/-/depd-2.0.0.tgz attempt 3 failed with EAI_AGAIN
+3198 http fetch GET https://registry.npmjs.org/define-lazy-prop/-/define-lazy-prop-3.0.0.tgz attempt 3 failed with EAI_AGAIN
+3199 http fetch GET https://registry.npmjs.org/default-browser-id/-/default-browser-id-5.0.1.tgz attempt 3 failed with EAI_AGAIN
+3200 http fetch GET https://registry.npmjs.org/default-browser/-/default-browser-5.5.0.tgz attempt 3 failed with EAI_AGAIN
+3201 http fetch GET https://registry.npmjs.org/deepmerge/-/deepmerge-4.3.1.tgz attempt 3 failed with EAI_AGAIN
+3202 http fetch GET https://registry.npmjs.org/deep-eql/-/deep-eql-5.0.2.tgz attempt 3 failed with EAI_AGAIN
+3203 http fetch GET https://registry.npmjs.org/dedent/-/dedent-1.7.2.tgz attempt 3 failed with EAI_AGAIN
+3204 http fetch GET https://registry.npmjs.org/decode-named-character-reference/-/decode-named-character-reference-1.3.0.tgz attempt 3 failed with EAI_AGAIN
+3205 http fetch GET https://registry.npmjs.org/decimal.js-light/-/decimal.js-light-2.5.1.tgz attempt 3 failed with EAI_AGAIN
+3206 http fetch GET https://registry.npmjs.org/decimal.js/-/decimal.js-10.6.0.tgz attempt 3 failed with EAI_AGAIN
+3207 http fetch GET https://registry.npmjs.org/debug/-/debug-4.4.3.tgz attempt 3 failed with EAI_AGAIN
+3208 http fetch GET https://registry.npmjs.org/debounce-fn/-/debounce-fn-4.0.0.tgz attempt 3 failed with EAI_AGAIN
+3209 http fetch GET https://registry.npmjs.org/data-urls/-/data-urls-6.0.1.tgz attempt 3 failed with EAI_AGAIN
+3210 http fetch GET https://registry.npmjs.org/d3-zoom/-/d3-zoom-3.0.0.tgz attempt 3 failed with EAI_AGAIN
+3211 http fetch GET https://registry.npmjs.org/d3-transition/-/d3-transition-3.0.1.tgz attempt 3 failed with EAI_AGAIN
+3212 http fetch GET https://registry.npmjs.org/d3-timer/-/d3-timer-3.0.1.tgz attempt 3 failed with EAI_AGAIN
+3213 http fetch GET https://registry.npmjs.org/d3-time-format/-/d3-time-format-4.1.0.tgz attempt 3 failed with EAI_AGAIN
+3214 http fetch GET https://registry.npmjs.org/d3-time/-/d3-time-3.1.0.tgz attempt 3 failed with EAI_AGAIN
+3215 http fetch GET https://registry.npmjs.org/d3-shape/-/d3-shape-3.2.0.tgz attempt 3 failed with EAI_AGAIN
+3216 http fetch GET https://registry.npmjs.org/d3-selection/-/d3-selection-3.0.0.tgz attempt 3 failed with EAI_AGAIN
+3217 http fetch GET https://registry.npmjs.org/d3-scale/-/d3-scale-4.0.2.tgz attempt 3 failed with EAI_AGAIN
+3218 http fetch GET https://registry.npmjs.org/d3-quadtree/-/d3-quadtree-3.0.1.tgz attempt 3 failed with EAI_AGAIN
+3219 http fetch GET https://registry.npmjs.org/d3-path/-/d3-path-3.1.0.tgz attempt 3 failed with EAI_AGAIN
+3220 http fetch GET https://registry.npmjs.org/d3-interpolate/-/d3-interpolate-3.0.1.tgz attempt 3 failed with EAI_AGAIN
+3221 http fetch GET https://registry.npmjs.org/d3-format/-/d3-format-3.1.2.tgz attempt 3 failed with EAI_AGAIN
+3222 http fetch GET https://registry.npmjs.org/d3-force/-/d3-force-3.0.0.tgz attempt 3 failed with EAI_AGAIN
+3223 http fetch GET https://registry.npmjs.org/d3-ease/-/d3-ease-3.0.1.tgz attempt 3 failed with EAI_AGAIN
+3224 http fetch GET https://registry.npmjs.org/d3-drag/-/d3-drag-3.0.0.tgz attempt 3 failed with EAI_AGAIN
+3225 http fetch GET https://registry.npmjs.org/d3-dispatch/-/d3-dispatch-3.0.1.tgz attempt 3 failed with EAI_AGAIN
+3226 http fetch GET https://registry.npmjs.org/d3-color/-/d3-color-3.1.0.tgz attempt 3 failed with EAI_AGAIN
+3227 http fetch GET https://registry.npmjs.org/d3-array/-/d3-array-3.2.4.tgz attempt 3 failed with EAI_AGAIN
+3228 http fetch GET https://registry.npmjs.org/csstype/-/csstype-3.2.3.tgz attempt 3 failed with EAI_AGAIN
+3229 http fetch GET https://registry.npmjs.org/cssstyle/-/cssstyle-5.3.7.tgz attempt 3 failed with EAI_AGAIN
+3230 http fetch GET https://registry.npmjs.org/cssesc/-/cssesc-3.0.0.tgz attempt 3 failed with EAI_AGAIN
+3231 http fetch GET https://registry.npmjs.org/css-tree/-/css-tree-3.2.1.tgz attempt 3 failed with EAI_AGAIN
+3232 http fetch GET https://registry.npmjs.org/cross-spawn/-/cross-spawn-7.0.6.tgz attempt 3 failed with EAI_AGAIN
+3233 http fetch GET https://registry.npmjs.org/cosmiconfig/-/cosmiconfig-9.0.2.tgz attempt 3 failed with EAI_AGAIN
+3234 http fetch GET https://registry.npmjs.org/cors/-/cors-2.8.6.tgz attempt 3 failed with EAI_AGAIN
+3235 http fetch GET https://registry.npmjs.org/cookie-signature/-/cookie-signature-1.2.2.tgz attempt 3 failed with EAI_AGAIN
+3236 http fetch GET https://registry.npmjs.org/cookie/-/cookie-0.7.2.tgz attempt 3 failed with EAI_AGAIN
+3237 http fetch GET https://registry.npmjs.org/convert-source-map/-/convert-source-map-2.0.0.tgz attempt 3 failed with EAI_AGAIN
+3238 http fetch GET https://registry.npmjs.org/content-type/-/content-type-1.0.5.tgz attempt 3 failed with EAI_AGAIN
+3239 http fetch GET https://registry.npmjs.org/content-disposition/-/content-disposition-1.1.0.tgz attempt 3 failed with EAI_AGAIN
+3240 http fetch GET https://registry.npmjs.org/commander/-/commander-14.0.3.tgz attempt 3 failed with EAI_AGAIN
+3241 http fetch GET https://registry.npmjs.org/conf/-/conf-10.2.0.tgz attempt 3 failed with EAI_AGAIN
+3242 http fetch GET https://registry.npmjs.org/comma-separated-tokens/-/comma-separated-tokens-2.0.3.tgz attempt 3 failed with EAI_AGAIN
+3243 http fetch GET https://registry.npmjs.org/code-block-writer/-/code-block-writer-13.0.3.tgz attempt 3 failed with EAI_AGAIN
+3244 http fetch GET https://registry.npmjs.org/clsx/-/clsx-2.1.1.tgz attempt 3 failed with EAI_AGAIN
+3245 http fetch GET https://registry.npmjs.org/cli-spinners/-/cli-spinners-2.9.2.tgz attempt 3 failed with EAI_AGAIN
+3246 http fetch GET https://registry.npmjs.org/cli-cursor/-/cli-cursor-5.0.0.tgz attempt 3 failed with EAI_AGAIN
+3247 http fetch GET https://registry.npmjs.org/classcat/-/classcat-5.0.5.tgz attempt 3 failed with EAI_AGAIN
+3248 http fetch GET https://registry.npmjs.org/class-variance-authority/-/class-variance-authority-0.7.1.tgz attempt 3 failed with EAI_AGAIN
+3249 http fetch GET https://registry.npmjs.org/check-error/-/check-error-2.1.3.tgz attempt 3 failed with EAI_AGAIN
+3250 http fetch GET https://registry.npmjs.org/character-reference-invalid/-/character-reference-invalid-2.0.1.tgz attempt 3 failed with EAI_AGAIN
+3251 http fetch GET https://registry.npmjs.org/character-entities-html4/-/character-entities-html4-2.1.0.tgz attempt 3 failed with EAI_AGAIN
+3252 http fetch GET https://registry.npmjs.org/character-entities-legacy/-/character-entities-legacy-3.0.0.tgz attempt 3 failed with EAI_AGAIN
+3253 http fetch GET https://registry.npmjs.org/character-entities/-/character-entities-2.0.2.tgz attempt 3 failed with EAI_AGAIN
+3254 http fetch GET https://registry.npmjs.org/chalk/-/chalk-5.6.2.tgz attempt 3 failed with EAI_AGAIN
+3255 http fetch GET https://registry.npmjs.org/chai/-/chai-5.3.3.tgz attempt 3 failed with EAI_AGAIN
+3256 http fetch GET https://registry.npmjs.org/ccount/-/ccount-2.0.1.tgz attempt 3 failed with EAI_AGAIN
+3257 http fetch GET https://registry.npmjs.org/caniuse-lite/-/caniuse-lite-1.0.30001803.tgz attempt 3 failed with EAI_AGAIN
+3258 http fetch GET https://registry.npmjs.org/callsites/-/callsites-3.1.0.tgz attempt 3 failed with EAI_AGAIN
+3259 http fetch GET https://registry.npmjs.org/call-bound/-/call-bound-1.0.4.tgz attempt 3 failed with EAI_AGAIN
+3260 http fetch GET https://registry.npmjs.org/call-bind-apply-helpers/-/call-bind-apply-helpers-1.0.2.tgz attempt 3 failed with EAI_AGAIN
+3261 http fetch GET https://registry.npmjs.org/cac/-/cac-6.7.14.tgz attempt 3 failed with EAI_AGAIN
+3262 http fetch GET https://registry.npmjs.org/bytes/-/bytes-3.1.2.tgz attempt 3 failed with EAI_AGAIN
+3263 http fetch GET https://registry.npmjs.org/bundle-name/-/bundle-name-4.1.0.tgz attempt 3 failed with EAI_AGAIN
+3264 http fetch GET https://registry.npmjs.org/browserslist/-/browserslist-4.28.5.tgz attempt 3 failed with EAI_AGAIN
+3265 http fetch GET https://registry.npmjs.org/braces/-/braces-3.0.3.tgz attempt 3 failed with EAI_AGAIN
+3266 http fetch GET https://registry.npmjs.org/brace-expansion/-/brace-expansion-5.0.7.tgz attempt 3 failed with EAI_AGAIN
+3267 http fetch GET https://registry.npmjs.org/body-parser/-/body-parser-2.3.0.tgz attempt 3 failed with EAI_AGAIN
+3268 http fetch GET https://registry.npmjs.org/baseline-browser-mapping/-/baseline-browser-mapping-2.10.43.tgz attempt 3 failed with EAI_AGAIN
+3269 http fetch GET https://registry.npmjs.org/bidi-js/-/bidi-js-1.0.3.tgz attempt 3 failed with EAI_AGAIN
+3270 http fetch GET https://registry.npmjs.org/bail/-/bail-2.0.2.tgz attempt 3 failed with EAI_AGAIN
+3271 http fetch GET https://registry.npmjs.org/balanced-match/-/balanced-match-4.0.4.tgz attempt 3 failed with EAI_AGAIN
+3272 http fetch GET https://registry.npmjs.org/atomically/-/atomically-1.7.0.tgz attempt 3 failed with EAI_AGAIN
+3273 http fetch GET https://registry.npmjs.org/assistant-stream/-/assistant-stream-0.3.39.tgz attempt 3 failed with EAI_AGAIN
+3274 http fetch GET https://registry.npmjs.org/ast-types/-/ast-types-0.16.1.tgz attempt 3 failed with EAI_AGAIN
+3275 http fetch GET https://registry.npmjs.org/assistant-cloud/-/assistant-cloud-0.1.41.tgz attempt 3 failed with EAI_AGAIN
+3276 http fetch GET https://registry.npmjs.org/assertion-error/-/assertion-error-2.0.1.tgz attempt 3 failed with EAI_AGAIN
+3277 http fetch GET https://registry.npmjs.org/aria-hidden/-/aria-hidden-1.2.6.tgz attempt 3 failed with EAI_AGAIN
+3278 http fetch GET https://registry.npmjs.org/argparse/-/argparse-2.0.1.tgz attempt 3 failed with EAI_AGAIN
+3279 http fetch GET https://registry.npmjs.org/ansi-regex/-/ansi-regex-5.0.1.tgz attempt 3 failed with EAI_AGAIN
+3280 http fetch GET https://registry.npmjs.org/ansi-colors/-/ansi-colors-4.1.3.tgz attempt 3 failed with EAI_AGAIN
+3281 http fetch GET https://registry.npmjs.org/ajv-formats/-/ajv-formats-3.0.1.tgz attempt 3 failed with EAI_AGAIN
+3282 http fetch GET https://registry.npmjs.org/ajv/-/ajv-8.20.0.tgz attempt 3 failed with EAI_AGAIN
+3283 http fetch GET https://registry.npmjs.org/agent-base/-/agent-base-7.1.4.tgz attempt 3 failed with EAI_AGAIN
+3284 http fetch GET https://registry.npmjs.org/accepts/-/accepts-2.0.0.tgz attempt 3 failed with EAI_AGAIN
+3285 http fetch GET https://registry.npmjs.org/@xyflow/system/-/system-0.0.79.tgz attempt 3 failed with EAI_AGAIN
+3286 http fetch GET https://registry.npmjs.org/@xyflow/react/-/react-12.11.2.tgz attempt 3 failed with EAI_AGAIN
+3287 http fetch GET https://registry.npmjs.org/@vitest/utils/-/utils-3.2.7.tgz attempt 3 failed with EAI_AGAIN
+3288 http fetch GET https://registry.npmjs.org/@vitest/spy/-/spy-3.2.7.tgz attempt 3 failed with EAI_AGAIN
+3289 http fetch GET https://registry.npmjs.org/@vitest/snapshot/-/snapshot-3.2.7.tgz attempt 3 failed with EAI_AGAIN
+3290 http fetch GET https://registry.npmjs.org/@vitest/runner/-/runner-3.2.7.tgz attempt 3 failed with EAI_AGAIN
+3291 http fetch GET https://registry.npmjs.org/@vitest/pretty-format/-/pretty-format-3.2.7.tgz attempt 3 failed with EAI_AGAIN
+3292 http fetch GET https://registry.npmjs.org/@vitest/mocker/-/mocker-3.2.7.tgz attempt 3 failed with EAI_AGAIN
+3293 http fetch GET https://registry.npmjs.org/@vitest/expect/-/expect-3.2.7.tgz attempt 3 failed with EAI_AGAIN
+3294 http fetch GET https://registry.npmjs.org/@vitejs/plugin-react/-/plugin-react-4.7.0.tgz attempt 3 failed with EAI_AGAIN
+3295 http fetch GET https://registry.npmjs.org/@ungap/structured-clone/-/structured-clone-1.3.3.tgz attempt 3 failed with EAI_AGAIN
+3296 http fetch GET https://registry.npmjs.org/@types/validate-npm-package-name/-/validate-npm-package-name-4.0.2.tgz attempt 3 failed with EAI_AGAIN
+3297 http fetch GET https://registry.npmjs.org/@types/use-sync-external-store/-/use-sync-external-store-0.0.6.tgz attempt 3 failed with EAI_AGAIN
+3298 http fetch GET https://registry.npmjs.org/@types/unist/-/unist-3.0.3.tgz attempt 3 failed with EAI_AGAIN
+3299 http fetch GET https://registry.npmjs.org/@types/react-dom/-/react-dom-18.3.7.tgz attempt 3 failed with EAI_AGAIN
+3300 http fetch GET https://registry.npmjs.org/@types/react/-/react-18.3.31.tgz attempt 3 failed with EAI_AGAIN
+3301 http fetch GET https://registry.npmjs.org/@types/prop-types/-/prop-types-15.7.15.tgz attempt 3 failed with EAI_AGAIN
+3302 http fetch GET https://registry.npmjs.org/@types/node/-/node-22.20.1.tgz attempt 3 failed with EAI_AGAIN
+3303 http fetch GET https://registry.npmjs.org/@types/ms/-/ms-2.1.0.tgz attempt 3 failed with EAI_AGAIN
+3304 http fetch GET https://registry.npmjs.org/@types/mdast/-/mdast-4.0.4.tgz attempt 3 failed with EAI_AGAIN
+3305 http fetch GET https://registry.npmjs.org/@types/hast/-/hast-3.0.5.tgz attempt 3 failed with EAI_AGAIN
+3306 http fetch GET https://registry.npmjs.org/@types/estree-jsx/-/estree-jsx-1.0.5.tgz attempt 3 failed with EAI_AGAIN
+3307 http fetch GET https://registry.npmjs.org/@types/estree/-/estree-1.0.9.tgz attempt 3 failed with EAI_AGAIN
+3308 http fetch GET https://registry.npmjs.org/@types/deep-eql/-/deep-eql-4.0.2.tgz attempt 3 failed with EAI_AGAIN
+3309 http fetch GET https://registry.npmjs.org/@types/debug/-/debug-4.1.13.tgz attempt 3 failed with EAI_AGAIN
+3310 http fetch GET https://registry.npmjs.org/@types/d3-zoom/-/d3-zoom-3.0.8.tgz attempt 3 failed with EAI_AGAIN
+3311 http fetch GET https://registry.npmjs.org/@types/d3-transition/-/d3-transition-3.0.9.tgz attempt 3 failed with EAI_AGAIN
+3312 http fetch GET https://registry.npmjs.org/@types/d3-timer/-/d3-timer-3.0.2.tgz attempt 3 failed with EAI_AGAIN
+3313 http fetch GET https://registry.npmjs.org/@types/d3-time/-/d3-time-3.0.4.tgz attempt 3 failed with EAI_AGAIN
+3314 http fetch GET https://registry.npmjs.org/@types/d3-shape/-/d3-shape-3.1.8.tgz attempt 3 failed with EAI_AGAIN
+3315 http fetch GET https://registry.npmjs.org/@types/d3-selection/-/d3-selection-3.0.11.tgz attempt 3 failed with EAI_AGAIN
+3316 http fetch GET https://registry.npmjs.org/@types/d3-scale/-/d3-scale-4.0.9.tgz attempt 3 failed with EAI_AGAIN
+3317 http fetch GET https://registry.npmjs.org/@types/d3-path/-/d3-path-3.1.1.tgz attempt 3 failed with EAI_AGAIN
+3318 http fetch GET https://registry.npmjs.org/@types/d3-interpolate/-/d3-interpolate-3.0.4.tgz attempt 3 failed with EAI_AGAIN
+3319 http fetch GET https://registry.npmjs.org/@types/d3-force/-/d3-force-3.0.10.tgz attempt 3 failed with EAI_AGAIN
+3320 http fetch GET https://registry.npmjs.org/@types/d3-ease/-/d3-ease-3.0.2.tgz attempt 3 failed with EAI_AGAIN
+3321 http fetch GET https://registry.npmjs.org/@types/d3-drag/-/d3-drag-3.0.7.tgz attempt 3 failed with EAI_AGAIN
+3322 http fetch GET https://registry.npmjs.org/@types/d3-color/-/d3-color-3.1.3.tgz attempt 3 failed with EAI_AGAIN
+3323 http fetch GET https://registry.npmjs.org/@types/d3-array/-/d3-array-3.2.2.tgz attempt 3 failed with EAI_AGAIN
+3324 http fetch GET https://registry.npmjs.org/@types/chai/-/chai-5.2.3.tgz attempt 3 failed with EAI_AGAIN
+3325 http fetch GET https://registry.npmjs.org/@types/babel__traverse/-/babel__traverse-7.28.0.tgz attempt 3 failed with EAI_AGAIN
+3326 http fetch GET https://registry.npmjs.org/@types/babel__template/-/babel__template-7.4.4.tgz attempt 3 failed with EAI_AGAIN
+3327 http fetch GET https://registry.npmjs.org/@types/babel__generator/-/babel__generator-7.27.0.tgz attempt 3 failed with EAI_AGAIN
+3328 http fetch GET https://registry.npmjs.org/@types/babel__core/-/babel__core-7.20.5.tgz attempt 3 failed with EAI_AGAIN
+3329 http fetch GET https://registry.npmjs.org/@ts-morph/common/-/common-0.27.0.tgz attempt 3 failed with EAI_AGAIN
+3330 http fetch GET https://registry.npmjs.org/@tauri-apps/cli-linux-x64-musl/-/cli-linux-x64-musl-2.11.4.tgz attempt 3 failed with EAI_AGAIN
+3331 verbose reify failed optional dependency /home/enamakel/work/workflow-opencompany/opencompany/worktrees/issue-1317/frontend/node_modules/@tauri-apps/cli-linux-x64-musl
+3332 silly reify mark deleted [
+3332 silly reify   '/home/enamakel/work/workflow-opencompany/opencompany/worktrees/issue-1317/frontend/node_modules/@tauri-apps/cli-linux-x64-musl'
+3332 silly reify ]
+3333 http fetch GET https://registry.npmjs.org/@tauri-apps/cli-linux-x64-gnu/-/cli-linux-x64-gnu-2.11.4.tgz attempt 3 failed with EAI_AGAIN
+3334 verbose reify failed optional dependency /home/enamakel/work/workflow-opencompany/opencompany/worktrees/issue-1317/frontend/node_modules/@tauri-apps/cli-linux-x64-gnu
+3335 silly reify mark deleted [
+3335 silly reify   '/home/enamakel/work/workflow-opencompany/opencompany/worktrees/issue-1317/frontend/node_modules/@tauri-apps/cli-linux-x64-gnu'
+3335 silly reify ]
+3336 http fetch GET https://registry.npmjs.org/@tauri-apps/cli/-/cli-2.11.4.tgz attempt 3 failed with EAI_AGAIN
+3337 http fetch GET https://registry.npmjs.org/@tauri-apps/api/-/api-2.11.1.tgz attempt 3 failed with EAI_AGAIN
+3338 http fetch GET https://registry.npmjs.org/@tailwindcss/vite/-/vite-4.3.2.tgz attempt 3 failed with EAI_AGAIN
+3339 http fetch GET https://registry.npmjs.org/@tailwindcss/typography/-/typography-0.5.20.tgz attempt 3 failed with EAI_AGAIN
+3340 http fetch GET https://registry.npmjs.org/@tailwindcss/oxide-linux-x64-musl/-/oxide-linux-x64-musl-4.3.2.tgz attempt 3 failed with EAI_AGAIN
+3341 verbose reify failed optional dependency /home/enamakel/work/workflow-opencompany/opencompany/worktrees/issue-1317/frontend/node_modules/@tailwindcss/oxide-linux-x64-musl
+3342 silly reify mark deleted [
+3342 silly reify   '/home/enamakel/work/workflow-opencompany/opencompany/worktrees/issue-1317/frontend/node_modules/@tailwindcss/oxide-linux-x64-musl'
+3342 silly reify ]
+3343 http fetch GET https://registry.npmjs.org/@tailwindcss/oxide-linux-x64-gnu/-/oxide-linux-x64-gnu-4.3.2.tgz attempt 3 failed with EAI_AGAIN
+3344 verbose reify failed optional dependency /home/enamakel/work/workflow-opencompany/opencompany/worktrees/issue-1317/frontend/node_modules/@tailwindcss/oxide-linux-x64-gnu
+3345 silly reify mark deleted [
+3345 silly reify   '/home/enamakel/work/workflow-opencompany/opencompany/worktrees/issue-1317/frontend/node_modules/@tailwindcss/oxide-linux-x64-gnu'
+3345 silly reify ]
+3346 http fetch GET https://registry.npmjs.org/@tailwindcss/oxide/-/oxide-4.3.2.tgz attempt 3 failed with EAI_AGAIN
+3347 http fetch GET https://registry.npmjs.org/@tailwindcss/node/-/node-4.3.2.tgz attempt 3 failed with EAI_AGAIN
+3348 http fetch GET https://registry.npmjs.org/@standard-schema/utils/-/utils-0.3.0.tgz attempt 3 failed with EAI_AGAIN
+3349 http fetch GET https://registry.npmjs.org/@standard-schema/spec/-/spec-1.1.0.tgz attempt 3 failed with EAI_AGAIN
+3350 http fetch GET https://registry.npmjs.org/@sindresorhus/merge-streams/-/merge-streams-4.0.0.tgz attempt 3 failed with EAI_AGAIN
+3351 http fetch GET https://registry.npmjs.org/@sec-ant/readable-stream/-/readable-stream-0.4.1.tgz attempt 3 failed with EAI_AGAIN
+3352 http fetch GET https://registry.npmjs.org/@rollup/rollup-linux-x64-musl/-/rollup-linux-x64-musl-4.62.2.tgz attempt 3 failed with EAI_AGAIN
+3353 verbose reify failed optional dependency /home/enamakel/work/workflow-opencompany/opencompany/worktrees/issue-1317/frontend/node_modules/@rollup/rollup-linux-x64-musl
+3354 silly reify mark deleted [
+3354 silly reify   '/home/enamakel/work/workflow-opencompany/opencompany/worktrees/issue-1317/frontend/node_modules/@rollup/rollup-linux-x64-musl'
+3354 silly reify ]
+3355 http fetch GET https://registry.npmjs.org/@rollup/rollup-linux-x64-gnu/-/rollup-linux-x64-gnu-4.62.2.tgz attempt 3 failed with EAI_AGAIN
+3356 verbose reify failed optional dependency /home/enamakel/work/workflow-opencompany/opencompany/worktrees/issue-1317/frontend/node_modules/@rollup/rollup-linux-x64-gnu
+3357 silly reify mark deleted [
+3357 silly reify   '/home/enamakel/work/workflow-opencompany/opencompany/worktrees/issue-1317/frontend/node_modules/@rollup/rollup-linux-x64-gnu'
+3357 silly reify ]
+3358 http fetch GET https://registry.npmjs.org/@rolldown/pluginutils/-/pluginutils-1.0.0-beta.27.tgz attempt 3 failed with EAI_AGAIN
+3359 http fetch GET https://registry.npmjs.org/@reduxjs/toolkit/-/toolkit-2.12.0.tgz attempt 3 failed with EAI_AGAIN
+3360 http fetch GET https://registry.npmjs.org/@radix-ui/rect/-/rect-1.1.3.tgz attempt 3 failed with EAI_AGAIN
+3361 http fetch GET https://registry.npmjs.org/@radix-ui/react-visually-hidden/-/react-visually-hidden-1.2.11.tgz attempt 3 failed with EAI_AGAIN
+3362 http fetch GET https://registry.npmjs.org/@radix-ui/react-use-size/-/react-use-size-1.1.4.tgz attempt 3 failed with EAI_AGAIN
+3363 http fetch GET https://registry.npmjs.org/@radix-ui/react-use-rect/-/react-use-rect-1.1.4.tgz attempt 3 failed with EAI_AGAIN
+3364 http fetch GET https://registry.npmjs.org/@radix-ui/react-use-previous/-/react-use-previous-1.1.4.tgz attempt 3 failed with EAI_AGAIN
+3365 http fetch GET https://registry.npmjs.org/@radix-ui/react-use-layout-effect/-/react-use-layout-effect-1.1.4.tgz attempt 3 failed with EAI_AGAIN
+3366 http fetch GET https://registry.npmjs.org/@radix-ui/react-use-is-hydrated/-/react-use-is-hydrated-0.1.3.tgz attempt 3 failed with EAI_AGAIN
+3367 http fetch GET https://registry.npmjs.org/@radix-ui/react-use-escape-keydown/-/react-use-escape-keydown-1.1.5.tgz attempt 3 failed with EAI_AGAIN
+3368 http fetch GET https://registry.npmjs.org/@radix-ui/react-use-effect-event/-/react-use-effect-event-0.0.5.tgz attempt 3 failed with EAI_AGAIN
+3369 http fetch GET https://registry.npmjs.org/@radix-ui/react-use-controllable-state/-/react-use-controllable-state-1.2.6.tgz attempt 3 failed with EAI_AGAIN
+3370 http fetch GET https://registry.npmjs.org/@radix-ui/react-use-callback-ref/-/react-use-callback-ref-1.1.4.tgz attempt 3 failed with EAI_AGAIN
+3371 http fetch GET https://registry.npmjs.org/@radix-ui/react-tooltip/-/react-tooltip-1.2.16.tgz attempt 3 failed with EAI_AGAIN
+3372 http fetch GET https://registry.npmjs.org/@radix-ui/react-toolbar/-/react-toolbar-1.1.19.tgz attempt 3 failed with EAI_AGAIN
+3373 http fetch GET https://registry.npmjs.org/@radix-ui/react-toggle-group/-/react-toggle-group-1.1.19.tgz attempt 3 failed with EAI_AGAIN
+3374 http fetch GET https://registry.npmjs.org/@radix-ui/react-toggle/-/react-toggle-1.1.18.tgz attempt 3 failed with EAI_AGAIN
+3375 http fetch GET https://registry.npmjs.org/@radix-ui/react-toast/-/react-toast-1.2.23.tgz attempt 3 failed with EAI_AGAIN
+3376 http fetch GET https://registry.npmjs.org/@radix-ui/react-tabs/-/react-tabs-1.1.21.tgz attempt 3 failed with EAI_AGAIN
+3377 http fetch GET https://registry.npmjs.org/@radix-ui/react-slot/-/react-slot-1.3.3.tgz attempt 3 failed with EAI_AGAIN
+3378 http fetch GET https://registry.npmjs.org/@radix-ui/react-switch/-/react-switch-1.3.7.tgz attempt 3 failed with EAI_AGAIN
+3379 http fetch GET https://registry.npmjs.org/@radix-ui/react-slider/-/react-slider-1.4.7.tgz attempt 3 failed with EAI_AGAIN
+3380 http fetch GET https://registry.npmjs.org/@radix-ui/react-scroll-area/-/react-scroll-area-1.2.18.tgz attempt 3 failed with EAI_AGAIN
+3381 http fetch GET https://registry.npmjs.org/@radix-ui/react-separator/-/react-separator-1.1.15.tgz attempt 3 failed with EAI_AGAIN
+3382 http fetch GET https://registry.npmjs.org/@radix-ui/react-select/-/react-select-2.3.7.tgz attempt 3 failed with EAI_AGAIN
+3383 http fetch GET https://registry.npmjs.org/@radix-ui/react-roving-focus/-/react-roving-focus-1.1.19.tgz attempt 3 failed with EAI_AGAIN
+3384 http fetch GET https://registry.npmjs.org/@radix-ui/react-radio-group/-/react-radio-group-1.4.7.tgz attempt 3 failed with EAI_AGAIN
+3385 http fetch GET https://registry.npmjs.org/@radix-ui/react-progress/-/react-progress-1.1.16.tgz attempt 3 failed with EAI_AGAIN
+3386 http fetch GET https://registry.npmjs.org/@radix-ui/react-primitive/-/react-primitive-2.1.10.tgz attempt 3 failed with EAI_AGAIN
+3387 http fetch GET https://registry.npmjs.org/@radix-ui/react-portal/-/react-portal-1.1.17.tgz attempt 3 failed with EAI_AGAIN
+3388 http fetch GET https://registry.npmjs.org/@radix-ui/react-presence/-/react-presence-1.1.10.tgz attempt 3 failed with EAI_AGAIN
+3389 http fetch GET https://registry.npmjs.org/@radix-ui/react-popper/-/react-popper-1.3.7.tgz attempt 3 failed with EAI_AGAIN
+3390 http fetch GET https://registry.npmjs.org/@radix-ui/react-popover/-/react-popover-1.1.23.tgz attempt 3 failed with EAI_AGAIN
+3391 http fetch GET https://registry.npmjs.org/@radix-ui/react-password-toggle-field/-/react-password-toggle-field-0.1.11.tgz attempt 3 failed with EAI_AGAIN
+3392 http fetch GET https://registry.npmjs.org/@radix-ui/react-navigation-menu/-/react-navigation-menu-1.2.22.tgz attempt 3 failed with EAI_AGAIN
+3393 http fetch GET https://registry.npmjs.org/@radix-ui/react-one-time-password-field/-/react-one-time-password-field-0.1.16.tgz attempt 3 failed with EAI_AGAIN
+3394 http fetch GET https://registry.npmjs.org/@radix-ui/react-menubar/-/react-menubar-1.1.24.tgz attempt 3 failed with EAI_AGAIN
+3395 http fetch GET https://registry.npmjs.org/@radix-ui/react-menu/-/react-menu-2.1.24.tgz attempt 3 failed with EAI_AGAIN
+3396 http fetch GET https://registry.npmjs.org/@radix-ui/react-label/-/react-label-2.1.15.tgz attempt 3 failed with EAI_AGAIN
+3397 http fetch GET https://registry.npmjs.org/@radix-ui/react-id/-/react-id-1.1.4.tgz attempt 3 failed with EAI_AGAIN
+3398 http fetch GET https://registry.npmjs.org/@radix-ui/react-hover-card/-/react-hover-card-1.1.23.tgz attempt 3 failed with EAI_AGAIN
+3399 http fetch GET https://registry.npmjs.org/@radix-ui/react-form/-/react-form-0.1.16.tgz attempt 3 failed with EAI_AGAIN
+3400 http fetch GET https://registry.npmjs.org/@radix-ui/react-focus-scope/-/react-focus-scope-1.1.16.tgz attempt 3 failed with EAI_AGAIN
+3401 http fetch GET https://registry.npmjs.org/@radix-ui/react-focus-guards/-/react-focus-guards-1.1.6.tgz attempt 3 failed with EAI_AGAIN
+3402 http fetch GET https://registry.npmjs.org/@radix-ui/react-dropdown-menu/-/react-dropdown-menu-2.1.24.tgz attempt 3 failed with EAI_AGAIN
+3403 http fetch GET https://registry.npmjs.org/@radix-ui/react-dismissable-layer/-/react-dismissable-layer-1.1.19.tgz attempt 3 failed with EAI_AGAIN
+3404 http fetch GET https://registry.npmjs.org/@radix-ui/react-direction/-/react-direction-1.1.4.tgz attempt 3 failed with EAI_AGAIN
+3405 http fetch GET https://registry.npmjs.org/@radix-ui/react-dialog/-/react-dialog-1.1.23.tgz attempt 3 failed with EAI_AGAIN
+3406 http fetch GET https://registry.npmjs.org/@radix-ui/react-context-menu/-/react-context-menu-2.3.7.tgz attempt 3 failed with EAI_AGAIN
+3407 http fetch GET https://registry.npmjs.org/@radix-ui/react-compose-refs/-/react-compose-refs-1.1.5.tgz attempt 3 failed with EAI_AGAIN
+3408 http fetch GET https://registry.npmjs.org/@radix-ui/react-context/-/react-context-1.2.2.tgz attempt 3 failed with EAI_AGAIN
+3409 http fetch GET https://registry.npmjs.org/@radix-ui/react-collection/-/react-collection-1.1.15.tgz attempt 3 failed with EAI_AGAIN
+3410 http fetch GET https://registry.npmjs.org/@radix-ui/react-collapsible/-/react-collapsible-1.1.20.tgz attempt 3 failed with EAI_AGAIN
+3411 http fetch GET https://registry.npmjs.org/@radix-ui/react-checkbox/-/react-checkbox-1.3.11.tgz attempt 3 failed with EAI_AGAIN
+3412 http fetch GET https://registry.npmjs.org/@radix-ui/react-avatar/-/react-avatar-1.2.6.tgz attempt 3 failed with EAI_AGAIN
+3413 http fetch GET https://registry.npmjs.org/@radix-ui/react-aspect-ratio/-/react-aspect-ratio-1.1.15.tgz attempt 3 failed with EAI_AGAIN
+3414 http fetch GET https://registry.npmjs.org/@radix-ui/react-arrow/-/react-arrow-1.1.15.tgz attempt 3 failed with EAI_AGAIN
+3415 http fetch GET https://registry.npmjs.org/@radix-ui/react-alert-dialog/-/react-alert-dialog-1.1.23.tgz attempt 3 failed with EAI_AGAIN
+3416 http fetch GET https://registry.npmjs.org/@radix-ui/react-accordion/-/react-accordion-1.2.20.tgz attempt 3 failed with EAI_AGAIN
+3417 http fetch GET https://registry.npmjs.org/@radix-ui/react-accessible-icon/-/react-accessible-icon-1.1.15.tgz attempt 3 failed with EAI_AGAIN
+3418 http fetch GET https://registry.npmjs.org/@radix-ui/primitive/-/primitive-1.1.7.tgz attempt 3 failed with EAI_AGAIN
+3419 http fetch GET https://registry.npmjs.org/@radix-ui/number/-/number-1.1.3.tgz attempt 3 failed with EAI_AGAIN
+3420 http fetch GET https://registry.npmjs.org/@playwright/test/-/test-1.61.1.tgz attempt 3 failed with EAI_AGAIN
+3421 http fetch GET https://registry.npmjs.org/@nodelib/fs.walk/-/fs.walk-1.2.8.tgz attempt 3 failed with EAI_AGAIN
+3422 http fetch GET https://registry.npmjs.org/@nodelib/fs.stat/-/fs.stat-2.0.5.tgz attempt 3 failed with EAI_AGAIN
+3423 http fetch GET https://registry.npmjs.org/@nodelib/fs.scandir/-/fs.scandir-2.1.5.tgz attempt 3 failed with EAI_AGAIN
+3424 http fetch GET https://registry.npmjs.org/@modelcontextprotocol/sdk/-/sdk-1.29.0.tgz attempt 3 failed with EAI_AGAIN
+3425 http fetch GET https://registry.npmjs.org/@jridgewell/trace-mapping/-/trace-mapping-0.3.31.tgz attempt 3 failed with EAI_AGAIN
+3426 http fetch GET https://registry.npmjs.org/@jridgewell/sourcemap-codec/-/sourcemap-codec-1.5.5.tgz attempt 3 failed with EAI_AGAIN
+3427 http fetch GET https://registry.npmjs.org/@jridgewell/resolve-uri/-/resolve-uri-3.1.2.tgz attempt 3 failed with EAI_AGAIN
+3428 http fetch GET https://registry.npmjs.org/@jridgewell/remapping/-/remapping-2.3.5.tgz attempt 3 failed with EAI_AGAIN
+3429 http fetch GET https://registry.npmjs.org/@jridgewell/gen-mapping/-/gen-mapping-0.3.13.tgz attempt 3 failed with EAI_AGAIN
+3430 http fetch GET https://registry.npmjs.org/@gilbarbara/types/-/types-0.2.2.tgz attempt 3 failed with EAI_AGAIN
+3431 http fetch GET https://registry.npmjs.org/@gilbarbara/hooks/-/hooks-0.11.0.tgz attempt 3 failed with EAI_AGAIN
+3432 http fetch GET https://registry.npmjs.org/@gilbarbara/deep-equal/-/deep-equal-0.4.1.tgz attempt 3 failed with EAI_AGAIN
+3433 http fetch GET https://registry.npmjs.org/@hono/node-server/-/node-server-1.19.14.tgz attempt 3 failed with EAI_AGAIN
+3434 http fetch GET https://registry.npmjs.org/@fontsource-variable/geist-mono/-/geist-mono-5.3.0.tgz attempt 3 failed with EAI_AGAIN
+3435 http fetch GET https://registry.npmjs.org/@fontsource-variable/geist/-/geist-5.2.9.tgz attempt 3 failed with EAI_AGAIN
+3436 http fetch GET https://registry.npmjs.org/@floating-ui/utils/-/utils-0.2.12.tgz attempt 3 failed with EAI_AGAIN
+3437 http fetch GET https://registry.npmjs.org/@floating-ui/react-dom/-/react-dom-2.1.9.tgz attempt 3 failed with EAI_AGAIN
+3438 http fetch GET https://registry.npmjs.org/@floating-ui/dom/-/dom-1.8.0.tgz attempt 3 failed with EAI_AGAIN
+3439 http fetch GET https://registry.npmjs.org/@floating-ui/core/-/core-1.8.0.tgz attempt 3 failed with EAI_AGAIN
+3440 http fetch GET https://registry.npmjs.org/@fastify/deepmerge/-/deepmerge-3.2.1.tgz attempt 3 failed with EAI_AGAIN
+3441 http fetch GET https://registry.npmjs.org/@esbuild/linux-x64/-/linux-x64-0.21.5.tgz attempt 3 failed with EAI_AGAIN
+3442 verbose reify failed optional dependency /home/enamakel/work/workflow-opencompany/opencompany/worktrees/issue-1317/frontend/node_modules/@esbuild/linux-x64
+3443 silly reify mark deleted [
+3443 silly reify   '/home/enamakel/work/workflow-opencompany/opencompany/worktrees/issue-1317/frontend/node_modules/@esbuild/linux-x64'
+3443 silly reify ]
+3444 http fetch GET https://registry.npmjs.org/@dotenvx/primitives/-/primitives-0.8.0.tgz attempt 3 failed with EAI_AGAIN
+3445 http fetch GET https://registry.npmjs.org/@dotenvx/dotenvx/-/dotenvx-1.75.1.tgz attempt 3 failed with EAI_AGAIN
+3446 http fetch GET https://registry.npmjs.org/@csstools/css-tokenizer/-/css-tokenizer-4.0.0.tgz attempt 3 failed with EAI_AGAIN
+3447 http fetch GET https://registry.npmjs.org/@csstools/css-syntax-patches-for-csstree/-/css-syntax-patches-for-csstree-1.1.7.tgz attempt 3 failed with EAI_AGAIN
+3448 http fetch GET https://registry.npmjs.org/@csstools/css-parser-algorithms/-/css-parser-algorithms-4.0.0.tgz attempt 3 failed with EAI_AGAIN
+3449 http fetch GET https://registry.npmjs.org/@csstools/css-color-parser/-/css-color-parser-4.1.10.tgz attempt 3 failed with EAI_AGAIN
+3450 http fetch GET https://registry.npmjs.org/@csstools/css-calc/-/css-calc-3.3.0.tgz attempt 3 failed with EAI_AGAIN
+3451 http fetch GET https://registry.npmjs.org/@csstools/color-helpers/-/color-helpers-6.1.0.tgz attempt 3 failed with EAI_AGAIN
+3452 http fetch GET https://registry.npmjs.org/@base-ui/utils/-/utils-0.3.1.tgz attempt 3 failed with EAI_AGAIN
+3453 http fetch GET https://registry.npmjs.org/@base-ui/react/-/react-1.6.0.tgz attempt 3 failed with EAI_AGAIN
+3454 http fetch GET https://registry.npmjs.org/@babel/types/-/types-7.29.7.tgz attempt 3 failed with EAI_AGAIN
+3455 http fetch GET https://registry.npmjs.org/@babel/traverse/-/traverse-7.29.7.tgz attempt 3 failed with EAI_AGAIN
+3456 http fetch GET https://registry.npmjs.org/@babel/template/-/template-7.29.7.tgz attempt 3 failed with EAI_AGAIN
+3457 http fetch GET https://registry.npmjs.org/@babel/runtime/-/runtime-7.29.7.tgz attempt 3 failed with EAI_AGAIN
+3458 http fetch GET https://registry.npmjs.org/@babel/preset-typescript/-/preset-typescript-7.29.7.tgz attempt 3 failed with EAI_AGAIN
+3459 http fetch GET https://registry.npmjs.org/@babel/plugin-transform-typescript/-/plugin-transform-typescript-7.29.7.tgz attempt 3 failed with EAI_AGAIN
+3460 http fetch GET https://registry.npmjs.org/@babel/plugin-transform-react-jsx-source/-/plugin-transform-react-jsx-source-7.29.7.tgz attempt 3 failed with EAI_AGAIN
+3461 http fetch GET https://registry.npmjs.org/@babel/plugin-transform-react-jsx-self/-/plugin-transform-react-jsx-self-7.29.7.tgz attempt 3 failed with EAI_AGAIN
+3462 http fetch GET https://registry.npmjs.org/@babel/plugin-transform-modules-commonjs/-/plugin-transform-modules-commonjs-7.29.7.tgz attempt 3 failed with EAI_AGAIN
+3463 http fetch GET https://registry.npmjs.org/@babel/plugin-syntax-typescript/-/plugin-syntax-typescript-7.29.7.tgz attempt 3 failed with EAI_AGAIN
+3464 http fetch GET https://registry.npmjs.org/@babel/plugin-syntax-jsx/-/plugin-syntax-jsx-7.29.7.tgz attempt 3 failed with EAI_AGAIN
+3465 http fetch GET https://registry.npmjs.org/@babel/parser/-/parser-7.29.7.tgz attempt 3 failed with EAI_AGAIN
+3466 http fetch GET https://registry.npmjs.org/@babel/helpers/-/helpers-7.29.7.tgz attempt 3 failed with EAI_AGAIN
+3467 http fetch GET https://registry.npmjs.org/@babel/helper-validator-option/-/helper-validator-option-7.29.7.tgz attempt 3 failed with EAI_AGAIN
+3468 http fetch GET https://registry.npmjs.org/@babel/helper-validator-identifier/-/helper-validator-identifier-7.29.7.tgz attempt 3 failed with EAI_AGAIN
+3469 http fetch GET https://registry.npmjs.org/@babel/helper-string-parser/-/helper-string-parser-7.29.7.tgz attempt 3 failed with EAI_AGAIN
+3470 http fetch GET https://registry.npmjs.org/@babel/helper-skip-transparent-expression-wrappers/-/helper-skip-transparent-expression-wrappers-7.29.7.tgz attempt 3 failed with EAI_AGAIN
+3471 http fetch GET https://registry.npmjs.org/@babel/helper-replace-supers/-/helper-replace-supers-7.29.7.tgz attempt 3 failed with EAI_AGAIN
+3472 http fetch GET https://registry.npmjs.org/@babel/helper-plugin-utils/-/helper-plugin-utils-7.29.7.tgz attempt 3 failed with EAI_AGAIN
+3473 http fetch GET https://registry.npmjs.org/@babel/helper-optimise-call-expression/-/helper-optimise-call-expression-7.29.7.tgz attempt 3 failed with EAI_AGAIN
+3474 http fetch GET https://registry.npmjs.org/@babel/helper-module-transforms/-/helper-module-transforms-7.29.7.tgz attempt 3 failed with EAI_AGAIN
+3475 http fetch GET https://registry.npmjs.org/@babel/helper-module-imports/-/helper-module-imports-7.29.7.tgz attempt 3 failed with EAI_AGAIN
+3476 http fetch GET https://registry.npmjs.org/@babel/helper-member-expression-to-functions/-/helper-member-expression-to-functions-7.29.7.tgz attempt 3 failed with EAI_AGAIN
+3477 http fetch GET https://registry.npmjs.org/@babel/helper-globals/-/helper-globals-7.29.7.tgz attempt 3 failed with EAI_AGAIN
+3478 http fetch GET https://registry.npmjs.org/@babel/helper-create-class-features-plugin/-/helper-create-class-features-plugin-7.29.7.tgz attempt 3 failed with EAI_AGAIN
+3479 http fetch GET https://registry.npmjs.org/@babel/helper-compilation-targets/-/helper-compilation-targets-7.29.7.tgz attempt 3 failed with EAI_AGAIN
+3480 http fetch GET https://registry.npmjs.org/@babel/helper-annotate-as-pure/-/helper-annotate-as-pure-7.29.7.tgz attempt 3 failed with EAI_AGAIN
+3481 http fetch GET https://registry.npmjs.org/@babel/generator/-/generator-7.29.7.tgz attempt 3 failed with EAI_AGAIN
+3482 http fetch GET https://registry.npmjs.org/@babel/core/-/core-7.29.7.tgz attempt 3 failed with EAI_AGAIN
+3483 http fetch GET https://registry.npmjs.org/@babel/compat-data/-/compat-data-7.29.7.tgz attempt 3 failed with EAI_AGAIN
+3484 http fetch GET https://registry.npmjs.org/@babel/code-frame/-/code-frame-7.29.7.tgz attempt 3 failed with EAI_AGAIN
+3485 http fetch GET https://registry.npmjs.org/@assistant-ui/tap/-/tap-0.9.14.tgz attempt 3 failed with EAI_AGAIN
+3486 http fetch GET https://registry.npmjs.org/@assistant-ui/store/-/store-0.3.10.tgz attempt 3 failed with EAI_AGAIN
+3487 http fetch GET https://registry.npmjs.org/@assistant-ui/react/-/react-0.15.16.tgz attempt 3 failed with EAI_AGAIN
+3488 http fetch GET https://registry.npmjs.org/@asamuzakjp/nwsapi/-/nwsapi-2.3.9.tgz attempt 3 failed with EAI_AGAIN
+3489 http fetch GET https://registry.npmjs.org/@asamuzakjp/dom-selector/-/dom-selector-6.8.1.tgz attempt 3 failed with EAI_AGAIN
+3490 http fetch GET https://registry.npmjs.org/@asamuzakjp/css-color/-/css-color-4.1.2.tgz attempt 3 failed with EAI_AGAIN
+3491 http fetch GET https://registry.npmjs.org/content-type/-/content-type-2.0.0.tgz attempt 3 failed with EAI_AGAIN
+3492 http fetch GET https://registry.npmjs.org/js-tokens/-/js-tokens-9.0.1.tgz attempt 3 failed with EAI_AGAIN
+3493 http fetch GET https://registry.npmjs.org/iconv-lite/-/iconv-lite-0.6.3.tgz attempt 3 failed with EAI_AGAIN
+3494 http fetch GET https://registry.npmjs.org/is-obj/-/is-obj-3.0.0.tgz attempt 3 failed with EAI_AGAIN
+3495 http fetch GET https://registry.npmjs.org/strip-ansi/-/strip-ansi-7.2.0.tgz attempt 3 failed with EAI_AGAIN
+3496 http fetch GET https://registry.npmjs.org/ansi-regex/-/ansi-regex-6.2.2.tgz attempt 3 failed with EAI_AGAIN
+3497 http fetch GET https://registry.npmjs.org/onetime/-/onetime-7.0.0.tgz attempt 3 failed with EAI_AGAIN
+3498 http fetch GET https://registry.npmjs.org/reselect/-/reselect-5.1.1.tgz attempt 3 failed with EAI_AGAIN
+3499 http fetch GET https://registry.npmjs.org/kleur/-/kleur-3.0.3.tgz attempt 3 failed with EAI_AGAIN
+3500 http fetch GET https://registry.npmjs.org/@types/unist/-/unist-2.0.11.tgz attempt 3 failed with EAI_AGAIN
+3501 http fetch GET https://registry.npmjs.org/strip-ansi/-/strip-ansi-7.2.0.tgz attempt 3 failed with EAI_AGAIN
+3502 http fetch GET https://registry.npmjs.org/ansi-regex/-/ansi-regex-6.2.2.tgz attempt 3 failed with EAI_AGAIN
+3503 http fetch GET https://registry.npmjs.org/mimic-fn/-/mimic-fn-2.1.0.tgz attempt 3 failed with EAI_AGAIN
+3504 http fetch GET https://registry.npmjs.org/path-key/-/path-key-4.0.0.tgz attempt 3 failed with EAI_AGAIN
+3505 http fetch GET https://registry.npmjs.org/picomatch/-/picomatch-2.3.2.tgz attempt 3 failed with EAI_AGAIN
+3506 http fetch GET https://registry.npmjs.org/is-unicode-supported/-/is-unicode-supported-1.3.0.tgz attempt 3 failed with EAI_AGAIN
+3507 http fetch GET https://registry.npmjs.org/whatwg-mimetype/-/whatwg-mimetype-5.0.0.tgz attempt 3 failed with EAI_AGAIN
+3508 http fetch GET https://registry.npmjs.org/lru-cache/-/lru-cache-11.5.2.tgz attempt 3 failed with EAI_AGAIN
+3509 http fetch GET https://registry.npmjs.org/which/-/which-2.0.2.tgz attempt 3 failed with EAI_AGAIN
+3510 http fetch GET https://registry.npmjs.org/isexe/-/isexe-2.0.0.tgz attempt 3 failed with EAI_AGAIN
+3511 http fetch GET https://registry.npmjs.org/semver/-/semver-7.8.5.tgz attempt 3 failed with EAI_AGAIN
+3512 http fetch GET https://registry.npmjs.org/json-schema-typed/-/json-schema-typed-7.0.3.tgz attempt 3 failed with EAI_AGAIN
+3513 http fetch GET https://registry.npmjs.org/ajv-formats/-/ajv-formats-2.1.1.tgz attempt 3 failed with EAI_AGAIN
+3514 http fetch GET https://registry.npmjs.org/nanoid/-/nanoid-6.0.1.tgz attempt 3 failed with EAI_AGAIN
+3515 http fetch GET https://registry.npmjs.org/content-type/-/content-type-2.0.0.tgz attempt 3 failed with EAI_AGAIN
+3516 http fetch GET https://registry.npmjs.org/postcss-selector-parser/-/postcss-selector-parser-6.0.10.tgz attempt 3 failed with EAI_AGAIN
+3517 http fetch GET https://registry.npmjs.org/immer/-/immer-11.1.11.tgz attempt 3 failed with EAI_AGAIN
+3518 http fetch GET https://registry.npmjs.org/strip-final-newline/-/strip-final-newline-2.0.0.tgz attempt 3 failed with EAI_AGAIN
+3519 http fetch GET https://registry.npmjs.org/signal-exit/-/signal-exit-3.0.7.tgz attempt 3 failed with EAI_AGAIN
+3520 http fetch GET https://registry.npmjs.org/open/-/open-8.4.2.tgz attempt 3 failed with EAI_AGAIN
+3521 http fetch GET https://registry.npmjs.org/npm-run-path/-/npm-run-path-4.0.1.tgz attempt 3 failed with EAI_AGAIN
+3522 http fetch GET https://registry.npmjs.org/is-wsl/-/is-wsl-2.2.0.tgz attempt 3 failed with EAI_AGAIN
+3523 http fetch GET https://registry.npmjs.org/is-stream/-/is-stream-2.0.1.tgz attempt 3 failed with EAI_AGAIN
+3524 http fetch GET https://registry.npmjs.org/is-docker/-/is-docker-2.2.1.tgz attempt 3 failed with EAI_AGAIN
+3525 http fetch GET https://registry.npmjs.org/human-signals/-/human-signals-2.1.0.tgz attempt 3 failed with EAI_AGAIN
+3526 http fetch GET https://registry.npmjs.org/get-stream/-/get-stream-6.0.1.tgz attempt 3 failed with EAI_AGAIN
+3527 http fetch GET https://registry.npmjs.org/execa/-/execa-5.1.1.tgz attempt 3 failed with EAI_AGAIN
+3528 http fetch GET https://registry.npmjs.org/define-lazy-prop/-/define-lazy-prop-2.0.0.tgz attempt 3 failed with EAI_AGAIN
+3529 http fetch GET https://registry.npmjs.org/commander/-/commander-11.1.0.tgz attempt 3 failed with EAI_AGAIN
+3530 http fetch GET https://registry.npmjs.org/zustand/-/zustand-5.0.15.tgz attempt 3 failed with EAI_AGAIN
+3531 http fetch GET https://registry.npmjs.org/zod/-/zod-4.4.3.tgz attempt 3 failed with EAI_AGAIN
+3532 http fetch GET https://registry.npmjs.org/nanoid/-/nanoid-6.0.1.tgz attempt 3 failed with EAI_AGAIN
+3533 http fetch GET https://registry.npmjs.org/lru-cache/-/lru-cache-11.5.2.tgz attempt 3 failed with EAI_AGAIN
+3534 http fetch GET https://registry.npmjs.org/lru-cache/-/lru-cache-11.5.2.tgz attempt 3 failed with EAI_AGAIN
+3535 http fetch GET https://registry.npmjs.org/@assistant-ui/core/-/core-0.3.15.tgz attempt 3 failed with EAI_AGAIN
+3536 verbose type system
+3537 verbose stack FetchError: request to https://registry.npmjs.org/zwitch/-/zwitch-2.0.4.tgz failed, reason: getaddrinfo EAI_AGAIN registry.npmjs.org
+3537 verbose stack     at ClientRequest.<anonymous> (/home/enamakel/.nvm/versions/node/v24.18.0/lib/node_modules/npm/node_modules/minipass-fetch/lib/index.js:130:14)
+3537 verbose stack     at ClientRequest.emit (node:events:509:28)
+3537 verbose stack     at emitErrorEvent (node:_http_client:109:11)
+3537 verbose stack     at _destroy (node:_http_client:993:9)
+3537 verbose stack     at onSocketNT (node:_http_client:1014:5)
+3537 verbose stack     at process.processTicksAndRejections (node:internal/process/task_queues:91:21)
+3538 error code EAI_AGAIN
+3539 error syscall getaddrinfo
+3540 error errno EAI_AGAIN
+3541 error request to https://registry.npmjs.org/zwitch/-/zwitch-2.0.4.tgz failed, reason: getaddrinfo EAI_AGAIN registry.npmjs.org
+3542 silly unfinished npm timer reify 1787488975988
+3543 silly unfinished npm timer reify:unpack 1787488976177
+3544 silly unfinished npm timer reifyNode:node_modules/zwitch 1787488976177
+3545 silly unfinished npm timer reifyNode:node_modules/zustand 1787488976177
+3546 silly unfinished npm timer reifyNode:node_modules/zod-to-json-schema 1787488976177
+3547 silly unfinished npm timer reifyNode:node_modules/zod 1787488976177
+3548 silly unfinished npm timer reifyNode:node_modules/yoctocolors 1787488976177
+3549 silly unfinished npm timer reifyNode:node_modules/yocto-spinner 1787488976177
+3550 silly unfinished npm timer reifyNode:node_modules/yallist 1787488976178
+3551 silly unfinished npm timer reifyNode:node_modules/xmlchars 1787488976178
+3552 silly unfinished npm timer reifyNode:node_modules/xml-name-validator 1787488976178
+3553 silly unfinished npm timer reifyNode:node_modules/wsl-utils 1787488976178
+3554 silly unfinished npm timer reifyNode:node_modules/ws 1787488976178
+3555 silly unfinished npm timer reifyNode:node_modules/wrappy 1787488976178
+3556 silly unfinished npm timer reifyNode:node_modules/why-is-node-running 1787488976178
+3557 silly unfinished npm timer reifyNode:node_modules/which 1787488976178
+3558 silly unfinished npm timer reifyNode:node_modules/whatwg-url 1787488976178
+3559 silly unfinished npm timer reifyNode:node_modules/whatwg-mimetype 1787488976178
+3560 silly unfinished npm timer reifyNode:node_modules/whatwg-encoding 1787488976178
+3561 silly unfinished npm timer reifyNode:node_modules/whatwg-encoding/node_modules/iconv-lite 1787488976178
+3562 silly unfinished npm timer reifyNode:node_modules/webidl-conversions 1787488976178
+3563 silly unfinished npm timer reifyNode:node_modules/w3c-xmlserializer 1787488976178
+3564 silly unfinished npm timer reifyNode:node_modules/vitest 1787488976178
+3565 silly unfinished npm timer reifyNode:node_modules/vite-node 1787488976178
+3566 silly unfinished npm timer reifyNode:node_modules/vite 1787488976178
+3567 silly unfinished npm timer reifyNode:node_modules/victory-vendor 1787488976178
+3568 silly unfinished npm timer reifyNode:node_modules/vfile-message 1787488976178
+3569 silly unfinished npm timer reifyNode:node_modules/vfile 1787488976178
+3570 silly unfinished npm timer reifyNode:node_modules/vary 1787488976178
+3571 silly unfinished npm timer reifyNode:node_modules/validate-npm-package-name 1787488976178
+3572 silly unfinished npm timer reifyNode:node_modules/util-deprecate 1787488976178
+3573 silly unfinished npm timer reifyNode:node_modules/use-sync-external-store 1787488976178
+3574 silly unfinished npm timer reifyNode:node_modules/use-sidecar 1787488976178
+3575 silly unfinished npm timer reifyNode:node_modules/use-latest 1787488976178
+3576 silly unfinished npm timer reifyNode:node_modules/use-isomorphic-layout-effect 1787488976178
+3577 silly unfinished npm timer reifyNode:node_modules/use-composed-ref 1787488976178
+3578 silly unfinished npm timer reifyNode:node_modules/use-callback-ref 1787488976178
+3579 silly unfinished npm timer reifyNode:node_modules/update-browserslist-db 1787488976178
+3580 silly unfinished npm timer reifyNode:node_modules/unpipe 1787488976178
+3581 silly unfinished npm timer reifyNode:node_modules/universalify 1787488976178
+3582 silly unfinished npm timer reifyNode:node_modules/unist-util-visit-parents 1787488976178
+3583 silly unfinished npm timer reifyNode:node_modules/unist-util-visit 1787488976178
+3584 silly unfinished npm timer reifyNode:node_modules/unist-util-stringify-position 1787488976178
+3585 silly unfinished npm timer reifyNode:node_modules/unist-util-position 1787488976178
+3586 silly unfinished npm timer reifyNode:node_modules/unist-util-is 1787488976179
+3587 silly unfinished npm timer reifyNode:node_modules/unified 1787488976179
+3588 silly unfinished npm timer reifyNode:node_modules/unicorn-magic 1787488976179
+3589 silly unfinished npm timer reifyNode:node_modules/undici-types 1787488976179
+3590 silly unfinished npm timer reifyNode:node_modules/undici 1787488976179
+3591 silly unfinished npm timer reifyNode:node_modules/typescript 1787488976179
+3592 silly unfinished npm timer reifyNode:node_modules/type-is 1787488976179
+3593 silly unfinished npm timer reifyNode:node_modules/type-is/node_modules/content-type 1787488976179
+3594 silly unfinished npm timer reifyNode:node_modules/type-fest 1787488976179
+3595 silly unfinished npm timer reifyNode:node_modules/tw-animate-css 1787488976179
+3596 silly unfinished npm timer reifyNode:node_modules/tslib 1787488976179
+3597 silly unfinished npm timer reifyNode:node_modules/tsconfig-paths 1787488976179
+3598 silly unfinished npm timer reifyNode:node_modules/ts-morph 1787488976179
+3599 silly unfinished npm timer reifyNode:node_modules/trough 1787488976179
+3600 silly unfinished npm timer reifyNode:node_modules/trim-lines 1787488976179
+3601 silly unfinished npm timer reifyNode:node_modules/tr46 1787488976179
+3602 silly unfinished npm timer reifyNode:node_modules/tough-cookie 1787488976179
+3603 silly unfinished npm timer reifyNode:node_modules/toidentifier 1787488976179
+3604 silly unfinished npm timer reifyNode:node_modules/to-regex-range 1787488976179
+3605 silly unfinished npm timer reifyNode:node_modules/tldts-core 1787488976179
+3606 silly unfinished npm timer reifyNode:node_modules/tldts 1787488976179
+3607 silly unfinished npm timer reifyNode:node_modules/tinyspy 1787488976179
+3608 silly unfinished npm timer reifyNode:node_modules/tinyrainbow 1787488976179
+3609 silly unfinished npm timer reifyNode:node_modules/tinypool 1787488976179
+3610 silly unfinished npm timer reifyNode:node_modules/tinyglobby 1787488976179
+3611 silly unfinished npm timer reifyNode:node_modules/tinyexec 1787488976179
+3612 silly unfinished npm timer reifyNode:node_modules/tinybench 1787488976179
+3613 silly unfinished npm timer reifyNode:node_modules/tiny-invariant 1787488976179
+3614 silly unfinished npm timer reifyNode:node_modules/tapable 1787488976179
+3615 silly unfinished npm timer reifyNode:node_modules/tailwindcss 1787488976179
+3616 silly unfinished npm timer reifyNode:node_modules/tailwind-merge 1787488976179
+3617 silly unfinished npm timer reifyNode:node_modules/systeminformation 1787488976179
+3618 silly unfinished npm timer reifyNode:node_modules/symbol-tree 1787488976179
+3619 silly unfinished npm timer reifyNode:node_modules/style-to-object 1787488976179
+3620 silly unfinished npm timer reifyNode:node_modules/style-to-js 1787488976179
+3621 silly unfinished npm timer reifyNode:node_modules/strip-literal 1787488976179
+3622 silly unfinished npm timer reifyNode:node_modules/strip-literal/node_modules/js-tokens 1787488976179
+3623 silly unfinished npm timer reifyNode:node_modules/strip-final-newline 1787488976179
+3624 silly unfinished npm timer reifyNode:node_modules/strip-bom 1787488976179
+3625 silly unfinished npm timer reifyNode:node_modules/strip-ansi 1787488976179
+3626 silly unfinished npm timer reifyNode:node_modules/stringify-object 1787488976179
+3627 silly unfinished npm timer reifyNode:node_modules/stringify-object/node_modules/is-obj 1787488976179
+3628 silly unfinished npm timer reifyNode:node_modules/stringify-entities 1787488976179
+3629 silly unfinished npm timer reifyNode:node_modules/string-width 1787488976179
+3630 silly unfinished npm timer reifyNode:node_modules/string-width/node_modules/strip-ansi 1787488976179
+3631 silly unfinished npm timer reifyNode:node_modules/string-width/node_modules/ansi-regex 1787488976179
+3632 silly unfinished npm timer reifyNode:node_modules/stdin-discarder 1787488976179
+3633 silly unfinished npm timer reifyNode:node_modules/std-env 1787488976179
+3634 silly unfinished npm timer reifyNode:node_modules/statuses 1787488976179
+3635 silly unfinished npm timer reifyNode:node_modules/stackback 1787488976179
+3636 silly unfinished npm timer reifyNode:node_modules/space-separated-tokens 1787488976179
+3637 silly unfinished npm timer reifyNode:node_modules/source-map-js 1787488976179
+3638 silly unfinished npm timer reifyNode:node_modules/source-map 1787488976179
+3639 silly unfinished npm timer reifyNode:node_modules/sonner 1787488976179
+3640 silly unfinished npm timer reifyNode:node_modules/sisteransi 1787488976179
+3641 silly unfinished npm timer reifyNode:node_modules/signal-exit 1787488976179
+3642 silly unfinished npm timer reifyNode:node_modules/siginfo 1787488976179
+3643 silly unfinished npm timer reifyNode:node_modules/side-channel-weakmap 1787488976179
+3644 silly unfinished npm timer reifyNode:node_modules/side-channel-map 1787488976179
+3645 silly unfinished npm timer reifyNode:node_modules/side-channel-list 1787488976179
+3646 silly unfinished npm timer reifyNode:node_modules/side-channel 1787488976179
+3647 silly unfinished npm timer reifyNode:node_modules/shebang-regex 1787488976179
+3648 silly unfinished npm timer reifyNode:node_modules/shebang-command 1787488976179
+3649 silly unfinished npm timer reifyNode:node_modules/shadcn 1787488976179
+3650 silly unfinished npm timer reifyNode:node_modules/setprototypeof 1787488976179
+3651 silly unfinished npm timer reifyNode:node_modules/serve-static 1787488976179
+3652 silly unfinished npm timer reifyNode:node_modules/send 1787488976179
+3653 silly unfinished npm timer reifyNode:node_modules/semver 1787488976179
+3654 silly unfinished npm timer reifyNode:node_modules/secure-json-parse 1787488976179
+3655 silly unfinished npm timer reifyNode:node_modules/scrollparent 1787488976179
+3656 silly unfinished npm timer reifyNode:node_modules/scroll 1787488976179
+3657 silly unfinished npm timer reifyNode:node_modules/scheduler 1787488976179
+3658 silly unfinished npm timer reifyNode:node_modules/saxes 1787488976179
+3659 silly unfinished npm timer reifyNode:node_modules/safer-buffer 1787488976179
+3660 silly unfinished npm timer reifyNode:node_modules/safe-content-frame 1787488976179
+3661 silly unfinished npm timer reifyNode:node_modules/run-parallel 1787488976179
+3662 silly unfinished npm timer reifyNode:node_modules/run-applescript 1787488976179
+3663 silly unfinished npm timer reifyNode:node_modules/rrweb-cssom 1787488976179
+3664 silly unfinished npm timer reifyNode:node_modules/router 1787488976179
+3665 silly unfinished npm timer reifyNode:node_modules/rollup 1787488976179
+3666 silly unfinished npm timer reifyNode:node_modules/reusify 1787488976179
+3667 silly unfinished npm timer reifyNode:node_modules/restore-cursor 1787488976179
+3668 silly unfinished npm timer reifyNode:node_modules/restore-cursor/node_modules/onetime 1787488976179
+3669 silly unfinished npm timer reifyNode:node_modules/resolve-from 1787488976179
+3670 silly unfinished npm timer reifyNode:node_modules/reselect 1787488976179
+3671 silly unfinished npm timer reifyNode:node_modules/require-from-string 1787488976179
+3672 silly unfinished npm timer reifyNode:node_modules/remark-stringify 1787488976179
+3673 silly unfinished npm timer reifyNode:node_modules/remark-rehype 1787488976179
+3674 silly unfinished npm timer reifyNode:node_modules/remark-parse 1787488976179
+3675 silly unfinished npm timer reifyNode:node_modules/remark-gfm 1787488976179
+3676 silly unfinished npm timer reifyNode:node_modules/redux-thunk 1787488976179
+3677 silly unfinished npm timer reifyNode:node_modules/redux 1787488976179
+3678 silly unfinished npm timer reifyNode:node_modules/recharts 1787488976179
+3679 silly unfinished npm timer reifyNode:node_modules/recharts/node_modules/reselect 1787488976179
+3680 silly unfinished npm timer reifyNode:node_modules/recast 1787488976179
+3681 silly unfinished npm timer reifyNode:node_modules/react-textarea-autosize 1787488976179
+3682 silly unfinished npm timer reifyNode:node_modules/react-style-singleton 1787488976179
+3683 silly unfinished npm timer reifyNode:node_modules/react-remove-scroll-bar 1787488976179
+3684 silly unfinished npm timer reifyNode:node_modules/react-remove-scroll 1787488976179
+3685 silly unfinished npm timer reifyNode:node_modules/react-refresh 1787488976179
+3686 silly unfinished npm timer reifyNode:node_modules/react-redux 1787488976179
+3687 silly unfinished npm timer reifyNode:node_modules/react-markdown 1787488976179
+3688 silly unfinished npm timer reifyNode:node_modules/react-joyride 1787488976179
+3689 silly unfinished npm timer reifyNode:node_modules/react-is 1787488976179
+3690 silly unfinished npm timer reifyNode:node_modules/react-innertext 1787488976179
+3691 silly unfinished npm timer reifyNode:node_modules/react-dom 1787488976179
+3692 silly unfinished npm timer reifyNode:node_modules/react 1787488976180
+3693 silly unfinished npm timer reifyNode:node_modules/raw-body 1787488976180
+3694 silly unfinished npm timer reifyNode:node_modules/range-parser 1787488976180
+3695 silly unfinished npm timer reifyNode:node_modules/radix-ui 1787488976180
+3696 silly unfinished npm timer reifyNode:node_modules/queue-microtask 1787488976180
+3697 silly unfinished npm timer reifyNode:node_modules/qs 1787488976180
+3698 silly unfinished npm timer reifyNode:node_modules/punycode 1787488976180
+3699 silly unfinished npm timer reifyNode:node_modules/proxy-addr 1787488976180
+3700 silly unfinished npm timer reifyNode:node_modules/property-information 1787488976180
+3701 silly unfinished npm timer reifyNode:node_modules/prompts 1787488976180
+3702 silly unfinished npm timer reifyNode:node_modules/prompts/node_modules/kleur 1787488976180
+3703 silly unfinished npm timer reifyNode:node_modules/pretty-ms 1787488976180
+3704 silly unfinished npm timer reifyNode:node_modules/powershell-utils 1787488976180
+3705 silly unfinished npm timer reifyNode:node_modules/postcss-selector-parser 1787488976180
+3706 silly unfinished npm timer reifyNode:node_modules/postcss 1787488976180
+3707 silly unfinished npm timer reifyNode:node_modules/playwright-core 1787488976180
+3708 silly unfinished npm timer reifyNode:node_modules/playwright 1787488976180
+3709 silly unfinished npm timer reifyNode:node_modules/pkg-up 1787488976180
+3710 silly unfinished npm timer reifyNode:node_modules/pkce-challenge 1787488976180
+3711 silly unfinished npm timer reifyNode:node_modules/picomatch 1787488976180
+3712 silly unfinished npm timer reifyNode:node_modules/picocolors 1787488976180
+3713 silly unfinished npm timer reifyNode:node_modules/pathval 1787488976180
+3714 silly unfinished npm timer reifyNode:node_modules/pathe 1787488976180
+3715 silly unfinished npm timer reifyNode:node_modules/path-to-regexp 1787488976180
+3716 silly unfinished npm timer reifyNode:node_modules/path-key 1787488976180
+3717 silly unfinished npm timer reifyNode:node_modules/path-exists 1787488976180
+3718 silly unfinished npm timer reifyNode:node_modules/path-browserify 1787488976180
+3719 silly unfinished npm timer reifyNode:node_modules/parseurl 1787488976180
+3720 silly unfinished npm timer reifyNode:node_modules/parse5 1787488976180
+3721 silly unfinished npm timer reifyNode:node_modules/parse-ms 1787488976180
+3722 silly unfinished npm timer reifyNode:node_modules/parse-json 1787488976180
+3723 silly unfinished npm timer reifyNode:node_modules/parse-entities 1787488976180
+3724 silly unfinished npm timer reifyNode:node_modules/parse-entities/node_modules/@types/unist 1787488976180
+3725 silly unfinished npm timer reifyNode:node_modules/parent-module 1787488976180
+3726 silly unfinished npm timer reifyNode:node_modules/p-try 1787488976180
+3727 silly unfinished npm timer reifyNode:node_modules/p-locate 1787488976180
+3728 silly unfinished npm timer reifyNode:node_modules/p-limit 1787488976180
+3729 silly unfinished npm timer reifyNode:node_modules/ora 1787488976180
+3730 silly unfinished npm timer reifyNode:node_modules/ora/node_modules/strip-ansi 1787488976180
+3731 silly unfinished npm timer reifyNode:node_modules/ora/node_modules/ansi-regex 1787488976180
+3732 silly unfinished npm timer reifyNode:node_modules/open 1787488976180
+3733 silly unfinished npm timer reifyNode:node_modules/onetime 1787488976180
+3734 silly unfinished npm timer reifyNode:node_modules/onetime/node_modules/mimic-fn 1787488976180
+3735 silly unfinished npm timer reifyNode:node_modules/once 1787488976180
+3736 silly unfinished npm timer reifyNode:node_modules/on-finished 1787488976180
+3737 silly unfinished npm timer reifyNode:node_modules/object-treeify 1787488976180
+3738 silly unfinished npm timer reifyNode:node_modules/object-inspect 1787488976180
+3739 silly unfinished npm timer reifyNode:node_modules/object-assign 1787488976180
+3740 silly unfinished npm timer reifyNode:node_modules/npm-run-path 1787488976180
+3741 silly unfinished npm timer reifyNode:node_modules/npm-run-path/node_modules/path-key 1787488976180
+3742 silly unfinished npm timer reifyNode:node_modules/node-releases 1787488976180
+3743 silly unfinished npm timer reifyNode:node_modules/next-themes 1787488976180
+3744 silly unfinished npm timer reifyNode:node_modules/negotiator 1787488976180
+3745 silly unfinished npm timer reifyNode:node_modules/nanoid 1787488976180
+3746 silly unfinished npm timer reifyNode:node_modules/ms 1787488976180
+3747 silly unfinished npm timer reifyNode:node_modules/minimist 1787488976180
+3748 silly unfinished npm timer reifyNode:node_modules/minimatch 1787488976180
+3749 silly unfinished npm timer reifyNode:node_modules/mimic-function 1787488976180
+3750 silly unfinished npm timer reifyNode:node_modules/mimic-fn 1787488976180
+3751 silly unfinished npm timer reifyNode:node_modules/mime-types 1787488976180
+3752 silly unfinished npm timer reifyNode:node_modules/mime-db 1787488976180
+3753 silly unfinished npm timer reifyNode:node_modules/micromatch 1787488976180
+3754 silly unfinished npm timer reifyNode:node_modules/micromatch/node_modules/picomatch 1787488976180
+3755 silly unfinished npm timer reifyNode:node_modules/micromark-util-types 1787488976180
+3756 silly unfinished npm timer reifyNode:node_modules/micromark-util-symbol 1787488976180
+3757 silly unfinished npm timer reifyNode:node_modules/micromark-util-subtokenize 1787488976180
+3758 silly unfinished npm timer reifyNode:node_modules/micromark-util-sanitize-uri 1787488976180
+3759 silly unfinished npm timer reifyNode:node_modules/micromark-util-resolve-all 1787488976180
+3760 silly unfinished npm timer reifyNode:node_modules/micromark-util-normalize-identifier 1787488976180
+3761 silly unfinished npm timer reifyNode:node_modules/micromark-util-html-tag-name 1787488976180
+3762 silly unfinished npm timer reifyNode:node_modules/micromark-util-encode 1787488976180
+3763 silly unfinished npm timer reifyNode:node_modules/micromark-util-decode-string 1787488976180
+3764 silly unfinished npm timer reifyNode:node_modules/micromark-util-decode-numeric-character-reference 1787488976180
+3765 silly unfinished npm timer reifyNode:node_modules/micromark-util-combine-extensions 1787488976180
+3766 silly unfinished npm timer reifyNode:node_modules/micromark-util-classify-character 1787488976180
+3767 silly unfinished npm timer reifyNode:node_modules/micromark-util-chunked 1787488976180
+3768 silly unfinished npm timer reifyNode:node_modules/micromark-util-character 1787488976180
+3769 silly unfinished npm timer reifyNode:node_modules/micromark-factory-whitespace 1787488976180
+3770 silly unfinished npm timer reifyNode:node_modules/micromark-factory-title 1787488976180
+3771 silly unfinished npm timer reifyNode:node_modules/micromark-factory-space 1787488976180
+3772 silly unfinished npm timer reifyNode:node_modules/micromark-factory-label 1787488976180
+3773 silly unfinished npm timer reifyNode:node_modules/micromark-factory-destination 1787488976180
+3774 silly unfinished npm timer reifyNode:node_modules/micromark-extension-gfm-task-list-item 1787488976180
+3775 silly unfinished npm timer reifyNode:node_modules/micromark-extension-gfm-tagfilter 1787488976180
+3776 silly unfinished npm timer reifyNode:node_modules/micromark-extension-gfm-table 1787488976180
+3777 silly unfinished npm timer reifyNode:node_modules/micromark-extension-gfm-strikethrough 1787488976180
+3778 silly unfinished npm timer reifyNode:node_modules/micromark-extension-gfm-footnote 1787488976180
+3779 silly unfinished npm timer reifyNode:node_modules/micromark-extension-gfm-autolink-literal 1787488976180
+3780 silly unfinished npm timer reifyNode:node_modules/micromark-extension-gfm 1787488976180
+3781 silly unfinished npm timer reifyNode:node_modules/micromark-core-commonmark 1787488976180
+3782 silly unfinished npm timer reifyNode:node_modules/micromark 1787488976180
+3783 silly unfinished npm timer reifyNode:node_modules/merge2 1787488976180
+3784 silly unfinished npm timer reifyNode:node_modules/merge-stream 1787488976180
+3785 silly unfinished npm timer reifyNode:node_modules/merge-descriptors 1787488976180
+3786 silly unfinished npm timer reifyNode:node_modules/media-typer 1787488976180
+3787 silly unfinished npm timer reifyNode:node_modules/mdn-data 1787488976180
+3788 silly unfinished npm timer reifyNode:node_modules/mdast-util-to-string 1787488976180
+3789 silly unfinished npm timer reifyNode:node_modules/mdast-util-to-markdown 1787488976180
+3790 silly unfinished npm timer reifyNode:node_modules/mdast-util-to-hast 1787488976180
+3791 silly unfinished npm timer reifyNode:node_modules/mdast-util-phrasing 1787488976180
+3792 silly unfinished npm timer reifyNode:node_modules/mdast-util-mdxjs-esm 1787488976180
+3793 silly unfinished npm timer reifyNode:node_modules/mdast-util-mdx-jsx 1787488976181
+3794 silly unfinished npm timer reifyNode:node_modules/mdast-util-mdx-expression 1787488976181
+3795 silly unfinished npm timer reifyNode:node_modules/mdast-util-gfm-task-list-item 1787488976181
+3796 silly unfinished npm timer reifyNode:node_modules/mdast-util-gfm-table 1787488976181
+3797 silly unfinished npm timer reifyNode:node_modules/mdast-util-gfm-strikethrough 1787488976181
+3798 silly unfinished npm timer reifyNode:node_modules/mdast-util-gfm-footnote 1787488976181
+3799 silly unfinished npm timer reifyNode:node_modules/mdast-util-gfm-autolink-literal 1787488976181
+3800 silly unfinished npm timer reifyNode:node_modules/mdast-util-gfm 1787488976181
+3801 silly unfinished npm timer reifyNode:node_modules/mdast-util-from-markdown 1787488976181
+3802 silly unfinished npm timer reifyNode:node_modules/mdast-util-find-and-replace 1787488976181
+3803 silly unfinished npm timer reifyNode:node_modules/math-intrinsics 1787488976181
+3804 silly unfinished npm timer reifyNode:node_modules/markdown-table 1787488976181
+3805 silly unfinished npm timer reifyNode:node_modules/magic-string 1787488976181
+3806 silly unfinished npm timer reifyNode:node_modules/lucide-react 1787488976181
+3807 silly unfinished npm timer reifyNode:node_modules/lru-cache 1787488976181
+3808 silly unfinished npm timer reifyNode:node_modules/loupe 1787488976181
+3809 silly unfinished npm timer reifyNode:node_modules/loose-envify 1787488976181
+3810 silly unfinished npm timer reifyNode:node_modules/longest-streak 1787488976181
+3811 silly unfinished npm timer reifyNode:node_modules/log-symbols 1787488976181
+3812 silly unfinished npm timer reifyNode:node_modules/log-symbols/node_modules/is-unicode-supported 1787488976181
+3813 silly unfinished npm timer reifyNode:node_modules/locate-path 1787488976181
+3814 silly unfinished npm timer reifyNode:node_modules/lines-and-columns 1787488976181
+3815 silly unfinished npm timer reifyNode:node_modules/lightningcss 1787488976181
+3816 silly unfinished npm timer reifyNode:node_modules/kleur 1787488976181
+3817 silly unfinished npm timer reifyNode:node_modules/jsonfile 1787488976181
+3818 silly unfinished npm timer reifyNode:node_modules/json5 1787488976181
+3819 silly unfinished npm timer reifyNode:node_modules/json-schema-typed 1787488976181
+3820 silly unfinished npm timer reifyNode:node_modules/json-schema-traverse 1787488976181
+3821 silly unfinished npm timer reifyNode:node_modules/json-parse-even-better-errors 1787488976182
+3822 silly unfinished npm timer reifyNode:node_modules/jsesc 1787488976182
+3823 silly unfinished npm timer reifyNode:node_modules/jsdom 1787488976182
+3824 silly unfinished npm timer reifyNode:node_modules/js-yaml 1787488976182
+3825 silly unfinished npm timer reifyNode:node_modules/js-tokens 1787488976182
+3826 silly unfinished npm timer reifyNode:node_modules/jose 1787488976182
+3827 silly unfinished npm timer reifyNode:node_modules/jiti 1787488976182
+3828 silly unfinished npm timer reifyNode:node_modules/isexe 1787488976182
+3829 silly unfinished npm timer reifyNode:node_modules/is-wsl 1787488976182
+3830 silly unfinished npm timer reifyNode:node_modules/is-unicode-supported 1787488976182
+3831 silly unfinished npm timer reifyNode:node_modules/is-stream 1787488976182
+3832 silly unfinished npm timer reifyNode:node_modules/is-regexp 1787488976182
+3833 silly unfinished npm timer reifyNode:node_modules/is-promise 1787488976182
+3834 silly unfinished npm timer reifyNode:node_modules/is-potential-custom-element-name 1787488976182
+3835 silly unfinished npm timer reifyNode:node_modules/is-plain-obj 1787488976182
+3836 silly unfinished npm timer reifyNode:node_modules/is-obj 1787488976182
+3837 silly unfinished npm timer reifyNode:node_modules/is-number 1787488976182
+3838 silly unfinished npm timer reifyNode:node_modules/is-lite 1787488976182
+3839 silly unfinished npm timer reifyNode:node_modules/is-interactive 1787488976182
+3840 silly unfinished npm timer reifyNode:node_modules/is-inside-container 1787488976182
+3841 silly unfinished npm timer reifyNode:node_modules/is-in-ssh 1787488976182
+3842 silly unfinished npm timer reifyNode:node_modules/is-hexadecimal 1787488976182
+3843 silly unfinished npm timer reifyNode:node_modules/is-glob 1787488976182
+3844 silly unfinished npm timer reifyNode:node_modules/is-extglob 1787488976182
+3845 silly unfinished npm timer reifyNode:node_modules/is-docker 1787488976182
+3846 silly unfinished npm timer reifyNode:node_modules/is-decimal 1787488976182
+3847 silly unfinished npm timer reifyNode:node_modules/is-arrayish 1787488976182
+3848 silly unfinished npm timer reifyNode:node_modules/is-alphanumerical 1787488976182
+3849 silly unfinished npm timer reifyNode:node_modules/is-alphabetical 1787488976182
+3850 silly unfinished npm timer reifyNode:node_modules/ipaddr.js 1787488976182
+3851 silly unfinished npm timer reifyNode:node_modules/ip-address 1787488976182
+3852 silly unfinished npm timer reifyNode:node_modules/internmap 1787488976182
+3853 silly unfinished npm timer reifyNode:node_modules/inline-style-parser 1787488976182
+3854 silly unfinished npm timer reifyNode:node_modules/inherits 1787488976182
+3855 silly unfinished npm timer reifyNode:node_modules/import-fresh 1787488976182
+3856 silly unfinished npm timer reifyNode:node_modules/immer 1787488976182
+3857 silly unfinished npm timer reifyNode:node_modules/ignore 1787488976182
+3858 silly unfinished npm timer reifyNode:node_modules/iconv-lite 1787488976182
+3859 silly unfinished npm timer reifyNode:node_modules/human-signals 1787488976182
+3860 silly unfinished npm timer reifyNode:node_modules/https-proxy-agent 1787488976182
+3861 silly unfinished npm timer reifyNode:node_modules/http-proxy-agent 1787488976182
+3862 silly unfinished npm timer reifyNode:node_modules/http-errors 1787488976182
+3863 silly unfinished npm timer reifyNode:node_modules/html-url-attributes 1787488976182
+3864 silly unfinished npm timer reifyNode:node_modules/html-encoding-sniffer 1787488976182
+3865 silly unfinished npm timer reifyNode:node_modules/hono 1787488976182
+3866 silly unfinished npm timer reifyNode:node_modules/hast-util-whitespace 1787488976182
+3867 silly unfinished npm timer reifyNode:node_modules/hast-util-to-jsx-runtime 1787488976182
+3868 silly unfinished npm timer reifyNode:node_modules/hasown 1787488976182
+3869 silly unfinished npm timer reifyNode:node_modules/has-symbols 1787488976182
+3870 silly unfinished npm timer reifyNode:node_modules/graceful-fs 1787488976182
+3871 silly unfinished npm timer reifyNode:node_modules/gopd 1787488976182
+3872 silly unfinished npm timer reifyNode:node_modules/glob-parent 1787488976182
+3873 silly unfinished npm timer reifyNode:node_modules/get-stream 1787488976182
+3874 silly unfinished npm timer reifyNode:node_modules/get-proto 1787488976182
+3875 silly unfinished npm timer reifyNode:node_modules/get-own-enumerable-keys 1787488976182
+3876 silly unfinished npm timer reifyNode:node_modules/get-nonce 1787488976182
+3877 silly unfinished npm timer reifyNode:node_modules/get-intrinsic 1787488976182
+3878 silly unfinished npm timer reifyNode:node_modules/get-east-asian-width 1787488976182
+3879 silly unfinished npm timer reifyNode:node_modules/gensync 1787488976182
+3880 silly unfinished npm timer reifyNode:node_modules/fuzzysort 1787488976182
+3881 silly unfinished npm timer reifyNode:node_modules/function-bind 1787488976182
+3882 silly unfinished npm timer reifyNode:node_modules/fs-extra 1787488976182
+3883 silly unfinished npm timer reifyNode:node_modules/fresh 1787488976182
+3884 silly unfinished npm timer reifyNode:node_modules/forwarded 1787488976182
+3885 silly unfinished npm timer reifyNode:node_modules/find-up 1787488976183
+3886 silly unfinished npm timer reifyNode:node_modules/finalhandler 1787488976183
+3887 silly unfinished npm timer reifyNode:node_modules/fill-range 1787488976183
+3888 silly unfinished npm timer reifyNode:node_modules/figures 1787488976183
+3889 silly unfinished npm timer reifyNode:node_modules/fdir 1787488976183
+3890 silly unfinished npm timer reifyNode:node_modules/fastq 1787488976183
+3891 silly unfinished npm timer reifyNode:node_modules/fast-uri 1787488976183
+3892 silly unfinished npm timer reifyNode:node_modules/fast-glob 1787488976183
+3893 silly unfinished npm timer reifyNode:node_modules/fast-deep-equal 1787488976183
+3894 silly unfinished npm timer reifyNode:node_modules/extend 1787488976183
+3895 silly unfinished npm timer reifyNode:node_modules/express-rate-limit 1787488976183
+3896 silly unfinished npm timer reifyNode:node_modules/express 1787488976183
+3897 silly unfinished npm timer reifyNode:node_modules/expect-type 1787488976183
+3898 silly unfinished npm timer reifyNode:node_modules/execa 1787488976183
+3899 silly unfinished npm timer reifyNode:node_modules/eventsource-parser 1787488976183
+3900 silly unfinished npm timer reifyNode:node_modules/eventsource 1787488976183
+3901 silly unfinished npm timer reifyNode:node_modules/eventemitter3 1787488976183
+3902 silly unfinished npm timer reifyNode:node_modules/etag 1787488976183
+3903 silly unfinished npm timer reifyNode:node_modules/estree-walker 1787488976183
+3904 silly unfinished npm timer reifyNode:node_modules/estree-util-is-identifier-name 1787488976183
+3905 silly unfinished npm timer reifyNode:node_modules/esprima 1787488976183
+3906 silly unfinished npm timer reifyNode:node_modules/escape-string-regexp 1787488976183
+3907 silly unfinished npm timer reifyNode:node_modules/escape-html 1787488976183
+3908 silly unfinished npm timer reifyNode:node_modules/escalade 1787488976183
+3909 silly unfinished npm timer reifyNode:node_modules/esbuild 1787488976183
+3910 silly unfinished npm timer reifyNode:node_modules/es-toolkit 1787488976183
+3911 silly unfinished npm timer reifyNode:node_modules/es-object-atoms 1787488976183
+3912 silly unfinished npm timer reifyNode:node_modules/es-module-lexer 1787488976183
+3913 silly unfinished npm timer reifyNode:node_modules/es-errors 1787488976183
+3914 silly unfinished npm timer reifyNode:node_modules/es-define-property 1787488976183
+3915 silly unfinished npm timer reifyNode:node_modules/error-ex 1787488976183
+3916 silly unfinished npm timer reifyNode:node_modules/env-paths 1787488976183
+3917 silly unfinished npm timer reifyNode:node_modules/entities 1787488976183
+3918 silly unfinished npm timer reifyNode:node_modules/enquirer 1787488976183
+3919 silly unfinished npm timer reifyNode:node_modules/enhanced-resolve 1787488976183
+3920 silly unfinished npm timer reifyNode:node_modules/encodeurl 1787488976183
+3921 silly unfinished npm timer reifyNode:node_modules/emoji-regex 1787488976183
+3922 silly unfinished npm timer reifyNode:node_modules/electron-to-chromium 1787488976183
+3923 silly unfinished npm timer reifyNode:node_modules/ee-first 1787488976183
+3924 silly unfinished npm timer reifyNode:node_modules/dunder-proto 1787488976183
+3925 silly unfinished npm timer reifyNode:node_modules/dotenv 1787488976183
+3926 silly unfinished npm timer reifyNode:node_modules/dot-prop 1787488976183
+3927 silly unfinished npm timer reifyNode:node_modules/diff 1787488976183
+3928 silly unfinished npm timer reifyNode:node_modules/devlop 1787488976183
+3929 silly unfinished npm timer reifyNode:node_modules/detect-node-es 1787488976183
+3930 silly unfinished npm timer reifyNode:node_modules/detect-libc 1787488976183
+3931 silly unfinished npm timer reifyNode:node_modules/dequal 1787488976183
+3932 silly unfinished npm timer reifyNode:node_modules/depd 1787488976183
+3933 silly unfinished npm timer reifyNode:node_modules/define-lazy-prop 1787488976183
+3934 silly unfinished npm timer reifyNode:node_modules/default-browser-id 1787488976183
+3935 silly unfinished npm timer reifyNode:node_modules/default-browser 1787488976183
+3936 silly unfinished npm timer reifyNode:node_modules/deepmerge 1787488976183
+3937 silly unfinished npm timer reifyNode:node_modules/deep-eql 1787488976183
+3938 silly unfinished npm timer reifyNode:node_modules/dedent 1787488976183
+3939 silly unfinished npm timer reifyNode:node_modules/decode-named-character-reference 1787488976183
+3940 silly unfinished npm timer reifyNode:node_modules/decimal.js-light 1787488976183
+3941 silly unfinished npm timer reifyNode:node_modules/decimal.js 1787488976183
+3942 silly unfinished npm timer reifyNode:node_modules/debug 1787488976183
+3943 silly unfinished npm timer reifyNode:node_modules/debounce-fn 1787488976183
+3944 silly unfinished npm timer reifyNode:node_modules/data-urls 1787488976183
+3945 silly unfinished npm timer reifyNode:node_modules/data-urls/node_modules/whatwg-mimetype 1787488976183
+3946 silly unfinished npm timer reifyNode:node_modules/d3-zoom 1787488976183
+3947 silly unfinished npm timer reifyNode:node_modules/d3-transition 1787488976183
+3948 silly unfinished npm timer reifyNode:node_modules/d3-timer 1787488976183
+3949 silly unfinished npm timer reifyNode:node_modules/d3-time-format 1787488976183
+3950 silly unfinished npm timer reifyNode:node_modules/d3-time 1787488976183
+3951 silly unfinished npm timer reifyNode:node_modules/d3-shape 1787488976183
+3952 silly unfinished npm timer reifyNode:node_modules/d3-selection 1787488976183
+3953 silly unfinished npm timer reifyNode:node_modules/d3-scale 1787488976183
+3954 silly unfinished npm timer reifyNode:node_modules/d3-quadtree 1787488976183
+3955 silly unfinished npm timer reifyNode:node_modules/d3-path 1787488976183
+3956 silly unfinished npm timer reifyNode:node_modules/d3-interpolate 1787488976183
+3957 silly unfinished npm timer reifyNode:node_modules/d3-format 1787488976183
+3958 silly unfinished npm timer reifyNode:node_modules/d3-force 1787488976183
+3959 silly unfinished npm timer reifyNode:node_modules/d3-ease 1787488976183
+3960 silly unfinished npm timer reifyNode:node_modules/d3-drag 1787488976183
+3961 silly unfinished npm timer reifyNode:node_modules/d3-dispatch 1787488976183
+3962 silly unfinished npm timer reifyNode:node_modules/d3-color 1787488976183
+3963 silly unfinished npm timer reifyNode:node_modules/d3-array 1787488976183
+3964 silly unfinished npm timer reifyNode:node_modules/csstype 1787488976183
+3965 silly unfinished npm timer reifyNode:node_modules/cssstyle 1787488976183
+3966 silly unfinished npm timer reifyNode:node_modules/cssstyle/node_modules/lru-cache 1787488976183
+3967 silly unfinished npm timer reifyNode:node_modules/cssesc 1787488976183
+3968 silly unfinished npm timer reifyNode:node_modules/css-tree 1787488976183
+3969 silly unfinished npm timer reifyNode:node_modules/cross-spawn 1787488976183
+3970 silly unfinished npm timer reifyNode:node_modules/cross-spawn/node_modules/which 1787488976183
+3971 silly unfinished npm timer reifyNode:node_modules/cross-spawn/node_modules/isexe 1787488976183
+3972 silly unfinished npm timer reifyNode:node_modules/cosmiconfig 1787488976183
+3973 silly unfinished npm timer reifyNode:node_modules/cors 1787488976183
+3974 silly unfinished npm timer reifyNode:node_modules/cookie-signature 1787488976183
+3975 silly unfinished npm timer reifyNode:node_modules/cookie 1787488976183
+3976 silly unfinished npm timer reifyNode:node_modules/convert-source-map 1787488976183
+3977 silly unfinished npm timer reifyNode:node_modules/content-type 1787488976183
+3978 silly unfinished npm timer reifyNode:node_modules/content-disposition 1787488976183
+3979 silly unfinished npm timer reifyNode:node_modules/conf 1787488976183
+3980 silly unfinished npm timer reifyNode:node_modules/conf/node_modules/semver 1787488976183
+3981 silly unfinished npm timer reifyNode:node_modules/conf/node_modules/json-schema-typed 1787488976183
+3982 silly unfinished npm timer reifyNode:node_modules/conf/node_modules/ajv-formats 1787488976183
+3983 silly unfinished npm timer reifyNode:node_modules/commander 1787488976183
+3984 silly unfinished npm timer reifyNode:node_modules/comma-separated-tokens 1787488976183
+3985 silly unfinished npm timer reifyNode:node_modules/code-block-writer 1787488976183
+3986 silly unfinished npm timer reifyNode:node_modules/clsx 1787488976183
+3987 silly unfinished npm timer reifyNode:node_modules/cli-spinners 1787488976183
+3988 silly unfinished npm timer reifyNode:node_modules/cli-cursor 1787488976183
+3989 silly unfinished npm timer reifyNode:node_modules/classcat 1787488976183
+3990 silly unfinished npm timer reifyNode:node_modules/class-variance-authority 1787488976184
+3991 silly unfinished npm timer reifyNode:node_modules/check-error 1787488976184
+3992 silly unfinished npm timer reifyNode:node_modules/character-reference-invalid 1787488976184
+3993 silly unfinished npm timer reifyNode:node_modules/character-entities-legacy 1787488976184
+3994 silly unfinished npm timer reifyNode:node_modules/character-entities-html4 1787488976184
+3995 silly unfinished npm timer reifyNode:node_modules/character-entities 1787488976184
+3996 silly unfinished npm timer reifyNode:node_modules/chalk 1787488976184
+3997 silly unfinished npm timer reifyNode:node_modules/chai 1787488976184
+3998 silly unfinished npm timer reifyNode:node_modules/ccount 1787488976184
+3999 silly unfinished npm timer reifyNode:node_modules/caniuse-lite 1787488976184
+4000 silly unfinished npm timer reifyNode:node_modules/callsites 1787488976184
+4001 silly unfinished npm timer reifyNode:node_modules/call-bound 1787488976184
+4002 silly unfinished npm timer reifyNode:node_modules/call-bind-apply-helpers 1787488976184
+4003 silly unfinished npm timer reifyNode:node_modules/cac 1787488976184
+4004 silly unfinished npm timer reifyNode:node_modules/bytes 1787488976184
+4005 silly unfinished npm timer reifyNode:node_modules/bundle-name 1787488976184
+4006 silly unfinished npm timer reifyNode:node_modules/browserslist 1787488976184
+4007 silly unfinished npm timer reifyNode:node_modules/braces 1787488976184
+4008 silly unfinished npm timer reifyNode:node_modules/brace-expansion 1787488976184
+4009 silly unfinished npm timer reifyNode:node_modules/body-parser 1787488976184
+4010 silly unfinished npm timer reifyNode:node_modules/body-parser/node_modules/content-type 1787488976184
+4011 silly unfinished npm timer reifyNode:node_modules/bidi-js 1787488976184
+4012 silly unfinished npm timer reifyNode:node_modules/baseline-browser-mapping 1787488976184
+4013 silly unfinished npm timer reifyNode:node_modules/balanced-match 1787488976184
+4014 silly unfinished npm timer reifyNode:node_modules/bail 1787488976184
+4015 silly unfinished npm timer reifyNode:node_modules/atomically 1787488976184
+4016 silly unfinished npm timer reifyNode:node_modules/ast-types 1787488976184
+4017 silly unfinished npm timer reifyNode:node_modules/assistant-stream 1787488976184
+4018 silly unfinished npm timer reifyNode:node_modules/assistant-stream/node_modules/nanoid 1787488976184
+4019 silly unfinished npm timer reifyNode:node_modules/assistant-cloud 1787488976184
+4020 silly unfinished npm timer reifyNode:node_modules/assertion-error 1787488976184
+4021 silly unfinished npm timer reifyNode:node_modules/aria-hidden 1787488976184
+4022 silly unfinished npm timer reifyNode:node_modules/argparse 1787488976184
+4023 silly unfinished npm timer reifyNode:node_modules/ansi-regex 1787488976184
+4024 silly unfinished npm timer reifyNode:node_modules/ansi-colors 1787488976184
+4025 silly unfinished npm timer reifyNode:node_modules/ajv-formats 1787488976184
+4026 silly unfinished npm timer reifyNode:node_modules/ajv 1787488976184
+4027 silly unfinished npm timer reifyNode:node_modules/agent-base 1787488976184
+4028 silly unfinished npm timer reifyNode:node_modules/accepts 1787488976184
+4029 silly unfinished npm timer reifyNode:node_modules/@xyflow/system 1787488976184
+4030 silly unfinished npm timer reifyNode:node_modules/@xyflow/react 1787488976184
+4031 silly unfinished npm timer reifyNode:node_modules/@vitest/utils 1787488976184
+4032 silly unfinished npm timer reifyNode:node_modules/@vitest/spy 1787488976184
+4033 silly unfinished npm timer reifyNode:node_modules/@vitest/snapshot 1787488976185
+4034 silly unfinished npm timer reifyNode:node_modules/@vitest/runner 1787488976185
+4035 silly unfinished npm timer reifyNode:node_modules/@vitest/pretty-format 1787488976185
+4036 silly unfinished npm timer reifyNode:node_modules/@vitest/mocker 1787488976185
+4037 silly unfinished npm timer reifyNode:node_modules/@vitest/expect 1787488976185
+4038 silly unfinished npm timer reifyNode:node_modules/@vitejs/plugin-react 1787488976185
+4039 silly unfinished npm timer reifyNode:node_modules/@ungap/structured-clone 1787488976185
+4040 silly unfinished npm timer reifyNode:node_modules/@types/validate-npm-package-name 1787488976185
+4041 silly unfinished npm timer reifyNode:node_modules/@types/use-sync-external-store 1787488976185
+4042 silly unfinished npm timer reifyNode:node_modules/@types/unist 1787488976185
+4043 silly unfinished npm timer reifyNode:node_modules/@types/react-dom 1787488976185
+4044 silly unfinished npm timer reifyNode:node_modules/@types/react 1787488976186
+4045 silly unfinished npm timer reifyNode:node_modules/@types/prop-types 1787488976186
+4046 silly unfinished npm timer reifyNode:node_modules/@types/node 1787488976186
+4047 silly unfinished npm timer reifyNode:node_modules/@types/ms 1787488976186
+4048 silly unfinished npm timer reifyNode:node_modules/@types/mdast 1787488976186
+4049 silly unfinished npm timer reifyNode:node_modules/@types/hast 1787488976186
+4050 silly unfinished npm timer reifyNode:node_modules/@types/estree-jsx 1787488976187
+4051 silly unfinished npm timer reifyNode:node_modules/@types/estree 1787488976187
+4052 silly unfinished npm timer reifyNode:node_modules/@types/deep-eql 1787488976188
+4053 silly unfinished npm timer reifyNode:node_modules/@types/debug 1787488976188
+4054 silly unfinished npm timer reifyNode:node_modules/@types/d3-zoom 1787488976188
+4055 silly unfinished npm timer reifyNode:node_modules/@types/d3-transition 1787488976188
+4056 silly unfinished npm timer reifyNode:node_modules/@types/d3-timer 1787488976188
+4057 silly unfinished npm timer reifyNode:node_modules/@types/d3-time 1787488976188
+4058 silly unfinished npm timer reifyNode:node_modules/@types/d3-shape 1787488976188
+4059 silly unfinished npm timer reifyNode:node_modules/@types/d3-selection 1787488976188
+4060 silly unfinished npm timer reifyNode:node_modules/@types/d3-scale 1787488976188
+4061 silly unfinished npm timer reifyNode:node_modules/@types/d3-path 1787488976188
+4062 silly unfinished npm timer reifyNode:node_modules/@types/d3-interpolate 1787488976188
+4063 silly unfinished npm timer reifyNode:node_modules/@types/d3-force 1787488976188
+4064 silly unfinished npm timer reifyNode:node_modules/@types/d3-ease 1787488976188
+4065 silly unfinished npm timer reifyNode:node_modules/@types/d3-drag 1787488976188
+4066 silly unfinished npm timer reifyNode:node_modules/@types/d3-color 1787488976188
+4067 silly unfinished npm timer reifyNode:node_modules/@types/d3-array 1787488976188
+4068 silly unfinished npm timer reifyNode:node_modules/@types/chai 1787488976188
+4069 silly unfinished npm timer reifyNode:node_modules/@types/babel__traverse 1787488976188
+4070 silly unfinished npm timer reifyNode:node_modules/@types/babel__template 1787488976188
+4071 silly unfinished npm timer reifyNode:node_modules/@types/babel__generator 1787488976188
+4072 silly unfinished npm timer reifyNode:node_modules/@types/babel__core 1787488976188
+4073 silly unfinished npm timer reifyNode:node_modules/@ts-morph/common 1787488976188
+4074 silly unfinished npm timer reifyNode:node_modules/@tauri-apps/cli 1787488976188
+4075 silly unfinished npm timer reifyNode:node_modules/@tauri-apps/api 1787488976188
+4076 silly unfinished npm timer reifyNode:node_modules/@tailwindcss/vite 1787488976188
+4077 silly unfinished npm timer reifyNode:node_modules/@tailwindcss/typography 1787488976188
+4078 silly unfinished npm timer reifyNode:node_modules/@tailwindcss/typography/node_modules/postcss-selector-parser 1787488976188
+4079 silly unfinished npm timer reifyNode:node_modules/@tailwindcss/oxide 1787488976188
+4080 silly unfinished npm timer reifyNode:node_modules/@tailwindcss/node 1787488976188
+4081 silly unfinished npm timer reifyNode:node_modules/@standard-schema/utils 1787488976188
+4082 silly unfinished npm timer reifyNode:node_modules/@standard-schema/spec 1787488976188
+4083 silly unfinished npm timer reifyNode:node_modules/@sindresorhus/merge-streams 1787488976188
+4084 silly unfinished npm timer reifyNode:node_modules/@sec-ant/readable-stream 1787488976188
+4085 silly unfinished npm timer reifyNode:node_modules/@rolldown/pluginutils 1787488976188
+4086 silly unfinished npm timer reifyNode:node_modules/@reduxjs/toolkit 1787488976188
+4087 silly unfinished npm timer reifyNode:node_modules/@reduxjs/toolkit/node_modules/immer 1787488976188
+4088 silly unfinished npm timer reifyNode:node_modules/@radix-ui/rect 1787488976188
+4089 silly unfinished npm timer reifyNode:node_modules/@radix-ui/react-visually-hidden 1787488976188
+4090 silly unfinished npm timer reifyNode:node_modules/@radix-ui/react-use-size 1787488976188
+4091 silly unfinished npm timer reifyNode:node_modules/@radix-ui/react-use-rect 1787488976188
+4092 silly unfinished npm timer reifyNode:node_modules/@radix-ui/react-use-previous 1787488976188
+4093 silly unfinished npm timer reifyNode:node_modules/@radix-ui/react-use-layout-effect 1787488976188
+4094 silly unfinished npm timer reifyNode:node_modules/@radix-ui/react-use-is-hydrated 1787488976188
+4095 silly unfinished npm timer reifyNode:node_modules/@radix-ui/react-use-escape-keydown 1787488976188
+4096 silly unfinished npm timer reifyNode:node_modules/@radix-ui/react-use-effect-event 1787488976188
+4097 silly unfinished npm timer reifyNode:node_modules/@radix-ui/react-use-controllable-state 1787488976188
+4098 silly unfinished npm timer reifyNode:node_modules/@radix-ui/react-use-callback-ref 1787488976188
+4099 silly unfinished npm timer reifyNode:node_modules/@radix-ui/react-tooltip 1787488976188
+4100 silly unfinished npm timer reifyNode:node_modules/@radix-ui/react-toolbar 1787488976188
+4101 silly unfinished npm timer reifyNode:node_modules/@radix-ui/react-toggle-group 1787488976188
+4102 silly unfinished npm timer reifyNode:node_modules/@radix-ui/react-toggle 1787488976188
+4103 silly unfinished npm timer reifyNode:node_modules/@radix-ui/react-toast 1787488976188
+4104 silly unfinished npm timer reifyNode:node_modules/@radix-ui/react-tabs 1787488976188
+4105 silly unfinished npm timer reifyNode:node_modules/@radix-ui/react-switch 1787488976188
+4106 silly unfinished npm timer reifyNode:node_modules/@radix-ui/react-slot 1787488976188
+4107 silly unfinished npm timer reifyNode:node_modules/@radix-ui/react-slider 1787488976188
+4108 silly unfinished npm timer reifyNode:node_modules/@radix-ui/react-separator 1787488976188
+4109 silly unfinished npm timer reifyNode:node_modules/@radix-ui/react-select 1787488976188
+4110 silly unfinished npm timer reifyNode:node_modules/@radix-ui/react-scroll-area 1787488976188
+4111 silly unfinished npm timer reifyNode:node_modules/@radix-ui/react-roving-focus 1787488976188
+4112 silly unfinished npm timer reifyNode:node_modules/@radix-ui/react-radio-group 1787488976188
+4113 silly unfinished npm timer reifyNode:node_modules/@radix-ui/react-progress 1787488976188
+4114 silly unfinished npm timer reifyNode:node_modules/@radix-ui/react-primitive 1787488976188
+4115 silly unfinished npm timer reifyNode:node_modules/@radix-ui/react-presence 1787488976188
+4116 silly unfinished npm timer reifyNode:node_modules/@radix-ui/react-portal 1787488976188
+4117 silly unfinished npm timer reifyNode:node_modules/@radix-ui/react-popper 1787488976188
+4118 silly unfinished npm timer reifyNode:node_modules/@radix-ui/react-popover 1787488976188
+4119 silly unfinished npm timer reifyNode:node_modules/@radix-ui/react-password-toggle-field 1787488976188
+4120 silly unfinished npm timer reifyNode:node_modules/@radix-ui/react-one-time-password-field 1787488976188
+4121 silly unfinished npm timer reifyNode:node_modules/@radix-ui/react-navigation-menu 1787488976188
+4122 silly unfinished npm timer reifyNode:node_modules/@radix-ui/react-menubar 1787488976188
+4123 silly unfinished npm timer reifyNode:node_modules/@radix-ui/react-menu 1787488976188
+4124 silly unfinished npm timer reifyNode:node_modules/@radix-ui/react-label 1787488976188
+4125 silly unfinished npm timer reifyNode:node_modules/@radix-ui/react-id 1787488976188
+4126 silly unfinished npm timer reifyNode:node_modules/@radix-ui/react-hover-card 1787488976188
+4127 silly unfinished npm timer reifyNode:node_modules/@radix-ui/react-form 1787488976188
+4128 silly unfinished npm timer reifyNode:node_modules/@radix-ui/react-focus-scope 1787488976188
+4129 silly unfinished npm timer reifyNode:node_modules/@radix-ui/react-focus-guards 1787488976188
+4130 silly unfinished npm timer reifyNode:node_modules/@radix-ui/react-dropdown-menu 1787488976188
+4131 silly unfinished npm timer reifyNode:node_modules/@radix-ui/react-dismissable-layer 1787488976188
+4132 silly unfinished npm timer reifyNode:node_modules/@radix-ui/react-direction 1787488976188
+4133 silly unfinished npm timer reifyNode:node_modules/@radix-ui/react-dialog 1787488976188
+4134 silly unfinished npm timer reifyNode:node_modules/@radix-ui/react-context-menu 1787488976188
+4135 silly unfinished npm timer reifyNode:node_modules/@radix-ui/react-context 1787488976188
+4136 silly unfinished npm timer reifyNode:node_modules/@radix-ui/react-compose-refs 1787488976188
+4137 silly unfinished npm timer reifyNode:node_modules/@radix-ui/react-collection 1787488976188
+4138 silly unfinished npm timer reifyNode:node_modules/@radix-ui/react-collapsible 1787488976188
+4139 silly unfinished npm timer reifyNode:node_modules/@radix-ui/react-checkbox 1787488976188
+4140 silly unfinished npm timer reifyNode:node_modules/@radix-ui/react-avatar 1787488976188
+4141 silly unfinished npm timer reifyNode:node_modules/@radix-ui/react-aspect-ratio 1787488976188
+4142 silly unfinished npm timer reifyNode:node_modules/@radix-ui/react-arrow 1787488976188
+4143 silly unfinished npm timer reifyNode:node_modules/@radix-ui/react-alert-dialog 1787488976188
+4144 silly unfinished npm timer reifyNode:node_modules/@radix-ui/react-accordion 1787488976188
+4145 silly unfinished npm timer reifyNode:node_modules/@radix-ui/react-accessible-icon 1787488976188
+4146 silly unfinished npm timer reifyNode:node_modules/@radix-ui/primitive 1787488976188
+4147 silly unfinished npm timer reifyNode:node_modules/@radix-ui/number 1787488976188
+4148 silly unfinished npm timer reifyNode:node_modules/@playwright/test 1787488976188
+4149 silly unfinished npm timer reifyNode:node_modules/@nodelib/fs.walk 1787488976188
+4150 silly unfinished npm timer reifyNode:node_modules/@nodelib/fs.stat 1787488976188
+4151 silly unfinished npm timer reifyNode:node_modules/@nodelib/fs.scandir 1787488976188
+4152 silly unfinished npm timer reifyNode:node_modules/@modelcontextprotocol/sdk 1787488976188
+4153 silly unfinished npm timer reifyNode:node_modules/@jridgewell/trace-mapping 1787488976188
+4154 silly unfinished npm timer reifyNode:node_modules/@jridgewell/sourcemap-codec 1787488976188
+4155 silly unfinished npm timer reifyNode:node_modules/@jridgewell/resolve-uri 1787488976188
+4156 silly unfinished npm timer reifyNode:node_modules/@jridgewell/remapping 1787488976188
+4157 silly unfinished npm timer reifyNode:node_modules/@jridgewell/gen-mapping 1787488976189
+4158 silly unfinished npm timer reifyNode:node_modules/@hono/node-server 1787488976189
+4159 silly unfinished npm timer reifyNode:node_modules/@gilbarbara/types 1787488976189
+4160 silly unfinished npm timer reifyNode:node_modules/@gilbarbara/hooks 1787488976189
+4161 silly unfinished npm timer reifyNode:node_modules/@gilbarbara/deep-equal 1787488976189
+4162 silly unfinished npm timer reifyNode:node_modules/@fontsource-variable/geist-mono 1787488976189
+4163 silly unfinished npm timer reifyNode:node_modules/@fontsource-variable/geist 1787488976189
+4164 silly unfinished npm timer reifyNode:node_modules/@floating-ui/utils 1787488976189
+4165 silly unfinished npm timer reifyNode:node_modules/@floating-ui/react-dom 1787488976189
+4166 silly unfinished npm timer reifyNode:node_modules/@floating-ui/dom 1787488976189
+4167 silly unfinished npm timer reifyNode:node_modules/@floating-ui/core 1787488976189
+4168 silly unfinished npm timer reifyNode:node_modules/@fastify/deepmerge 1787488976189
+4169 silly unfinished npm timer reifyNode:node_modules/@dotenvx/primitives 1787488976189
+4170 silly unfinished npm timer reifyNode:node_modules/@dotenvx/dotenvx 1787488976189
+4171 silly unfinished npm timer reifyNode:node_modules/@dotenvx/dotenvx/node_modules/strip-final-newline 1787488976189
+4172 silly unfinished npm timer reifyNode:node_modules/@dotenvx/dotenvx/node_modules/signal-exit 1787488976189
+4173 silly unfinished npm timer reifyNode:node_modules/@dotenvx/dotenvx/node_modules/open 1787488976189
+4174 silly unfinished npm timer reifyNode:node_modules/@dotenvx/dotenvx/node_modules/npm-run-path 1787488976189
+4175 silly unfinished npm timer reifyNode:node_modules/@dotenvx/dotenvx/node_modules/is-wsl 1787488976189
+4176 silly unfinished npm timer reifyNode:node_modules/@dotenvx/dotenvx/node_modules/is-stream 1787488976189
+4177 silly unfinished npm timer reifyNode:node_modules/@dotenvx/dotenvx/node_modules/is-docker 1787488976189
+4178 silly unfinished npm timer reifyNode:node_modules/@dotenvx/dotenvx/node_modules/human-signals 1787488976189
+4179 silly unfinished npm timer reifyNode:node_modules/@dotenvx/dotenvx/node_modules/get-stream 1787488976189
+4180 silly unfinished npm timer reifyNode:node_modules/@dotenvx/dotenvx/node_modules/execa 1787488976189
+4181 silly unfinished npm timer reifyNode:node_modules/@dotenvx/dotenvx/node_modules/define-lazy-prop 1787488976189
+4182 silly unfinished npm timer reifyNode:node_modules/@dotenvx/dotenvx/node_modules/commander 1787488976189
+4183 silly unfinished npm timer reifyNode:node_modules/@csstools/css-tokenizer 1787488976189
+4184 silly unfinished npm timer reifyNode:node_modules/@csstools/css-syntax-patches-for-csstree 1787488976189
+4185 silly unfinished npm timer reifyNode:node_modules/@csstools/css-parser-algorithms 1787488976189
+4186 silly unfinished npm timer reifyNode:node_modules/@csstools/css-color-parser 1787488976189
+4187 silly unfinished npm timer reifyNode:node_modules/@csstools/css-calc 1787488976189
+4188 silly unfinished npm timer reifyNode:node_modules/@csstools/color-helpers 1787488976189
+4189 silly unfinished npm timer reifyNode:node_modules/@base-ui/utils 1787488976189
+4190 silly unfinished npm timer reifyNode:node_modules/@base-ui/react 1787488976189
+4191 silly unfinished npm timer reifyNode:node_modules/@babel/types 1787488976189
+4192 silly unfinished npm timer reifyNode:node_modules/@babel/traverse 1787488976189
+4193 silly unfinished npm timer reifyNode:node_modules/@babel/template 1787488976189
+4194 silly unfinished npm timer reifyNode:node_modules/@babel/runtime 1787488976189
+4195 silly unfinished npm timer reifyNode:node_modules/@babel/preset-typescript 1787488976189
+4196 silly unfinished npm timer reifyNode:node_modules/@babel/plugin-transform-typescript 1787488976189
+4197 silly unfinished npm timer reifyNode:node_modules/@babel/plugin-transform-react-jsx-source 1787488976189
+4198 silly unfinished npm timer reifyNode:node_modules/@babel/plugin-transform-react-jsx-self 1787488976189
+4199 silly unfinished npm timer reifyNode:node_modules/@babel/plugin-transform-modules-commonjs 1787488976189
+4200 silly unfinished npm timer reifyNode:node_modules/@babel/plugin-syntax-typescript 1787488976189
+4201 silly unfinished npm timer reifyNode:node_modules/@babel/plugin-syntax-jsx 1787488976189
+4202 silly unfinished npm timer reifyNode:node_modules/@babel/parser 1787488976189
+4203 silly unfinished npm timer reifyNode:node_modules/@babel/helpers 1787488976189
+4204 silly unfinished npm timer reifyNode:node_modules/@babel/helper-validator-option 1787488976189
+4205 silly unfinished npm timer reifyNode:node_modules/@babel/helper-validator-identifier 1787488976189
+4206 silly unfinished npm timer reifyNode:node_modules/@babel/helper-string-parser 1787488976189
+4207 silly unfinished npm timer reifyNode:node_modules/@babel/helper-skip-transparent-expression-wrappers 1787488976189
+4208 silly unfinished npm timer reifyNode:node_modules/@babel/helper-replace-supers 1787488976189
+4209 silly unfinished npm timer reifyNode:node_modules/@babel/helper-plugin-utils 1787488976189
+4210 silly unfinished npm timer reifyNode:node_modules/@babel/helper-optimise-call-expression 1787488976189
+4211 silly unfinished npm timer reifyNode:node_modules/@babel/helper-module-transforms 1787488976189
+4212 silly unfinished npm timer reifyNode:node_modules/@babel/helper-module-imports 1787488976189
+4213 silly unfinished npm timer reifyNode:node_modules/@babel/helper-member-expression-to-functions 1787488976189
+4214 silly unfinished npm timer reifyNode:node_modules/@babel/helper-globals 1787488976189
+4215 silly unfinished npm timer reifyNode:node_modules/@babel/helper-create-class-features-plugin 1787488976189
+4216 silly unfinished npm timer reifyNode:node_modules/@babel/helper-compilation-targets 1787488976189
+4217 silly unfinished npm timer reifyNode:node_modules/@babel/helper-annotate-as-pure 1787488976189
+4218 silly unfinished npm timer reifyNode:node_modules/@babel/generator 1787488976189
+4219 silly unfinished npm timer reifyNode:node_modules/@babel/core 1787488976189
+4220 silly unfinished npm timer reifyNode:node_modules/@babel/compat-data 1787488976189
+4221 silly unfinished npm timer reifyNode:node_modules/@babel/code-frame 1787488976189
+4222 silly unfinished npm timer reifyNode:node_modules/@assistant-ui/tap 1787488976189
+4223 silly unfinished npm timer reifyNode:node_modules/@assistant-ui/store 1787488976189
+4224 silly unfinished npm timer reifyNode:node_modules/@assistant-ui/react 1787488976189
+4225 silly unfinished npm timer reifyNode:node_modules/@assistant-ui/react/node_modules/zustand 1787488976189
+4226 silly unfinished npm timer reifyNode:node_modules/@assistant-ui/react/node_modules/zod 1787488976189
+4227 silly unfinished npm timer reifyNode:node_modules/@assistant-ui/react/node_modules/nanoid 1787488976189
+4228 silly unfinished npm timer reifyNode:node_modules/@assistant-ui/react/node_modules/@assistant-ui/core 1787488976189
+4229 silly unfinished npm timer reifyNode:node_modules/@asamuzakjp/nwsapi 1787488976189
+4230 silly unfinished npm timer reifyNode:node_modules/@asamuzakjp/dom-selector 1787488976189
+4231 silly unfinished npm timer reifyNode:node_modules/@asamuzakjp/dom-selector/node_modules/lru-cache 1787488976189
+4232 silly unfinished npm timer reifyNode:node_modules/@asamuzakjp/css-color 1787488976189
+4233 silly unfinished npm timer reifyNode:node_modules/@asamuzakjp/css-color/node_modules/lru-cache 1787488976189
+4234 verbose cwd /home/enamakel/work/workflow-opencompany/opencompany/worktrees/issue-1317
+4235 verbose os Linux 7.0.0-30-generic
+4236 verbose node v24.18.0
+4237 verbose npm  v11.16.0
+4238 verbose exit 1
+4239 verbose code 1
+4240 error A complete log of this run can be found in: /home/enamakel/work/workflow-opencompany/opencompany/worktrees/issue-1317/.npm-cache/_logs/2026-08-23T12_42_54_330Z-debug-0.log
