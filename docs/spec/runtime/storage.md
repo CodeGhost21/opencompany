@@ -235,13 +235,16 @@ It also asserts that two distinct keys stay distinct — issue #1510. The
 filesystem backend encodes each key into an injective filename (percent-encoded
 with a `%` prefix the legacy slug layout can never produce, and truncated with a
 digest suffix for long keys), and the old slugged file is kept readable as a
-migration fallback. `set` deliberately does not remove the legacy file: one slug
-can name several distinct keys, so it may still hold a colliding alias's value
-that an un-migrated alias reads through the fallback — rotating one alias must
-not delete another's credential. `get` prefers the canonical file, so the kept
-legacy file is shadowed for the migrated key. The suite covers both the
-space-vs-underscore keys the old slug conflated and a key shaped like a legacy
-filename (`key-foo`) reading or deleting a different key's value.
+migration fallback. Upper-case letters are percent-encoded rather than passed
+through, so canonical filenames stay distinct even on case-insensitive volumes
+(the macOS and Windows default). `set` deliberately does not remove the legacy
+file: one slug can name several distinct keys, so it may still hold a colliding
+alias's value that an un-migrated alias reads through the fallback — rotating
+one alias must not delete another's credential. `get` prefers the canonical
+file, so the kept legacy file is shadowed for the migrated key. The suite
+covers both the space-vs-underscore keys the old slug conflated, two keys
+differing only in letter case, and a key shaped like a legacy filename
+(`key-foo`) reading or deleting a different key's value.
 
 **Fixtures in this suite are non-empty on purpose.** An empty vec, map or `None`
 survives every possible bug, including a backend that never persisted the field
