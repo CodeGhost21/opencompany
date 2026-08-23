@@ -3,6 +3,8 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  absorbHubSetupHandoff,
+  arrivedViaHubSetupHandoff,
   arrivedViaSetupHandoff,
   clearSetupHandoff,
   SETUP_HANDOFF_FRAGMENT,
