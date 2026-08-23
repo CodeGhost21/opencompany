@@ -556,9 +556,13 @@ impl Bundle {
     /// Path used for secrets before secret filenames became injective.
     ///
     /// [`FsSecretStore`](crate::store::FsSecretStore) reads this path only as a
-    /// migration fallback and removes it after a successful write to [`secret`].
-    /// It is never written by the new layout, and its `[A-Za-z0-9._-]` filename
-    /// can never coincide with a canonical `%`-prefixed one.
+    /// migration fallback. It is never written by the new layout, and its
+    /// `[A-Za-z0-9._-]` filename can never coincide with a canonical
+    /// `%`-prefixed one. [`set`](crate::ports::SecretStore::set) deliberately
+    /// keeps the file: one slug can name several distinct keys, and an
+    /// un-migrated colliding alias still reads it through the fallback. `get`
+    /// prefers the canonical file, so the kept legacy file is shadowed for the
+    /// migrated key.
     pub(crate) fn legacy_secret(&self, key: &str) -> PathBuf {
         self.secrets_dir().join(slug(&CompanyId::new(key)))
     }
