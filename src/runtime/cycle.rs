@@ -1716,7 +1716,7 @@ async fn perform_effect(rt: &CompanyRuntime, effect: &Effect) -> Result<()> {
         // is on the remote regardless. It is reported instead: the operator is
         // told, on the task itself, that the branch is up but the PR did not open.
         let title = repo_publish_pr_title(message);
-        let body = repo_publish_pr_body(agent, task, message);
+        let body = repo_publish_pr_body(agent, task, effect.run_id.as_deref(), message);
         match repos.open_pull_request(repo, branch, &title, &body).await {
             Ok(pr) => tracing::info!(
                 number = pr.number,
@@ -1814,10 +1814,10 @@ fn repo_publish_pr_title(message: &str) -> String {
     }
 }
 
-/// The body of that pull request (issue #736): the agent's message, then task
-/// and agent linkage so an operator landing on the PR can get back to the card
-/// and the seat that produced it.
-fn repo_publish_pr_body(agent: &str, task: &str, message: &str) -> String {
+/// The body of that pull request (issue #736): the agent's message, then task,
+/// run, and agent linkage so an operator landing on the PR can get back to the
+/// card, attempt, and seat that produced it.
+fn repo_publish_pr_body(agent: &str, task: &str, run_id: Option<&str>, message: &str) -> String {
     let mut body = String::new();
     let message = message.trim();
     if !message.is_empty() {
@@ -1831,6 +1831,9 @@ fn repo_publish_pr_body(agent: &str, task: &str, message: &str) -> String {
     }
     if !task.is_empty() {
         body.push_str(&format!(" for task `{task}`"));
+    }
+    if let Some(run_id) = run_id.filter(|run_id| !run_id.is_empty()) {
+        body.push_str(&format!(" in run `{run_id}`"));
     }
     body.push('.');
     body
