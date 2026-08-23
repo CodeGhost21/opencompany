@@ -193,6 +193,47 @@ fn refusal() -> OpenCompanyError {
     ))
 }
 
+/// Validates a submitted reference **and what it points at**, returning the form
+/// to store.
+///
+/// [`normalize`] answers "is this a well-formed reference"; this answers "is
+/// there an image here". The difference matters because a `blob:` reference is
+/// just a node id, and any member can type one: pointed at a 60 MB PDF it makes
+/// every surface that draws a face try to decode a PDF as an image, on every
+/// page load, for everyone. Checking the referent turns that from a thing the
+/// roster does into a `400` on the request that asked for it.
+///
+/// A `tiny:` reference needs no lookup — the file is shipped with the console —
+/// so the store is only touched for the form that names something mutable.
+pub async fn resolve(
+    workspace: &dyn crate::ports::WorkspaceStore,
+    company: &crate::ports::types::CompanyId,
+    value: &str,
+) -> Result<String> {
+    let stored = normalize(value)?;
+    let AvatarRef::Blob(node_id) = parse(&stored)? else {
+        return Ok(stored);
+    };
+    let node = workspace
+        .read(company, node_id)
+        .await?
+        .map(|(node, _)| node)
+        .ok_or_else(|| {
+            OpenCompanyError::InvalidRequest(
+                "that image isn't here any more. Upload it again.".to_string(),
+            )
+        })?;
+    match node.mime.as_deref() {
+        Some(mime) if is_supported_image(mime) => Ok(stored),
+        // Deliberately the same wording as the upload's refusal: from the
+        // caller's side these are one failure — "that isn't an avatar" — and
+        // two different sentences for it would read as two different problems.
+        _ => Err(OpenCompanyError::InvalidRequest(
+            "that file isn't a PNG, JPEG, GIF or WebP image, so it can't be an avatar.".to_string(),
+        )),
+    }
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
