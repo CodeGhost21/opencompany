@@ -42,7 +42,7 @@ use serde_json::Value;
 use async_trait::async_trait;
 use tinyflows::caps::WorkflowResolver;
 use tinyflows::error::{EngineError, Result as TfResult};
-use tinyflows::model::WorkflowGraph;
+use tinyflows::model::{NodeKind, WorkflowGraph};
 
 use crate::company::{WorkflowFile, WorkflowNodeKind, load_workflow_with_globals};
 use crate::ports::CompanyStore;
