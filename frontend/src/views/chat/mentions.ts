@@ -51,20 +51,19 @@ function isWord(ch: string | undefined): boolean {
  *
  * The condition that keeps `jane@acme.com` from opening a picker mid-address:
  * an `@` counts only at the start or after whitespace or an opening bracket,
- * and never immediately after a `<`.
+ * and never immediately after a `<`. Anything else — `/docs/@eng`, `$@eng` —
+ * is part of some other token, and a picker there would resolve a mention the
+ * host's fallback extraction (`opens_mention`) would refuse.
  */
 function opensMention(text: string, i: number): boolean {
   if (text[i] !== "@") return false;
   const before = text[i - 1];
   // Start of text always opens.
   if (before === undefined) return true;
-  // Never inside an existing `<@id>` token.
+  // Never inside an existing `<@id>` token. The bracket check below would
+  // already refuse it, but the rule is documented, so it is stated.
   if (before === "<") return false;
-  // Anything word-like before it means this `@` is part of something else —
-  // overwhelmingly an email address. This is `vercel/chat`'s accept condition
-  // minus its `isWord(text[i + 1])` half, which a picker cannot have: the
-  // first keystroke of a mention is a bare `@` with nothing after it yet.
-  return !isWord(before);
+  return /[\s([{]/.test(before);
 }
 
 /**
