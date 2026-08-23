@@ -572,6 +572,7 @@ mod test {
         .unwrap();
         let preview_body = preview.preview_body.expect("preview body");
         assert!(preview_body.contains("ghp_newtoken"));
+        let stored = store.get(&it.id).await.unwrap().expect("item exists");
 
         // The value is now a stored secret: the confirm must refuse to post it.
         secrets
@@ -584,7 +585,7 @@ mod test {
             &filer,
             &company,
             Some(&manifest(false)),
-            &it,
+            &stored,
             Severity::Annoyance,
             FeedbackSource::Operator,
             false,
