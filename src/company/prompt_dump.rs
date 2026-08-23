@@ -438,7 +438,14 @@ mod tests {
     /// writing instead of writing, and an operator reading a dump that omits
     /// the section has no way to see why. A default belt (`[tools].allow`
     /// defaults to `*`) must therefore produce it, naming all three clauses.
+    ///
+    /// `harness_sections` — the only place that ever adds or defers a "Your
+    /// sandbox" section — is itself `#[cfg(feature = "openhuman")]`; a
+    /// default build folds it into the single "Tool briefs (...)" deferred
+    /// line instead (see the `#[cfg(not(feature = "openhuman"))]` branch
+    /// above). This test needs the same feature gate its subject does.
     #[test]
+    #[cfg(feature = "openhuman")]
     fn a_default_belt_is_told_about_its_sandbox_and_its_shell() {
         let manifest = manifest(
             "[company]\nname = \"Acme\"\n\n[[agent]]\nid = \"pm\"\nrole = \"Product Manager\"\n",
