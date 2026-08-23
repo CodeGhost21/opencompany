@@ -359,11 +359,14 @@ mod tests {
             2
         );
 
-        // The seeded admin is a person, and is offered with a label and a slug.
+        // The seeded admin is a person — but the caller's own row is dropped,
+        // so with nobody else in the directory there is no person to offer.
+        // See `a_person_never_sees_their_own_row` for the two-person case.
         let people = body["people"].as_array().expect("people");
-        assert_eq!(people.len(), 1);
-        assert!(people[0]["label"].as_str().is_some_and(|l| !l.is_empty()));
-        assert!(people[0]["slug"].as_str().is_some_and(|s| !s.is_empty()));
+        assert!(
+            people.is_empty(),
+            "the caller must not be offered as a mention target: {people:?}"
+        );
 
         assert_eq!(body["everyone"]["label"], "everyone");
         let aliases = body["everyone"]["aliases"].as_array().expect("aliases");
