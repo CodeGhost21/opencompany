@@ -268,6 +268,10 @@ export function AgentRuns({
   useEffect(() => {
     const generation = ++generationRef.current;
     setRuns(null);
+    // `failed` belongs to the effect that owns the failure — a previous
+    // teammate's or filter's error must not paint the new section before its
+    // own read has resolved.
+    setFailed(false);
     openIdRef.current = null;
     setOpenId(null);
     // A refresh superseded by a teammate switch must not mark the new
