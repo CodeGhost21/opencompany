@@ -598,15 +598,25 @@ const PAYLOAD_KEY_ORDER: Readonly<Record<string, string[]>> = {
  *
  * `PAYLOAD_KEY_ORDER` promotes the argument an operator is consenting to, and
  * for most tools the first alone is the whole decision — the shell command, the
- * glob pattern, the fetch URL. One tool carries a second key that re-describes
- * the first: `http_request`'s method is the difference between a read and a
- * delete on the same URL, so a row that shows only the URL cannot tell them
- * apart. This is that list, and {@link payloadLeadLabel} appends these values
- * ahead of the first line.
+ * glob pattern, the fetch URL. `http_request` carries two consequential keys
+ * past the lead: its method is the difference between a read and a delete on
+ * the same URL, and its body is what a write *sends* — two POSTs to the same
+ * address are only the same decision if the payload is the same, so a row that
+ * shows only the URL cannot tell them apart. This is that list, and
+ * {@link payloadLeadLabel} appends these values ahead of the first line.
  */
 const PAYLOAD_LEAD_EXTRA: Readonly<Record<string, string[]>> = {
-  http_request: ["method"],
+  http_request: ["method", "body"],
 };
+
+/** A promoted extra's longest render in the compact lead; past it, a preview. */
+const EXTRA_PREVIEW_MAX = 60;
+
+function preview(value: string): string {
+  return value.length > EXTRA_PREVIEW_MAX
+    ? `${value.slice(0, EXTRA_PREVIEW_MAX)}…`
+    : value;
+}
 
 /**
  * The payload's lead line, with any consequential later keys in front — the
@@ -616,6 +626,10 @@ const PAYLOAD_LEAD_EXTRA: Readonly<Record<string, string[]>> = {
  * fall back to the action's own words rather than rendering blank. Unlisted
  * arguments still follow the lead, exactly as in {@link payloadLines}: this
  * promotes, it never hides.
+ *
+ * A promoted extra is previewed, not printed whole: `http_request`'s body can
+ * be a large document, and the row's job is to distinguish two requests, not
+ * to carry the file. The detailed view still shows the full payload.
  */
 export function payloadLeadLabel(a: ApprovalSummary): string | null {
   const lines = payloadLines(a);
@@ -627,7 +641,7 @@ export function payloadLeadLabel(a: ApprovalSummary): string | null {
   // the lead's label is the lead itself and must not be repeated before it.
   const extraValues = lines
     .filter((line) => line.label !== first.label && extras.includes(line.label))
-    .map((line) => line.value);
+    .map((line) => preview(line.value));
   return extraValues.length > 0 ? `${extraValues.join(" ")} ${first.value}` : first.value;
 }
 
