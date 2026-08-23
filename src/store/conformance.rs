@@ -3367,6 +3367,11 @@ pub async fn assert_notification_store(notes: Arc<dyn NotificationStore>) {
         },
         created_at,
         title: format!("notification {id}"),
+        // Company-wide, which is what every row written before the field
+        // existed means — so the whole suite above this line is also the
+        // regression guard for that reading.
+        audience: None,
+        context: None,
     };
 
     // Empty: nobody has anything.
@@ -3506,6 +3511,103 @@ pub async fn assert_notification_store(notes: Arc<dyn NotificationStore>) {
         notes.list(&alpha, "ada").await.unwrap().len(),
         4,
         "beta's write must not change alpha"
+    );
+
+    // ---- Targeted rows: an audience is a boundary, not a hint ----
+    //
+    // A mention notification names the people it is for. Every backend must
+    // enforce that identically, or one storage choice silently shows a person
+    // a message they were never addressed by.
+    let targeted = |id: &str, created_at: u64, audience: Option<Vec<&str>>| Notification {
+        id: id.to_string(),
+        kind: "mention".to_string(),
+        subject: Subject {
+            kind: SubjectKind::Message,
+            id: "42".to_string(),
+        },
+        created_at,
+        title: format!("someone mentioned you ({id})"),
+        audience: audience.map(|a| a.into_iter().map(str::to_string).collect()),
+        context: Some("engineering".to_string()),
+    };
+
+    let gamma = CompanyId::new("gamma");
+    notes
+        .append(&gamma, &targeted("for-ada", 100, Some(vec!["ada"])))
+        .await
+        .unwrap();
+    notes
+        .append(&gamma, &targeted("for-grace", 200, Some(vec!["grace"])))
+        .await
+        .unwrap();
+    notes
+        .append(&gamma, &targeted("for-everyone", 300, None))
+        .await
+        .unwrap();
+
+    // Each person sees their own row plus the company-wide one, and nobody
+    // else's.
+    let ada = notes.list(&gamma, "ada").await.unwrap();
+    let ada_ids: Vec<&str> = ada.iter().map(|v| v.notification.id.as_str()).collect();
+    assert_eq!(ada_ids, vec!["for-everyone", "for-ada"]);
+    let grace = notes.list(&gamma, "grace").await.unwrap();
+    let grace_ids: Vec<&str> = grace.iter().map(|v| v.notification.id.as_str()).collect();
+    assert_eq!(grace_ids, vec!["for-everyone", "for-grace"]);
+
+    // A person named by nothing still sees the company-wide row — an audience
+    // narrows, it does not opt anyone out of what was addressed to everybody.
+    let stranger = notes.list(&gamma, "stranger").await.unwrap();
+    assert_eq!(stranger.len(), 1);
+    assert_eq!(stranger[0].notification.id, "for-everyone");
+
+    // The context rides through, so a badge can be placed without the console
+    // having loaded that channel's transcript.
+    assert_eq!(ada[0].notification.context.as_deref(), Some("engineering"));
+    assert_eq!(
+        ada[1].notification.audience.as_deref(),
+        Some(&["ada".to_string()][..])
+    );
+
+    // The unread count is per person AND per audience: Ada has two visible
+    // rows, not three, so a badge built from this cannot count a colleague's
+    // mention.
+    let ada_unread = notes
+        .mark_read(&gamma, "ada", Some(&["for-ada".to_string()]))
+        .await
+        .unwrap();
+    assert_eq!(
+        ada_unread, 1,
+        "the company-wide row is still unread for Ada"
+    );
+
+    // Marking everything read is scoped the same way: it must not reach into
+    // Grace's targeted row, and Grace must be unaffected.
+    let ada_unread = notes.mark_read(&gamma, "ada", None).await.unwrap();
+    assert_eq!(ada_unread, 0);
+    let grace = notes.list(&gamma, "grace").await.unwrap();
+    assert!(
+        grace.iter().all(|v| v.read_at.is_none()),
+        "Ada marking all read must not touch Grace's own rows"
+    );
+
+    // And a person cannot mark somebody else's row read by naming its id.
+    let stranger_unread = notes
+        .mark_read(&gamma, "stranger", Some(&["for-grace".to_string()]))
+        .await
+        .unwrap();
+    assert_eq!(
+        stranger_unread, 1,
+        "the stranger's own unread count is the company-wide row alone"
+    );
+    let grace = notes.list(&gamma, "grace").await.unwrap();
+    assert!(
+        grace
+            .iter()
+            .find(|v| v.notification.id == "for-grace")
+            .expect("grace still sees her row")
+            .read_at
+            .is_none(),
+        "naming another person's notification must not mark it read for them"
     );
 }
 
