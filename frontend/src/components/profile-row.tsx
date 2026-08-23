@@ -166,12 +166,22 @@ function ProfileDialog({
   async function save() {
     setSaving(true);
     try {
-      const updated = await updateMe(client, company, {
-        // An emptied field is "call me the derived name again", which is what
-        // `null` stores — not `""`, which would be a name that renders as a gap.
+      // Three-state on the wire — omitted leaves a field alone, `null` goes
+      // back to the default, a value sets it — so an untouched field is left
+      // **off** the payload rather than echoed back. That matters for the
+      // avatar above all: the host re-resolves a supplied reference, so a
+      // name-only save that re-sent a `blob:` reference whose uploaded node
+      // was deleted from Files would make the whole save fail — an unrelated
+      // name edit held hostage by a face nobody asked about. (An unchanged
+      // name can still be sent: `null` is the legitimate "call me the derived
+      // name again", and `""` would be a name that renders as a gap.)
+      const changes: { displayName?: string | null; avatar?: string | null } = {
         displayName: name.trim() === "" ? null : name.trim(),
-        avatar: avatar ?? null,
-      });
+      };
+      if (avatar !== me.avatar) {
+        changes.avatar = avatar ?? null;
+      }
+      const updated = await updateMe(client, company, changes);
       onSaved(updated);
       onOpenChange(false);
       toast.success("Profile updated.");
