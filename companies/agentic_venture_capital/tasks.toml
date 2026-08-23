@@ -1,0 +1,48 @@
+# The setup work this company starts with, on the board in To-do at first
+# boot.
+#
+# Vertical-specific: the baseline in `globals/tasks.toml` already covers the
+# brief, the first goals, the standing decisions, the top risks and the
+# connections. What is here is the setup an investment firm is defined by —
+# the flow it runs on, and the ledgers it keeps.
+#
+# Each card names what it produces, so an agent picking it up hands back the
+# thing rather than an essay about the thing.
+
+[[task]]
+id = "set-up-the-diligence-checklist"
+title = "Set up the diligence checklist"
+priority = "high"
+note = """
+Decide what `diligence` must cover before a cheque is written — market, \
+team, numbers, legal — and what a gap in each one means.
+
+Diligence improvised per deal is diligence that is thorough when there is \
+time and thin when there is a hot round, which is exactly backwards.
+
+Done when the checklist is in the workspace and open deals are graded on \
+it.\
+"""
+
+[[task]]
+id = "set-up-the-investment-thesis"
+title = "Set up the investment thesis"
+priority = "high"
+note = """
+Record on `decisions` what this firm invests in and what it passes on \
+regardless of quality, so a pipeline can be filtered by something other \
+than enthusiasm.
+
+Done when the thesis is a decision row naming what is out of scope.\
+"""
+
+[[task]]
+id = "set-up-the-portfolio-review"
+title = "Set up the portfolio review"
+priority = "medium"
+note = """
+Get the portfolio onto `portfolio` with each company's state and what it \
+needs, and decide how often that is refreshed.
+
+Done when every holding has a row and a review cadence is set.\
+"""
