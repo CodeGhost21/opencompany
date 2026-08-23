@@ -718,7 +718,7 @@ export function ApprovalCard({
             /* `decisionLabel`, not `approvalAction`: two same-kind cards read
                identically from the kind alone, and button-only screen-reader
                navigation never hears the card body (#1411). */
-            aria-label={`Decline: ${decisionLabel(a, askerNames)}`}
+            aria-label={`Decline: ${decisionLabel(a, askerNames, now)}`}
             disabled={deciding !== null}
             /* A decline never carries a scope — there is nothing to grant,
                and the host refuses the pairing anyway. */
