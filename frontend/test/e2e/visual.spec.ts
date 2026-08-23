@@ -34,6 +34,13 @@ import { VISUAL, VISUAL_REASON } from "./capabilities";
  *     run does not fail on a diff, it fails on "failed to take two consecutive
  *     stable screenshots", and it costs seconds per attempt while the frame
  *     budget goes to the graph.
+ *   - **The graph's physics is waited out, not raced.** The media query stops
+ *     the camera and the pulses, but the d3 simulation still repaints nodes
+ *     until it cools to sleep (`alphaDecay(0.015)` ≈ 8s), and
+ *     `toHaveScreenshot`'s own two-stable-shots retry window is 5s — shorter
+ *     than a cold settle. `settleKnowledgeGraph` below polls the graph until
+ *     two samples agree, so the screenshot is taken of the settled graph the
+ *     baseline was recorded from.
  *
  * # Masks, and the clock this deliberately does not freeze
  *
@@ -72,8 +79,16 @@ test.skip(!VISUAL, VISUAL_REASON);
  * produced two byte-identical PNGs. A duplicate baseline costs a megabyte and
  * catches nothing the original does not, while looking like coverage.
  */
-const SURFACES = [
-  { name: "overview", hash: "/#/overview" },
+/** One baselined destination: where it lives, and anything it must wait on. */
+type Surface = {
+  name: string;
+  hash: string;
+  /** Extra wait before the screenshot, for a surface that settles late. */
+  settle?: (page: Page) => Promise<void>;
+};
+
+const SURFACES: Surface[] = [
+  { name: "overview", hash: "/#/overview", settle: settleKnowledgeGraph },
   { name: "tasks", hash: "/#/ledgers/tasks" },
   { name: "workflows", hash: "/#/workflows" },
   { name: "company", hash: "/#/company" },
@@ -81,7 +96,7 @@ const SURFACES = [
   { name: "inbox", hash: "/#/inbox" },
   { name: "approvals", hash: "/#/approvals" },
   { name: "settings", hash: "/#/settings" },
-] as const;
+];
 
 /**
  * Regions excused from comparison. Everything here is painted from a value that
@@ -162,11 +177,41 @@ async function open(page: Page, theme: "dark" | "light", hash: string) {
   await hideScrollbars(page);
 }
 
+/**
+ * Wait for Overview's knowledge graph to finish moving.
+ *
+ * The graph is a d3 simulation that cools to sleep on its own schedule
+ * (`alphaDecay(0.015)` ≈ 8s from a cold start; the comment above line 1900 of
+ * `KnowledgeGraph.tsx` says so). `toHaveScreenshot` needs two consecutive
+ * identical shots, and its retry window is 5s — shorter than a cold settle, so
+ * without this the comparison is made while the physics is still repainting
+ * and the run flips on machine speed. Reduced motion freezes the camera and
+ * the pulses, but the simulation's own ticks still move nodes until it sleeps.
+ *
+ * Two identical samples 750ms apart is the settle signal rather than a fixed
+ * timeout, which would have to guess at how long a particular graph takes. The
+ * page writes nothing once the sim is asleep — the camera loop is at rest and
+ * emits no transforms in the home state — so byte-identical markup is the
+ * honest "done".
+ */
+async function settleKnowledgeGraph(page: Page) {
+  const svg = page.getByRole("img", { name: "Operating knowledge graph" });
+  await expect(svg).toBeVisible({ timeout: 30_000 });
+  let previous = "";
+  for (let attempt = 0; attempt < 24; attempt += 1) {
+    const current = await svg.evaluate((el) => el.innerHTML);
+    if (current === previous) return;
+    previous = current;
+    await page.waitForTimeout(750);
+  }
+}
+
 for (const theme of ["light", "dark"] as const) {
   for (const surface of SURFACES) {
     test(`${surface.name} renders as recorded (${theme})`, async ({ page }) => {
       await skipTour(page);
       await open(page, theme, surface.hash);
+      await surface.settle?.(page);
 
       await expect(page).toHaveScreenshot(`${surface.name}-${theme}.png`, {
         fullPage: true,
