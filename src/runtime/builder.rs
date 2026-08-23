@@ -2231,6 +2231,11 @@ impl RuntimeBuilder {
                         .manifest
                         .agents
                         .iter()
+                        .any(|agent| crate::company::grants_repo_explicit(&agent.tools))
+                    || self
+                        .manifest
+                        .agents
+                        .iter()
                         .map(|agent| {
                             agent_effective_grants(&self.manifest.tools.allow, &agent.tools)
                         })
