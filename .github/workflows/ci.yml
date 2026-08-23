@@ -785,11 +785,6 @@ jobs:
     name: Rust (openhuman, tinymemory)
     runs-on: ubuntu-latest
     timeout-minutes: 60
-    env:
-      # OpenHuman's agent loop requires the same stack its production runtimes
-      # allocate. Apply it to every test invocation in this multi-feature job;
-      # Rust's test harness otherwise creates 2 MiB threads.
-      RUST_MIN_STACK: 16777216
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
