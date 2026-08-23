@@ -47,6 +47,13 @@ describe("toast click-through", () => {
     const below = document.createElementNS("http://www.w3.org/2000/svg", "svg");
     const clicked = vi.fn();
     below.addEventListener("click", clicked);
+    // jsdom's SVGElement implements `focus` but not `click` (the browser has
+    // both). Stub the method with the dispatch the browser would perform so the
+    // relay under test matches real behavior.
+    Object.defineProperty(below, "click", {
+      configurable: true,
+      value: () => below.dispatchEvent(new MouseEvent("click", { bubbles: true })),
+    });
     document.body.append(below);
     mockElementFromPoint(below);
 
