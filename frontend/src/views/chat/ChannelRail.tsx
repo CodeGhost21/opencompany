@@ -2,7 +2,6 @@ import { useState } from "react";
 import { ChevronRight, CircleDot, Hash, Lock } from "lucide-react";
 
 import { TeammateAvatar } from "@/components/teammate-avatar";
-import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { channelSubtitle, dmFace, type Channel, type ChannelSection } from "./model";
 
