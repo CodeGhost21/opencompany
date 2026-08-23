@@ -290,6 +290,27 @@ mod test {
     }
 
     #[test]
+    fn removing_a_connections_last_session_prunes_the_connection() {
+        // `session/new` + `session/disconnect` over fresh caller-controlled
+        // connection ids must not grow the host-wide registry by one empty map
+        // per connection, forever.
+        let registry = SessionRegistry::new();
+        registry.insert("conn-a", session("s1", "acme"));
+        registry.insert("conn-b", session("s2", "acme"));
+
+        assert!(registry.remove("conn-a", "s1"));
+        let by_connection = registry.by_connection.lock().unwrap();
+        assert!(
+            !by_connection.contains_key("conn-a"),
+            "the emptied connection key is pruned, not left as an empty map"
+        );
+        assert!(
+            by_connection.contains_key("conn-b"),
+            "a connection that still holds sessions survives"
+        );
+    }
+
+    #[test]
     fn deleting_a_never_existing_session_is_a_silent_no_op() {
         // ACP says deleting an already-deleted or never-existing session should
         // succeed silently — an opaque id leaking "I never had that" by an
