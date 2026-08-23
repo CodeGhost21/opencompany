@@ -911,7 +911,8 @@ export function LedgersView({
                   indistinguishably — the read is filtered server-side. The two
                   are not the same claim, and saying the stronger one over a
                   ledger the nav is counting 14 rows for is simply false. */}
-              {read &&
+              {mode === "list" &&
+                read &&
                 read.entries.length === 0 &&
                 !reading &&
                 (emptyNotice ? (
