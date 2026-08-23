@@ -2738,6 +2738,94 @@ mod tests {
         }
     }
 
+    /// A folder rename re-renders the path of every node inside it, so the
+    /// auto-tier exception for `workspace_rename` is not target-only: an
+    /// agent-created folder that has since gained an operator- or teammate-
+    /// authored node must restore the approval gate, while a folder holding
+    /// only the agent's own work still runs unattended.
+    #[tokio::test]
+    async fn auto_rename_of_a_folder_checks_every_descendants_authorship() {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn WorkspaceStore> = Arc::new(FsOps::new(dir.path()));
+        let company = CompanyId::new("acme");
+        let own = WorkspaceOrigin::Agent {
+            id: "ceo".to_string(),
+        };
+        let node = |id: &str, name: &str, kind: NodeKind, parent: Option<&str>, origin: WorkspaceOrigin| {
+            WorkspaceNode {
+                id: id.to_string(),
+                name: name.to_string(),
+                kind,
+                parent_id: parent.map(str::to_string),
+                updated_at_millis: 1,
+                created_by: origin.clone(),
+                updated_by: origin,
+                mime: None,
+                size: None,
+                sha256: None,
+            }
+        };
+        store
+            .create(&company, &node("own", "own", NodeKind::Folder, None, own), None)
+            .await
+            .unwrap();
+        store
+            .create(
+                &company,
+                &node("mixed", "mixed", NodeKind::Folder, None, own),
+                None,
+            )
+            .await
+            .unwrap();
+        store
+            .create(
+                &company,
+                &node(
+                    "own-note",
+                    "own-note.md",
+                    NodeKind::File,
+                    Some("own"),
+                    own,
+                ),
+                Some("mine"),
+            )
+            .await
+            .unwrap();
+        store
+            .create(
+                &company,
+                &node(
+                    "operator-note",
+                    "operator-note.md",
+                    NodeKind::File,
+                    Some("mixed"),
+                    WorkspaceOrigin::Operator,
+                ),
+                Some("theirs"),
+            )
+            .await
+            .unwrap();
+
+        let policy = policy("auto", &[], None)
+            .with_agent("ceo")
+            .with_workspace(store, company);
+        assert_eq!(
+            policy
+                .check(&request("workspace_rename", serde_json::json!({ "id": "own" })))
+                .await,
+            ToolPolicyDecision::Allow
+        );
+        assert!(matches!(
+            policy
+                .check(&request(
+                    "workspace_rename",
+                    serde_json::json!({ "id": "mixed" })
+                ))
+                .await,
+            ToolPolicyDecision::RequireApproval { .. }
+        ));
+    }
+
     /// The repository pair across all four tiers (issue #245), asserted as a
     /// line rather than as four independent facts.
     ///
