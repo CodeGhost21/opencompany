@@ -202,6 +202,11 @@ pub(crate) fn agent_scoped_grants(
 /// uses. A catalog doing its own matching would be free to advertise a grant the
 /// gate does not honour — precisely the disagreement between what the console
 /// shows and what an agent can actually do that the catalog exists to end.
+///
+/// The metered, credentialed, and third-party namespaces are explicit opt-ins;
+/// a catch-all `*` never covers them here, even though [`grant_matches`] treats
+/// `*` as a generic match. MCP uses the same rule for `mcp:*`, so an agent belt
+/// cannot reintroduce a capability the company intentionally omitted.
 pub(crate) fn allow_covers(allow: &[String], tool: &str) -> bool {
     let literal = tool.strip_suffix('*').unwrap_or(tool);
 
