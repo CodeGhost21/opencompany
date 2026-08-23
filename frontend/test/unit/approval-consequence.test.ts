@@ -79,4 +79,28 @@ describe("the consequence on an approval card", () => {
     await render(approval({ group: "publish" }));
     expect(container.textContent).not.toMatch(/public/i);
   });
+
+  // `docs/brand/README.md` ("Status is a closed vocabulary") reserves the five
+  // status hues for run state. A consequence is a category, not a run outcome,
+  // so a pending approval must never be painted the green that means "finished
+  // cleanly" or the red that means "failed".
+  it.each(["spend", "send", "sign", "publish", "hire", "identity"] as const)(
+    "tints a %s consequence from the identity palette, not the status one",
+    async (group) => {
+      await render(approval({ group }));
+      expect(container.innerHTML).not.toMatch(/status-(done|failed|running|blocked|idle)-soft/);
+    },
+  );
+
+  // `hire` and `identity` are separate rows in the taxonomy and shared one
+  // label until #1426, which hid the distinction the badge exists to draw.
+  it("labels hire and identity approvals differently", async () => {
+    await render(approval({ group: "hire" }));
+    const hire = container.textContent ?? "";
+
+    await render(approval({ group: "identity" }));
+    const identity = container.textContent ?? "";
+
+    expect(hire).not.toEqual(identity);
+  });
 });
