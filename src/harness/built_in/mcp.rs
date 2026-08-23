@@ -90,22 +90,18 @@ pub fn registry_for_agent(
     }
 }
 
-/// Whether `agent`'s tool grants reach the MCP server named `name`, using the
-/// same glob semantics as every other tool grant (`mcp:*` = all, `mcp:notion` =
-/// exact).
-fn agent_grants_server(agent: &ManifestAgent, name: &str) -> bool {
-    let want = format!("mcp:{name}");
-    agent.tools.iter().any(|grant| grant_matches(grant, &want))
-}
-
 /// The credential substrings from the (enabled, grant-matched) servers this
 /// agent reaches — the known-secret set fed to
 /// [`scrub`](crate::harness::mcp_probe::scrub) so no configured credential can
-/// survive into an agent-visible error. Never serialized anywhere.
-pub fn granted_secrets(decls: &[McpServerDecl], agent: &ManifestAgent) -> Vec<String> {
+/// survive into an agent-visible error. `grants` must be the same effective
+/// grants passed to [`registry_for_agent`], rather than the raw manifest
+/// request, because an empty request inherits the company belt and therefore
+/// reaches every server that belt grants.
+/// Never serialized anywhere.
+pub fn granted_secrets(decls: &[McpServerDecl], grants: &[String]) -> Vec<String> {
     decls
         .iter()
-        .filter(|decl| decl.enabled && agent_grants_server(agent, &decl.name))
+        .filter(|decl| decl.enabled && grants_cover_server(grants, &decl.name))
         .flat_map(|decl| decl.auth.secret_values())
         .collect()
 }
