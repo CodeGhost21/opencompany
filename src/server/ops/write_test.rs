@@ -1197,7 +1197,7 @@ async fn memory_is_isolated_between_companies() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(list_a.as_array().unwrap().len(), 1);
+    assert_eq!(list_a["items"].as_array().unwrap().len(), 1);
 
     // A's token may not address B's memory at all — 403 (scoped auth).
     let (status, _) = send_auth(
