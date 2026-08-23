@@ -86,16 +86,42 @@ impl FeedbackStore {
         Ok(out)
     }
 
+    /// Loads one stored feedback item by id.
+    pub async fn get(&self, id: &str) -> Result<Option<FeedbackItem>> {
+        Ok(self.list().await?.into_iter().find(|item| item.id == id))
+    }
+
     /// Records a filed issue's URL and status against an item, rewriting the log
     /// atomically. Closing-the-loop uses this to track status changes.
     pub async fn update_status(&self, id: &str, url: &str, status: &str) -> Result<()> {
+        self.update(id, |item| {
+            item.filed_issue_url = Some(url.to_string());
+            item.issue_status = Some(status.to_string());
+        })
+        .await
+    }
+
+    /// Freezes the byte-exact final body a preview produced on an item, so a
+    /// later confirm of the same item posts exactly the bytes the operator
+    /// approved (see [`super::service::finalize`]).
+    pub async fn record_preview(&self, id: &str, body: &str) -> Result<()> {
+        self.update(id, |item| item.scrubbed_body = Some(body.to_string()))
+            .await
+    }
+
+    /// Applies `edit` to the stored item with `id` and rewrites the log
+    /// atomically, serialising on the path key's write lock so an append cannot
+    /// be erased by the read-modify-write (issue #388).
+    async fn update<F>(&self, id: &str, edit: F) -> Result<()>
+    where
+        F: FnOnce(&mut FeedbackItem),
+    {
         let lock = self.write_lock();
         let _guard = lock.lock().await;
         let mut items = self.list_unlocked().await?;
         for item in &mut items {
             if item.id == id {
-                item.filed_issue_url = Some(url.to_string());
-                item.issue_status = Some(status.to_string());
+                edit(item);
             }
         }
         let mut body = String::new();
