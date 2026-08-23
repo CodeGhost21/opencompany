@@ -98,6 +98,29 @@ describe("applyPresence", () => {
   });
 });
 
+/**
+ * Every one of these iterates something the host supplied. The types promise an
+ * array; a host promises nothing. A stub answering `[]` for unrecognised routes
+ * made `res.people` `undefined`, and iterating it threw during render — blanking
+ * the entire console and failing every test in an unrelated spec file. Presence
+ * is the least important thing on the screen and has to fail like it.
+ */
+describe("malformed host responses", () => {
+  it("reconcilePresenceSnapshot treats a missing snapshot as no news", () => {
+    const peers = new Map([["u1", { status: "online" as const, atMillis: 1 }]]);
+    for (const bad of [undefined, null, "nope", 7, {}]) {
+      const out = reconcilePresenceSnapshot(
+        peers,
+        new Map(),
+        bad as unknown as Array<{ userId: string; status: PresenceStatus; atMillis: number }>,
+        1_000,
+      );
+      // Unchanged, not emptied: absent news must not evict somebody we know of.
+      expect(out.get("u1")?.status).toBe("online");
+    }
+  });
+});
+
 describe("livePeers", () => {
   const peers = new Map<string, Peer>([["u1", { status: "online", atMillis: 0 }]]);
 

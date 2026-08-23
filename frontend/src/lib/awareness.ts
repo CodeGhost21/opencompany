@@ -130,6 +130,12 @@ export function reconcilePresenceSnapshot(
 ): Map<string, Peer> {
   const next = new Map(peers);
   const seen = new Set<string>();
+  // The type says this is an array; a host says whatever it says. An older
+  // host, a proxy, or a stub that answers `[]` for unrecognised routes makes
+  // this `undefined`, and iterating it throws during render — which blanks the
+  // whole console, not just the presence roster. A missing snapshot means "no
+  // news", which is exactly an empty one.
+  if (!Array.isArray(snapshot)) return next;
   for (const row of snapshot) {
     seen.add(row.userId);
     const current = next.get(row.userId);

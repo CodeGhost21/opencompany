@@ -184,7 +184,7 @@ export function usePresence(
         .then((res) => {
           if (!live) return;
           setPeers((current) =>
-            reconcilePresenceSnapshot(current, tombstones.current, res.people, requestSentAt),
+            reconcilePresenceSnapshot(current, tombstones.current, res?.people, requestSentAt),
           );
         })
         .catch((error) => {

@@ -1530,7 +1530,18 @@ export function AppShell({
     void client
       .mentionables(company)
       .then((d) => {
-        if (live) setCompanyPeople(d.people.map((p) => ({ id: p.id, label: p.label })));
+        // `d.people` is trusted by the types and not by reality: a host that
+        // answers this route with a different shape — an older one, a proxy, a
+        // stub that returns `[]` for anything it does not recognise — makes
+        // this `undefined`, and `.map` on it throws during render. That blanks
+        // the WHOLE console, not just the presence roster.
+        //
+        // Not hypothetical: it took out every test in
+        // chat-channel-membership.spec.ts, a file with nothing to do with
+        // presence, because its mock returns `[]` for unmatched routes.
+        if (!live) return;
+        const people = Array.isArray(d?.people) ? d.people : [];
+        setCompanyPeople(people.map((p) => ({ id: p.id, label: p.label })));
       })
       .catch(() => {
         if (live) setCompanyPeople([]);
