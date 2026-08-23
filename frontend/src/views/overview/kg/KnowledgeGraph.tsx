@@ -2238,7 +2238,14 @@ export function KnowledgeGraph({
                 onPointerDown={(e) => onNodePointerDown(e, n.id)}
                 onPointerMove={(e) => onNodePointerMove(e, n.id)}
                 onPointerUp={(e) => onNodePointerUp(e, n.id)}
-                onFocus={() => setActiveNodeId(n.id)}
+                onFocus={(e) => {
+                  // The vault's notes live inside this <g>, and focus moving
+                  // onto a note bubbles its focusin up through the core — the
+                  // core must not claim a focus that landed on one of its notes
+                  // (that would kick the roving active id off the note and
+                  // strand the tab stop back on the core).
+                  if (e.target === e.currentTarget) setActiveNodeId(n.id);
+                }}
                 onKeyDown={(e) => onNodeKeyDown(e, n)}
                 onClick={(e) => {
                   e.stopPropagation();
