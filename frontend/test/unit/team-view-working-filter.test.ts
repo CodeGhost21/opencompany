@@ -149,14 +149,14 @@ afterEach(async () => {
 
 function card(name: string): HTMLElement | null {
   return (
-    Array.from(document.querySelectorAll('[data-testid="team-card"]')).find((el) =>
+    Array.from(document.querySelectorAll<HTMLElement>('[data-testid="team-card"]')).find((el) =>
       el.textContent?.includes(name),
     ) ?? null
   );
 }
 
 function workingSwitch(): HTMLElement | null {
-  return document.querySelector('[data-testid="team-roster-working"]');
+  return document.querySelector<HTMLElement>('[data-testid="team-roster-working"]');
 }
 
 function render(client: OpenCompanyClient, refreshKey: number) {
