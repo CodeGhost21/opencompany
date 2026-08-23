@@ -1985,29 +1985,61 @@ mod tests {
     // Focus, and the belt it decides
     // ---------------------------------------------------------------------
 
-    /// The control, quantified over the **whole** vocabulary rather than the
-    /// four focuses a reader happened to remember.
+    /// The control that survived the widening, quantified over the **whole**
+    /// vocabulary rather than the focuses a reader happened to remember.
     ///
-    /// `media` spends real money, `composio` reaches per-tenant credentials,
-    /// `search` bills per call, `repo` reaches bound source, and `shell` is
-    /// arbitrary execution. None of them may be reachable from a job shape a
-    /// model chose after reading free text a stranger typed — those stay
-    /// company-level grants an operator makes on purpose. A fifth focus added
-    /// later fails here unless it obeys the same rule.
+    /// The belts are wide now — `search` is on every one of them, and the
+    /// shapes whose work needs them reach `media`, `composio`, `shell` and
+    /// `code`. What must never happen is a focus asking for the **catch-all**:
+    /// a bare `*` is the inherit-the-lot behaviour this seam exists to end, and
+    /// a belt that contains it stops being a belt. The narrowing is the point,
+    /// not the width — every shape must still name what it wants, so an
+    /// operator reading `company.toml` can see exactly what each teammate holds
+    /// and the company's `[tools].allow` remains the one place that takes any
+    /// of it away.
+    ///
+    /// `repo` stays off every belt for a different reason, pinned here because
+    /// it is a boot failure rather than a preference: a host on filesystem
+    /// storage refuses to start a company whose grants name it.
     #[test]
-    fn no_focus_ever_confers_money_credentials_or_a_shell() {
-        const FORBIDDEN: [&str; 5] = ["media", "composio", "search", "repo", "shell"];
+    fn no_focus_asks_for_the_catch_all_or_a_bound_repository() {
         for focus in AgentFocus::ALL {
-            for grant in focus.tools() {
-                let namespace = grant.split(['.', '_', ':']).next().unwrap_or(&grant);
-                assert!(
-                    !FORBIDDEN.contains(&namespace),
-                    "{} grants `{grant}`",
+            let belt = focus.tools();
+            assert!(!belt.is_empty(), "{} has no belt", focus.as_str());
+            for grant in &belt {
+                assert_ne!(grant, "*", "{} grants the catch-all", focus.as_str());
+                let namespace = grant.split(['.', '_', ':']).next().unwrap_or(grant);
+                assert_ne!(
+                    namespace,
+                    "repo",
+                    "{} grants `{grant}`, which an fs-storage host refuses to boot",
                     focus.as_str()
                 );
-                // A bare `*` would confer everything the wildcard covers, which
-                // is the inherit-the-lot behaviour focus exists to end.
-                assert_ne!(grant, "*", "{} grants the catch-all", focus.as_str());
+            }
+        }
+    }
+
+    /// Every namespace a belt names is one the default company grant covers.
+    ///
+    /// The failure this rules out is silent and was the whole complaint: an
+    /// agent's `tools` line is **intersected** with `[tools].allow`, so a belt
+    /// that asks for something the default allow-list does not carry produces a
+    /// teammate that quietly does not have it — reported on the Team screen as
+    /// "asked for but not granted", and by the teammate itself as the tool not
+    /// being enabled. Widening a belt without widening the default is therefore
+    /// not a half-fix; it is no fix at all.
+    #[test]
+    fn every_focus_belt_is_covered_by_the_default_company_grant() {
+        let allow = crate::company::Tools::default().allow;
+        for focus in AgentFocus::ALL {
+            for grant in focus.tools() {
+                assert!(
+                    crate::company::tool_catalog::company_allows(&allow, &grant),
+                    "{} asks for `{grant}`, which the default allow-list {allow:?} \
+                     does not cover — it would be dropped on every company minted \
+                     by this flow",
+                    focus.as_str()
+                );
             }
         }
     }
