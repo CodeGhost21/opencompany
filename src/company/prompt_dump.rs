@@ -464,7 +464,12 @@ mod tests {
     /// The inverse, and the reason the section is gated at all: a belt that
     /// reaches none of the three namespaces must report the absence rather than
     /// describe tools this agent cannot call.
+    ///
+    /// Same feature gate as above — without `openhuman`, this manifest's
+    /// absence gets folded into the generic "Tool briefs (...)" deferred
+    /// line rather than a "Your sandbox" one.
     #[test]
+    #[cfg(feature = "openhuman")]
     fn a_belt_with_no_sandbox_namespace_defers_the_section() {
         let manifest = manifest(
             "[company]\nname = \"Acme\"\n\n[tools]\nallow = [\"workspace\"]\n\n[[agent]]\nid = \"pm\"\nrole = \"Product Manager\"\ntools = [\"workspace\"]\n",
