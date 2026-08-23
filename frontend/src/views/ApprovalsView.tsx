@@ -726,7 +726,7 @@ export function ApprovalCard({
           </Button>
           <Button
             size="sm"
-            aria-label={`Approve: ${approvalAction(a)}`}
+            aria-label={`Approve: ${decisionLabel(a, askerNames)}`}
             disabled={deciding !== null}
             onClick={() => onDecide("approve", scope)}
           >
