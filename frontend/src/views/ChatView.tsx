@@ -1045,6 +1045,8 @@ export function ChatView({
     try {
       await client.removeTeamMember(member.id, company);
       setMembers((ms) => ms.filter((m) => m.id !== member.id));
+      // The removed teammate leaves the picker now, not on the next reload.
+      void reloadDirectory();
     } catch (error) {
       if (error instanceof ApiError && error.status === 409) {
         // The only 409 this route still answers: a company must keep at
