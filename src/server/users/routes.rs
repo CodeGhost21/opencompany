@@ -153,6 +153,19 @@ struct HubProvidersResult {
     providers: Vec<HubProviderOption>,
 }
 
+/// What the console may ask a hub sign-in to return to, beyond its company.
+#[derive(Debug, Deserialize)]
+struct HubProvidersQuery {
+    /// The console destination the hub sign-in should land on, asked as a
+    /// *query* parameter because the console's fragment cannot survive the
+    /// OAuth round trip — the hub appends `token=…&key=auth` to the return URI
+    /// it was given, and anything after a `#` there would swallow them. Only
+    /// setup's dead-link recovery forwards a destination today (`from=setup`);
+    /// every other sign-in omits it and lands wherever it always did.
+    #[serde(default)]
+    from: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 struct LoginPassword {
     email: String,
