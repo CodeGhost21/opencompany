@@ -1696,7 +1696,7 @@ impl HarnessPool {
     ///
     /// A transient **read error** keeps that connection too, with a warning,
     /// rather than un-wiring the billing tools — the same direction
-    /// [`Self::resolve_repo_bindings`] and [`Self::resolve_effective_mcp`]
+    /// [`Self::resolve_effective_mcp`]
     /// degrade in, and the safe one here for a specific reason: a stale
     /// Chargebee credential is refused by Chargebee, which the agent surfaces as
     /// a tool error it can report, whereas a tool that has vanished is invisible
@@ -6772,37 +6772,6 @@ budget_usd_daily = 0.0
                 crate::company::credentials::Credential::from_value("managed-platform-token"),
                 crate::company::DEFAULT_SEARCH_DAILY_CALLS,
             ));
-            // Issue #245: a repository manager AND a binding, because the tools
-            // are gated on both — with a manager and nothing bound the belt
-            // would be missing `repo_checkout` / `repo_pr` and this check would
-            // pass while never having looked at them, which is the exact way
-            // `describe_skill` stayed invisible here while parking in
-            // production.
-            // Issue #752 added a fourth gate: a backend that keeps the
-            // credential off this container's disk. Declared here for the same
-            // reason the binding below is — without it the belt would be
-            // missing `repo_checkout` / `repo_pr` and this check would pass
-            // while never having looked at them.
-            deps.repos = Some(Arc::new(
-                crate::runtime::RepoManager::new(
-                    CompanyId::new("acme"),
-                    dir.path().join("repos"),
-                    Arc::new(crate::store::FsSecretStore::new(dir.path())),
-                )
-                .with_storage_kind(crate::store::StorageKind::Mongodb),
-            ));
-            deps.repo_bindings = vec![crate::runtime::repo_manager::types::RepoBinding {
-                key: "acme-widgets-000000000000".to_string(),
-                url: "https://github.com/acme/widgets".to_string(),
-                owner: "acme".to_string(),
-                repo: "widgets".to_string(),
-                branches: vec!["main".to_string()],
-                token_fingerprint: "0f1e2d3c4b5a".to_string(),
-                last_fetched_millis: None,
-                size_bytes: 0,
-                bound_at_millis: 1,
-                can_push: None,
-            }];
             // A registered MCP server is what puts `mcp_list_servers`,
             // `mcp_list_tools` and `mcp_call_tool` on the belt — the three
             // tools issue #443 is about. Without one the coverage check would
