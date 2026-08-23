@@ -141,18 +141,20 @@ describe("the consolidated approval card", () => {
     // this has to be a width floor and wrapping contract on each headline — not
     // a viewport breakpoint. A 12rem title plus the icon and action pair cannot
     // fit in the narrow transcript, moving the pair to its own line instead of
-    // reducing the title to one word per line.
+    // reducing the title to one word per line. The floor is capped at the
+    // card's own width (#1617 review) so a column narrower than the icon plus
+    // a 12rem title wraps rather than overflowing the card.
     await render([ESPN]);
     const singleActions = container.querySelector<HTMLElement>("[data-approval-actions]");
     expect(singleActions).not.toBeNull();
     expect(singleActions!.parentElement?.className).toContain("flex-wrap");
-    expect(singleActions!.previousElementSibling?.className).toContain("min-w-48");
+    expect(singleActions!.previousElementSibling?.className).toContain("min-w-[min(12rem,100%)]");
 
     await render([ESPN, BBC]);
     const batchActions = container.querySelector<HTMLElement>("[data-approval-actions]");
     expect(batchActions).not.toBeNull();
     expect(batchActions!.parentElement?.className).toContain("flex-wrap");
-    expect(batchActions!.previousElementSibling?.className).toContain("min-w-48");
+    expect(batchActions!.previousElementSibling?.className).toContain("min-w-[min(12rem,100%)]");
   });
 
   it("asks once for a turn's three gated calls, naming each of them", async () => {
