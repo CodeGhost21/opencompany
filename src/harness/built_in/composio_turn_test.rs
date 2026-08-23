@@ -183,7 +183,7 @@ fn github_catalogue() -> Vec<Value> {
         .collect();
     out[97] = action(
         "github",
-        "GITHUB_LIST_ISSUES",
+        "GITHUB_LIST_REPOSITORY_ISSUES",
         "List the issues on a repository, optionally filtered by state.",
     );
     out
@@ -203,7 +203,7 @@ fn notion_catalogue() -> Vec<Value> {
         .collect();
     out[131] = action(
         "notion",
-        "NOTION_SEARCH_PAGES",
+        "NOTION_SEARCH_NOTION_PAGE",
         "Search the pages in a workspace by query text.",
     );
     out
@@ -292,8 +292,9 @@ async fn spawn_composio_backend() -> (String, Arc<ComposioStub>) {
 // ---------------------------------------------------------------------------
 
 /// A one-agent company that explicitly grants `composio` (the catch-all `*`
-/// deliberately does not) and runs in `full` mode, so `composio_execute` is not
-/// parked for operator approval mid-test.
+/// deliberately does not) and runs in `full` mode. The scripted actions use
+/// the provider's curated read slugs, so the policy can classify and run them
+/// rather than conservatively parking an unknown action mid-test.
 fn manifest() -> CompanyManifest {
     toml::from_str(
         r#"
@@ -482,7 +483,7 @@ async fn an_agent_discovers_and_calls_an_action_unaided_on_two_large_toolkits() 
         Turn::Call {
             tool: "composio_execute",
             args: json!({
-                "tool": "GITHUB_LIST_ISSUES",
+                "tool": "GITHUB_LIST_REPOSITORY_ISSUES",
                 "arguments": { "owner": "acme", "state": "open" }
             }),
         },
@@ -494,7 +495,7 @@ async fn an_agent_discovers_and_calls_an_action_unaided_on_two_large_toolkits() 
         Turn::Call {
             tool: "composio_execute",
             args: json!({
-                "tool": "NOTION_SEARCH_PAGES",
+                "tool": "NOTION_SEARCH_NOTION_PAGE",
                 "arguments": { "owner": "acme", "target": "roadmap" }
             }),
         },
@@ -548,7 +549,7 @@ async fn an_agent_discovers_and_calls_an_action_unaided_on_two_large_toolkits() 
 
     // The narrowed step delivered exactly the schema needed to call it.
     assert!(
-        joined.contains("GITHUB_LIST_ISSUES"),
+        joined.contains("GITHUB_LIST_REPOSITORY_ISSUES"),
         "the needle slug never reached the model: {joined}"
     );
     assert!(
@@ -556,7 +557,7 @@ async fn an_agent_discovers_and_calls_an_action_unaided_on_two_large_toolkits() 
         "the parameter schema never reached the model: {joined}"
     );
     assert!(
-        joined.contains("NOTION_SEARCH_PAGES"),
+        joined.contains("NOTION_SEARCH_NOTION_PAGE"),
         "the second toolkit's needle never reached the model: {joined}"
     );
 
@@ -566,8 +567,8 @@ async fn an_agent_discovers_and_calls_an_action_unaided_on_two_large_toolkits() 
     assert_eq!(
         executed,
         vec![
-            "GITHUB_LIST_ISSUES".to_string(),
-            "NOTION_SEARCH_PAGES".to_string()
+            "GITHUB_LIST_REPOSITORY_ISSUES".to_string(),
+            "NOTION_SEARCH_NOTION_PAGE".to_string()
         ],
         "the agent did not reach both providers: {executed:?}; tool results: {results:#?}"
     );
