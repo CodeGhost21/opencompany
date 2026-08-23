@@ -218,4 +218,37 @@ describe("the Working filter survives a workload outage (issue #1436)", () => {
     expect(card("Ravi")).not.toBeNull();
     expect(card("Priya")).not.toBeNull();
   });
+
+  it("clears a stale workload before a re-read, so the previous map cannot filter the refreshed roster", async () => {
+    api.listTasks.mockResolvedValue(TASKS);
+    api.fetchBoardColumns.mockResolvedValue(COLUMNS);
+    api.fetchMe.mockResolvedValue({ role: "admin" });
+    api.listPeople.mockResolvedValue([]);
+
+    const client = fakeClient();
+    await render(client, 0);
+
+    // Turn the filter on: only Maya — the one with an in-flight card — remains.
+    await act(async () => {
+      workingSwitch()?.click();
+    });
+    expect(card("Maya")).not.toBeNull();
+    expect(card("Ravi")).toBeNull();
+
+    // The next re-read's workload requests hang (a stalled network). The
+    // roster read still lands, so the refreshed roster renders — and the
+    // previous read's workload map must not silently filter it.
+    api.listTasks.mockReturnValue(new Promise<Task[]>(() => {}));
+    api.fetchBoardColumns.mockReturnValue(new Promise<TaskColumn[]>(() => {}));
+    await render(client, 1);
+
+    // Everyone is visible, and the switch is disabled because the new workload
+    // is not known yet — the stale map is gone rather than still filtering.
+    expect(card("Maya")).not.toBeNull();
+    expect(card("Ravi")).not.toBeNull();
+    expect(card("Priya")).not.toBeNull();
+    const after = workingSwitch();
+    expect(after?.getAttribute("data-disabled")).not.toBeNull();
+    expect(after?.getAttribute("data-checked")).toBeNull();
+  });
 });
