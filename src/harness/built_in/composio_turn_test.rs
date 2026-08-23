@@ -569,7 +569,7 @@ async fn an_agent_discovers_and_calls_an_action_unaided_on_two_large_toolkits() 
             "GITHUB_LIST_ISSUES".to_string(),
             "NOTION_SEARCH_PAGES".to_string()
         ],
-        "the agent did not reach both providers: {executed:?}"
+        "the agent did not reach both providers: {executed:?}; tool results: {results:#?}"
     );
 
     // The generic fix, stated as a wire fact: the second Notion listing carried
