@@ -40,7 +40,7 @@ use crate::harness::HarnessPool;
 use crate::ports::WorkflowRunContext;
 use crate::ports::types::CompanyRecord;
 use crate::runtime::workflow_resume::{
-    PAYLOAD_NODE_ID, PAYLOAD_REASON, PAYLOAD_TARGET, PAYLOAD_TOOL, PAYLOAD_WORKFLOW_ID,
+    PAYLOAD_ARGS, PAYLOAD_NODE_ID, PAYLOAD_REASON, PAYLOAD_TARGET, PAYLOAD_TOOL, PAYLOAD_WORKFLOW_ID,
     WORKFLOW_APPROVE_KIND,
 };
 
