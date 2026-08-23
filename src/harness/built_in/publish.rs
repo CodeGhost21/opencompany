@@ -131,15 +131,6 @@ pub const MAX_ARTIFACT_BODY_BYTES: usize = 256 * 1024;
 /// would fire every time — asking an agent whether its own transcript is a
 /// deliverable. That is not a tuning detail; it is the difference between a
 /// feature and a permanent false positive.
-/// **Third-party content the agent did not write** — `repos`. Issue #245's
-/// agent tier clones a bound repository into `workspace/repos/<key>` and spills
-/// an oversized pull-request diff beside it. Both are somebody else's source,
-/// both appear as thousands of "new" files the moment `repo_checkout` runs, and
-/// neither is ever this company's deliverable. Without this the nudge would
-/// fire after every checkout, asking an agent whether a third party's
-/// repository is something it meant to publish — the same permanent false
-/// positive the runtime-bookkeeping family above exists to prevent, from the
-/// other direction.
 const SCAN_SKIP_DIRS: [&str; 7] = [
     "node_modules",
     "target",
