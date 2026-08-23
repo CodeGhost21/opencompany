@@ -26,6 +26,7 @@ no roster beyond its single implicit local owner.
 | Bootstrap | The manifest's `[users] admins` list |
 | Mode | `[users] mode` — `email` (default), `wallet`, or `none`. See [Sign-in modes](auth-modes.md) |
 | Roles | `admin` (may invite and administer) / `member` |
+| Profile | Name and icon, self-served through `PATCH …/auth/me` — see [avatars.md](avatars.md) |
 
 An `admin` is also what the write plane means by authority over the company: the
 routes that decide what the company reaches the world as — its Composio and
