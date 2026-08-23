@@ -310,6 +310,33 @@ export function PolicySettings({ client, company }: Props) {
         )
     : [];
 
+  /**
+   * The note's wording, scoped to what `gateableSet` can prove. With the
+   * complete registry the claim is confident — no tool the gate recognizes —
+   * and the hedge only needs the open effect namespace. On a host predating
+   * the field, the note names the workflow set it actually compared against
+   * and hedges that a wired agent tool outside it may still exist.
+   */
+  const unmatchedNote = unmatchedWiredTools.length
+    ? `${unmatchedWiredTools.join(", ")} ${
+        unmatchedWiredTools.length === 1 ? "doesn't" : "don't"
+      } match any ${
+        knownTools
+          ? "tool the approval gate recognizes"
+          : "of the workflow tools wired here"
+      }. ${
+        unmatchedWiredTools.length === 1 ? "It may" : "They may"
+      } still be ${
+        knownTools
+          ? unmatchedWiredTools.length === 1
+            ? "a hosted effect kind"
+            : "hosted effect kinds"
+          : unmatchedWiredTools.length === 1
+            ? "a wired agent tool or a hosted effect kind"
+            : "wired agent tools or hosted effect kinds"
+      }.`
+    : null;
+
   const saveAlways = async () => {
     if (!status || saving) return;
     setSaving(true);
