@@ -456,7 +456,13 @@ function CompactApprovalRow({
         <div className="min-w-0 flex-1">
           <CompactLabel approvals={approvals} />
           <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-            <ApprovalMeta approval={lead} now={now} askerNames={askerNames} status={status} />
+            <ApprovalMeta
+              approval={lead}
+              now={now}
+              askerNames={askerNames}
+              thread={thread}
+              status={status}
+            />
             {!busy && (
               <a
                 href="#/approvals"
