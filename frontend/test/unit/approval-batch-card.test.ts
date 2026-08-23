@@ -520,4 +520,51 @@ describe("the consolidated approval card", () => {
     expect(row?.textContent).toContain("Send a payment — details hidden by your role");
     expect(row?.textContent ?? "").not.toContain("Send a payment — Send a payment");
   });
+
+  it("summarizes only what the compact row's buttons still decide", async () => {
+    // The drift case in the compact row: one of three already approved on the
+    // page, and the row must not go on claiming all three are on the table.
+    // The Approve button left here authorizes only the two still open, so the
+    // line names them and lets the status say what was already decided.
+    await render([ESPN, BBC, GUARDIAN], { a1: "approve" }, {}, new Map(), true);
+
+    const row = container.querySelector<HTMLElement>('[data-approval-inline="compact"]');
+    const text = row?.textContent ?? "";
+    expect(text).toContain(
+      "Fetch a web page — https://bbc.com/sport, https://theguardian.com/uk",
+    );
+    // The status still tells the operator one has been settled elsewhere.
+    expect(text).toContain("1 of 3 decided — 2 still waiting on you");
+    // The settled item is not named as something the buttons here will touch.
+    expect(text).not.toContain("https://espn.com/nba");
+
+    await click(button("Approve"));
+    // And an approve here covers only what the label named — re-resolving a1
+    // would be a second decision on an approval the host has already dropped.
+    expect(decisions.map((d) => d.id)).toEqual(["a2", "a3"]);
+  });
+
+  it("names the HTTP method beside a request URL in the compact chat row", async () => {
+    // The method is the difference between a read and a delete on the same URL:
+    // a row that showed only the address would render GET and DELETE
+    // identically even though approving them has very different effects.
+    await render([DELETE_ITEMS], {}, {}, new Map(), true);
+
+    const row = container.querySelector<HTMLElement>('[data-approval-inline="compact"]');
+    expect(row?.textContent).toContain(
+      "Make a request to a web address — DELETE https://example.com/items",
+    );
+  });
+
+  it("names each request's method in a compact batch, not just the lead's", async () => {
+    // Same URL, opposite effects: the second item's method is the consequential
+    // half of the one Approve, so it has to be on the line, not hidden behind
+    // a count or a shared address.
+    await render([GET_ITEMS, DELETE_ITEMS], {}, {}, new Map(), true);
+
+    const row = container.querySelector<HTMLElement>('[data-approval-inline="compact"]');
+    expect(row?.textContent).toContain(
+      "Make a request to a web address — GET https://example.com/items, DELETE https://example.com/items",
+    );
+  });
 });
