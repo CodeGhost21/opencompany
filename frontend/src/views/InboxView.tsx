@@ -148,6 +148,7 @@ export function InboxView({ client, company }: Props) {
   if (load === "loading") {
     return (
       <div className="flex flex-1 flex-col gap-2 p-4">
+        <h1 className="sr-only">Inbox</h1>
         {Array.from({ length: 6 }).map((_, i) => (
           <Skeleton key={i} className="h-16 rounded-lg" />
         ))}
@@ -158,6 +159,7 @@ export function InboxView({ client, company }: Props) {
   if (load === "error") {
     return (
       <div className="flex flex-1 flex-col items-center justify-center gap-3 text-center text-muted-foreground">
+        <h1 className="sr-only">Inbox</h1>
         <InboxIcon className="size-8" />
         <div className="space-y-1">
           <p className="font-medium text-foreground">Inboxes unavailable</p>
@@ -173,6 +175,7 @@ export function InboxView({ client, company }: Props) {
   if (listed.length === 0) {
     return (
       <div className="flex flex-1 flex-col items-center justify-center gap-3 text-center text-muted-foreground">
+        <h1 className="sr-only">Inbox</h1>
         <InboxIcon className="size-8" />
         <div className="space-y-1">
           <p className="font-medium text-foreground">No inboxes yet</p>
@@ -188,6 +191,7 @@ export function InboxView({ client, company }: Props) {
 
   return (
     <div className="flex flex-1 overflow-hidden">
+      <h1 className="sr-only">Inbox</h1>
       {/* Message list */}
       <section
         className={cn(

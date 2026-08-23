@@ -685,14 +685,12 @@ export function McpServersSection({ client, company, canManage, chrome = "inline
 
   return (
     <section className="space-y-3">
-      {chrome === "inline" && (
-        <div className="flex items-center gap-2">
-          <Server className="size-4 text-muted-foreground" />
-          <h3 className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
-            MCP Servers
-          </h3>
-        </div>
-      )}
+      <div className="flex items-center gap-2">
+        {chrome === "inline" && <Server className="size-4 text-muted-foreground" />}
+        <h2 className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
+          {chrome === "inline" ? "MCP Servers" : "Installed servers"}
+        </h2>
+      </div>
       <p className="text-sm text-muted-foreground">
         Remote MCP tool servers your teammates can call. Add an HTTP endpoint and (optionally) a
         token — the token is stored securely and never shown again.
