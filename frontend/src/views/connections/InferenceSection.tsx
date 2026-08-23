@@ -361,9 +361,9 @@ export function InferenceSection({
     <section className="space-y-3">
       <div className="flex items-center gap-2">
         <BrainCircuit className="size-4 text-muted-foreground" />
-        <h3 className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
+        <h2 className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
           Inference (BYOK)
-        </h3>
+        </h2>
         {/* Mirrors the Company credential card's own subtitle. Two cards in
             Connections accept a key and one of them accepts a TinyHumans key,
             so each says in one line which it is — the distinction is otherwise

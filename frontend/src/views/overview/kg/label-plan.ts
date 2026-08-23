@@ -51,7 +51,7 @@ export type LabelCamera = { x: number; y: number; w: number };
 
 export type LabelCandidate = {
   id: string;
-  /** the text as rendered (already shortened, if the caller shortens it) */
+  /** the complete text the component renders */
   text: string;
   /** the node's centre, in graph units */
   x: number;
