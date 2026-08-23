@@ -592,7 +592,24 @@ export function PolicySettings({ client, company }: Props) {
                 }
               }}
             >
-              <AlertDialogContent>
+              <AlertDialogContent
+                // A tier escalation is opened from the radio the operator
+                // pressed, which may not be the one that ends up selected —
+                // cancelling leaves the old tier checked with focus on the new
+                // one. Return focus to the checked tier so the roving-tabindex
+                // group's next arrow key computes from the right radio. The
+                // reset flow keeps the default (its own trigger); `null` means
+                // "use the default" to Base UI.
+                finalFocus={() => {
+                  if (confirmSource.current === "reset") return null;
+                  const index = status.tiers.findIndex(
+                    (tier) => tier.value === status.mode,
+                  );
+                  return index === -1
+                    ? null
+                    : tierButtons.current[index] ?? null;
+                }}
+              >
                 <AlertDialogHeader>
                   <AlertDialogTitle>
                     Give teammates more autonomy?
