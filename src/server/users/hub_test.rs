@@ -156,6 +156,21 @@ async fn providers(state: &AppState) -> serde_json::Value {
     body_json(response).await
 }
 
+/// `providers`, with the console's own `?…` query appended to the request.
+async fn providers_from(state: &AppState, query: &str) -> serde_json::Value {
+    let response = router(state.clone())
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/v1/companies/acme/auth/hub?{query}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    body_json(response).await
+}
+
 // ---------------------------------------------------------------------------
 // The buttons
 // ---------------------------------------------------------------------------
