@@ -205,6 +205,16 @@ struct AddMember {
     /// only restrict the new teammate below what the company already allows.
     #[serde(default)]
     tools: Vec<String>,
+    /// An optional face for the new teammate — a `tiny:<flavour>` mascot or a
+    /// `blob:<nodeId>` upload (`docs/spec/runtime/avatars.md`), so a teammate can
+    /// be born wearing the face the operator picked in the create dialog rather
+    /// than flashing a hashed one until a second PATCH lands.
+    ///
+    /// A plain `Option` for the same reason `instructions` is one: at creation
+    /// there is nothing to reset to, so `null` and omitted are the same thing —
+    /// the hashed default.
+    #[serde(default)]
+    avatar: Option<String>,
     /// Optional persona instructions for the new teammate (issue #1530), so a
     /// teammate can be born with an overridden persona rather than needing a
     /// second PATCH. A plain `Option` — at creation there is no blueprint to
@@ -521,6 +531,27 @@ async fn add_member(
             ..Default::default()
         });
     }
+    // A create-time face, validated before it is stored for the reason the PATCH
+    // gives: the value is rendered into an `src=` wherever this teammate appears.
+    // Blank is dropped rather than stored — "no choice" is the hashed default.
+    let avatar = match body
+        .avatar
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        Some(value) => {
+            let stored = crate::company::avatar::normalize(value)
+                .map_err(|e| ApiError(e).into_response())?;
+            record.upsert_agent_override(AgentOverride {
+                agent_id: agent.id.clone(),
+                avatar: Some(stored.clone()),
+                ..Default::default()
+            });
+            Some(stored)
+        }
+        None => None,
+    };
     company
         .runtime
         .store()
@@ -555,6 +586,7 @@ async fn add_member(
         spent_today_usd: body.budget_usd_daily.map(|_| 0.0),
         budget_set_by: attribution.as_ref().map(|entry| entry.set_by.id.clone()),
         budget_set_at_millis: attribution.as_ref().map(|entry| entry.at_millis),
+        avatar,
         // An operator just created this one, so it is by construction not from
         // the baseline — the merge only ever appends to the manifest roster.
         // It is also exactly the write that closes the first-run gate.
