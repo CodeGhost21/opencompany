@@ -917,13 +917,13 @@ function Tools({
             // Not a warning about losing tools — the opposite, and the
             // inversion is exactly what an operator clearing this field
             // expects to be told.
-            <p className="text-xs text-amber-600" data-testid="agent-tools-empty-warning">
+            <p className="text-xs text-status-blocked-text" data-testid="agent-tools-empty-warning">
               An empty list means the company's standard grant, not "no tools" — this teammate
               would hold everything the company allows.
             </p>
           )}
           {willNotApply.length > 0 && (
-            <p className="text-xs text-amber-600" data-testid="agent-tools-uncovered">
+            <p className="text-xs text-status-blocked-text" data-testid="agent-tools-uncovered">
               The company tool list does not cover {willNotApply.join(", ")}, so it will be stored
               and confer nothing.
             </p>
