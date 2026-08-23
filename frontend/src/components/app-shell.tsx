@@ -1806,7 +1806,7 @@ export function AppShell({
               {NAV.map((item) => (
                 <SidebarMenuItem key={item.view} data-tour={`nav-${item.view}`}>
                   <SidebarMenuButton
-                    isActive={view === item.view}
+                    isActive={view === item.view || (item.view === "ledgers" && view === "tasks")}
                     tooltip={item.label}
                     onClick={() => setView(item.view)}
                     className={RESTING_ROW}

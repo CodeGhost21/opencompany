@@ -184,12 +184,11 @@ function neverDispatched(task: Task): boolean {
 /**
  * Extends a host-computed duration to `now` while its span is still open.
  *
- * The worked/waiting arithmetic — the dispatch-window pairing and the approval
- * interval merge — used to live here *and* in the exporter
+ * The worked arithmetic used to live here *and* in the exporter
  * (`src/server/ops/task_export.rs`), so the screen and the exported record of
- * the same task could disagree about how long a person was waited on with
- * nothing failing. The host now computes both totals once in `TaskDurations`
- * and hands them to whoever reads the task; this is all that is left client-side.
+ * the same task could disagree with nothing failing. The host now computes the
+ * total once in `TaskDurations` and hands it to whoever reads the task; this is
+ * all that is left client-side.
  *
  * The extension is exact rather than an approximation, which is why the merge
  * does not have to be repeated here: every closed span ends in the past, so past
@@ -444,33 +443,13 @@ export function TaskDetailView({
         : null,
     [detail, now],
   );
-  const waiting = useMemo(
-    () =>
-      detail
-        ? extend(
-            detail.durations.waitingMillis,
-            detail.durations.waitingLive,
-            detail.durations.asOfMillis,
-            now,
-          )
-        : null,
-    [detail, now],
-  );
-
   // Only tick the 1s clock while something is actually running: a dispatch
-  // window is open, the task is parked on an operator right now, an attempt has
-  // not settled, or this task still owns a pending approval.
-  //
-  // The pending-approval term is not redundant with `waiting?.live`. That one
-  // derives from `waitingSince`, which the server gates on an *open run
-  // window* (#305) — so a finished card that still has a sign-off outstanding
-  // reports no `waitingSince` at all, and the Approvals tab's "waiting Xs"
-  // froze at whatever it read on mount. Since #333 the backend deliberately
-  // returns that row, so the clock has to keep up with it.
+  // window is open, an attempt has not settled, or this task still owns a
+  // pending approval. Pending approvals are the one source for the current
+  // wait clock, including after the run that created one has settled.
   const awaitingApproval = Boolean(detail?.approvals.some((a) => a.status === "pending"));
   const ticking =
     Boolean(worked?.live) ||
-    Boolean(waiting?.live) ||
     Boolean(detail?.runs.some(isRunOpen)) ||
     awaitingApproval;
   useEffect(() => {
@@ -527,25 +506,29 @@ export function TaskDetailView({
         </div>
       ) : detail ? (
         <ScrollArea className="min-h-0 flex-1">
-          <div className="mx-auto w-full max-w-3xl space-y-5 p-4">
-            <DetailHeader
-              task={detail.task}
-              worked={worked}
-              waiting={waiting}
-              columns={columns}
-            />
+          <div className="w-full space-y-4 p-4">
+            <section className="overflow-hidden rounded-xl border bg-card">
+              <DetailHeader task={detail.task} worked={worked} columns={columns} />
 
-            <ControlBar
-              task={detail.task}
-              inflight={inflight}
-              irreversible={detail.irreversibleEffects}
-              historyIncomplete={detail.historyIncomplete}
-              client={client}
-              company={company}
-              onChanged={load}
-              onSaved={onSaved}
-              onEdit={() => setEditing(true)}
-            />
+              <ControlBar
+                task={detail.task}
+                inflight={inflight}
+                irreversible={detail.irreversibleEffects}
+                historyIncomplete={detail.historyIncomplete}
+                client={client}
+                company={company}
+                onChanged={load}
+                onSaved={onSaved}
+                onEdit={() => setEditing(true)}
+              />
+
+              <AwaitingApprovalRow
+                approvals={detail.approvals}
+                parked={parked}
+                taskId={detail.task.id}
+                now={now}
+              />
+            </section>
 
             <OriginThreadRow
               originChatId={detail.task.originChatId}
@@ -556,13 +539,6 @@ export function TaskDetailView({
               lineage={detail.lineage}
               onNavigate={onNavigate}
               columns={columns}
-            />
-
-            <AwaitingApprovalRow
-              approvals={detail.approvals}
-              parked={parked}
-              taskId={detail.task.id}
-              now={now}
             />
 
             {/* Issue #580: the built workflow awaiting approval, shown only while
@@ -618,11 +594,7 @@ export function TaskDetailView({
               </TabsList>
 
               <TabsContent value="timeline" className="mt-4">
-                <TimelineList
-                  entries={detail.timeline}
-                  waitingSince={detail.waitingSince}
-                  now={now}
-                />
+                <TimelineList entries={detail.timeline} />
               </TabsContent>
 
               <TabsContent value="attempts" className="mt-4">
@@ -712,12 +684,10 @@ export function TaskDetailView({
 function DetailHeader({
   task,
   worked,
-  waiting,
   columns,
 }: {
   task: Task;
   worked: { millis: number; live: boolean } | null;
-  waiting: { millis: number; live: boolean } | null;
   /** The board's columns, for the status badge's label. Passed rather than
       read here: they come from the `tasks` ledger, so the one component that
       can fetch them is the one that already holds the client. */
@@ -729,17 +699,8 @@ function DetailHeader({
   // was journaled for it, so claiming otherwise beside a settled status is the
   // self-contradiction the report caught.
   const neverStarted = !hasDispatch && neverDispatched(task);
-  // `worked` is the whole elapsed run window; waiting sits *inside* it, so
-  // working time is the remainder. Clamped at zero because the two figures come
-  // from different sources (event log vs journal join) and a clock skew between
-  // them must never render a negative duration.
-  const waitedMs = waiting?.millis ?? 0;
-  const workingMs = Math.max(0, (worked?.millis ?? 0) - waitedMs);
-  // The acceptance line: a task that never waited shows no waiting figure at
-  // all, not a "Waiting 0s".
-  const showWaiting = waitedMs > 0 || Boolean(waiting?.live);
   return (
-    <div className="rounded-xl border bg-card p-4">
+    <div className="p-4">
       <div className="flex items-start justify-between gap-3">
         <h1 className="text-lg font-semibold leading-snug">{task.title}</h1>
         <Badge
@@ -799,7 +760,7 @@ function DetailHeader({
             {hasDispatch ? (
               <>
                 <span className="font-medium text-foreground">
-                  Worked {formatDuration(workingMs)}
+                  Worked {formatDuration(worked!.millis)}
                 </span>
                 {worked!.live && (
                   <span className="inline-flex items-center gap-1 text-status-done-text">
@@ -816,23 +777,6 @@ function DetailHeader({
             )}
           </span>
         )}
-        {showWaiting && (
-          <span className="inline-flex items-center gap-1.5">
-            <Hourglass className="size-3.5 text-status-blocked-text" />
-            <span className="font-medium text-status-blocked-text">
-              Waiting {formatDuration(waitedMs)}
-            </span>
-            {waiting!.live && (
-              <span className="inline-flex items-center gap-1 text-status-blocked-text">
-                <span
-                  className="size-1.5 animate-pulse rounded-full bg-current"
-                  aria-hidden
-                />
-                on you
-              </span>
-            )}
-          </span>
-        )}
       </div>
 
       {task.note && (
@@ -841,17 +785,6 @@ function DetailHeader({
         </p>
       )}
 
-      {/* Each waiting span is exact — a real park instant to a real resolution
-          — and since #333 so is the card it is charged to: an approval is
-          journaled with the task that parked it. Only a sign-off parked by a
-          host older than #333 has no link and still falls back to the run
-          window. Said plainly rather than left for a reader to discover. */}
-      {showWaiting && (
-        <p className="mt-2 text-2xs text-muted-foreground/70">
-          Waiting counts this task&rsquo;s own approvals; sign-offs parked before they carried a
-          task id fall back to its run window.
-        </p>
-      )}
     </div>
   );
 }
@@ -992,7 +925,7 @@ function ControlBar({
   const resumeLabel = task.stage === "paused" ? "Resume" : "Retry";
 
   return (
-    <div className="rounded-xl border bg-card/40 p-3">
+    <div className="border-t bg-card/40 p-3">
       <div className="flex flex-wrap items-center gap-2">
         {inflight ? (
           <>
@@ -1304,15 +1237,11 @@ type TimelineItem =
  *
  * Waiting bands (#305) are spliced in *before* the approval row that ended the
  * wait — the band is the pause that led to the decision, so it reads in that
- * order — and a live band is appended at the foot when the task is parked on an
- * operator right now. Approvals are never coalesced, so no band can land inside
- * a `×N` group.
+ * order. The current wait appears once in the task panel's approval signal;
+ * only completed waits belong in the timeline. Approvals are never coalesced,
+ * so no band can land inside a `×N` group.
  */
-function groupTimeline(
-  entries: TimelineEntry[],
-  waitingSince?: number,
-  now: number = Date.now(),
-): TimelineItem[] {
+export function groupTimeline(entries: TimelineEntry[]): TimelineItem[] {
   const groups: TimelineGroup[] = [];
   for (const e of entries) {
     const last = groups[groups.length - 1];
@@ -1352,14 +1281,6 @@ function groupTimeline(
       });
     }
     items.push({ row: "group", key: g.key, group: g });
-  }
-  if (waitingSince !== undefined) {
-    items.push({
-      row: "wait",
-      key: "wait-live",
-      millis: Math.max(0, now - waitingSince),
-      live: true,
-    });
   }
   return items;
 }
@@ -1424,19 +1345,8 @@ function isFailureRow(entry: TimelineEntry): boolean {
   return entry.kind === "tool_failed" || entry.status === "error";
 }
 
-function TimelineList({
-  entries,
-  waitingSince,
-  now,
-}: {
-  entries: TimelineEntry[];
-  waitingSince?: number;
-  now: number;
-}) {
-  const items = useMemo(
-    () => groupTimeline(entries, waitingSince, now),
-    [entries, waitingSince, now],
-  );
+function TimelineList({ entries }: { entries: TimelineEntry[] }) {
+  const items = useMemo(() => groupTimeline(entries), [entries]);
   if (items.length === 0) {
     return (
       <EmptyState
@@ -1459,34 +1369,28 @@ function TimelineList({
 }
 
 /**
- * A waiting period, rendered as space rather than as another uniform row (#305).
+ * A completed waiting period, rendered as space rather than as another uniform
+ * row (#305).
  *
  * This is the acceptance criterion the timeline exists for: a four-hour wait and
  * a four-second wait must not look alike. The height carries the comparison at a
  * glance; the printed duration carries the exact figure, including past the
  * point the height saturates.
  */
-function WaitingBand({ millis, live }: { millis: number; live: boolean }) {
-  // Height is quantised to the 4s poll while the band is live, so a 1s text tick
-  // does not relayout the list underneath the reader's cursor every second.
-  const height = waitingBandHeight(
-    live ? Math.round(millis / 4000) * 4000 : millis,
-  );
+function WaitingBand({ millis }: { millis: number }) {
+  const height = waitingBandHeight(millis);
   return (
     <li
       className={cn(
         "flex items-center justify-center gap-1.5 rounded-lg border border-dashed",
         "border-status-blocked/40 bg-status-blocked-soft text-2xs text-status-blocked-text",
-        live && "animate-pulse",
       )}
       style={{ minHeight: height }}
       aria-label={`Waiting on a human for ${formatDuration(millis)}`}
     >
       <Hourglass className="size-3.5 shrink-0" aria-hidden />
       <span className="font-medium tabular-nums">
-        {live
-          ? `Waiting on you · ${formatDuration(millis)}`
-          : `Waited ${formatDuration(millis)}`}
+        {`Waited ${formatDuration(millis)}`}
       </span>
     </li>
   );
@@ -2047,7 +1951,7 @@ function AwaitingApprovalRow({
   const href = `#/approvals/${encodeURIComponent(taskId)}`;
 
   return (
-    <div className="flex items-center gap-2 rounded-lg border border-status-blocked/30 bg-status-blocked-soft px-3 py-2 text-xs">
+    <div className="flex items-center gap-2 border-t border-status-blocked/30 bg-status-blocked-soft px-4 py-3 text-xs">
       <Hourglass className="size-3.5 shrink-0 text-status-blocked-text" />
       <span className="min-w-0 flex-1 text-status-blocked-text">
         {/* Issue #883: name the call, not the mechanism. "Waiting on an
