@@ -759,15 +759,8 @@ mod test {
         settings: &StorageSettings,
         to: &str,
         to_url: Option<&str>,
-        to_data_dir: Option<&str>,
     ) -> crate::Result<(MemoryDriverConfig, MemoryDriverConfig)> {
-        resolve_migrate_configs(
-            settings,
-            to,
-            to_url.map(str::to_owned),
-            None,
-            to_data_dir.map(std::path::PathBuf::from),
-        )
+        resolve_migrate_configs(settings, to, to_url.map(str::to_owned), None)
     }
 
     #[test]
