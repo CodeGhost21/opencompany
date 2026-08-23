@@ -62,6 +62,7 @@ beforeEach(() => {
 afterEach(() => {
   act(() => root.unmount());
   container.remove();
+  vi.useRealTimers();
 });
 
 describe("the approvals backlog queue (#1427)", () => {
