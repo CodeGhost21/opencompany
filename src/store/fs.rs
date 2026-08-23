@@ -3008,7 +3008,7 @@ mod test {
     }
 
     #[tokio::test]
-    async fn secret_store_reads_legacy_file_and_removes_it_on_rotation() {
+    async fn secret_store_reads_legacy_file_and_keeps_it_after_rotation() {
         let root_dir = tmp_root();
         let root = root_dir.path().to_path_buf();
         let secrets = FsSecretStore::new(&root);
