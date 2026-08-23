@@ -2697,10 +2697,10 @@ mod tests {
     /// renderable path, yet a parent-id rename still moves it, so the gate has
     /// to decide on nodes no `FsOps`-seeded test can reach.
     #[derive(Clone)]
-    struct FixedTree(Vec<WorkspaceNode>);
+    struct FixedWorkspaceTree(Vec<WorkspaceNode>);
 
     #[async_trait]
-    impl WorkspaceStore for FixedTree {
+    impl WorkspaceStore for FixedWorkspaceTree {
         async fn tree(&self, _company: &CompanyId) -> crate::Result<Vec<WorkspaceNode>> {
             Ok(self.0.clone())
         }
