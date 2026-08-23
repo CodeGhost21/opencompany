@@ -250,4 +250,28 @@ describe("PagesView bridge", () => {
     // The second load represents a frame navigation, not a new document the
     // console selected, so it cannot be granted bridge access.
   });
+
+  it("mints a fresh bridge when the same slug loads under a different company", async () => {
+    const graphqlRequest = vi.fn();
+    await show(clientWith(graphqlRequest));
+
+    const first = iframe();
+    expect(first).not.toBeNull();
+    mintBridge(first as HTMLIFrameElement);
+
+    // Switch companies while staying on the same slug. The iframe document's
+    // identity now includes the company, so the iframe must remount and its
+    // first load must be granted a fresh bridge — not counted as a navigation
+    // of the previous company's document and revoked (a regression where the
+    // new document's `client.query` would hang until timeout).
+    await show(clientWith(graphqlRequest), "globex");
+
+    const second = iframe();
+    expect(second).not.toBeNull();
+    expect(second).not.toBe(first);
+
+    const { capability, port } = mintBridge(second as HTMLIFrameElement);
+    expect(capability).toBeTruthy();
+    expect(port).toBeInstanceOf(MessagePort);
+  });
 });
