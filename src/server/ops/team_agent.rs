@@ -2047,7 +2047,7 @@ prompt = "Lead decisively."
         let (_, agent) = get_agent(&state, &jamie).await;
         assert_eq!(
             strings(&agent["editable"]),
-            vec!["name", "role", "description", "tools", "instructions"],
+            vec!["name", "role", "description", "tools", "instructions", "avatar"],
             "{agent}"
         );
     }
@@ -2268,7 +2268,7 @@ prompt = "Lead decisively."
         let (_, as_admin) = get_agent(&state, &jamie).await;
         assert_eq!(
             strings(&as_admin["editable"]),
-            vec!["name", "role", "description", "tools", "instructions"],
+            vec!["name", "role", "description", "tools", "instructions", "avatar"],
             "{as_admin}"
         );
 
@@ -2282,8 +2282,10 @@ prompt = "Lead decisively."
         .await;
         assert_eq!(
             strings(&as_member["editable"]),
-            vec!["name", "role", "description", "instructions"],
-            "a member is not offered a field they cannot save: {as_member}"
+            vec!["name", "role", "description", "instructions", "avatar"],
+            "a member is not offered a field they cannot save — but a face is not \
+             one of those: picking a colleague's icon is no privilege boundary, \
+             and `tools` stays the only admin-gated field: {as_member}"
         );
     }
 
