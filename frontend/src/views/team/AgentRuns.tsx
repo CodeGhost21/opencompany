@@ -147,6 +147,23 @@ function stepSummary(run: RunSummary): string {
   return `${n}${run.stepCountCapped ? "+" : ""} step${n === 1 ? "" : "s"}`;
 }
 
+/**
+ * Runs `read`, and answers `null` however it fails.
+ *
+ * A plain `.catch()` would be *nearly* enough — and the gap is the whole
+ * reason this exists. `.catch` handles a rejected promise; it does not handle
+ * the call throwing before it returns one, which is what a client missing the
+ * method does. Every read behind this helper is decoration on a section that
+ * renders without it, so neither failure mode may reach the caller.
+ */
+async function best<T>(read: () => Promise<T>): Promise<T | null> {
+  try {
+    return await read();
+  } catch {
+    return null;
+  }
+}
+
 /** A date heading, so a long history reads as days rather than as timestamps. */
 function dayOf(at: number): string {
   return new Date(at).toLocaleDateString(undefined, {
@@ -215,13 +232,13 @@ export function AgentRuns({
     let live = true;
     void (async () => {
       const [tasks, workflows, desks] = await Promise.all([
-        listTasks(client, company).catch(() => null),
-        listWorkflows(client, company).catch(() => null),
+        best(() => listTasks(client, company)),
+        best(() => listWorkflows(client, company)),
         // The desks are what turn a chat run's `chatId` into `#front-desk`
         // rather than `front-desk`. A host that does not expose `…/desks`
         // 404s; the id then stands in for the name, which is what
         // `RunSource.resolved` is for.
-        client.listDesks(company).catch(() => null),
+        best(() => client.listDesks(company)),
       ]);
       if (!live) return;
       // `Array.isArray` rather than a null check: these reads are best-effort
