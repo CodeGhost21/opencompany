@@ -338,6 +338,7 @@ fn every_disable_kind_has_a_surface_behind_it() {
             "workflow" => workflows()[0].id.clone(),
             "skill" => skills()[0].slug.clone(),
             "ledger" => ledgers()[0].slug.clone(),
+            "task" => tasks()[0].id.clone(),
             other => panic!("`{other}` is a disable kind with no surface behind it"),
         };
         assert!(has(&format!("{kind}:{id}")), "{kind}:{id}");
