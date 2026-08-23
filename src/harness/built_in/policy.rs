@@ -1112,16 +1112,21 @@ impl ApprovalPolicy {
     }
 
     fn standing_deny_applies(&self, tool: &str, args: &serde_json::Value) -> bool {
-        let subject = match (self.agent.as_deref(), self.workflow.as_deref()) {
-            (Some(agent), _) => GrantSubject::Agent(agent.to_string()),
-            (None, Some(workflow)) => GrantSubject::Workflow(workflow.to_string()),
-            (None, None) => return false,
+        // Agents only, on purpose: a standing denial is only *enforced* on the
+        // agent turn path, where openhuman treats a `Deny` verdict as
+        // fail-closed. The workflow gate deliberately does not honour `Deny`
+        // (see `src/workflows/gate.rs`), so minting a standing denial for a
+        // workflow would advertise a refusal nothing ever enforces. The mint
+        // side refuses those too; this keeps the check from ever *advertising*
+        // one even if a stale deny were already in the set.
+        let Some(agent) = self.agent.as_deref() else {
+            return false;
         };
         let scope = crate::policy::consequence::standing_scope_of(tool, args);
         self.requests
             .grants()
             .match_standing_with_verdict(
-                &subject,
+                &GrantSubject::Agent(agent.to_string()),
                 tool,
                 scope.as_deref(),
                 Verdict::Deny,
