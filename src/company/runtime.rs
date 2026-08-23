@@ -2738,7 +2738,16 @@ impl CompanyRuntime {
         supplied: Option<Vec<Mention>>,
         sender: Option<&Actor>,
     ) -> Vec<Mention> {
-        let record = match self.store.load(&self.id).await {
+        // Issue: on the operator-message path this runs BEFORE the journal
+        // append (`mention_responder` reads the resolved mentions off the
+        // journaled event, so the append cannot go first), which puts these
+        // two store reads in front of every chat POST's accept latency. Run
+        // together rather than sequentially — they read different stores and
+        // neither depends on the other's result — to keep that addition close
+        // to the cost of the slower read alone rather than the sum of both.
+        let (record, user_list) =
+            tokio::join!(self.store.load(&self.id), self.users().list_users(&self.id));
+        let record = match record {
             Ok(Some(record)) => record,
             Ok(None) => return Vec::new(),
             Err(err) => {
@@ -2751,7 +2760,7 @@ impl CompanyRuntime {
                 return Vec::new();
             }
         };
-        let mut users = self.users().list_users(&self.id).await.unwrap_or_else(|err| {
+        let mut users = user_list.unwrap_or_else(|err| {
             tracing::warn!(
                 company = %self.id,
                 error = %err,
