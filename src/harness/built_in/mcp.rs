@@ -595,8 +595,7 @@ impl McpRuntime {
     }
 
     /// One directory entry in full, routed back to the registry it came from.
-    pub async fn registry_get(&self, qualified_name: String
-    ) -> crate::Result<serde_json::Value> {
+    pub async fn registry_get(&self, qualified_name: String) -> crate::Result<serde_json::Value> {
         oh::mcp::registry::ops::mcp_clients_registry_get(
             &self.directory_config(),
             qualified_name,
