@@ -60,16 +60,6 @@ use crate::server::ops::mailer::{MailCredentials, OutboundEmail};
 /// park cards that silently do nothing when approved.
 pub(crate) const EMAIL_SEND_KIND: &str = "email.send";
 
-/// The effect kind a `repo_publish` approval performs (issue #735) — the
-/// host-side push to the real remote.
-///
-/// `pub(crate)` and defined here, in the always-compiled runtime, rather than in
-/// the `openhuman`-gated `harness::repo` that builds it: `perform_effect` below
-/// matches on it in the default build, where `crate::harness` does not exist. The
-/// tool references it through `crate::runtime::cycle::REPO_PUBLISH_EFFECT`, the
-/// same shape `workflows::delivery` uses for [`EMAIL_SEND_KIND`], so the producer
-/// and this consumer key off one literal.
-pub(crate) const REPO_PUBLISH_EFFECT: &str = "repo.publish";
 
 /// The `error` the terminality backstop stamps on an attempt row whose cycle
 /// ended without settling it (issue #242) — a brain that ignored the dispatch,
@@ -1641,98 +1631,6 @@ async fn perform_effect(rt: &CompanyRuntime, effect: &Effect) -> Result<()> {
         crate::runtime::workflow_resume::on_gate_approved(rt, effect).await?;
     }
     Ok(())
-}
-
-/// Whether `task` names a real card in `cards` (issue #815).
-///
-/// The guard that keeps a DM's `dm-*` work key — which `repo_publish` stamps as
-/// the effect's `task`, and which no card owns — from filing a publish-failure
-/// note under a phantom card. The empty id, an unknown id, and a work key all
-/// resolve to nothing.
-fn task_names_a_card(cards: &[TaskRecord], task: &str) -> bool {
-    !task.is_empty() && cards.iter().any(|card| card.id == task)
-}
-
-/// Records a host-side `repo_publish` failure where the operator will see it,
-/// but **only when the work unit is a real card** (issue #815).
-///
-/// A DM's `repo_publish` stamps its `dm-*` work key as the effect's `task`, and
-/// no card owns that id — a [`TaskDiscussionPosted`](CompanyEvent::TaskDiscussionPosted)
-/// under it would file the note against a phantom card. When the id does not
-/// resolve to a card the board post is skipped: the failure is already in the
-/// operator log (the `tracing::warn` at the call site), which is where a `git`
-/// error that can name host paths and the remote URL belongs, rather than in a
-/// durable, company-readable record (the rule #614/#688 set). `text` is a fixed,
-/// classified sentence carrying none of the raw error.
-async fn note_publish_failure_on_card(rt: &CompanyRuntime, task: &str, text: String) {
-    if task.is_empty() {
-        return;
-    }
-    // Resolve to a live card; a `dm-*` work key or an unknown id resolves to
-    // nothing, and the note stays in the log rather than misfiling. A store error
-    // is treated the same way — better a logged-only note than one on a card that
-    // may not exist.
-    let is_card = match rt.tasks().list(&rt.id).await {
-        Ok(cards) => task_names_a_card(&cards, task),
-        Err(err) => {
-            tracing::warn!("[repo] could not resolve the task for a publish-failure note: {err}");
-            false
-        }
-    };
-    if !is_card {
-        return;
-    }
-    if let Err(err) = rt
-        .events
-        .append(
-            &rt.id,
-            CompanyEvent::TaskDiscussionPosted {
-                task_id: task.to_string(),
-                text,
-                by: None,
-            },
-        )
-        .await
-    {
-        tracing::warn!("[repo] could not record the publish failure on the task: {err}");
-    }
-}
-
-/// The title of the pull request a `repo_publish` opens (issue #736): the first
-/// line of the agent's message, bounded, or a plain fallback when it said
-/// nothing.
-fn repo_publish_pr_title(message: &str) -> String {
-    let first = message.trim().lines().next().unwrap_or("").trim();
-    if first.is_empty() {
-        "Published by an OpenCompany agent".to_string()
-    } else {
-        first.chars().take(72).collect()
-    }
-}
-
-/// The body of that pull request (issue #736): the agent's message, then task,
-/// run, and agent linkage so an operator landing on the PR can get back to the
-/// card, attempt, and seat that produced it.
-fn repo_publish_pr_body(agent: &str, task: &str, run_id: Option<&str>, message: &str) -> String {
-    let mut body = String::new();
-    let message = message.trim();
-    if !message.is_empty() {
-        body.push_str(message);
-        body.push_str("\n\n");
-    }
-    body.push_str("---\n");
-    body.push_str("Opened host-side by an OpenCompany agent");
-    if !agent.is_empty() {
-        body.push_str(&format!(" (`{agent}`)"));
-    }
-    if !task.is_empty() {
-        body.push_str(&format!(" for task `{task}`"));
-    }
-    if let Some(run_id) = run_id.filter(|run_id| !run_id.is_empty()) {
-        body.push_str(&format!(" in run `{run_id}`"));
-    }
-    body.push('.');
-    body
 }
 
 /// Sends an `email.send` effect via the company's own outbound-mail handle
