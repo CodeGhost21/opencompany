@@ -167,12 +167,15 @@ pub enum PolicyMode {
     Readonly,
     /// Supervised: external-effect tools require operator approval.
     Supervised,
-    /// Auto: the agent's own sandbox writes and outward reads run unattended;
-    /// anything that leaves the company or spends money still parks.
+    /// Auto: the agent's own sandbox writes, outward reads, and workspace
+    /// mutations confined to nodes the calling agent created and last wrote run
+    /// unattended; anything that leaves the company or spends money still parks.
     ///
     /// The tier line itself is
     /// [`Consequence::parks_under_auto`](crate::policy::Consequence::parks_under_auto),
-    /// which reads the existing declaration table rather than adding a list.
+    /// which reads the existing declaration table rather than adding a list; the
+    /// workspace exception is graded at the policy seam before the table verdict
+    /// is taken (issue #877).
     Auto,
     /// Full autonomy: tools run without approval (except `always_approve`).
     Full,
