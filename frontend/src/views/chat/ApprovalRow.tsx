@@ -49,6 +49,7 @@ import {
   ApprovalPayload,
   ApprovalScopeControl,
   approvalIcon,
+  type ApprovalThreadLink,
 } from "@/components/approval-card";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { approvedLine } from "@/lib/approval-wording";
@@ -150,6 +151,7 @@ export function ApprovalRow({
   approvals,
   now,
   askerNames,
+  thread,
   compact = false,
   deciding,
   decided,
@@ -160,6 +162,8 @@ export function ApprovalRow({
   approvals: ApprovalSummary[];
   now: number;
   askerNames: Map<string, string>;
+  /** The channel this inline row is already rendered inside. */
+  thread?: ApprovalThreadLink | null;
   /** Render as a quiet interruption inside a chat transcript (#1330). */
   compact?: boolean;
   /** The verdict an item is waiting on, keyed by approval id; empty when idle. */
@@ -300,6 +304,7 @@ export function ApprovalRow({
         approvals={pending}
         now={now}
         askerNames={askerNames}
+        thread={thread}
         actions={actions}
         busy={busy}
         status={
@@ -384,6 +389,7 @@ export function ApprovalRow({
             approval={lead}
             now={now}
             askerNames={askerNames}
+            thread={thread}
             status={
               busy
                   ? awaiting("approve")
@@ -411,6 +417,7 @@ function CompactApprovalRow({
   approvals,
   now,
   askerNames,
+  thread,
   actions,
   busy,
   status,
@@ -423,6 +430,8 @@ function CompactApprovalRow({
   approvals: ApprovalSummary[];
   now: number;
   askerNames: Map<string, string>;
+  /** The channel this inline row is already rendered inside (#1419). */
+  thread?: ApprovalThreadLink | null;
   actions: React.ReactNode;
   busy: boolean;
   status?: React.ReactNode;
@@ -448,7 +457,13 @@ function CompactApprovalRow({
         <div className="min-w-0 flex-1">
           <CompactLabel approvals={approvals} />
           <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-            <ApprovalMeta approval={lead} now={now} askerNames={askerNames} status={status} />
+            <ApprovalMeta
+              approval={lead}
+              now={now}
+              askerNames={askerNames}
+              thread={thread}
+              status={status}
+            />
             {!busy && (
               <a
                 href="#/approvals"

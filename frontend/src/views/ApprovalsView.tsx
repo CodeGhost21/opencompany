@@ -18,6 +18,7 @@ import {
   ApprovalPayload,
   ApprovalScopeControl,
   useAskerNames,
+  useApprovalThreadLinks,
 } from "@/components/approval-card";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -169,6 +170,7 @@ export function ApprovalsView({
    */
   const { items: rows, containerProps: queueHold } = useStableList(visible);
   const askerNames = useAskerNames(client, company, approvals);
+  const threadLinks = useApprovalThreadLinks(client, company, rows);
   const { grants, granterNames, refreshGrants } = useStandingGrants(client, company);
   /**
    * How many rows each turn's batch still has waiting (#842).
@@ -378,6 +380,7 @@ export function ApprovalsView({
                   approval={a}
                   now={now}
                   askerNames={askerNames}
+                  thread={threadLinks.get(a.id)}
                   deciding={inFlight.get(a.id) ?? null}
                   batchIndex={batchPos.get(a.id)?.index ?? 1}
                   batchTotal={batchPos.get(a.id)?.total ?? 1}
@@ -599,13 +602,16 @@ function granterLabel(g: StandingGrant, granterNames: Map<string, string>): stri
  *
  * **An old host degrades to the pre-#372 card by construction.** It omits
  * `payload` and `agent` from the wire, so the payload block and the "Asked by"
- * line simply do not render and what is left is the headline, the amount and
- * the relative time — exactly what shipped before.
+ * line simply do not render when the action is named. An unlabelled native
+ * action instead says that no further details were supplied (#1419), because
+ * leaving its generic headline alone would not distinguish one request from
+ * another.
  */
 export function ApprovalCard({
   approval: a,
   now,
   askerNames,
+  thread,
   deciding,
   batchIndex,
   batchTotal,
@@ -614,6 +620,7 @@ export function ApprovalCard({
   approval: ApprovalSummary;
   now: number;
   askerNames: Map<string, string>;
+  thread?: import("@/components/approval-card").ApprovalThreadLink | null;
   /** The verdict this card is waiting on, or `null` when it is idle (#373). */
   deciding: Verdict | null;
   /**
@@ -671,6 +678,7 @@ export function ApprovalCard({
           approval={a}
           now={now}
           askerNames={askerNames}
+          thread={thread}
           /* Honest copy for a request that spans an agent turn (#373): an
              approve is not done when the button stops spinning, it is handed
              to the agent. A decline IS terminal, so it only has to record. */

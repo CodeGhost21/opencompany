@@ -250,6 +250,17 @@ test("a card drags from Working to Done, and the board scrolls to get there", as
   // below turns on that measurement — which columns collapse, and by how much
   // the board overflows — so wait for it rather than for a timeout.
   await expect.poll(pane).toBeLessThan(wide);
+  // The width poll passes as soon as CSS narrows the board, which is one
+  // frame before the ResizeObserver's `setViewport` has re-rendered it — and
+  // the collapse decision lands in that re-render. `expandAll` below must run
+  // against the settled board: run early, it sees a board that has not decided
+  // to collapse anything, returns without pinning a single rail, and the empty
+  // Done column folds itself into one on the next commit — failing the
+  // `toHaveCount(0)` below on a board this test never pinned. So wait for the
+  // fold to land before offering it a pin.
+  await expect
+    .poll(async () => (await board(page).locator('[data-collapsed="true"]').count()) > 0)
+    .toBe(true);
 
   // And expand *again*, because narrowing the window is what created the rails.
   // `openBoard` ran `expandAll` at 1280px, where three phases fit and the board
