@@ -48,8 +48,8 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use crate::error::OpenCompanyError;
 use crate::app::config::{EnvSource, ProcessEnv};
+use crate::error::OpenCompanyError;
 use crate::server::ops::imap::ImapCredentials;
 use crate::server::ops::smtp::{SmtpCredentials, SmtpSecurity};
 
@@ -629,7 +629,6 @@ mod test {
             ("OPENCOMPANY_MAIL_IMAP_PORT", "993"),
             ("OPENCOMPANY_MAIL_USER", "acme@opencompany.work"),
             ("OPENCOMPANY_MAIL_PASSWORD", "secret"),
-        ] {
         ]);
         let cfg = TenantMailboxConfig::from_env_source(&env)
             .unwrap()
@@ -638,17 +637,23 @@ mod test {
         assert_eq!(cfg.imap.host, "mail.opencompany.work");
         assert_eq!(cfg.imap.port, 993);
         assert_eq!(cfg.smtp.from_email, "acme@opencompany.work");
-
     }
 
     #[test]
     fn tenant_mailbox_config_absent_is_none() {
-        assert!(TenantMailboxConfig::from_env_source(&crate::app::config::MapEnv::default()).unwrap().is_none());
+        assert!(
+            TenantMailboxConfig::from_env_source(&crate::app::config::MapEnv::default())
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
     fn tenant_mailbox_config_partial_is_error() {
-        let env = crate::app::config::MapEnv::new([("OPENCOMPANY_MAIL_ADDRESS", "acme@opencompany.work")]);
+        let env = crate::app::config::MapEnv::new([(
+            "OPENCOMPANY_MAIL_ADDRESS",
+            "acme@opencompany.work",
+        )]);
         assert!(TenantMailboxConfig::from_env_source(&env).is_err());
     }
 }
