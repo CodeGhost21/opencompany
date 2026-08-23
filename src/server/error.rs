@@ -17,6 +17,24 @@ use crate::error::OpenCompanyError;
 #[derive(Debug)]
 pub struct ApiError(pub OpenCompanyError);
 
+/// A compact wrapper for a response that has already been rendered by a
+/// handler. Axum cannot use `Box<Response>` directly because it does not
+/// implement [`IntoResponse`]; this wrapper preserves that response unchanged.
+#[derive(Debug)]
+pub struct Rejection(Box<Response>);
+
+impl From<Response> for Rejection {
+    fn from(response: Response) -> Self {
+        Self(Box::new(response))
+    }
+}
+
+impl IntoResponse for Rejection {
+    fn into_response(self) -> Response {
+        *self.0
+    }
+}
+
 impl From<OpenCompanyError> for ApiError {
     fn from(error: OpenCompanyError) -> Self {
         Self(error)
