@@ -69,6 +69,11 @@ export function PagesView({ client, company }: Props) {
   // makes the port the real credential and the capability string a backstop.
   const portRef = useRef<MessagePort | null>(null);
   const loadsRef = useRef(0);
+  // The bridge handler, kept in a ref because the port it is attached to is
+  // minted later (in `handleLoad`, on the iframe's `load` event) while the
+  // handler needs `client` and the current page. The bridge effect below only
+  // swaps what this ref points at.
+  const bridgeHandlerRef = useRef<(event: MessageEvent) => void>(() => {});
 
   // Only nav-visible pages appear in the sidebar (`nav_visible = false` in
   // `page.toml` deliberately keeps one off the nav, reachable only by direct
