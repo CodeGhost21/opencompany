@@ -558,7 +558,11 @@ export function StandingPermissions({
                 <Button
                   variant="outline"
                   size="sm"
-                  aria-label={`Revoke: ${grantHeadline(g)}`}
+                  /* The grantee, not just the grant: two teammates holding the
+                     same tool and scope read identically in grantHeadline, so
+                     button-only navigation would hear two identical "Revoke"
+                     buttons and could take back the wrong one (#1411). */
+                  aria-label={`Revoke ${askerNames.get(g.agent) ?? g.agent}'s permission: ${grantHeadline(g)}`}
                   disabled={busy}
                   onClick={() => {
                     mark(g.id, true);
