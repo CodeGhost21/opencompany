@@ -141,7 +141,6 @@ const settle = async () =>
  * preselects `none` and the address step is absent.
  */
 async function finishNoSignIn() {
-  (window as unknown as { __TAURI__: unknown }).__TAURI__ = { core: {} };
   await click("setup-skip-model");
   await next(); // -> business
   await fill("setup-field-industry", "E-commerce — homeware");
