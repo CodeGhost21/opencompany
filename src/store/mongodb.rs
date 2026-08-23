@@ -327,37 +327,47 @@ impl MongoStore {
     /// this server-side — the desk lives inside a **string** of JSON, not a
     /// sub-document — so the rows are read back and rewritten one by one.
     ///
-    /// Cheap on every boot after the first: the `$exists: false` probe is
-    /// answered by the `agent_id` index, and matches nothing once the backfill
-    /// has run. Best-effort at the call site for the same reason the orphan
-    /// blob sweep is — a company that will not start is worse than one whose
-    /// oldest run rows are not yet filterable by desk.
+    /// The `$exists: false` probe is answered by the `agent_id` index, and
+    /// matches nothing once the backfill has run — but a first boot can still
+    /// hold a whole legacy collection's worth of work, so the migration is
+    /// batched: each pass collects at most [`BACKFILL_BATCH_SIZE`] rows, keeps
+    /// them in memory only long enough to fill them, then re-probes for the
+    /// next batch. Bounded memory, and the server's own run writes interleave
+    /// between passes. Best-effort at the call site for the same reason the
+    /// orphan blob sweep is — a company that will not start is worse than one
+    /// whose oldest run rows are not yet filterable by desk.
     async fn backfill_run_agent_ids(&self) -> Result<usize> {
         let runs = self.collection("runs");
-        let mut cursor = runs
-            .find(doc! {"agent_id": {"$exists": false}})
-            .await
-            .map_err(mongo_err)?;
-        let mut pending: Vec<(String, String, String)> = Vec::new();
-        while let Some(document) = cursor.try_next().await.map_err(mongo_err)? {
-            let record: crate::ports::runs::RunRecord =
-                serde_json::from_str(&get_str(&document, "run_json")?)?;
-            pending.push((
-                get_str(&document, "company_id")?,
-                get_str(&document, "run_id")?,
-                record.agent_id,
-            ));
+        let mut filled = 0usize;
+        loop {
+            let mut cursor = runs
+                .find(doc! {"agent_id": {"$exists": false}})
+                .limit(BACKFILL_BATCH_SIZE as i64)
+                .await
+                .map_err(mongo_err)?;
+            let mut batch: Vec<(String, String, String)> = Vec::new();
+            while let Some(document) = cursor.try_next().await.map_err(mongo_err)? {
+                let record: crate::ports::runs::RunRecord =
+                    serde_json::from_str(&get_str(&document, "run_json")?)?;
+                batch.push((
+                    get_str(&document, "company_id")?,
+                    get_str(&document, "run_id")?,
+                    record.agent_id,
+                ));
+            }
+            if batch.is_empty() {
+                return Ok(filled);
+            }
+            for (company_id, run_id, agent_id) in &batch {
+                runs.update_one(
+                    doc! {"company_id": company_id.as_str(), "run_id": run_id.as_str()},
+                    doc! {"$set": {"agent_id": agent_id.as_str()}},
+                )
+                .await
+                .map_err(mongo_err)?;
+            }
+            filled += batch.len();
         }
-        let filled = pending.len();
-        for (company_id, run_id, agent_id) in pending {
-            runs.update_one(
-                doc! {"company_id": company_id, "run_id": run_id},
-                doc! {"$set": {"agent_id": agent_id}},
-            )
-            .await
-            .map_err(mongo_err)?;
-        }
-        Ok(filled)
     }
 
     /// Idempotent index creation — the MongoDB equivalent of the sqlite
