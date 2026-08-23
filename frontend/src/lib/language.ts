@@ -395,8 +395,14 @@ function payloadLead(a: ApprovalSummary): string | null {
   const first = lines[0];
   if (!first) return null;
   const rest = lines.slice(1, 1 + MAX_LEAD_LINES);
-  if (rest.length === 0) return first.value;
-  return [first.value, ...rest.map((line) => `${line.label}: ${line.value}`)].join(" — ");
+  const dropped = lines.length - rest.length - 1;
+  const parts = [first.value, ...rest.map((line) => `${line.label}: ${line.value}`)];
+  // A payload with more lines than the label carries can still collide: two
+  // `http_request`s sharing url, method and headers differ only in the body,
+  // which is exactly what the cap omits. The card id is the one field that is
+  // guaranteed to differ, so it rides along only when something was dropped.
+  if (dropped > 0) parts.push(`card ${a.id}`);
+  return parts.join(" — ");
 }
 
 /** How many follow-up payload lines a decision label may carry (#1411). */
