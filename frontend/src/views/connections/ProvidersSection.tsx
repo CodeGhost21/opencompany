@@ -596,7 +596,7 @@ function ProviderTile({
           disabled={anyBusy || (row.route.kind === "composio" && noCredential)}
           onClick={onConnect}
           title={row.description || undefined}
-          aria-label={`Connect ${row.label}. ${state}. Authorises: ${permissionHint(row.category)}.`}
+          aria-label={`Connect ${row.label}. ${state}. Typical access: ${permissionHint(row.category)}.`}
           className={cn(
             shell,
             "transition-colors hover:border-foreground/20 hover:bg-accent",
