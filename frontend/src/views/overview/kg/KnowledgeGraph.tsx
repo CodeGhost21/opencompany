@@ -1935,7 +1935,21 @@ export function KnowledgeGraph({
   // between the console's ordinary controls. Nodes hidden behind the focused
   // tree are excluded, because focus must never move somewhere a reader cannot
   // see or operate.
-  const navigableNodes = nodes.filter((n) => !visuals.get(n.id)?.hidden);
+  const simNavigable = nodes.filter((n) => !visuals.get(n.id)?.hidden);
+  // With the Notes core open, its notes are visible click targets — keyboard
+  // users get the same set. They are namespaced so a note id can never collide
+  // with an org node id in the roving state or the ref map.
+  const memoryNavigable =
+    coreExpanded && memoryOn ? memory!.nodes.map((m) => ({ id: `memory:${m.id}` })) : [];
+  const selfNode = simNavigable.find((n) => n.id === SELF_ID);
+  // The memory notes belong to the core they sit inside, so the roving order
+  // walks self → its notes → the departments, rather than making a keyboard
+  // user pass every department to reach the vault they just opened.
+  const navigableNodes = [
+    ...(selfNode ? [selfNode] : []),
+    ...memoryNavigable,
+    ...simNavigable.filter((n) => n !== selfNode),
+  ];
   useEffect(() => {
     if (navigableNodes.some((n) => n.id === activeNodeId)) return;
     setActiveNodeId(navigableNodes[0]?.id ?? null);
