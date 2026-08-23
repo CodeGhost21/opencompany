@@ -52,6 +52,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Skeleton } from "@/components/ui/skeleton";
+import { personName } from "@/lib/person";
 import { avatarFor, roleSubtitle, toneFor, type TeamMember } from "@/lib/team";
 import {
   addMemberFailure,
@@ -215,7 +216,9 @@ export function OrgChartView({ client, company, focusDeskId, onBack }: Props) {
           .then((rows) =>
             rows.map((p): OrgPerson => ({
               id: p.id,
-              name: p.displayName?.trim() || p.email.split("@")[0],
+              // Through `personName`, so a person is called the same thing
+              // here as in chat and in the mail the host sends them.
+              name: personName(p),
               email: p.email,
               role: p.role,
             })),
