@@ -29,6 +29,11 @@ interface Props {
    * loaded — the composer degrades to plain-text typing.
    */
   mentionables?: Mentionable[];
+  /**
+   * The ids of the teammates on the channel this thread belongs to, for the
+   * composer's outside-channel warning. Absent when membership is unknown.
+   */
+  channelMemberIds?: string[];
   onSend: (text: string, intent?: MessageIntent, mentions?: Mention[]) => void;
   onClose: () => void;
 }
