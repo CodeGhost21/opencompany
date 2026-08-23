@@ -920,6 +920,7 @@ fn console_redirect_uri(state: &AppState, company: &CompanyId, from: Option<&str
 async fn hub_providers(
     company: PublicCompany,
     State(state): State<AppState>,
+    Query(query): Query<HubProvidersQuery>,
 ) -> Json<HubProvidersResult> {
     // No exchange means no way to check a token that came back, so there is no
     // honest button to offer. Refusing here — rather than at redemption — is
