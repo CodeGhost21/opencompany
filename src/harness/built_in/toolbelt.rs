@@ -1367,4 +1367,24 @@ mod tests {
             "only the intrinsic tool must survive a full deny: {kept_names:?}"
         );
     }
+
+    /// [`namespace_denied`] must agree with [`filter_by_capabilities`] on every
+    /// case: it is the standalone check `build_agent` uses to keep the sandbox
+    /// brief from describing a namespace the filter is about to strip from the
+    /// tool vector, so a mismatch between the two would let the brief and the
+    /// live belt disagree again — the exact bug this function exists to close.
+    #[test]
+    fn namespace_denied_agrees_with_filter_by_capabilities() {
+        assert!(!namespace_denied(&CapabilityFilter::AllowAll, "shell"));
+        assert!(!namespace_denied(&CapabilityFilter::AllowAll, "code"));
+
+        let deny: HashSet<&'static str> = ["shell"].into_iter().collect();
+        let filter = CapabilityFilter::DenyNamespaces(deny);
+        assert!(namespace_denied(&filter, "shell"));
+        assert!(!namespace_denied(&filter, "code"));
+
+        // A namespace outside `DenyNamespaces`' set is simply not denied — it
+        // is never asked to special-case a name it does not recognize.
+        assert!(!namespace_denied(&filter, "web"));
+    }
 }
