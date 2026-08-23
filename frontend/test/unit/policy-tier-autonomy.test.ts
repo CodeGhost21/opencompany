@@ -194,6 +194,42 @@ describe("changing the autonomy tier", () => {
     expect(put).toHaveBeenCalledWith("/api/v1/acme/policy", { mode: "supervised" });
     expect(document.querySelector("[data-testid=policy-tier-confirm]")).toBeNull();
   });
+
+  it("drops a pending confirmation when the company changes underneath it", async () => {
+    const { client, put } = makeClient(status("supervised"));
+    await mount(client);
+
+    await act(async () => {
+      container.querySelector<HTMLButtonElement>("[data-testid=policy-tier-full]")!.click();
+    });
+    expect(document.querySelector("[data-testid=policy-tier-confirm]")).not.toBeNull();
+
+    // The scope moves to another company while the dialog is open: the pending
+    // choice was reviewed against "acme"'s policy and must not apply to the
+    // new one.
+    await act(async () => {
+      root.render(createElement(PolicySettings, { client, company: "other" }));
+      await Promise.resolve();
+    });
+    expect(document.querySelector("[data-testid=policy-tier-confirm]")).toBeNull();
+    expect(put).not.toHaveBeenCalled();
+  });
+
+  it("qualifies the always-ask reassurance when edits are unsaved", async () => {
+    const { client } = makeClient(status("supervised"));
+    await mount(client);
+
+    await type(
+      container.querySelector<HTMLInputElement>("#always-approve")!,
+      "shell, http_request",
+    );
+    await act(async () => {
+      container.querySelector<HTMLButtonElement>("[data-testid=policy-tier-full]")!.click();
+    });
+    expect(document.body.textContent).toContain(
+      "Your saved always-ask list still wins, even on Full — save the list to enforce new gates.",
+    );
+  });
 });
 
 describe("resetting to the manifest's policy", () => {
