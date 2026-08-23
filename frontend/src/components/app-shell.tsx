@@ -57,6 +57,7 @@ import { type AgentReplyEvent, type CompanyStreamEvent, useEvents } from "@/hook
 import { useLedgerNav } from "@/hooks/use-ledger-nav";
 import { usePresence } from "@/hooks/use-presence";
 import { useTyping } from "@/hooks/use-typing";
+import { typersIn } from "@/lib/awareness";
 import type { WorkspaceEvent } from "@/views/WorkspaceView";
 import { useHashView } from "@/hooks/use-hash-view";
 import { BOARD_LEDGER } from "@/lib/board-columns";
@@ -1540,24 +1541,30 @@ export function AppShell({
   }, [client, company]);
 
   /**
-   * Who to name in the typing line for the channel on screen.
+   * Who to name in the typing line for a given channel (and, when a thread
+   * is open, that thread) — a resolver rather than one precomputed array,
+   * because `ChatView` needs two independent lines: the main composer's
+   * (`parentId` unset) and the open thread panel's (`parentId` set to the
+   * parent message's id). A single array could only ever answer one of them,
+   * which is why thread typing indicators never worked before this: the wire
+   * and `useTyping` already carried `parentId`, but everything upstream threw
+   * it away.
    *
    * Resolved here rather than in the view because the label map is here.
    * Somebody the directory does not name is dropped rather than shown as a raw
-   * id — "u_01H4… is typing" is worse than saying nothing.
+   * id — "u_01H4… is typing" is worse than saying nothing. Reuses `typersIn`
+   * — the same filter+sort `TypingLine`'s stable ordering already relies on —
+   * rather than re-deriving it here.
    */
-  const typingNames = useMemo(() => {
-    const byId = new Map(companyPeople.map((p) => [p.id, p.label]));
-    // `sub` rather than `activeChatChannelRef`, which is a ref and so cannot
-    // drive a memo — and falling back to the first desk matches what the chat
-    // view itself opens when the hash names no channel.
-    const active = view === "chat" ? (sub ?? firstDeskChannelId) : null;
-    if (!active) return [];
-    return typing.typers
-      .filter((t) => t.chatId === active && !t.parentId)
-      .map((t) => byId.get(t.userId))
-      .filter((label): label is string => Boolean(label));
-  }, [typing.typers, companyPeople, view, sub, firstDeskChannelId]);
+  const resolveTypingNames = useCallback(
+    (chatId: string, parentId?: string) => {
+      const byId = new Map(companyPeople.map((p) => [p.id, p.label]));
+      return typersIn(typing.typers, chatId, parentId, Date.now())
+        .map((t) => byId.get(t.userId))
+        .filter((label): label is string => Boolean(label));
+    },
+    [typing.typers, companyPeople],
+  );
   const onTurnEvent = useCallback((event: CompanyStreamEvent) => {
     // Route by the frame's own thread id so concurrent turns (even from the same
     // desk member) never cross-attribute; fall back to the in-flight ref only
@@ -1976,7 +1983,7 @@ export function AppShell({
               sub={sub}
               presence={presence.peers}
               companyPeople={companyPeople}
-              typingNames={typingNames}
+              resolveTypingNames={resolveTypingNames}
               onTyping={typing.announce}
               onNavigate={(channelId) => navigate("chat", channelId)}
               onReply={() => void feed.refresh()}

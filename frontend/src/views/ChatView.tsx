@@ -120,10 +120,16 @@ interface Props {
    * so people are never "in" or "outside" a channel.
    */
   companyPeople?: Array<{ id: string; label: string }>;
-  /** Display names for the typing line, in a stable order. */
-  typingNames?: string[];
-  /** Called as the composer is typed in; the caller throttles. */
-  onTyping?: (chatId: string) => void;
+  /**
+   * Display names for the typing line, in a stable order — resolved on
+   * demand rather than a single precomputed array, because this view needs
+   * two independent lines: the main composer's (no `parentId`) and, when a
+   * thread is open, that thread's own (`parentId` set). A single `string[]`
+   * could only ever answer one of them.
+   */
+  resolveTypingNames?: (chatId: string, parentId?: string) => string[];
+  /** Called as a composer is typed in; the caller throttles. */
+  onTyping?: (chatId: string, parentId?: string) => void;
   onSendEnd?: (threadId: string) => void;
   /**
    * The host accepted the turn and answered `202` instead of the reply
@@ -222,7 +228,7 @@ export function ChatView({
   onSendStart,
   presence,
   companyPeople,
-  typingNames = [],
+  resolveTypingNames,
   onTyping,
   onSendEnd,
   onSendDetached,
@@ -1077,7 +1083,7 @@ export function ChatView({
                 </span>
               </p>
             )}
-            <TypingLine names={typingNames} />
+            <TypingLine names={resolveTypingNames?.(active.id) ?? []} />
             <MessageComposer
               placeholder={`Message ${channelTitle(channel)}`}
               disabled={sending}
@@ -1104,6 +1110,8 @@ export function ChatView({
               sending={sending}
               onSend={(text) => void send(text, undefined, parent.id)}
               onClose={() => setOpenThreadId(null)}
+              typingNames={resolveTypingNames?.(active.id, parent.id) ?? []}
+              onTyping={() => onTyping?.(active.id, parent.id)}
             />
           )}
 
