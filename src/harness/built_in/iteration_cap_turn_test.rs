@@ -244,9 +244,6 @@ fn deps(model_url: String, dir: &std::path::Path) -> HarnessDeps {
         search: None,
         tenant_search: None,
         workspace: None,
-        repos: None,
-        repo_bindings: Vec::new(),
-        checkouts: crate::harness::repo::CheckoutLedger::default(),
     }
 }
 

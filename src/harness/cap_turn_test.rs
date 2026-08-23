@@ -345,9 +345,6 @@ fn deps_for(base_url: String, dir: &std::path::Path) -> (HarnessDeps, Arc<FsOps>
         run_supervisor: crate::runtime::RunSupervisor::default(),
         delivery: None,
         workspace: None,
-        repos: None,
-        repo_bindings: Vec::new(),
-        checkouts: crate::harness::repo::CheckoutLedger::default(),
         search: None,
         tenant_search: None,
     };

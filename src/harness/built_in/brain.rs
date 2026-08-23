@@ -590,8 +590,6 @@ impl HarnessBrain {
         // claimed here deletes what this turn creates. Issue #796 refines what
         // "this turn's checkout" is: a turn resuming a task first reclaims that
         // task's held-across-park tree, so the resumed step operates on the same
-        // working tree — and the commit it needs — the parked step left behind.
-        let _checkout_janitor = CheckoutJanitor::claim(&self.deps.checkouts);
         // Issue #796: at the claim, drop any task's retained checkout whose
         // approval was denied or expired — no live grant names it, so nothing
         // will ever resume it. `grants` is the same live set peeked above.
@@ -863,8 +861,6 @@ impl HarnessBrain {
         // Issue #245: and the checkout ledger, for the same span. A dispatched
         // card is where a `repo_checkout` is most likely to happen, and the
         // guard's `Drop` is what deletes the tree on every exit — success,
-        // error, cancel, redirect exhaustion and panic-unwind alike.
-        let _checkout_janitor = CheckoutJanitor::claim(&self.deps.checkouts);
         // Issue #796: at the claim, drop any task's retained checkout whose
         // approval was denied or expired — no live grant names it, so nothing
         // will resume it.
@@ -2878,8 +2874,6 @@ impl HarnessBrain {
                     // Issue #245: the chat half of the checkout lifecycle. An
                     // operator conversation runs the same toolbelt a card does,
                     // so it can clone a repository, and the guard's `Drop`
-                    // removes it when this turn ends.
-                    let _checkout_janitor = CheckoutJanitor::claim(&self.deps.checkouts);
                     // Issue #796: sweep any task checkout orphaned by a
                     // denied/expired approval, on this turn's claim like every
                     // other.
@@ -3360,9 +3354,6 @@ description = "Runs Acme."
             search: None,
             tenant_search: None,
             workspace: None,
-            repos: None,
-            repo_bindings: Vec::new(),
-            checkouts: crate::harness::repo::CheckoutLedger::default(),
         };
         HarnessBrain::new(Arc::new(HarnessPool::new()), deps, record)
     }
@@ -3547,9 +3538,6 @@ description = "Builds it."
             search: None,
             tenant_search: None,
             workspace: None,
-            repos: None,
-            repo_bindings: Vec::new(),
-            checkouts: crate::harness::repo::CheckoutLedger::default(),
         };
         (
             HarnessBrain::new(Arc::new(HarnessPool::new()), deps, record_two()),
@@ -3673,9 +3661,6 @@ members = ["engineer"]
             search: None,
             tenant_search: None,
             workspace: with_workspace.then(|| ops.clone() as Arc<dyn crate::ports::WorkspaceStore>),
-            repos: None,
-            repo_bindings: Vec::new(),
-            checkouts: crate::harness::repo::CheckoutLedger::default(),
         };
         (
             HarnessBrain::new(Arc::new(HarnessPool::new()), deps, record_two()),
@@ -5582,9 +5567,6 @@ members = ["engineer"]
             search: None,
             tenant_search: None,
             workspace: None,
-            repos: None,
-            repo_bindings: Vec::new(),
-            checkouts: crate::harness::repo::CheckoutLedger::default(),
         };
         (
             HarnessBrain::new(Arc::new(HarnessPool::new()), deps, record),
@@ -6580,9 +6562,6 @@ members = ["eng1", "eng2"]
             search: None,
             tenant_search: None,
             workspace: None,
-            repos: None,
-            repo_bindings: Vec::new(),
-            checkouts: crate::harness::repo::CheckoutLedger::default(),
         };
         let brain = HarnessBrain::new(Arc::new(HarnessPool::new()), deps, record());
 
@@ -6733,9 +6712,6 @@ members = ["eng1", "eng2"]
             search: None,
             tenant_search: None,
             workspace: None,
-            repos: None,
-            repo_bindings: Vec::new(),
-            checkouts: crate::harness::repo::CheckoutLedger::default(),
         };
         let brain = HarnessBrain::new(Arc::new(HarnessPool::new()), deps, record());
 
@@ -6829,9 +6805,6 @@ members = ["eng1", "eng2"]
             search: None,
             tenant_search: None,
             workspace: None,
-            repos: None,
-            repo_bindings: Vec::new(),
-            checkouts: crate::harness::repo::CheckoutLedger::default(),
         };
         HarnessBrain::new(Arc::new(HarnessPool::new()), deps, record())
     }
@@ -7166,9 +7139,6 @@ members = ["eng1", "eng2"]
             search: None,
             tenant_search: None,
             workspace: None,
-            repos: None,
-            repo_bindings: Vec::new(),
-            checkouts: crate::harness::repo::CheckoutLedger::default(),
         };
         HarnessBrain::new(Arc::new(HarnessPool::new()), deps, record())
     }
@@ -7671,9 +7641,6 @@ members = ["eng1", "eng2"]
             search: None,
             tenant_search: None,
             workspace: None,
-            repos: None,
-            repo_bindings: Vec::new(),
-            checkouts: crate::harness::repo::CheckoutLedger::default(),
         };
         HarnessBrain::new(Arc::new(HarnessPool::new()), deps, record())
     }
@@ -8000,9 +7967,6 @@ members = ["eng1", "eng2"]
             search: None,
             tenant_search: None,
             workspace: None,
-            repos: None,
-            repo_bindings: Vec::new(),
-            checkouts: crate::harness::repo::CheckoutLedger::default(),
         };
         (
             HarnessBrain::new(Arc::new(HarnessPool::new()), deps, record()),
@@ -8406,9 +8370,6 @@ members = ["eng1", "eng2"]
             search: None,
             tenant_search: None,
             workspace: None,
-            repos: None,
-            repo_bindings: Vec::new(),
-            checkouts: crate::harness::repo::CheckoutLedger::default(),
         };
         (
             HarnessBrain::new(Arc::new(HarnessPool::new()), deps, record_with_desk()),

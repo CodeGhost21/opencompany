@@ -1939,9 +1939,6 @@ mod tests {
             // tools are never built and the pinned belt below is the
             // pre-#237 belt exactly.
             workspace: None,
-            repos: None,
-            repo_bindings: Vec::new(),
-            checkouts: crate::harness::repo::CheckoutLedger::default(),
         }
     }
 

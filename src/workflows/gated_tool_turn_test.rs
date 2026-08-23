@@ -269,9 +269,6 @@ pub(super) fn deps(base_url: String, dir: &std::path::Path) -> (HarnessDeps, Arc
             events: Arc::new(crate::store::FsEventLog::new(dir)),
         }),
         workspace: None,
-        repos: None,
-        repo_bindings: Vec::new(),
-        checkouts: crate::harness::repo::CheckoutLedger::default(),
         search: None,
         tenant_search: None,
     };

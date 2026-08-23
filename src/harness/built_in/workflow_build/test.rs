@@ -858,9 +858,6 @@ pub(crate) fn agent_deps(
         run_supervisor: crate::runtime::RunSupervisor::default(),
         delivery: None,
         workspace: None,
-        repos: None,
-        repo_bindings: Vec::new(),
-        checkouts: crate::harness::repo::CheckoutLedger::default(),
     }
 }
 

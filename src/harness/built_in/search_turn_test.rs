@@ -323,9 +323,6 @@ async fn harness(
         // test exercises the #238 search path only, and an unwired store is the
         // fail-closed default everywhere but the runtime builder.
         workspace: None,
-        repos: None,
-        repo_bindings: Vec::new(),
-        checkouts: crate::harness::repo::CheckoutLedger::default(),
     };
 
     let record = CompanyRecord {

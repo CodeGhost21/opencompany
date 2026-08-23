@@ -562,31 +562,6 @@ pub struct HarnessDeps {
     /// construction site but the production runtime builder) **fails closed**:
     /// no workspace tools are wired and agents behave exactly as before.
     pub workspace: Option<Arc<dyn crate::ports::WorkspaceStore>>,
-    /// Issue #245, agent half — the company's [`RepoManager`], so an agent that
-    /// explicitly grants `repo` can check a bound repository out and read a
-    /// pull request. `None` (the default at every construction site but the
-    /// production runtime builder) **fails closed**: no repository tools are
-    /// wired and agents behave exactly as before.
-    ///
-    /// [`RepoManager`]: crate::runtime::RepoManager
-    pub repos: Option<Arc<crate::runtime::RepoManager>>,
-    /// The company's bound repositories, resolved to **data** before deps
-    /// construction — the `mcp_servers` doctrine, and for the same reason:
-    /// [`build::build_agent`] is synchronous while reading the binding index is
-    /// async, and the tool descriptions name what is bound so a model does not
-    /// have to guess. Empty means nothing is bound, which is also what makes a
-    /// `repo` grant with no bindings wire nothing and warn.
-    pub repo_bindings: Vec<crate::runtime::repo_manager::types::RepoBinding>,
-    /// The shared per-turn ledger of checkouts and diff spills, so the
-    /// [`CheckoutJanitor`](brain::CheckoutJanitor) claimed at each entry point
-    /// can delete them however the turn ends.
-    ///
-    /// Same cheap-shared-handle pattern as [`Self::pending_publishes`], and for
-    /// the same structural reason: the tools are built **once per agent** while
-    /// the deletion boundary is **per turn**. Default is an empty ledger, which
-    /// simply means nothing is ever recorded for deletion — the boot sweep is
-    /// the backstop.
-    pub checkouts: repo::CheckoutLedger,
 }
 
 /// One live openhuman agent, keyed by its manifest id.
@@ -3484,9 +3459,6 @@ pub(crate) fn workflow_wiring_deps(
         run_supervisor: crate::runtime::RunSupervisor::default(),
         delivery: None,
         workspace: None,
-        repos: None,
-        repo_bindings: Vec::new(),
-        checkouts: repo::CheckoutLedger::default(),
     }
 }
 
@@ -4066,9 +4038,6 @@ description = "Builds the product."
                 search: None,
                 tenant_search: None,
                 workspace: None,
-                repos: None,
-                repo_bindings: Vec::new(),
-                checkouts: crate::harness::repo::CheckoutLedger::default(),
             },
             store,
             meter,
@@ -4281,9 +4250,6 @@ description = "Builds the product."
             search: None,
             tenant_search: None,
             workspace: None,
-            repos: None,
-            repo_bindings: Vec::new(),
-            checkouts: crate::harness::repo::CheckoutLedger::default(),
         };
 
         let roster = build_roster(&record(), &deps, &[], &HashMap::new())
@@ -5049,9 +5015,6 @@ description = "Builds the product."
             search: None,
             tenant_search: None,
             workspace: None,
-            repos: None,
-            repo_bindings: Vec::new(),
-            checkouts: crate::harness::repo::CheckoutLedger::default(),
         };
         let roster = build_roster(&record(), &deps, &[], &HashMap::new()).expect("roster");
         // Keep the tempdir alive for the agent's workspace by leaking it into the
@@ -5237,9 +5200,6 @@ description = "Builds the product."
             search: None,
             tenant_search: None,
             workspace: None,
-            repos: None,
-            repo_bindings: Vec::new(),
-            checkouts: crate::harness::repo::CheckoutLedger::default(),
         };
         let pool = HarnessPool::new();
         let rec = record();
@@ -5911,9 +5871,6 @@ description = "Builds the product."
             search: None,
             tenant_search: None,
             workspace: None,
-            repos: None,
-            repo_bindings: Vec::new(),
-            checkouts: crate::harness::repo::CheckoutLedger::default(),
         };
         let pool = HarnessPool::new();
 
@@ -6096,9 +6053,6 @@ description = "Sets direction."
             search: None,
             tenant_search: None,
             workspace: None,
-            repos: None,
-            repo_bindings: Vec::new(),
-            checkouts: crate::harness::repo::CheckoutLedger::default(),
         };
         let pool = HarnessPool::new();
         let rec = granting_record();
@@ -6257,9 +6211,6 @@ description = "Sets direction."
             search: None,
             tenant_search: None,
             workspace: None,
-            repos: None,
-            repo_bindings: Vec::new(),
-            checkouts: crate::harness::repo::CheckoutLedger::default(),
         }
     }
 

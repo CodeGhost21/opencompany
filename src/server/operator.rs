@@ -3989,9 +3989,6 @@ mode = "full"
             search: None,
             tenant_search: None,
             workspace: None,
-            repos: None,
-            repo_bindings: Vec::new(),
-            checkouts: crate::harness::repo::CheckoutLedger::default(),
         };
         let brain = HarnessBrain::new(Arc::new(HarnessPool::new()), deps, record);
 

@@ -2673,10 +2673,6 @@ impl RuntimeBuilder {
                                 // one thing in this process holding the token.
                                 repos: Some(repos.clone()),
                                 repo_bindings,
-                                // One ledger per company runtime, shared by every
-                                // agent's tools and claimed per turn by the
-                                // brain's `CheckoutJanitor`.
-                                checkouts: crate::harness::repo::CheckoutLedger::default(),
                             };
                             workflow_harness_deps = Some(deps.clone());
                             let record = CompanyRecord {
