@@ -77,6 +77,7 @@ export function ChatHeader({
       )}
 
       <Button
+        ref={channelsToggleRef}
         variant="ghost"
         size="icon"
         className="hidden size-8 lg:inline-flex"
