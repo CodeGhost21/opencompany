@@ -151,6 +151,11 @@ export function PolicySettings({ client, company }: Props) {
    * repository has never seen), so nothing here validates what is typed.
    */
   const [wiredTools, setWiredTools] = useState<string[]>([]);
+  // Whether the wired-tool set above was actually served. The array starts
+  // empty while the request is pending and stays empty on a host predating the
+  // route; an empty set is not proof that every configured entry is unwired, so
+  // only a successful load lets the "is not a tool" warning speak.
+  const [wiredToolsLoaded, setWiredToolsLoaded] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
