@@ -188,15 +188,15 @@ export function PagesView({ client, company }: Props) {
         });
     };
     return () => {
-      // The selected page changed or the view unmounted: the iframe document
-      // this port was minted for is gone, so the port can never legitimately
-      // be used again. Close it rather than leaving a live channel into a
-      // document that no longer exists.
+      // The selected page or company changed, or the view unmounted: the
+      // iframe document this port was minted for is gone, so the port can
+      // never legitimately be used again. Close it rather than leaving a live
+      // channel into a document that no longer exists.
       portRef.current?.close();
       portRef.current = null;
       capabilityRef.current = "";
     };
-  }, [client, active?.slug]);
+  }, [client, active?.slug, company]);
 
   if (load === "loading") {
     return (
