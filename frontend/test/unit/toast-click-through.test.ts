@@ -35,16 +35,18 @@ function press(element: Element, x = 40, y = 50, pointerId = 7): void {
 }
 
 /** A primary-button click at a known position. */
-function clickAt(element: Element, x: number, y: number): void {
-  element.dispatchEvent(
-    new MouseEvent("click", {
-      bubbles: true,
-      cancelable: true,
-      clientX: x,
-      clientY: y,
-      button: 0,
-    }),
-  );
+function clickAt(element: Element, x: number, y: number, pointerId?: number): void {
+  const event = new MouseEvent("click", {
+    bubbles: true,
+    cancelable: true,
+    clientX: x,
+    clientY: y,
+    button: 0,
+  });
+  if (pointerId !== undefined) {
+    Object.defineProperty(event, "pointerId", { value: pointerId });
+  }
+  element.dispatchEvent(event);
 }
 
 /** A page frame beneath the toast, relaying back to a stubbed `postMessage`. */
