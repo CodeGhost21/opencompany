@@ -3923,11 +3923,29 @@ mod test {
         }
 
         /// A catch-all company grant must not satisfy opt-in namespaces that
-        /// carry billing, tenant credentials, or third-party source access.
+        /// carry billing, tenant credentials, or third-party source access —
+        /// whether the ask is the bare namespace or one of its dotted
+        /// descendants. A `search.*` or `media.image` request falls through to
+        /// the generic matcher otherwise, and the wildcard would then cover it,
+        /// wiring the whole namespace for a company that never opted in.
         #[test]
         fn wildcard_does_not_cover_special_namespaces() {
             let allow = strings(&["*"]);
-            for grant in ["media", "composio", "search", "repo", "mcp:*"] {
+            for grant in [
+                "media",
+                "media.*",
+                "media.image",
+                "composio",
+                "composio.*",
+                "composio.gmail",
+                "search",
+                "search.*",
+                "search.web",
+                "repo",
+                "repo.*",
+                "repo.read",
+                "mcp:*",
+            ] {
                 assert!(
                     !allow_covers(&allow, grant),
                     "catch-all must not cover opt-in grant `{grant}`"
@@ -3937,16 +3955,49 @@ mod test {
             assert!(allow_covers(&allow, "docs.read"));
         }
 
-        /// Explicit special grants still cover the corresponding setup belt.
+        /// Explicit special grants still cover the corresponding setup belt —
+        /// bare namespaces and sub-grant requests alike, matching the `_explicit`
+        /// wiring predicates that accept both shapes.
         #[test]
         fn explicit_special_grants_cover_their_namespaces() {
             let allow = strings(&["media", "composio", "search", "repo.*", "mcp:*"]);
-            for grant in ["media", "composio", "search", "repo", "mcp:*"] {
+            for grant in [
+                "media",
+                "media.*",
+                "media.image",
+                "composio",
+                "composio.*",
+                "composio.gmail",
+                "search",
+                "search.*",
+                "search.web",
+                "repo",
+                "repo.*",
+                "repo.read",
+                "mcp:*",
+            ] {
                 assert!(
                     allow_covers(&allow, grant),
                     "explicit grant must cover `{grant}`"
                 );
             }
+        }
+
+        /// A bare opt-in namespace grant covers its sub-grant requests, again
+        /// matching the wiring predicate: `search.web` in the effective grants
+        /// satisfies `grants_search_explicit` exactly as `search` does, so the
+        /// request must not be dropped at the allow-list. The ordinary namespaces
+        /// keep the exact-match rule, which is why this test sits beside the two
+        /// opt-in ones rather than being folded into the generic matcher.
+        #[test]
+        fn a_bare_opt_in_grant_covers_its_sub_grants() {
+            assert!(allow_covers(&strings(&["search"]), "search.*"));
+            assert!(allow_covers(&strings(&["search"]), "search.web"));
+            assert!(allow_covers(&strings(&["media"]), "media.image"));
+            assert!(
+                !allow_covers(&strings(&["docs"]), "docs.read"),
+                "ordinary namespaces keep the unstarred-grant exact-match rule"
+            );
         }
 
         /// Runs the three-level narrowing over `&str` slices, so each case below
