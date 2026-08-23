@@ -377,19 +377,29 @@ export function decisionLabel(a: ApprovalSummary, askerNames: Map<string, string
 }
 
 /**
- * The one payload argument that says most about what a call will do — the
- * command line, the URL, the pattern — or `null` when the card carries no
- * payload.
+ * The payload's lead argument — the command line, the URL, the pattern — plus
+ * just enough of the remaining arguments to tell two same-kind cards apart, or
+ * `null` when the card carries no payload.
  *
- * Just the value, not `label: value`: for a shell card the label is "command",
- * so including it would read "command: command". The value is the thing being
- * consented to, and it is already redacted and bounded host-side
- * (`src/runtime/approval_display.rs`).
+ * The lead value is bare, not `label: value`: for a shell card the label is
+ * "command", so including it would read "command: command". The follow-ups keep
+ * their labels, which is what makes them *distinguishing* — "DELETE" only means
+ * the method next to its `method` key, and two shell cards sharing a command
+ * still differ by `cwd`. The count is bounded so a large payload cannot turn
+ * the button's accessible name into a wall of text. Values are already redacted
+ * and bounded host-side (`src/runtime/approval_display.rs`).
  */
 function payloadLead(a: ApprovalSummary): string | null {
-  const first = payloadLines(a)[0];
-  return first ? first.value : null;
+  const lines = payloadLines(a);
+  const first = lines[0];
+  if (!first) return null;
+  const rest = lines.slice(1, 1 + MAX_LEAD_LINES);
+  if (rest.length === 0) return first.value;
+  return [first.value, ...rest.map((line) => `${line.label}: ${line.value}`)].join(" — ");
 }
+
+/** How many follow-up payload lines a decision label may carry (#1411). */
+const MAX_LEAD_LINES = 2;
 
 /** The effect kind a paused workflow gate parks as — mirrors
  * `WORKFLOW_APPROVE_KIND` in `src/runtime/workflow_resume.rs`. */
