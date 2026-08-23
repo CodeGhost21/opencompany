@@ -127,7 +127,10 @@ pub(crate) struct ChildGateRegistry {
 impl ChildGateRegistry {
     /// Records the gate pass for one resolved child.
     pub(crate) fn record(&self, child_id: &str, record: ChildGateRecord) {
-        self.inner.lock().unwrap().insert(child_id.to_string(), record);
+        self.inner
+            .lock()
+            .unwrap()
+            .insert(child_id.to_string(), record);
     }
 
     /// The record for `child_id`, cloned out so the caller need not hold the
@@ -372,7 +375,11 @@ pub(crate) fn child_gate_call(
         .and_then(|n| n.config.get("workflow_id"))
         .and_then(Value::as_str)?;
     let record = registry.get(child_id)?;
-    record.gated.iter().find(|g| g.node_id == child_gate).cloned()
+    record
+        .gated
+        .iter()
+        .find(|g| g.node_id == child_gate)
+        .cloned()
 }
 
 /// Whether `id` is a single safe on-disk filename stem — no path separators, no

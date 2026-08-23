@@ -403,7 +403,12 @@ fn child_calls_preceding(child: &WorkflowGraph, gate: &str) -> Vec<UnreplayableC
         if !reached.contains(&node.id) {
             continue;
         }
-        if node.config.get("requires_approval").and_then(Value::as_bool) == Some(true) {
+        if node
+            .config
+            .get("requires_approval")
+            .and_then(Value::as_bool)
+            == Some(true)
+        {
             // The child restarts and pauses at this node again; it does not
             // execute it.
             continue;

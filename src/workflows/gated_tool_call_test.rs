@@ -40,8 +40,8 @@ use crate::harness::HarnessPool;
 use crate::ports::WorkflowRunContext;
 use crate::ports::types::CompanyRecord;
 use crate::runtime::workflow_resume::{
-    PAYLOAD_ARGS, PAYLOAD_NODE_ID, PAYLOAD_REASON, PAYLOAD_TARGET, PAYLOAD_TOOL, PAYLOAD_WORKFLOW_ID,
-    WORKFLOW_APPROVE_KIND,
+    PAYLOAD_ARGS, PAYLOAD_NODE_ID, PAYLOAD_REASON, PAYLOAD_TARGET, PAYLOAD_TOOL,
+    PAYLOAD_WORKFLOW_ID, WORKFLOW_APPROVE_KIND,
 };
 
 /// A graph whose only working node is a `tool_call` running `shell`. The
@@ -378,8 +378,11 @@ async fn an_ungated_outward_call_before_a_child_gate_is_reported_unreplayable() 
     let source = dir.path().join("company");
     let workflows = source.join("workflows");
     std::fs::create_dir_all(&workflows).expect("create child workflow directory");
-    std::fs::write(workflows.join("child.toml"), SUB_WORKFLOW_CHILD_WITH_UPSTREAM)
-        .expect("write child workflow");
+    std::fs::write(
+        workflows.join("child.toml"),
+        SUB_WORKFLOW_CHILD_WITH_UPSTREAM,
+    )
+    .expect("write child workflow");
 
     let (mut deps, _journal) =
         super::gated_tool_turn_test::deps("http://127.0.0.1:1/unused".to_string(), dir.path());
