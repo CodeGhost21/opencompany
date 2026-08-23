@@ -2290,8 +2290,8 @@ pub fn workspace_tools(
 /// shape. A node is owned only when both durable origins name this agent; an
 /// operator or teammate edit must restore the approval gate. A folder rename
 /// goes further — it re-renders the path of every node inside the folder — so
-/// every addressable descendant must be owned by this agent as well, or the
-/// rename may not take the exception.
+/// every descendant must be owned by this agent as well (descendants the path
+/// rules exclude included, or the rename may not take the exception).
 pub(crate) async fn mutation_is_owned_by_agent(
     store: &Arc<dyn WorkspaceStore>,
     company: &CompanyId,
