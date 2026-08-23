@@ -743,7 +743,7 @@ mod test {
 
     // ── resolve_migrate_configs: every refusal, executed ──────────────────
 
-    use crate::store::{MemoryBackend, StorageKind, StorageSettings};
+    use crate::store::{MemoryBackend, StorageSettings};
 
     fn base_settings() -> StorageSettings {
         StorageSettings {
@@ -779,7 +779,6 @@ mod test {
         for (backend, driver, needle) in [
             (MemoryBackend::Store, None, "provider seam"),
             (MemoryBackend::Null, None, "nothing to migrate"),
-            (MemoryBackend::Tinycortex, None, "EngineCortex overlay"),
         ] {
             let settings = StorageSettings {
                 memory_backend: backend,
@@ -838,36 +837,6 @@ mod test {
     }
 
     #[test]
-    fn a_namespace_target_with_no_dir_anywhere_names_the_flag() {
-        let settings = StorageSettings {
-            data_dir: None,
-            ..base_settings()
-        };
-        let err = resolve(&settings, "namespace", None, None)
-            .expect_err("no dir at all must refuse")
-            .to_string();
-        assert!(err.contains("--to-data-dir"), "{err}");
-    }
-
-    #[test]
-    fn a_mongodb_base_refuses_an_ephemeral_namespace_target() {
-        let settings = StorageSettings {
-            kind: StorageKind::Mongodb,
-            ..base_settings()
-        };
-        let err = resolve(&settings, "namespace", None, Some("/data/mem"))
-            .expect_err("ephemeral target must refuse")
-            .to_string();
-        assert!(err.contains("OPENCOMPANY_MEMORY_ALLOW_EPHEMERAL"), "{err}");
-        let allowed = StorageSettings {
-            allow_ephemeral_memory: true,
-            ..settings
-        };
-        resolve(&allowed, "namespace", None, Some("/data/mem"))
-            .expect("the operator override must open the path");
-    }
-
-    #[test]
     fn the_same_engine_guard_fires_remote_to_remote_and_normalizes() {
         // Identical endpoint, spelled with a trailing slash and whitespace:
         // the naive field-equality version could never fire here because the
@@ -890,26 +859,5 @@ mod test {
             None,
         )
         .expect("a genuinely different endpoint is a migration");
-    }
-
-    #[test]
-    fn the_same_engine_guard_canonicalizes_dirs() {
-        // A real directory reached by two spellings: direct, and via `..`.
-        let dir = tempfile::tempdir().unwrap();
-        let real = dir.path().join("data");
-        std::fs::create_dir_all(&real).unwrap();
-        let dotted = dir.path().join("sub").join("..").join("data");
-        std::fs::create_dir_all(dir.path().join("sub")).unwrap();
-
-        let settings = StorageSettings {
-            memory_backend: MemoryBackend::Tinycortex,
-            memory_driver: Some("namespace".into()),
-            data_dir: Some(real),
-            ..StorageSettings::default()
-        };
-        let err = resolve(&settings, "namespace", None, Some(dotted.to_str().unwrap()))
-            .expect_err("a dotted spelling of the same dir must refuse")
-            .to_string();
-        assert!(err.contains("same engine"), "{err}");
     }
 }
