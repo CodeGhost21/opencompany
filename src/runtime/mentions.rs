@@ -988,6 +988,7 @@ members = ["engineer", "ceo"]
             id: id.to_string(),
             email: email.to_string(),
             display_name: display.map(str::to_string),
+            avatar: None,
             role: UserRole::Member,
             status: UserStatus::Active,
             password_hash: None,
