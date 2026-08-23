@@ -102,16 +102,28 @@ fn every_company_skill_and_workspace_parses() {
 /// Whether a template belongs here is therefore a judgement about its charter —
 /// research, editorial, marketing, legal, product engineering — recorded here
 /// because it cannot be derived from content.
-const SEARCH_GRANTED_COMPANIES: [&str; 9] = [
+const SEARCH_GRANTED_COMPANIES: [&str; 21] = [
+    "agentic_accounting_firm",
     "agentic_consultation_firm",
+    "agentic_customer_support",
     "agentic_design_studio",
+    "agentic_enterprise_sales",
+    "agentic_game_business",
+    "agentic_game_studio",
+    "agentic_influencer_business",
     "agentic_law_firm",
     "agentic_marketing_agency",
     "agentic_media_company",
+    "agentic_pharma_startup",
     "agentic_product_team",
+    "agentic_realestate_company",
+    "agentic_recruiting_company",
     "agentic_research_lab",
     "agentic_software_company",
+    "agentic_venture_capital",
+    "agentic_venture_studio",
     "signals_opportunity_studio",
+    "startup_accelerator",
 ];
 
 /// Templates that must NEVER reach the metered search backend: `e2e_harness` and
@@ -141,20 +153,7 @@ const SEARCH_DENIED_COMPANIES: [&str; 4] = [
 /// [`every_company_declares_a_search_posture`] asserts this list plus the other
 /// two covers `companies/` exactly, so a new template fails CI until whoever
 /// adds it writes the decision down here.
-const SEARCH_UNGRANTED_COMPANIES: [&str; 12] = [
-    "agentic_accounting_firm",
-    "agentic_customer_support",
-    "agentic_enterprise_sales",
-    "agentic_game_business",
-    "agentic_game_studio",
-    "agentic_influencer_business",
-    "agentic_pharma_startup",
-    "agentic_realestate_company",
-    "agentic_recruiting_company",
-    "agentic_venture_capital",
-    "agentic_venture_studio",
-    "startup_accelerator",
-];
+const SEARCH_UNGRANTED_COMPANIES: [&str; 0] = [];
 
 /// The subset of [`SEARCH_GRANTED_COMPANIES`] that restates the default belt
 /// verbatim and appends `search`. `signals_opportunity_studio` is deliberately
