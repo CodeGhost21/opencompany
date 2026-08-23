@@ -3035,10 +3035,52 @@ mod test {
             .await
             .unwrap();
 
-        assert!(tokio::fs::metadata(&legacy_path).await.is_err());
+        // The legacy file is kept: a slug may be shared by several keys, so it
+        // may still hold a colliding alias's value. The canonical file shadows
+        // it for this key, so `get` returns the rotated value.
+        assert!(tokio::fs::metadata(&legacy_path).await.is_ok());
         assert_eq!(
             secrets.get(&company, key).await.unwrap(),
             Some(SecretValue("rotated-not-a-real-token".into()))
+        );
+    }
+
+    #[tokio::test]
+    async fn rotating_one_colliding_key_keeps_the_other_alias_readable() {
+        // Issue #1510 migration hazard: two distinct keys can share one legacy
+        // slug (`mcp/acme prod/auth` and `mcp/acme_prod/auth` both slug to
+        // `mcp_acme_prod_auth`). Rotating one of them used to delete the shared
+        // legacy file, so the other alias's next `get` fell through to `None`
+        // even though it had been reading its own value before the upgrade.
+        let root_dir = tmp_root();
+        let root = root_dir.path().to_path_buf();
+        let secrets = FsSecretStore::new(&root);
+        let company = CompanyId::new("company-a");
+        let bundle = Bundle::new(root, &company);
+        bundle.ensure_dirs().await.unwrap();
+
+        // The shared file, exactly as a pre-injective install would have left
+        // it: one value for both keys, last write wins.
+        let key_a = "mcp/acme prod/auth";
+        let key_b = "mcp/acme_prod/auth";
+        let shared = bundle.legacy_secret(key_a);
+        assert_eq!(shared, bundle.legacy_secret(key_b));
+        tokio::fs::write(&shared, "token-for-underscore-name")
+            .await
+            .unwrap();
+
+        // Rotate only A. B's value must survive in the kept legacy file.
+        secrets
+            .set(&company, key_a, SecretValue("rotated-token-a".into()))
+            .await
+            .unwrap();
+        assert_eq!(
+            secrets.get(&company, key_a).await.unwrap(),
+            Some(SecretValue("rotated-token-a".into()))
+        );
+        assert_eq!(
+            secrets.get(&company, key_b).await.unwrap(),
+            Some(SecretValue("token-for-underscore-name".into()))
         );
     }
 
