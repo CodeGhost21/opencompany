@@ -206,7 +206,7 @@ export function PolicySettings({ client, company }: Props) {
   };
 
   const saveTier = async (mode: string) => {
-    if (!status || saving || mode === status.mode) return;
+    if (!status || saving || mode === status.mode) return false;
     setSaving(true);
     try {
       // Only `mode` is sent: an omitted field leaves the always-ask list where
@@ -218,10 +218,12 @@ export function PolicySettings({ client, company }: Props) {
         "Autonomy tier updated",
         !dirty,
       );
+      return true;
     } catch (error) {
       toast.error(
         error instanceof Error ? error.message : "Could not change the tier.",
       );
+      return false;
     } finally {
       setSaving(false);
     }
@@ -406,9 +408,14 @@ export function PolicySettings({ client, company }: Props) {
               )}
               {unmatchedWiredTools.length > 0 && (
                 <p className="text-xs text-muted-foreground">
-                  {unmatchedWiredTools.join(", ")} {unmatchedWiredTools.length === 1 ? "is" : "are"} not
-                  {" "}tools this deployment wires. {unmatchedWiredTools.length === 1 ? "It may" : "They may"} still be
-                  {" "}hosted effect kinds.
+                  {unmatchedWiredTools.join(", ")}{" "}
+                  {unmatchedWiredTools.length === 1
+                    ? "is not a tool"
+                    : "are not tools"}{" "}
+                  this deployment wires. {unmatchedWiredTools.length === 1
+                    ? "It may"
+                    : "They may"}{" "}
+                  still be hosted effect kinds.
                 </p>
               )}
               {dirty && (
@@ -463,8 +470,10 @@ export function PolicySettings({ client, company }: Props) {
                     disabled={saving}
                     onClick={() => {
                       if (tierAwaitingConfirmation) {
-                        void saveTier(tierAwaitingConfirmation.value).then(() =>
-                          setTierAwaitingConfirmation(null),
+                        void saveTier(tierAwaitingConfirmation.value).then(
+                          (saved) => {
+                            if (saved) setTierAwaitingConfirmation(null);
+                          },
                         );
                       }
                     }}
