@@ -356,11 +356,6 @@ struct MemoryStats {
     document_memory: usize,
     /// Stored task outcomes, excluding operator-fact mirrors.
     task_outcomes: usize,
-    /// Whether `GET /memory` capped its context rows (the non-mirror chunk
-    /// count past [`MAX_CONTEXT_ENTRIES`]). Computed from this same snapshot
-    /// so the console's "showing the newest N of M" notice never compares the
-    /// capped list against a count taken at a different moment.
-    context_truncated: bool,
 }
 
 /// `GET /memory` — everything the company remembers, so the console lists what
