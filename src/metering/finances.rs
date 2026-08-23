@@ -157,7 +157,7 @@ mod tests {
         assert_eq!(f.revenue_usd, 0.0);
         assert_eq!(f.net_usd, 0.0);
         assert_eq!(f.balance_usd, 0.0);
-        assert_eq!(f.budget_usd, 0.0);
+        assert_eq!(f.budget_usd, None);
         assert!(f.by_category.is_empty());
         assert!(f.transactions.is_empty());
     }
