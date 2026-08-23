@@ -57,8 +57,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::AppState;
 use crate::company::{POLICY_MODES, Policy};
-use crate::policy::DEFAULT_TTL_MILLIS;
 use crate::error::OpenCompanyError;
+use crate::policy::DEFAULT_TTL_MILLIS;
 use crate::ports::now_millis;
 use crate::ports::store::company_write_lock;
 use crate::ports::types::{Actor, ActorKind, CompanyRecord, PolicyOverride};
@@ -313,7 +313,9 @@ async fn set_policy(
     if let Some(Some(cap)) = body.auto_approve_under_usd
         && (!cap.is_finite() || cap < 0.0)
     {
-        return Err(refusal("`autoApproveUnderUsd` must be a non-negative number."));
+        return Err(refusal(
+            "`autoApproveUnderUsd` must be a non-negative number.",
+        ));
     }
 
     let write_lock = company_write_lock(company.id());
@@ -567,7 +569,10 @@ mod tests {
         assert!(body["autoApproveUnderUsd"].is_null());
         assert_eq!(body["approvalTtlHours"], 72);
         assert_eq!(body["mode"], "supervised");
-        assert_eq!(body["alwaysApprove"], json!(["payment.send", "filing.submit"]));
+        assert_eq!(
+            body["alwaysApprove"],
+            json!(["payment.send", "filing.submit"])
+        );
 
         let (_, reread) = call(&state, "GET", None).await;
         assert!(reread["autoApproveUnderUsd"].is_null());
@@ -587,12 +592,7 @@ mod tests {
         )
         .await;
 
-        let (status, body) = call(
-            &state,
-            "PUT",
-            Some(json!({ "approvalTtlHours": null })),
-        )
-        .await;
+        let (status, body) = call(&state, "PUT", Some(json!({ "approvalTtlHours": null }))).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["autoApproveUnderUsd"], 10.0);
         assert_eq!(body["approvalTtlHours"], 24);

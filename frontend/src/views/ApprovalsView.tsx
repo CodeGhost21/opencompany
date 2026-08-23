@@ -5,6 +5,7 @@ import remarkGfm from "remark-gfm";
 import { toast } from "sonner";
 
 import type { OpenCompanyClient } from "@/api/client";
+import { getPolicy } from "@/api/policy";
 import {
   ApiError,
   type ApprovalSummary,
@@ -115,6 +116,21 @@ export function ApprovalsView({
   onGoToConversation,
   onDecideStart,
 }: Props) {
+  const [approvalTtlHours, setApprovalTtlHours] = useState(24);
+  useEffect(() => {
+    let live = true;
+    void getPolicy(client, company)
+      .then((policy) => {
+        if (live) setApprovalTtlHours(policy.approvalTtlHours);
+      })
+      .catch(() => {
+        // A policy read is explanatory here. Keep the historical default if an
+        // older or temporarily unreachable host cannot serve it.
+      });
+    return () => {
+      live = false;
+    };
+  }, [client, company]);
   // Issue #373: in-flight state is per approval, not a single module-wide slot.
   //
   // Approving is not a quick write — the host mints a grant and re-dispatches
@@ -368,8 +384,7 @@ export function ApprovalsView({
                 below. Each card carries its own deadline; this is the sentence
                 that stops that deadline being a surprise. */}
             <p className="mb-3 text-xs text-muted-foreground">
-              Each one has a deadline — 24 hours. Anything still undecided by
-              then is declined on its own, and the work behind it moves on.
+              Each one has a deadline — {approvalTtlHours} {approvalTtlHours === 1 ? "hour" : "hours"}. Anything still undecided by then is declined on its own, and the work behind it moves on.
             </p>
             <div className="flex flex-col gap-3" {...queueHold}>
               {rows.map((a) => (
