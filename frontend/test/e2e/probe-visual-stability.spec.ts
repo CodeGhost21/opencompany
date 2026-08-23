@@ -44,16 +44,23 @@ async function open(page: Page) {
 
 test("overview holds still without the mask (probe)", async ({ page }) => {
   await open(page);
-  // Let the sim cool past the initial settle.
   await page.waitForTimeout(2500);
-  const a = await page.screenshot({ fullPage: true, animations: "disabled", caret: "hide" });
-  await page.waitForTimeout(1500);
-  const b = await page.screenshot({ fullPage: true, animations: "disabled", caret: "hide" });
-  await import("node:fs/promises").then(async (fs) => {
-    await fs.writeFile("/tmp/probe-a.png", a);
-    await fs.writeFile("/tmp/probe-b.png", b);
-  });
-  const same = a.equals(b);
-  console.log(`PROBE overview stable without mask: ${same} (${a.length} bytes)`);
-  expect(same).toBe(true);
+  const samples = [] as string[];
+  for (let i = 0; i < 5; i++) {
+    samples.push(
+      await page.evaluate(() => {
+        const svg = document.querySelector('.oc-kg svg');
+        const vb = svg?.getAttribute('viewBox') ?? 'none';
+        const tickEl = document.querySelector('.oc-kg [data-tick]');
+        const circles = Array.from(document.querySelectorAll('.oc-kg svg circle'))
+          .slice(0, 8)
+          .map((c) => c.getAttribute('cx') + ',' + c.getAttribute('cy'));
+        const stage = (window as any).__probeStage;
+        return JSON.stringify({ vb, tick: tickEl?.getAttribute('data-tick'), circles: circles.slice(0, 4), stage });
+      }),
+    );
+    await page.waitForTimeout(800);
+  }
+  console.log("PROBE_SAMPLES=" + JSON.stringify(samples, null, 1));
+  expect(false).toBe(true);
 });
