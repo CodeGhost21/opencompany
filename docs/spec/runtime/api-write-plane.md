@@ -50,6 +50,7 @@ DELETE …/team/{agentId}                      remove a teammate
 PUT    …/team/{agentId}/inbox                toggle a teammate's inbox
 PUT    …/team/{agentId}/budget               set / change / remove a daily cap
 DELETE …/team/{agentId}/budget               reset the cap to the manifest default
+POST   …/avatars                            upload an image → an avatar reference (avatars.md)
 POST   …/setup/roster                       propose a starting team from three answers (company-setup.md)
 GET    …/policy                              the autonomy tier + always-ask list
 PUT    …/policy                              set the tier and/or the always-ask list

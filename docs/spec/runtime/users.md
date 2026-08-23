@@ -172,6 +172,7 @@ addressing forms work: `/api/v1/companies/{id}/…` and `/api/v1/company/…`.
 | `POST …/auth/wallet/challenge` | Mint a nonce for a wallet to sign (`wallet` mode) |
 | `POST …/auth/wallet/verify` | Answer a challenge → session cookie (`wallet` mode) |
 | `GET …/auth/me` | Who this session belongs to |
+| `PATCH …/auth/me` | Your own name and icon — see [avatars.md](avatars.md). No user id in the path, so it can only ever be you |
 | `POST …/auth/logout` | Revoke this session |
 | `GET …/users` | The roster (admin) |
 | `GET …/users/invites` | List outstanding invites (admin) |
