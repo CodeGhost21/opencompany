@@ -4150,6 +4150,104 @@ mod test {
         );
     }
 
+    /// Issue #1573: a database created before the `agent_id` mirror column must
+    /// end up able to answer "what has this desk run" over its **whole**
+    /// history, not just the attempts written since the upgrade.
+    ///
+    /// The column reaches an existing deployment through an additive `ALTER`,
+    /// which leaves every stored row `NULL` — and a `NULL` never matches
+    /// `agent_id = ?`. So the rows that would silently disappear from the new
+    /// filter are precisely the ones an operator opening a teammate for the
+    /// first time most wants to see. That is a wrong answer rather than a
+    /// missing feature: an empty history reads as "this teammate has never
+    /// run".
+    ///
+    /// Seeded with the **post-#983** shape on purpose, so this exercises the
+    /// plain `ALTER` + backfill path rather than riding along on the table
+    /// rebuild that `a_legacy_runs_table_learns_to_hold_a_card_less_run`
+    /// already covers.
+    #[tokio::test]
+    async fn a_legacy_runs_table_learns_which_desk_ran_each_attempt() {
+        use crate::ports::runs::{NewRun, RunFilter, RunStore};
+
+        let conn = Connection::open_in_memory().expect("open in-memory sqlite");
+        conn.execute_batch(
+            "CREATE TABLE runs (
+                 company_id TEXT NOT NULL,
+                 id         TEXT NOT NULL,
+                 task_id    TEXT,
+                 status     TEXT NOT NULL,
+                 attempt    INTEGER NOT NULL,
+                 created_ms INTEGER NOT NULL,
+                 run_json   TEXT NOT NULL,
+                 PRIMARY KEY (company_id, id)
+             );
+             INSERT INTO runs (company_id, id, task_id, status, attempt, created_ms, run_json)
+             VALUES ('acme', 'old-run', 'card-7', 'succeeded', 1, 1700000000000,
+                     '{\"id\":\"old-run\",\"company\":\"acme\",\"taskId\":\"card-7\",\
+                       \"agentId\":\"engineer\",\"attempt\":1,\"status\":\"succeeded\",\
+                       \"createdAtMillis\":1700000000000}');",
+        )
+        .expect("seed a pre-#1573 database");
+
+        let store = SqliteStore::from_conn(conn).expect("migrations run on a legacy database");
+        let id = CompanyId::new("acme");
+
+        // The desk was only ever inside the blob; the backfill is what makes it
+        // a predicate.
+        assert_eq!(
+            store
+                .list_runs(&id, &RunFilter::for_agent("engineer"))
+                .await
+                .expect("list by desk")
+                .iter()
+                .map(|r| r.id.as_str())
+                .collect::<Vec<_>>(),
+            ["old-run"],
+            "an attempt written before the column existed is still this desk's"
+        );
+        assert!(
+            store
+                .list_runs(&id, &RunFilter::for_agent("ceo"))
+                .await
+                .expect("list by desk")
+                .is_empty(),
+            "and it is not somebody else's"
+        );
+
+        // A run written after the upgrade is filed by the same predicate.
+        store
+            .create_run(&id, NewRun::for_chat("turn-1", "general", "engineer"))
+            .await
+            .expect("mint a run on the migrated table");
+        let mut ids = store
+            .list_runs(&id, &RunFilter::for_agent("engineer"))
+            .await
+            .expect("list by desk")
+            .into_iter()
+            .map(|r| r.id)
+            .collect::<Vec<_>>();
+        ids.sort();
+        assert_eq!(ids, ["old-run", "turn-1"]);
+
+        // The heal is idempotent — it runs on every open, and must not rewrite
+        // the run history each time. Re-running it leaves the same answer, and
+        // nothing is left `NULL` for it to touch.
+        heal_runs_agent_id(&store.conn()).expect("the heal is idempotent");
+        assert_eq!(
+            store
+                .conn()
+                .query_row(
+                    "SELECT COUNT(*) FROM runs WHERE agent_id IS NULL",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .expect("count"),
+            0,
+            "the backfill left nothing behind for a later open to find"
+        );
+    }
+
     /// **Issue #392 through the port**: the host-durable append really does
     /// commit under `synchronous=FULL`, and really does put it back.
     ///
