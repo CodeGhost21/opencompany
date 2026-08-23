@@ -196,7 +196,7 @@ const CAM_EASE_HOME = 0.3;
 // font counter-scales through it. `px` is the desired size at rest;
 // `groupScale` compensates for an extra ancestor scale (the constellation).
 const fixedLabel = (px: number, groupScale = 1): React.CSSProperties => ({
-  fontSize: `calc(${(px / groupScale).toFixed(3)}px * var(--kg-cam-k, 1))`,
+  fontSize: `calc(${(Math.max(px, LABEL_FONT_PX) / groupScale).toFixed(3)}px * var(--kg-cam-k, 1))`,
 });
 
 type SimNode = KGNode & { x: number; y: number; vx?: number; vy?: number; fx?: number | null; fy?: number | null };
