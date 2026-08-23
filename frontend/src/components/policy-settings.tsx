@@ -134,6 +134,12 @@ export function PolicySettings({ client, company }: Props) {
   const [pendingTier, setPendingTier] = useState<PolicyStatus["tiers"][number] | null>(
     null,
   );
+  // A reset restores the manifest's tier, so the widening check must run on it
+  // too — otherwise "Use the manifest's policy" is a one-click way around the
+  // confirmation the tier buttons get. Remember which action the dialog is
+  // confirming so the confirm button performs the same one the operator asked
+  // for.
+  const [pendingReset, setPendingReset] = useState(false);
   /**
    * The tool names this deployment can actually gate (issue #1226).
    *
@@ -235,10 +241,30 @@ export function PolicySettings({ client, company }: Props) {
   const requestTier = (tier: PolicyStatus["tiers"][number]) => {
     if (!status || saving || tier.value === status.mode) return;
     if (widensAutonomy(status.tiers, status.mode, tier.value)) {
+      setPendingReset(false);
       setPendingTier(tier);
       return;
     }
     void chooseTier(tier.value);
+  };
+
+  const requestReset = () => {
+    if (!status || saving) return;
+    // The manifest's tier can be MORE autonomous than the override an operator
+    // set — resetting would restore that looser tier, so it earns the same
+    // widening confirmation as picking the tier directly.
+    const manifestTier = status.tiers.find(
+      (tier) => tier.value === status.manifestMode,
+    );
+    if (
+      manifestTier &&
+      widensAutonomy(status.tiers, status.mode, status.manifestMode)
+    ) {
+      setPendingReset(true);
+      setPendingTier(manifestTier);
+      return;
+    }
+    void reset();
   };
 
   const saveAlways = async () => {
@@ -359,7 +385,10 @@ export function PolicySettings({ client, company }: Props) {
             <AlertDialog
               open={pendingTier !== null}
               onOpenChange={(open) => {
-                if (!open) setPendingTier(null);
+                if (!open) {
+                  setPendingTier(null);
+                  setPendingReset(false);
+                }
               }}
             >
               <AlertDialogContent>
@@ -386,7 +415,13 @@ export function PolicySettings({ client, company }: Props) {
                 <AlertDialogFooter>
                   <AlertDialogCancel>Keep current setting</AlertDialogCancel>
                   <AlertDialogAction
-                    onClick={() => pendingTier && void chooseTier(pendingTier.value)}
+                    onClick={() => {
+                      if (pendingReset) {
+                        void reset();
+                      } else if (pendingTier) {
+                        void chooseTier(pendingTier.value);
+                      }
+                    }}
                     data-testid="policy-tier-confirm"
                   >
                     Use {pendingTier?.label}
@@ -466,7 +501,7 @@ export function PolicySettings({ client, company }: Props) {
                   size="sm"
                   variant="outline"
                   disabled={saving}
-                  onClick={() => void reset()}
+                  onClick={() => requestReset()}
                 >
                   <RotateCcw className="mr-1 h-3 w-3" />
                   Use the manifest's policy

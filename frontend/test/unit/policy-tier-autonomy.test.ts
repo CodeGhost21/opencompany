@@ -58,19 +58,31 @@ function status(mode: string): PolicyStatus {
   };
 }
 
+/** A status carrying an operator override that differs from the manifest. */
+function overridden(mode: string, manifestMode: string): PolicyStatus {
+  return {
+    ...status(mode),
+    manifestMode,
+    overridden: true,
+    setBy: "someone",
+  };
+}
+
 function makeClient(initial: PolicyStatus) {
   const put = vi.fn(async (_path: string, body: { mode?: string }) =>
     status(body.mode ?? initial.mode),
   );
+  const del = vi.fn(async () => initial);
   return {
     client: {
       scopeFor: () => "/api/v1/acme",
       get: async (path: string) =>
         path.endsWith("/policy") ? initial : { slugs: [], unwired: [] },
       put,
-      del: async () => initial,
+      del,
     } as unknown as OpenCompanyClient,
     put,
+    del,
   };
 }
 
@@ -149,6 +161,50 @@ describe("changing the autonomy tier", () => {
       await Promise.resolve();
     });
     expect(put).toHaveBeenCalledWith("/api/v1/acme/policy", { mode: "supervised" });
+    expect(document.querySelector("[data-testid=policy-tier-confirm]")).toBeNull();
+  });
+});
+
+describe("resetting to the manifest's policy", () => {
+  it("confirms a reset that restores a more autonomous manifest tier", async () => {
+    const { client, del } = makeClient(overridden("readonly", "full"));
+    await mount(client);
+
+    await act(async () => {
+      const button = [...container.querySelectorAll("button")].find((b) =>
+        b.textContent?.includes("manifest's policy"),
+      )!;
+      button.click();
+    });
+    expect(del).not.toHaveBeenCalled();
+    expect(document.body.textContent).toContain(
+      "Let teammates do more on their own?",
+    );
+    expect(document.body.textContent).toContain(
+      "The agents act without asking",
+    );
+
+    await act(async () => {
+      document
+        .querySelector<HTMLButtonElement>("[data-testid=policy-tier-confirm]")!
+        .click();
+      await Promise.resolve();
+    });
+    expect(del).toHaveBeenCalledWith("/api/v1/acme/policy");
+  });
+
+  it("keeps a reset that tightens the tier to one click", async () => {
+    const { client, del } = makeClient(overridden("full", "readonly"));
+    await mount(client);
+
+    await act(async () => {
+      const button = [...container.querySelectorAll("button")].find((b) =>
+        b.textContent?.includes("manifest's policy"),
+      )!;
+      button.click();
+      await Promise.resolve();
+    });
+    expect(del).toHaveBeenCalledWith("/api/v1/acme/policy");
     expect(document.querySelector("[data-testid=policy-tier-confirm]")).toBeNull();
   });
 });
