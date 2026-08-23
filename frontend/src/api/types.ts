@@ -628,6 +628,8 @@ export interface FeedbackInput {
   note: string;
   work_ref?: string;
   preview?: boolean;
+  /** Confirm the previewed item by id (Send after Preview). */
+  item_id?: string;
 }
 
 /**
