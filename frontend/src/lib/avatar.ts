@@ -157,7 +157,7 @@ export function resolveAvatarSrc(
   if (staticSrc) return staticSrc;
   const node = blobNodeId(ref);
   if (!node) return Promise.resolve(null);
-  const key = `${company ?? ""}:${node}`;
+  const key = `${client.baseUrl}|${company ?? ""}|${node}`;
   let pending = blobUrls.get(key);
   if (!pending) {
     pending = client
