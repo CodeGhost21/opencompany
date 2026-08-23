@@ -2131,46 +2131,6 @@ impl RuntimeBuilder {
         let setup = existing.as_ref().and_then(|r| r.setup.clone());
         let ledger = existing.map(|r| r.ledger).unwrap_or_default();
 
-        // Issue #752: a company whose roster holds `repo` does not come up on a
-        // backend that keeps secrets as plaintext on this container's disk.
-        //
-        // The bind-time refusal in `RepoManager::bind` covers new credentials.
-        // It cannot cover a company that bound one *before* this gate existed —
-        // that credential is already sitting on `/data`, and its agents would
-        // keep checking out under it forever. So the same condition is asked
-        // again here, where the answer is "this company does not start", and an
-        // operator restarting a tenant finds out at the moment they can still
-        // act on it.
-        //
-        // Read over the **effective roster**, not `[tools].allow` alone: an
-        // agent naming `tools = ["repo"]` under a company allow-list of `["*"]`
-        // holds an explicit `repo` grant that `grants_repo_explicit(&allow)`
-        // does not see, because the wildcard deliberately does not confer the
-        // namespace. Checking only the company line would miss exactly the
-        // configuration a wildcard company is most likely to have.
-        //
-        // NOT feature-gated, for the reason `build_agent` states about the repo
-        // tools themselves: a control compiled only under `openhuman` is a
-        // control most CI lanes never type-check.
-        if self.storage_kind.secrets_are_plaintext_on_disk() {
-            let roster_holds_repo =
-                crate::company::grants_repo_explicit(&self.manifest.tools.allow)
-                    || self
-                        .manifest
-                        .agents
-                        .iter()
-                        .map(|agent| {
-                            agent_effective_grants(&self.manifest.tools.allow, &agent.tools)
-                        })
-                        .chain(overlay_agents.iter().map(|overlay| {
-                            agent_effective_grants(&self.manifest.tools.allow, &overlay.tools)
-                        }))
-                        .any(|grants| crate::company::grants_repo_explicit(&grants));
-            if roster_holds_repo {
-                return Err(crate::error::OpenCompanyError::Config(
-                    crate::store::plaintext_secret_refusal(self.storage_kind),
-                ));
-            }
         }
 
         let brain: Arc<dyn Brain> = match self.brain {
