@@ -392,13 +392,18 @@ struct MemoryList {
 async fn list_facts(
     company: ScopedCompany,
     Query(ListQuery { query, kind }): Query<ListQuery>,
-) -> Result<Json<Vec<MemoryEntry>>, ApiError> {
+) -> Result<Json<MemoryList>, ApiError> {
     let rows = company
         .runtime
         .facts()
         .list(company.id(), query.as_deref(), kind)
         .await?;
     let mut entries: Vec<MemoryEntry> = rows.into_iter().map(MemoryEntry::from).collect();
+
+    // The non-mirror context chunk population BEFORE the display cap — the "M"
+    // in the console's "newest N of M" notice. Facts are never capped, so this
+    // excludes them; a `?kind=` filter omits context entirely and leaves it 0.
+    let mut total_context = 0;
 
     // A fact-kind filter is inherently facts-only — context chunks carry no
     // `FactKind`, so skip them (and the reads) when one is set.
@@ -408,6 +413,10 @@ async fn list_facts(
         // the reads so a huge context store can't unbound this request.
         let mirror_prefix = format!("{OPERATOR_FACT_PREFIX}/");
         let metas = company.runtime.context.list(company.id(), "").await?;
+        total_context = metas
+            .iter()
+            .filter(|m| !m.label.starts_with(&mirror_prefix))
+            .count();
         let metas = capped_newest_first(metas, &mirror_prefix, MAX_CONTEXT_ENTRIES);
         // One batched read for every surviving body — how few round trips
         // that really is, is the backend's business (see `peek_many`); what
