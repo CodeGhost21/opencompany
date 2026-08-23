@@ -1208,11 +1208,6 @@ to = "nested"
     /// record and describe the gate.
     #[tokio::test]
     async fn an_expr_bound_child_gate_resolves_through_the_registry() {
-        let (resolver, _unused_registry) = gated_resolver_with_grants(
-            vec![overlay("child", child_with_shell("child"))],
-            "supervised",
-            crate::runtime::grants::GrantSet::default(),
-        );
         let registry = Arc::new(ChildGateRegistry::default());
         let child = crate::workflows::translate::translate(
             &crate::company::parse_workflow(&child_with_shell("child")).expect("child parses"),
