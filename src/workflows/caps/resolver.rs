@@ -1136,17 +1136,34 @@ to = "fetch"
             "supervised",
             crate::runtime::grants::GrantSet::default(),
         );
-        // Populate the registry in the same order the nested engine calls do:
-        // resolving `b` while running `a`, then resolving `a` while running the
-        // top-level parent. `resolve("a")` alone does not resolve its child.
-        resolver.resolve("b").await.expect("b resolves");
-        resolver.resolve("a").await.expect("a resolves");
-
-        // The top-level parent runs `a` from a node named `sub`, so the gate
-        // the grandchild paused on reads `sub::nested::work`.
-        let file =
-            crate::company::parse_workflow(&parent_of("parent", "a")).expect("parent parses");
-        let parent = crate::workflows::translate::translate(&file);
+        // `a`'s child record is the graph that contains `nested`; `b`'s record
+        // is the graph that contains the gated `work` node. Populate both
+        // explicitly so the lookup test mirrors the engine's call order.
+        let registry = Arc::new(ChildGateRegistry::default());
+        let a = crate::workflows::translate::translate(
+            &crate::company::parse_workflow(&parent_of("a", "b")).expect("a parses"),
+        );
+        let b = crate::workflows::translate::translate(
+            &crate::company::parse_workflow(&child_with_shell("b")).expect("b parses"),
+        );
+        let gated = b
+            .nodes
+            .iter()
+            .find(|node| node.id == "run")
+            .map(|node| crate::workflows::gate::GatedCall {
+                node_id: node.id.clone(),
+                slug: "shell".to_string(),
+                reason: "shell requires approval".to_string(),
+                args: node.config.get("args").cloned().unwrap_or(Value::Null),
+                target: None,
+            })
+            .into_iter()
+            .collect();
+        registry.record("a", ChildGateRecord { graph: a, gated: Vec::new() });
+        registry.record("b", ChildGateRecord { graph: b, gated });
+        let parent = crate::workflows::translate::translate(
+            &crate::company::parse_workflow(&parent_of("parent", "a")).expect("parent parses"),
+        );
         let described = child_gate_call(&registry, &parent, "sub::nested::work", None)
             .expect("a two-level namespaced child gate resolves through the registry");
         assert_eq!(described.node_id, "work");
