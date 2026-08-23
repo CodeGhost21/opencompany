@@ -404,7 +404,11 @@ export function useApprovalThreadLinks(
     ]).then(([deskDtos, roster]) => {
       if (!live) return;
       setTopology({
-        desks: deskDtos.map(deskFromDto),
+        // Same empty-response fallback as ChatView and AppShell: a company with
+        // no declared `[[group_chat]]` entries still has the default desks, and
+        // an approval raised in one of those (e.g. the `main` thread) must be
+        // resolvable even though `/desks` came back empty.
+        desks: deskDtos.length ? deskDtos.map(deskFromDto) : defaultDesks(),
         members: roster.map(fromDto),
       });
     });
