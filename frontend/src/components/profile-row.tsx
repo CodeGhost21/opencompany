@@ -1,0 +1,257 @@
+// You, in the sidebar footer: the face and name you wear in this company, and
+// the way to change either.
+//
+// It sits with the standing controls rather than in the working nav because it
+// is not a destination — it is the console saying who you are signed in as, in
+// the place every other app puts that, and opening the one form that changes it.
+
+import { useCallback, useEffect, useState } from "react";
+import { toast } from "sonner";
+
+import type { OpenCompanyClient } from "@/api/client";
+import { me as fetchMe, updateMe, type Me } from "@/api/auth";
+import { AvatarPicker } from "@/components/avatar-picker";
+import { TeammateAvatar } from "@/components/teammate-avatar";
+import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { SidebarMenu, SidebarMenuButton, SidebarMenuItem } from "@/components/ui/sidebar";
+import { uploadAvatar } from "@/lib/avatar";
+import { pictureAsFile, readDeviceIdentity, type DeviceIdentity } from "@/lib/device-identity";
+import { guessName, personAvatar, personName } from "@/lib/person";
+import { toneFor } from "@/lib/team";
+
+export function ProfileRow({
+  client,
+  company,
+}: {
+  client: OpenCompanyClient;
+  company: string | null;
+}) {
+  const [me, setMe] = useState<Me | null>(null);
+  const [open, setOpen] = useState(false);
+
+  useEffect(() => {
+    let live = true;
+    void fetchMe(client, company)
+      .then((who) => {
+        if (live) setMe(who);
+      })
+      // A company with no sign-in has no `me` to read, and a session that has
+      // just expired answers 401. Neither is worth a toast on a sidebar row:
+      // the row simply does not appear.
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, [client, company]);
+
+  if (!me) return null;
+  const name = personName(me);
+
+  return (
+    <SidebarMenu>
+      <SidebarMenuItem>
+        <SidebarMenuButton
+          tooltip={name}
+          onClick={() => setOpen(true)}
+          data-testid="profile-row"
+        >
+          {/* 16px, which is below the size a mascot can be read at — so this is
+              the one place the tone tile alone is the right answer. The name
+              beside it is what identifies you here; the tile is a colour. */}
+          <TeammateAvatar
+            name={name}
+            tone={toneFor(me.id || me.email)}
+            avatar={personAvatar(me)}
+            className="size-4 rounded-[4px] text-3xs"
+          />
+          <span className="truncate">{name}</span>
+        </SidebarMenuButton>
+      </SidebarMenuItem>
+      <ProfileDialog
+        client={client}
+        company={company}
+        me={me}
+        open={open}
+        onOpenChange={setOpen}
+        onSaved={setMe}
+      />
+    </SidebarMenu>
+  );
+}
+
+/**
+ * Your name and your face.
+ *
+ * Both are three-state on the wire — leave alone / back to the default / this
+ * value — so this form can save one without touching the other, and can offer a
+ * real "use the default" rather than only an empty field.
+ */
+function ProfileDialog({
+  client,
+  company,
+  me,
+  open,
+  onOpenChange,
+  onSaved,
+}: {
+  client: OpenCompanyClient;
+  company: string | null;
+  me: Me;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  onSaved: (me: Me) => void;
+}) {
+  const [name, setName] = useState("");
+  const [avatar, setAvatar] = useState<string | undefined>(undefined);
+  const [saving, setSaving] = useState(false);
+  const [device, setDevice] = useState<DeviceIdentity>({});
+
+  // Reset from the record every time the dialog opens, not once on mount: a
+  // form left half-edited and dismissed must not still be half-edited when it
+  // is opened again.
+  useEffect(() => {
+    if (!open) return;
+    setName(me.displayName ?? "");
+    setAvatar(me.avatar);
+  }, [open, me.displayName, me.avatar]);
+
+  // What this machine knows, read once and only on the desktop. It is offered,
+  // never applied: see `lib/device-identity.ts`.
+  useEffect(() => {
+    if (!open) return;
+    let live = true;
+    void readDeviceIdentity().then((identity) => {
+      if (live) setDevice(identity);
+    });
+    return () => {
+      live = false;
+    };
+  }, [open]);
+
+  // The placeholder is the name the console would show if this field stayed
+  // empty — the guess from the sign-in address — so an empty field reads as
+  // "we'll call you this" rather than as a gap.
+  const derived = guessName(me.email);
+  // Offered only while it would actually change something: suggesting a name
+  // that is already in the box is a button that does nothing.
+  const suggestedName =
+    device.fullName && device.fullName !== name.trim() ? device.fullName : null;
+
+  const applyDevicePicture = useCallback(async () => {
+    const file = pictureAsFile(device.pictureDataUrl);
+    if (!file) return;
+    setSaving(true);
+    try {
+      const { avatar: reference } = await uploadAvatar(client, company, file);
+      setAvatar(reference);
+    } catch {
+      toast.error("That picture couldn't be used. Pick an image instead.");
+    } finally {
+      setSaving(false);
+    }
+  }, [client, company, device.pictureDataUrl]);
+
+  async function save() {
+    setSaving(true);
+    try {
+      const updated = await updateMe(client, company, {
+        // An emptied field is "call me the derived name again", which is what
+        // `null` stores — not `""`, which would be a name that renders as a gap.
+        displayName: name.trim() === "" ? null : name.trim(),
+        avatar: avatar ?? null,
+      });
+      onSaved(updated);
+      onOpenChange(false);
+      toast.success("Profile updated.");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Couldn't save your profile.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  const preview = name.trim() || derived || me.email;
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle>Your profile</DialogTitle>
+          <DialogDescription>
+            How you appear to everyone else in this company — in chat, on approvals, and
+            everywhere your name is on something.
+          </DialogDescription>
+        </DialogHeader>
+        <div className="grid gap-4">
+          <div className="grid gap-2">
+            <Label htmlFor="profile-name">Name</Label>
+            <Input
+              id="profile-name"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              placeholder={derived ?? "Your name"}
+              data-testid="profile-name"
+            />
+            {suggestedName && (
+              <button
+                type="button"
+                className="self-start text-xs text-muted-foreground underline underline-offset-2 hover:text-foreground"
+                onClick={() => setName(suggestedName)}
+                data-testid="profile-name-suggestion"
+              >
+                Use “{suggestedName}” from this computer
+              </button>
+            )}
+          </div>
+          <div className="grid gap-2">
+            <Label>Icon</Label>
+            <AvatarPicker
+              client={client}
+              company={company}
+              value={avatar}
+              seed={me.id || me.email}
+              name={preview}
+              tone={toneFor(me.id || me.email)}
+              onChange={setAvatar}
+              disabled={saving}
+            />
+            {device.pictureDataUrl && (
+              <button
+                type="button"
+                className="flex items-center gap-2 self-start text-xs text-muted-foreground underline underline-offset-2 hover:text-foreground disabled:opacity-50"
+                disabled={saving}
+                onClick={() => void applyDevicePicture()}
+                data-testid="profile-device-picture"
+              >
+                <img
+                  src={device.pictureDataUrl}
+                  alt=""
+                  className="size-5 rounded-[4px] object-cover"
+                />
+                Use your account picture from this computer
+              </button>
+            )}
+          </div>
+        </div>
+        <DialogFooter>
+          <Button variant="ghost" onClick={() => onOpenChange(false)} disabled={saving}>
+            Cancel
+          </Button>
+          <Button onClick={() => void save()} disabled={saving} data-testid="profile-save">
+            Save
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}

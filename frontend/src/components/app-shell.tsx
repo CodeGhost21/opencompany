@@ -75,6 +75,7 @@ import { defaultDesks, type Desk } from "@/lib/desks";
 import { mergeReadFloors, unreadCount } from "@/lib/unread";
 import { approvedLine, staleDecisionLine } from "@/lib/approval-wording";
 import { writeLastChannel } from "@/lib/last-channel";
+import { ProfileRow } from "@/components/profile-row";
 import { ConsoleProvider } from "@/lib/console-context";
 import { fromDto, type TeamMember } from "@/lib/team";
 import { agentDmThreads, defaultThreads, threadsFromDesks } from "@/lib/threads";
@@ -1843,6 +1844,10 @@ export function AppShell({
           </SidebarGroup>
         </SidebarContent>
         <SidebarFooter>
+          {/* Who you are signed in as, above the controls that act on the
+              company. It renders nothing where there is nobody to name — a host
+              with no sign-in, or a session that has just gone. */}
+          <ProfileRow client={client} company={company} />
           <SidebarControls
             lifecycleState={feed.status.lifecycle}
             emergencyPaused={feed.status.emergency_paused}
