@@ -282,12 +282,18 @@ export function PolicySettings({ client, company }: Props) {
 
   // Only a successfully loaded tool set may label an entry "not a tool": while
   // the request is pending, and on hosts predating the route, the empty array
-  // is "unknown", not "none of these are wired".
+  // is "unknown", not "none of these are wired". An entry counts as wired when
+  // it would gate a wired slug under the backend's own matcher — `SHELL` for
+  // the `shell` tool, `invoice` for a `invoice.send` kind — so a fence the
+  // gate accepts is never presented as a mistake.
   const unmatchedWiredTools = wiredToolsLoaded
     ? draftAlways
         .split(",")
         .map((kind) => kind.trim())
-        .filter((kind) => kind && !wiredTools.includes(kind))
+        .filter(
+          (kind) =>
+            kind && !wiredTools.some((slug) => alwaysApproveGates(kind, slug)),
+        )
     : [];
 
   const saveAlways = async () => {
