@@ -621,7 +621,7 @@ mod tests {
         // fails `valid_slug` and 404s. `./{slug}/bootstrap.mjs` resolves to the
         // registered bootstrap route.
         assert!(
-            html.contains("src=\"./revenue/bootstrap.mjs\""),
+            html.contains("src=\"./revenue/bootstrap.mjs"),
             "the bootstrap module must be relative to the shell URL"
         );
     }
