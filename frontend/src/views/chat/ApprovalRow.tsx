@@ -398,7 +398,7 @@ function CompactApprovalRow({
           <Icon className="size-3.5" aria-hidden />
         </div>
         <div className="min-w-0 flex-1">
-          <p className="truncate text-sm font-medium">{compactLabel(approvals)}</p>
+          <CompactLabel approvals={approvals} />
           <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
             <ApprovalMeta approval={lead} now={now} askerNames={askerNames} status={status} />
             {!busy && (
