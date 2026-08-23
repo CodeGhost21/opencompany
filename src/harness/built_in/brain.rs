@@ -585,26 +585,6 @@ impl HarnessBrain {
                     .pending_publishes
                     .claim(publish::PublishDestination::Conversation)
             });
-        // Issue #245: a re-dispatched approval is a full agent turn with the
-        // whole toolbelt, so it can check a repository out, and the janitor
-        // claimed here deletes what this turn creates. Issue #796 refines what
-        // "this turn's checkout" is: a turn resuming a task first reclaims that
-        // task's held-across-park tree, so the resumed step operates on the same
-        // Issue #796: at the claim, drop any task's retained checkout whose
-        // approval was denied or expired — no live grant names it, so nothing
-        // will ever resume it. `grants` is the same live set peeked above.
-        self.deps
-            .checkouts
-            .sweep_orphans(|task| grants.any_for_task(task));
-        // Issue #735/#796: stamp the task this grant resumes so `repo_publish`
-        // can name its branch, and reclaim the checkout the parked step left so
-        // the resumed step — a commit, a publish — finds its own work. A
-        // re-dispatch with no task (a plain operator-chat approval) clears the
-        // cell and reclaims nothing, exactly as #735 did.
-        self.deps.checkouts.set_task(origin_task.clone());
-        if let Some(task) = &origin_task {
-            self.deps.checkouts.reclaim(task);
-        }
         // Un-streamed, like a dispatched card: this turn is answered by the
         // bubble returned below, and its transient frames would otherwise
         // misattribute onto whichever chat thread the console is watching.
@@ -618,23 +598,6 @@ impl HarnessBrain {
             )
             .await;
         drop(guard);
-        // Issue #796: hold the task's checkout across the turn boundary on EVERY
-        // re-issue, not only one that parks a new approval.
-        //
-        // A write is a chain of separately-approved steps — checkout, edit,
-        // commit, publish — and an operator commonly approves them in a batch, so
-        // the grants exist up front. Re-issuing one grant then need NOT queue a
-        // new approval, yet the checkout it just materialized (or the commit it
-        // just made) must still be there when the next grant is re-issued in its
-        // own turn. Retaining only on a fresh park dropped exactly that tree the
-        // turn it was created. So retain unconditionally here; the checkout is
-        // reclaimed on the next re-issue, and `sweep_orphans` at the next claim
-        // deletes it once no live grant names the task — the flow finished, was
-        // denied, or expired.
-        if let Some(task) = &origin_task {
-            self.deps.checkouts.retain_for_task(task);
-        }
-
         let published = self.deps.pending_publishes.drain();
         if !published.is_empty()
             && publish_claim.is_some()
@@ -858,24 +821,6 @@ impl HarnessBrain {
         // redirected turn's work, which is a different decision from who is
         // entitled to queue.
         let _delegation_claim = self.deps.delegations.claim();
-        // Issue #245: and the checkout ledger, for the same span. A dispatched
-        // card is where a `repo_checkout` is most likely to happen, and the
-        // guard's `Drop` is what deletes the tree on every exit — success,
-        // Issue #796: at the claim, drop any task's retained checkout whose
-        // approval was denied or expired — no live grant names it, so nothing
-        // will resume it.
-        {
-            let grants = self.deps.approval_requests.grants();
-            self.deps
-                .checkouts
-                .sweep_orphans(|task| grants.any_for_task(task));
-        }
-        // Issue #735: this is a dispatched card, so `repo_publish` names its
-        // branch `oc/<company>/<card>`. Stamped on the same per-turn cell the
-        // janitor above claims. A parked step of this card resumes through the
-        // approval re-issue path (which reclaims the tree there, issue #796), not
-        // by re-running the card, so nothing is reclaimed here.
-        self.deps.checkouts.set_task(Some(card.id.clone()));
         // Issue #339, same argument for staged workflow references: an operator
         // chat turn earlier in this cycle may have run a workflow through the
         // orchestrator's tool, and that run belongs to the conversation, not to
@@ -936,12 +881,6 @@ impl HarnessBrain {
             // part of the loop and never clears, so a nudge cannot discard what
             // the turn it is asking about published.
             self.deps.pending_publishes.clear();
-            // Issue #245, same argument for a checkout: a redirect abandons the
-            // previous turn's work, and a working tree that turn cloned is part
-            // of that work. Deleting it here also means a redirect re-runs
-            // against a fresh checkout rather than one the abandoned turn may
-            // have half-patched.
-            self.deps.checkouts.purge();
             // Issue #339: an abandoned redirect's workflow run is abandoned with
             // it, for the same reason — the card's link must name what the turn
             // that actually settled produced, not what a discarded one did.
