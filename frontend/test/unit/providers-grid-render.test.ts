@@ -158,9 +158,9 @@ describe("what a tile says about its accounts", () => {
     expect(text()).not.toContain("none connected");
   });
 
-  it("shows an unconnected provider's requested permission before sign-in", async () => {
+  it("shows an unconnected provider's typical access before sign-in", async () => {
     await render([row("slack", "Slack", [])]);
-    expect(text()).toContain("Permission requested:");
+    expect(text()).toContain("Typical access:");
   });
 });
 
