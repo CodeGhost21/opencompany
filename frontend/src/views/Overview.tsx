@@ -160,7 +160,9 @@ export function Overview({ client, company, companyName }: Props) {
       const desks = desksResult.status === "fulfilled" ? desksResult.value : ([] as DeskDto[]);
       const people = peopleResult.status === "fulfilled" ? peopleResult.value : ([] as Person[]);
       const memories =
-        memoriesResult.status === "fulfilled" ? memoriesResult.value : ([] as MemoryEntry[]);
+        memoriesResult.status === "fulfilled"
+          ? memoriesResult.value.items
+          : ([] as MemoryEntry[]);
       const flowList = flowListResult.status === "fulfilled" ? flowListResult.value : [];
 
       // `listWorkflows` answers with `{id,name,description,editable,enabled}`
