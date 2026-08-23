@@ -701,6 +701,39 @@ impl PathIndex {
             .collect()
     }
 
+    /// Every node id under `root_id` in the store's parent-id tree — the nodes
+    /// a rename of `root_id` would re-render, whether or not each one has a
+    /// renderable path. The root itself is excluded: the caller has already
+    /// resolved and checked it.
+    ///
+    /// Path-based descent ([`entries_under`](Self::entries_under)) cannot see
+    /// an unaddressable descendant, and this is exactly the gate that needs to:
+    /// a folder rename moves the whole subtree, so a descendant the path rules
+    /// exclude must still have its authorship checked. Walking parent ids is
+    /// structural, like the emptiness gate, and terminates on a visited set so
+    /// a hand-edited backing store that cycles cannot hang it.
+    fn subtree_ids(&self, root_id: &str) -> Vec<&str> {
+        let mut out = Vec::new();
+        let mut visited = HashSet::new();
+        let mut stack: Vec<&str> = self
+            .children
+            .get(root_id)
+            .into_iter()
+            .flatten()
+            .map(String::as_str)
+            .collect();
+        while let Some(id) = stack.pop() {
+            if !visited.insert(id) {
+                continue;
+            }
+            out.push(id);
+            if let Some(kids) = self.children.get(id) {
+                stack.extend(kids.iter().map(String::as_str));
+            }
+        }
+        out
+    }
+
     /// Every entry carrying `path`, matching the literal path first and its
     /// normalized form second.
     ///
