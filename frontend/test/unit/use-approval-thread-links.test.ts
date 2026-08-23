@@ -97,4 +97,18 @@ describe("useApprovalThreadLinks", () => {
 
     expect(lastLinks?.has("a1")).toBe(false);
   });
+
+  it("falls back to the default desks when /desks comes back empty", async () => {
+    // A company with no declared `[[group_chat]]` entries gets `[]` from
+    // /desks, yet ChatView and AppShell still show the default desks. An
+    // approval raised in one of those (the `main` thread) must resolve too,
+    // or its "Asked in" link would silently disappear.
+    const client = {
+      listDesks: vi.fn(async () => []),
+      listTeam: vi.fn(async () => []),
+    } as unknown as OpenCompanyClient;
+    await render(client, [approval("a1", "main")]);
+
+    expect(lastLinks?.get("a1")).toEqual({ channelId: "main", label: "#general" });
+  });
 });
