@@ -2238,6 +2238,15 @@ pub(crate) async fn mutation_is_owned_by_agent(
     tool: &str,
     args: &Value,
 ) -> bool {
+    if !matches!(
+        tool.to_ascii_lowercase().as_str(),
+        WORKSPACE_CREATE_TOOL
+            | WORKSPACE_WRITE_TOOL
+            | WORKSPACE_DELETE_TOOL
+            | WORKSPACE_RENAME_TOOL
+    ) {
+        return false;
+    }
     let workspace = CompanyWorkspace::new(store.clone(), company.clone(), agent_id.to_string());
 
     if tool.eq_ignore_ascii_case(WORKSPACE_CREATE_TOOL) {

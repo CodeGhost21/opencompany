@@ -1341,6 +1341,12 @@ impl ApprovalPolicy {
         let Some(agent) = self.agent.as_deref() else {
             return consequence;
         };
+        if !matches!(
+            tool.to_ascii_lowercase().as_str(),
+            "workspace_create" | "workspace_write" | "workspace_delete" | "workspace_rename"
+        ) {
+            return consequence;
+        }
         if crate::harness::built_in::workspace_tools::mutation_is_owned_by_agent(
             &workspace.store,
             &workspace.company,
