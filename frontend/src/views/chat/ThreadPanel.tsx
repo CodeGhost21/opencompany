@@ -45,7 +45,7 @@ interface Props {
  * channel apart. The parent message sits at the top under a rule, and the
  * panel carries its own composer scoped to the thread.
  */
-export function ThreadPanel({ channel, members, parent, replies, sending, mentionables, onSend, onClose }: Props) {
+export function ThreadPanel({ channel, members, parent, replies, sending, mentionables, channelMemberIds, onSend, onClose }: Props) {
   return (
     <aside className="flex w-96 shrink-0 flex-col border-l bg-background">
       <header className="flex h-13 shrink-0 items-center gap-2 border-b px-3">
