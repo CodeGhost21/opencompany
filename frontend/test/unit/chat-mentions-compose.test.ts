@@ -436,3 +436,88 @@ describe("mentionsOutsideChannel", () => {
     ]);
   });
 });
+
+describe("resolvableMentions", () => {
+  const directory: Mentionable[] = [
+    {
+      target: { kind: "agent", id: "engineer" },
+      label: "engineer",
+      aliases: ["engineer"],
+      inChannel: true,
+    },
+    {
+      target: { kind: "user", id: "u1" },
+      label: "Jane Doe",
+      aliases: ["jane doe", "jane-doe"],
+    },
+    {
+      target: { kind: "everyone" },
+      label: "everyone",
+      aliases: ["everyone", "channel", "here"],
+    },
+  ];
+
+  it("resolves every span the directory can name", () => {
+    const out = resolvableMentions("@engineer @Jane Doe", directory);
+    expect(out.map((m) => m.text)).toEqual(["@engineer", "@Jane Doe"]);
+    expect(out[0].target).toEqual({ kind: "agent", id: "engineer" });
+  });
+
+  it("leaves a name shared by two targets as text", () => {
+    const sam1: Mentionable = {
+      target: { kind: "user", id: "u1" },
+      label: "Sam",
+      aliases: ["sam"],
+    };
+    const sam2: Mentionable = {
+      target: { kind: "user", id: "u2" },
+      label: "Sam",
+      aliases: ["sam"],
+    };
+    expect(resolvableMentions("@Sam", [sam1, sam2])).toEqual([]);
+  });
+
+  it("ignores code regions", () => {
+    expect(resolvableMentions("`@engineer`", directory)).toEqual([]);
+    expect(
+      resolvableMentions("before\n```\n@engineer\n```\nafter", directory),
+    ).toEqual([]);
+  });
+
+  it("does not resolve an @ inside another token", () => {
+    expect(resolvableMentions("jane@engineer", directory)).toEqual([]);
+    expect(resolvableMentions("/docs/@eng", directory)).toEqual([]);
+  });
+
+  it("prefers the longest alias when one name prefixes another", () => {
+    const ann: Mentionable = {
+      target: { kind: "user", id: "a" },
+      label: "Ann",
+      aliases: ["ann"],
+    };
+    const annLee: Mentionable = {
+      target: { kind: "user", id: "b" },
+      label: "Ann Lee",
+      aliases: ["ann lee"],
+    };
+    const out = resolvableMentions("@Ann Lee", [ann, annLee]);
+    expect(out).toHaveLength(1);
+    expect(out[0].text).toBe("@Ann Lee");
+    expect(out[0].target).toEqual(annLee.target);
+  });
+
+  it("requires a clean boundary after the name", () => {
+    expect(resolvableMentions("@engineerish", directory)).toEqual([]);
+    expect(resolvableMentions("@engineer, thanks", directory)).toHaveLength(1);
+  });
+});
+
+describe("utf8ByteLength", () => {
+  it("counts bytes, not UTF-16 units", () => {
+    expect(utf8ByteLength("")).toBe(0);
+    expect(utf8ByteLength("hey @engineer")).toBe(13);
+    expect(utf8ByteLength("👍 ")).toBe(5);
+    expect(utf8ByteLength("é")).toBe(2);
+    expect(utf8ByteLength("café")).toBe(5);
+  });
+});
