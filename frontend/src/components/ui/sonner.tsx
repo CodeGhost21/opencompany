@@ -4,7 +4,7 @@ import { Toaster as Sonner, toast, useSonner, type ToasterProps } from "sonner"
 import { CircleCheckIcon, InfoIcon, TriangleAlertIcon, OctagonXIcon, Loader2Icon } from "lucide-react"
 
 import { reconcileTracked, sweepToasts, type TrackedToast } from "@/lib/toast-lifetime"
-import { relayToastClick } from "@/lib/toast-click-through"
+import { relayToastClick, relayToastPointerDown } from "@/lib/toast-click-through"
 
 /** How often the dismissal guard re-checks the toasts that are up. */
 const SWEEP_INTERVAL_MS = 500
