@@ -304,6 +304,7 @@ export function ApprovalRow({
         approvals={pending}
         now={now}
         askerNames={askerNames}
+        thread={thread}
         actions={actions}
         busy={busy}
         status={
