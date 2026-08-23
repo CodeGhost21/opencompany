@@ -1098,6 +1098,7 @@ mod test {
             agent: agent.to_string(),
             workflow: None,
             tool: tool.to_string(),
+            verdict: crate::ports::types::Verdict::Approve,
             granted_by: operator(),
             approval_id: ApprovalId::new(format!("approval-{id}")),
             at_millis: 1_000,

@@ -7490,6 +7490,7 @@ members = ["eng1", "eng2"]
                 agent: "ceo".into(),
                 workflow: None,
                 tool: "workspace_write".into(),
+                verdict: Verdict::Approve,
                 granted_by: crate::ports::types::Actor {
                     kind: crate::ports::types::ActorKind::User,
                     id: "user-1".into(),

@@ -8475,6 +8475,7 @@ mode = "full"
                 agent: "ops".into(),
                 workflow: None,
                 tool: "workspace_write".into(),
+                verdict: Verdict::Approve,
                 granted_by: Actor {
                     kind: ActorKind::User,
                     id: "user-7".into(),
