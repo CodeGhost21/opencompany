@@ -518,6 +518,9 @@ mod test {
             "got {preview_body}"
         );
         assert!(!preview_body.contains("dana_roe"));
+        // The preview persisted its body on the item; the confirm finalizes the
+        // STORED item, exactly as the runtime's confirm path loads it.
+        let stored = store.get(&it.id).await.unwrap().expect("item exists");
 
         // Between preview and confirm the roster loses the agent. The confirm
         // must still post exactly what the operator inspected.
@@ -527,7 +530,7 @@ mod test {
             &filer,
             &company,
             Some(&manifest(false)),
-            &it,
+            &stored,
             Severity::Annoyance,
             FeedbackSource::Operator,
             false,
