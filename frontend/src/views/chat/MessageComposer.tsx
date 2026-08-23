@@ -183,7 +183,11 @@ export function MessageComposer({
       closePicker();
       return;
     }
-    const next = activeMentionQuery(text, caret, aliases);
+    // Code regions are masked so an `@` inside backticks never opens the picker
+    // (a supplied mention would survive revalidation, since the host's code
+    // mask only applies to its own extraction). Masking preserves offsets, so
+    // the range this returns is valid against the raw `text`.
+    const next = activeMentionQuery(stripCodeRegions(text), caret, aliases);
     setQuery(next);
     setActiveRow(0);
   }
