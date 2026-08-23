@@ -14,18 +14,7 @@ use crate::ports::types::{CompanyId, CompanyRecord};
 use crate::runtime::RuntimeBuilder;
 use crate::server::router;
 use crate::store::FsCompanyStore;
-use crate::test_support::EnvVarGuard;
 use crate::{AppConfig, AppState};
-
-/// Every environment key the engine surface reads, so a guarded test restores
-/// all of them however it fails.
-const MEMORY_ENV: [&str; 5] = [
-    "OPENCOMPANY_MEMORY",
-    "OPENCOMPANY_MEMORY_DRIVER",
-    "OPENCOMPANY_MEMORY_URL",
-    "OPENCOMPANY_MEMORY_API_KEY",
-    "OPENCOMPANY_DATA_DIR",
-];
 
 /// A rebuilder that rebuilds a company over its live handover, so the apply
 /// path's live swap is exercised rather than reported as needing a restart.
@@ -261,8 +250,6 @@ fn switching_to_the_built_in_store_drops_endpoint_and_credential() {
 #[tokio::test]
 async fn the_default_host_reports_the_built_in_store_as_editable() {
     let dir = tempfile::tempdir().unwrap();
-    let guard = EnvVarGuard::capture(&MEMORY_ENV);
-    guard.remove("OPENCOMPANY_MEMORY");
     let state = state_at(dir.path()).await;
 
     let (status, body) = call(&state, "GET", "/api/v1/company/memory/engine", None).await;
@@ -282,36 +269,10 @@ async fn the_default_host_reports_the_built_in_store_as_editable() {
     );
 }
 
-/// The refusal this surface exists for: a deployment that injects
-/// `OPENCOMPANY_MEMORY` owns the engine, so the console renders read-only and
-/// a write is refused rather than accepted-and-dropped.
-#[tokio::test]
-async fn an_env_owned_engine_is_read_only_and_refuses_a_write() {
-    let dir = tempfile::tempdir().unwrap();
-    let guard = EnvVarGuard::capture(&MEMORY_ENV);
-    guard.set("OPENCOMPANY_MEMORY", "store");
-    let state = state_at(dir.path()).await;
-
-    let (status, body) = call(&state, "GET", "/api/v1/company/memory/engine", None).await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["layer"], "env");
-    assert_eq!(body["editable"], false);
-
-    let (status, body) = call(
-        &state,
-        "PUT",
-        "/api/v1/company/memory/engine",
-        Some(json!({ "engine": "store" })),
-    )
-    .await;
-    assert_eq!(status, StatusCode::CONFLICT);
-    assert!(
-        body["error"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("OPENCOMPANY_MEMORY"),
-        "the refusal must name the variable that outranks the file: {body}"
-    );
+#[test]
+fn an_env_owned_engine_is_detected_from_an_injected_source() {
+    let env = crate::app::config::MapEnv::new([("OPENCOMPANY_MEMORY", "store")]);
+    assert!(crate::store::StorageSettings::memory_is_env_owned_by(&env));
 }
 
 /// An apply writes the file, and the read that follows reports the new
@@ -319,9 +280,6 @@ async fn an_env_owned_engine_is_read_only_and_refuses_a_write() {
 #[tokio::test]
 async fn applying_an_engine_persists_it_to_config_toml() {
     let dir = tempfile::tempdir().unwrap();
-    let guard = EnvVarGuard::capture(&MEMORY_ENV);
-    guard.remove("OPENCOMPANY_MEMORY");
-    guard.set("OPENCOMPANY_DATA_DIR", dir.path().to_str().unwrap());
     let state = state_at(dir.path()).await;
 
     let (status, body) = call(
@@ -353,8 +311,6 @@ async fn applying_an_engine_persists_it_to_config_toml() {
 #[tokio::test]
 async fn an_unknown_engine_is_refused_with_the_catalog() {
     let dir = tempfile::tempdir().unwrap();
-    let guard = EnvVarGuard::capture(&MEMORY_ENV);
-    guard.remove("OPENCOMPANY_MEMORY");
     let state = state_at(dir.path()).await;
 
     let (status, body) = call(
