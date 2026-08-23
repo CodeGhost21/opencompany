@@ -363,7 +363,10 @@ export function SetupWizard({ client, onDone, onCancel }: Props) {
           // over a link rather than describe one.
           setHandoff({
             kind: "link",
-            url: `/login?company=${encodeURIComponent(company)}&code=${encodeURIComponent(result.dev_code)}`,
+            // The magic-link landing preserves this router hash while it
+            // strips the single-use code, so sign-in reaches the roster setup
+            // just created rather than the stale Overview graph.
+            url: `/login?company=${encodeURIComponent(company)}&code=${encodeURIComponent(result.dev_code)}#/company`,
           });
         } else {
           setHandoff(status.mail.wired ? { kind: "mailed" } : { kind: "unmailable" });
@@ -611,6 +614,7 @@ export function SetupWizard({ client, onDone, onCancel }: Props) {
           {handoff?.kind === "link" ? (
             <Button
               data-testid="setup-signin"
+              data-handoff-url={handoff.url}
               onClick={() => {
                 window.location.href = handoff.url;
               }}

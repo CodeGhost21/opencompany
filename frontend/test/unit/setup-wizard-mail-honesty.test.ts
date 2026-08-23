@@ -205,7 +205,10 @@ describe("the hand-off after setup applies", () => {
     await finish();
 
     expect(find("setup-handoff-link")).toBeTruthy();
-    expect(find("setup-signin")).toBeTruthy();
+    expect(find("setup-signin")).toHaveAttribute(
+      "data-handoff-url",
+      "/login?company=acme&code=abc123#/company",
+    );
   });
 
   it("points at the inbox only when the host can actually send", async () => {

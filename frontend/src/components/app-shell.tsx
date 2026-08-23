@@ -423,6 +423,11 @@ export function AppShell({
    * the read, and a flag that was already `true` would not.
    */
   const [teamBuilt, setTeamBuilt] = useState(0);
+  /**
+   * Setup has already introduced the console while it builds the team, so do
+   * not immediately cover the roster it leads to with the tour welcome.
+   */
+  const [setupCompleted, setSetupCompleted] = useState(false);
   // The shell owns every channel's transcript, not `ChatView` — the shell
   // mounts and unmounts `ChatView` per route, so component-local state there
   // would be discarded on every trip away from Chat and back.
@@ -2223,10 +2228,21 @@ export function AppShell({
         deepLinked={deepLinked}
         onForceHandled={() => setSetupForced(false)}
         onOpenChange={setSetupOpen}
-        onCompleted={() => setTeamBuilt((n) => n + 1)}
+        onCompleted={() => {
+          // Keep these together: Company mounts with the new refresh key, and
+          // setup's payoff is the roster rather than the Overview graph.
+          setTeamBuilt((n) => n + 1);
+          setSetupCompleted(true);
+          setView("company");
+        }}
       />
 
-      <TourController company={company} setView={setView} hold={setupOpen} />
+      <TourController
+        company={company}
+        setView={setView}
+        hold={setupOpen}
+        suppressWelcome={setupCompleted}
+      />
     </SidebarProvider>
   );
 }
