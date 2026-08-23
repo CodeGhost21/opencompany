@@ -418,18 +418,20 @@ function CompactApprovalRow({
 }
 
 /**
- * A differentiating, one-line summary rather than a second full approval card.
+ * The compact row's one-line summary, split so the amounts survive truncation.
  *
  * A batch's line has to name what the one Approve covers, never just the first
- * call. When every call is the same action, the lead's words plus the count
- * still tell the truth — "Fetch a web page … + 2 more" is three of the same
- * thing. The moment the batch mixes actions, that phrasing would hide a payment
- * behind a fetch, so the line names every distinct action and states the count
- * plainly, the way `BatchHeadline` does. Either way, every amount in the batch
- * is named: an operator approving money must see its value whether the payment
- * is first in the batch or not.
+ * call. When every call is the same action, each call's own detail is named —
+ * "Fetch a web page — espn.com, bbc.com, theguardian.com" is three things, and
+ * "+ 2 more" would let a harmless first call conceal a consequential second.
+ * When the batch mixes actions, that phrasing would hide a payment behind a
+ * fetch, so the line names every distinct action and states the count plainly,
+ * the way `BatchHeadline` does. Either way, every amount is returned separately
+ * from the text so the row can keep it outside the truncating region: an
+ * operator approving money must see its value whether the payment is first in
+ * the batch or not.
  */
-function compactLabel(approvals: ApprovalSummary[]): string {
+function compactLabel(approvals: ApprovalSummary[]): { text: string; amounts: string } {
   const lead = approvals[0];
   const action = approvalAction(lead);
   const detail = itemLabel(lead);
@@ -440,22 +442,22 @@ function compactLabel(approvals: ApprovalSummary[]): string {
   // A monetary effect shows its value beside whatever else it is doing — an
   // operator approving a payment must see its amount, whether or not the host
   // also sent a payload line to describe it.
-  const amount = lead.amount_usd != null ? ` · ${money(lead.amount_usd)}` : "";
-  const label = `${prefix}${amount}`;
+  const amounts = approvals
+    .filter((a) => a.amount_usd != null)
+    .map((a) => money(a.amount_usd as number));
+  const amountText = amounts.length > 0 ? ` · ${amounts.join(" · ")}` : "";
 
-  if (approvals.length === 1) return label;
+  if (approvals.length === 1) return { text: prefix, amounts: amountText };
 
   const rest = approvals.slice(1);
 
-  // One action, many calls. The lead's words and the count stay — the rest are
-  // the same action — but any further amounts are appended so a second payment
-  // in the batch is seen before the one Approve is pressed.
+  // One action, many calls. Every call is named, not just the lead's — a
+  // second command or recipient can be the consequential one, and "+ N more"
+  // would hide it behind the first. A hidden call's `itemLabel` already names
+  // its own action, so the comma-joined tail reads the same way.
   if (rest.every((a) => a.kind === lead.kind)) {
-    const otherAmounts = rest
-      .filter((a) => a.amount_usd != null)
-      .map((a) => money(a.amount_usd as number));
-    const amounts = otherAmounts.length > 0 ? ` · ${otherAmounts.join(" · ")}` : "";
-    return `${label}${amounts} + ${rest.length} more`;
+    const details = rest.map((a) => itemLabel(a)).join(", ");
+    return { text: `${prefix}, ${details}`, amounts: amountText };
   }
 
   // Mixed actions: "Fetch a web page + 1 more" over a card that also sends a
@@ -467,11 +469,21 @@ function compactLabel(approvals: ApprovalSummary[]): string {
     kinds.length === 2
       ? `${kinds[0]} and ${kinds[1]}`
       : `${kinds.slice(0, -1).join(", ")}, and ${kinds[kinds.length - 1]}`;
-  const amounts = approvals
-    .filter((a) => a.amount_usd != null)
-    .map((a) => money(a.amount_usd as number));
-  const amountText = amounts.length > 0 ? ` · ${amounts.join(" · ")}` : "";
-  return `${approvals.length} actions need your sign-off — ${named}${amountText}`;
+  return {
+    text: `${approvals.length} actions need your sign-off — ${named}`,
+    amounts: amountText,
+  };
+}
+
+/** The compact row's first line: text may ellipsize, amounts never do. */
+function CompactLabel({ approvals }: { approvals: ApprovalSummary[] }) {
+  const { text, amounts } = compactLabel(approvals);
+  return (
+    <p className="flex min-w-0 items-baseline text-sm font-medium">
+      <span className="min-w-0 truncate">{text}</span>
+      {amounts !== "" && <span className="shrink-0">{amounts}</span>}
+    </p>
+  );
 }
 
 /** Quiet until an operator targets a decision; the composer keeps the emphasis. */
