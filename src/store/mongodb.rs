@@ -274,21 +274,30 @@ impl MongoStore {
         };
         store.ensure_indexes().await?;
         // Issue #1573: give run documents written before the `agent_id` mirror
-        // existed one, so a per-teammate history is the whole history. Runs
-        // after `ensure_indexes` so the `agent_id` index exists to make the
-        // "is there anything left to do?" probe a lookup.
-        match store.backfill_run_agent_ids().await {
-            Ok(0) => {}
-            Ok(filled) => tracing::info!(
-                filled,
-                "backfilled the agent id on run rows written before the column existed"
-            ),
-            Err(err) => tracing::warn!(
-                error = %err,
-                "could not backfill run agent ids; a per-teammate run history will \
-                 under-report until the next boot"
-            ),
-        }
+        // existed one, so a per-teammate history is the whole history. Spawned
+        // rather than awaited: on a first boot the migration can touch every
+        // legacy run one row at a time, and storage initialization must not sit
+        // in front of `/healthz` (AGENTS.md:170). The sqlite backend heals
+        // synchronously because its migration is a single UPDATE; Mongo's desk
+        // lives inside a JSON string, so there is no equivalent and the cost is
+        // a bounded background churn. Best-effort for the same reason the
+        // orphan-blob sweep is — a store that will not boot is worse than one
+        // whose oldest run rows are not yet filterable by desk.
+        let backfill_store = store.clone();
+        tokio::spawn(async move {
+            match backfill_store.backfill_run_agent_ids().await {
+                Ok(0) => {}
+                Ok(filled) => tracing::info!(
+                    filled,
+                    "backfilled the agent id on run rows written before the column existed"
+                ),
+                Err(err) => tracing::warn!(
+                    error = %err,
+                    "could not backfill run agent ids; a per-teammate run history will \
+                     under-report until the next boot"
+                ),
+            }
+        });
         // Reclaim workspace payloads whose node document never landed (issue
         // #553). Best-effort by design: the cost of skipping it is disk that is
         // already unreachable, and the cost of failing boot over it would be a
