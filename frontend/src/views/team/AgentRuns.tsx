@@ -214,6 +214,7 @@ export function AgentRuns({
   const wanted = FILTERS.find((f) => f.key === filter)?.statuses;
 
   const read = useCallback(async () => {
+    const generation = generationRef.current;
     const rows = await listRuns(client, company, {
       agent: agentId,
       // Keep the open run in the refreshed answer so a live run that settles
@@ -221,17 +222,34 @@ export function AgentRuns({
       ...(!openIdRef.current && wanted ? { status: wanted } : {}),
       limit: RUN_PAGE,
     });
+    // A read that started before the operator switched teammates must not
+    // commit after it: the rows were filtered against the old `agentId` and
+    // would render beneath the new teammate's name until the newer read won.
+    if (generation !== generationRef.current) return;
     // Belt and braces against a host that predates `?agent=` (and so, being
     // older still, `?status=`): an unrecognised selector is *ignored* rather
     // than refused, so such a host answers with the whole company's newest
     // attempts. Every row would be real and the page would still be a lie.
     // Filtering here costs nothing and makes the section under-report on that
     // host instead of misattributing — which is the right way round.
-    setRuns(
-      Array.isArray(rows) ? rows.filter((run) => run.agentId === agentId) : [],
-    );
+    const own = Array.isArray(rows)
+      ? rows.filter((run) => run.agentId === agentId)
+      : [];
+    setRuns((prev) => {
+      const openId = openIdRef.current;
+      // The poll drops the status filter while a run is open so a live run
+      // that settles stays inspectable — but a run the operator reached
+      // through that filter can sit older than the newest page and fall out of
+      // the unfiltered answer, which would close its detail panel on the next
+      // refresh. Hold the previously-known summary for the open run instead.
+      if (openId && !own.some((run) => run.id === openId)) {
+        const held = prev?.find((run) => run.id === openId);
+        if (held) return [...own, held];
+      }
+      return own;
+    });
     setFailed(false);
-    }, [client, company, agentId, wanted]);
+  }, [client, company, agentId, wanted]);
 
   useEffect(() => {
     setRuns(null);
