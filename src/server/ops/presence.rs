@@ -173,11 +173,14 @@ async fn disconnect(
         return Err(unauthorized());
     };
     let console = query.console_id.as_deref().unwrap_or(DEFAULT_CONSOLE);
-    // Only announce a departure that actually happened — a duplicate teardown
-    // (`pagehide` and `visibilitychange` both firing, which they do) or a tab
-    // closing while another the same person has open is still live — publishes
-    // nothing.
-    if state
+    // Only announce a change the person's aggregate status actually made — a
+    // duplicate teardown, or a tab closing while another the same person has
+    // open already carried the same aggregate status, publishes nothing. When
+    // it does change, publish *that* status: closing the online tab while an
+    // away one is still open reports `away`, not `offline` — the person is
+    // still here, just not at their most-present console anymore. `Offline`
+    // only comes back once nobody is left.
+    if let Some(status) = state
         .presence()
         .detach(company.id(), &user, console, now_millis())
     {
@@ -186,7 +189,7 @@ async fn disconnect(
             PresenceFrame {
                 kind: "presence",
                 user_id: user,
-                status: PresenceStatus::Offline.as_str(),
+                status: status.as_str(),
                 at_millis: now_millis(),
             },
         );
@@ -533,5 +536,54 @@ mod tests {
         assert_eq!(status, StatusCode::NO_CONTENT);
         let (_, listed) = call(&state, "GET", "/presence", None, true).await;
         assert_eq!(listed["people"].as_array().unwrap().len(), 0);
+    }
+
+    /// Closing the console that was carrying the aggregate must downgrade the
+    /// person to `away`, not disappear them to `offline` — the away tab is
+    /// still open, and every viewer should see that immediately rather than
+    /// waiting out its next heartbeat.
+    #[tokio::test]
+    async fn closing_the_more_present_tab_downgrades_rather_than_disconnects() {
+        let home = home();
+        let state = state(home.path()).await;
+
+        let (status, _) = call(
+            &state,
+            "PUT",
+            "/presence",
+            Some(json!({"status": "online", "consoleId": "tab-online"})),
+            true,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let (status, _) = call(
+            &state,
+            "PUT",
+            "/presence",
+            Some(json!({"status": "away", "consoleId": "tab-away"})),
+            true,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        let (_, listed) = call(&state, "GET", "/presence", None, true).await;
+        let people = listed["people"].as_array().expect("people");
+        assert_eq!(people.len(), 1);
+        assert_eq!(people[0]["status"], "online");
+
+        let (status, _) = call(
+            &state,
+            "DELETE",
+            "/presence?consoleId=tab-online",
+            None,
+            true,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        let (_, listed) = call(&state, "GET", "/presence", None, true).await;
+        let people = listed["people"].as_array().expect("people");
+        assert_eq!(people.len(), 1, "the away tab keeps them present");
+        assert_eq!(people[0]["status"], "away");
     }
 }
