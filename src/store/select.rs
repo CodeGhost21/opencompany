@@ -946,6 +946,7 @@ impl OwnershipStore for crate::store::MongoStore {
 
 #[cfg(test)]
 mod selection_tests {
+    #[cfg(feature = "mongodb")]
     use super::*;
 
     #[cfg(feature = "mongodb")]
