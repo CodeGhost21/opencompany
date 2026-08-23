@@ -408,7 +408,7 @@ pub fn shell_tools(
 }
 
 /// The sandbox brief: what the agent's own working directory is, which tools
-/// reach it, and that the shell is confined to it.
+/// reach it, and the path confinement the file/code tools enforce there.
 ///
 /// # Why this exists
 ///
