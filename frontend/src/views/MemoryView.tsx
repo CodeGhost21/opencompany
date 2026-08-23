@@ -133,12 +133,14 @@ export function MemoryView({ client, company }: Props) {
       const mine = ++gen.current;
       if (!opts?.silent) setLoading(true);
       try {
-        const [rows, s] = await Promise.all([
+        const [list, s] = await Promise.all([
           listMemory(client, company),
           memoryStats(client, company),
         ]);
         if (mine !== gen.current) return;
-        setEntries(rows);
+        setEntries(list.items);
+        setTotalContext(list.totalContext);
+        setContextTruncated(list.contextTruncated);
         setStats(s);
         setError(null);
       } catch (e) {
