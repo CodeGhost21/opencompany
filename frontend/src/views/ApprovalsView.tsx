@@ -441,23 +441,60 @@ export function ApprovalsView({
  * a host that predates the route 404s, which is caught here so the section
  * simply does not appear rather than breaking the page.
  */
-function useStandingGrants(client: OpenCompanyClient, company: string | null) {
+function useStandingGrants(
+  client: OpenCompanyClient,
+  company: string | null,
+  /**
+   * True while the queue is interaction-held (#1593): the section renders above
+   * the queue, so a grants update that changes it would shift every
+   * approve/decline control while the operator is aiming at one. The freshest
+   * grants wait out the hold and land the moment it releases — the same
+   * hold-and-reconcile shape `useStableList` gives the rows below.
+   */
+  holding: boolean,
+) {
   const [grants, setGrants] = useState<StandingGrant[]>([]);
   // Actor id → what to call them. Without this the row reads "granted by
   // 019fd3d1bddf-000000000005", which is a runtime identifier in front of an
   // operator — the thing the glossary rule forbids, and useless besides.
   const [granterNames, setGranterNames] = useState<Map<string, string>>(new Map());
+  // The newest grants while the queue is held. `null` means nothing pending; an
+  // empty list is a real answer and must not be mistaken for "nothing arrived".
+  const pending = useRef<StandingGrant[] | null>(null);
+  // Live is read inside `refreshGrants`, which is memoised and must not close
+  // over a stale render — the same ref pattern `useStableList` uses for `live`.
+  const holdingRef = useRef(holding);
+  holdingRef.current = holding;
 
   const refreshGrants = useCallback(async () => {
     const next = await client.listGrants(company).catch(() => [] as StandingGrant[]);
+    if (holdingRef.current) {
+      pending.current = next;
+      return;
+    }
     setGrants(next);
   }, [client, company]);
+
+  // Grants that arrived during a hold render the moment it releases. Without
+  // this a grant minted elsewhere — or by the approve that started the hold —
+  // stays invisible until the next poll.
+  useEffect(() => {
+    if (holding) return;
+    if (pending.current !== null) {
+      const next = pending.current;
+      pending.current = null;
+      setGrants(next);
+    }
+  }, [holding]);
 
   useEffect(() => {
     let live = true;
     void (async () => {
       const next = await client.listGrants(company).catch(() => [] as StandingGrant[]);
-      if (live) setGrants(next);
+      if (live) {
+        if (holdingRef.current) pending.current = next;
+        else setGrants(next);
+      }
     })();
     // Who the granter ids belong to. Two reads, both allowed to fail: the
     // roster is admin-only, so a member sees no names and the row falls back to
