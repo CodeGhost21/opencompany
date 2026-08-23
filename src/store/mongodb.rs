@@ -925,15 +925,18 @@ impl MemoryStore for MongoStore {
         let traces = self.collection("memory_traces");
         let removed = match policy {
             EvictionPolicy::KeepRecent { n } => {
-                // Collect the seqs to keep (newest n), delete the rest.
-                //
                 // `KeepRecent { n: 0 }` keeps nothing, so there is no query to
                 // run — and must never become `find().limit(0)`, which would
                 // keep EVERYTHING and evict none of it. This arm is the old
                 // `if n > 0` guard, now stated in the shared vocabulary.
-                let mut keep = Vec::new();
                 match find_limit(n) {
-                    FindLimit::Empty => {}
+                    FindLimit::Empty => {
+                        traces
+                            .delete_many(doc! {"company_id": id.as_ref()})
+                            .await
+                            .map_err(mongo_err)?
+                            .deleted_count
+                    }
                     limit => {
                         let mut find = traces
                             .find(doc! {"company_id": id.as_ref()})
@@ -942,19 +945,35 @@ impl MemoryStore for MongoStore {
                             find = find.limit(n);
                         }
                         let mut cursor = find.await.map_err(mongo_err)?;
+                        // The n-th newest seq is the eviction cutoff, and the
+                        // delete is `seq < cutoff` rather than `$nin` of the
+                        // snapshot. `next_seq` hands out strictly increasing
+                        // sequences per company, so a trace saved AFTER this
+                        // read has a seq larger than every seq seen here and
+                        // can never satisfy `seq < cutoff`. The `$nin` form
+                        // deleted any doc whose seq was not in the snapshot, so
+                        // a `save_trace` landing between the find and the
+                        // delete was evicted the same pass it was written — and
+                        // the sweep runs every minute, silently dropping the
+                        // newest completed cycle from inspection and export.
+                        let mut cutoff: Option<i64> = None;
                         while let Some(doc) = cursor.try_next().await.map_err(mongo_err)? {
-                            keep.push(get_i64(&doc, "seq")?);
+                            let seq = get_i64(&doc, "seq")?;
+                            cutoff = Some(cutoff.map_or(seq, |smallest| smallest.min(seq)));
                         }
+                        let Some(cutoff) = cutoff else {
+                            return Ok(0); // the company has no traces to evict
+                        };
+                        traces
+                            .delete_many(doc! {
+                                "company_id": id.as_ref(),
+                                "seq": {"$lt": cutoff},
+                            })
+                            .await
+                            .map_err(mongo_err)?
+                            .deleted_count
                     }
                 }
-                traces
-                    .delete_many(doc! {
-                        "company_id": id.as_ref(),
-                        "seq": {"$nin": keep},
-                    })
-                    .await
-                    .map_err(mongo_err)?
-                    .deleted_count
             }
             EvictionPolicy::OlderThan { before_millis } => {
                 traces
