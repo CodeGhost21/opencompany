@@ -60,6 +60,7 @@ import type { TeamMember } from "@/lib/team";
 import { humanizeStatus } from "@/lib/board-columns";
 import type { BrainGraphEdge, BrainGraphNode, MemoryGraph } from "./memory-core";
 import { distillMemoryGraph } from "./memory-core";
+import { personName } from "@/lib/person";
 import { isOpen } from "../pulse";
 import type { Agent, Department, Person, SopTask, Workflow, WorkflowStage } from "./schemas";
 

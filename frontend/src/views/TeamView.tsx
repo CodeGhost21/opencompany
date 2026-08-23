@@ -40,6 +40,7 @@ import {
 } from "@/lib/member-feedback";
 import { fromDto, newMember, roleSubtitle, type TeamMember } from "@/lib/team";
 import { workloadByAssignee, type Workload } from "@/lib/team-workload";
+import { personName } from "@/lib/person";
 import { cn } from "@/lib/utils";
 import { AgentDetailView } from "@/views/team/AgentDetailView";
 import { AgentFields } from "@/views/team/AgentFields";
