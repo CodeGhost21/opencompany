@@ -388,12 +388,23 @@ export function decisionLabel(a: ApprovalSummary, askerNames: Map<string, string
  * the method next to its `method` key, and two shell cards sharing a command
  * still differ by `cwd`. The count is bounded so a large payload cannot turn
  * the button's accessible name into a wall of text. When the bound drops a
- * line, the card id rides along as the discriminator — the one field
- * guaranteed to differ between two cards — so truncated labels still cannot
- * collide. Values are already redacted and bounded host-side
- * (`src/runtime/approval_display.rs`).
+ * line, the dropped line's own start rides along as the discriminator — it is
+ * the argument that usually *is* the difference (two `http_request`s sharing
+ * url, method and headers differ in the body), and it is the same content the
+ * card body shows, so the button names what the operator can see. The composed
+ * lead is additionally clipped to {@link MAX_LEAD_CHARS}: the host bounds each
+ * value at 2,000 characters, so without the clip a single long command would
+ * still stretch the label into a wall of text. Values are already redacted and
+ * bounded host-side (`src/runtime/approval_display.rs`).
  */
 function payloadLead(a: ApprovalSummary): string | null {
+  // Withheld contents have nothing to lead with, but the button still has to
+  // say *why*: two hidden cards must not read as ordinary no-argument
+  // approvals (issue #618), and the resolve route accepts any member, not just
+  // admins — so the name has to tell the reader the payload is gone rather
+  // than pretend it was never there.
+  if (a.contents_hidden) return "details hidden by your role";
+
   const lines = payloadLines(a);
   const first = lines[0];
   if (!first) return null;
@@ -402,14 +413,38 @@ function payloadLead(a: ApprovalSummary): string | null {
   const parts = [first.value, ...rest.map((line) => `${line.label}: ${line.value}`)];
   // A payload with more lines than the label carries can still collide: two
   // `http_request`s sharing url, method and headers differ only in the body,
-  // which is exactly what the cap omits. The card id is the one field that is
-  // guaranteed to differ, so it rides along only when something was dropped.
-  if (dropped > 0) parts.push(`card ${a.id}`);
-  return parts.join(" — ");
+  // which is exactly what the cap omits. The dropped line's own start is the
+  // discriminator — the argument that usually *is* the difference, in the same
+  // words the card body uses. (The internal approval id would also differ, but
+  // runtime ids stay out of operator-facing names.)
+  if (dropped > 0) {
+    const lead = lines[1 + MAX_LEAD_LINES];
+    parts.push(`${lead.label}: ${lead.value}`);
+  }
+  return clipMiddle(parts.join(" — "), MAX_LEAD_CHARS);
 }
 
 /** How many follow-up payload lines a decision label may carry (#1411). */
 const MAX_LEAD_LINES = 2;
+
+/** How many characters the composed payload lead may run to (#1411). */
+const MAX_LEAD_CHARS = 120;
+
+/**
+ * Truncates `s` to at most `budget` characters, keeping its start and end and
+ * replacing the middle with "…".
+ *
+ * The end survives because in a payload lead the end is the dropped-line
+ * discriminator — the part that tells two same-kind cards apart. Counting code
+ * points rather than UTF-16 units so a multi-byte value never splits a
+ * surrogate pair.
+ */
+function clipMiddle(s: string, budget: number): string {
+  const chars = Array.from(s);
+  if (chars.length <= budget) return s;
+  const keep = Math.floor((budget - 1) / 2);
+  return `${chars.slice(0, keep).join("")}…${chars.slice(-keep).join("")}`;
+}
 
 /** The effect kind a paused workflow gate parks as — mirrors
  * `WORKFLOW_APPROVE_KIND` in `src/runtime/workflow_resume.rs`. */
