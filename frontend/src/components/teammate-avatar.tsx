@@ -169,7 +169,7 @@ function useAvatarSrc(ref: string): string | null {
     // shell, or before one is chosen. A mascot still resolves; an uploaded face
     // draws as the tone tile, which is the same thing a deleted one does.
     const resolved = client ? resolveAvatarSrc(client, company, ref) : immediate;
-    if (typeof resolved === "string") {
+    if (typeof resolved === "string" || resolved === null) {
       setSrc(resolved);
       return;
     }
