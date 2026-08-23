@@ -147,8 +147,32 @@ describe("ApprovalCard decide ordering (#1406)", () => {
       payload: { url: "https://api.example.com/items", method: "DELETE" },
     };
 
-    await render(get);
-    await render(del);
+    await act(async () => {
+      root.render(
+        createElement(
+          "div",
+          null,
+          createElement(ApprovalCard, {
+            approval: get,
+            now: T0 + 60_000,
+            askerNames: new Map([["ops", "Ops"]]),
+            deciding: null,
+            batchIndex: 1,
+            batchTotal: 2,
+            onDecide: (_verdict: Verdict, _scope: GrantScope) => {},
+          }),
+          createElement(ApprovalCard, {
+            approval: del,
+            now: T0 + 60_000,
+            askerNames: new Map([["ops", "Ops"]]),
+            deciding: null,
+            batchIndex: 2,
+            batchTotal: 2,
+            onDecide: (_verdict: Verdict, _scope: GrantScope) => {},
+          }),
+        ),
+      );
+    });
 
     const labelled = Array.from(container.querySelectorAll("button")).map((b) =>
       b.getAttribute("aria-label"),
