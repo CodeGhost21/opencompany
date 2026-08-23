@@ -55,7 +55,7 @@
 
 use std::collections::HashMap;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use async_trait::async_trait;
 
@@ -167,7 +167,7 @@ pub enum ResolveOutcome {
 /// `[policy]` and holds the in-memory approval queue.
 pub struct ManifestApprovalGate {
     policy: Policy,
-    ttl_millis: u64,
+    ttl_millis: AtomicU64,
     parked: Mutex<HashMap<ApprovalId, ParkedEffect>>,
     /// The governance kill switch (issue #86).
     ///
@@ -207,7 +207,7 @@ impl ManifestApprovalGate {
             .unwrap_or(DEFAULT_TTL_MILLIS);
         Self {
             policy,
-            ttl_millis,
+            ttl_millis: AtomicU64::new(ttl_millis),
             parked: Mutex::new(HashMap::new()),
             emergency: AtomicBool::new(false),
         }
@@ -238,7 +238,7 @@ impl ManifestApprovalGate {
 
     /// Overrides the parked-approval TTL (default [`DEFAULT_TTL_MILLIS`]).
     pub fn with_ttl_millis(mut self, ttl_millis: u64) -> Self {
-        self.ttl_millis = ttl_millis;
+        self.ttl_millis = AtomicU64::new(ttl_millis);
         self
     }
 
@@ -251,7 +251,18 @@ impl ManifestApprovalGate {
     /// second thing that can disagree — the console would then show a deadline
     /// the gate does not enforce.
     pub fn ttl_millis(&self) -> u64 {
-        self.ttl_millis
+        self.ttl_millis.load(Ordering::Relaxed)
+    }
+
+    /// Updates the deadline used for new and already parked approvals.
+    ///
+    /// The policy overlay is an operator control, so waiting for a process
+    /// restart would make the Settings panel report a deadline the live queue
+    /// does not use. A parked card remains the same request, but its deadline
+    /// is evaluated from the current company policy each time it is displayed
+    /// or resolved.
+    pub fn set_ttl_millis(&self, ttl_millis: u64) {
+        self.ttl_millis.store(ttl_millis, Ordering::Relaxed);
     }
 
     /// The ids of every currently-parked approval.
@@ -305,7 +316,7 @@ impl ManifestApprovalGate {
         let mut map = self.parked.lock().expect("parked map poisoned");
         let mut expired: Vec<(u64, ApprovalId)> = map
             .iter()
-            .filter(|(_, pe)| now_millis.saturating_sub(pe.parked_at_millis) >= self.ttl_millis)
+            .filter(|(_, pe)| now_millis.saturating_sub(pe.parked_at_millis) >= self.ttl_millis())
             .map(|(id, pe)| (pe.parked_at_millis, id.clone()))
             .collect();
         expired.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.as_ref().cmp(b.1.as_ref())));
@@ -377,7 +388,7 @@ impl ManifestApprovalGate {
         let Some(parked) = self.parked.lock().expect("parked map poisoned").remove(id) else {
             return ResolveOutcome::NotParked;
         };
-        if now_millis.saturating_sub(parked.parked_at_millis) >= self.ttl_millis {
+        if now_millis.saturating_sub(parked.parked_at_millis) >= self.ttl_millis() {
             return ResolveOutcome::Expired;
         }
         ResolveOutcome::Approved(amended)
@@ -403,7 +414,7 @@ impl ManifestApprovalGate {
         let Some(parked) = self.parked.lock().expect("parked map poisoned").remove(id) else {
             return ResolveOutcome::NotParked;
         };
-        if now_millis.saturating_sub(parked.parked_at_millis) >= self.ttl_millis {
+        if now_millis.saturating_sub(parked.parked_at_millis) >= self.ttl_millis() {
             return ResolveOutcome::Expired;
         }
         match verdict {
@@ -427,7 +438,7 @@ impl ManifestApprovalGate {
             .lock()
             .expect("parked map poisoned")
             .remove(id)?;
-        if now_millis.saturating_sub(parked.parked_at_millis) >= self.ttl_millis {
+        if now_millis.saturating_sub(parked.parked_at_millis) >= self.ttl_millis() {
             return None;
         }
         match verdict {

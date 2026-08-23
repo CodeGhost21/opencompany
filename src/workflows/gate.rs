@@ -259,7 +259,7 @@ pub(crate) async fn apply_policy_gates(
 ) -> Vec<GatedCall> {
     let gated = policy_gates(
         graph,
-        &record.manifest.policy,
+        &record.effective_policy(),
         &record.id,
         workflow_id,
         run_id,

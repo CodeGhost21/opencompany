@@ -363,6 +363,14 @@ async fn set_policy(
     record.overlay_policy = (!entry.is_empty()).then_some(entry);
 
     save(&company, &record).await?;
+    let ttl_hours = record
+        .effective_policy()
+        .approval_ttl_hours
+        .unwrap_or(DEFAULT_TTL_MILLIS / (60 * 60 * 1000));
+    company
+        .runtime
+        .approval_gate
+        .set_ttl_millis(ttl_hours.saturating_mul(60 * 60 * 1000));
     Ok(Json(PolicyDto::build(&record)))
 }
 
@@ -388,6 +396,14 @@ async fn clear_policy(
     let mut record = load_record(&company).await?;
     record.overlay_policy = None;
     save(&company, &record).await?;
+    let ttl_hours = record
+        .effective_policy()
+        .approval_ttl_hours
+        .unwrap_or(DEFAULT_TTL_MILLIS / (60 * 60 * 1000));
+    company
+        .runtime
+        .approval_gate
+        .set_ttl_millis(ttl_hours.saturating_mul(60 * 60 * 1000));
     Ok(Json(PolicyDto::build(&record)))
 }
 
