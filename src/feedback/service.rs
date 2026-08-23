@@ -139,7 +139,7 @@ impl FeedbackResponse {
         }
     }
 
-    fn blocked(item_id: &str, reason: String) -> Self {
+    pub(crate) fn blocked(item_id: &str, reason: String) -> Self {
         Self {
             blocked: true,
             reason: Some(reason),
