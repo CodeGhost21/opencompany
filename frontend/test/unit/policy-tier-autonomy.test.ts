@@ -209,6 +209,47 @@ describe("resetting to the manifest's policy", () => {
     expect(del).toHaveBeenCalledWith("/api/v1/acme/policy");
   });
 
+  it("confirms a reset that drops an always-ask gate the manifest does not carry", async () => {
+    const initial: PolicyStatus = {
+      mode: "full",
+      alwaysApprove: ["shell"],
+      manifestMode: "full",
+      manifestAlwaysApprove: [],
+      overridden: true,
+      setBy: "someone",
+      takesEffect: "on the next turn",
+      tiers: TIERS,
+    };
+    const { client, del } = makeClient(initial);
+    await mount(client);
+
+    await act(async () => {
+      const button = [...container.querySelectorAll("button")].find((b) =>
+        b.textContent?.includes("manifest's policy"),
+      )!;
+      button.click();
+    });
+    expect(del).not.toHaveBeenCalled();
+    expect(document.body.textContent).toContain(
+      "Let teammates do more on their own?",
+    );
+    expect(document.body.textContent).not.toContain("Instead of:");
+    expect(document.body.textContent).toContain(
+      "This replaces the current always-ask list with the manifest's list: none",
+    );
+    expect(document.body.textContent).toContain(
+      "shell stops always asking for approval",
+    );
+
+    await act(async () => {
+      document
+        .querySelector<HTMLButtonElement>("[data-testid=policy-tier-confirm]")!
+        .click();
+      await Promise.resolve();
+    });
+    expect(del).toHaveBeenCalledWith("/api/v1/acme/policy");
+  });
+
   it("keeps a reset that tightens the tier to one click", async () => {
     const { client, del } = makeClient(overridden("full", "readonly"));
     await mount(client);
