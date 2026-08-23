@@ -866,32 +866,14 @@ impl HarnessAgentRunner {
     /// three times should name it once, for the reason
     /// [`push_tool`] gives.
     ///
-    /// # Known limitation: the bucket is unscoped
+    /// # Scope
     ///
-    /// The queue handle is shared across every path in the company, and the
-    /// chat cycle's `clear()` at the top of each turn empties it. So a chat
-    /// cycle starting between a node's refusal and this drain can discard the
-    /// notice. That is the **safe** direction and the reason it is left as is:
-    /// the loss is a notice that does not appear, never one attributed to a run
-    /// that did not earn it — a claimed destination records no refusal at all
-    /// (pinned by `a_claimed_destination_records_no_refusal`), so nothing a chat
-    /// or task turn does can *add* to this bucket.
-    ///
-    /// A *different* workflow run can add to it, though: two overlapping runs
-    /// of the same company share this same bucket, and whichever run's
-    /// `drain_publish_refusals` executes first takes every refusal queued so
-    /// far, including one a sibling run just raised — a misattribution, not a
-    /// loss (tracked as issue #1243). Closing it properly is **not** as simple
-    /// as handing each run a private queue at `build_capabilities` time: the
-    /// `agent` node type dispatches through `HarnessPool::run_background` to a
-    /// roster agent built **once** by `HarnessPool::ensure` and cached behind
-    /// fingerprints, so the `PublishArtifactTool` a model's turn actually calls
-    /// captures its `pending_publishes` handle at that cache-build time, not at
-    /// per-run dispatch time — a fork made here never reaches it. The fix needs
-    /// the same *task-local* run scope issue #771 gave the delegation queue
-    /// (`ApprovalScope` / `DelegationScope` / `board_claim.scoped(..)` above),
-    /// read by `push_refusal` at call time rather than baked in at tool
-    /// construction, which is a wider change than this fix.
+    /// The queue handle is shared across every path in the company because the
+    /// cached roster tool captures it at construction time. A run therefore
+    /// claims a task-local refusal scope around its node turn and this drain;
+    /// `push_refusal` reads that scope at call time. Concurrent runs write to
+    /// and drain distinct buckets while chat and task turns retain the default
+    /// bucket and their existing behavior.
     fn drain_publish_refusals(&self) {
         let refusals = self.deps.pending_publishes.drain_refusals();
         let mut seen: Vec<String> = Vec::new();
