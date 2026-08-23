@@ -160,15 +160,6 @@ impl ConnectionsRuntime {
         self
     }
 
-    /// Injects the outbound Telegram transport (real under `telegram`, a
-    /// recording mock in tests).
-    pub fn with_telegram(
-        mut self,
-        telegram: Arc<dyn crate::company::telegram::TelegramApi>,
-    ) -> Self {
-        self.telegram = Some(telegram);
-        self
-    }
 }
 
 impl std::fmt::Debug for ConnectionsRuntime {
@@ -178,7 +169,6 @@ impl std::fmt::Debug for ConnectionsRuntime {
             .field("dns", &self.dns.is_some())
             .field("mail", &self.mail.is_some())
             .field("mail_credentials", &self.mail_credentials)
-            .field("telegram", &self.telegram.is_some())
             .finish()
     }
 }
