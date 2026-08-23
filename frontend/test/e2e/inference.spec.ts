@@ -116,11 +116,11 @@ test("a key typed for a BYOK provider does reach the host on save", async ({ pag
   expect(body.keyConfigured).toBe(true);
   expect(body.provider).toBe("openai_compatible");
 
-  // Put the company back on the managed default for whatever runs next.
-  await page.getByRole("button", { name: "Reset to managed" }).click();
-  await expect(page.getByText("Reverted to the managed configuration.")).toBeVisible({
-    timeout: 30_000,
-  });
+  // Put the company back on the committed default for whatever runs next.
+  await page.getByRole("button", { name: "Reset to default" }).click();
+  await expect(
+    page.getByText("Reverted to the committed manifest (or managed) configuration."),
+  ).toBeVisible({ timeout: 30_000 });
 
   // The reset is a full one, not a half-clear: the host also wipes the stored
   // credential on revert (issue #993), so nothing is left behind to reroute the
