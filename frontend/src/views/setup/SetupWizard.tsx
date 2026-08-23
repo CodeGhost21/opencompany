@@ -995,12 +995,12 @@ function FieldRow({
         onChange={(e) => onChange(e.target.value)}
       />
       <div className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1">
-        <code className="font-mono text-2xs text-muted-foreground/70">{field.key}</code>
+        <code className="font-mono text-2xs text-muted-foreground">{field.key}</code>
         {/* Only where it is true *and* actionable: a locked field cannot be
             changed here at all, so telling its owner about a restart is noise
             about work they are not doing. */}
         {field.requires_restart && !locked && (
-          <span className="text-2xs text-muted-foreground/70">· needs a restart</span>
+          <span className="text-2xs text-muted-foreground">· needs a restart</span>
         )}
       </div>
       {locked && <div className="mt-1.5">{<LayerLock />}</div>}

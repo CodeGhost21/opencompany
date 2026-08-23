@@ -847,7 +847,7 @@ function DetailHeader({
           host older than #333 has no link and still falls back to the run
           window. Said plainly rather than left for a reader to discover. */}
       {showWaiting && (
-        <p className="mt-2 text-2xs text-muted-foreground/70">
+        <p className="mt-2 text-2xs text-muted-foreground">
           Waiting counts this task&rsquo;s own approvals; sign-offs parked before they carried a
           task id fall back to its run window.
         </p>
@@ -1505,7 +1505,7 @@ function StepBody({ entry }: { entry: TimelineEntry }) {
       {entry.detail && (
         <div>
           {entry.result && (
-            <div className="text-3xs font-medium uppercase tracking-wide text-muted-foreground/70">
+            <div className="text-3xs font-medium uppercase tracking-wide text-muted-foreground">
               Called with
             </div>
           )}
@@ -1517,7 +1517,7 @@ function StepBody({ entry }: { entry: TimelineEntry }) {
       {entry.result && (
         <div>
           {entry.detail && (
-            <div className="text-3xs font-medium uppercase tracking-wide text-muted-foreground/70">
+            <div className="text-3xs font-medium uppercase tracking-wide text-muted-foreground">
               Result
             </div>
           )}
