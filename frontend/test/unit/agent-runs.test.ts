@@ -145,6 +145,59 @@ describe("a teammate's run history", () => {
     expect(container.textContent).toContain("Robin hasn't run yet");
   });
 
+  it("sends the selected status filter to the host rather than filtering the page", async () => {
+    // The history is fetched at a page limit; a status filter applied to the
+    // truncated page would make "no attempt matches" a claim about the newest
+    // 50, hiding older matches that sat past the cut. It must go to the host.
+    const client = makeClient({
+      "/runs": [run(), run({ id: "failed-1", status: "failed" })],
+      "/tasks": [],
+      "/workflows": [],
+    });
+    await mount(client);
+
+    const failed = container.querySelector<HTMLButtonElement>(
+      '[data-testid="agent-runs-filter-failed"]',
+    );
+    expect(failed).not.toBeNull();
+    await act(async () => failed!.click());
+    await act(async () => {});
+
+    const asked = client.get.mock.calls
+      .map(([path]) => path)
+      .filter((path) => path.startsWith("/runs"));
+    expect(asked[asked.length - 1]).toContain("agent=engineer");
+    expect(asked[asked.length - 1]).toContain("status=failed");
+    // And the empty-state claim is made against the filtered answer.
+    expect(
+      container.querySelector('[data-testid="agent-run-run-1"]'),
+    ).toBeNull();
+    expect(
+      container.querySelector('[data-testid="agent-run-failed-1"]'),
+    ).not.toBeNull();
+  });
+
+  it("says no attempt matches an empty filtered fetch, not that the teammate never ran", async () => {
+    const client = makeClient({ "/runs": [], "/tasks": [], "/workflows": [] });
+    await mount(client);
+
+    const failed = container.querySelector<HTMLButtonElement>(
+      '[data-testid="agent-runs-filter-failed"]',
+    );
+    expect(failed).not.toBeNull();
+    await act(async () => failed!.click());
+    await act(async () => {});
+
+    expect(container.textContent).toContain(
+      "No attempt in this history matches that filter.",
+    );
+    expect(container.textContent).not.toContain("Robin hasn't run yet");
+    // The filter controls stay up so the filter can be turned off again.
+    expect(
+      container.querySelector('[data-testid="agent-runs-filter-all"]'),
+    ).not.toBeNull();
+  });
+
   it("opens one attempt full-width, and comes back", async () => {
     const client = makeClient({
       "/runs/run-1": { run: run(), steps: [] },
