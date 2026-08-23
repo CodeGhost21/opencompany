@@ -10,7 +10,7 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-function mockElementFromPoint(element: HTMLElement): void {
+function mockElementFromPoint(element: Element): void {
   Object.defineProperty(document, "elementFromPoint", {
     configurable: true,
     value: vi.fn(() => element),
