@@ -14,6 +14,12 @@ pub(crate) mod agent_file;
 /// Always compiled — the console's workspace and artifact routes reach it in
 /// every build, and only the publish drain's half is behind `openhuman`.
 pub mod artifact_mirror;
+/// Avatar references: which face a teammate or a person wears when somebody has
+/// chosen one (`docs/spec/runtime/avatars.md`). Always compiled — the team and
+/// user write planes validate through it in every build, and the rule it
+/// enforces (an avatar names something this host holds, never a URL) is a
+/// control rather than a convenience.
+pub mod avatar;
 pub mod company_key;
 pub mod composio;
 #[cfg(test)]
