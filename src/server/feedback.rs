@@ -90,12 +90,12 @@ async fn submit(
 ) -> Result<Json<FeedbackResponse>, crate::server::Rejection> {
     let company = CompanyId::new(&id);
     if let Some(resp) = authorize_address(&state, &auth, &company) {
-        return Err(resp);
+        return Err(resp.into());
     }
     let runtime = lookup(&state, &id).map_err(IntoResponse::into_response)?;
     run(runtime, body)
         .await
-        .map_err(IntoResponse::into_response)
+        .map_err(|error| IntoResponse::into_response(error).into())
 }
 
 /// `POST /api/v1/company/feedback` (single-company alias).
@@ -108,14 +108,14 @@ async fn submit_single(
     // The sole company IS the addressed one, so the principal is checked
     // against it exactly as on the `{id}` form.
     if let Some(resp) = authorize_address(&state, &auth, runtime.id()) {
-        return Err(resp);
+        return Err(resp.into());
     }
     if let Some(resp) = refuse_until_password_changed(&auth) {
-        return Err(resp);
+        return Err(resp.into());
     }
     run(runtime, body)
         .await
-        .map_err(IntoResponse::into_response)
+        .map_err(|error| IntoResponse::into_response(error).into())
 }
 
 /// `GET /api/v1/companies/{id}/feedback` — this company's reports, newest first.
@@ -129,14 +129,14 @@ async fn list(
 ) -> Result<Json<Vec<FeedbackSummary>>, crate::server::Rejection> {
     let company = CompanyId::new(&id);
     if let Some(resp) = authorize_address(&state, &auth, &company) {
-        return Err(resp);
+        return Err(resp.into());
     }
     let runtime = lookup(&state, &id).map_err(IntoResponse::into_response)?;
     runtime
         .list_feedback()
         .await
         .map(Json)
-        .map_err(|e| ApiError(e).into_response())
+        .map_err(|e| ApiError(e).into_response().into())
 }
 
 /// `GET /api/v1/company/feedback` (single-company alias).
@@ -146,13 +146,13 @@ async fn list_single(
 ) -> Result<Json<Vec<FeedbackSummary>>, crate::server::Rejection> {
     let runtime = sole(&state).map_err(IntoResponse::into_response)?;
     if let Some(resp) = authorize_address(&state, &auth, runtime.id()) {
-        return Err(resp);
+        return Err(resp.into());
     }
     runtime
         .list_feedback()
         .await
         .map(Json)
-        .map_err(|e| ApiError(e).into_response())
+        .map_err(|e| ApiError(e).into_response().into())
 }
 
 #[cfg(test)]
