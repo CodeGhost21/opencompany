@@ -42,6 +42,13 @@ function useReturnFocus(
   const wasOpen = React.useRef(false)
 
   const capture = () => {
+    // Cleared first, every time. The target belongs to *this* opening: if
+    // nothing is focused now — a dialog opened from code after its opener was
+    // removed, say — the previous opening's target is not a sensible answer,
+    // and it may not even be in the document any more. A `null` ref makes Base
+    // UI fall back to its own return-focus handling, which is what should
+    // happen when the console has nothing better to offer.
+    target.current = null
     if (typeof document === "undefined") return
     const active = document.activeElement
     if (active instanceof HTMLElement && active !== document.body) {

@@ -129,6 +129,27 @@ describe("useReturnFocus", () => {
     expect(harness.target.current).toBe(opener);
   });
 
+  it("drops a stale target when the next opening has nothing focused", () => {
+    const opener = button("opener");
+    render(createElement(Probe, { open: false }));
+
+    opener.focus();
+    render(createElement(Probe, { open: true }));
+    expect(harness.target.current).toBe(opener);
+
+    // The dialog closes and its opener leaves the document — a row that was
+    // deleted, a toolbar that rerendered — so focus falls back to `<body>` and
+    // the next opening comes from code rather than from a control.
+    render(createElement(Probe, { open: false }));
+    opener.remove();
+    expect(document.activeElement).toBe(document.body);
+    render(createElement(Probe, { open: true }));
+
+    // Null, not the detached opener: Base UI's own fallback is a better answer
+    // than focusing something that is no longer on the page.
+    expect(harness.target.current).toBeNull();
+  });
+
   it("recaptures for an uncontrolled root, which only reports through the callback", () => {
     const opener = button("opener");
     render(createElement(Probe, {}));
