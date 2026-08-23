@@ -188,10 +188,12 @@ describe("ApprovalCard decide ordering (#1406)", () => {
     );
   });
 
-  it("keeps truncated payload labels distinct with the card id (#1411)", async () => {
+  it("keeps truncated payload labels distinct with the dropped argument (#1411)", async () => {
     // Same url, method and headers — the only difference is the body, which
-    // sits past `MAX_LEAD_LINES` and is dropped from the label. The card id
-    // must ride along so the two buttons do not read identically.
+    // sits past `MAX_LEAD_LINES` and is dropped from the label. The dropped
+    // line's own start must ride along so the two buttons do not read
+    // identically — and it must be the argument's words, not the card id, so
+    // the button names what the operator can see on the card body.
     const a: ApprovalSummary = {
       ...APPROVAL,
       id: "req-1",
