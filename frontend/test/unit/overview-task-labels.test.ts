@@ -47,7 +47,12 @@ afterEach(() => {
 });
 
 describe("task labels", () => {
-  it("renders the complete title when the task is named", () => {
+  it("renders the complete title when the task is named", async () => {
+    // The graph starts its d3 layout after mounting, so wait for its first
+    // tick to populate the SVG nodes.
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    });
     const title = [...host.querySelectorAll("title")].find((el) => el.textContent === TASK_TITLE);
     expect(title, "the task node must be rendered").toBeDefined();
 
