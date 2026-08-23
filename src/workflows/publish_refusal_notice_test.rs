@@ -180,9 +180,9 @@ async fn run_publishing(dir: &std::path::Path) -> crate::ports::WorkflowRun {
 /// received a refused-publish result, before either can complete and drain.
 ///
 /// The lane comes from the run request, which stays in every provider request.
-/// This deliberately shares one endpoint, one deps handle, and one cached
-/// roster agent: separate pools would evade the construction-time queue handle
-/// that made the production bug possible.
+/// Both agents share one deps handle and therefore one publish queue, while
+/// using distinct roster entries so one agent's serialized turn lock cannot
+/// prevent the other run from reaching the barrier.
 async fn spawn_interleaved_publish_script() -> String {
     let steps = Arc::new(Mutex::new(BTreeMap::<String, usize>::new()));
     let barrier = Arc::new(tokio::sync::Barrier::new(2));
