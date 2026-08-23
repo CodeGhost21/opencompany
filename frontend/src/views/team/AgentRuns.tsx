@@ -55,6 +55,7 @@ import {
 } from "@/api/runs";
 import { listTasks, type Task } from "@/api/tasks";
 import type { DeskDto } from "@/api/types";
+import { deskFromDto } from "@/views/chat/model";
 import { listWorkflows } from "@/api/workflows";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -254,9 +255,17 @@ export function AgentRuns({
         workflows: Array.isArray(workflows)
           ? new Map(workflows.map((flow) => [flow.id, flow.name]))
           : undefined,
+        // Named the way Chat names them: `deskFromDto` is where the console's
+        // channel slug is derived, so `#engineering-desk` here and in the
+        // sidebar are the same string by construction rather than by two files
+        // agreeing to slugify the same way. A desk's `name` is its *voice*
+        // ("Engineering desk") and reads wrong behind a hash.
         chats: Array.isArray(desks)
           ? new Map(
-              (desks as DeskDto[]).map((desk) => [desk.id, `#${desk.name}`]),
+              (desks as DeskDto[]).map((desk) => [
+                desk.id,
+                `#${deskFromDto(desk).channel}`,
+              ]),
             )
           : undefined,
       });
