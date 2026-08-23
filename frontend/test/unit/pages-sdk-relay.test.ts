@@ -99,7 +99,13 @@ describe("the page frame's toast-relay listener", () => {
   });
 
   it("is a no-op when nothing is beneath the relayed point", () => {
-    mockElementFromPoint(document.body);
+    // A coordinate outside the document (a point over the frame's own chrome,
+    // or a stale frame-relative offset) has no element beneath it; the relay
+    // must simply give up rather than throw.
+    Object.defineProperty(document, "elementFromPoint", {
+      configurable: true,
+      value: vi.fn(() => null),
+    });
 
     expect(() =>
       relayFrom(window.parent, { type: "oc:relay-click", x: 12, y: 34 }),
