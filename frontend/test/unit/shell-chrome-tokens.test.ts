@@ -108,7 +108,8 @@ describe("light accessibility tokens", () => {
     // `--input` stroke must therefore not inherit the deliberately subtle
     // decorative `--border` value (issue #1394).
     expect(declaration(light, "input")).not.toBe(declaration(light, "border"));
-    expect(declaration(light, "input")).toBe("oklch(0.62 0.0149 286.09)");
+    expect(declaration(light, "input")).toBe("var(--surface-light-input)");
+    expect(declaration(light, "surface-light-input")).toBe("oklch(0.62 0.0149 286.09)");
   });
 
   it("uses the AA light error text weight for destructive text", () => {

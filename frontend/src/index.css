@@ -86,6 +86,7 @@
     --surface-light-2: oklch(0.9601 0.0093 286.22); /* #F1F1F8 */
     --surface-light-3: oklch(0.9339 0.0134 286.14); /* #E8E8F2 */
     --surface-light-4: oklch(0.8916 0.0149 286.09); /* #DADAE5 */
+    --surface-light-input: oklch(0.62 0.0149 286.09); /* #85858F  3.07:1 on light active */
     --surface-light-active: oklch(0.942 0.0256 293.15); /* #ECE9FC */
 
     --surface-dark-bg: oklch(0.1395 0.0048 262.8); /* #08090B */
@@ -235,7 +236,7 @@
     --destructive-foreground: var(--surface-light-1);
 
     --border: var(--surface-light-4);
-    --input: oklch(0.62 0.0149 286.09); /* #85858F  3.07:1 on light active */
+    --input: var(--surface-light-input);
 
     /* The window chrome, and the hairline where the content card meets it.
        One value, painted exactly once — on the shell root — so the sidebar
