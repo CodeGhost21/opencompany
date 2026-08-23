@@ -3,13 +3,14 @@
 // `app-shell.tsx`'s `View`/`NAV` brings this surface straight back. Do not
 // delete it as dead code.
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ArrowLeft, Inbox as InboxIcon, Mail, Send } from "lucide-react";
+import { ArrowLeft, Inbox as InboxIcon, Info, Mail, Send } from "lucide-react";
 
 import type { OpenCompanyClient } from "@/api/client";
 import { enabledInboxes, preview } from "@/api/inbox";
 import type { InboxDto, InboxMessageDto } from "@/api/types";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import {
   Select,
   SelectContent,
@@ -157,44 +158,52 @@ export function InboxView({ client, company }: Props) {
 
   if (load === "error") {
     return (
-      <div className="flex flex-1 flex-col items-center justify-center gap-3 text-center text-muted-foreground">
-        <InboxIcon className="size-8" />
-        <div className="space-y-1">
-          <p className="font-medium text-foreground">Inboxes unavailable</p>
-          <p className="max-w-sm text-sm">{error}</p>
+      <div className="flex flex-1 flex-col overflow-hidden">
+        <InboxParkingNotice />
+        <div className="flex flex-1 flex-col items-center justify-center gap-3 text-center text-muted-foreground">
+          <InboxIcon className="size-8" />
+          <div className="space-y-1">
+            <p className="font-medium text-foreground">Inboxes unavailable</p>
+            <p className="max-w-sm text-sm">{error}</p>
+          </div>
+          <Button variant="outline" size="sm" onClick={() => void loadRoster()}>
+            Try again
+          </Button>
         </div>
-        <Button variant="outline" size="sm" onClick={() => void loadRoster()}>
-          Try again
-        </Button>
       </div>
     );
   }
 
   if (listed.length === 0) {
     return (
-      <div className="flex flex-1 flex-col items-center justify-center gap-3 text-center text-muted-foreground">
-        <InboxIcon className="size-8" />
-        <div className="space-y-1">
-          <p className="font-medium text-foreground">No inboxes yet</p>
-          <p className="max-w-sm text-sm">
-            Give a teammate its own inbox from the <span className="font-medium">Team</span> page —
-            flip on the inbox toggle for anyone who needs to receive email. Mail sent to that
-            address shows up here.
-          </p>
+      <div className="flex flex-1 flex-col overflow-hidden">
+        <InboxParkingNotice />
+        <div className="flex flex-1 flex-col items-center justify-center gap-3 text-center text-muted-foreground">
+          <InboxIcon className="size-8" />
+          <div className="space-y-1">
+            <p className="font-medium text-foreground">No inboxes yet</p>
+            <p className="max-w-sm text-sm">
+              Give a teammate its own inbox from <a className="font-medium underline" href="#/chat">Chat</a>'s
+              teammate list — flip on the inbox toggle for anyone who needs to receive email.
+              Mail sent to that address shows up here.
+            </p>
+          </div>
         </div>
       </div>
     );
   }
 
   return (
-    <div className="flex flex-1 overflow-hidden">
-      {/* Message list */}
-      <section
-        className={cn(
-          "w-full shrink-0 flex-col border-r md:flex lg:w-96",
-          mobilePane === "list" ? "flex" : "hidden",
-        )}
-      >
+    <div className="flex flex-1 flex-col overflow-hidden">
+      <InboxParkingNotice />
+      <div className="flex min-h-0 flex-1 overflow-hidden">
+        {/* Message list */}
+        <section
+          className={cn(
+            "w-full shrink-0 flex-col border-r md:flex lg:w-96",
+            mobilePane === "list" ? "flex" : "hidden",
+          )}
+        >
         <div className="flex items-center gap-2 border-b px-3 py-2.5">
           <Select
             value={active?.key}
@@ -255,20 +264,34 @@ export function InboxView({ client, company }: Props) {
             </div>
           )}
         </div>
-      </section>
+        </section>
 
-      {/* Reading pane */}
-      <section className={cn("flex-1 flex-col overflow-hidden md:flex", mobilePane === "read" ? "flex" : "hidden")}>
-        {openMsg && active ? (
-          <Reading message={openMsg} inbox={active} onBack={() => setMobilePane("list")} />
-        ) : (
-          <div className="flex flex-1 flex-col items-center justify-center gap-2 text-center text-muted-foreground">
-            <Mail className="size-8" />
-            <p className="text-sm">Select a message to read.</p>
-          </div>
-        )}
-      </section>
+        {/* Reading pane */}
+        <section className={cn("flex-1 flex-col overflow-hidden md:flex", mobilePane === "read" ? "flex" : "hidden")}>
+          {openMsg && active ? (
+            <Reading message={openMsg} inbox={active} onBack={() => setMobilePane("list")} />
+          ) : (
+            <div className="flex flex-1 flex-col items-center justify-center gap-2 text-center text-muted-foreground">
+              <Mail className="size-8" />
+              <p className="text-sm">Select a message to read.</p>
+            </div>
+          )}
+        </section>
+      </div>
     </div>
+  );
+}
+
+/** A persistent explanation for Inbox's deliberately direct-URL-only state. */
+function InboxParkingNotice() {
+  return (
+    <Alert className="m-4 mb-0 shrink-0" data-testid="inbox-parked-notice">
+      <Info className="size-4" />
+      <AlertTitle>Inbox is not in the console navigation right now</AlertTitle>
+      <AlertDescription>
+        This page still works and shows live email data, but nothing in the console links to it.
+      </AlertDescription>
+    </Alert>
   );
 }
 
