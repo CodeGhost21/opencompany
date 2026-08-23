@@ -231,6 +231,15 @@ impl PolicyDto {
             set_at_millis: record.overlay_policy.as_ref().map(|o| o.at_millis),
             tiers: selectable_tiers(),
             takes_effect: TAKES_EFFECT,
+            known_tools: {
+                let mut tools: Vec<String> = crate::policy::consequence::declared_tools()
+                    .map(str::to_owned)
+                    .collect();
+                // Deterministic over the wire; the console compares membership,
+                // not order, but a stable list is easier to read and to test.
+                tools.sort();
+                tools
+            },
         }
     }
 }
