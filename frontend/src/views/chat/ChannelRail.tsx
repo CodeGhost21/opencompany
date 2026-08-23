@@ -106,6 +106,13 @@ function Section({
   const hiddenUnread = !open
     ? section.channels.reduce((n, c) => n + (unread[c.id] ?? 0), 0)
     : 0;
+  // A mention hidden by a collapsed section is exactly the case a mention
+  // exists to cover: something arrived while you weren't looking. Aggregating
+  // it onto the header — same as unread already does — is what keeps that
+  // true when the section itself is closed.
+  const hiddenMentions = !open
+    ? section.channels.reduce((n, c) => n + (mentions?.[c.id] ?? 0), 0)
+    : 0;
 
   return (
     <section className="group/section select-none px-2 pt-2">
@@ -120,12 +127,29 @@ function Section({
           aria-hidden
         />
         <span className="truncate">{section.label}</span>
-        {hiddenUnread > 0 && (
-          <span
-            title={UNREAD_IS_LOCAL}
-            className="ml-auto rounded-full bg-primary px-1.5 text-3xs font-semibold leading-4 text-primary-foreground"
-          >
-            {hiddenUnread > 99 ? "99+" : hiddenUnread}
+        {(hiddenMentions > 0 || hiddenUnread > 0) && (
+          <span className="ml-auto flex items-center gap-1">
+            {hiddenMentions > 0 && (
+              <span
+                data-testid="section-mentions"
+                title={
+                  hiddenMentions === 1
+                    ? "1 mention of you in this section"
+                    : `${hiddenMentions} mentions of you in this section`
+                }
+                className="rounded-full bg-destructive px-1.5 text-3xs font-semibold leading-4 text-destructive-foreground"
+              >
+                @{hiddenMentions > 99 ? "99+" : hiddenMentions}
+              </span>
+            )}
+            {hiddenUnread > 0 && (
+              <span
+                title={UNREAD_IS_LOCAL}
+                className="rounded-full bg-primary px-1.5 text-3xs font-semibold leading-4 text-primary-foreground"
+              >
+                {hiddenUnread > 99 ? "99+" : hiddenUnread}
+              </span>
+            )}
           </span>
         )}
       </button>

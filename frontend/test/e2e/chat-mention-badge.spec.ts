@@ -192,6 +192,23 @@ test("opening a channel clears only its own mentions", async ({ page }) => {
   expect(clearing.flatMap((c) => c.ids ?? []).sort()).toContain("eng-1");
 });
 
+test("a collapsed section aggregates its hidden mentions, same as unread", async ({ page }) => {
+  await mockApi(page, seedFeed());
+  await openChannel(page, "general");
+  await expect(mentionBadge(page, "Engineering")).toHaveText("@2");
+
+  // Engineering and Design both live in the "Channels" section. Collapsing it
+  // hides both rows, and with them the per-row badges under test above — the
+  // only place those three mentions can still be seen is the header.
+  await page.getByRole("button", { name: "Channels" }).click();
+
+  await expect(mentionBadge(page, "Engineering")).toHaveCount(0);
+  const sectionMentions = page
+    .locator("section", { hasText: "Channels" })
+    .getByTestId("section-mentions");
+  await expect(sectionMentions).toHaveText("@3");
+});
+
 test("a host with no notification route simply shows no mention badges", async ({ page }) => {
   await page.addInitScript(() => {
     const real = Storage.prototype.getItem;
