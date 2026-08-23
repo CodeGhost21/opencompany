@@ -1006,6 +1006,10 @@ mod tests {
 
     use axum::body::{Body, to_bytes};
     use axum::http::{Request, StatusCode};
+    #[cfg(feature = "composio")]
+    use axum::routing::post;
+    #[cfg(feature = "composio")]
+    use axum::{Json, Router};
     use serde_json::{Value, json};
     use tower::ServiceExt;
 
@@ -1023,6 +1027,33 @@ mod tests {
             .prefix("oc-composio-")
             .tempdir()
             .expect("tempdir")
+    }
+
+    /// A loopback Composio authorize endpoint for the feature-enabled route
+    /// test. Keeping the HTTP boundary real proves the handler reaches the
+    /// client after the admin guard, without allowing a unit test to dial the
+    /// production backend.
+    #[cfg(feature = "composio")]
+    async fn spawn_authorize_backend() -> String {
+        let app = Router::new().route(
+            "/agent-integrations/composio/authorize",
+            post(|Json(body): Json<Value>| async move {
+                assert_eq!(body["toolkit"], "gmail");
+                Json(json!({
+                    "success": true,
+                    "data": {
+                        "connectUrl": "https://composio.test/connect/gmail",
+                        "connectionId": "gmail-connection"
+                    }
+                }))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        format!("http://{addr}")
     }
 
     async fn state_with_manifest(home: &std::path::Path, manifest_toml: &str) -> AppState {
@@ -1724,12 +1755,24 @@ mod tests {
     }
 
     /// The other side of the boundary, and the reason this is a role check
-    /// rather than a removal: an admin still does both things. `authorize`
-    /// answering `409` here is the *build* refusing (no `composio` feature),
-    /// which is exactly the point — it got past the guard and failed later, on
-    /// a different axis than the member's `403`.
+    /// rather than a removal: an admin still does both things. Without the
+    /// feature, `authorize` answers `409` at the build boundary; with it, this
+    /// test supplies a loopback backend and proves the admin reaches the real
+    /// authorization call without dialling production (issue #801).
     #[tokio::test]
     async fn an_admin_is_unaffected() {
+        #[cfg(feature = "composio")]
+        let backend = spawn_authorize_backend().await;
+        #[cfg(feature = "composio")]
+        let env = crate::test_support::EnvVarGuard::capture(&[
+            crate::company::composio::COMPOSIO_BACKEND_URL_ENV,
+        ]);
+        #[cfg(feature = "composio")]
+        env.set(
+            crate::company::composio::COMPOSIO_BACKEND_URL_ENV,
+            &backend,
+        );
+
         let home_dir = home();
         let state = state_with_manifest(home_dir.path(), GRANTED).await;
 
@@ -1743,13 +1786,22 @@ mod tests {
         assert_eq!(status, StatusCode::OK, "{raw}");
         assert_eq!(resp["status"]["credentialSource"], "static");
 
-        let (status, _, raw) = send(
+        let (status, body, raw) = send(
             &state,
             "POST",
             "/api/v1/company/composio/authorize",
             Some(json!({ "toolkit": "gmail" })),
         )
         .await;
+        #[cfg(feature = "composio")]
+        assert_eq!(status, StatusCode::OK, "an admin reaches authorization: {raw}");
+        #[cfg(feature = "composio")]
+        assert_eq!(
+            body["connectUrl"],
+            "https://composio.test/connect/gmail",
+            "the handler returns the loopback backend's authorization URL: {body}"
+        );
+        #[cfg(not(feature = "composio"))]
         assert_eq!(
             status,
             StatusCode::CONFLICT,
