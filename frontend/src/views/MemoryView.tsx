@@ -220,7 +220,7 @@ export function MemoryView({ client, company }: Props) {
       <div className="mx-auto w-full max-w-5xl space-y-5 px-4 py-6">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="space-y-1">
-            <h2 className="text-2xl font-semibold tracking-tight">Brain</h2>
+            <h1 className="text-2xl font-semibold tracking-tight">Brain</h1>
             <p className="text-sm text-muted-foreground">
               What your company remembers — facts, people, projects, and preferences your
               teammates can recall.
