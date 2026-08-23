@@ -188,9 +188,9 @@ export function McpRegistryBrowser({ client, company, onInstalled }: Props) {
   return (
     <div className="space-y-3 border-t border-border pt-3" data-testid="mcp-registry-browser">
       <div className="space-y-1">
-        <h4 className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
+        <h3 className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
           Add from the MCP directory
-        </h4>
+        </h3>
         <p className="text-xs text-muted-foreground">
           Search Smithery and the official MCP registry. An installed server joins the list above
           and every teammate can call it.

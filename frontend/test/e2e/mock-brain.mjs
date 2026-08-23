@@ -4,7 +4,7 @@
 // (issue #467).
 //
 // Four of the suite's specs need an agent that actually executes, which needs
-// a host built with `--features openhuman,tinycortex,mcp` **and** something for
+// a host built with `--features openhuman,mcp` **and** something for
 // that harness to think with. This is that something: an OpenAI-compatible
 // chat-completions endpoint with no model behind it, whose answers are very
 // nearly a function of the prompt.

@@ -995,12 +995,12 @@ function FieldRow({
         onChange={(e) => onChange(e.target.value)}
       />
       <div className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1">
-        <code className="font-mono text-2xs text-muted-foreground/70">{field.key}</code>
+        <code className="font-mono text-2xs text-muted-foreground">{field.key}</code>
         {/* Only where it is true *and* actionable: a locked field cannot be
             changed here at all, so telling its owner about a restart is noise
             about work they are not doing. */}
         {field.requires_restart && !locked && (
-          <span className="text-2xs text-muted-foreground/70">· needs a restart</span>
+          <span className="text-2xs text-muted-foreground">· needs a restart</span>
         )}
       </div>
       {locked && <div className="mt-1.5">{<LayerLock />}</div>}
@@ -1118,8 +1118,20 @@ function PowerStep({
   // The house already holds one, and this operator may have no way to get their
   // own. The key box is then optional rather than the point of the screen.
   const onTheHouse = status.inference.ready && provider === status.inference.provider;
+  // "Use my own" flips the gate: the host credential is only testable while
+  // that is the operator's actual choice. Once they opt to supply their own
+  // key, an empty box must not test anything — a test with no key probes the
+  // host credential and would report a pass for a key they never provided.
+  const canTest =
+    (!spec.needsKey || (onTheHouse && !override) || value.trim().length > 0) &&
+    (!spec.needsUrl || baseUrl.trim().length > 0);
 
   const run = async () => {
+    // This also protects the Enter shortcut on the inputs. A disabled button
+    // alone would still leave that route to a request the provider cannot
+    // answer usefully.
+    if (!canTest) return;
+
     onTested({ kind: "testing" });
     try {
       const result = await testInference(client, {
@@ -1287,7 +1299,7 @@ function PowerStep({
         <Button
           type="button"
           variant={tested.kind === "ok" ? "outline" : "default"}
-          disabled={tested.kind === "testing"}
+          disabled={tested.kind === "testing" || !canTest}
           onClick={() => void run()}
           data-testid="setup-test-connection"
         >
@@ -1528,7 +1540,7 @@ function ReviewStep({
               </ul>
               <p className="mt-2 text-sm leading-snug text-muted-foreground">
                 You can still continue — add someone for it here, or later from
-                the team page.
+                the Company page.
               </p>
             </>
           )}

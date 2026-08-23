@@ -61,7 +61,7 @@ use crate::server::error::ApiError;
 use crate::server::ops::scope::{AdminScopedCompany, scoped};
 use crate::store::{MemoryBackend, MemorySelection, StorageSettings};
 
-/// How long an interactive probe waits for the engine to answer.
+/// How long an operator-visible probe waits for the engine to answer.
 ///
 /// Shorter than boot's five seconds on purpose: a human is watching this one,
 /// and a hosted engine that needs more than three seconds to answer a health
@@ -78,14 +78,14 @@ pub fn router() -> Router<AppState> {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct EngineOption {
-    /// What a `PUT` sends back: `store`, `embedded`, `namespace`,
-    /// `supermemory`, `mem0`, `cognee`, `null`.
+    /// What a `PUT` sends back: `store`, `supermemory`, `mem0`, `cognee`, or
+    /// `null`.
     ///
     /// Deliberately flatter than the `(backend, driver)` pair the runtime
-    /// takes: "embedded, driver namespace" and "remote, driver mem0" are one
-    /// choice to an operator and two knobs to the host, and asking a console
-    /// to model that correctly is how a UI ends up offering `remote` with no
-    /// driver — a combination the host refuses at bind.
+    /// takes: "remote, driver mem0" is one choice to an operator and two knobs
+    /// to the host, and asking a console to model that correctly is how a UI
+    /// ends up offering `remote` with no driver — a combination the host
+    /// refuses at bind.
     id: &'static str,
     /// Human label for the tile.
     label: &'static str,
@@ -209,8 +209,6 @@ fn catalog() -> Vec<EngineOption> {
     // so the catalog is one list in one order in every build — an option that
     // disappears entirely reads as "this product has no such engine".
     let tinymemory = cfg!(feature = "tinymemory");
-    let embedded_contract = cfg!(feature = "tinymemory-embedded");
-    let engine = cfg!(feature = "tinycortex");
     let feature = |on: bool, name: &str| {
         (!on).then(|| format!("this build was compiled without the `{name}` feature"))
     };
@@ -222,28 +220,6 @@ fn catalog() -> Vec<EngineOption> {
                           network call, nothing to configure.",
             available: true,
             unavailable_reason: None,
-            requires_url: false,
-            requires_key: false,
-            durable: true,
-        },
-        EngineOption {
-            id: "embedded",
-            label: "TinyCortex",
-            description: "The in-pod engine: vector-first recall over a persistent per-company \
-                          store, with lexical and recency fallback.",
-            available: engine,
-            unavailable_reason: feature(engine, "tinycortex"),
-            requires_url: false,
-            requires_key: false,
-            durable: true,
-        },
-        EngineOption {
-            id: "namespace",
-            label: "TinyMemory (in-pod)",
-            description: "The memory contract's own durable store, in this pod. Graph and \
-                          keyword recall; starts empty — nothing migrates from TinyCortex.",
-            available: embedded_contract,
-            unavailable_reason: feature(embedded_contract, "tinymemory-embedded"),
             requires_url: false,
             requires_key: false,
             durable: true,
@@ -302,14 +278,9 @@ fn option_for(engine: &str) -> Option<EngineOption> {
 
 /// The `(backend, driver)` pair an engine id resolves to.
 ///
-/// This is the whole reason the wire carries one id: `embedded` with no driver
-/// is the incumbent engine and `embedded` with `namespace` is the contract
-/// store, a distinction no console should have to encode.
 fn split_engine(engine: &str) -> Option<(MemoryBackend, Option<&'static str>)> {
     match engine {
         "store" => Some((MemoryBackend::Store, None)),
-        "embedded" => Some((MemoryBackend::Tinycortex, None)),
-        "namespace" => Some((MemoryBackend::Tinycortex, Some("namespace"))),
         "supermemory" => Some((MemoryBackend::Remote, Some("supermemory"))),
         "mem0" => Some((MemoryBackend::Remote, Some("mem0"))),
         "cognee" => Some((MemoryBackend::Remote, Some("cognee"))),
@@ -327,8 +298,6 @@ fn split_engine(engine: &str) -> Option<(MemoryBackend, Option<&'static str>)> {
 fn engine_id(selection: &MemorySelection) -> String {
     match (selection.backend, selection.driver.as_deref()) {
         (MemoryBackend::Store, _) => "store".to_string(),
-        (MemoryBackend::Tinycortex, None) => "embedded".to_string(),
-        (MemoryBackend::Tinycortex, Some(driver)) => driver.to_string(),
         (MemoryBackend::Remote, Some(driver)) => driver.to_string(),
         (MemoryBackend::Remote, None) => "remote".to_string(),
         (MemoryBackend::Null, _) => "null".to_string(),
@@ -359,10 +328,16 @@ fn saved_selection(state: &AppState) -> Result<(MemorySelection, &'static str), 
     Ok((selection, if named { "config.toml" } else { "default" }))
 }
 
-/// Renders the whole engine surface.
-fn snapshot(state: &AppState) -> Result<EngineDto, OpenCompanyError> {
+/// Renders the whole engine surface, optionally from a freshly probed overlay.
+///
+/// A read probes its clone rather than replacing the live overlay: health is
+/// status, not configuration, and a concurrent apply must never be overwritten
+/// by a status request that started first.
+fn snapshot(
+    state: &AppState,
+    live: Option<crate::store::MemoryOverlay>,
+) -> Result<EngineDto, OpenCompanyError> {
     let (selection, layer) = saved_selection(state)?;
-    let live = state.memory_overlay();
     // The live overlay is the honest answer to "what is bound"; its absence
     // means the base store serves memory, which is exactly `store`.
     let (active, capabilities, healthy) = match &live {
@@ -404,7 +379,11 @@ async fn read(
     // The company is resolved for authorization only: the engine is an
     // instance-level choice, and every company on this host shares it.
     let _ = company.id();
-    Ok(Json(snapshot(&state)?))
+    let mut live = state.memory_overlay();
+    if let Some(overlay) = &mut live {
+        overlay.refresh_health(PROBE_TIMEOUT).await;
+    }
+    Ok(Json(snapshot(&state, live)?))
 }
 
 /// Refuses an engine this build cannot construct, before its fields are
@@ -651,7 +630,7 @@ async fn apply(
         healthy,
         restart_required_for,
         config_path: config_path.display().to_string(),
-        engine_state: snapshot(&state)?,
+        engine_state: snapshot(&state, state.memory_overlay())?,
     }))
 }
 
