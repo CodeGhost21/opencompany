@@ -186,9 +186,14 @@ export function PolicySettings({ client, company }: Props) {
   // plainer — the same reasoning `LedgersView.refreshTasks` gives.
   useEffect(() => {
     let live = true;
+    setWiredTools([]);
+    setWiredToolsLoaded(false);
     void listWorkflowToolSlugs(client, company)
       .then((r) => {
-        if (live) setWiredTools(r.slugs);
+        if (live) {
+          setWiredTools(r.slugs);
+          setWiredToolsLoaded(true);
+        }
       })
       .catch(() => {
         if (live) setWiredTools([]);
