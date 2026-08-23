@@ -28,12 +28,6 @@ test("an agent-authored page bundle loads and paints in its sandboxed iframe", a
 }) => {
   page.on("console", (message) => console.log(`[page console] ${message.type()}: ${message.text()}`));
   page.on("requestfailed", (failed) => console.log(`[page request failed] ${failed.url()} ${failed.failure()?.errorText}`));
-  page.on("response", (res) => {
-    const url = res.url();
-    if (url.includes("/pages/") || url.includes("/pages-sdk/")) {
-      console.log(`[page response ${res.status()}] ${url}`);
-    }
-  });
   const slug = `page-e2e-${Date.now().toString(36)}`;
   const title = `E2E page ${slug}`;
   const painted = `Page ${slug} painted`;
