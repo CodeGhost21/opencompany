@@ -47,7 +47,7 @@ import { cn } from "@/lib/utils";
  */
 export function StyleguideView() {
   return (
-    <div className="min-h-0 flex-1 overflow-y-auto">
+    <div className="min-h-svh">
       <Header />
       <div className="mx-auto w-full max-w-5xl px-6 py-10">
         <div className="space-y-14 pb-24">
