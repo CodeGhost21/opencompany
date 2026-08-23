@@ -370,6 +370,13 @@ pub fn build_agent(
     let wants_shell = grants_cover(grants, "shell");
     let wants_code = grants_cover(grants, "code");
     let wants_web = grants_cover(grants, "web");
+    // The GRANT says shell was asked for; this says it was actually wired.
+    // `shell_tools` withholds the whole namespace when the audit logger cannot
+    // be initialized (below), and the sandbox brief must describe the belt the
+    // agent holds rather than the one it requested — otherwise the one company
+    // whose audit sink is unwritable is also the one whose agents are told to
+    // run commands with a tool that is not there.
+    let mut shell_wired = false;
     if wants_shell || wants_code || wants_web {
         let exec_security = Arc::new(toolbelt::exec_security(&workspace, policy.mode()));
         // `shell` and `code` are separate grant namespaces and are wired from
@@ -396,12 +403,9 @@ pub fn build_agent(
                 company,
                 &manifest_agent.id,
             ));
-            tools.extend(toolbelt::shell_tools(
-                exec_security.clone(),
-                runtime,
-                audit,
-                &workspace,
-            ));
+            let shell = toolbelt::shell_tools(exec_security.clone(), runtime, audit, &workspace);
+            shell_wired = !shell.is_empty();
+            tools.extend(shell);
         }
         if wants_code {
             tools.extend(toolbelt::code_tools(exec_security.clone(), &workspace));
@@ -918,7 +922,7 @@ pub fn build_agent(
     // the brief cannot describe a namespace this agent was not granted. `shell`
     // in particular was wired since Cell A and named in no brief anywhere: an
     // agent asked to run something recorded a task about running it.
-    persona.push_str(&toolbelt::sandbox_brief(wants_files, wants_shell, wants_code));
+    persona.push_str(&toolbelt::sandbox_brief(wants_files, shell_wired, wants_code));
 
     // Issue #244: what a deliverable is, and how to hand one over. Only when
     // the tool was actually wired above — describing a tool the agent does not
