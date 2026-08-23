@@ -44,7 +44,7 @@ turned off for a whole company**. It defaults to `globals/globals.toml`'s
 `default_allow`:
 
 ```toml
-default_allow = ["*", "workspace.*", "media", "composio", "search", "mcp:*"]
+default_allow = ["*", "workspace.*", "workspace.write", "media", "composio", "search", "mcp:*"]
 ```
 
 Everything a company can hold is on by default, and dropping an entry from this
