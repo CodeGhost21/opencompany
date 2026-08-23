@@ -326,7 +326,10 @@ export function AgentRuns({
               dispatched, messages it answered, and workflow steps it ran.
             </p>
           </div>
-          {runs && runs.length > 0 && (
+          {/* Visible while a filter is active even if its fetch came back empty —
+              a desk that has run but has no *failed* attempts must not strand the
+              reader on a filter they cannot turn off. */}
+          {runs !== null && (runs.length > 0 || wanted) && (
             <div className="flex flex-wrap gap-1" role="group" aria-label="Filter runs">
               {FILTERS.map((option) => (
                 <Button
