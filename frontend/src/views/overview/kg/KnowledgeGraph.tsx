@@ -2498,6 +2498,11 @@ export function KnowledgeGraph({
 /* SVG groups have no useful browser focus outline, so keep the keyboard
    position visible on the node itself rather than around its whole subtree. */
 .kg-node:focus-visible > circle:first-of-type { stroke: var(--ring); stroke-width: 3px; }
+/* The memory-backed core draws its body as nested groups (the constellation),
+   so the direct-circle rule above reaches nothing — ring its disc instead. */
+.kg-node:focus-visible > g:first-of-type > circle:first-of-type { stroke: var(--ring); stroke-width: 3px; }
+/* Memory notes get the same ring when the keyboard reaches them. */
+.kg-mem-node:focus-visible > circle:first-of-type { stroke: var(--ring); stroke-width: 2px; }
 
 /* detail cards glide in with the camera instead of popping */
 @keyframes kg-panel-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
