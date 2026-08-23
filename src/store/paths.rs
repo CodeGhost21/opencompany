@@ -728,7 +728,8 @@ mod test {
         assert_ne!(plain, trailing_dot);
         assert!(plain.ends_with("%k-foo"));
         assert!(trailing_dot.ends_with("%k-foo%2E"));
-        assert!(!trailing_dot.ends_with('.'));
+        let name = trailing_dot.file_name().unwrap().to_string_lossy();
+        assert!(!name.ends_with('.'));
 
         // Several trailing periods are each distinct too.
         let two = bundle.secret("foo..");
