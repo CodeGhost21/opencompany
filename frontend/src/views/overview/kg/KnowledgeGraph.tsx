@@ -85,11 +85,6 @@ const EDGE_COLOR: Record<string, string> = {
   reports: 'var(--accent)',
 };
 
-// Task titles are whole jobs ("Broadcast directives across the fleet") — trim
-// for the on-canvas label; the full title lives in the hover tooltip + card.
-const shortLabel = (n: KGNode) =>
-  n.kind === 'task' && n.label.length > 20 ? `${n.label.slice(0, 18).trimEnd()}…` : n.label;
-
 // On-screen label size per tier, in px. Quoted at rest and held there at every
 // camera depth by `fixedLabel`, which is why the declutter can measure in px.
 const labelFontPx = (kind: KGNodeKind): number =>
@@ -1884,7 +1879,7 @@ export function KnowledgeGraph({
     const degree = (adjacency.get(n.id)?.size ?? 1) - 1;
     labelCandidates.push({
       id: n.id,
-      text: shortLabel(n),
+      text: n.label,
       x: n.x,
       y: n.y,
       dy: v.r + 11 + (labelDy.get(n.id) ?? 0),
@@ -2318,7 +2313,7 @@ export function KnowledgeGraph({
                   fill={hoverId === n.id ? 'var(--text)' : n.kind === 'team' ? color : 'var(--text-2)'}
                   style={fixedLabel(labelFontPx(n.kind))}
                 >
-                  {shortLabel(n)}
+                  {n.label}
                 </text>
               )}
             </g>

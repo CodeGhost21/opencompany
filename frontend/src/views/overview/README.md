@@ -1,8 +1,8 @@
 # Overview — the knowledge graph
 
-`#/overview` is the graph and nothing else: no page header, no strip, and the
-console's own top bar is hidden for this view (see `app-shell.tsx`). It fills
-the viewport beside the sidebar.
+`#/overview` is the graph and nothing else: no page header or strip. No view
+has a top bar; its remaining controls live in the sidebar. The graph fills the
+shell's content surface beside the sidebar.
 
 ## What it draws
 
@@ -46,12 +46,13 @@ except the node under the pointer. Every node keeps a `<title>`, so a native
 tooltip is the floor wherever a drawn label is suppressed. Tasks, workflow stages and tools are the numerous tiers, which is
 why they are bare until you point at one.
 
-Whatever that leaves is then decluttered: candidates are placed highest
-priority first and any label whose box overlaps one already placed is dropped
-rather than nudged. The pass measures in **screen px**, not graph units —
-labels hold one on-screen size at every camera depth (`fixedLabel` counter
-scales through `--kg-cam-k`), so zooming changes how far apart nodes are and
-never how wide a name is. `kg/label-plan.ts` holds both steps, pure.
+Whatever that leaves is then decluttered: candidates retain their full titles,
+are placed highest priority first, and any label whose box overlaps one already
+placed is dropped rather than nudged. The pass measures in **screen px**, not
+graph units — labels hold one on-screen size at every camera depth
+(`fixedLabel` counter-scales through `--kg-cam-k`), so zooming changes how far
+apart nodes are and never how wide a name is. `kg/label-plan.ts` holds both
+steps, pure.
 
 ## What is derived — read this before trusting the org chart
 

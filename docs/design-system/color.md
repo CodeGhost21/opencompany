@@ -135,7 +135,7 @@ Layer 2. These are what components use.
 | `--chrome` | `#EBEBF4` | rung `2` | The window chrome |
 | `--chrome-border` | rung `4` | rung `active` | Where the content card meets it |
 | `--border` | rung `4` | rung `4` | The hairline |
-| `--input` | rung `4` | rung `active` | Field borders, stronger rules |
+| `--input` | `#85858F` | rung `active` | Field borders, stronger rules |
 | `--ring` | `brand-500` | `brand-400` | Focus |
 
 Light surfaces climb *toward* the viewer with lightness (canvas `#F7F7FC` →
@@ -202,7 +202,7 @@ the nav row you are standing on.
 | `--foreground` | 18.44:1 | 19.92:1 | Primary reading text |
 | `--muted-foreground` | 5.07:1 | 5.46:1 | Secondary, metadata, captions |
 | `--primary` | 4.58:1 | 5.98:1 | Links, emphasis |
-| `--destructive` | 3.82:1 | 6.73:1 | Error marks (see caveat below) |
+| `--destructive` | 4.67:1 | 6.73:1 | Error text and marks |
 
 `--muted-foreground` also measures 4.55:1 on `--muted`, so caption text on a
 recessed fill still passes.
@@ -221,16 +221,15 @@ both fill a 6px dot and set legible 11px text.
 | State | Light mark | Light text | Dark (both) |
 | --- | --- | --- | --- |
 | **idle** | `#8C8C9E` 3.22:1 | `#6E6E80` 4.87:1 | `#9797A8` 6.80:1 |
-| **running** | `#0EA5E9` 2.70:1 | `#0A6E9C` 5.50:1 | `#38BDF8` 9.12:1 |
-| **blocked** | `#F5A524` 1.99:1 | `#A16207` 4.80:1 | `#FFC53D` 12.38:1 |
-| **done** | `#12A150` 3.28:1 | `#0A7D3E` 5.10:1 | `#35C77F` 8.95:1 |
-| **failed** | `#E5484D` 3.82:1 | `#C62A2F` 5.43:1 | `#FF6369` 6.73:1 |
+| **running** | `#008DD0` 3.08:1 | `#0A6E9C` 5.50:1 | `#38BDF8` 9.12:1 |
+| **blocked** | `#BF7200` 3.14:1 | `#A16207` 4.80:1 | `#FFC53D` 12.38:1 |
+| **done** | `#009A49` 3.08:1 | `#0A7D3E` 5.10:1 | `#35C77F` 8.95:1 |
+| **failed** | `#E5484D` 3.29:1 | `#C62A2F` 5.43:1 | `#FF6369` 6.73:1 |
 
-**Read the two low numbers.** Amber at 1.99:1 and cyan at 2.70:1 do not meet
-even the 3:1 UI threshold on the light canvas — that is exactly why the split
-exists. They are legitimate on a badge's soft background or as a large filled
-bar, and they must never set text or paint a lone thin mark on the canvas. Use
-`-text` for anything a person reads.
+The light marks clear 3:1 against every surface where they render, including
+the muted and active fills. The light text weights remain darker, so a compact
+label keeps the 4.5:1 text target without making the corresponding dot or bar
+unnecessarily heavy.
 
 In dark mode `-mark` and `-text` intentionally collapse to the same bright
 value: on near-black it clears 4.5:1 on its own, and a separate text weight
@@ -298,9 +297,9 @@ renamed — they name a slot, not a colour. A desk keyed `amber` resolves to
 | Slot | Light | Dark |
 | --- | --- | --- |
 | `--chart-1` | `#7153F0` violet | `#937BF6` |
-| `--chart-2` | `#0EA5E9` cyan | `#38BDF8` |
-| `--chart-3` | `#12A150` green | `#35C77F` |
-| `--chart-4` | `#F5A524` amber | `#FFC53D` |
+| `--chart-2` | `#008DD0` cyan | `#38BDF8` |
+| `--chart-3` | `#009A49` green | `#35C77F` |
+| `--chart-4` | `#BF7200` amber | `#FFC53D` |
 | `--chart-5` | `#E93D82` pink | `#FF6BA6` |
 
 Brand leads slot 1; the sequence then walks the hue circle so neighbouring
