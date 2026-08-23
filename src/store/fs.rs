@@ -3122,8 +3122,8 @@ mod test {
         assert!(!tokio::fs::try_exists(&shared).await.unwrap());
         assert_eq!(secrets.get(&company, key_b).await.unwrap(), None);
     }
-
-
+    #[tokio::test]
+    async fn canonical_namespace_does_not_bleed_into_legacy_fallback() {
         // Issue #1510's follow-up: `key-` was itself a valid legacy slug, so
         // the old canonical file for `foo` (`key-foo`) was returned when
         // reading `key-foo` through the legacy fallback, and writing `key-foo`
