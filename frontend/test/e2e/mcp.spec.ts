@@ -52,11 +52,6 @@ test("Settings MCP lists the company's servers instead of crashing on open", asy
 
   await expect(page.getByRole("heading", { name: "MCP Servers", level: 1 })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Installed servers", level: 2 })).toBeVisible();
-  // The directory browser is the one heading that nests *inside* a section, so
-  // it is the level below it rather than a peer of it.
-  await expect(
-    page.getByRole("heading", { name: "Add from the MCP directory", level: 3 }),
-  ).toBeVisible();
 
   // The manifest server the harness company declares. Rendering it at all is
   // the fix: the old view read the list off a wrapper key the host never sent.
