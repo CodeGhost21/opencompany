@@ -168,7 +168,7 @@ export function EngineSection({ client, company, onApplied }: Props) {
           {state.editable ? (
             <>
               Where this company&rsquo;s memory is stored. Instance-wide — every company on this
-              host shares it — and saved to <code className="text-xs">{state.configPath}</code>.
+              host shares it — and saved to <code className="text-xs" data-visual-volatile>{state.configPath}</code>.
             </>
           ) : (
             <>
