@@ -67,11 +67,14 @@ const WIRED = ["shell", "apply_patch", "git_operations", "web_fetch", "http_requ
 function makeClient({
   slugs,
   status = STATUS,
+  resetStatus = STATUS,
 }: {
   slugs?: string[] | "unavailable";
   status?: PolicyStatus;
+  resetStatus?: PolicyStatus;
 } = {}) {
   const put = vi.fn(async () => status);
+  const del = vi.fn(async () => resetStatus);
   return {
     scopeFor: (company: string | null) => `/api/v1/${company ?? "company"}`,
     get: async (path: string) => {
@@ -83,7 +86,7 @@ function makeClient({
       return null;
     },
     put,
-    del: async () => STATUS,
+    del,
   } as unknown as OpenCompanyClient;
 }
 
