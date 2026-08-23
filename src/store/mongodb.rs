@@ -352,7 +352,7 @@ impl MongoStore {
         // the next legacy one. `_id` is the one index every document has, and
         // the cursor advances in `_id` order, so the `$gt` bound is both cheap
         // and lossless: everything at or before the watermark has been filled.
-        let mut after: Option<bson::Bson> = None;
+        let mut after: Option<mongodb::bson::Bson> = None;
         loop {
             let mut filter = doc! {"agent_id": {"$exists": false}};
             if let Some(id) = after.clone() {
