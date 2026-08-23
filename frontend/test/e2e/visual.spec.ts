@@ -90,6 +90,23 @@ const SURFACES = [
  */
 const VOLATILE = ["[data-visual-volatile]"];
 
+/**
+ * Selectors for the loading placeholders a surface mounts before its own read
+ * answers. The views share no single loaded marker, so the inverse is the
+ * signal: a surface has settled once none of these is inside it. Matching
+ * nothing is the success case — only a surface still waiting on its first read
+ * renders one, and the wait below is what keeps a slow-host `--update-snapshots`
+ * run from recording a skeleton as a baseline.
+ */
+const LOADING_PLACEHOLDERS = [
+  // Every view that reads before painting uses the shared Skeleton component.
+  `${CONTENT_SURFACE} >> [data-slot="skeleton"]`,
+  // Approvals pulses its own rows instead of the Skeleton component.
+  `${CONTENT_SURFACE} >> [aria-label="Loading approvals"]`,
+  // Overview suspends on the graph chunk's import and says so in a fallback.
+  `${CONTENT_SURFACE} >> text=Drawing the graph…`,
+];
+
 /** The first-run tour opens a modal over a fresh console and eats every click. */
 async function skipTour(page: Page) {
   await page.addInitScript(() => {
