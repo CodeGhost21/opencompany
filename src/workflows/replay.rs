@@ -320,6 +320,107 @@ pub(crate) fn outward_calls_performed(
     (performed, unreplayable)
 }
 
+/// The ungated outward calls a paused child will repeat when its gate is
+/// approved (issue #617).
+///
+/// A `sub_workflow` child that stops at an approval gate pauses the *parent*:
+/// tinyflows reports the child's gates namespaced (`<node>::<gate>`), and the
+/// continuation re-runs the parent, which re-runs the child from the top. Any
+/// outward call the child made before the gate therefore fires again — but
+/// unlike a top-level call, its result does not travel up when the child
+/// pauses (tinyflows drops the child's partial output on
+/// `ChildOutcome::Paused`), so there is nothing to replay. Report it the same
+/// way [`outward_calls_performed`] reports a top-level call it cannot replay,
+/// so the operator is warned that approving restarts the child from the top.
+///
+/// Each namespaced pending id is resolved through `registry` to the child graph
+/// the resolver actually gated, then every call **upstream-reachable** from the
+/// paused gate is examined. "Upstream-reachable" is read off the child's edges
+/// by walking backward from the gate; a call on an un-taken branch of a fan-out
+/// is over-reported, the same conservative direction the top-level
+/// [`outward_calls_performed`] takes when it reads "completed" from the run
+/// state rather than per-branch.
+pub(crate) fn child_calls_to_repeat(
+    parent: &WorkflowGraph,
+    pending: &[String],
+    registry: &ChildGateRegistry,
+) -> Vec<UnreplayableCall> {
+    let mut out = Vec::new();
+    for node_id in pending {
+        let Some((parent_node, child_gate)) = node_id.split_once(GATE_NAMESPACE) else {
+            continue;
+        };
+        let Some(child_id) = parent
+            .nodes
+            .iter()
+            .find(|n| n.id == parent_node)
+            .and_then(|n| n.config.get("workflow_id"))
+            .and_then(Value::as_str)
+        else {
+            continue;
+        };
+        let Some(record) = registry.get(child_id) else {
+            continue;
+        };
+        for call in child_calls_preceding(&record.graph, child_gate) {
+            if !out.contains(&call) {
+                out.push(call);
+            }
+        }
+    }
+    out
+}
+
+/// The outward calls in `child` that run before `gate` and are not themselves
+/// gated.
+///
+/// Every node from which `gate` is reachable by walking `edges` backward must
+/// have run (or be on the branch that ran) before the pause; everything past
+/// the gate is unreachable and excluded. Nodes the gate pass marked — the
+/// `requires_approval` flag it writes — are excluded too, because the child
+/// restarts and *pauses at them again* rather than executing them.
+///
+/// Classified with the same [`outward_call_of`] the top-level guard uses, so
+/// the two reports agree about what an "outward call" is. The child's authored
+/// `repeatable` declarations are not consulted (the resolver keeps the
+/// translated graph, not the authored file); an undeclared classification is
+/// the conservative direction for a warning.
+fn child_calls_preceding(child: &WorkflowGraph, gate: &str) -> Vec<UnreplayableCall> {
+    let mut reached = std::collections::HashSet::new();
+    let mut queue = std::collections::VecDeque::from([gate.to_string()]);
+    while let Some(id) = queue.pop_front() {
+        if !reached.insert(id.clone()) {
+            continue;
+        }
+        for edge in &child.edges {
+            if edge.to_node == id {
+                queue.push_back(edge.from_node.clone());
+            }
+        }
+    }
+    let mut out = Vec::new();
+    for node in &child.nodes {
+        if !reached.contains(&node.id) {
+            continue;
+        }
+        if node.config.get("requires_approval").and_then(Value::as_bool) == Some(true) {
+            // The child restarts and pauses at this node again; it does not
+            // execute it.
+            continue;
+        }
+        let Some(slug) = outward_call_of(node, false) else {
+            continue;
+        };
+        out.push(UnreplayableCall {
+            node_id: node.id.clone(),
+            slug,
+            why: "it runs inside a child workflow whose ungated calls are not carried up when \
+                  the child pauses, so approving restarts the child and calls it again",
+        });
+    }
+    out
+}
+
 /// Rewrites every node this lineage has already called so the continuation
 /// replays its recorded result instead of calling again (issue #846).
 ///
