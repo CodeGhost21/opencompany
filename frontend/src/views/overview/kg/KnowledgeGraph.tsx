@@ -50,7 +50,7 @@ const CAT: Record<KGNodeKind, { color: string; Icon: LucideIcon; label: string; 
   self: { color: 'var(--text)', Icon: Sparkles, label: 'Notes', r: 18 },
   team: { color: 'var(--brain-1)', Icon: Users, label: 'Pillars', r: 15 },
   workflow: { color: 'var(--brain-2)', Icon: WorkflowIcon, label: 'Workflows', r: 8.5 },
-  step: { color: 'var(--brain-2)', Icon: Milestone, label: 'Stages', r: 6 },
+  step: { color: 'var(--accent)', Icon: Milestone, label: 'Stages', r: 6 },
   task: { color: 'var(--muted)', Icon: ClipboardList, label: 'SOP tasks', r: 7 },
   person: { color: 'var(--warn)', Icon: UserRound, label: 'Humans', r: 10 },
   employee: { color: 'var(--accent)', Icon: User, label: 'AI teammates', r: 10 },
@@ -137,6 +137,48 @@ const hashStr = (s: string) => {
 const HUB_COLOR = 'var(--kg-brain-1)';
 const NOTE_COLOR = 'var(--kg-brain-1)';
 const ORPHAN_COLOR = 'var(--kg-brain-1)'; // rim dust dims via its lower fill opacity
+
+/** The fullscreen wheel's persistent key. Its items wrap within the canvas so
+ * narrower fields never crop the kinds an operator needs to distinguish. */
+export function KnowledgeGraphLegend() {
+  return (
+    <div
+      aria-label="Graph legend"
+      className="flex max-w-[calc(100%-2.5rem)] flex-wrap items-center gap-x-3 gap-y-1.5 rounded-sm-t border border-os-border-strong bg-os-bg/85 px-2.5 py-1.5 backdrop-blur"
+    >
+      {(
+        [
+          { label: 'Notes', color: HUB_COLOR, Icon: CAT.self.Icon },
+          { label: 'Human', color: CAT.person.color, Icon: CAT.person.Icon },
+          { label: 'AI teammate', color: CAT.employee.color, Icon: CAT.employee.Icon },
+          { label: 'Tool', color: CAT.tool.color, Icon: CAT.tool.Icon },
+          { label: 'Workflow', color: CAT.workflow.color, Icon: CAT.workflow.Icon },
+          { label: 'Stage', color: CAT.step.color, Icon: CAT.step.Icon },
+          { label: 'SOP task', color: CAT.task.color, Icon: CAT.task.Icon },
+        ] as const
+      ).map(({ label, color, Icon }) => (
+        <span key={label} className="flex items-center gap-1.5 whitespace-nowrap font-mono text-3xs text-os-muted">
+          <Icon className="h-3 w-3" style={{ color }} strokeWidth={2} />
+          {label}
+        </span>
+      ))}
+      {/* The standing caveat (adapter.ts's DERIVED_NOTICE): this legend is the
+          graph's persistent, low-weight chrome, so it is where an operator
+          reading the wheel is already looking to learn how to read it. The
+          full sentence lives in the title — the strip is crowded enough
+          without seven kind-labels wrapping around a whole caveat.
+
+          It used to read "derived data", covering three whole invented rings.
+          Since issue #601 the notice names the one thing left: where a flow
+          sits on the wheel. Departments, tools and stages are the company's own
+          answers now, so claiming otherwise here would understate them. */}
+      <span className="flex items-center gap-1 whitespace-nowrap border-l border-os-border pl-3 font-mono text-3xs text-os-dim" title={DERIVED_NOTICE}>
+        <Info className="h-3 w-3 shrink-0" strokeWidth={2} />
+        flow placement
+      </span>
+    </div>
+  );
+}
 // the bright traveling sparks that fire along the links like synapses
 const SYNAPSE_COLOR = 'var(--kg-spark)';
 const SYNAPSE_N = 22;
@@ -1514,42 +1556,7 @@ export function KnowledgeGraph({
     if (target) selectTool(target);
   };
 
-  // compact legend for the fullscreen wheel: color + icon per kind, with the
-  // Notes core in its vault orange
-  const compactLegend = (
-    <div className="flex items-center gap-3 rounded-sm-t border border-os-border-strong bg-os-bg/85 px-2.5 py-1.5 backdrop-blur">
-      {(
-        [
-          { label: 'Notes', color: HUB_COLOR, Icon: CAT.self.Icon },
-          { label: 'Human', color: CAT.person.color, Icon: CAT.person.Icon },
-          { label: 'AI teammate', color: CAT.employee.color, Icon: CAT.employee.Icon },
-          { label: 'Tool', color: CAT.tool.color, Icon: CAT.tool.Icon },
-          { label: 'Workflow', color: CAT.workflow.color, Icon: CAT.workflow.Icon },
-          { label: 'Stage', color: CAT.step.color, Icon: CAT.step.Icon },
-          { label: 'SOP task', color: CAT.task.color, Icon: CAT.task.Icon },
-        ] as const
-      ).map(({ label, color, Icon }) => (
-        <span key={label} className="flex items-center gap-1.5 font-mono text-3xs text-os-muted">
-          <Icon className="h-3 w-3" style={{ color }} strokeWidth={2} />
-          {label}
-        </span>
-      ))}
-      {/* The standing caveat (adapter.ts's DERIVED_NOTICE): this legend is the
-          graph's persistent, low-weight chrome, so it is where an operator
-          reading the wheel is already looking to learn how to read it. The
-          full sentence lives in the title — the strip is crowded enough
-          without seven kind-labels wrapping around a whole caveat.
-
-          It used to read "derived data", covering three whole invented rings.
-          Since issue #601 the notice names the one thing left: where a flow
-          sits on the wheel. Departments, tools and stages are the company's own
-          answers now, so claiming otherwise here would understate them. */}
-      <span className="flex items-center gap-1 border-l border-os-border pl-3 font-mono text-3xs text-os-dim" title={DERIVED_NOTICE}>
-        <Info className="h-3 w-3 shrink-0" strokeWidth={2} />
-        flow placement
-      </span>
-    </div>
-  );
+  const compactLegend = <KnowledgeGraphLegend />;
 
   // the vault search chip — one instance, rendered by whichever chrome is live
   // (inline top-left row or the fullscreen wrapper slot)
