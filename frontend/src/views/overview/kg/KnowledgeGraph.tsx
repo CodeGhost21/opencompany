@@ -741,6 +741,18 @@ export function KnowledgeGraph({
     // The sim may tick faster than the display; coalesce the React render to
     // one per animation frame (d3's physics keep ticking freely underneath).
     const renderTick = rafThrottle(() => setTick((t) => (t + 1) % 1_000_000));
+    // TEMP-DIAGNOSTIC: wrap renderTick so we can log the alpha trajectory
+    // without replacing the real render handler (d3's .on("tick") replaces).
+    const lastLog = { a: 1 };
+    const alphaLog: Array<{ t: number; a: number }> = [];
+    const tickHandler = () => {
+      renderTick();
+      const a = sim.alpha();
+      if (a !== lastLog.a) {
+        lastLog.a = a;
+        alphaLog.push({ t: performance.now(), a: Math.round(a * 1000) / 1000 });
+      }
+    };
     const sim = forceSimulation(nodes)
       // extra friction + a slow cool-down → nodes drift floatily into place
       // instead of snapping or overshooting
@@ -752,24 +764,14 @@ export function KnowledgeGraph({
       .force('x', forceX<SimNode>(CX))
       .force('y', forceY<SimNode>(CY))
       .force('collide', forceCollide<SimNode>(10))
-      .on('tick', renderTick);
+      .on('tick', tickHandler);
     configure(sim);
     simRef.current = sim;
     // TEMP-DIAGNOSTIC: log sim creation + alpha trajectory (visual-flake hunt).
-    // Remove before final push.
-    const alog: Array<{ t: number; a: number; n: number }> = [];
-    const lastLog = { a: sim.alpha() };
-    sim.on("tick", () => {
-      const a = sim.alpha();
-      if (a !== lastLog.a) {
-        lastLog.a = a;
-        alog.push({ t: performance.now(), a: Math.round(a * 1000) / 1000, n: nodes.length });
-      }
-    });
     const prevLog = (window as unknown as { __simLog?: Array<object> }).__simLog ?? [];
     prevLog.push({ ev: "create", t: performance.now(), nodes: nodes.length, alpha: sim.alpha() });
     (window as unknown as { __simLog?: Array<object> }).__simLog = prevLog;
-    (window as unknown as { __alphaLog?: Array<object> }).__alphaLog = alog;
+    (window as unknown as { __alphaLog?: Array<object> }).__alphaLog = alphaLog;
     return () => {
       sim.stop();
       simRef.current = null;
