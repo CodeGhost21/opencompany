@@ -1806,6 +1806,41 @@ prompt = "Lead decisively."
         )
     }
 
+    /// Posts `bytes` to the generic workspace upload route as a `file` part
+    /// named `name`, declaring `image/png`. The declared type is what the store
+    /// keeps — the referent check must not trust it, and this helper exists to
+    /// prove that.
+    async fn upload_workspace_binary(state: &AppState, name: &str, bytes: &[u8]) -> (StatusCode, Value) {
+        const BOUNDARY: &str = "----ocworkspacetest";
+        let mut body: Vec<u8> = Vec::new();
+        body.extend_from_slice(
+            format!(
+                "--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"file\"; \
+                 filename=\"{name}\"\r\nContent-Type: image/png\r\n\r\n"
+            )
+            .as_bytes(),
+        );
+        body.extend_from_slice(bytes);
+        body.extend_from_slice(format!("\r\n--{BOUNDARY}--\r\n").as_bytes());
+        let request = Request::builder()
+            .method("POST")
+            .uri("/api/v1/company/workspace/upload")
+            .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+            .header(
+                "content-type",
+                format!("multipart/form-data; boundary={BOUNDARY}"),
+            )
+            .body(Body::from(body))
+            .unwrap();
+        let response = router(state.clone()).oneshot(request).await.unwrap();
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+        )
+    }
+
     /// Picking one of the shipped mascots, and putting it back. `null` resets to
     /// "nobody has chosen", which is what makes the console's hashed default
     /// reachable again — a stored empty string could not express it.
