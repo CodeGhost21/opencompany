@@ -1235,9 +1235,10 @@ approval.]"
         // older refusal expired or was revoked. Revoke the shadowed
         // opposite-polarity policy before arming the new one, journaled as a
         // revocation by the same resolving actor, so replay reconstructs the
-        // same single-policy state. Scoped to what would actually shadow
-        // (`admits_scope`), so a denial of one host leaves a grant for another
-        // alone.
+        // same single-policy state. Scoped to what would actually shadow (either
+        // scope overlapping the other), so a denial of one host leaves a grant
+        // for another alone while a wildcard policy supersedes scoped
+        // opposite-polarity ones in both directions.
         //
         // The reconcile is not itself atomic: the snapshot below, the journal
         // appends, and the insert are separate steps, and the journal appends
