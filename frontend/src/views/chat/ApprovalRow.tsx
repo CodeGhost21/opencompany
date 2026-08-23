@@ -193,6 +193,19 @@ export function ApprovalRow({
   const done = pending.length === 0;
   /** Whether any item in this card is waiting on `verdict` right now. */
   const awaiting = (verdict: Verdict) => [...deciding.values()].includes(verdict);
+  /**
+   * Whether the compact row is asked to one-click Approve something its label
+   * does not fully say.
+   *
+   * A body cut to fit the lead is a preview, not the payload — two POSTs to the
+   * same URL whose bodies share the first 60 code units render identically even
+   * when the cut-off suffix changes what the request does. The operator must
+   * see the complete host-bounded payload before approving, so the inline
+   * Approve is gated behind the detailed view. Scoped to `pending` because
+   * that is what the button would decide; an item already settled elsewhere is
+   * not part of the one-click authorisation.
+   */
+  const needsFullReview = compact && pending.some((a) => payloadLeadTruncated(a));
 
   /**
    * The decision, applied to every item the card is still asking about.
