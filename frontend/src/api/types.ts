@@ -1133,7 +1133,7 @@ export interface McpHealth {
 
 /**
  * One roster agent named on a console coverage line — {@link
- * McpServer.reachableBy} ("Reachable by") and the repositories card's
+ * McpServer.reachableBy} ("Reachable by") and the console's other coverage lines'
  * `grantedAgents` ("Readable by"), both computed from one roster walk on the
  * host.
  *
@@ -1386,16 +1386,6 @@ export interface CapabilityStatusDto {
    * provider without finishing it is still on `managed`.
    */
   searchProvider?: string;
-  /**
-   * Bound repositories (issue #245, agent half): whether the company
-   * **explicitly** grants the `repo` namespace (a `*` wildcard does not count).
-   *
-   * The grant is only half the setup — the other half is whether anything is
-   * bound — so the repositories card reads this alongside the bindings list and
-   * names whichever half is missing. `undefined` is an older host that does not
-   * send the field, and must not be rendered as "not granted".
-   */
-  repoGranted?: boolean;
   /**
    * Publishing (issue #244, panel half #1192): whether the company's grants
    * confer `publish_artifact` — the only way a file an agent wrote becomes a
