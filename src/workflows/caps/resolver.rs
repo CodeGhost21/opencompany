@@ -1117,8 +1117,11 @@ to = "fetch"
             "supervised",
             crate::runtime::grants::GrantSet::default(),
         );
-        resolver.resolve("a").await.expect("a resolves");
+        // Populate the registry in the same order the nested engine calls do:
+        // resolving `b` while running `a`, then resolving `a` while running the
+        // top-level parent. `resolve("a")` alone does not resolve its child.
         resolver.resolve("b").await.expect("b resolves");
+        resolver.resolve("a").await.expect("a resolves");
 
         // The top-level parent runs `a` from a node named `sub`, so the gate
         // the grandchild paused on reads `sub::nested::work`.
