@@ -90,6 +90,9 @@ const SURFACES = [
  */
 const VOLATILE = ["[data-visual-volatile]"];
 
+/** The single content sheet every surface paints inside (`content-surface.tsx`). */
+const CONTENT_SURFACE = '[data-testid="content-surface"]';
+
 /**
  * Selectors for the loading placeholders a surface mounts before its own read
  * answers. The views share no single loaded marker, so the inverse is the
