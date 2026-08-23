@@ -343,10 +343,13 @@ struct MemoryStats {
     /// — for any company whose operator had not hand-authored a fact, however
     /// much memory the agents had accumulated.
     last_updated_at_millis: u64,
-    /// Total agent-accessible context chunks — learned context, task outcomes,
-    /// and the operator-fact mirrors together.
-    agent_chunks: usize,
-    /// Of those chunks, how many are stored task outcomes.
+    /// Operator facts plus the non-mirrored context chunks displayed by the
+    /// Brain. This stays authoritative even when the list caps context rows.
+    total_items: usize,
+    /// Context chunks written by teammates, excluding task outcomes and the
+    /// mirrors of operator-authored facts.
+    teammate_memory: usize,
+    /// Stored task outcomes, excluding operator-fact mirrors.
     task_outcomes: usize,
 }
 
@@ -469,24 +472,31 @@ async fn memory_stats(company: ScopedCompany) -> Result<Json<MemoryStats>, ApiEr
         .await?;
     // `list` is newest-first, so the head carries the freshest timestamp.
     let facts_updated_at_millis = facts.first().map(|f| f.updated_at_millis).unwrap_or(0);
-    // Prefix `""` lists every chunk; the task-outcome prefix narrows to stored
-    // outcomes (a subset of the total).
+    // Count the same disjoint context populations as `context_entries` without
+    // its display cap: operator-fact mirrors duplicate FactStore rows and must
+    // not inflate teammate memory, while task outcomes get their own bucket.
     let chunks = company.runtime.context.list(company.id(), "").await?;
-    let agent_chunks = chunks.len();
     // Chunks list in insertion order, not freshness order, and a backend that
     // predates the stamp reports `0` — so take the max rather than the head.
     let chunks_stored_at_millis = chunks.iter().map(|m| m.stored_at_millis).max().unwrap_or(0);
-    let task_outcomes = company
-        .runtime
-        .context
-        .list(company.id(), OUTCOME_LABEL_PREFIX)
-        .await?
-        .len();
+    let mirror_prefix = format!("{OPERATOR_FACT_PREFIX}/");
+    let outcome_prefix = format!("{OUTCOME_LABEL_PREFIX}/");
+    let (teammate_memory, task_outcomes) = chunks
+        .iter()
+        .filter(|chunk| !chunk.label.starts_with(&mirror_prefix))
+        .fold((0, 0), |(teammate_memory, task_outcomes), chunk| {
+            if chunk.label.starts_with(&outcome_prefix) {
+                (teammate_memory, task_outcomes + 1)
+            } else {
+                (teammate_memory + 1, task_outcomes)
+            }
+        });
     Ok(Json(MemoryStats {
         facts: facts.len(),
         facts_updated_at_millis,
         last_updated_at_millis: facts_updated_at_millis.max(chunks_stored_at_millis),
-        agent_chunks,
+        total_items: facts.len() + teammate_memory + task_outcomes,
+        teammate_memory,
         task_outcomes,
     }))
 }

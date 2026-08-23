@@ -303,7 +303,14 @@ export function MemoryView({ client, company }: Props) {
           </Alert>
         )}
 
-        <HealthStrip loading={loading} stats={stats} total={entries.length} perType={perType} />
+        <HealthStrip loading={loading} stats={stats} perType={perType} />
+        {stats && stats.teammateMemory + stats.taskOutcomes > entries.filter((e) => e.origin !== "fact").length && (
+          <Alert>
+            <AlertDescription>
+              Showing the newest {entries.filter((e) => e.origin !== "fact").length} of {stats.teammateMemory + stats.taskOutcomes} teammate memory and task outcome items.
+            </AlertDescription>
+          </Alert>
+        )}
 
         <div className="flex flex-wrap items-center gap-2">
           <div className="relative flex-1 sm:max-w-xs">
@@ -354,23 +361,19 @@ export function MemoryView({ client, company }: Props) {
 function HealthStrip({
   loading,
   stats,
-  total,
   perType,
 }: {
   loading: boolean;
   stats: MemoryStats | null;
-  total: number;
   perType: Record<string, number>;
 }) {
   if (loading && !stats) {
     return <Skeleton className="h-16 rounded-xl" />;
   }
   const tiles: { label: string; value: string }[] = [
-    { label: "Total items", value: String(total) },
-    // `agentChunks` minus the outcomes carved out of it — the two tiles are
-    // peers on screen, so they must be disjoint in fact. See
-    // `teammateMemoryCount` (issue #1402).
-    { label: "Teammate memory", value: String(teammateMemoryCount(stats)) },
+    { label: "Total items", value: String(stats?.totalItems ?? 0) },
+    { label: "Operator facts", value: String(stats?.facts ?? 0) },
+    { label: "Teammate memory", value: String(stats?.teammateMemory ?? 0) },
     { label: "Task outcomes", value: String(stats?.taskOutcomes ?? 0) },
     // Across every memory source, not just operator facts — teammates write only
     // context chunks, so a facts-only figure left this stat at "—" forever.
@@ -574,6 +577,3 @@ function AddMemoryDialog({
  * Clamped because the two figures are two reads of a live store and can cross
  * under a concurrent write; a negative tile is a worse lie than a stale one.
  */
-export function teammateMemoryCount(stats: MemoryStats | null): number {
-  return Math.max(0, (stats?.agentChunks ?? 0) - (stats?.taskOutcomes ?? 0));
-}

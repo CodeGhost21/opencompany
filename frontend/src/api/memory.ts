@@ -67,9 +67,11 @@ export interface MemoryStats {
    * for any company whose operator has not hand-authored a fact.
    */
   lastUpdatedAtMillis: number;
-  /** Total agent-accessible context chunks (learned context + outcomes + mirrors). */
-  agentChunks: number;
-  /** Of those, how many are stored task outcomes. */
+  /** All displayable memory: facts plus non-mirrored context chunks. */
+  totalItems: number;
+  /** Context written by teammates, excluding outcomes and operator-fact mirrors. */
+  teammateMemory: number;
+  /** Stored task outcomes, disjoint from teammate memory. */
   taskOutcomes: number;
 }
 
