@@ -934,13 +934,14 @@ async fn memory_list_filters_stats_and_dual_write() {
     assert_eq!(hit.len(), 1);
     assert_eq!(hit[0]["id"], "f-new");
 
-    // Stats over the seeded facts: 3 facts, freshest timestamp, no agent chunks
-    // yet (seeding bypassed the mirror), 0 task outcomes.
+    // Stats over the seeded facts: 3 display items, freshest timestamp, no
+    // teammate memory yet (seeding bypassed the mirror), and 0 task outcomes.
     let (status, stats) = send(&state, "GET", "/api/v1/company/memory/stats", None).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(stats["facts"], 3);
     assert_eq!(stats["factsUpdatedAtMillis"], 3_000);
-    assert_eq!(stats["agentChunks"], 0);
+    assert_eq!(stats["totalItems"], 3);
+    assert_eq!(stats["teammateMemory"], 0);
     assert_eq!(stats["taskOutcomes"], 0);
     // Nothing but facts so far, so "Last updated" tracks the newest fact.
     assert_eq!(stats["lastUpdatedAtMillis"], 3_000);
@@ -966,11 +967,13 @@ async fn memory_list_filters_stats_and_dual_write() {
         "an operator fact must be mirrored into the ContextStore for agent recall"
     );
 
-    // Stats now count that mirror as an agent chunk (not a task outcome).
+    // The mirror stays agent-recallable but is not a display item of teammate
+    // memory — the fact is the one row the operator sees.
     let (status, stats) = send(&state, "GET", "/api/v1/company/memory/stats", None).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(stats["facts"], 4);
-    assert_eq!(stats["agentChunks"], 1);
+    assert_eq!(stats["totalItems"], 4);
+    assert_eq!(stats["teammateMemory"], 0);
     assert_eq!(stats["taskOutcomes"], 0);
 }
 
@@ -993,7 +996,8 @@ async fn memory_stats_last_updated_covers_agent_written_context() {
     let (status, stats) = send(&state, "GET", "/api/v1/company/memory/stats", None).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(stats["facts"], 0);
-    assert_eq!(stats["agentChunks"], 0);
+    assert_eq!(stats["totalItems"], 0);
+    assert_eq!(stats["teammateMemory"], 0);
     assert_eq!(
         stats["lastUpdatedAtMillis"], 0,
         "no memory of any kind yet, so the stat has nothing to report"
@@ -1022,7 +1026,8 @@ async fn memory_stats_last_updated_covers_agent_written_context() {
     let (status, stats) = send(&state, "GET", "/api/v1/company/memory/stats", None).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(stats["facts"], 0, "still no operator facts");
-    assert_eq!(stats["agentChunks"], 2);
+    assert_eq!(stats["totalItems"], 2);
+    assert_eq!(stats["teammateMemory"], 1);
     assert_eq!(stats["taskOutcomes"], 1);
     assert_eq!(
         stats["factsUpdatedAtMillis"], 0,
@@ -1057,6 +1062,7 @@ async fn memory_stats_last_updated_covers_agent_written_context() {
         last_updated + 60_000,
         "the stat is the max across every memory source, whichever is freshest"
     );
+    assert_eq!(stats["totalItems"], 3);
 
     // The list surfaces the same stamps per row, so a context card no longer
     // renders "—" while the header claims recent activity.
