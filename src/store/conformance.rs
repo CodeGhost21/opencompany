@@ -1367,6 +1367,13 @@ pub async fn assert_user_store(users: Arc<dyn UserStore>) {
     let list = users.list_users(&alpha).await.unwrap();
     assert_eq!(list.len(), 2);
     assert_eq!(list[0].id, "u2");
+    // The whole record round-trips, not only the columns each backend happened
+    // to think of: a dropped display name or avatar silently reverts a person
+    // to the console's derived name and hashed face.
+    assert_eq!(
+        users.get_user(&alpha, "u1").await.unwrap().as_ref(),
+        Some(&user("u1", "ada@example.com", 1))
+    );
     assert_eq!(users.list_users(&beta).await.unwrap().len(), 1);
 
     // A user of one company is invisible to another, by id and by email.
