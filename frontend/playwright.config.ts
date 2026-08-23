@@ -1,4 +1,5 @@
 import { defineConfig } from "@playwright/test";
+import { createHash } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -119,20 +120,36 @@ const managesHost = !providedBaseURL;
 /**
  * Where a host *we* manage listens.
  *
- * `PW_HOST_BIND` is already `host.sh`'s name for this, and until now the only
- * way to reach it was to stop managing the host at all: `PW_BASE_URL` moved the
- * port and switched off the `webServer` and the sign-in in the same breath.
- * That made the default port a hard constraint, and a repository whose
- * developers work in several worktrees at once has more than one suite wanting
- * it — with `reuseExistingServer` true outside CI, the second run does not fail
- * on the busy port. It silently *adopts* the other worktree's host, tests code
- * that is not its own, and then goes red on `ERR_CONNECTION_REFUSED` the moment
- * that run finishes and takes its host with it.
+ * The default is derived from this checkout's own path. A fixed default
+ * collides across worktrees, and it collides SILENTLY: `reuseExistingServer`
+ * below is on outside CI, so a second run does not fail with "port in use" —
+ * it adopts the host the first run started and reports on that binary, that
+ * console bundle and that data directory. Hashing the checkout path gives
+ * every worktree its own port, stable across runs (so a host you left up is
+ * still reused by the next run in the SAME worktree, which is what
+ * `reuseExistingServer` is for) and distinct from every other worktree's.
+ * `test/e2e/host.sh` derives the identical default from the same path, so
+ * running it directly agrees with running it through Playwright.
  *
- * So: name the bind and keep everything else. `PW_HOST_BIND=127.0.0.1:8123 npm
- * run e2e` is a run that cannot collide with anyone.
+ * 8100-16899 avoids 8080 itself and stays below the ephemeral range
+ * (net.ipv4.ip_local_port_range starts at 32768), so the kernel cannot hand a
+ * derived port to something else first. The width matters: this repository has
+ * ~200 worktrees, and birthday collisions over 800 ports put ~23 of them on a
+ * shared number. Over 8800 it is closer to two, and two worktrees that do
+ * collide are still only as broken as every worktree is today.
+ *
+ * `PW_HOST_BIND` names the bind explicitly when the derived default is not the
+ * one you want — `PW_HOST_BIND=127.0.0.1:8123 npm run e2e` is a run that
+ * cannot collide with anyone. (`PW_BASE_URL` moves the port too, but by
+ * handing the host over to you entirely.)
  */
-const managedBind = process.env.PW_HOST_BIND || "127.0.0.1:8080";
+const repoRoot = resolve(here, "..");
+const derivedPort =
+  8100 +
+  (parseInt(createHash("sha256").update(repoRoot).digest("hex").slice(0, 8), 16) %
+    8800);
+
+const managedBind = process.env.PW_HOST_BIND || `127.0.0.1:${derivedPort}`;
 
 const baseURL = providedBaseURL || `http://${managedBind}`;
 
