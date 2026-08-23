@@ -425,4 +425,30 @@ mod test {
         assert_eq!(decode_jpegphoto("JPEGPhoto: 4141"), None);
         assert_eq!(decode_jpegphoto("JPEGPhoto:"), None);
     }
+
+    /// `whoami /user` is localized and its column layout varies; the SID is
+    /// found by shape — a `S-1-5-21-…` digit token — never by column or
+    /// position. This is the parse behind scoping the Windows picture lookup
+    /// to the current account rather than every SID on the machine.
+    #[test]
+    fn whoami_user_sid_is_found_by_shape() {
+        assert_eq!(
+            parse_whoami_user(
+                "USER INFORMATION\n\
+                 ----------------\n\
+                 \n\
+                 User Name        SID\n\
+                 ================ =================================\n\
+                 workstation\\alice S-1-5-21-1004336348-1177238915-682003330-1001\n",
+            ),
+            Some("S-1-5-21-1004336348-1177238915-682003330-1001".to_string())
+        );
+        // Nothing SID-shaped means no suggestion — the correct answer when the
+        // account cannot be identified.
+        assert_eq!(parse_whoami_user("workstation\\alice"), None);
+        assert_eq!(parse_whoami_user(""), None);
+        // `S-` alone, or `S-123` with no second dash, is not a SID.
+        assert_eq!(parse_whoami_user("S-"), None);
+        assert_eq!(parse_whoami_user("S-123"), None);
+    }
 }
