@@ -119,12 +119,13 @@ export function PagesView({ client, company }: Props) {
     ]);
   }, []);
 
-  // Changing the selected page creates a new iframe document. Its first load
-  // is eligible for a capability; any later load in that browsing context is
-  // a navigation and remains revoked.
+  // Changing the selected page — or switching to a different company, which
+  // serves a different document at the same slug — creates a new iframe
+  // document. Its first load is eligible for a capability; any later load in
+  // that browsing context is a navigation and remains revoked.
   useEffect(() => {
     loadsRef.current = 0;
-  }, [active?.slug]);
+  }, [active?.slug, company]);
 
   const loadRun = useRef(0);
   const loadPages = useCallback(async () => {
