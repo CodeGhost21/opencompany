@@ -252,7 +252,10 @@ mod test {
         // on every surface that draws a face, not just the one that set it.
         let err = parse("tiny:puce").unwrap_err().to_string();
         assert!(err.contains("puce"), "{err}");
-        assert!(err.contains("amber"), "the refusal must list what to pick: {err}");
+        assert!(
+            err.contains("amber"),
+            "the refusal must list what to pick: {err}"
+        );
     }
 
     #[test]
@@ -303,7 +306,10 @@ mod test {
         assert_eq!(sniff_image(b"\xff\xd8\xff\xe0rest"), Some("image/jpeg"));
         assert_eq!(sniff_image(b"GIF89a...."), Some("image/gif"));
         assert_eq!(sniff_image(b"GIF87a...."), Some("image/gif"));
-        assert_eq!(sniff_image(b"RIFF\x20\x00\x00\x00WEBPVP8 "), Some("image/webp"));
+        assert_eq!(
+            sniff_image(b"RIFF\x20\x00\x00\x00WEBPVP8 "),
+            Some("image/webp")
+        );
     }
 
     /// The point of sniffing rather than trusting the declared type: each of
@@ -320,7 +326,12 @@ mod test {
             &b""[..],
             &b"RIFF"[..],
         ] {
-            assert_eq!(sniff_image(bytes), None, "{:?}", &bytes[..bytes.len().min(16)]);
+            assert_eq!(
+                sniff_image(bytes),
+                None,
+                "{:?}",
+                &bytes[..bytes.len().min(16)]
+            );
         }
     }
 
@@ -328,7 +339,13 @@ mod test {
     /// less); SVG is refused deliberately (a document that can carry script).
     #[test]
     fn image_types() {
-        for ok in ["image/png", "image/jpeg", "image/webp", "image/gif", "IMAGE/GIF"] {
+        for ok in [
+            "image/png",
+            "image/jpeg",
+            "image/webp",
+            "image/gif",
+            "IMAGE/GIF",
+        ] {
             assert!(is_supported_image(ok), "{ok}");
         }
         for no in ["image/svg+xml", "text/html", "application/pdf", ""] {

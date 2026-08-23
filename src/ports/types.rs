@@ -6504,7 +6504,10 @@ mod test {
             avatar: Some("blob:01J8Z5Q9YQ".into()),
             ..Default::default()
         });
-        assert_eq!(record.effective_avatar("alex"), Some("blob:01J8Z5Q9YQ".into()));
+        assert_eq!(
+            record.effective_avatar("alex"),
+            Some("blob:01J8Z5Q9YQ".into())
+        );
     }
 
     /// Resetting a face says nothing about the persona. The two clear paths

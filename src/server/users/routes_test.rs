@@ -2029,7 +2029,11 @@ fn patch_with_cookie(uri: &str, body: serde_json::Value, cookie: &str) -> Reques
         .unwrap()
 }
 
-async fn patch_me(state: &AppState, cookie: &str, body: serde_json::Value) -> (StatusCode, serde_json::Value) {
+async fn patch_me(
+    state: &AppState,
+    cookie: &str,
+    body: serde_json::Value,
+) -> (StatusCode, serde_json::Value) {
     let response = router(state.clone())
         .oneshot(patch_with_cookie(
             "/api/v1/companies/acme/auth/me",

@@ -1155,13 +1155,9 @@ async fn edit_me(
             .filter(|value| !value.is_empty())
         {
             Some(value) => Some(
-                crate::company::avatar::resolve(
-                    runtime.workspace().as_ref(),
-                    runtime.id(),
-                    &value,
-                )
-                .await
-                .map_err(|e| ApiError(e).into_response())?,
+                crate::company::avatar::resolve(runtime.workspace().as_ref(), runtime.id(), &value)
+                    .await
+                    .map_err(|e| ApiError(e).into_response())?,
             ),
             None => None,
         };

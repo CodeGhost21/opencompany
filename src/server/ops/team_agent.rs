@@ -126,8 +126,7 @@ const EDITABLE_FIELDS: [&str; 6] = [
 /// gives: a console renders a field read-only exactly when the host says it is,
 /// so offering `tools` to a member who would meet a `403` on save is precisely
 /// the drift `editable` exists to remove.
-const EDITABLE_FIELDS_MEMBER: [&str; 5] =
-    ["name", "role", "description", "instructions", "avatar"];
+const EDITABLE_FIELDS_MEMBER: [&str; 5] = ["name", "role", "description", "instructions", "avatar"];
 
 /// One agent, in full — everything #264 lists as unreachable.
 #[derive(Debug, Serialize)]
@@ -1907,7 +1906,10 @@ prompt = "Lead decisively."
             uploaded["mime"], "image/gif",
             "sniffed from the bytes, not taken from the part's `image/png`: {uploaded}"
         );
-        let reference = uploaded["avatar"].as_str().expect("a reference").to_string();
+        let reference = uploaded["avatar"]
+            .as_str()
+            .expect("a reference")
+            .to_string();
         assert!(reference.starts_with("blob:"), "{reference}");
 
         let (status, worn) = patch_agent(&state, "ceo", json!({"avatar": reference})).await;
@@ -2047,7 +2049,14 @@ prompt = "Lead decisively."
         let (_, agent) = get_agent(&state, &jamie).await;
         assert_eq!(
             strings(&agent["editable"]),
-            vec!["name", "role", "description", "tools", "instructions", "avatar"],
+            vec![
+                "name",
+                "role",
+                "description",
+                "tools",
+                "instructions",
+                "avatar"
+            ],
             "{agent}"
         );
     }
@@ -2268,7 +2277,14 @@ prompt = "Lead decisively."
         let (_, as_admin) = get_agent(&state, &jamie).await;
         assert_eq!(
             strings(&as_admin["editable"]),
-            vec!["name", "role", "description", "tools", "instructions", "avatar"],
+            vec![
+                "name",
+                "role",
+                "description",
+                "tools",
+                "instructions",
+                "avatar"
+            ],
             "{as_admin}"
         );
 
