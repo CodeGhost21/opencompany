@@ -395,20 +395,26 @@ export function decisionLabel(
  * just enough of the remaining arguments to tell two same-kind cards apart, or
  * `null` when the card carries no payload.
  *
- * The lead value is bare, not `label: value`: for a shell card the label is
- * "command", so including it would read "command: command". The follow-ups keep
- * their labels, which is what makes them *distinguishing* — "DELETE" only means
- * the method next to its `method` key, and two shell cards sharing a command
- * still differ by `cwd`. The count is bounded so a large payload cannot turn
- * the button's accessible name into a wall of text. When the bound drops a
- * line, the dropped line's own start rides along as the discriminator — it is
- * the argument that usually *is* the difference (two `http_request`s sharing
- * url, method and headers differ in the body), and it is the same content the
- * card body shows, so the button names what the operator can see. The composed
- * lead is additionally clipped to {@link MAX_LEAD_CHARS}: the host bounds each
- * value at 2,000 characters, so without the clip a single long command would
- * still stretch the label into a wall of text. Values are already redacted and
- * bounded host-side (`src/runtime/approval_display.rs`).
+ * The lead value is bare, not `label: value`, when the first label is the
+ * kind's predictable one: for a shell card the label is always "command", so
+ * including it would read "command: command". When the first label is NOT
+ * predictable — an unmapped tool's arbitrary argument names — it is the very
+ * thing that can tell two cards apart (`{path: "/tmp/a"}` and
+ * `{destination: "/tmp/a"}` would otherwise collide), so it rides along. The
+ * follow-ups keep their labels, which is what makes them *distinguishing* —
+ * "DELETE" only means the method next to its `method` key, and two shell cards
+ * sharing a command still differ by `cwd`. The count is bounded so a large
+ * payload cannot turn the button's accessible name into a wall of text. When
+ * the bound drops a line, the dropped line's own start rides along as the
+ * discriminator — it is the argument that usually *is* the difference (two
+ * `http_request`s sharing url, method and headers differ in the body), and it
+ * is the same content the card body shows, so the button names what the
+ * operator can see. That first dropped line is placed LAST, so the clip below
+ * — which keeps the composed lead's start and end — never cuts it away. The
+ * composed lead is additionally clipped to {@link MAX_LEAD_CHARS}: the host
+ * bounds each value at 2,000 characters, so without the clip a single long
+ * command would still stretch the label into a wall of text. Values are
+ * already redacted and bounded host-side (`src/runtime/approval_display.rs`).
  */
 function payloadLead(a: ApprovalSummary): string | null {
   // Withheld contents have nothing to lead with, but the button still has to
@@ -423,7 +429,13 @@ function payloadLead(a: ApprovalSummary): string | null {
   if (!first) return null;
   const rest = lines.slice(1, 1 + MAX_LEAD_LINES);
   const dropped = lines.length - rest.length - 1;
-  const parts = [first.value, ...rest.map((line) => `${line.label}: ${line.value}`)];
+  // Bare when the first label is the kind's predictable one (the constant
+  // "command:" prefix on every shell card is noise); labelled when it is not,
+  // because an unmapped tool's argument names vary and the name is then the
+  // distinguishing bit. See the doc comment above for both halves.
+  const firstLead =
+    first.label === PAYLOAD_KEY_ORDER[a.kind]?.[0] ? first.value : `${first.label}: ${first.value}`;
+  const parts = [firstLead, ...rest.map((line) => `${line.label}: ${line.value}`)];
   // A payload with more lines than the label carries can still collide: two
   // `http_request`s sharing url, method and headers differ only in the body,
   // which is exactly what the cap omits. The dropped lines' own starts are the
@@ -433,12 +445,16 @@ function payloadLead(a: ApprovalSummary): string | null {
   //
   // Every omitted entry rides along, not just the first: two cards can share
   // the first dropped line and still differ in a later one (arbitrary tool
-  // arguments have no fixed length), and `clipMiddle` below keeps the composed
-  // lead's start and end, so the last omitted entry survives the bound too.
+  // arguments have no fixed length). The first dropped line goes LAST of the
+  // omitted set — it is the argument that usually *is* the difference — so
+  // `clipMiddle` below, which keeps the composed lead's end, always retains
+  // it; the later entries sit before it for context and are only clipped when
+  // the label is genuinely long.
   if (dropped > 0) {
-    parts.push(
-      ...lines.slice(1 + MAX_LEAD_LINES).map((line) => `${line.label}: ${line.value}`),
-    );
+    const omitted = lines.slice(1 + MAX_LEAD_LINES);
+    parts.push(...omitted.slice(1).map((line) => `${line.label}: ${line.value}`));
+    const lead = omitted[0];
+    parts.push(`${lead.label}: ${lead.value}`);
   }
   return clipMiddle(parts.join(" — "), MAX_LEAD_CHARS);
 }
