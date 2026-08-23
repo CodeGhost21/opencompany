@@ -22,7 +22,7 @@ human_role = "Creative direction sign-off"
 #
 # Search spend is bounded by `[tools].search_daily_calls` (200/day by default);
 # setting it to `0` pauses search without editing this list.
-allow = ["*", "media", "composio", "search"]
+allow = ["*", "workspace.*", "media", "composio", "search", "mcp:*"]
 
 # The creative-direction desk brings research, brand, and product-design decisions to one review.
 [[group_chat]]
