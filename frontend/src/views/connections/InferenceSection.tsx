@@ -454,8 +454,10 @@ export function InferenceSection({
                   </Button>
                 </div>
                 <p className="text-xs text-muted-foreground">
-                  Test sends one real message to this provider using its stored key. Your provider may
-                  charge for it; it does not change the saved configuration.
+                  Test sends one real message to this provider using its stored key, and your provider
+                  may charge for it; it does not change the saved configuration. A company with no
+                  custom inference configured stays on the managed brain, and Test just reports that
+                  instead of sending anything.
                 </p>
                 <p className="truncate text-xs text-muted-foreground">{status.baseUrl}</p>
                 {/* Issue #174: config resolving to a provider does not mean the
