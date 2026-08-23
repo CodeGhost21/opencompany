@@ -248,6 +248,9 @@ export function KnowledgeGraph({
   const [coreExpanded, setCoreExpanded] = useState(false);
   const [selectedMemoryId, setSelectedMemoryId] = useState<string | null>(null);
   const [memHoverId, setMemHoverId] = useState<string | null>(null);
+  // The graph is one tab stop. Arrow keys move its roving focus between
+  // visible nodes, rather than making a large company a wall of tab stops.
+  const [activeNodeId, setActiveNodeId] = useState<string | null>(() => graph.nodes[0]?.id ?? null);
   // type-to-find over the open vault; hits highlight in the overlay layer
   const [memQuery, setMemQuery] = useState('');
   const memSearchRef = useRef<HTMLInputElement | null>(null);
@@ -260,6 +263,15 @@ export function KnowledgeGraph({
   const nodesRef = useRef<SimNode[]>([]);
   const linksRef = useRef<SimLink[]>([]);
   const svgRef = useRef<SVGSVGElement | null>(null);
+  const nodeRefs = useRef(new Map<string, SVGGElement>());
+  // The memory field is memoized so hover/selection never rebuilds it, but the
+  // roving-focus handlers are recreated every render. The notes read them
+  // through this ref: a note's handlers fire at event time, never at render
+  // time, so the memo can stay blind to them being re-created.
+  const memoryKeyNavRef = useRef<{ move: (direction: number) => void; select: (id: string) => void }>({
+    move: () => {},
+    select: () => {},
+  });
   const dragRef = useRef<{ id: string; moved: boolean; startX: number; startY: number } | null>(null);
   const suppressClickRef = useRef(false);
   // Drag-to-pan. `panRef` is an offset in viewBox units added to whatever the
@@ -1252,11 +1264,40 @@ export function KnowledgeGraph({
               return (
                 <g
                   key={m.id}
-                  className={coreExpanded && !restIds.has(m.id) ? 'kg-mem-in' : undefined}
+                  ref={(el) => {
+                    // namespaced so a note id can never collide with an org node id
+                    const key = `memory:${m.id}`;
+                    if (el) nodeRefs.current.set(key, el);
+                    else nodeRefs.current.delete(key);
+                  }}
+                  // Collapsed, the notes are backdrop for the core's single
+                  // click target; only the opened vault exposes them as buttons.
+                  role={coreExpanded ? 'button' : undefined}
+                  aria-label={
+                    coreExpanded ? `Memory note: ${m.label}. Press Enter or Space to open.` : undefined
+                  }
+                  tabIndex={coreExpanded && activeNodeId === `memory:${m.id}` ? 0 : -1}
+                  className={coreExpanded && !restIds.has(m.id) ? 'kg-mem-node kg-mem-in' : 'kg-mem-node'}
                   transform={`translate(${p.x},${p.y})`}
                   style={{ pointerEvents: coreExpanded ? 'auto' : 'none', cursor: 'pointer' }}
                   onMouseEnter={() => setMemHoverId(m.id)}
                   onMouseLeave={() => setMemHoverId((h) => (h === m.id ? null : h))}
+                  onFocus={() => setActiveNodeId(`memory:${m.id}`)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'ArrowRight' || e.key === 'ArrowDown') {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      memoryKeyNavRef.current.move(1);
+                    } else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      memoryKeyNavRef.current.move(-1);
+                    } else if (e.key === 'Enter' || e.key === ' ') {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      memoryKeyNavRef.current.select(m.id);
+                    }
+                  }}
                   // keep the core's drag machinery (and its pointer capture,
                   // which would retarget the click) out of note interactions
                   onPointerDown={(e) => e.stopPropagation()}
@@ -1325,7 +1366,7 @@ export function KnowledgeGraph({
       </g>
     );
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [memoryOn, memory, memLayout, memById, coreExpanded, coreScale]);
+  }, [memoryOn, memory, memLayout, memById, coreExpanded, coreScale, activeNodeId]);
 
   // Static backdrop chrome — depends only on constants, so memoize it once and
   // let React skip reconciling it on every (now frame-throttled) sim tick.
@@ -1894,6 +1935,75 @@ export function KnowledgeGraph({
   // from under a neighbour's icon, so it hands back the `dy` to draw it at
   const labelPlan = planLabels(labelCandidates, { x: camRectRef.current.x, y: camRectRef.current.y, w: camK * W }, W, labelIcons);
 
+  // A roving tab stop keeps the graph reachable without inserting every node
+  // between the console's ordinary controls. Nodes hidden behind the focused
+  // tree are excluded, because focus must never move somewhere a reader cannot
+  // see or operate.
+  const simNavigable = nodes.filter((n) => !visuals.get(n.id)?.hidden);
+  // With the Notes core open, its notes are visible click targets — keyboard
+  // users get the same set. They are namespaced so a note id can never collide
+  // with an org node id in the roving state or the ref map.
+  const memoryNavigable =
+    coreExpanded && memoryOn ? memory!.nodes.map((m) => ({ id: `memory:${m.id}` })) : [];
+  const selfNode = simNavigable.find((n) => n.id === SELF_ID);
+  // The memory notes belong to the core they sit inside, so the roving order
+  // walks self → its notes → the departments, rather than making a keyboard
+  // user pass every department to reach the vault they just opened.
+  const navigableNodes = [
+    ...(selfNode ? [selfNode] : []),
+    ...memoryNavigable,
+    ...simNavigable.filter((n) => n !== selfNode),
+  ];
+  useEffect(() => {
+    if (navigableNodes.some((n) => n.id === activeNodeId)) return;
+    const next = navigableNodes[0]?.id ?? null;
+    setActiveNodeId(next);
+    // The roving focus parked on a node that just left the set (Escape
+    // collapsed the vault and unmounted its note, or a tree closed under
+    // it): the browser strands focus on <body> the moment a focused element
+    // unmounts, so hand it to the fallback node or arrow keys stop reaching
+    // the graph's handler.
+    if (activeNodeId) {
+      const prev = nodeRefs.current.get(activeNodeId) ?? null;
+      const stranded =
+        document.activeElement === document.body ||
+        (prev !== null && prev.contains(document.activeElement));
+      if (stranded) nodeRefs.current.get(next ?? '')?.focus();
+    }
+  }, [activeNodeId, navigableNodes]);
+  const moveActiveNode = (direction: number) => {
+    if (navigableNodes.length === 0) return;
+    const current = navigableNodes.findIndex((n) => n.id === activeNodeId);
+    const next = navigableNodes[(current + direction + navigableNodes.length) % navigableNodes.length];
+    setActiveNodeId(next.id);
+    nodeRefs.current.get(next.id)?.focus();
+  };
+  const onNodeKeyDown = (e: React.KeyboardEvent<SVGGElement>, n: KGNode) => {
+    if (e.key === 'ArrowRight' || e.key === 'ArrowDown') {
+      e.preventDefault();
+      e.stopPropagation();
+      moveActiveNode(1);
+    } else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      e.stopPropagation();
+      moveActiveNode(-1);
+    } else if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      e.stopPropagation();
+      onNodeClick(n);
+    }
+  };
+  const nodeAriaLabel = (n: KGNode) => `${CAT[n.kind].label}: ${n.label}. Press Enter or Space to select.`;
+  // The memory notes (memoized, rendered earlier) read these through their ref
+  // so the roving logic here can stay exactly where the sim nodes use it.
+  memoryKeyNavRef.current = {
+    move: moveActiveNode,
+    select: (id: string) => {
+      clearDetail();
+      setSelectedMemoryId((s) => (s === id ? null : id));
+    },
+  };
+
   // ── the graph itself (reused inline + fullscreen) ───────────────────────────
   const graphInner = (
     <>
@@ -1902,8 +2012,8 @@ export function KnowledgeGraph({
         ref={svgRef}
         viewBox={`0 0 ${W} ${H}`}
         className="h-full w-full cursor-grab touch-none active:cursor-grabbing"
-        role="img"
-        aria-label="Operating knowledge graph"
+        role="application"
+        aria-label="Operating knowledge graph. Use arrow keys to move between nodes, then Enter or Space to select one."
         onPointerDown={onCanvasPointerDown}
         onPointerMove={onCanvasPointerMove}
         onPointerUp={onCanvasPointerUp}
@@ -2118,7 +2228,23 @@ export function KnowledgeGraph({
             return (
               <g
                 key={n.id}
-                ref={coreGRef}
+                ref={(el) => {
+                  coreGRef.current = el;
+                  if (el) nodeRefs.current.set(n.id, el);
+                  else nodeRefs.current.delete(n.id);
+                }}
+                // The open vault's notes are buttons that sit inside this <g>;
+                // a `button` role would make them presentational, so once the
+                // constellation is expanded the core becomes a labelled group
+                // and the notes carry the interactive roles.
+                role={coreExpanded ? 'group' : 'button'}
+                aria-label={
+                  coreExpanded
+                    ? `Notes: ${n.label}. ${memory?.nodes.length ?? 0} notes.`
+                    : nodeAriaLabel(n)
+                }
+                tabIndex={activeNodeId === n.id ? 0 : -1}
+                className="kg-node"
                 transform={`translate(${n.x},${n.y})`}
                 opacity={dim ? 0.15 : 1}
                 style={{ cursor: dragRef.current?.id === n.id ? 'grabbing' : 'grab', transition: 'opacity 0.25s' }}
@@ -2133,6 +2259,15 @@ export function KnowledgeGraph({
                 onPointerDown={(e) => onNodePointerDown(e, n.id)}
                 onPointerMove={(e) => onNodePointerMove(e, n.id)}
                 onPointerUp={(e) => onNodePointerUp(e, n.id)}
+                onFocus={(e) => {
+                  // The vault's notes live inside this <g>, and focus moving
+                  // onto a note bubbles its focusin up through the core — the
+                  // core must not claim a focus that landed on one of its notes
+                  // (that would kick the roving active id off the note and
+                  // strand the tab stop back on the core).
+                  if (e.target === e.currentTarget) setActiveNodeId(n.id);
+                }}
+                onKeyDown={(e) => onNodeKeyDown(e, n)}
                 onClick={(e) => {
                   e.stopPropagation();
                   if (suppressClickRef.current) {
@@ -2270,9 +2405,18 @@ export function KnowledgeGraph({
           }
 
           return (
-            <g
-              key={n.id}
-              transform={`translate(${n.x},${n.y})`}
+              <g
+                key={n.id}
+                ref={(el) => {
+                  if (el) nodeRefs.current.set(n.id, el);
+                  else nodeRefs.current.delete(n.id);
+                }}
+                role="button"
+                aria-label={nodeAriaLabel(n)}
+                aria-hidden={hidden || undefined}
+                tabIndex={activeNodeId === n.id ? 0 : -1}
+                className="kg-node"
+                transform={`translate(${n.x},${n.y})`}
               opacity={nodeOpacity}
               style={{
                 cursor: dragRef.current?.id === n.id ? 'grabbing' : 'grab',
@@ -2286,6 +2430,8 @@ export function KnowledgeGraph({
               onPointerDown={(e) => onNodePointerDown(e, n.id)}
               onPointerMove={(e) => onNodePointerMove(e, n.id)}
               onPointerUp={(e) => onNodePointerUp(e, n.id)}
+              onFocus={() => setActiveNodeId(n.id)}
+              onKeyDown={(e) => onNodeKeyDown(e, n)}
               onClick={(e) => {
                 e.stopPropagation();
                 if (suppressClickRef.current) {
@@ -2381,6 +2527,14 @@ export function KnowledgeGraph({
 .kg-fade { opacity: 0; animation: kg-fade-in 0.7s ease 0.25s forwards; }
 .kg-leaf { transform-box: fill-box; transform-origin: center; opacity: 0; animation: kg-leaf-in 0.6s ease 0.2s forwards; }
 .kg-glow { opacity: 0; animation: kg-glow-in 0.9s ease forwards; }
+/* SVG groups have no useful browser focus outline, so keep the keyboard
+   position visible on the node itself rather than around its whole subtree. */
+.kg-node:focus-visible > circle:first-of-type { stroke: var(--ring); stroke-width: 3px; }
+/* The memory-backed core draws its body as nested groups (the constellation),
+   so the direct-circle rule above reaches nothing — ring its disc instead. */
+.kg-node:focus-visible > g:first-of-type > circle:first-of-type { stroke: var(--ring); stroke-width: 3px; }
+/* Memory notes get the same ring when the keyboard reaches them. */
+.kg-mem-node:focus-visible > circle:first-of-type { stroke: var(--ring); stroke-width: 2px; }
 
 /* detail cards glide in with the camera instead of popping */
 @keyframes kg-panel-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
