@@ -14,16 +14,17 @@ async function settleKnowledgeGraph(page: Page) {
   await svg.waitFor({ state: "visible", timeout: 30_000 });
   // Record the node-count trajectory from first visibility — detects whether the
   // graph mounted empty (chunk won the load race) and grew, or mounted full
-  // (data won), which changes the sim's alpha trajectory.
+  // (data won), which changes the sim's alpha trajectory. Poll fast up front so
+  // an empty→full growth is caught, then slow for the settle.
   const trajectory: Array<{ t: number; n: number }> = [];
   let previous = "";
   const t0 = Date.now();
-  for (let attempt = 0; attempt < 24; attempt += 1) {
+  for (let attempt = 0; attempt < 40; attempt += 1) {
     const current = await svg.evaluate((el) => el.innerHTML);
     trajectory.push({ t: Date.now() - t0, n: (current.match(/<g transform=/g) || []).length });
     if (current === previous) break;
     previous = current;
-    await page.waitForTimeout(750);
+    await page.waitForTimeout(attempt < 6 ? 60 : 750);
   }
   return trajectory;
 }
