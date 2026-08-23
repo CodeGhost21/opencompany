@@ -78,11 +78,6 @@ pub mod search;
 // inference credential still gets a real team.
 pub mod setup;
 mod skill_file;
-// The company's Smithery directory credential (issue #1287): the key that
-// decides whether the MCP directory has hosted servers to show. Always compiled
-// — the console must be able to manage it in a build with no `mcp` feature, the
-// same way it manages the Composio token without the harness.
-pub mod smithery;
 // Steer (issue #111): pause / cancel / redirect an in-flight task or delegation
 // from the operator chat. Always compiled + openhuman-free so the operator
 // control plane can steer in any build and no agent tool can ever reach it.

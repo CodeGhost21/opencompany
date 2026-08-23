@@ -16,7 +16,6 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::company::mcp::{McpHealth, McpStatus, stdio_install_refusal};
-use crate::company::smithery::DirectoryKeySource;
 
 // ---------------------------------------------------------------------------
 // Connection state → health — always compiled
@@ -128,8 +127,6 @@ pub(in crate::server::ops) struct CatalogueSearchDto {
     /// returns cannot know it. It rides on the search response rather than
     /// forcing a second request because the console needs it in exactly the
     /// moment it renders zero rows, and a separate fetch would let the two
-    /// answers arrive out of order and describe different states.
-    pub(in crate::server::ops) directory_credential: DirectoryKeySource,
 }
 
 /// One directory entry in full, with the install decision already made.
@@ -200,7 +197,6 @@ pub(in crate::server::ops) fn catalogue_search(raw: &Value) -> CatalogueSearchDt
         total_pages: raw.get("total_pages").and_then(Value::as_u64).unwrap_or(0) as u32,
         // Not knowable from the payload; the route overwrites it. `None` is the
         // safe default: it never claims a credential that was not presented.
-        directory_credential: DirectoryKeySource::None,
     }
 }
 
