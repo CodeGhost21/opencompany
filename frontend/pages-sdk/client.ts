@@ -148,11 +148,20 @@ window.addEventListener("message", function onRelay(event: MessageEvent) {
       ? pressed
       : document.elementFromPoint(event.data.x, event.data.y);
     if (!(element instanceof HTMLElement || element instanceof SVGElement)) return;
+    // Focus the control the click activates, not the leaf the point landed on:
+    // `elementFromPoint` hands back the icon `<path>` or `<span>` inside a
+    // button, and `focus()` on that leaf is a no-op — the button is clicked but
+    // keyboard focus is left behind, where a later Enter/Space operates the
+    // wrong element. A native click focuses the nearest focusable ancestor, so
+    // the relay does the same.
+    const focusTarget = element.closest(
+      'button, a[href], input, select, textarea, [contenteditable="true"], [tabindex]',
+    ) as HTMLElement | SVGElement | null;
     // Dispatch the click with the relayed coordinates: a canvas, chart or
     // image-style control reads them, and a dispatched `MouseEvent` still runs
     // an element's click default actions (link navigation, form submission,
     // checkbox toggle), so ordinary controls behave as if clicked directly.
-    element.focus({ preventScroll: true });
+    (focusTarget ?? element).focus({ preventScroll: true });
     element.dispatchEvent(
       new MouseEvent("click", {
         clientX: event.data.x,
