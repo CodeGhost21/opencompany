@@ -818,7 +818,7 @@ mod test {
     /// the source env var whose advice would silently repoint the source.
     #[test]
     fn a_missing_target_url_names_the_flag_not_the_source_env() {
-        let err = resolve(&base_settings(), "mem0", None, None)
+        let err = resolve(&base_settings(), "mem0", None)
             .expect_err("hosted target without --to-url must refuse")
             .to_string();
         assert!(err.contains("--to-url"), "{err}");
