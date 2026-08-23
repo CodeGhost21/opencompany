@@ -2745,7 +2745,8 @@ impl CompanyRuntime {
                 tracing::warn!(
                     company = %self.id,
                     error = %err,
-                    "[mentions] the company record could not be read; this message                      is journaled with no mentions"
+                    "[mentions] the company record could not be read; this message is \
+                     journaled with no mentions"
                 );
                 return Vec::new();
             }
@@ -2754,7 +2755,8 @@ impl CompanyRuntime {
             tracing::warn!(
                 company = %self.id,
                 error = %err,
-                "[mentions] the user directory could not be read; only teammates and                  desks are resolvable on this message"
+                "[mentions] the user directory could not be read; only teammates and \
+                 desks are resolvable on this message"
             );
             Vec::new()
         });
