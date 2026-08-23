@@ -216,24 +216,47 @@ pub async fn resolve(
     let AvatarRef::Blob(node_id) = parse(&stored)? else {
         return Ok(stored);
     };
-    let node = workspace
-        .read(company, node_id)
-        .await?
-        .map(|(node, _)| node)
-        .ok_or_else(|| {
-            OpenCompanyError::InvalidRequest(
-                "that image isn't here any more. Upload it again.".to_string(),
-            )
-        })?;
-    match node.mime.as_deref() {
-        Some(mime) if is_supported_image(mime) => Ok(stored),
-        // Deliberately the same wording as the upload's refusal: from the
-        // caller's side these are one failure — "that isn't an avatar" — and
-        // two different sentences for it would read as two different problems.
-        _ => Err(OpenCompanyError::InvalidRequest(
-            "that file isn't a PNG, JPEG, GIF or WebP image, so it can't be an avatar.".to_string(),
-        )),
+    let Some((node, stream)) = workspace.read_bytes(company, node_id).await? else {
+        return Err(OpenCompanyError::InvalidRequest(
+            "that image isn't here any more. Upload it again.".to_string(),
+        ));
+    };
+    // The store's own byte count, when it has one, refused before any of the
+    // payload is buffered. The stream below re-checks with the bytes
+    // themselves, so a store that leaves `size` unset is still bounded.
+    if let Some(size) = node.size {
+        if size > MAX_AVATAR_BYTES as u64 {
+            return Err(not_an_image());
+        }
     }
+    // The bytes themselves are the only claim worth trusting. A `blob:`
+    // reference can name any binary this host holds, and the type a generic
+    // workspace upload declared is a claim by whoever uploaded it — a member
+    // can reach the 4 MiB avatar ceiling with `image/png` on arbitrary bytes.
+    // Sniffing here closes the gap between the avatar route (which sniffs
+    // before storing) and a reference typed by hand.
+    let mut bytes: Vec<u8> = Vec::new();
+    let mut stream = stream;
+    while let Some(chunk) = stream.next().await.transpose()? {
+        if bytes.len().saturating_add(chunk.len()) > MAX_AVATAR_BYTES {
+            return Err(not_an_image());
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    match sniff_image(&bytes) {
+        Some(_) => Ok(stored),
+        None => Err(not_an_image()),
+    }
+}
+
+/// The refusal a `blob:` reference gets when its bytes are not a supported
+/// image or are over the avatar ceiling. One sentence for both: from the
+/// caller's side these are one failure — "that isn't an avatar" — and two
+/// different sentences for it would read as two different problems.
+fn not_an_image() -> OpenCompanyError {
+    OpenCompanyError::InvalidRequest(
+        "that file isn't a PNG, JPEG, GIF or WebP image, so it can't be an avatar.".to_string(),
+    )
 }
 
 #[cfg(test)]
