@@ -147,12 +147,13 @@ window.addEventListener("message", function onRelay(event: MessageEvent) {
     // A click arrives immediately after the `pointerup` of its own press and
     // before any newer press starts, which is the only correlation available
     // (the click message has no pointer id).
+    const pointerId = event.data.pointerId;
+    const lastPressEnd = pointerId === undefined ? undefined : lastPressEnds.get(pointerId);
     if (
-      lastPressEnd !== null &&
-      lastPressEnd.press === relayedPressCount &&
-      Math.hypot(event.data.x - lastPressEnd.x, event.data.y - lastPressEnd.y) <= 4 &&
-      lastPressEnd.dragged
+      lastPressEnd?.dragged &&
+      Math.hypot(event.data.x - lastPressEnd.x, event.data.y - lastPressEnd.y) <= 4
     ) {
+      lastPressEnds.delete(pointerId!);
       return;
     }
     const element = document.elementFromPoint(event.data.x, event.data.y);
