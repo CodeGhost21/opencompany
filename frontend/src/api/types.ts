@@ -801,6 +801,15 @@ export interface TeamMemberDto {
   role: string;
   description?: string;
   /**
+   * The face somebody chose for this teammate (`lib/avatar.ts`) — a
+   * `tiny:<flavour>` mascot or a `blob:<nodeId>` upload.
+   *
+   * Absent means **nobody has chosen**, which is not "no face": the console
+   * draws the mascot it hashes from the id. Never default it to a flavour — the
+   * distinction is what makes "reset to the default face" offerable.
+   */
+  avatar?: string;
+  /**
    * Whether this teammate has an enabled inbox, as the host's `InboxStore` sees
    * it. Absent on hosts predating the field; the console reads that as `false`.
    */
