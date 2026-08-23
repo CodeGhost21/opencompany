@@ -401,8 +401,13 @@ mod live_smoke {
         // This knob only exists in test builds, and leaves production's TLS
         // verification path unchanged. SMTP stays plaintext in that fixture;
         // IMAPS still performs a real TLS handshake via the test-only verifier.
+        // The fixture's plaintext SMTP listener advertises no AUTH mechanism,
+        // so the round trip is unauthenticated on that leg and authenticated on
+        // IMAP — matching how the container is provisioned above.
         if std::env::var_os("OPENCOMPANY_MAIL_TEST_INSECURE_TLS").is_some() {
             cfg.smtp.security = crate::server::ops::smtp::SmtpSecurity::None;
+            cfg.smtp.username.clear();
+            cfg.smtp.password.clear();
         }
 
         let token = format!(
