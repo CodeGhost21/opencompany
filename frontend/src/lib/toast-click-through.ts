@@ -17,6 +17,15 @@
  * its close button and any action button — are excluded by `isToastControl`,
  * so a notification can still offer a one-click recovery without eating
  * nearby page controls.
+ *
+ * A control rendered inside the console's Pages view is a different story:
+ * it lives in another *document* (a sandboxed `allow-scripts` iframe), and
+ * events dispatched here cannot cross the browsing-context boundary into it.
+ * `elementFromPoint` answers with the frame host, and clicking the host does
+ * nothing to what is mounted inside — so for a frame the gesture is handed to
+ * the frame itself over the existing postMessage bridge, and the page SDK
+ * turns it back into a click on the element beneath the point (see
+ * `pages-sdk/client.ts`).
  */
 
 /** Can this part of a toast handle its own pointer rather than passing it through? */
