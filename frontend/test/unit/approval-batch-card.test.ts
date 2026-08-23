@@ -142,8 +142,8 @@ describe("the consolidated approval card", () => {
     // a viewport breakpoint. A 12rem title plus the icon and action pair cannot
     // fit in the narrow transcript, moving the pair to its own line instead of
     // reducing the title to one word per line. The floor is capped at the
-    // card's own width (#1617 review) so a column narrower than the icon plus
-    // a 12rem title wraps rather than overflowing the card.
+    // card's own width so a column narrower than the icon plus a 12rem title
+    // wraps rather than overflowing the card.
     await render([ESPN]);
     const singleActions = container.querySelector<HTMLElement>("[data-approval-actions]");
     expect(singleActions).not.toBeNull();
