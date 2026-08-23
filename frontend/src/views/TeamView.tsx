@@ -130,6 +130,14 @@ export function TeamView({
    * every teammate is free on a host that never said so. See `lib/team-workload.ts`.
    */
   const [workload, setWorkload] = useState<Map<string, Workload> | null>(null);
+  /**
+   * A monotonic run id for the workload read. The effect below bumps it on every
+   * re-read, and `loadWorkload` only commits a result whose run is still
+   * current. Clearing `workload` alone is not enough: a superseded read still in
+   * flight can resolve *after* a newer one and repopulate the state with a map
+   * the roster no longer describes.
+   */
+  const workloadRun = useRef(0);
 
   /**
    * Hiding the budget controls from a non-admin is **courtesy, not enforcement**.
