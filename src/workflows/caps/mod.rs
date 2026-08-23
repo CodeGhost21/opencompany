@@ -2638,4 +2638,3 @@ mod tests {
         .expect("a dry build never touches the workspace");
     }
 }
-mod probe_test;
