@@ -907,6 +907,19 @@ pub fn build_agent(
         ));
     }
 
+    // The agent's own working directory, and the tools that reach it. Placed
+    // BEFORE the publish brief because that brief's first sentence ("the files
+    // you write live in your sandbox") presumes a sandbox the agent has by then
+    // been told about — and because publishing is gated on an artifact store,
+    // so a company without one used to get no mention of the sandbox at all
+    // while still holding every file tool.
+    //
+    // Each flag is the same one that wired the tools a few hundred lines up, so
+    // the brief cannot describe a namespace this agent was not granted. `shell`
+    // in particular was wired since Cell A and named in no brief anywhere: an
+    // agent asked to run something recorded a task about running it.
+    persona.push_str(&toolbelt::sandbox_brief(wants_files, wants_shell, wants_code));
+
     // Issue #244: what a deliverable is, and how to hand one over. Only when
     // the tool was actually wired above — describing a tool the agent does not
     // have is how you get a turn spent calling something that does not exist.
