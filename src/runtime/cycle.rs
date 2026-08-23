@@ -7796,6 +7796,67 @@ mod test {
         }
     }
 
+    /// Issue #1458: a standing **denial** for a workflow is refused at the
+    /// edge — the workflow gate does not enforce a `Deny` verdict
+    /// (`src/workflows/gate.rs`), so a time-bounded refusal would be a control
+    /// that never took effect. The card stays parked so the operator can still
+    /// deny it once.
+    #[tokio::test]
+    async fn a_standing_deny_on_a_workflow_gate_is_refused_and_mints_nothing() {
+        let home_dir = tmp_home();
+        let (rt, id) = park_one_blocked_tool_call(
+            home_dir.path().to_path_buf(),
+            Effect {
+                kind: crate::runtime::workflow_resume::WORKFLOW_APPROVE_KIND.to_string(),
+                group: EffectGroup::Other,
+                amount_usd: None,
+                established_thread: false,
+                first_time_counterparty: false,
+                payload: serde_json::json!({
+                    "workflow_id": "sports_digest",
+                    "node_id": "fetch_bbc",
+                    "tool": "web_fetch",
+                    "args": { "url": "https://docs.rs/x" },
+                }),
+                agent: None,
+                run_id: None,
+            },
+        )
+        .await;
+
+        let err = match rt
+            .resolve_approval_spawned(&id, Verdict::Deny, operator(), tool_scope())
+            .await
+        {
+            Ok(_) => panic!("a workflow standing denial must be refused at the edge"),
+            Err(err) => err,
+        };
+        assert!(
+            matches!(
+                err,
+                OpenCompanyError::InvalidRequest(ref msg)
+                    if msg.contains("'web_fetch' is a workflow call")
+                        && msg.contains("does not enforce a standing refusal")
+            ),
+            "{err:?}"
+        );
+
+        assert_eq!(
+            rt.pending_approvals().len(),
+            1,
+            "the card is still there to be denied once"
+        );
+        assert_eq!(rt.grants.standing_count(), 0, "no refusal is minted");
+        assert_eq!(rt.grants.live_count(), 0);
+
+        // And the operator can still deny it once — the refused request did not
+        // consume the card.
+        rt.resolve_approval(&id, Verdict::Deny, operator())
+            .await
+            .unwrap();
+        assert!(rt.pending_approvals().is_empty());
+    }
+
     /// The default scope is byte-identical to pre-#374 behaviour.
     ///
     /// The existing suite passing untouched is the real proof; this pins the
