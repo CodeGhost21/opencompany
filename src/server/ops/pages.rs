@@ -471,7 +471,12 @@ async fn page_shell(
         return Err(ApiError(OpenCompanyError::NotFound(format!("page {slug}"))));
     }
 
-    let html = page_shell_html(&slug);
+    // This route is session-authenticated — the iframe loads the shell by
+    // navigation, which does attach the cookie — but the module graph it points
+    // at does not get that cookie. Mint the capability the graph needs here,
+    // bound to this company and page, and hand it out in the module URLs.
+    let cap = mint_module_cap(company.id(), &slug);
+    let html = page_shell_html(&slug, &cap);
 
     let mut response = Response::builder()
         .status(StatusCode::OK)
