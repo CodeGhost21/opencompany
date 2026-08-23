@@ -10,6 +10,17 @@ import {
 } from "@/api/mcp-registry";
 import { ApiError } from "@/api/types";
 import { Button } from "@/components/ui/button";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from "@/components/ui/alert-dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -183,19 +194,35 @@ export function McpDirectoryCredentialCard({ client, company, onChanged }: Props
           {configured ? "Rotate key" : "Save key"}
         </Button>
         {configured && (
-          <Button
-            size="sm"
-            variant="outline"
-            disabled={busy !== null}
-            onClick={() => void write("", "clear")}
-          >
-            {busy === "clear" ? (
-              <Loader2 className="size-4 animate-spin" />
-            ) : (
-              <Trash2 className="size-4" />
-            )}
-            Clear
-          </Button>
+          <AlertDialog>
+            <AlertDialogTrigger
+              render={
+                <Button size="sm" variant="outline" disabled={busy !== null}>
+                  {busy === "clear" ? (
+                    <Loader2 className="size-4 animate-spin" />
+                  ) : (
+                    <Trash2 className="size-4" />
+                  )}
+                  Clear key
+                </Button>
+              }
+            />
+            <AlertDialogContent>
+              <AlertDialogHeader>
+                <AlertDialogTitle>Clear this company&apos;s Smithery key?</AlertDialogTitle>
+                <AlertDialogDescription>
+                  This removes the write-only key. It cannot be shown or recovered; paste it again
+                  to restore this company&apos;s directory access.
+                </AlertDialogDescription>
+              </AlertDialogHeader>
+              <AlertDialogFooter>
+                <AlertDialogCancel>Cancel</AlertDialogCancel>
+                <AlertDialogAction variant="destructive" onClick={() => void write("", "clear")}>
+                  Clear key
+                </AlertDialogAction>
+              </AlertDialogFooter>
+            </AlertDialogContent>
+          </AlertDialog>
         )}
       </div>
     </section>

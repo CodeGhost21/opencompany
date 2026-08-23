@@ -6,6 +6,17 @@ import type { OpenCompanyClient } from "@/api/client";
 import { bindRepo, listRepos, revokeRepo, type Repo } from "@/api/repos";
 import { ApiError, type RosterAgent } from "@/api/types";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -247,19 +258,42 @@ export function RepositoriesCard({ client, company, canManage }: Props) {
                     </p>
                   </div>
                   {canManage && (
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      disabled={busy !== null}
-                      onClick={() => void revoke(repo.key)}
-                      aria-label={`Unbind ${repo.owner}/${repo.repo}`}
-                    >
-                      {busy === repo.key ? (
-                        <Loader2 className="size-4 animate-spin" />
-                      ) : (
-                        <Trash2 className="size-4" />
-                      )}
-                    </Button>
+                    <AlertDialog>
+                      <AlertDialogTrigger
+                        render={
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            disabled={busy !== null}
+                            title={`Unbind ${repo.owner}/${repo.repo}. This deletes its mirror and stored credential.`}
+                          >
+                            {busy === repo.key ? (
+                              <Loader2 className="size-4 animate-spin" />
+                            ) : (
+                              <Trash2 className="size-4" />
+                            )}
+                            Unbind
+                          </Button>
+                        }
+                      />
+                      <AlertDialogContent>
+                        <AlertDialogHeader>
+                          <AlertDialogTitle>
+                            Unbind {repo.owner}/{repo.repo}?
+                          </AlertDialogTitle>
+                          <AlertDialogDescription>
+                            This permanently deletes this host&apos;s repository mirror and stored
+                            access token. Bind the repository again with a new token to restore it.
+                          </AlertDialogDescription>
+                        </AlertDialogHeader>
+                        <AlertDialogFooter>
+                          <AlertDialogCancel>Cancel</AlertDialogCancel>
+                          <AlertDialogAction variant="destructive" onClick={() => void revoke(repo.key)}>
+                            Unbind repository
+                          </AlertDialogAction>
+                        </AlertDialogFooter>
+                      </AlertDialogContent>
+                    </AlertDialog>
                   )}
                 </li>
               ))}
