@@ -2247,10 +2247,28 @@ pub(crate) async fn mutation_is_owned_by_agent(
         let Ok(segments) = split_logical_path(path.trim()) else {
             return false;
         };
-        // A creation has no existing node to inspect. Its only affirmative safe
-        // shape is a direct child of the caller's home: the tool stamps both
-        // origins with this agent and cannot overwrite another node.
-        return segments.len() == 3 && workspace.is_strictly_inside_own_home(&segments[..2]);
+        if !workspace.is_strictly_inside_own_home(&segments) {
+            return false;
+        }
+        // A direct child of the home is safe even before that home exists: the
+        // create tool mints it on demand and stamps both origins with this
+        // agent. Deeper creations need an affirmative owned parent, so an
+        // operator-created folder inside an agent's home cannot become an
+        // unreviewed landing zone merely because its path looks familiar.
+        if segments.len() == 3 {
+            return true;
+        }
+        let Ok(index) = workspace.index().await else {
+            return false;
+        };
+        let parent = segments[..segments.len() - 1].join("/");
+        let Ok(entry) = index.resolve(Some(&parent), None) else {
+            return false;
+        };
+        let own_origin = WorkspaceOrigin::Agent {
+            id: agent_id.to_string(),
+        };
+        return entry.node.created_by == own_origin && entry.node.updated_by == own_origin;
     }
 
     let path = args.get("path").and_then(Value::as_str).map(str::trim);
