@@ -111,4 +111,19 @@ describe("useApprovalThreadLinks", () => {
 
     expect(lastLinks?.get("a1")).toEqual({ channelId: "main", label: "#general" });
   });
+
+  it("does not guess desks when the desks read fails", async () => {
+    // A failed read is not an empty response: ChatView surfaces the error rather
+    // than inventing desks, and the hook's contract is that an unresolved thread
+    // must not be guessed. The `main` thread stays unlinked.
+    const client = {
+      listDesks: vi.fn(async () => {
+        throw new Error("offline");
+      }),
+      listTeam: vi.fn(async () => []),
+    } as unknown as OpenCompanyClient;
+    await render(client, [approval("a1", "main")]);
+
+    expect(lastLinks?.has("a1")).toBe(false);
+  });
 });
