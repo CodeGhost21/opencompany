@@ -61,6 +61,59 @@ afterEach(() => {
 });
 
 describe("the deadline on an approval card", () => {
+  it("links a reported desk thread back to its conversation", async () => {
+    await act(async () => {
+      root.render(
+        createElement(ApprovalMeta, {
+          approval: approval({ thread: "engineering" }),
+          now: T0,
+          askerNames: new Map(),
+          chatChannelByThread: { engineering: "engineering" },
+        }),
+      );
+    });
+
+    const link = container.querySelector<HTMLAnchorElement>('a[href="#/chat/engineering"]');
+    expect(link?.textContent).toContain("Open the conversation");
+  });
+
+  it("uses the resolved DM channel rather than the host thread id", async () => {
+    await act(async () => {
+      root.render(
+        createElement(ApprovalMeta, {
+          approval: approval({ thread: "agent-grace" }),
+          now: T0,
+          askerNames: new Map(),
+          chatChannelByThread: { "agent-grace": "dm:agent-grace" },
+        }),
+      );
+    });
+
+    const link = container.querySelector<HTMLAnchorElement>('a[href="#/chat/dm%3Aagent-grace"]');
+    expect(link?.textContent).toContain("Open the conversation");
+  });
+
+  it("links a native workflow gate to its exact run", async () => {
+    await render(
+      approval({
+        kind: "workflow.approve",
+        workflow_run_id: "run/1",
+        payload: { workflow_id: "invoice sync" },
+      }),
+      T0,
+    );
+
+    const link = container.querySelector<HTMLAnchorElement>(
+      'a[href="#/workflows/invoice%20sync?run=run%2F1"]',
+    );
+    expect(link?.textContent).toContain("Open the run");
+  });
+
+  it("says when the host did not report an addressable origin", async () => {
+    await render(approval({ agent: null }), T0);
+    expect(container.textContent).toContain("Origin unavailable");
+  });
+
   it("renders beside how long the request has already waited", async () => {
     await render(approval({ expires_at_millis: T0 + 24 * HOUR }), T0 + 2 * HOUR);
     const text = container.textContent ?? "";

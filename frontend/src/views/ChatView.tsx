@@ -1038,6 +1038,7 @@ export function ChatView({
               onAddPeople={() => setMembersOpen(true)}
               now={now}
               askerNames={askerNames}
+              chatChannelByThread={chatChannelByThread}
               decidingApprovals={decidingApprovals}
               failedApprovals={failedApprovals}
               onDecideApproval={onDecideApproval}

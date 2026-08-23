@@ -96,6 +96,8 @@ interface Props {
   sub?: string | null;
   onResolved: (systemLine: string) => void;
   onGoToConversation: () => void;
+  /** Host thread id → console channel id, owned by the shell's chat hydration. */
+  chatChannelByThread?: Readonly<Record<string, string>>;
   /**
    * Called the instant a decide click starts, before the network call
    * (issue #1211) — so the shell can mark this approval as "this tab decided
@@ -113,6 +115,7 @@ export function ApprovalsView({
   sub,
   onResolved,
   onGoToConversation,
+  chatChannelByThread,
   onDecideStart,
 }: Props) {
   // Issue #373: in-flight state is per approval, not a single module-wide slot.
@@ -378,6 +381,7 @@ export function ApprovalsView({
                   approval={a}
                   now={now}
                   askerNames={askerNames}
+                  chatChannelByThread={chatChannelByThread}
                   deciding={inFlight.get(a.id) ?? null}
                   batchIndex={batchPos.get(a.id)?.index ?? 1}
                   batchTotal={batchPos.get(a.id)?.total ?? 1}
@@ -502,12 +506,14 @@ function StandingPermissions({
   grants,
   now,
   askerNames,
+  chatChannelByThread,
   granterNames,
   onRevoke,
 }: {
   grants: StandingGrant[];
   now: number;
   askerNames: Map<string, string>;
+  chatChannelByThread?: Readonly<Record<string, string>>;
   /** Actor id → display name; empty when the roster read was not permitted. */
   granterNames: Map<string, string>;
   onRevoke: (id: string) => Promise<void>;
@@ -662,6 +668,7 @@ export function ApprovalCard({
         <ApprovalScopeControl
           approval={a}
           askerNames={askerNames}
+          chatChannelByThread={chatChannelByThread}
           scope={scope}
           onChange={setScope}
           disabled={deciding !== null}

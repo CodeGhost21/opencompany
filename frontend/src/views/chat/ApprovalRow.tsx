@@ -145,6 +145,7 @@ export function ApprovalRow({
   approvals,
   now,
   askerNames,
+  chatChannelByThread,
   deciding,
   decided,
   failed,
@@ -154,6 +155,7 @@ export function ApprovalRow({
   approvals: ApprovalSummary[];
   now: number;
   askerNames: Map<string, string>;
+  chatChannelByThread?: Readonly<Record<string, string>>;
   /** The verdict an item is waiting on, keyed by approval id; empty when idle. */
   deciding: ReadonlyMap<string, Verdict>;
   /** Verdicts already witnessed — from this console or from the page. */
@@ -306,6 +308,7 @@ export function ApprovalRow({
             approval={lead}
             now={now}
             askerNames={askerNames}
+            chatChannelByThread={chatChannelByThread}
             status={
               busy
                   ? awaiting("approve")

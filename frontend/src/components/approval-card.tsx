@@ -47,6 +47,7 @@ import {
   payloadLines,
 } from "@/lib/language";
 import { cn } from "@/lib/utils";
+import { workflowHref } from "@/lib/task-output";
 
 const KIND_ICONS: Record<string, LucideIcon> = {
   "payment.send": CreditCard,
@@ -121,15 +122,23 @@ export function ApprovalMeta({
   approval: a,
   now,
   askerNames,
+  chatChannelByThread,
   status,
 }: {
   approval: ApprovalSummary;
   now: number;
   askerNames: Map<string, string>;
+  /** Host thread id → console channel id, resolved with `channelIdForThread`. */
+  chatChannelByThread?: Readonly<Record<string, string>>;
   /** Trailing status text ("Waiting for the teammate…", "Approved"), if any. */
   status?: React.ReactNode;
 }) {
   const taskId = a.task?.link === "task" ? a.task.id : null;
+  const conversationChannelId = a.thread ? (chatChannelByThread?.[a.thread] ?? null) : null;
+  const workflowId = workflowIdForApproval(a);
+  const workflowRunHref =
+    workflowId && a.workflow_run_id ? workflowHref(workflowId, a.workflow_run_id) : null;
+  const hasOriginLink = taskId !== null || conversationChannelId !== null || workflowRunHref !== null;
   // An id the roster does not know still beats no attribution at all — the
   // operator can at least tell two askers apart.
   const asker = a.agent ? (askerNames.get(a.agent) ?? a.agent) : null;
@@ -159,6 +168,36 @@ export function ApprovalMeta({
             <SquareKanban className="size-3 shrink-0" />
             Open the card
           </a>
+          <span aria-hidden>·</span>
+        </>
+      )}
+      {conversationChannelId && (
+        <>
+          <a
+            href={`#/chat/${encodeURIComponent(conversationChannelId)}`}
+            className="flex w-fit items-center gap-1 rounded-full bg-accent px-2 py-0.5 font-medium text-accent-foreground transition-opacity hover:opacity-80"
+          >
+            <MessageSquare className="size-3 shrink-0" />
+            Open the conversation
+          </a>
+          <span aria-hidden>·</span>
+        </>
+      )}
+      {workflowRunHref && (
+        <>
+          <a
+            href={workflowRunHref}
+            className="flex w-fit items-center gap-1 rounded-full bg-accent px-2 py-0.5 font-medium text-accent-foreground transition-opacity hover:opacity-80"
+          >
+            <Workflow className="size-3 shrink-0" />
+            Open the run
+          </a>
+          <span aria-hidden>·</span>
+        </>
+      )}
+      {!hasOriginLink && (
+        <>
+          <span>Origin unavailable</span>
           <span aria-hidden>·</span>
         </>
       )}
@@ -211,6 +250,23 @@ export function ApprovalMeta({
       )}
     </div>
   );
+}
+
+/**
+ * The only workflow approval shape that carries both parts of the run address.
+ *
+ * `workflow_run_id` names a run but the console route also needs its workflow.
+ * Native `workflow.approve` effects carry that id in their host-projected
+ * payload; a tool call parked by a workflow does not. Never infer the latter
+ * from a run id: it has no global namespace and could send the operator to a
+ * different workflow.
+ */
+function workflowIdForApproval(approval: ApprovalSummary): string | null {
+  if (approval.kind !== "workflow.approve" || !approval.payload) return null;
+  const payload = approval.payload;
+  if (typeof payload !== "object" || Array.isArray(payload)) return null;
+  const workflowId = (payload as Record<string, unknown>).workflow_id;
+  return typeof workflowId === "string" && workflowId.length > 0 ? workflowId : null;
 }
 
 /**
