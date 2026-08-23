@@ -407,7 +407,7 @@ fn leading_spaces(bytes: &[u8], from: usize) -> usize {
 /// The condition that keeps `jane@acme.com` from reading as a mention of
 /// `acme`: an `@` counts only at the start of the text or after whitespace or
 /// an opening bracket, and only when something word-like follows it.
-fn opens_mention(bytes: &[u8], idx: usize) -> bool {
+fn opens_mention(text: &str, bytes: &[u8], idx: usize) -> bool {
     if bytes[idx] != b'@' {
         return false;
     }
@@ -420,14 +420,25 @@ fn opens_mention(bytes: &[u8], idx: usize) -> bool {
     };
     // `@#engineering` is the documented desk spelling (`MentionTarget::Desk`'s
     // own doc comment). The `#` is not itself word-like, so it needs its own
-    // branch: either the byte right after `@` is word-like, or it is `#` and
-    // the byte after THAT is — an `@#` with nothing nameable following it
+    // branch: either the char right after `@` is word-like, or it is `#` and
+    // the char after THAT is — an `@#` with nothing nameable following it
     // opens nothing.
-    let after_ok = match bytes.get(idx + 1) {
-        Some(b'#') => bytes
-            .get(idx + 2)
-            .is_some_and(|b| b.is_ascii_alphanumeric() || *b == b'_'),
-        Some(b) => b.is_ascii_alphanumeric() || *b == b'_',
+    //
+    // Unicode-aware (`char::is_alphanumeric`), not the ASCII-only byte
+    // predicate this used to be: a label like "Élodie" is a real alias
+    // `directory` offers verbatim (see its people loop), and `@Élodie` must
+    // open a mention exactly as `@engineer` does. `idx` is `@`'s byte offset
+    // and `@` is one byte, so `idx + 1` is always a char boundary to slice
+    // from; that only fails if `idx + 1` also needs a second character (the
+    // `@#` arm), which re-slices from `idx + 1` rather than assuming `#` is
+    // one byte at some other fixed offset — it is, but the slice makes that
+    // true by construction instead of by charset assumption.
+    let mut after_chars = text[idx + 1..].chars();
+    let after_ok = match after_chars.next() {
+        Some('#') => after_chars
+            .next()
+            .is_some_and(|c| c.is_alphanumeric() || c == '_'),
+        Some(c) => c.is_alphanumeric() || c == '_',
         None => false,
     };
     before_ok && after_ok
@@ -474,7 +485,7 @@ pub fn extract_at_names(text: &str) -> Vec<(usize, String)> {
     let mut out = Vec::new();
     let mut i = 0usize;
     while i < bytes.len() {
-        if opens_mention(bytes, i) {
+        if opens_mention(text, bytes, i) {
             let mut j = i + 1;
             while j < bytes.len()
                 && (bytes[j].is_ascii_alphanumeric() || matches!(bytes[j], b'_' | b'-' | b'.'))
@@ -551,7 +562,7 @@ pub fn extract_with_known(text: &str, dir: &[MentionAlias]) -> Vec<Mention> {
     let mut out: Vec<Mention> = Vec::new();
     let mut i = 0usize;
     while i < bytes.len() {
-        if !opens_mention(bytes, i) {
+        if !opens_mention(text, bytes, i) {
             i += 1;
             continue;
         }
@@ -574,7 +585,17 @@ pub fn extract_with_known(text: &str, dir: &[MentionAlias]) -> Vec<Mention> {
             if end > lowered.len() {
                 continue;
             }
-            if &&lowered[after..end] != alias || !closes_mention(bytes, end) {
+            // Byte comparison, not a `&lowered[after..end]` str slice: `end`
+            // is an arbitrary byte offset (`after` plus some alias's byte
+            // length), and nothing has proven it lands on a UTF-8 character
+            // boundary in `lowered`. A message that puts a multi-byte
+            // character where a shorter alias's end would fall — `@é` against
+            // a one-character alias `j`, for instance — slices mid-character
+            // and panics. Comparing `&[u8]` cannot panic on a partial
+            // character: two byte spans are equal or they are not, and
+            // `lowered`/`bytes` share `text`'s length either way (the fold
+            // above guarantees it), so the offsets still line up.
+            if &lowered.as_bytes()[after..end] != alias.as_bytes() || !closes_mention(bytes, end) {
                 continue;
             }
             match matched {
@@ -618,17 +639,32 @@ pub fn extract_with_known(text: &str, dir: &[MentionAlias]) -> Vec<Mention> {
 ///   reader sees still matches what the author wrote, and only the notifying
 ///   stops.
 ///
+/// * **At most one target per span.** A structured caller can otherwise
+///   submit the same `(offset, text)` twice with two different live targets —
+///   two people who share an alias, say — and both would survive dedupe-by-
+///   target (which only catches the SAME target repeated) as separate,
+///   non-quiet mentions. One run of text cannot literally name two different
+///   people at once, so only the first target claiming a span is honoured;
+///   sorting by offset first (below) and Rust's stable sort is what makes
+///   "first" mean "first as the caller supplied it" for two entries at the
+///   same offset — the picker's own ordering, so it still decides which of an
+///   ambiguous pair a click meant.
+///
 /// Sorted by offset on the way out, so the order is the order a reader
 /// encounters them rather than the order the matcher happened to find them.
 pub fn normalize(mut mentions: Vec<Mention>, sender: Option<&Actor>) -> Vec<Mention> {
     mentions.sort_by_key(|m| m.offset);
 
     let mut seen: HashSet<MentionTarget> = HashSet::new();
+    let mut seen_spans: HashSet<usize> = HashSet::new();
     let mut pings = 0usize;
     let mut out = Vec::with_capacity(mentions.len());
 
     for mut mention in mentions {
         if is_sender(&mention.target, sender) {
+            continue;
+        }
+        if !seen_spans.insert(mention.offset) {
             continue;
         }
         let duplicate = !seen.insert(mention.target.clone());
@@ -705,6 +741,18 @@ fn is_sender(target: &MentionTarget, sender: Option<&Actor>) -> bool {
 /// a target that is already being demoted for having left the roster is not
 /// in `dir` at all (it is built from the same live company and user list),
 /// so it would fail this check for the wrong reason.
+///
+/// A span whose text is a real alias but sits somewhere `opens_mention`/
+/// `closes_mention` would refuse — mid-word (`jane@engineer`), or inside a
+/// fenced or inline code span — is dropped outright too, same as a span that
+/// does not match its claimed text at all. Matching alias text is not enough
+/// on its own: fallback extraction deliberately never treats either shape as
+/// a mention, and a structured caller must not be able to manufacture a chip,
+/// and — once mention routing is wired — a routing decision, from text that
+/// reads as something else to every other path through this module. Checked
+/// against a **masked** copy (`strip_code_regions`), which preserves every
+/// offset, so a span the mask blanked out (inside a code region) fails the
+/// open check exactly as one that was never `@`-shaped at all.
 pub fn revalidate(
     text: &str,
     mentions: Vec<Mention>,
@@ -713,9 +761,17 @@ pub fn revalidate(
 ) -> Vec<Mention> {
     let user_ids: HashSet<&str> = users.iter().map(|u| u.id.as_str()).collect();
     let dir = directory(record, users);
+    let masked = strip_code_regions(text);
+    let masked_bytes = masked.as_bytes();
     mentions
         .into_iter()
         .filter(|m| text.get(m.offset..m.offset + m.text.len()) == Some(m.text.as_str()))
+        .filter(|m| {
+            let end = m.offset + m.text.len();
+            end <= masked_bytes.len()
+                && opens_mention(&masked, masked_bytes, m.offset)
+                && closes_mention(masked_bytes, end)
+        })
         .map(|mut m| {
             let live = match &m.target {
                 MentionTarget::Agent { id } => record.is_roster_agent(id),
@@ -1553,9 +1609,31 @@ members = ["engineer", "ceo"]
 
     /// A caller cannot pair arbitrary text with a live target's id and have it
     /// persisted as a real, notifying mention — the span must actually be a
-    /// spelling of that target.
+    /// spelling of that target. `@hello` is syntactically a mention (starts
+    /// with `@`, closes at the space), so this isolates the alias-mismatch
+    /// path from the syntax check covered separately below.
     #[test]
     fn a_supplied_mention_whose_text_does_not_name_its_target_is_demoted() {
+        let supplied = vec![Mention {
+            target: agent("engineer"),
+            text: "@hello".to_string(),
+            offset: 0,
+            quiet: false,
+        }];
+        let out = resolve("@hello there", Some(supplied), None, &acme(), &people());
+        assert_eq!(out.len(), 1, "the span survives so the text still matches");
+        assert!(
+            out[0].quiet,
+            "text that never named the target must not ping it: {out:?}"
+        );
+    }
+
+    /// Text that never had `@`-shape at all (no `@`, nowhere) is dropped
+    /// outright rather than kept and demoted — the same treatment a
+    /// mid-word or in-code-span match gets, and consistent with fallback
+    /// extraction, which would never have produced a mention here either.
+    #[test]
+    fn a_supplied_mention_with_no_at_sign_at_all_is_dropped() {
         let supplied = vec![Mention {
             target: agent("engineer"),
             text: "hello".to_string(),
@@ -1563,11 +1641,7 @@ members = ["engineer", "ceo"]
             quiet: false,
         }];
         let out = resolve("hello there", Some(supplied), None, &acme(), &people());
-        assert_eq!(out.len(), 1, "the span survives so the text still matches");
-        assert!(
-            out[0].quiet,
-            "text that never named the target must not ping it: {out:?}"
-        );
+        assert!(out.is_empty(), "{out:?}");
     }
 
     /// The picker is still trusted to disambiguate — a genuinely valid alias
@@ -1583,5 +1657,114 @@ members = ["engineer", "ceo"]
         let out = resolve("@engineer hello", Some(supplied), None, &acme(), &people());
         assert_eq!(out.len(), 1);
         assert!(!out[0].quiet, "{out:?}");
+    }
+
+    /// A live alias sitting somewhere `opens_mention`/`closes_mention` would
+    /// refuse — mid-word, here — must be demoted the same way a mismatched
+    /// span is, not trusted just because the text happens to spell a real
+    /// alias.
+    #[test]
+    fn a_supplied_mention_mid_word_is_dropped() {
+        let supplied = vec![Mention {
+            target: agent("engineer"),
+            text: "@engineer".to_string(),
+            offset: 4,
+            quiet: false,
+        }];
+        let out = resolve("jane@engineer", Some(supplied), None, &acme(), &people());
+        assert!(
+            out.is_empty(),
+            "a span with no whitespace/bracket before it is not a mention: {out:?}"
+        );
+    }
+
+    /// The same alias-shaped-but-not-a-mention rule applies inside a fenced or
+    /// inline code span — fallback extraction already masks these, and a
+    /// structured caller must not be able to route around that mask.
+    #[test]
+    fn a_supplied_mention_inside_a_code_span_is_dropped() {
+        let text = "see `@engineer` for the review";
+        let offset = text.find("@engineer").expect("span present");
+        let supplied = vec![Mention {
+            target: agent("engineer"),
+            text: "@engineer".to_string(),
+            offset,
+            quiet: false,
+        }];
+        let out = resolve(text, Some(supplied), None, &acme(), &people());
+        assert!(out.is_empty(), "{out:?}");
+    }
+
+    /// Two live targets can share an alias (two "Sam"s, say); a structured
+    /// caller submitting the identical span for both must not double-ping —
+    /// only the first-supplied target for that exact span survives.
+    #[test]
+    fn only_the_first_target_for_one_span_survives() {
+        let users = vec![
+            user("u1", "sam.one@acme.test", Some("Sam")),
+            user("u2", "sam.two@acme.test", Some("Sam")),
+        ];
+        let supplied = vec![
+            Mention {
+                target: MentionTarget::User {
+                    id: "u1".to_string(),
+                },
+                text: "@Sam".to_string(),
+                offset: 0,
+                quiet: false,
+            },
+            Mention {
+                target: MentionTarget::User {
+                    id: "u2".to_string(),
+                },
+                text: "@Sam".to_string(),
+                offset: 0,
+                quiet: false,
+            },
+        ];
+        let out = resolve("@Sam please review", Some(supplied), None, &acme(), &users);
+        assert_eq!(
+            out.len(),
+            1,
+            "one run of text cannot name two different people: {out:?}"
+        );
+        assert_eq!(
+            out[0].target,
+            MentionTarget::User {
+                id: "u1".to_string()
+            },
+            "the picker's own ordering decides which of the pair is honoured: {out:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Unicode
+    // -----------------------------------------------------------------------
+
+    /// A display name that starts with a non-ASCII letter is still a real
+    /// alias `directory` offers verbatim — extraction must open a mention on
+    /// it exactly as it does on an ASCII one.
+    #[test]
+    fn a_non_ascii_display_name_opens_a_mention() {
+        let users = vec![user("u1", "elodie@acme.test", Some("Élodie"))];
+        let found = resolve("hey @Élodie, can you look?", None, None, &acme(), &users);
+        assert_eq!(
+            targets(&found),
+            vec![&MentionTarget::User {
+                id: "u1".to_string()
+            }],
+            "{found:?}"
+        );
+    }
+
+    /// A multi-byte character landing where a short alias's span would end
+    /// must not panic — it simply does not match, the same as any other
+    /// non-matching text.
+    #[test]
+    fn a_multibyte_character_at_a_short_aliass_boundary_does_not_panic() {
+        let users = vec![user("u1", "j@acme.test", Some("J"))];
+        // "é" is two UTF-8 bytes; a one-character alias ("j") ends inside it.
+        let found = resolve("@é hello", None, None, &acme(), &users);
+        assert!(found.is_empty(), "{found:?}");
     }
 }

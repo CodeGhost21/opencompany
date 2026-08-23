@@ -456,12 +456,12 @@ export class OpenCompanyClient {
      * `"workflow"` say what the card it opens produces, `"chat"` says it is not
      * a request for work and no card should be opened for it.
      *
-     * Everything except `"once"` reaches the wire; `"once"` and the default are
-     * sent as *nothing at all*. That is what keeps "Do it once" the default: an
-     * unmarked message posts the exact body shape it posted before any of these
-     * controls existed, so the host cannot tell one from a pre-#580 client —
-     * the same omitted-field compatibility rule the deliverable field follows
-     * everywhere (see `CreateTask.deliverable`).
+     * Everything except `"once"` reaches the wire; `"once"` and no selection
+     * are sent as *nothing at all*. That preserves the historical wire shape:
+     * an unmarked message posts exactly what it did before any of these controls
+     * existed, so the host can apply its normal triage without a browser-asserted
+     * override — the same omitted-field compatibility rule the deliverable field
+     * follows everywhere (see `CreateTask.deliverable`).
      *
      * One key, not two. `"chat"` rides `deliverable` rather than arriving as a
      * second `intent` field, so a body cannot claim "build me the workflow" and

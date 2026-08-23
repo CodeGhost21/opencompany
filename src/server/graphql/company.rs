@@ -589,7 +589,14 @@ impl From<MentionView> for MessageMentionGql {
             // offset this large cannot occur in a chat message, so the clamp is
             // unreachable — it is here so that if it ever is reached, the chip
             // lands at the end rather than at a wrapped-around position.
-            offset: u32::try_from(view.offset).unwrap_or(u32::MAX),
+            //
+            // `i32::MAX`, not `u32::MAX`: the GraphQL spec defines `Int` as a
+            // signed 32-bit integer, so a `u32` value above `i32::MAX` is
+            // already out of range for the scalar this field is declared as
+            // and can fail serialization on the way out — the clamp exists
+            // for exactly this unreachable-in-practice case, so it needs to
+            // clamp to a value the wire type can actually carry.
+            offset: i32::try_from(view.offset).unwrap_or(i32::MAX) as u32,
             label: view.label,
             mine: view.mine,
             quiet: view.quiet,

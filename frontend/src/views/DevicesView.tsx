@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { Copy, Laptop, Loader2, TriangleAlert } from "lucide-react";
+import { Copy, Loader2, TriangleAlert } from "lucide-react";
 import { toast } from "sonner";
 
 import type { OpenCompanyClient } from "@/api/client";
@@ -150,9 +150,7 @@ export function DevicesView({ client, company }: Props) {
     <div className="flex-1 overflow-y-auto" data-testid="devices-view">
       <div className="mx-auto w-full max-w-5xl space-y-6 px-4 py-6">
         <div>
-          <h1 className="flex items-center gap-2 text-lg font-medium">
-            <Laptop className="size-5" /> Devices
-          </h1>
+          <h1 className="text-2xl font-semibold tracking-tight">Devices</h1>
           <p className="text-sm text-muted-foreground">
             The desktop app cannot use this browser&rsquo;s session, so it enrols
             as a device of its own. Create a code here and paste it into the app

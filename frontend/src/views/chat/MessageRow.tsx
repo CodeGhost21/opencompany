@@ -222,7 +222,7 @@ function Reactions({
           onClick={() => onReact(chip.emoji)}
           title={disabledReason ?? `${chip.by.join(", ")} reacted with ${chip.emoji}`}
           className={cn(
-            "flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs transition-colors",
+            "flex min-h-6 items-center gap-1 rounded-full border px-2 py-0.5 text-xs transition-colors md:min-h-0",
             chip.mine
               ? "border-primary/40 bg-primary/10 hover:bg-primary/20"
               : "border-border bg-muted/60 hover:bg-muted",

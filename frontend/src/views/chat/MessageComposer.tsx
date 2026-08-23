@@ -146,15 +146,12 @@ export function MessageComposer({
   // through after the user has confirmed.
   const [outsideWarning, setOutsideWarning] = useState<string[] | null>(null);
   const [activeRow, setActiveRow] = useState(0);
-  // What the NEXT line is for, and only the next one. It resets to "once"
-  // after every send so neither a workflow request nor a "just chatting" mark
-  // silently carries into the message after it — each is an explicit, per-line
-  // decision.
-  //
-  // "once" is the initial value, and stays it (issue #1152): "Just chatting" is
-  // a third position, not the new default, so an unmarked message is
-  // byte-identical on the wire to one sent before this control existed.
-  const [intent, setIntent] = useState<MessageIntent>("once");
+  // What the NEXT line is for, and only the next one. It starts and resets
+  // unselected: an intent is an operator assertion, so no button may claim one
+  // until the operator presses it (issue #984). An unmarked message therefore
+  // reaches the host without an override and lets triage decide whether it is
+  // work or conversation.
+  const [intent, setIntent] = useState<MessageIntent>();
   // The formatting row is opt-in, behind the `Aa` toggle in the icon row. It
   // used to sit open above every composer, which spent the widest strip of the
   // dock on four buttons most lines never use.
@@ -266,7 +263,8 @@ export function MessageComposer({
       deliverableChoice ? intent : undefined,
       sending.length ? sending : undefined,
     );
-    setIntent("once");
+    // Back to unselected, not to a default (issue #984).
+    setIntent(undefined);
   }
 
   function onKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
@@ -402,6 +400,7 @@ export function MessageComposer({
           onBlur={closePicker}
           aria-controls={pickerOpen ? "mention-picker" : undefined}
           aria-expanded={pickerOpen}
+          aria-label={placeholder}
           placeholder={placeholder}
           rows={1}
           className="field-sizing-content max-h-48 min-h-10 w-full resize-none bg-transparent px-3 py-2 text-sm outline-none placeholder:text-muted-foreground"
@@ -427,8 +426,8 @@ export function MessageComposer({
                   // "Just chatting" leads, because it is the position that
                   // withholds: the operator reaches for it to stop something
                   // happening, and a control you press to prevent an action
-                  // belongs before the ones that cause it. It is NOT pre-pressed
-                  // — "Do it once" stays the default.
+                  // belongs before the ones that cause it. None is pre-pressed:
+                  // an operator has to state which outcome they want.
                   { value: "chat", label: "Just chatting" },
                   { value: "once", label: "Do it once" },
                   { value: "workflow", label: "Build me the workflow" },
@@ -443,7 +442,7 @@ export function MessageComposer({
                   className={cn(
                     "rounded-md px-2 py-1 text-2xs font-medium transition-colors",
                     intent === option.value
-                      ? "bg-primary text-primary-foreground"
+                      ? "bg-primary/10 text-brand-700 dark:text-brand-300"
                       : "text-muted-foreground hover:text-foreground",
                   )}
                 >

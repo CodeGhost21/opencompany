@@ -51,6 +51,7 @@ import { MembersPane } from "./chat/MembersPane";
 import { MessageComposer } from "./chat/MessageComposer";
 import {
   mentionablesFor,
+  sameTarget,
   mentionsOutsideChannel,
   utf8ByteLength,
   type Mention,
@@ -757,11 +758,10 @@ export function ChatView({
     // metadata has to land on this row or the just-sent line renders without
     // chips until reload.
     const localMentions = mentions?.map((m) => {
-      const row = mentionables?.find(
-        (e) =>
-          e.target.kind === m.target.kind &&
-          (m.target.kind === "everyone" ? true : e.target.id === m.target.id),
-      );
+      // `sameTarget` rather than an inline comparison: narrowing one operand
+      // says nothing about the other, so the inline form does not typecheck —
+      // and the rule belongs in one place regardless.
+      const row = mentionables?.find((e) => sameTarget(e.target, m.target));
       return {
         text: m.text,
         offset: m.offset,

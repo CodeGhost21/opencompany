@@ -363,10 +363,16 @@ export function resolvableMentions(
   return out;
 }
 
-/** Whether two mention targets name the same thing. */
-function sameTarget(a: MentionTarget, b: MentionTarget): boolean {
+/**
+ * Whether two mention targets name the same thing.
+ *
+ * Both operands are narrowed explicitly. Checking `a.kind === "everyone"` alone
+ * tells the compiler nothing about `b`, even after `a.kind !== b.kind` has been
+ * ruled out — so the `id` read below needs both sides eliminated, not one.
+ */
+export function sameTarget(a: MentionTarget, b: MentionTarget): boolean {
   if (a.kind !== b.kind) return false;
-  if (a.kind === "everyone") return true;
+  if (a.kind === "everyone" || b.kind === "everyone") return true;
   return a.id === b.id;
 }
 
