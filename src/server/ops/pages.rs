@@ -4,7 +4,8 @@
 //! ```text
 //! GET …/pages                    every page's manifest, for the nav
 //! GET …/pages/{slug}             a fixed HTML shell that mounts the page
-//! GET …/pages/{slug}/bundle.mjs  the page's compiled JS, streamed
+//! GET …/pages/{slug}/bootstrap.mjs  the fixed mounting module (capability-gated)
+//! GET …/pages/{slug}/bundle.mjs  the page's compiled JS, streamed (capability-gated)
 //! ```
 //!
 //! See `docs/spec/runtime/pages.md` for the full design. The load-bearing
