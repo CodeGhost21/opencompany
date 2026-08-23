@@ -24,7 +24,6 @@
 
 use std::sync::{Arc, Mutex};
 
-
 use crate::company::mcp::{McpHealth, McpServerDecl, McpStatus};
 use crate::harness::mcp::registry_from_decls;
 use crate::ports::now_millis;
@@ -230,14 +229,15 @@ fn classify_kind(err: &anyhow::Error, auth_configured: bool, in_call_context: bo
     //    when the client was extracted. `Error` is `#[non_exhaustive]`, so match
     //    the one variant and fall through to the string rules for the rest —
     //    which is what a new variant should do here anyway.
-    if let Some(resource_metadata) = err.chain().find_map(|cause| {
-        match cause.downcast_ref::<tinymcp::Error>() {
-            Some(tinymcp::Error::Unauthorized {
-                resource_metadata, ..
-            }) => Some(resource_metadata),
-            _ => None,
-        }
-    }) {
+    if let Some(resource_metadata) =
+        err.chain()
+            .find_map(|cause| match cause.downcast_ref::<tinymcp::Error>() {
+                Some(tinymcp::Error::Unauthorized {
+                    resource_metadata, ..
+                }) => Some(resource_metadata),
+                _ => None,
+            })
+    {
         return if resource_metadata.is_some() {
             FailureKind::OauthRequired
         } else if auth_configured {
