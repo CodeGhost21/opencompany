@@ -248,6 +248,7 @@ describe("toast click-through", () => {
     // A detached or not-yet-loaded frame has no `contentWindow` to hand the
     // gesture to; the relay must simply give up rather than throw.
     const frame = document.createElement("iframe");
+    Object.defineProperty(frame, "contentWindow", { value: null });
     document.body.append(frame);
     mockElementFromPoint(frame);
 
