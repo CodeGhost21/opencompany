@@ -251,7 +251,7 @@ pub(super) struct SetBudget {
 /// Deserializes into `Some(inner)` when the field is present (so an explicit
 /// `null` becomes `Some(None)`). Without a companion `#[serde(default)]` an
 /// omitted field stays an error — which is what [`SetBudget`] wants.
-pub(super) fn double_option<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+pub(crate) fn double_option<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
 where
     D: serde::Deserializer<'de>,
     T: Deserialize<'de>,
