@@ -104,7 +104,7 @@ const ROUTABLE: Record<View, true> = {
   team: true,
   workspace: true,
   /** No nav row (issue #1416): the browser now lives at `#/settings/brain`.
-   * Keep this route for direct links, including the existing Brain e2e flow. */
+   * Keep this route for direct links retained by integrations and bookmarks. */
   memory: true,
   approvals: true,
   workflows: true,
