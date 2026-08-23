@@ -458,13 +458,12 @@ pub struct StorageSettings {
     /// in-memory engine — the shape tests and no-data-dir callers get.
     pub data_dir: Option<PathBuf>,
     /// Operator's explicit durability assertion for the data dir
-    /// (`OPENCOMPANY_MEMORY_ALLOW_EPHEMERAL`). The in-pod TinyCortex engine is
-    /// refused by default under `OPENCOMPANY_STORAGE=mongodb`, because the hosted
-    /// model treats `/data` as ephemeral scratch there and engine memory would be
-    /// silently lost on restart. Setting this flag is the operator asserting that
-    /// they have mounted a genuinely persistent volume at the data dir, which
-    /// lifts the refusal for the mongodb+tinycortex combination. `false` (the
-    /// [`Default`], and the safe default) keeps the silent-memory-loss guard.
+    /// (`OPENCOMPANY_MEMORY_ALLOW_EPHEMERAL`). Retained from the embedded-engine
+    /// era, when the in-pod engine was refused by default under
+    /// `OPENCOMPANY_STORAGE=mongodb` because the hosted model treats `/data` as
+    /// ephemeral scratch. The in-pod engine is gone, so the flag is currently a
+    /// no-op kept for deployment compatibility; `false` (the [`Default`]) stays
+    /// the safe default.
     pub allow_ephemeral_memory: bool,
     /// Which engine to bind for `OPENCOMPANY_MEMORY=remote`
     /// (`OPENCOMPANY_MEMORY_DRIVER`): `supermemory`, `mem0`, `cognee`.
