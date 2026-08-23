@@ -76,6 +76,7 @@ export function ThreadPanel({ channel, members, parent, replies, sending, mentio
         placeholder="Reply…"
         disabled={sending}
         mentionables={mentionables}
+        channelMemberIds={channelMemberIds}
         onSend={onSend}
       />
     </aside>
