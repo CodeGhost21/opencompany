@@ -10,7 +10,7 @@ import type { View } from "@/components/app-shell";
  * element (`[data-tour="nav-<view>"]`), which sidesteps the lazy/Suspense race
  * entirely — navigating still swaps the main pane so the operator sees the
  * view, but the spotlight never waits on a code-split chunk. Only the two
- * richest moments (the Overview graph, the chat composer) anchor to content on
+ * richest moments (the operator overview, the chat composer) anchor to content on
  * non-lazy views.
  */
 export interface TourStop {
@@ -33,10 +33,10 @@ export const TOUR: TourStop[] = [
   },
   {
     view: "overview",
-    target: '[data-tour="overview-graph"]',
+    target: '[data-tour="operator-overview"]',
     placement: "top",
     title: "Start here each day",
-    body: "Your company at a glance: its departments, the work in flight, who's doing it, and what it remembers. Pull the graph around to explore it.",
+    body: "Start with the decisions waiting for you and work that stopped. The company graph is one click away when you need its structure.",
   },
   {
     view: "chat",

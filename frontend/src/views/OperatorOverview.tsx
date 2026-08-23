@@ -66,11 +66,11 @@ export function OperatorOverview({ client, company, companyName, feed, scope }: 
   );
 
   return (
-    <div className="mx-auto flex w-full max-w-5xl flex-1 flex-col gap-6 overflow-auto p-5 sm:p-8" data-testid="operator-overview">
+    <div className="mx-auto flex w-full max-w-5xl flex-1 flex-col gap-6 overflow-auto p-5 sm:p-8" data-testid="operator-overview" data-tour="operator-overview">
       <header className="flex flex-col gap-4 border-b pb-6 sm:flex-row sm:items-end sm:justify-between">
         <div>
-          <p className="text-sm text-muted-foreground">Operator overview</p>
-          <h1 className="text-2xl font-semibold tracking-tight">{companyName}</h1>
+          <p className="text-sm text-muted-foreground">{companyName}</p>
+          <h1 className="text-2xl font-semibold tracking-tight">Overview</h1>
           <p className="mt-1 text-sm text-muted-foreground">Start with the work that needs your judgment.</p>
         </div>
         <a href="#/chat" className="inline-flex items-center justify-center gap-2 rounded-md bg-primary px-3 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90">
