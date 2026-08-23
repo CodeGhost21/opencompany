@@ -350,6 +350,31 @@ impl WorkflowResolver for StoreWorkflowResolver {
     }
 }
 
+/// The policy classification behind a namespaced child gate (`sub::work`), if
+/// the resolver recorded it this run.
+///
+/// The parent's parking path resolves `<node>::<gate>` by reading the parent
+/// node's static `workflow_id`, looking the child up in the registry, and
+/// finding the gate's own classification. This is the only route by which the
+/// child's policy gate (tool, reason, arguments) reaches the card — the parent
+/// graph does not contain the child's nodes, and the child's partial output
+/// does not travel up when it pauses (tinyflows drops it on `ChildOutcome::Paused`).
+pub(crate) fn child_gate_call(
+    registry: &ChildGateRegistry,
+    parent: &WorkflowGraph,
+    node_id: &str,
+) -> Option<crate::workflows::gate::GatedCall> {
+    let (parent_node, child_gate) = node_id.split_once(GATE_NAMESPACE)?;
+    let child_id = parent
+        .nodes
+        .iter()
+        .find(|n| n.id == parent_node)
+        .and_then(|n| n.config.get("workflow_id"))
+        .and_then(Value::as_str)?;
+    let record = registry.get(child_id)?;
+    record.gated.iter().find(|g| g.node_id == child_gate).cloned()
+}
+
 /// Whether `id` is a single safe on-disk filename stem — no path separators, no
 /// `..`, not empty — so it cannot escape the `workflows/` directory. Mirrors the
 /// `safe_wid` check the REST workflow routes use.
