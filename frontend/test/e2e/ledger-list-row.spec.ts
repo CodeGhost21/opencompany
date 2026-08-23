@@ -55,8 +55,10 @@ test("a list row leads with its title and shows one readable status", async ({
     expect(recorded.ok()).toBeTruthy();
 
     await page.goto(`/#/ledgers/${slug}`);
-    await page.getByRole("button", { name: "List", exact: true }).click();
-
+    // Declared ledgers open as readable rows now (issue #1351 pins that in
+    // `defaultLedgerMode`, asserted by `ledger-default-view.test.ts`), so the
+    // row is the initial view — there is no "List" toggle to click. The row
+    // assertion below is what proves the mode is the one this spec reads.
     const row = page.getByTestId(`ledger-entry-${id}`);
     await expect(row).toBeVisible({ timeout: 15_000 });
     await expect(row.getByTestId("ledger-entry-title")).toHaveText(title);
