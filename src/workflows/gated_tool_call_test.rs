@@ -366,6 +366,62 @@ async fn a_policy_gated_child_tool_call_parks_and_resumes_through_its_parent() {
     );
 }
 
+/// Issue #617, the continuation half. A child that parks namespaced gates
+/// restarts from the trigger when its gate is approved, and a restart re-runs
+/// the child's ungated outward calls — whose results were never carried up
+/// with the pause. The run must tell the operator, the same way the top-level
+/// path does for its own unreplayable calls, so approving is a decision made
+/// with that cost in view.
+#[tokio::test]
+async fn an_ungated_outward_call_before_a_child_gate_is_reported_unreplayable() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("company");
+    let workflows = source.join("workflows");
+    std::fs::create_dir_all(&workflows).expect("create child workflow directory");
+    std::fs::write(workflows.join("child.toml"), SUB_WORKFLOW_CHILD_WITH_UPSTREAM)
+        .expect("write child workflow");
+
+    let (mut deps, _journal) =
+        super::gated_tool_turn_test::deps("http://127.0.0.1:1/unused".to_string(), dir.path());
+    deps.workflow_source_dir = Some(source);
+    // `shell` gated, `http_request` not — so the child runs the POST and then
+    // parks at the shell node, exactly the shape the hazard describes.
+    let record = record("\"shell\"");
+    let pool = Arc::new(HarnessPool::new());
+    pool.ensure(&record, &deps).await.expect("roster builds");
+    let file = parse_workflow(SUB_WORKFLOW_PARENT).expect("parent parses");
+
+    let first = super::runner::run_workflow(
+        pool,
+        deps.clone(),
+        &record,
+        &file,
+        json!({}),
+        &WorkflowRunContext::new(false),
+    )
+    .await
+    .expect("the parent pauses cleanly");
+    assert_eq!(first.pending_approvals, vec!["sub::work".to_string()]);
+
+    let notices = first
+        .notices
+        .iter()
+        .filter(|n| n.contains("fetch"))
+        .collect::<Vec<_>>();
+    assert!(
+        !notices.is_empty(),
+        "approving restarts the child, so its ungated http_request must be reported: {:?}",
+        first.notices
+    );
+    assert!(
+        notices
+            .iter()
+            .any(|n| n.contains("http_request") && n.contains("restarts")),
+        "the notice must name the call and why it would repeat: {:?}",
+        notices
+    );
+}
+
 /// The other half of the claim, and the one that keeps this change from being a
 /// regression: when the policy does NOT gate the call, the node runs exactly as
 /// it did before. Without this, every assertion above is also satisfied by a
