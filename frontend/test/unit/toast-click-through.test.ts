@@ -88,6 +88,23 @@ describe("toast click-through", () => {
     expect(clicked).toHaveBeenCalledOnce();
   });
 
+  it("focuses the control a relayed click on a leaf inside it activates", () => {
+    const below = document.createElement("button");
+    const leaf = document.createElement("span");
+    below.append(leaf);
+    document.body.append(below);
+    mockElementFromPoint(leaf);
+
+    const text = document.createElement("span");
+    toast().append(text);
+    text.addEventListener("click", relayToastClick);
+    text.click();
+
+    // A native click on the icon/leaf inside the button focuses the button; the
+    // relay must do the same rather than leaving keyboard focus where it was.
+    expect(document.activeElement).toBe(below);
+  });
+
   it("relays a click on toast text to an SVG control below", () => {
     const below = document.createElementNS("http://www.w3.org/2000/svg", "svg");
     const clicked = vi.fn();
