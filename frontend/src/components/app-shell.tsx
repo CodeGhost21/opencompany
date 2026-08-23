@@ -40,6 +40,7 @@ import {
   SidebarTrigger,
   useSidebar,
 } from "@/components/ui/sidebar";
+import { AgentProfileProvider } from "@/components/agent-profile-sheet";
 import { ContentSurface } from "@/components/content-surface";
 import { FeedbackDialog } from "@/components/feedback-dialog";
 import { HostSwitcher } from "@/components/host-switcher";
@@ -2018,6 +2019,12 @@ export function AppShell({
             #1178). A `div`, not `main` — `SidebarInset` above is already the
             console's one `<main>` landmark, and a second nested one gave every
             page two identical "skip to content" destinations (issue #1221). */}
+        {/* Every teammate's face in here is a way into who they are (issue
+            #1653): the panel is mounted once around the whole surface so a
+            click on an avatar in a transcript, a member list or a channel
+            header opens the same summary, over the page rather than instead of
+            it. */}
+        <AgentProfileProvider client={client} company={company}>
         <ContentSurface>
           {view === "overview" && (
             <Overview client={client} company={company} companyName={feed.status.name} />
@@ -2348,6 +2355,7 @@ export function AppShell({
           )}
           {view === "feedback" && <FeedbackView client={client} company={company} />}
         </ContentSurface>
+        </AgentProfileProvider>
 
         {/* Mobile only: dedicated chrome for the way back to navigation, not an
             overlay on top of it. A `fixed` trigger here used to float over

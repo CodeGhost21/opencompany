@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
 import { Mail, MessageSquare, MoreHorizontal, UserPlus, Wallet } from "lucide-react";
 
+import { AgentAvatarButton } from "@/components/agent-profile-sheet";
 import { TeammateAvatar } from "@/components/teammate-avatar";
 import { Button } from "@/components/ui/button";
 import {
@@ -325,13 +326,19 @@ function MemberRow({
 
   return (
     <div className="group/member flex items-center gap-2.5 rounded-lg px-2 py-1.5 transition-colors hover:bg-accent/60">
+      {/* Outside the row button, not inside it: a button inside a button is
+          invalid HTML, and the two want different things anyway — the face
+          opens who this teammate is (issue #1653), the row opens a line to
+          them. */}
+      <AgentAvatarButton agentId={member.id} name={member.name}>
+        <TeammateAvatar name={member.name} tone={member.tone} avatar={member.avatar} className="size-8" />
+      </AgentAvatarButton>
       <button
         type="button"
         onClick={onMessage}
         className="flex min-w-0 flex-1 items-center gap-2.5 text-left"
         title={member.description || member.role}
       >
-        <TeammateAvatar name={member.name} tone={member.tone} avatar={member.avatar} className="size-8" />
         <span className="min-w-0">
           <span className="flex items-center gap-1">
             <span className="truncate text-sm font-medium">{member.name}</span>

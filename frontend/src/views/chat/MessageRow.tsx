@@ -1,5 +1,6 @@
 import { MessageSquareReply } from "lucide-react";
 
+import { AgentAvatarButton, useAgentProfileOpener } from "@/components/agent-profile-sheet";
 import { Markdown } from "@/components/markdown";
 import { TeammateAvatar } from "@/components/teammate-avatar";
 import { Button } from "@/components/ui/button";
@@ -88,13 +89,18 @@ export function MessageRow({
             {formatTime(message.at)}
           </span>
         ) : (
-          <TeammateAvatar
-            name={sender.name}
-            tone={sender.tone}
-            avatar={sender.avatar}
-            company={sender.kind === "company"}
-            className="size-9"
-          />
+          // The face in the gutter is the way into who is talking (issue
+          // #1653) — for a voice that resolves to a roster teammate. A desk,
+          // the company and "you" have no profile behind them and stay plain.
+          <AgentAvatarButton agentId={sender.agentId} name={sender.name}>
+            <TeammateAvatar
+              name={sender.name}
+              tone={sender.tone}
+              avatar={sender.avatar}
+              company={sender.kind === "company"}
+              className="size-9"
+            />
+          </AgentAvatarButton>
         )}
       </div>
 
@@ -185,9 +191,25 @@ function SystemPill({ message }: { message: ChatMessage }) {
 }
 
 function AuthorLine({ sender, at }: { sender: Sender; at: number }) {
+  const openProfile = useAgentProfileOpener();
+  const { agentId } = sender;
+  // The name is the other half of the same target as the avatar beside it: a
+  // reader who wants to know who this is aims at whichever of the two their
+  // eye landed on.
+  const name = agentId && openProfile ? (
+    <button
+      type="button"
+      onClick={() => openProfile(agentId)}
+      className="truncate rounded-sm text-sm font-semibold tracking-tight hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+    >
+      {sender.name}
+    </button>
+  ) : (
+    <span className="truncate text-sm font-semibold tracking-tight">{sender.name}</span>
+  );
   return (
     <div className="flex min-w-0 flex-wrap items-baseline gap-x-2 leading-5">
-      <span className="truncate text-sm font-semibold tracking-tight">{sender.name}</span>
+      {name}
       <span className="shrink-0 text-2xs text-muted-foreground tabular-nums">
         {formatTime(at)}
       </span>
