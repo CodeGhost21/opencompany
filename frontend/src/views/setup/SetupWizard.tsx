@@ -1118,8 +1118,12 @@ function PowerStep({
   // The house already holds one, and this operator may have no way to get their
   // own. The key box is then optional rather than the point of the screen.
   const onTheHouse = status.inference.ready && provider === status.inference.provider;
+  // "Use my own" flips the gate: the host credential is only testable while
+  // that is the operator's actual choice. Once they opt to supply their own
+  // key, an empty box must not test anything — a test with no key probes the
+  // host credential and would report a pass for a key they never provided.
   const canTest =
-    (!spec.needsKey || onTheHouse || value.trim().length > 0) &&
+    (!spec.needsKey || (onTheHouse && !override) || value.trim().length > 0) &&
     (!spec.needsUrl || baseUrl.trim().length > 0);
 
   const run = async () => {
