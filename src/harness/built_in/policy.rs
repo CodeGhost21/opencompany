@@ -2778,7 +2778,7 @@ mod tests {
         store
             .create(
                 &company,
-                &node("own", "own", NodeKind::Folder, None, own),
+                &node("own", "own", NodeKind::Folder, None, own.clone()),
                 None,
             )
             .await
