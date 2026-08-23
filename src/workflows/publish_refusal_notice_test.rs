@@ -322,7 +322,7 @@ async fn a_workflow_node_whose_publish_was_refused_says_so_on_the_run() {
 }
 
 /// Concurrent runs keep their refused-publish notices separate even though both
-/// dispatch through one cached roster agent and its one queue handle.
+/// dispatch through one cached roster and its one queue handle.
 #[tokio::test]
 async fn concurrent_workflow_runs_do_not_take_each_others_publish_refusals() {
     let dir = tempfile::tempdir().expect("tempdir");
