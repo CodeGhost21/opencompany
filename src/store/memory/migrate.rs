@@ -777,7 +777,7 @@ mod test {
                 memory_driver: driver,
                 ..base_settings()
             };
-            let err = resolve(&settings, "mem0", Some("https://t.example"), None)
+            let err = resolve(&settings, "mem0", Some("https://t.example"))
                 .expect_err("must refuse")
                 .to_string();
             assert!(err.contains(needle), "backend {backend:?}: {err}");
@@ -807,7 +807,7 @@ mod test {
             tenant_id: Some("acme-tenant".into()),
             ..base_settings()
         };
-        let err = resolve(&settings, "mem0", Some("https://t.example"), None)
+        let err = resolve(&settings, "mem0", Some("https://t.example"))
             .expect_err("tenant mode must refuse")
             .to_string();
         assert!(err.contains("OPENCOMPANY_TENANT_ID"), "{err}");
