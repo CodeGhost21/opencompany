@@ -144,8 +144,17 @@ async function open(page: Page, theme: "dark" | "light", hash: string) {
   }, theme);
   await page.goto(hash);
 
-  await expect(page.locator('[data-testid="content-surface"]')).toBeVisible({ timeout: 30_000 });
+  await expect(page.locator(CONTENT_SURFACE)).toBeVisible({ timeout: 30_000 });
   await expect(page.locator("html")).toHaveClass(new RegExp(`\\b${theme}\\b`));
+
+  // A baseline recorded while a surface still shows its loading placeholder is
+  // a baseline of the placeholder: the views mount their real content only
+  // after their own read answers, which on a slow host outlive the shell.
+  // Wait the placeholders out so a slow `--update-snapshots` run records the
+  // same pixels a fast one would have had in the frame.
+  for (const loading of LOADING_PLACEHOLDERS) {
+    await expect(page.locator(loading)).toHaveCount(0, { timeout: 30_000 });
+  }
 
   // A baseline recorded mid-flash — fallback metrics, Geist not yet applied —
   // differs from every later run by the whole page.
