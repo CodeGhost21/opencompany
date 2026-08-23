@@ -88,10 +88,9 @@ export function widensAutonomy(
   from: string,
   to: string,
 ): boolean {
-  return (
-    tiers.findIndex((tier) => tier.value === to) >
-    tiers.findIndex((tier) => tier.value === from)
-  );
+  const fromIndex = tiers.findIndex((tier) => tier.value === from);
+  const toIndex = tiers.findIndex((tier) => tier.value === to);
+  return fromIndex !== -1 && toIndex > fromIndex;
 }
 
 /**
@@ -329,7 +328,8 @@ export function PolicySettings({ client, company }: Props) {
                     className={cn(
                       "w-full rounded-md border p-3 text-left transition-colors",
                       "disabled:cursor-not-allowed disabled:opacity-60",
-                      looser && "border-status-blocked/40 bg-status-blocked-soft hover:bg-status-blocked-soft",
+                      looser &&
+                        "border-status-blocked/40 bg-status-blocked-soft hover:bg-status-blocked-soft",
                       active
                         ? looser
                           ? "ring-1 ring-status-blocked/30"
@@ -370,7 +370,11 @@ export function PolicySettings({ client, company }: Props) {
                   <AlertDialogDescription>
                     {pendingTier && (
                       <>
-                        Instead of: {status.tiers.find((tier) => tier.value === status.mode)?.description}{" "}
+                        Instead of:{" "}
+                        {
+                          status.tiers.find((tier) => tier.value === status.mode)
+                            ?.description
+                        }{" "}
                         With {pendingTier.label}: {pendingTier.description}
                       </>
                     )}

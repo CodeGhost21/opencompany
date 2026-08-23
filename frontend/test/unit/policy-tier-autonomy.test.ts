@@ -103,6 +103,7 @@ describe("the autonomy direction", () => {
     expect(widensAutonomy(TIERS, "supervised", "full")).toBe(true);
     expect(widensAutonomy(TIERS, "full", "readonly")).toBe(false);
     expect(widensAutonomy(TIERS, "supervised", "unknown")).toBe(false);
+    expect(widensAutonomy(TIERS, "unknown", "full")).toBe(false);
   });
 
   it("shows the looser end of the scale in the console's amber risk tone", async () => {
