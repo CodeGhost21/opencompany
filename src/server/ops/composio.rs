@@ -1531,6 +1531,47 @@ mod tests {
         assert_eq!(resp["status"]["credentialSource"], "none");
     }
 
+    /// The note on a write names the operation (issue #1471): a set tells the
+    /// operator a new token is live, a clear must not claim one exists — the
+    /// effective credential after a clear is whatever tier remains, which may
+    /// be nothing at all.
+    #[tokio::test]
+    async fn the_clear_note_does_not_claim_a_new_token() {
+        let home_dir = home();
+        let state = state_with_manifest(home_dir.path(), GRANTED).await;
+
+        let (_, resp, _) = send(
+            &state,
+            "PUT",
+            "/api/v1/company/composio/token",
+            Some(json!({ "token": TOKEN })),
+        )
+        .await;
+        let set_note = resp["note"].as_str().expect("a note").to_string();
+        assert!(
+            set_note.contains("new Composio token"),
+            "a set announces the new token: {set_note}"
+        );
+
+        let (_, resp, _) = send(
+            &state,
+            "PUT",
+            "/api/v1/company/composio/token",
+            Some(json!({ "token": "" })),
+        )
+        .await;
+        let clear_note = resp["note"].as_str().expect("a note").to_string();
+        assert_ne!(clear_note, set_note, "set and clear are told apart: {clear_note}");
+        assert!(
+            !clear_note.contains("new Composio token"),
+            "a clear must not invent a token that no longer exists: {clear_note}"
+        );
+        assert!(
+            clear_note.contains("cleared"),
+            "the clear names what it did: {clear_note}"
+        );
+    }
+
     /// The hosted shape, driven through the env seam (no process mutation): a
     /// company that pasted nothing reads `attested` from the instance identity,
     /// its own TinyHumans key outranks that, its own Composio token outranks
