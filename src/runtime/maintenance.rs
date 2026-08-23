@@ -51,9 +51,17 @@ use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 
 use crate::CompanyRuntime;
-use crate::ports::types::{ApprovalId, CompanyId};
+use crate::ports::types::{ApprovalId, CompanyId, EvictionPolicy};
 use crate::runtime::CompanyRegistry;
 use crate::runtime::scheduler::{Clock, MINUTE_MS, PRUNE_CUTOFF_MINUTES, millis_to_next_minute};
+
+/// Number of completed-cycle traces retained for one company.
+///
+/// Trace summaries are not yet a recall mechanism (#1175), but they remain
+/// useful in the export bundle and through the inspection route. Keeping this
+/// small, fixed window bounds every backend until a real compression and recall
+/// design supplies a policy with stronger product semantics.
+pub(crate) const TRACE_RETENTION_LIMIT: usize = 32;
 
 /// Retires expired approvals, expired grants and stale fire claims for every
 /// company in the registry, once a minute.
@@ -204,6 +212,18 @@ pub(crate) async fn sweep_company(
         .await
     {
         tracing::warn!(%company, %err, "[maintenance] pruning fire claims failed");
+    }
+    if let Err(err) = runtime
+        .memory
+        .evict(
+            company,
+            EvictionPolicy::KeepRecent {
+                n: TRACE_RETENTION_LIMIT,
+            },
+        )
+        .await
+    {
+        tracing::warn!(%company, %err, "[maintenance] trace retention sweep failed");
     }
     retired
 }
