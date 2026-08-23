@@ -187,6 +187,62 @@ describe("ApprovalCard decide ordering (#1406)", () => {
     );
   });
 
+  it("distinguishes two same-payload payment cards by amount (#1411)", async () => {
+    const small: ApprovalSummary = {
+      ...APPROVAL,
+      id: "pay-40",
+      kind: "payment.send",
+      amount_usd: 40,
+      payload: { recipient: "acme", note: "invoice" },
+    };
+    const big: ApprovalSummary = {
+      ...APPROVAL,
+      id: "pay-4000",
+      kind: "payment.send",
+      amount_usd: 4000,
+      payload: { recipient: "acme", note: "invoice" },
+    };
+
+    await act(async () => {
+      root.render(
+        createElement(
+          "div",
+          null,
+          createElement(ApprovalCard, {
+            approval: small,
+            now: T0 + 60_000,
+            askerNames: new Map([["ops", "Ops"]]),
+            deciding: null,
+            batchIndex: 1,
+            batchTotal: 2,
+            onDecide: (_verdict: Verdict, _scope: GrantScope) => {},
+          }),
+          createElement(ApprovalCard, {
+            approval: big,
+            now: T0 + 60_000,
+            askerNames: new Map([["ops", "Ops"]]),
+            deciding: null,
+            batchIndex: 2,
+            batchTotal: 2,
+            onDecide: (_verdict: Verdict, _scope: GrantScope) => {},
+          }),
+        ),
+      );
+    });
+
+    const labelled = Array.from(container.querySelectorAll("button")).map((b) =>
+      b.getAttribute("aria-label"),
+    );
+    // Identical payload and asker — the amount is the only thing that tells
+    // the $40 decision from the $4,000 one, so it has to ride in the name.
+    expect(labelled).toContain(
+      "Approve: Send a payment — $40 — recipient: acme — note: invoice — asked by Ops",
+    );
+    expect(labelled).toContain(
+      "Approve: Send a payment — $4,000 — recipient: acme — note: invoice — asked by Ops",
+    );
+  });
+
   it("names each permission revocation with the grantee it affects (#1411)", async () => {
     await act(async () => {
       root.render(
