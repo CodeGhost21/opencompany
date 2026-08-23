@@ -213,6 +213,7 @@ pub async fn build_capabilities(
         policy: record.effective_policy(),
         run_id: run_id.to_string(),
         grants: deps.approval_requests.grants(),
+        registry: child_gates.clone(),
     });
     let resolver: Arc<dyn WorkflowResolver> = Arc::new(StoreWorkflowResolver::new(
         deps.workflow_source_dir.clone(),
