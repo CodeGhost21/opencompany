@@ -82,7 +82,7 @@ import {
   type ApprovalSummary,
 } from "@/api/types";
 import type { OpenCompanyClient } from "@/api/client";
-import { hasFocus, type TaskFocus } from "@/lib/task-output";
+import { hasFocus, isTaskTab, type TaskFocus, type TaskTab } from "@/lib/task-output";
 import { pendingApprovalWait } from "@/lib/task-approvals";
 import { startVisiblePolling } from "@/lib/visible-poll";
 import {
@@ -256,6 +256,7 @@ function timeOf(at: number): string {
  * untouched by the feature.
  */
 function tabForFocus(focus?: TaskFocus): string {
+  if (focus?.tab) return focus.tab;
   if (focus?.artifactId) return "artifacts";
   if (focus?.runId) return "attempts";
   return "timeline";
@@ -290,6 +291,7 @@ export function TaskDetailView({
   taskId,
   attemptEventTick,
   focus,
+  onTabChange,
   parked = EMPTY_PARKED,
   onBack,
   onNavigate,
@@ -317,6 +319,8 @@ export function TaskDetailView({
    * lands on the default tab, exactly as before.
    */
   focus?: TaskFocus;
+  /** Writes an always-visible tab into the task detail's address. */
+  onTabChange?: (tab: TaskTab) => void;
   /** Return to the board. */
   onBack: () => void;
   /** Navigate the detail to a neighbouring (lineage) task. */
@@ -348,7 +352,7 @@ export function TaskDetailView({
   // the same card. Keyed on the focus's own identity rather than the object,
   // because the parent rebuilds it on every hash event and an object dependency
   // would yank the operator back to the linked tab on every re-render.
-  const focusKey = `${focus?.artifactId ?? ""}|${focus?.version ?? ""}|${focus?.runId ?? ""}`;
+  const focusKey = `${focus?.tab ?? ""}|${focus?.artifactId ?? ""}|${focus?.version ?? ""}|${focus?.runId ?? ""}`;
   useEffect(() => {
     if (!hasFocus(focus ?? {})) return;
     setTab(tabForFocus(focus));
@@ -579,7 +583,14 @@ export function TaskDetailView({
               />
             )}
 
-            <Tabs value={tab} onValueChange={(next) => setTab(String(next))}>
+            <Tabs
+              value={tab}
+              onValueChange={(next) => {
+                const selected = String(next);
+                setTab(selected);
+                if (isTaskTab(selected)) onTabChange?.(selected);
+              }}
+            >
               <TabsList>
                 <TabsTrigger value="timeline">Timeline</TabsTrigger>
                 <TabsTrigger value="attempts">
