@@ -15,7 +15,13 @@ import type { OpenCompanyClient } from "@/api/client";
 import { ApiError } from "@/api/types";
 import { TeammateAvatar } from "@/components/teammate-avatar";
 import { Button } from "@/components/ui/button";
-import { AVATAR_ACCEPT, TINY_FLAVOURS, avatarRef, uploadAvatar } from "@/lib/avatar";
+import {
+  AVATAR_ACCEPT,
+  MAX_AVATAR_MB,
+  TINY_FLAVOURS,
+  avatarRef,
+  uploadAvatar,
+} from "@/lib/avatar";
 import { cn } from "@/lib/utils";
 
 interface Props {
@@ -138,7 +144,7 @@ export function AvatarPicker({
       {/* GIFs are named on purpose: an animated face is the case people ask for
           and the one nobody expects to be allowed. */}
       <p className="text-xs text-muted-foreground">
-        PNG, JPEG, WebP or GIF, up to 4&nbsp;MB. Animated GIFs keep moving.
+        PNG, JPEG, WebP or GIF, up to {MAX_AVATAR_MB}&nbsp;MB. Animated GIFs keep moving.
       </p>
       <div
         className="flex flex-wrap gap-2"

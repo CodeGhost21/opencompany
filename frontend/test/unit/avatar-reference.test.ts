@@ -12,7 +12,15 @@ import { dirname, resolve } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
-import { TINY_FLAVOURS, avatarRef, blobNodeId, hashedFlavour, staticAvatarSrc, tinySrc } from "@/lib/avatar";
+import {
+  MAX_AVATAR_MB,
+  TINY_FLAVOURS,
+  avatarRef,
+  blobNodeId,
+  hashedFlavour,
+  staticAvatarSrc,
+  tinySrc,
+} from "@/lib/avatar";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(here, "../../..");
@@ -31,6 +39,18 @@ describe("the tiny flavours", () => {
       const rel = tinySrc(flavour).replace(/^\//, "");
       expect(existsSync(resolve(repoRoot, "frontend/public", rel)), flavour).toBe(true);
     }
+  });
+});
+
+describe("the upload ceiling", () => {
+  it("is the same number the host enforces", () => {
+    // The picker prints this before anybody picks a file; the host is what
+    // actually refuses. Two different figures would mean the copy promises a
+    // size the upload then rejects.
+    const rust = readFileSync(resolve(repoRoot, "src/company/avatar.rs"), "utf8");
+    const bytes = /MAX_AVATAR_BYTES: usize = (\d+) \* 1024 \* 1024/.exec(rust);
+    expect(bytes, "MAX_AVATAR_BYTES is no longer declared the way this test reads it").not.toBeNull();
+    expect(Number(bytes![1])).toBe(MAX_AVATAR_MB);
   });
 });
 

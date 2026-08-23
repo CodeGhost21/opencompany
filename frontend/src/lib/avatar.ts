@@ -41,6 +41,16 @@ export type TinyFlavour = (typeof TINY_FLAVOURS)[number];
 export const AVATAR_ACCEPT = "image/png,image/jpeg,image/webp,image/gif";
 
 /**
+ * The host's upload ceiling, in whole megabytes — for saying so before somebody
+ * picks a file, not for enforcing it.
+ *
+ * The enforcement is `MAX_AVATAR_BYTES` in `src/company/avatar.rs`, and it stays
+ * there: a limit checked in the browser is a limit anybody can skip. This is the
+ * number the picker prints, so the copy and the refusal name the same figure.
+ */
+export const MAX_AVATAR_MB = 4;
+
+/**
  * Picks a mascot from a seed, for whoever has not chosen one.
  *
  * A hash rather than a random draw, for the reason that matters to an operator:
