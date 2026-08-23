@@ -34,7 +34,7 @@ function isToastControl(target: Element): boolean {
  * for the instant of the read. Nothing is left disabled: the original
  * pointer-events values are restored before returning.
  */
-function beneathAt(x: number, y: number): Element | null {
+function beneathAt(x: number, y: number): (HTMLElement | SVGElement) | null {
   const toasterElements = Array.from(
     document.querySelectorAll<HTMLElement>("[data-sonner-toaster], [data-sonner-toaster] *"),
   );
