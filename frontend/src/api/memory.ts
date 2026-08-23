@@ -80,7 +80,8 @@ export interface MemoryStats {
 /**
  * `GET /memory` — the rows plus the context-truncation metadata for the SAME
  * read, so the "showing the newest N of M" notice never compares the capped
- * rows against a count taken at a different moment.
+ * rows against a count taken at a different moment. The metadata describes the
+ * unqueried browse list; a `?query=` request reports it as not applicable.
  */
 export interface MemoryList {
   /** The rows: operator facts, then the newest non-mirror context chunks. */
@@ -88,9 +89,14 @@ export interface MemoryList {
   /**
    * The non-mirror context chunk population before the 500-row display cap —
    * the "M" in the notice. Facts are never capped, so they are not counted.
+   * `0` for `?query=` requests, whose rows are search matches the metadata
+   * does not describe.
    */
   totalContext: number;
-  /** Whether `items` dropped context rows to the cap, from this same read. */
+  /**
+   * Whether `items` dropped context rows to the cap, from this same read.
+   * Always `false` for `?query=` requests.
+   */
   contextTruncated: boolean;
 }
 
