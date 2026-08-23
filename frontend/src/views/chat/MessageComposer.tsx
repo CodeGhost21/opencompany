@@ -164,6 +164,7 @@ export function MessageComposer({
           value={draft}
           onChange={(e) => setDraft(e.target.value)}
           onKeyDown={onKeyDown}
+          aria-label={placeholder}
           placeholder={placeholder}
           rows={1}
           className="field-sizing-content max-h-48 min-h-10 w-full resize-none bg-transparent px-3 py-2 text-sm outline-none placeholder:text-muted-foreground"
@@ -205,7 +206,7 @@ export function MessageComposer({
                   className={cn(
                     "rounded-md px-2 py-1 text-2xs font-medium transition-colors",
                     intent === option.value
-                      ? "bg-primary text-primary-foreground"
+                      ? "bg-primary/10 text-brand-700 dark:text-brand-300"
                       : "text-muted-foreground hover:text-foreground",
                   )}
                 >

@@ -285,7 +285,7 @@ export function Overview({ client, company, companyName }: Props) {
           disabled={loading}
           title="This page is a snapshot, not a live view. Re-read the company."
           aria-label="Refresh the graph"
-          className="inline-flex items-center gap-1 rounded px-1 py-0.5 hover:bg-muted disabled:opacity-50"
+          className="inline-flex min-h-6 items-center gap-1 rounded px-1 py-0.5 hover:bg-muted disabled:opacity-50 md:min-h-0"
         >
           <RefreshCw className={`size-3 ${loading ? "animate-spin" : ""}`} aria-hidden />
           Refresh
