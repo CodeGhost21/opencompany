@@ -33,9 +33,11 @@
 //! re-reads the source directory, so a workflow edited between steps is picked
 //! up.
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
+
+use serde_json::Value;
 
 use async_trait::async_trait;
 use tinyflows::caps::WorkflowResolver;
