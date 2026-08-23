@@ -1025,8 +1025,11 @@ pub fn build_agent(
         let mcp_security = Arc::new(SecurityPolicy::default());
         // The known-secret set for the scrubber: every credential the agent's
         // granted servers carry, so no configured token can leak into an
-        // agent-visible MCP error (the error-hardening cell).
-        let secrets = granted_secrets(&deps.mcp_servers, manifest_agent);
+        // agent-visible MCP error (the error-hardening cell). Use the same
+        // effective grants that selected `registry`, not the raw manifest
+        // request: an empty request inherits the company belt and can therefore
+        // reach servers even when `manifest_agent.tools` is empty.
+        let secrets = granted_secrets(&deps.mcp_servers, grants);
         tools.push(Box::new(OcMcpListServersTool::new(registry.clone())));
         tools.push(Box::new(McpListToolsTool::new(registry.clone())));
         // `OcMcpCallTool` replaces upstream's `McpCallTool`: same name/schema,
