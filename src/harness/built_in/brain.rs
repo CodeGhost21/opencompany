@@ -537,10 +537,6 @@ impl HarnessBrain {
             return Ok(None);
         };
         let instruction = grant.instruction.clone();
-        // Issue #796: the task (if any) this approval resumes. Bound before the
-        // struct's fields are moved into the run below.
-        let origin_task = grant.origin_task.clone();
-
         let guard = self.deps.steer.register(
             &self.record().id,
             InflightEntry {
