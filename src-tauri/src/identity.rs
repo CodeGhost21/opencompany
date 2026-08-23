@@ -27,8 +27,9 @@
 //! * **macOS** — `dscl` reads the local directory: `RealName` for the name,
 //!   `JPEGPhoto` for the account picture.
 //! * **Windows** — the account picture lives under
-//!   `%PUBLIC%\AccountPictures`; the full name is not read (the APIs that hold
-//!   it are not reachable without a dependency this crate does not want).
+//!   `%PUBLIC%\AccountPictures`, in the current account's SID folder; the full
+//!   name is not read (the APIs that hold it are not reachable without a
+//!   dependency this crate does not want).
 //!
 //! Everything is best-effort: any failure is `None`, never an error. A profile
 //! prefill that fails is a profile a person fills in themselves, which is
