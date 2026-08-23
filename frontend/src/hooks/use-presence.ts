@@ -6,6 +6,7 @@ import {
   applyPresence,
   livePeers,
   presenceToAnnounce,
+  reconcilePresenceSnapshot,
   PRESENCE_HEARTBEAT_MS,
   PRESENCE_TTL_MS,
   type Peer,
@@ -100,9 +101,23 @@ export function usePresence(
   const isRouteMissing = (error: unknown): boolean =>
     error instanceof ApiError && error.status === 404;
 
+  // The `atMillis` of the newest known `offline` frame per user, so a
+  // snapshot reconciled later (see `reconcilePresenceSnapshot`) knows a
+  // departure happened even though the departed peer has no entry left in
+  // `peers` to compare a timestamp against.
+  const tombstones = useRef(new Map<string, number>());
+
   /** Apply one live frame. */
   const onFrame = useCallback(
     (frame: { userId: string; status: PresenceStatus; atMillis: number }) => {
+      if (frame.status === "offline") {
+        const known = tombstones.current.get(frame.userId) ?? 0;
+        if (frame.atMillis > known) tombstones.current.set(frame.userId, frame.atMillis);
+      } else {
+        // Present again — a stale tombstone must not keep suppressing a
+        // future snapshot row for them once they're genuinely back.
+        tombstones.current.delete(frame.userId);
+      }
       setPeers((current) => applyPresence(current, frame) ?? current);
     },
     [],
@@ -159,14 +174,17 @@ export function usePresence(
     };
 
     const refresh = () => {
+      // Captured before the request goes out: see `reconcilePresenceSnapshot`
+      // for why a peer this snapshot never mentions is only dropped when what
+      // we already knew about them predates this moment, rather than the
+      // moment the response happens to land.
+      const requestSentAt = Date.now();
       void client
         .presence(company)
         .then((res) => {
           if (!live) return;
-          setPeers(
-            new Map(
-              res.people.map((p) => [p.userId, { status: p.status, atMillis: p.atMillis }]),
-            ),
+          setPeers((current) =>
+            reconcilePresenceSnapshot(current, tombstones.current, res.people, requestSentAt),
           );
         })
         .catch((error) => {

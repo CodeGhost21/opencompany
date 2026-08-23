@@ -5,6 +5,7 @@ import {
   IDLE_AWAY_MS,
   livePeers,
   presenceToAnnounce,
+  reconcilePresenceSnapshot,
   PRESENCE_HEARTBEAT_MS,
   PRESENCE_TTL_MS,
   pruneTypers,
@@ -107,6 +108,72 @@ describe("livePeers", () => {
 
   it("drops somebody whose lease lapsed", () => {
     expect(livePeers(peers, PRESENCE_TTL_MS + 1).size).toBe(0);
+  });
+});
+
+describe("reconcilePresenceSnapshot", () => {
+  /**
+   * Regression coverage for the race `usePresence`'s periodic snapshot
+   * refresh introduced: a `GET /presence` in flight racing a newer SSE frame
+   * must never let the (now stale) response win.
+   */
+  it("keeps a newer local status over an older snapshot row for the same peer", () => {
+    const peers = new Map<string, Peer>([["u1", { status: "away", atMillis: 2_000 }]]);
+    const next = reconcilePresenceSnapshot(
+      peers,
+      new Map(),
+      [{ userId: "u1", status: "online", atMillis: 1_000 }],
+      500,
+    );
+    expect(next.get("u1")).toEqual({ status: "away", atMillis: 2_000 });
+  });
+
+  it("applies a snapshot row newer than what is locally held", () => {
+    const peers = new Map<string, Peer>([["u1", { status: "away", atMillis: 1_000 }]]);
+    const next = reconcilePresenceSnapshot(
+      peers,
+      new Map(),
+      [{ userId: "u1", status: "online", atMillis: 2_000 }],
+      500,
+    );
+    expect(next.get("u1")).toEqual({ status: "online", atMillis: 2_000 });
+  });
+
+  it("does not resurrect somebody an offline tombstone already removed", () => {
+    // No entry in `peers` for u1 — a live "offline" frame already deleted it.
+    const tombstones = new Map([["u1", 3_000]]);
+    const next = reconcilePresenceSnapshot(
+      new Map(),
+      tombstones,
+      [{ userId: "u1", status: "online", atMillis: 2_000 }],
+      500,
+    );
+    expect(next.has("u1")).toBe(false);
+  });
+
+  it("applies a snapshot row newer than a stale offline tombstone", () => {
+    const tombstones = new Map([["u1", 1_000]]);
+    const next = reconcilePresenceSnapshot(
+      new Map(),
+      tombstones,
+      [{ userId: "u1", status: "online", atMillis: 2_000 }],
+      500,
+    );
+    expect(next.get("u1")).toEqual({ status: "online", atMillis: 2_000 });
+  });
+
+  it("does not drop a peer the snapshot omits if a live frame raced ahead of the request", () => {
+    // u2 arrived (via a live frame) *after* the snapshot request was sent —
+    // the snapshot's silence about them predates that arrival.
+    const peers = new Map<string, Peer>([["u2", { status: "online", atMillis: 5_000 }]]);
+    const next = reconcilePresenceSnapshot(peers, new Map(), [], 1_000);
+    expect(next.get("u2")).toEqual({ status: "online", atMillis: 5_000 });
+  });
+
+  it("drops a peer the snapshot omits when what we knew predates the request", () => {
+    const peers = new Map<string, Peer>([["u2", { status: "online", atMillis: 500 }]]);
+    const next = reconcilePresenceSnapshot(peers, new Map(), [], 1_000);
+    expect(next.has("u2")).toBe(false);
   });
 });
 

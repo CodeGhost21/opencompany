@@ -100,6 +100,54 @@ export function applyPresence(
   return next;
 }
 
+/**
+ * Merges a `GET /presence` snapshot into the peers already held, instead of
+ * replacing the map outright.
+ *
+ * The snapshot request and the live SSE stream race: a status change or a
+ * disconnect can arrive over the stream *while the GET is in flight*, and a
+ * plain replace on the response would silently undo it — reverting a status
+ * change to what the snapshot saw a moment earlier, or resurrecting somebody
+ * whose `offline` frame already deleted them, for up to the next refresh
+ * interval. Reconciled here the same way a live frame is: per user, whichever
+ * `atMillis` is newer wins.
+ *
+ * `tombstones` (userId → the `atMillis` of the last known `offline` frame) is
+ * what makes a disconnect win even though a departed peer has no entry left in
+ * `peers` to compare against — without it, any snapshot row for them would be
+ * applied unconditionally, since there is nothing in the *map* to compare its
+ * timestamp to. `requestSentAt` (`Date.now()` when the GET was issued) plays
+ * the same role for a peer the snapshot doesn't mention at all: they are only
+ * dropped if what we already knew about them predates the request, so an
+ * arrival whose live frame raced ahead of the snapshot is not undone by the
+ * snapshot's silence about them.
+ */
+export function reconcilePresenceSnapshot(
+  peers: ReadonlyMap<string, Peer>,
+  tombstones: ReadonlyMap<string, number>,
+  snapshot: ReadonlyArray<{ userId: string; status: PresenceStatus; atMillis: number }>,
+  requestSentAt: number,
+): Map<string, Peer> {
+  const next = new Map(peers);
+  const seen = new Set<string>();
+  for (const row of snapshot) {
+    seen.add(row.userId);
+    const current = next.get(row.userId);
+    if (current && current.atMillis > row.atMillis) continue;
+    const tombstone = tombstones.get(row.userId);
+    if (tombstone !== undefined && tombstone > row.atMillis) continue;
+    next.set(row.userId, { status: row.status, atMillis: row.atMillis });
+  }
+  for (const [userId, peer] of next) {
+    if (seen.has(userId)) continue;
+    // Missing from the snapshot. Only take that as "gone" when what we
+    // already knew predates the request — otherwise a live frame arrived
+    // after the GET was issued and simply raced ahead of its response.
+    if (peer.atMillis < requestSentAt) next.delete(userId);
+  }
+  return next;
+}
+
 /** Peers whose lease is still good. */
 export function livePeers(
   peers: ReadonlyMap<string, Peer>,
