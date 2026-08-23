@@ -213,10 +213,6 @@ enum MemoryCmd {
         /// Target credential (hosted engines only).
         #[arg(long)]
         to_api_key: Option<String>,
-        /// Target data root (`namespace` only). Defaults to the env data dir —
-        /// refused when that resolves to the source's own store.
-        #[arg(long)]
-        to_data_dir: Option<PathBuf>,
         /// Records per page.
         #[arg(long, default_value_t = 500)]
         page_size: usize,
