@@ -1087,6 +1087,36 @@ async fn the_local_owner_is_the_same_person_on_every_request() {
     assert!(first["id"].as_str().is_some_and(|id| !id.is_empty()));
 }
 
+/// The owner of a company with no sign-in is still a person with a name and a
+/// face — and on the desktop they are the *only* person, so if the profile route
+/// did not serve `none` mode it would not serve the case it matters most in.
+#[tokio::test]
+async fn the_local_owner_can_name_themselves_and_pick_a_face() {
+    let dir = home();
+    let state = state_in_mode(dir.path(), AuthMode::None, None).await;
+    let app = router(state);
+
+    let request = Request::builder()
+        .method("PATCH")
+        .uri("/api/v1/company/auth/me")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::json!({"displayName": "Steven", "avatar": "tiny:clay"}).to_string(),
+        ))
+        .unwrap();
+    let response = app.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let saved = body_json(response).await;
+    assert_eq!(saved["displayName"], "Steven", "{saved}");
+    assert_eq!(saved["avatar"], "tiny:clay", "{saved}");
+
+    // The same durable owner record, so the choice survives the next request
+    // rather than living on a principal invented per call.
+    let reread = body_json(app.oneshot(get("/api/v1/company/auth/me")).await.unwrap()).await;
+    assert_eq!(reread["id"], saved["id"], "{reread}");
+    assert_eq!(reread["avatar"], "tiny:clay", "{reread}");
+}
+
 /// `none` cannot add users. An invite would grant an account nobody could ever
 /// reach, because there is no sign-in to reach it through.
 #[tokio::test]
