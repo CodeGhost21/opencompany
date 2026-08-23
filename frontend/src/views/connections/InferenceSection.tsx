@@ -359,8 +359,12 @@ export function InferenceSection({
     if (busy) return;
     setBusy("reset");
     try {
-      await revertInference(client, company);
-      toast.success("Reverted to the managed configuration.");
+      const result = await revertInference(client, company);
+      // The host names what the company actually falls back to: its committed
+      // manifest `[inference]`, or the platform default when the manifest
+      // declares none. Claiming "managed" here would be wrong for a company
+      // whose manifest names its own provider (issue #1474).
+      toast.success(result.note);
       pickProvider("managed");
       setKey("");
       await refresh();
