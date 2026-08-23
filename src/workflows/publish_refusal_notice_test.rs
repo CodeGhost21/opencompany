@@ -228,7 +228,10 @@ async fn spawn_interleaved_publish_script() -> String {
                             "function": { "name": "publish_artifact", "arguments": json!({ "path": source }).to_string() }
                         }]
                     }),
-                    2 => json!({ "role": "assistant", "content": "could not publish" }),
+                    2 => {
+                        barrier.wait().await;
+                        json!({ "role": "assistant", "content": "could not publish" })
+                    }
                     _ => json!({ "role": "assistant", "content": "done" }),
                 };
                 Json(json!({
