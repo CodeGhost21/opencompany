@@ -297,9 +297,9 @@ renamed — they name a slot, not a colour. A desk keyed `amber` resolves to
 | Slot | Light | Dark |
 | --- | --- | --- |
 | `--chart-1` | `#7153F0` violet | `#937BF6` |
-| `--chart-2` | `#0EA5E9` cyan | `#38BDF8` |
-| `--chart-3` | `#12A150` green | `#35C77F` |
-| `--chart-4` | `#F5A524` amber | `#FFC53D` |
+| `--chart-2` | `#008DD0` cyan | `#38BDF8` |
+| `--chart-3` | `#009A49` green | `#35C77F` |
+| `--chart-4` | `#BF7200` amber | `#FFC53D` |
 | `--chart-5` | `#E93D82` pink | `#FF6BA6` |
 
 Brand leads slot 1; the sequence then walks the hue circle so neighbouring
