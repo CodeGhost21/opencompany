@@ -210,9 +210,11 @@ describe("what the always-ask field suggests", () => {
     await act(async () => {
       resolveSlugs({ slugs: [] });
     });
-    // Discovery succeeded and "shell" is genuinely not wired: now it speaks.
+    // Discovery succeeded and "shell" is genuinely not a workflow tool here:
+    // now it speaks — scoped to what the served set can prove, not a blanket
+    // "not a tool" claim.
     expect(container.textContent).toContain(
-      "shell is not a tool this deployment wires.",
+      "shell doesn't match any of the workflow tools wired here.",
     );
   });
 
