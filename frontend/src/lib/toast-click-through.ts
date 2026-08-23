@@ -177,9 +177,13 @@ export function relayToastPointerDown(event: PointerEvent): void {
   if (!beneath) return;
 
   // A page frame is another document: pointer capture here cannot reach its
-  // content, so the press is handed to the frame itself over the bridge.
+  // content, so the press is handed to the frame itself over the bridge, and
+  // the rest of the gesture is relayed to it as it lands back here
+  // (`relayFramePressTail`). A frame with no loaded document receives the
+  // press but cannot hold a gesture, so nothing is tracked for it.
   if (beneath instanceof HTMLIFrameElement) {
     relayToFrame(beneath, event, "oc:relay-pointerdown");
+    if (beneath.contentWindow) framePresses.set(event.pointerId, beneath);
     return;
   }
 
