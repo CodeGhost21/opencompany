@@ -24,6 +24,13 @@ kind or route involved, and error codes.
 
 - The operator MUST be shown the **exact final issue body** — post-scrub,
   byte-for-byte what will be posted.
+- The previewed body is frozen on the local Feedback Item, and a later
+  **confirm** (Send after Preview) posts exactly those bytes — never a
+  re-derivation under a possibly-changed secret store or manifest. The frozen
+  body is still re-scrubbed as a verification, so a value that became a secret
+  since the preview still aborts (fail closed), and a config change that would
+  alter the approved body asks for a fresh preview instead of silently posting
+  different bytes.
 - Nothing is transmitted without explicit confirmation or a standing
   per-category auto-consent ([README.md](README.md)); auto-consent filings
   are journaled and the operator can review every filed body after the fact.
