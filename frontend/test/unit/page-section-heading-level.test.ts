@@ -1,46 +1,64 @@
 import { readFileSync } from "node:fs";
-import { basename } from "node:path";
 import { describe, expect, it } from "vitest";
 
 /**
- * Every section of the Connections page sits at the same heading level.
+ * A page's top-level sections all head at `h2`, directly under its one `h1`.
  *
- * `ConnectionsView` renders one `h1` ("Connections") and then a row of peer
- * sections — MCP Servers, Inference, the company key, Composio, Channels,
- * repositories, providers, the account choice. They are siblings in the page's
- * outline, so they have to be siblings in its heading levels too.
+ * Issue #1392 is a family of the same mistake: a page grew an `h1`, and the
+ * sections beneath it kept heading at `h3` or `h4`. Each component is
+ * unimpeachable read on its own — nothing is wrong with an `h3` until you know
+ * what it renders beside — so the defect only exists at the level of the
+ * assembled page, which is the level this guards.
  *
- * They were all `h3` under that `h1`, which axe reported as `heading-order` on
- * `#/settings/connections` (issue #1392): a jump from 1 to 3 reads to a screen
- * reader as a missing section. Promoting only MCP to `h2` would have fixed the
- * axe finding and broken the outline in a way axe cannot see — heading
- * navigation would then present Inference, Composio, Channels and the rest as
- * subsections *of* MCP Servers rather than as its peers. The fix is that they
- * all move together, and this pins the "together" half.
+ * Two shapes of it were reported, and both are pinned below:
  *
- * A source guard, like `dialog-width-override`: the failure is a correct-looking
- * component in isolation. Nothing is wrong with an `h3` until you know what it
- * is rendered beside, and that context lives in `ConnectionsView`, not in the
- * section.
+ * - `#/settings/connections` headed all eight of its sections at `h3` under one
+ *   `h1`. axe reported `heading-order` against MCP alone, because MCP is the
+ *   first section on the page — but every one of them skipped 1→3, so promoting
+ *   only the flagged one would have satisfied axe while making the other seven
+ *   read as subsections *of* MCP Servers.
+ * - `#/feedback` left `FeedbackBoard` at `h3` when the page title became an
+ *   `h1`, so the board appeared nested beneath a section that does not exist.
+ *
+ * What this cannot check is a component's *position*. A section that heads at
+ * `h2` correctly can still be rendered before the `h1` — see
+ * `nav-rail-headings.test.ts`, which covers the navigation rails where that
+ * actually happened.
+ *
+ * A source guard in the idiom of `dialog-width-override`.
  */
 const VIEWS = new URL("../../src/views", import.meta.url).pathname;
 
 /**
- * The sections `ConnectionsView` renders directly, each contributing one
- * top-level heading to that page. `McpServersSection` is here too: it also
- * serves the standalone `#/settings/mcp` page, where its heading sits under
- * that page's own `h1` — the same level either way, which is why one tag can
- * serve both.
+ * Per page: the view holding its `h1`, and the components it renders directly
+ * that each contribute one top-level section heading to it.
+ *
+ * Only components whose heading lands in the *page's* outline belong here. A
+ * component rendered into a dialog is deliberately absent — `ProviderDetail`
+ * heads at `h4`, but it renders inside a `Sheet`, which carries its own
+ * `SheetTitle` and its own outline, so it is not a peer of the page's sections.
  */
-const SECTIONS = [
-  "McpServersSection",
-  "InferenceSection",
-  "CompanyCredentialCard",
-  "ComposioSection",
-  "ChannelsSection",
-  "RepositoriesCard",
-  "ProvidersSection",
-  "AccountChoiceSection",
+const PAGES = [
+  {
+    view: "ConnectionsView",
+    sections: [
+      // Also serves the standalone `#/settings/mcp` page, where its heading sits
+      // under that page's own `h1` — the same level either way, which is why one
+      // tag serves both.
+      "connections/McpServersSection",
+      "connections/InferenceSection",
+      "connections/CompanyCredentialCard",
+      "connections/ComposioSection",
+      "connections/ChannelsSection",
+      "connections/RepositoriesCard",
+      "connections/ProvidersSection",
+      "connections/AccountChoiceSection",
+    ],
+  },
+  {
+    view: "FeedbackView",
+    sections: ["feedback/FeedbackBoard"],
+  },
 ] as const;
 
 /** The heading tags a file opens, in source order. */
@@ -48,34 +66,35 @@ function headingLevels(source: string): number[] {
   return [...source.matchAll(/<h([1-6])[\s>]/g)].map(([, level]) => Number(level));
 }
 
-describe("Connections page sections", () => {
-  it("are all rendered by ConnectionsView, so this list cannot go stale", () => {
-    const view = readFileSync(`${VIEWS}/ConnectionsView.tsx`, "utf8");
-    const missing = SECTIONS.filter((name) => !view.includes(`<${name}`));
+const read = (name: string) => readFileSync(`${VIEWS}/${name}.tsx`, "utf8");
 
-    expect(missing, `no longer rendered by ConnectionsView: ${missing.join(", ")}`).toEqual([]);
+/** The bare component name, for a path that may carry a directory. */
+const componentName = (section: string) => section.split("/").at(-1) ?? section;
+
+describe.each(PAGES)("$view", ({ view, sections }) => {
+  it("renders every section this pins, so the list cannot go stale", () => {
+    const source = read(view);
+    const missing = sections.filter((s) => !source.includes(`<${componentName(s)}`));
+
+    expect(missing, `no longer rendered by ${view}: ${missing.join(", ")}`).toEqual([]);
   });
 
-  it("each head their section at level two, as peers of one another", () => {
+  it("holds the page's one h1 itself", () => {
+    expect(headingLevels(read(view))).toEqual([1]);
+  });
+
+  it("has each section head at level two, as peers of one another", () => {
     const offenders: string[] = [];
-    for (const name of SECTIONS) {
-      const path = `${VIEWS}/connections/${name}.tsx`;
-      const levels = headingLevels(readFileSync(path, "utf8"));
-      // A section may carry sub-headings; only its own top level is a peer of
-      // the other sections'. The shallowest heading in the file is that one.
-      const top = Math.min(...levels);
-      if (top !== 2) offenders.push(`${basename(path)} heads its section with h${top}`);
+    for (const section of sections) {
+      // A section may carry sub-headings of its own; only its shallowest is a
+      // peer of the other sections'.
+      const top = Math.min(...headingLevels(read(section)));
+      if (top !== 2) offenders.push(`${componentName(section)} heads its section with h${top}`);
     }
 
     expect(
       offenders,
-      `these sections disagree with their peers on the Connections outline:\n${offenders.join("\n")}`,
+      `these sections disagree with the ${view} outline:\n${offenders.join("\n")}`,
     ).toEqual([]);
-  });
-
-  it("keeps the one h1 on the page in ConnectionsView itself", () => {
-    const view = readFileSync(`${VIEWS}/ConnectionsView.tsx`, "utf8");
-
-    expect(headingLevels(view)).toEqual([1]);
   });
 });
