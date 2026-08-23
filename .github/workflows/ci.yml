@@ -15,10 +15,19 @@ name: CI
 # concurrency block below exists to protect) and every pull request, including
 # ones from forks. What it drops: runs on branches with no PR open yet, which
 # are re-run in full the moment the PR is opened.
+#
+# Issue #793. A merge queue dispatches `merge_group.checks_requested` for the
+# synthetic commit that would land on the default branch. That is the state a
+# required check must validate: if it fails, GitHub removes the entry before it
+# becomes `main`. Enabling the queue and choosing its batch size are repository
+# ruleset settings, deliberately left to maintainers; this trigger is the
+# workflow half GitHub requires once they enable it.
 on:
   push:
     branches: [main]
   pull_request:
+  merge_group:
+    types: [checks_requested]
 
 # Issue #770. Cancellation is scoped to NON-DEFAULT refs, and the asymmetry is
 # the whole point: on a PR branch a new push makes the previous run's answer
@@ -40,8 +49,8 @@ on:
 # `'refs/heads/main'`: the literal silently reverts to cancel-everything the day
 # the default branch is renamed, and it would do so without failing anything —
 # the same class of quietly-vacuous check this file exists to argue against.
-# Both triggers populate `github.event.repository`, so the expression resolves
-# on `push` and `pull_request` alike.
+# All three triggers populate `github.event.repository`, so the expression
+# resolves on `push`, `pull_request`, and `merge_group` alike.
 #
 # PR runs are UNAFFECTED. A `pull_request` run's `github.ref` is
 # `refs/pull/<n>/merge`, never `refs/heads/<default>`, so the expression is true
@@ -58,10 +67,11 @@ on:
 # that is cheaper — an hourly scheduled run on `main` — tells you later and
 # attributes the breakage to nothing at all. The structurally correct answer is
 # a MERGE QUEUE, which verifies the exact merged state before it becomes `main`
-# and makes this question moot; it needs a `merge_group` trigger plus a
-# branch-protection change no PR can make, and with a 26–30 minute critical path
-# it either serialises merges to ~2/hour or has to batch. Issue #793 carries that
-# evaluation; this block is the fix that does not need anyone's settings.
+# and makes this question moot. The workflow side now listens for that event;
+# enabling it and choosing a batch size remain repository settings, because a
+# 26–30 minute critical path either serialises merges to ~2/hour or has to
+# batch. This block still protects post-merge verification when the queue is
+# unavailable or intentionally disabled.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.ref != format('refs/heads/{0}', github.event.repository.default_branch) }}
@@ -186,15 +196,25 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
-      rust: ${{ steps.filter.outputs.rust }}
-      frontend: ${{ steps.filter.outputs.frontend }}
-      desktop: ${{ steps.filter.outputs.desktop }}
+      # `merge_group` has no pull-request changed-files payload. Do not let a
+      # path filter intended for a PR answer "nothing changed" and turn every
+      # conditional check into a green skip: a queue entry must validate its
+      # complete synthetic merge. The extra work is intentional — a batch may
+      # combine unrelated Rust, console, and desktop changes, and only running
+      # all three makes the required checks evidence for that combined state.
+      rust: ${{ github.event_name == 'merge_group' && 'true' || steps.filter.outputs.rust }}
+      frontend: ${{ github.event_name == 'merge_group' && 'true' || steps.filter.outputs.frontend }}
+      desktop: ${{ github.event_name == 'merge_group' && 'true' || steps.filter.outputs.desktop }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
+      # `dorny/paths-filter` uses pull-request file metadata for this workflow's
+      # selective runs. A merge group intentionally has no such PR context, and
+      # the outputs above already select every lane for it.
       - id: filter
+        if: github.event_name != 'merge_group'
         uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
         with:
           filters: |
@@ -323,6 +343,13 @@ jobs:
           [ "$failed" -eq 0 ] || exit 1
           echo "Vendored submodule init is inlined nowhere and called from:"
           echo "$callers"
+
+      # Issue #793. A merge queue can only protect `main` if this workflow
+      # receives its synthetic merge commit AND every conditional lane runs for
+      # it. Keep both halves checked together; a trigger without the output
+      # override is a queue run whose required checks can all be skipped.
+      - name: Assert merge-group CI wiring
+        run: scripts/ci/assert-merge-group-workflow.sh
 
   rust:
     needs: changes
@@ -785,11 +812,6 @@ jobs:
     name: Rust (openhuman, tinymemory)
     runs-on: ubuntu-latest
     timeout-minutes: 60
-    env:
-      # OpenHuman's agent loop requires the same stack its production runtimes
-      # allocate. Apply it to every test invocation in this multi-feature job;
-      # Rust's test harness otherwise creates 2 MiB threads.
-      RUST_MIN_STACK: 16777216
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -1022,6 +1044,13 @@ jobs:
             unshare --net -- sh -c "ip link set lo up && exec '$binary' --test-threads=1 --nocapture"
         env:
           OPENCOMPANY_OFFLINE_LANE: "1"
+          # This step runs the test binary DIRECTLY (bypassing cargo), so the
+          # tracked floor in `.cargo/config.toml` (issue #895) never reaches it:
+          # cargo applies `[env]` only to processes it launches. Without this,
+          # the OpenHuman agent-turn chain runs on libtest's 2 MiB default and
+          # can SIGABRT the whole binary before the offline lane is exercised
+          # (issue #579).
+          RUST_MIN_STACK: "8388608"
 
       # Catches the combination traps no single feature set can: most often a
       # mandatory struct field constructed differently across feature arms.
