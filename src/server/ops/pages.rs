@@ -514,14 +514,31 @@ async fn bundle(
         ))));
     };
 
-    let Some((node, stream)) = runtime
-        .workspace()
-        .read_bytes(company, &compiled.id)
-        .await?
-    else {
-        return Err(ApiError(OpenCompanyError::NotFound(format!(
-            "page {slug} bundle"
-        ))));
+    // The compiled bundle reaches the tree two ways: `pages_write` stores it as
+    // a *binary* node (`mime` set, size and sha256 computed by the store), while
+    // an operator creating `page.compiled.mjs` through the console — or a test
+    // seeding the tree over the workspace API — stores it as a plain text file.
+    // Both hold the same JS bytes, so serve whichever kind the node is; a route
+    // that served only one would 404 a legitimate page over a storage detail
+    // that has nothing to do with what the module graph needs.
+    let (node, body) = if compiled.is_binary() {
+        let Some((node, stream)) = runtime
+            .workspace()
+            .read_bytes(company, &compiled.id)
+            .await?
+        else {
+            return Err(ApiError(OpenCompanyError::NotFound(format!(
+                "page {slug} bundle"
+            ))));
+        };
+        (node, Body::from_stream(stream))
+    } else {
+        let Some((node, content)) = runtime.workspace().read(company, &compiled.id).await? else {
+            return Err(ApiError(OpenCompanyError::NotFound(format!(
+                "page {slug} bundle"
+            ))));
+        };
+        (node, Body::from(content))
     };
 
     let mut response = Response::builder()
@@ -535,7 +552,7 @@ async fn bundle(
     if let Some(size) = node.size {
         response = response.header(header::CONTENT_LENGTH, size);
     }
-    let mut response = response.body(Body::from_stream(stream)).map_err(|e| {
+    let mut response = response.body(body).map_err(|e| {
         ApiError(OpenCompanyError::Store(format!(
             "bundle response failed: {e}"
         )))
