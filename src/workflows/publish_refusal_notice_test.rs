@@ -64,8 +64,6 @@ kind = "agent"
 name = "Work"
 summary = "Draft the launch spec."
 agent = "ceo"
-[[node]]
-id = "done"
 kind = "output"
 name = "Done"
 [[edge]]
