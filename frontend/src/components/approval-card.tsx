@@ -119,6 +119,33 @@ export function approvalConsequence(group: ApprovalSummary["group"]): ApprovalCo
 }
 
 /**
+ * Every distinct consequence a batch of approvals carries, in the order the
+ * batch first raises each one.
+ *
+ * A turn that parks several calls renders as one card with one Approve, so the
+ * warning has to survive the consolidation: a batch of three outbound sends
+ * still leaves the company, and a mixed batch spends money *and* leaves it.
+ * Returning the distinct set rather than a single verdict is what lets the
+ * headline stay honest either way — one badge when the batch agrees with
+ * itself, one per consequence when it does not.
+ *
+ * Deduplicated by label, not by group: `hire` and `identity` are separate
+ * groups, while `spend` and `hire` share a tint, so the label is the thing an
+ * operator actually reads twice.
+ */
+export function batchConsequences(approvals: ApprovalSummary[]): ApprovalConsequence[] {
+  const seen = new Set<string>();
+  const out: ApprovalConsequence[] = [];
+  for (const a of approvals) {
+    const consequence = approvalConsequence(a.group);
+    if (!consequence || seen.has(consequence.label)) continue;
+    seen.add(consequence.label);
+    out.push(consequence);
+  }
+  return out;
+}
+
+/**
  * How much of a payload is shown before it is clamped. Past either bound the
  * block collapses behind a "Show everything" toggle — a queue of approvals has
  * to stay scannable, and a forty-line argument object buries the next card.
