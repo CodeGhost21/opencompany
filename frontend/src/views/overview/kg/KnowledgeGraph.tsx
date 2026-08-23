@@ -1897,13 +1897,14 @@ export function KnowledgeGraph({
   // ── the graph itself (reused inline + fullscreen) ───────────────────────────
   const graphInner = (
     <>
-      {/* `data-visual-volatile` on both halves of the canvas: the graph is a
-          d3-force simulation re-rendered every animation frame under a
-          cinematic camera, so it is never twice in the same place and
-          `visual.spec.ts` cannot compare it. Masking it keeps Overview's
-          surrounding chrome under a baseline instead of dropping the whole
-          view. */}
-      <div className="kg-grid pointer-events-none absolute inset-0" aria-hidden data-visual-volatile />
+      {/* The visual lane runs with `reducedMotion: "reduce"`, and this graph
+          reads that media query itself: the camera snaps instead of gliding,
+          the orbit and pulses freeze, and once the d3 sim cools to sleep
+          (`alphaDecay(0.015)` ≈ 8s) nothing repaints — so `visual.spec.ts`
+          compares the settled graph instead of masking it. Without the media
+          query the graph never holds still, which is exactly why the lane
+          sets it. */}
+      <div className="kg-grid pointer-events-none absolute inset-0" aria-hidden />
       <svg
         ref={svgRef}
         viewBox={`0 0 ${W} ${H}`}
