@@ -3541,7 +3541,7 @@ async fn mcp_manifest_server_cannot_be_deleted_but_can_be_overridden() {
 #[tokio::test]
 async fn mcp_reachability_lists_reaching_agents_including_overlay() {
     let manifest: CompanyManifest = toml::from_str(
-        "[company]\nname = \"Acme\"\n[tools]\nallow = [\"*\"]\n\
+        "[company]\nname = \"Acme\"\n[tools]\nallow = [\"*\", \"mcp:*\"]\n\
          [[agent]]\nid = \"ceo\"\nrole = \"Chief\"\ntools = [\"mcp:notion\"]\n\
          [[agent]]\nid = \"eng\"\nrole = \"Engineer\"\n[policy]\nmode = \"full\"\n\
          [[mcp_server]]\nname = \"notion\"\nendpoint = \"https://notion.example/mcp\"\n\
@@ -3661,7 +3661,7 @@ async fn mcp_reachability_flags_a_server_no_agent_can_reach() {
 #[tokio::test]
 async fn mcp_reachability_is_empty_for_a_disabled_server() {
     let manifest: CompanyManifest = toml::from_str(
-        "[company]\nname = \"Acme\"\n[tools]\nallow = [\"*\"]\n\
+        "[company]\nname = \"Acme\"\n[tools]\nallow = [\"*\", \"mcp:*\"]\n\
          [[agent]]\nid = \"ceo\"\nrole = \"Chief\"\ntools = [\"mcp:docs\"]\n[policy]\nmode = \"full\"\n\
          [[mcp_server]]\nname = \"docs\"\nendpoint = \"https://docs.example/mcp\"\n",
     )
