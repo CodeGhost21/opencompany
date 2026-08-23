@@ -991,6 +991,9 @@ export function ChatView({
     if (created) {
       const member = fromDto(created);
       setMembers((m) => [...m, member]);
+      // The host directory is re-read so the new teammate can be @-mentioned
+      // from the picker immediately, rather than after the next reload.
+      void reloadDirectory();
       // A successful host add proves the write plane exists, even for a
       // company that opened on the starter roster (fromHost still false from
       // `boot`) — flip it so this and later actions (inbox, budget) target
