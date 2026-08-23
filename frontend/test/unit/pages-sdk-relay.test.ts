@@ -293,9 +293,9 @@ describe("the page frame's toast-relay listener", () => {
     const releaseClicked = vi.fn();
     releaseTarget.addEventListener("click", releaseClicked);
     document.body.append(releaseTarget);
-    mockElementFromPoint(releaseTarget);
 
     // A drag that ends over `releaseTarget`, followed by a fresh press+click on it.
+    mockElementFromPoint(pressTarget);
     relayFrom(window.parent, {
       type: "oc:relay-pointerdown",
       x: 10,
