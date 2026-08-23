@@ -513,7 +513,10 @@ mod test {
         .await
         .unwrap();
         let preview_body = preview.preview_body.expect("preview body");
-        assert!(preview_body.contains("⟨redacted:name⟩"), "got {preview_body}");
+        assert!(
+            preview_body.contains("⟨redacted:name⟩"),
+            "got {preview_body}"
+        );
         assert!(!preview_body.contains("dana_roe"));
 
         // Between preview and confirm the roster loses the agent. The confirm
@@ -585,7 +588,10 @@ mod test {
         )
         .await
         .unwrap();
-        assert!(confirm.blocked, "a new secret value aborts, got {confirm:?}");
+        assert!(
+            confirm.blocked,
+            "a new secret value aborts, got {confirm:?}"
+        );
         assert!(github.created().is_empty());
     }
 
