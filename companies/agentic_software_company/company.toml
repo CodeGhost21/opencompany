@@ -28,7 +28,7 @@ human_role = "Product direction"
 #
 # Search spend is bounded by `[tools].search_daily_calls` (200/day by default);
 # setting it to `0` pauses search without editing this list.
-allow = ["*", "workspace.*", "media", "composio", "search", "mcp:*"]
+allow = ["*", "workspace.*", "workspace.write", "media", "composio", "search", "mcp:*"]
 
 # There is deliberately no `[tools.composio].toolkits` here. Absent means "open
 # mode": defer to the backend's own server-enforced allowlist, which is every
