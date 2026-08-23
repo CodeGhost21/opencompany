@@ -803,7 +803,14 @@ export function ChatView({
         // Who the picker resolved. The host re-validates every entry and
         // demotes what no longer exists, so this is a suggestion; omitting it
         // asks the host to extract from the text instead.
-        mentions,
+        //
+        // The composer tracks offsets as UTF-16 indices (they drive textarea
+        // and reconcile operations); the host reads them as UTF-8 bytes, so
+        // each is converted to the byte length of its prefix here.
+        mentions?.map((m) => ({
+          ...m,
+          offset: utf8ByteLength(text.slice(0, m.offset)),
+        })),
       );
       // Reconcile the optimistic id first, for BOTH shapes. On the detached one
       // this is strictly better than what came before: since #983 the message is
