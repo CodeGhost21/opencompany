@@ -413,6 +413,7 @@ mod tests {
                     id: "gone".to_string(),
                     email: "gone@acme.test".to_string(),
                     display_name: Some("Gone Guy".to_string()),
+                    avatar: None,
                     role: UserRole::Member,
                     status: UserStatus::Suspended,
                     password_hash: None,
