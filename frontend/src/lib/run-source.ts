@@ -89,7 +89,7 @@ export function runSource(run: RunSummary, index: RunSourceIndex = {}): RunSourc
   if (run.taskId !== undefined) {
     const card = index.tasks?.get(run.taskId);
     const workflowId = card?.originWorkflowId;
-    if (workflowId !== undefined) {
+    if (card && workflowId !== undefined) {
       const name = index.workflows?.get(workflowId);
       return {
         kind: "workflow",
