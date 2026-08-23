@@ -111,7 +111,7 @@ export function staticAvatarSrc(ref: string): string | null {
 }
 
 /**
- * Object URLs for uploaded avatars, keyed by node id.
+ * Object URLs for uploaded avatars, keyed by host, company and node id.
  *
  * Module-level and never revoked, which is deliberate rather than sloppy. An
  * avatar is drawn in dozens of places on one screen — chat gutters, facepiles,
@@ -120,6 +120,13 @@ export function staticAvatarSrc(ref: string): string | null {
  * each time it scrolled out of a list and back, and per-component caching would
  * fetch the same bytes once per component. The cost is bounded by the number of
  * *uploaded* avatars a company has, each capped at 4 MB by the host.
+ *
+ * The host is part of the key because the map outlives a connection switch: the
+ * desktop console remounts `AppShell` when it changes hosts, but this module
+ * does not reload, so a key that named only company and node would let the
+ * second host draw the first host's bytes when two hosts hold the same
+ * company/node ids — a cloned or restored company, say. Node ids are minted per
+ * host, so the collision is exactly the case this prefix exists for.
  *
  * The promise is cached, not the URL, so N components mounting at once share one
  * request instead of racing N.
