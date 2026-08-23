@@ -273,6 +273,22 @@ impl MongoStore {
             senders: Arc::new(StdMutex::new(HashMap::new())),
         };
         store.ensure_indexes().await?;
+        // Issue #1573: give run documents written before the `agent_id` mirror
+        // existed one, so a per-teammate history is the whole history. Runs
+        // after `ensure_indexes` so the `agent_id` index exists to make the
+        // "is there anything left to do?" probe a lookup.
+        match store.backfill_run_agent_ids().await {
+            Ok(0) => {}
+            Ok(filled) => tracing::info!(
+                filled,
+                "backfilled the agent id on run rows written before the column existed"
+            ),
+            Err(err) => tracing::warn!(
+                error = %err,
+                "could not backfill run agent ids; a per-teammate run history will \
+                 under-report until the next boot"
+            ),
+        }
         // Reclaim workspace payloads whose node document never landed (issue
         // #553). Best-effort by design: the cost of skipping it is disk that is
         // already unreachable, and the cost of failing boot over it would be a
@@ -289,6 +305,50 @@ impl MongoStore {
             ),
         }
         Ok(store)
+    }
+
+    /// Copies `agentId` out of `run_json` into the indexed `agent_id` field for
+    /// every run document that predates it (issue #1573), returning how many
+    /// were filled.
+    ///
+    /// The MongoDB half of sqlite's `heal_runs_agent_id`, and it exists for the
+    /// same reason: a per-teammate run list that silently omitted every attempt
+    /// written before the upgrade would read as "this teammate has never run",
+    /// which is a wrong answer rather than a missing feature. Mongo cannot do
+    /// this server-side — the desk lives inside a **string** of JSON, not a
+    /// sub-document — so the rows are read back and rewritten one by one.
+    ///
+    /// Cheap on every boot after the first: the `$exists: false` probe is
+    /// answered by the `agent_id` index, and matches nothing once the backfill
+    /// has run. Best-effort at the call site for the same reason the orphan
+    /// blob sweep is — a company that will not start is worse than one whose
+    /// oldest run rows are not yet filterable by desk.
+    async fn backfill_run_agent_ids(&self) -> Result<usize> {
+        let runs = self.collection("runs");
+        let mut cursor = runs
+            .find(doc! {"agent_id": {"$exists": false}})
+            .await
+            .map_err(mongo_err)?;
+        let mut pending: Vec<(String, String, String)> = Vec::new();
+        while let Some(document) = cursor.try_next().await.map_err(mongo_err)? {
+            let record: crate::ports::runs::RunRecord =
+                serde_json::from_str(&get_str(&document, "run_json")?)?;
+            pending.push((
+                get_str(&document, "company_id")?,
+                get_str(&document, "run_id")?,
+                record.agent_id,
+            ));
+        }
+        let filled = pending.len();
+        for (company_id, run_id, agent_id) in pending {
+            runs.update_one(
+                doc! {"company_id": company_id, "run_id": run_id},
+                doc! {"$set": {"agent_id": agent_id}},
+            )
+            .await
+            .map_err(mongo_err)?;
+        }
+        Ok(filled)
     }
 
     /// Idempotent index creation — the MongoDB equivalent of the sqlite
