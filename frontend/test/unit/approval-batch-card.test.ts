@@ -622,4 +622,29 @@ describe("the consolidated approval card", () => {
     // And the preview is not the whole body.
     expect(row?.textContent).not.toContain(bodyJson);
   });
+
+  it("gates the inline Approve when a body preview was cut (#1330 review)", async () => {
+    // A preview is not the payload: two POSTs to the same URL whose bodies share
+    // the first 60 code units render identically even when the cut-off suffix
+    // changes an amount or recipient. The compact row must not one-click
+    // Approve on that — the operator has to see the complete host-bounded
+    // payload (the detailed view) first, so the inline Approve is replaced by a
+    // path there. Decline is always safe and stays inline.
+    const body = { recipient: "vendor@example.test", message: "x".repeat(120) };
+    const bodyJson = JSON.stringify(body);
+    expect(bodyJson.length).toBeGreaterThan(60);
+    const WRITE = request("h5", "https://example.com/items", "POST", body);
+    await render([WRITE], {}, {}, new Map(), true);
+
+    const row = container.querySelector<HTMLElement>('[data-approval-inline="compact"]');
+    // The cut label names the row and admits it is cut…
+    expect(row?.textContent).toContain("…");
+    expect(row?.textContent).toContain("Review in Approvals");
+    // …but there is no live inline Approve button on the truncated preview, and
+    // a decline is still one press.
+    expect(() => button("Approve")).toThrow();
+    expect(() => button("Decline")).not.toThrow();
+    // Nothing was decided: the row only offered the detailed view.
+    expect(decisions).toEqual([]);
+  });
 });
