@@ -1228,6 +1228,36 @@ approval.]"
             // permission that never matches its own call.
             scope,
         };
+        // Issue #1458: newest standing decision wins. `ApprovalPolicy` checks
+        // a standing denial above a standing grant, so an approval minted while
+        // a denial of the same scope was still live would sit listed but never
+        // admit a call — the operator's later "yes" silently inert until the
+        // older refusal expired or was revoked. Revoke the shadowed
+        // opposite-polarity policy before arming the new one, journaled as a
+        // revocation by the same resolving actor, so replay reconstructs the
+        // same single-policy state. Scoped to what would actually shadow
+        // (`admits_scope`), so a denial of one host leaves a grant for another
+        // alone.
+        for old in self.rt.grants.drain_opposite_polarity(
+            &subject,
+            &grant.tool,
+            grant.scope.as_deref(),
+            verdict,
+            now_millis(),
+        ) {
+            self.rt
+                .journal
+                .record_standing_revoked(&old.id, by.clone(), now_millis())
+                .await?;
+            tracing::debug!(
+                grant_id = %old.id,
+                tool = %old.tool,
+                agent = %old.agent,
+                "[approval] minting a {:?} supersedes the opposite-polarity \
+                 standing policy for the same scope",
+                verdict
+            );
+        }
         self.rt.journal.record_standing_granted(&grant).await?;
         tracing::debug!(
             approval_id = %id,
