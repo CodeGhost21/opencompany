@@ -60,6 +60,7 @@ const STATUS: PolicyStatus = {
     { value: "auto", label: "Auto", description: "Works alone, stops before money." },
     { value: "full", label: "Full", description: "Acts without asking." },
   ],
+  knownTools: KNOWN_TOOLS,
 } as unknown as PolicyStatus;
 
 const WIRED = ["shell", "apply_patch", "git_operations", "web_fetch", "http_request"];
