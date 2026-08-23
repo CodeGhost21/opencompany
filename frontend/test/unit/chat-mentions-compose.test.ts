@@ -55,6 +55,18 @@ describe("activeMentionQuery", () => {
     expect(activeMentionQuery("jane@acme", 9)).toBeNull();
   });
 
+  /**
+   * The host's `opens_mention` draws the line at start, whitespace, and an
+   * opening bracket — anything else means the `@` belongs to some other token,
+   * and a picker there would resolve a mention the server's fallback
+   * extraction would refuse.
+   */
+  it("does not open after punctuation that is not a bracket", () => {
+    expect(activeMentionQuery("/docs/@eng", 10)).toBeNull();
+    expect(activeMentionQuery("$@eng", 5)).toBeNull();
+    expect(activeMentionQuery("x=@eng", 6)).toBeNull();
+  });
+
   it("keeps the query open across a space, so a two-word name is reachable", () => {
     expect(activeMentionQuery("hi @Jane Do", 11)).toEqual({
       start: 3,
