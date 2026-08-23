@@ -788,7 +788,7 @@ mod test {
     fn to_null_and_unknown_targets_refuse() {
         let s = base_settings();
         assert!(
-            resolve(&s, "null", None, None)
+            resolve(&s, "null", None)
                 .expect_err("null")
                 .to_string()
                 .contains("discard every record")
