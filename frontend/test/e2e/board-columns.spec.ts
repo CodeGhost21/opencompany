@@ -114,7 +114,6 @@ test("the board renders the three phases in order, and none of the retired colum
 });
 
 test("new work enters through one prompt box and lands in Pending", async ({ page, request }) => {
-  await page.goto("/#/ledgers/tasks");
   await dismissTour(page);
 
   // Exactly one entry point on the whole board (issue #206's rule, kept).
