@@ -289,6 +289,88 @@ export function reconcileMentions(text: string, mentions: Mention[]): Mention[] 
 }
 
 /**
+ * The length of `s` in UTF-8 bytes, not UTF-16 units.
+ *
+ * The host defines a mention's `offset` as a byte position into the message
+ * body, and `revalidate` checks it with `text.get(offset..)`. JavaScript string
+ * indices are UTF-16, so the prefix up to a non-ASCII char is shorter in bytes —
+ * `👍 ask @engineer` puts the mention at UTF-16 index 8 but byte index 12.
+ * Sending the UTF-16 index would make the server look at the wrong characters
+ * and demote the mention. The composer tracks UTF-16 indices internally (they
+ * drive textarea and reconcile operations); this converts at the wire only.
+ */
+export function utf8ByteLength(s: string): number {
+  return new TextEncoder().encode(s).length;
+}
+
+/** Whether the character at `idx` cleanly ends a mention — mirrors `closes_mention`. */
+function closesMention(text: string, idx: number): boolean {
+  const ch = text[idx];
+  if (ch === undefined) return true;
+  return /[\s,;.!?:)\]}'"]/.test(ch);
+}
+
+/**
+ * Every `@name` in `text` the directory can resolve to exactly one target.
+ *
+ * This is the composer side of the host's `extract_with_known`: longest alias
+ * first, a name shared by two targets resolves to nobody, and code regions are
+ * masked so an `@` inside backticks never names anyone. The composer sends the
+ * picker's picks *and* what this resolves, because the host uses a non-empty
+ * supplied list exclusively — a mention completed by hand (`@ceo ` — the query
+ * closed on the finished name) never enters the picker's `mentions`, and a
+ * partial supplied list would silently drop it.
+ */
+export function resolvableMentions(
+  text: string,
+  mentionables: readonly Mentionable[],
+): Mention[] {
+  const masked = stripCodeRegions(text);
+  const out: Mention[] = [];
+  let i = 0;
+  while (i < masked.length) {
+    if (masked[i] !== "@" || !opensMention(masked, i)) {
+      i += 1;
+      continue;
+    }
+    const after = i + 1;
+    let best: { end: number; target: MentionTarget } | undefined;
+    let ambiguous = false;
+    for (const entry of mentionables) {
+      for (const alias of entry.aliases) {
+        const end = after + alias.length;
+        if (end > masked.length) continue;
+        if (masked.slice(after, end).toLowerCase() !== alias) continue;
+        if (!closesMention(masked, end)) continue;
+        if (!best || end > best.end) {
+          best = { end, target: entry.target };
+        } else if (end === best.end && !sameTarget(best.target, entry.target)) {
+          // Two targets claiming the same span: nobody gets pinged. A shorter
+          // alias never overrides a longer one, so only equal lengths collide.
+          ambiguous = true;
+        }
+      }
+    }
+    if (best && !ambiguous) {
+      out.push({ target: best.target, text: masked.slice(i, best.end), offset: i });
+      i = best.end;
+      continue;
+    }
+    // Unresolved or ambiguous: leave it as text, and skip past this `@` so a
+    // longer alias starting mid-word cannot re-match inside it.
+    i = after;
+  }
+  return out;
+}
+
+/** Whether two mention targets name the same thing. */
+function sameTarget(a: MentionTarget, b: MentionTarget): boolean {
+  if (a.kind !== b.kind) return false;
+  if (a.kind === "everyone") return true;
+  return a.id === b.id;
+}
+
+/**
  * A pattern matching exactly the spans in `mentions`, and nothing else.
  *
  * Returns {@link NEVER_MATCH} for an empty list, which is the point: an
