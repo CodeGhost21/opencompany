@@ -15,7 +15,8 @@
 # how a suite comes to report on code that is not the code under test.
 #
 # Env:
-#   PW_HOST_BIND            address to bind         (default 127.0.0.1:8080)
+#   PW_HOST_BIND            address to bind         (default 127.0.0.1:<port derived
+#                           from this checkout's path, so worktrees do not collide)
 #   PW_HOST_COMPANY         company to load         (default companies/e2e_harness)
 #   PW_HOST_DATA_DIR        instance data root      (default target/e2e/data; wiped
 #                           each run ONLY while it stays inside target/e2e — see below)
