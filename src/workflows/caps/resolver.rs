@@ -1133,7 +1133,7 @@ to = "fetch"
     /// to reach the grandchild's own classification.
     #[tokio::test]
     async fn a_two_level_child_gate_resolves_through_the_registry() {
-        let (resolver, _unused_registry) = gated_resolver_with_grants(
+        let (_resolver, _unused_registry) = gated_resolver_with_grants(
             vec![
                 // `a` runs `b` from a node named `nested`.
                 overlay("a", parent_of("a", "b")),
@@ -1194,34 +1194,6 @@ to = "nested"
         registry.record("b", ChildGateRecord { graph: b, gated });
         let parent = crate::workflows::translate::translate(
             &crate::company::parse_workflow(&parent_of("parent", "a")).expect("parent parses"),
-        );
-        eprintln!(
-            "PARENT: {:?}",
-            parent
-                .nodes
-                .iter()
-                .map(|n| (&n.id, &n.config))
-                .collect::<Vec<_>>()
-        );
-        eprintln!(
-            "A: {:?}",
-            registry.get("a").map(|r| r
-                .graph
-                .nodes
-                .iter()
-                .map(|n| (&n.id, &n.config))
-                .collect::<Vec<_>>())
-        );
-        eprintln!(
-            "B: {:?}",
-            registry.get("b").map(|r| (
-                r.graph
-                    .nodes
-                    .iter()
-                    .map(|n| (&n.id, &n.config))
-                    .collect::<Vec<_>>(),
-                r.gated.iter().map(|g| &g.node_id).collect::<Vec<_>>()
-            ))
         );
         let described = child_gate_call(&registry, &parent, "sub::nested::work", None)
             .expect("a two-level namespaced child gate resolves through the registry");
