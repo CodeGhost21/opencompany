@@ -54,6 +54,7 @@ import {
   type RunSummary,
 } from "@/api/runs";
 import { listTasks, type Task } from "@/api/tasks";
+import type { DeskDto } from "@/api/types";
 import { listWorkflows } from "@/api/workflows";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -213,9 +214,14 @@ export function AgentRuns({
   useEffect(() => {
     let live = true;
     void (async () => {
-      const [tasks, workflows] = await Promise.all([
+      const [tasks, workflows, desks] = await Promise.all([
         listTasks(client, company).catch(() => null),
         listWorkflows(client, company).catch(() => null),
+        // The desks are what turn a chat run's `chatId` into `#front-desk`
+        // rather than `front-desk`. A host that does not expose `…/desks`
+        // 404s; the id then stands in for the name, which is what
+        // `RunSource.resolved` is for.
+        client.listDesks(company).catch(() => null),
       ]);
       if (!live) return;
       // `Array.isArray` rather than a null check: these reads are best-effort
@@ -230,6 +236,11 @@ export function AgentRuns({
           : undefined,
         workflows: Array.isArray(workflows)
           ? new Map(workflows.map((flow) => [flow.id, flow.name]))
+          : undefined,
+        chats: Array.isArray(desks)
+          ? new Map(
+              (desks as DeskDto[]).map((desk) => [desk.id, `#${desk.name}`]),
+            )
           : undefined,
       });
     })();
