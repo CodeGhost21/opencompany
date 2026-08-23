@@ -40,6 +40,7 @@
 // `LedgersView.MANAGE_SEGMENT`.
 
 import type { OpenCompanyClient } from "@/api/client";
+import { Overview } from "@/views/Overview";
 import { OrgChartView } from "@/views/company/OrgChartView";
 import { TeamView } from "@/views/TeamView";
 
@@ -53,6 +54,8 @@ import { TeamView } from "@/views/TeamView";
  * (see `focusDeskId`), never an error or a missing page.
  */
 export const DESKS_SEGMENT = "desks";
+/** The declared-structure graph, moved off the operator landing page (#1321). */
+export const GRAPH_SEGMENT = "graph";
 
 interface Props {
   client: OpenCompanyClient;
@@ -90,6 +93,10 @@ export function CompanyView({
   refreshKey,
   onRunSetup,
 }: Props) {
+  if (sub === GRAPH_SEGMENT) {
+    return <Overview client={client} company={company} />;
+  }
+
   if (sub) {
     return (
       <OrgChartView
