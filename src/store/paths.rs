@@ -665,12 +665,73 @@ mod test {
         let underscore = bundle.secret("mcp/acme_prod/auth");
 
         assert_ne!(space, underscore);
-        assert!(space.ends_with("key-mcp%2Facme%20prod%2Fauth"));
-        assert!(underscore.ends_with("key-mcp%2Facme%5Fprod%2Fauth"));
+        assert!(space.ends_with("%k-mcp%2Facme%20prod%2Fauth"));
+        assert!(underscore.ends_with("%k-mcp%2Facme%5Fprod%2Fauth"));
         assert_eq!(
             bundle.legacy_secret("mcp/acme prod/auth"),
             bundle.legacy_secret("mcp/acme_prod/auth")
         );
+    }
+
+    #[test]
+    fn canonical_filenames_are_disjoint_from_legacy_slugs() {
+        let bundle = Bundle::new("/root", &CompanyId::new("acme"));
+
+        // `key-` is itself a valid legacy slug, so the old `key-` canonical
+        // prefix let a canonical file for `foo` be read (or deleted) as the
+        // legacy file of `key-foo`. `%` cannot be emitted by `slug`, so the two
+        // namespaces are structurally disjoint.
+        let canonical = bundle.secret("foo");
+        let legacy_of_prefix_key = bundle.legacy_secret("key-foo");
+        assert_ne!(canonical, legacy_of_prefix_key);
+        assert!(canonical.ends_with("%k-foo"));
+        assert!(legacy_of_prefix_key.ends_with("key-foo"));
+
+        // No legacy slug can start with `%`, so the canonical namespace can
+        // never be entered through the legacy fallback.
+        for key in ["foo", "key-foo", "key_foo", "a/b/../c", "mcp/acme prod/auth"] {
+            let legacy = bundle.legacy_secret(key);
+            let file_name = legacy.file_name().unwrap().to_string_lossy();
+            assert!(
+                !file_name.starts_with('%'),
+                "legacy slug of {key:?} is {file_name:?}, which starts with %"
+            );
+        }
+    }
+
+    #[test]
+    fn secret_filenames_are_bounded() {
+        let bundle = Bundle::new("/root", &CompanyId::new("acme"));
+
+        // An emoji MCP server name percent-encodes to ~3 bytes per UTF-8 byte;
+        // the filename must stay inside the filesystem component limit whatever
+        // the key, or `set` fails with ENAMETOOLONG on a 255-byte filesystem.
+        let emoji_name = "🎯".repeat(40); // 40 emoji = 160 UTF-8 bytes
+        let emoji = bundle.secret(&format!("mcp/{emoji_name}/auth"));
+        let emoji_file = emoji.file_name().unwrap().to_str().unwrap();
+        assert!(
+            emoji_file.len() < 255,
+            "emoji key produced a {} byte filename",
+            emoji_file.len()
+        );
+        assert!(emoji_file.starts_with("%l-"), "expected truncated form, got {emoji_file}");
+
+        // Long ASCII keys (no percent-encoding) stay bounded too.
+        let ascii = bundle.secret(&"a".repeat(400));
+        let ascii_file = ascii.file_name().unwrap().to_str().unwrap();
+        assert!(ascii_file.len() < 255, "long ASCII key produced a {} byte filename", ascii_file.len());
+
+        // Distinct long keys sharing a prefix still get distinct filenames.
+        let a = bundle.secret(&format!("{}{}", "a".repeat(300), "X"));
+        let b = bundle.secret(&format!("{}{}", "a".repeat(300), "Y"));
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn empty_secret_key_is_distinct() {
+        let bundle = Bundle::new("/root", &CompanyId::new("acme"));
+        assert_ne!(bundle.secret(""), bundle.secret("a"));
+        assert!(bundle.secret("").ends_with("%k-"));
     }
 
     #[test]
