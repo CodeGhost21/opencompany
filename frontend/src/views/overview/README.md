@@ -67,7 +67,8 @@ workflow hangs on the wheel**: the host scopes a flow to the *company*, and
 nothing links a flow to a desk, so a flow is drawn on the desk of the first
 teammate it runs through. That is a real relationship read as a placement it was
 never declared to be. `DERIVED_NOTICE` in `kg/adapter.ts` is the standing
-caveat, and the legend chip reads "flow placement".
+caveat; the legend visibly labels its placement as inferred, and its native
+disclosure opens the full explanation for pointer, keyboard, and touch users.
 
 Three rings used to be invented, and were deleted as the host grew the reads
 they were standing in for:

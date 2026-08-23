@@ -12,8 +12,7 @@ import {
   forceY,
   type Simulation,
 } from 'd3-force';
-import { ClipboardList, Info, Milestone, Sparkles, User, UserRound, Users, Workflow as WorkflowIcon, Wrench, type LucideIcon } from 'lucide-react';
-import { DERIVED_NOTICE } from './adapter';
+import { ClipboardList, Milestone, Sparkles, User, UserRound, Users, Workflow as WorkflowIcon, Wrench, type LucideIcon } from 'lucide-react';
 import { orderGraphDepartments, SELF_ID, toolSlugOf, type KGNode, type KGNodeKind, type KnowledgeGraph as KGData } from './model';
 import { branchPath, branchWidth, cyclicDeltaF, edgeArc, focusWheel, radialRestLayout, responsiveRingR, rotateAbout, shortestAngleDelta, treeLayout, wheelPoint, wheelStageGeom, wheelStageSpot, type RestLayoutResult, type TreeLayoutResult, type TreeNodePos } from './tree-layout';
 import { focusLabelIds, LABEL_PRIORITY, planLabels, type LabelCandidate, type LabelIcon } from './label-plan';
@@ -28,6 +27,7 @@ import {
 } from './KnowledgeDetail';
 import { destinationFor, MEMORY_DESTINATION } from './open-in-console';
 import { KnowledgeGraphFullscreen } from './KnowledgeGraphFullscreen';
+import { WorkflowPlacementNotice } from './WorkflowPlacementNotice';
 
 const W = 880;
 const H = 600;
@@ -1552,8 +1552,21 @@ export function KnowledgeGraph({
 
   // compact legend for the fullscreen wheel: color + icon per kind, with the
   // Notes core in its vault orange
+  // `flex-wrap` + `max-w-full` are load-bearing, not cosmetic (issue #1385):
+  // this strip is pinned bottom-left inside the field's `overflow-hidden` box,
+  // so a single non-wrapping row is silently cut off at narrow widths — on
+  // mobile, and on desktop whenever the 13.5rem sidebar is expanded. The
+  // trailing caveat is the last item, so it is the first thing to disappear,
+  // which would put the one control that explains the wheel out of reach
+  // exactly where the wheel is hardest to read.
+  //
+  // `gap-y-1` keeps the wrapped rows tighter than the 12px column gap, and
+  // `items-end` keeps every label on the caveat summary's line: that caveat is
+  // a disclosure whose explanation opens in flow ABOVE its summary, so an open
+  // caveat grows this box upward and `items-center` would drag the labels up
+  // with it (see `WorkflowPlacementNotice`).
   const compactLegend = (
-    <div className="flex max-w-full flex-wrap items-center gap-x-3 gap-y-1 rounded-sm-t border border-os-border-strong bg-os-bg/85 px-2.5 py-1.5 backdrop-blur">
+    <div className="flex max-w-full flex-wrap items-end gap-x-3 gap-y-1 rounded-sm-t border border-os-border-strong bg-os-bg/85 px-2.5 py-1.5 backdrop-blur">
       {(
         [
           { label: 'Notes', color: HUB_COLOR, Icon: CAT.self.Icon },
@@ -1570,20 +1583,7 @@ export function KnowledgeGraph({
           {label}
         </span>
       ))}
-      {/* The standing caveat (adapter.ts's DERIVED_NOTICE): this legend is the
-          graph's persistent, low-weight chrome, so it is where an operator
-          reading the wheel is already looking to learn how to read it. The
-          full sentence lives in the title — the strip is crowded enough
-          without seven kind-labels wrapping around a whole caveat.
-
-          It used to read "derived data", covering three whole invented rings.
-          Since issue #601 the notice names the one thing left: where a flow
-          sits on the wheel. Departments, tools and stages are the company's own
-          answers now, so claiming otherwise here would understate them. */}
-      <span className="flex whitespace-nowrap items-center gap-1 border-l border-os-border pl-3 font-mono text-3xs text-os-dim" title={DERIVED_NOTICE}>
-        <Info className="h-3 w-3 shrink-0" strokeWidth={2} />
-        flow placement
-      </span>
+      <WorkflowPlacementNotice />
     </div>
   );
 
