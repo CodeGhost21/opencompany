@@ -146,7 +146,7 @@ export function UsageView({ client, company }: Props) {
             </p>
           </div>
           <Select value={range} onValueChange={(v) => v && setRange(v)} items={RANGE_LABELS}>
-            <SelectTrigger className="w-40">
+            <SelectTrigger className="w-40" aria-label="Usage date range">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
