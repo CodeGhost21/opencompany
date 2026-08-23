@@ -226,13 +226,7 @@ async fn spawn_interleaved_publish_script() -> String {
                             "function": { "name": "publish_artifact", "arguments": json!({ "path": source }).to_string() }
                         }]
                     }),
-                    2 => {
-                        // At this point both tool calls have executed and placed
-                        // their refusals in the queue; releasing either run before
-                        // the other would not reproduce the old cross-run drain.
-                        barrier.wait().await;
-                        json!({ "role": "assistant", "content": "could not publish" })
-                    }
+                    2 => json!({ "role": "assistant", "content": "could not publish" }),
                     _ => json!({ "role": "assistant", "content": "done" }),
                 };
                 Json(json!({
