@@ -1,11 +1,11 @@
 // @vitest-environment jsdom
 
-import { act, createElement } from "react";
+import { act, createElement, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("@/views/overview/kg/KnowledgeGraphFullscreen", () => ({
-  KnowledgeGraphFullscreen: ({ children }: { children: React.ReactNode }) => children,
+  KnowledgeGraphFullscreen: ({ children }: { children: ReactNode }) => children,
 }));
 
 import { KnowledgeGraph } from "@/views/overview/kg/KnowledgeGraph";
