@@ -1070,7 +1070,7 @@ export interface InboxDto {
   name: string;
   /** The full address (`{key}@{domain}` when a domain is configured). */
   address: string;
-  /** Whether the inbox is enabled on the Team page. */
+  /** Whether the inbox is enabled on this teammate's detail page. */
   enabled: boolean;
   /** The number of unread received (inbound) messages. */
   unread: number;
