@@ -29,9 +29,9 @@ import {
   batchPositions,
   staleDecisionLine,
 } from "@/lib/approval-wording";
+import { approvalsByDeadline } from "@/lib/approval-order";
 import { approvalSummary, grantHeadline, timeAgo, toolAction, untilLabel } from "@/lib/language";
 import { approvalsForTask } from "@/lib/task-approvals";
-import { approvalsByDeadline } from "@/lib/approval-order";
 import { startVisiblePolling } from "@/lib/visible-poll";
 import { isRecord, parseNodeMessages } from "@/views/workflows/run-output";
 
