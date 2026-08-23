@@ -71,6 +71,12 @@ function nextDesk(): HTMLElement {
   return el as HTMLElement;
 }
 
+function paddle(direction: "Previous" | "Next"): HTMLButtonElement {
+  const el = host.querySelector(`[aria-label="${direction} desk"]`);
+  expect(el).not.toBeNull();
+  return el as HTMLButtonElement;
+}
+
 beforeEach(() => {
   // React only treats `act` as authoritative when the environment says so;
   // without this every render logs "not configured to support act(...)".
@@ -86,6 +92,12 @@ afterEach(() => {
 });
 
 describe("the right-edge chrome and the detail rail", () => {
+  it("uses desk wording consistently in paddle names and tooltips", () => {
+    render(false);
+    expect(paddle("Previous").title).toBe("Previous desk (←)");
+    expect(paddle("Next").title).toBe("Next desk (→)");
+  });
+
   it("sits at the canvas edge while no card is open", () => {
     render(false);
     expect(statusColumn().className).toContain("right-5");
