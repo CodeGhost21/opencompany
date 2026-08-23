@@ -210,7 +210,6 @@ async fn facade_round_trip(provider: Arc<dyn MemoryProvider>, class: DriverClass
     crate::store::conformance::assert_delete_label_scoped(bound.context()).await;
 }
 
-
 // ── Vendor doubles ───────────────────────────────────────────────────────────
 //
 // Ported from the vendored `adapters/remote/src/conformance_test.rs` at
