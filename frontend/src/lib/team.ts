@@ -23,15 +23,6 @@ export interface TeamMember {
    */
   avatar: string;
   /**
-   * The chosen reference alone, absent when nobody has chosen.
-   *
-   * Kept beside the resolved `avatar` rather than folded into it because the
-   * picker needs the distinction: "reset to the default face" is only offerable
-   * when there is a choice masking the default, and the two look identical once
-   * one has fallen back to the other.
-   */
-  chosenAvatar?: string;
-  /**
    * Whether this teammate has an inbox on the host. Read from `GET …/team` and
    * written by `PUT …/team/{id}/inbox` — never guessed client-side, so the Inbox
    * page and this toggle agree on the same `InboxStore` state (issue #173).
@@ -162,10 +153,11 @@ export function fromDto(dto: TeamMemberDto): TeamMember {
     role: dto.role,
     description: dto.description ?? "",
     tone: toneFor(dto.id || name),
-    // What this teammate chose, else the hashed default — resolved once, here,
-    // so no rendering surface has to know the fallback rule.
+    // What this teammate chose, else the hashed default. Resolved to one
+    // reference here, because a roster row is only ever *drawn* — the picker
+    // needs "chosen" and "default" kept apart and reads the detail DTO, which
+    // carries the raw field.
     avatar: avatarRef(dto.avatar, dto.id || name),
-    chosenAvatar: dto.avatar,
     inboxEnabled: dto.inboxEnabled ?? false,
     // Carried through as-is: `undefined` means uncapped and must stay
     // `undefined`, never coalesced to `0`.
