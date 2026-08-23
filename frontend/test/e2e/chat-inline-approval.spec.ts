@@ -97,8 +97,11 @@ test("a request raised in a channel appears in that channel, and only there", as
   await openChannel(page, ENGINEERING.id);
   await expect(card(page, IN_ENGINEERING.id)).toBeVisible({ timeout: 30_000 });
   // The chat row names the decision distinctly without repeating the full
-  // approval form; the detailed card remains on the Approvals page.
+  // approval form; the detailed card remains on the Approvals page. A monetary
+  // approval also shows its amount — an operator approves the payment, not the
+  // address the payload happens to lead with.
   await expect(card(page, IN_ENGINEERING.id)).toContainText("vendor@example.test");
+  await expect(card(page, IN_ENGINEERING.id)).toContainText("$42.50");
   await expect(card(page, IN_ENGINEERING.id)).toHaveAttribute("data-approval-inline", "compact");
   await expect(card(page, IN_ENGINEERING.id).getByRole("link", { name: "View details" })).toHaveAttribute(
     "href",
