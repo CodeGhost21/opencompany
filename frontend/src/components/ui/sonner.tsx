@@ -15,6 +15,49 @@ function toasterHovered(): boolean {
   )
 }
 
+/** Can this part of a toast handle its own click rather than passing it through? */
+function isToastControl(target: Element): boolean {
+  return target.closest(
+    'a, button, input, select, textarea, [role="button"], [role="link"], [contenteditable="true"]',
+  ) !== null
+}
+
+/**
+ * Let a click on a toast's read-only surface reach the page behind it (issue #1303).
+ *
+ * The toast still receives pointer movement, which keeps sonner's useful
+ * hover-to-read pause intact. Only a click on its non-interactive content is
+ * relayed. Its close button and any action button remain ordinary controls, so
+ * a notification can still offer a one-click recovery without eating nearby
+ * page controls.
+ */
+function useToastClickThrough(): void {
+  useEffect(() => {
+    function relayClick(event: MouseEvent): void {
+      if (event.button !== 0 || !(event.target instanceof Element)) return
+      if (!event.target.closest("[data-sonner-toast]") || isToastControl(event.target)) return
+
+      const toasters = Array.from(document.querySelectorAll<HTMLElement>("[data-sonner-toaster]"))
+      const pointerEvents = toasters.map((toaster) => toaster.style.pointerEvents)
+      for (const toaster of toasters) toaster.style.pointerEvents = "none"
+      const beneath = document.elementFromPoint(event.clientX, event.clientY)
+      for (const [index, toaster] of toasters.entries()) {
+        toaster.style.pointerEvents = pointerEvents[index]
+      }
+
+      if (!(beneath instanceof HTMLElement) || beneath.closest("[data-sonner-toaster]")) return
+
+      event.preventDefault()
+      event.stopPropagation()
+      beneath.focus({ preventScroll: true })
+      beneath.click()
+    }
+
+    document.addEventListener("click", relayClick, true)
+    return () => document.removeEventListener("click", relayClick, true)
+  }, [])
+}
+
 /**
  * The ceiling on a toast's life that sonner does not provide (issue #933).
  *
@@ -61,6 +104,7 @@ function useToastDismissalCeiling(): void {
 const Toaster = ({ ...props }: ToasterProps) => {
   const { theme = "system" } = useTheme()
   useToastDismissalCeiling()
+  useToastClickThrough()
 
   return (
     <Sonner
