@@ -234,10 +234,19 @@ fn secret_filename(key: &str) -> String {
 /// output injective under case-folding: the only upper-case bytes it can ever
 /// contain are the hex digits of its own `%`-escapes, which are emitted in one
 /// fixed case, so no two distinct keys fold to the same filename.
+///
+/// A trailing `.` is encoded too. Windows Win32 paths strip trailing periods,
+/// so a passthrough `.` at the end let `foo` and `foo.` resolve to the same
+/// directory entry; the encoded `%2E` keeps the filename from ever ending in a
+/// dot. Interior periods are unaffected — Windows only strips trailing ones.
 fn percent_encode(key: &str) -> String {
     let mut out = String::with_capacity(key.len());
-    for byte in key.bytes() {
-        if byte.is_ascii_digit() || byte.is_ascii_lowercase() || matches!(byte, b'.' | b'-') {
+    let bytes = key.as_bytes();
+    let last = bytes.len().wrapping_sub(1);
+    for (index, byte) in bytes.iter().copied().enumerate() {
+        if byte == b'.' && index == last {
+            out.push_str("%2E");
+        } else if byte.is_ascii_digit() || byte.is_ascii_lowercase() || matches!(byte, b'.' | b'-') {
             out.push(char::from(byte));
         } else {
             use std::fmt::Write;
