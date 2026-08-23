@@ -63,7 +63,13 @@ export function FinancesView({ client, company }: Props) {
       .catch((error: unknown) => {
         if (alive) {
           setData(null);
-          setLoad(error instanceof ApiError && error.status === 404 ? "unavailable" : "error");
+          // A bare 404 (no host error envelope) is the signature of a host that
+          // never wired the finances route — the "unavailable" surface. A 404
+          // the host answered itself (e.g. `company_not_found`) is a real
+          // failure and must go through the normal error state instead.
+          const unwired =
+            error instanceof ApiError && error.status === 404 && error.code === "http_404";
+          setLoad(unwired ? "unavailable" : "error");
         }
       });
     return () => {
