@@ -25,6 +25,7 @@ import type { OpenCompanyClient } from "@/api/client";
 import type { ApprovalSummary } from "@/api/types";
 import { readTaskFocus, type TaskFocus } from "@/lib/task-output";
 import { LEDGER_VIEW_PARAM, readLedgerViewMode } from "@/hooks/use-ledger-view-mode";
+import { withHostParam } from "@/hooks/use-host-route";
 import { TaskDetailView } from "@/views/TaskDetailView";
 
 export function TaskDetailRoute({
@@ -70,9 +71,9 @@ export function TaskDetailRoute({
       onBack={onLeave}
       onNavigate={(id) => {
         const view = readLedgerViewMode();
-        window.location.hash = `#/tasks/${encodeURIComponent(id)}${
-          view === "list" ? `?${LEDGER_VIEW_PARAM}=list` : ""
-        }`;
+        window.location.hash = withHostParam(`tasks/${encodeURIComponent(id)}`, {
+          [LEDGER_VIEW_PARAM]: view === "list" ? "list" : null,
+        });
       }}
       onOpenThread={onOpenThread}
       // Both of these used to hand a card back to the board rendered beside

@@ -46,6 +46,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useHashFlag } from "@/hooks/use-hash-flag";
 import { useLedgerViewMode, type LedgerViewMode } from "@/hooks/use-ledger-view-mode";
+import { withHostParam } from "@/hooks/use-host-route";
 import { DeclareListWizard } from "@/views/company/DeclareListWizard";
 import {
   AlertTriangle,
@@ -981,7 +982,9 @@ export function LedgersView({
                       }
                       detailHref={
                         ledger.source === "native"
-                          ? `#/tasks/${encodeURIComponent(entry.id)}?view=list`
+                          ? withHostParam(`tasks/${encodeURIComponent(entry.id)}`, {
+                              view: "list",
+                            })
                           : undefined
                       }
                       onAmend={() =>

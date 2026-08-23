@@ -105,15 +105,7 @@ export function useHashView<T extends string>(
   // over, not to the one being navigated to.
   const navigate = useCallback((next: T, nextSub?: string, query?: Readonly<Record<string, string | null>>) => {
     const path = nextSub ? `${next}/${nextSub}` : next;
-    const target = withHostParam(path);
-    const [targetPath, targetQuery = ""] = target.split("?");
-    const params = new URLSearchParams(targetQuery);
-    for (const [key, value] of Object.entries(query ?? {})) {
-      if (value === null) params.delete(key);
-      else params.set(key, value);
-    }
-    const suffix = params.toString().replace(/=(?=&|$)/g, "");
-    const nextHash = `${targetPath}${suffix ? `?${suffix}` : ""}`;
+    const nextHash = withHostParam(path, query);
     if (window.location.hash !== nextHash) {
       window.location.hash = nextHash;
     }
