@@ -411,7 +411,10 @@ impl ManifestApprovalGate {
         }
         match verdict {
             Verdict::Approve => ResolveOutcome::Approved(parked.effect),
-            Verdict::Deny => ResolveOutcome::Denied,
+            // Carry the effect rather than re-reading the journal's scrubbed
+            // copy (issue #351): a standing deny minted from that copy would
+            // lose the scope the operator actually refused (issue #1458).
+            Verdict::Deny => ResolveOutcome::Denied(parked.effect),
         }
     }
 
