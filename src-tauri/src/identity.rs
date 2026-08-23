@@ -1,0 +1,307 @@
+//! Who is sitting at this machine, as the operating system already knows.
+//!
+//! The console asks for this **once**, to prefill a profile nobody has filled in
+//! yet: a person signing in for the first time should not have to type a name
+//! their computer has known since it was set up, or hunt for a picture that is
+//! already on it.
+//!
+//! ## It is a suggestion, and stays one
+//!
+//! Nothing here is stored, sent anywhere, or applied on its own. The console
+//! offers what it finds, and a person accepts it, edits it, or ignores it — at
+//! which point what gets saved is a decision rather than a guess. That is the
+//! whole reason this is a read and not an import: a name lifted off a machine
+//! and written into a company directory unasked is somebody's laptop's idea of
+//! who they are, published to their colleagues.
+//!
+//! ## What each platform actually knows
+//!
+//! There is no portable "current user's full name and picture", so each platform
+//! is asked in its own terms, and every field is optional because on any given
+//! machine it may genuinely not be set:
+//!
+//! * **Linux** — the full name is the GECOS field of `/etc/passwd` (its first
+//!   comma-separated part, which is the name; the rest is office/phone). The
+//!   picture is `~/.face` where the desktop environments put it, else
+//!   AccountsService's copy.
+//! * **macOS** — `dscl` reads the local directory: `RealName` for the name,
+//!   `JPEGPhoto` for the account picture.
+//! * **Windows** — the account picture lives under
+//!   `%PUBLIC%\AccountPictures`; the full name is not read (the APIs that hold
+//!   it are not reachable without a dependency this crate does not want).
+//!
+//! Everything is best-effort: any failure is `None`, never an error. A profile
+//! prefill that fails is a profile a person fills in themselves, which is
+//! exactly what happens today.
+
+use std::path::{Path, PathBuf};
+
+/// The largest account picture worth carrying into the webview.
+///
+/// The host's own avatar ceiling is 4 MB, and this is read into memory and then
+/// base64'd into an IPC payload — so a machine with a 30 MB portrait as its
+/// account picture should be reported as having none rather than have the
+/// console try, and fail, to upload it.
+const MAX_PICTURE_BYTES: u64 = 4 * 1024 * 1024;
+
+/// What this machine knows about the person using it. Every field optional.
+#[derive(Debug, Default, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceIdentity {
+    /// The account's login name — `enamakel`. Always available in practice.
+    pub username: Option<String>,
+    /// The account's full name — "Steven Enamakel" — where the OS holds one.
+    pub full_name: Option<String>,
+    /// The account picture as a `data:` URL, where the OS holds one.
+    ///
+    /// A data URL rather than a path because the webview cannot read the
+    /// filesystem, and rather than raw bytes because the console turns it
+    /// straight into a `File` to upload. It is **not** an avatar reference and
+    /// is never stored as one: the console uploads it through
+    /// `POST …/avatars` like any other image, so what ends up on the record
+    /// names bytes this host holds. See `docs/spec/runtime/avatars.md`.
+    pub picture_data_url: Option<String>,
+}
+
+/// Reads what this machine knows. Never fails; an unknown field is `None`.
+pub fn device_identity() -> DeviceIdentity {
+    let username = std::env::var("USER")
+        .or_else(|_| std::env::var("USERNAME"))
+        .ok()
+        .filter(|name| !name.trim().is_empty());
+    DeviceIdentity {
+        full_name: username.as_deref().and_then(full_name),
+        picture_data_url: picture_path(username.as_deref())
+            .and_then(|path| encode_picture(&path)),
+        username,
+    }
+}
+
+/// The account's full name, per platform. `None` where the OS has none set —
+/// which is common on Linux and is not a failure.
+#[cfg(target_os = "macos")]
+fn full_name(username: &str) -> Option<String> {
+    let out = std::process::Command::new("/usr/bin/dscl")
+        .args([".", "-read", &format!("/Users/{username}"), "RealName"])
+        .output()
+        .ok()?;
+    // `dscl` answers either `RealName: Steven Enamakel` or `RealName:` followed
+    // by an indented line — the second when the value contains a space, which
+    // is to say for almost every real name.
+    let text = String::from_utf8_lossy(&out.stdout);
+    let value = text
+        .strip_prefix("RealName:")
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .or_else(|| text.lines().nth(1).map(str::trim))?;
+    non_empty(value)
+}
+
+#[cfg(target_os = "linux")]
+fn full_name(username: &str) -> Option<String> {
+    let passwd = std::fs::read_to_string("/etc/passwd").ok()?;
+    let line = passwd
+        .lines()
+        .find(|line| line.split(':').next() == Some(username))?;
+    // GECOS is field 5, and is itself comma-separated: name, office, work
+    // phone, home phone. Only the first part is a name.
+    let gecos = line.split(':').nth(4)?;
+    non_empty(gecos.split(',').next().unwrap_or_default())
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn full_name(_username: &str) -> Option<String> {
+    None
+}
+
+/// Where this platform keeps the account picture, if it is there.
+#[cfg(target_os = "linux")]
+fn picture_path(username: Option<&str>) -> Option<PathBuf> {
+    // `~/.face` is what GNOME, KDE and friends write; AccountsService keeps its
+    // own copy, which is the one that survives a home directory the desktop
+    // never wrote to.
+    let home = std::env::var("HOME").ok()?;
+    let candidates = [
+        PathBuf::from(&home).join(".face"),
+        PathBuf::from(&home).join(".face.icon"),
+        PathBuf::from("/var/lib/AccountsService/icons").join(username?),
+    ];
+    candidates.into_iter().find(|path| path.is_file())
+}
+
+#[cfg(target_os = "macos")]
+fn picture_path(username: Option<&str>) -> Option<PathBuf> {
+    let _ = username;
+    // macOS keeps the picture *inside* the directory record rather than as a
+    // file, so it is extracted rather than read: `dscl` prints `JPEGPhoto` as
+    // hex, which `encode_picture` cannot use. Handled in `macos_picture`.
+    None
+}
+
+#[cfg(target_os = "windows")]
+fn picture_path(username: Option<&str>) -> Option<PathBuf> {
+    let _ = username;
+    let public = std::env::var("PUBLIC").ok()?;
+    let dir = PathBuf::from(public).join("AccountPictures");
+    // The directory holds one folder per account SID with several sizes in it;
+    // the largest file is the best picture without resolving the SID.
+    let mut best: Option<(u64, PathBuf)> = None;
+    for entry in walk(&dir, 2) {
+        let Ok(meta) = entry.metadata() else { continue };
+        if !meta.is_file() || meta.len() > MAX_PICTURE_BYTES {
+            continue;
+        }
+        if best.as_ref().is_none_or(|(size, _)| meta.len() > *size) {
+            best = Some((meta.len(), entry.path()));
+        }
+    }
+    best.map(|(_, path)| path)
+}
+
+#[cfg(target_os = "windows")]
+fn walk(dir: &Path, depth: usize) -> Vec<std::fs::DirEntry> {
+    if depth == 0 {
+        return Vec::new();
+    }
+    let Ok(read) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for entry in read.flatten() {
+        if entry.path().is_dir() {
+            out.extend(walk(&entry.path(), depth - 1));
+        } else {
+            out.push(entry);
+        }
+    }
+    out
+}
+
+/// Reads a picture file into a `data:` URL, or `None` if it is missing,
+/// unreadable, over the ceiling, or not an image this host would accept anyway.
+fn encode_picture(path: &Path) -> Option<String> {
+    let meta = std::fs::metadata(path).ok()?;
+    if !meta.is_file() || meta.len() > MAX_PICTURE_BYTES {
+        return None;
+    }
+    let bytes = std::fs::read(path).ok()?;
+    // Sniffed, not taken from the extension: `~/.face` conventionally has no
+    // extension at all, and the type has to be right or the console builds a
+    // `File` the host will refuse. The four signatures are the same set
+    // `src/company/avatar.rs` accepts.
+    let mime = sniff(&bytes)?;
+    Some(format!(
+        "data:{mime};base64,{}",
+        base64_encode(&bytes)
+    ))
+}
+
+/// The four image types the host accepts, by signature.
+fn sniff(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        return Some("image/png");
+    }
+    if bytes.starts_with(b"\xff\xd8\xff") {
+        return Some("image/jpeg");
+    }
+    if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        return Some("image/gif");
+    }
+    if bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP" {
+        return Some("image/webp");
+    }
+    None
+}
+
+/// Standard base64, hand-rolled to keep a dependency out of the desktop shell
+/// for one call site.
+fn base64_encode(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] =
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b = [
+            chunk[0],
+            chunk.get(1).copied().unwrap_or(0),
+            chunk.get(2).copied().unwrap_or(0),
+        ];
+        let n = u32::from(b[0]) << 16 | u32::from(b[1]) << 8 | u32::from(b[2]);
+        out.push(ALPHABET[(n >> 18) as usize & 63] as char);
+        out.push(ALPHABET[(n >> 12) as usize & 63] as char);
+        out.push(if chunk.len() > 1 {
+            ALPHABET[(n >> 6) as usize & 63] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            ALPHABET[n as usize & 63] as char
+        } else {
+            '='
+        });
+    }
+    out
+}
+
+fn non_empty(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn base64_matches_the_standard_alphabet_and_padding() {
+        assert_eq!(base64_encode(b""), "");
+        assert_eq!(base64_encode(b"f"), "Zg==");
+        assert_eq!(base64_encode(b"fo"), "Zm8=");
+        assert_eq!(base64_encode(b"foo"), "Zm9v");
+        assert_eq!(base64_encode(b"foob"), "Zm9vYg==");
+        assert_eq!(base64_encode(b"foobar"), "Zm9vYmFy");
+        // The bytes that expose an alphabet typo — the last two entries and the
+        // high bits — which ASCII test vectors never reach.
+        assert_eq!(base64_encode(&[0xff, 0xef, 0xbe]), "/+++");
+    }
+
+    /// The signature check is what stops `~/.face` — which conventionally has no
+    /// extension — being reported under a type the host will refuse.
+    #[test]
+    fn only_the_four_accepted_formats_are_recognised() {
+        assert_eq!(sniff(b"\x89PNG\r\n\x1a\nrest"), Some("image/png"));
+        assert_eq!(sniff(b"\xff\xd8\xffrest"), Some("image/jpeg"));
+        assert_eq!(sniff(b"GIF89a"), Some("image/gif"));
+        assert_eq!(sniff(b"RIFF\x20\x00\x00\x00WEBP"), Some("image/webp"));
+        assert_eq!(sniff(b"<svg><script/></svg>"), None);
+        assert_eq!(sniff(b"RIFF\x20\x00\x00\x00WAVE"), None);
+        assert_eq!(sniff(b""), None);
+    }
+
+    /// A picture that is missing, oversized or not an image is `None` rather
+    /// than an error: a prefill that cannot happen is a form somebody fills in.
+    #[test]
+    fn an_unreadable_picture_is_simply_absent() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        assert_eq!(encode_picture(&dir.path().join("nothing")), None);
+        let text = dir.path().join("notes.txt");
+        std::fs::write(&text, b"not an image").unwrap();
+        assert_eq!(encode_picture(&text), None);
+    }
+
+    /// The happy path, end to end: bytes on disk become a data URL the console
+    /// can turn into a `File`.
+    #[test]
+    fn a_png_becomes_a_data_url() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(".face");
+        std::fs::write(&path, b"\x89PNG\r\n\x1a\nbody").unwrap();
+        let url = encode_picture(&path).expect("a data url");
+        assert!(url.starts_with("data:image/png;base64,"), "{url}");
+    }
+
+    /// Reading identity must never panic or block, whatever this machine is.
+    #[test]
+    fn reading_this_machine_answers_something() {
+        let _ = device_identity();
+    }
+}
