@@ -930,7 +930,7 @@ async fn memory_list_filters_stats_and_dual_write() {
     // `?query=` is a case-insensitive substring over title + body.
     let (status, hit) = send(&state, "GET", "/api/v1/company/memory?query=priya", None).await;
     assert_eq!(status, StatusCode::OK);
-    let hit = hit.as_array().unwrap();
+    let hit = hit["items"].as_array().unwrap();
     assert_eq!(hit.len(), 1);
     assert_eq!(hit[0]["id"], "f-new");
 
