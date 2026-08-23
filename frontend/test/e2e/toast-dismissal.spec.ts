@@ -137,10 +137,11 @@ test("hovering a toast still holds it open to be read", async ({ page }) => {
 test("a toast passes clicks on its read-only surface through to the page", async ({ page }) => {
   await settings(page);
   await replayTour(page);
-  // The replay control also opens the tour dialog. It is higher than both the
-  // page and its toast, so close it before placing the page control in the
-  // notification region; this test is about the toast's hit testing alone.
-  await page.getByRole("button", { name: "Skip tour" }).click();
+  // On a warm chunk the replay tour starts synchronously; on a cold chunk it
+  // can arrive after this toast. If it did start, close that higher dialog so
+  // this test isolates the notification's hit testing.
+  const skipTour = page.getByRole("button", { name: "Skip tour" });
+  if (await skipTour.isVisible()) await skipTour.click();
   const toast = firstToast(page);
   const box = await toast.boundingBox();
   expect(box, "the visible toast has no position").not.toBeNull();
