@@ -295,11 +295,23 @@ mod tests {
     }
 
     async fn call(state: &AppState, signed_in: bool) -> (StatusCode, Value) {
+        let cookie = if signed_in {
+            Some(crate::server::test_support::fixed_cookie("acme"))
+        } else {
+            None
+        };
+        call_with_cookie(state, cookie).await
+    }
+
+    async fn call_with_cookie(
+        state: &AppState,
+        cookie: Option<String>,
+    ) -> (StatusCode, Value) {
         let mut request = Request::builder()
             .method("GET")
             .uri("/api/v1/company/chat/mentionables");
-        if signed_in {
-            request = request.header("cookie", crate::server::test_support::fixed_cookie("acme"));
+        if let Some(cookie) = cookie {
+            request = request.header("cookie", cookie);
         }
         let response = router(state.clone())
             .oneshot(request.body(Body::empty()).unwrap())
