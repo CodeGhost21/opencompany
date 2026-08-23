@@ -31,7 +31,17 @@ describe("Alert announcement semantics", () => {
   it("does not announce a standing informational notice assertively", async () => {
     await render();
 
-    expect(container.querySelector("[data-slot=alert]")?.getAttribute("role")).toBeNull();
+    expect(container.querySelector("[data-slot=alert]")?.getAttribute("role")).not.toBe("alert");
+  });
+
+  // Polite, not absent. A default alert is often mounted in response to
+  // something the operator did — the feedback form's success notice, the setup
+  // wizard's last-teammate warning — and with no role at all a screen reader
+  // would give no sign that the action produced anything.
+  it("keeps a default alert in a polite live region", async () => {
+    await render();
+
+    expect(container.querySelector("[data-slot=alert]")?.getAttribute("role")).toBe("status");
   });
 
   it("keeps destructive alerts assertive", async () => {
