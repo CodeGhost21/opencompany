@@ -1238,7 +1238,7 @@ approval.]"
         // same single-policy state. Scoped to what would actually shadow
         // (`admits_scope`), so a denial of one host leaves a grant for another
         // alone.
-        for old in self.rt.grants.drain_opposite_polarity(
+        for old in self.rt.grants.opposite_polarity(
             &subject,
             &grant.tool,
             grant.scope.as_deref(),
@@ -1249,6 +1249,7 @@ approval.]"
                 .journal
                 .record_standing_revoked(&old.id, by.clone(), now_millis())
                 .await?;
+            self.rt.grants.revoke_standing(&old.id);
             tracing::debug!(
                 grant_id = %old.id,
                 tool = %old.tool,
