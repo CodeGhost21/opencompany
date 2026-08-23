@@ -136,7 +136,7 @@ use crate::ports::bound_node_output;
 
 use crate::runtime::workflow_resume::{PerformedCall, performed_in_input};
 
-use crate::workflows::caps::resolver::{ChildGateRegistry, descend, GATE_NAMESPACE};
+use crate::workflows::caps::resolver::{ChildGateRegistry, GATE_NAMESPACE, descend};
 
 /// The host-private slug a replayed node invokes instead of its real tool.
 ///
@@ -1326,7 +1326,12 @@ mod tests {
         let pending = vec!["sub::work2".to_string()];
         let input = json!({ "approvals": ["sub::work"] });
 
-        let warned = child_calls_to_repeat(&parent, &pending, &child_registry(two_gate_child_graph()), &input);
+        let warned = child_calls_to_repeat(
+            &parent,
+            &pending,
+            &child_registry(two_gate_child_graph()),
+            &input,
+        );
 
         let ids: Vec<&str> = warned.iter().map(|w| w.node_id.as_str()).collect();
         assert_eq!(ids, vec!["notify", "work"], "{warned:?}");
@@ -1345,7 +1350,12 @@ mod tests {
         let parent = child_parent_graph("child");
         let pending = vec!["sub::work".to_string()];
 
-        let warned = child_calls_to_repeat(&parent, &pending, &child_registry(two_gate_child_graph()), &json!({}));
+        let warned = child_calls_to_repeat(
+            &parent,
+            &pending,
+            &child_registry(two_gate_child_graph()),
+            &json!({}),
+        );
 
         let ids: Vec<&str> = warned.iter().map(|w| w.node_id.as_str()).collect();
         assert_eq!(ids, vec!["notify"], "{warned:?}");
@@ -1403,7 +1413,12 @@ mod tests {
         let pending = vec!["sub::work".to_string()];
         let input = json!({ "target": "child" });
 
-        let warned = child_calls_to_repeat(&parent, &pending, &child_registry(two_gate_child_graph()), &input);
+        let warned = child_calls_to_repeat(
+            &parent,
+            &pending,
+            &child_registry(two_gate_child_graph()),
+            &input,
+        );
 
         let ids: Vec<&str> = warned.iter().map(|w| w.node_id.as_str()).collect();
         assert_eq!(ids, vec!["notify"], "{warned:?}");
@@ -1421,8 +1436,16 @@ mod tests {
         )]);
         let pending = vec!["sub::work".to_string()];
 
-        let warned = child_calls_to_repeat(&parent, &pending, &child_registry(two_gate_child_graph()), &json!({ "target": "child" }));
+        let warned = child_calls_to_repeat(
+            &parent,
+            &pending,
+            &child_registry(two_gate_child_graph()),
+            &json!({ "target": "child" }),
+        );
 
-        assert!(warned.is_empty(), "falls back rather than guessing: {warned:?}");
+        assert!(
+            warned.is_empty(),
+            "falls back rather than guessing: {warned:?}"
+        );
     }
 }

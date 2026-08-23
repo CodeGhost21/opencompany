@@ -386,9 +386,12 @@ pub(crate) fn child_id_of(
         return None;
     }
     let input = trigger_input?;
-    tinyflows::expr::resolve(config, &serde_json::json!({ "item": input, "items": [input] }))
-        .as_str()
-        .map(str::to_string)
+    tinyflows::expr::resolve(
+        config,
+        &serde_json::json!({ "item": input, "items": [input] }),
+    )
+    .as_str()
+    .map(str::to_string)
 }
 
 /// Walks a namespaced pending id (`sub::work`, `sub::nested::work`) down through
