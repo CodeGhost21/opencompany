@@ -235,6 +235,7 @@ mod test {
     use super::{MaintenanceTicker, TRACE_RETENTION_LIMIT};
     use crate::company::CompanyManifest;
     use crate::policy::ManifestApprovalGate;
+    use crate::ports::MemoryStore;
     use crate::ports::now_millis;
     use crate::ports::types::{
         Actor, ActorKind, ApprovalId, CompanyEvent, CompanyId, CompressedTrace, Effect,
@@ -242,7 +243,6 @@ mod test {
     };
     use crate::runtime::scheduler::FakeClock;
     use crate::runtime::{CompanyRegistry, RuntimeBuilder};
-    use crate::ports::MemoryStore;
     use crate::{CompanyRuntime, Result};
 
     fn tmp_home() -> tempfile::TempDir {

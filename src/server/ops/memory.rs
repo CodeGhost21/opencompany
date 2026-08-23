@@ -32,8 +32,8 @@ use crate::AppState;
 use crate::error::OpenCompanyError;
 use crate::ports::facts::{FactKind, FactRecord};
 use crate::ports::types::{ChunkAddr, ChunkMeta, CompanyEvent, CompressedTrace, ContextChunk};
-use crate::runtime::maintenance::TRACE_RETENTION_LIMIT;
 use crate::ports::{generate_id, now_millis};
+use crate::runtime::maintenance::TRACE_RETENTION_LIMIT;
 use crate::server::error::ApiError;
 use crate::server::ops::{ScopedCompany, scoped};
 
