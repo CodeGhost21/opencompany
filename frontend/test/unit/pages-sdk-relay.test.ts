@@ -238,6 +238,7 @@ describe("the page frame's toast-relay listener", () => {
       pointerId: 7,
     });
 
+    expect(pressClicked).toHaveBeenCalledOnce();
     expect(releaseClicked).not.toHaveBeenCalled();
   });
 
