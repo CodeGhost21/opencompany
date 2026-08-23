@@ -124,6 +124,13 @@ export function relayToastPointerDown(event: PointerEvent): void {
   const beneath = beneathAt(event.clientX, event.clientY);
   if (!beneath) return;
 
+  // A page frame is another document: pointer capture here cannot reach its
+  // content, so the press is handed to the frame itself over the bridge.
+  if (beneath instanceof HTMLIFrameElement) {
+    relayToFrame(beneath, event, "oc:relay-pointerdown");
+    return;
+  }
+
   // Best-effort: an element that declines capture still receives the
   // synthetic pointerdown; only the drag tail of the gesture is lost. jsdom
   // does not implement pointer capture and throws here.
