@@ -718,10 +718,8 @@ impl PathIndex {
         let mut stack: Vec<&str> = self
             .children
             .get(root_id)
-            .into_iter()
-            .flatten()
-            .map(String::as_str)
-            .collect();
+            .map(|kids| kids.iter().map(String::as_str).collect())
+            .unwrap_or_default();
         while let Some(id) = stack.pop() {
             if !visited.insert(id) {
                 continue;
