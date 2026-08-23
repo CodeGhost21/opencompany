@@ -431,4 +431,19 @@ mod tests {
             "react/jsx-runtime must resolve to the SDK's React bundle"
         );
     }
+
+    #[test]
+    fn shell_loads_the_page_sdk_even_for_a_page_that_does_not_import_it() {
+        let html = page_shell_html("revenue");
+        // The toast click relay (`toast-click-through.ts`) forwards a click on
+        // a toast over this frame to the page SDK's own listener
+        // (`pages-sdk/client.ts`), so the SDK must be present in every frame —
+        // including a static page whose own bundle never imports it. Without
+        // the shell import, a relayed click into such a page would reach no
+        // listener and the control beneath the toast would stay blocked.
+        assert!(
+            html.contains("import \"@opencompany/site\";"),
+            "the shell must load the page SDK itself: {html}"
+        );
+    }
 }
