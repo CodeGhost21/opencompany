@@ -813,6 +813,18 @@ export function AppShell({
     setLastViewedChannel({});
     setUnreadSince(Date.now());
     activeChatChannelRef.current = null;
+    // Another company's transcripts are another namespace too: a channel id
+    // is this company's desk id or a `dm:<roster-id>`, and a provisioned
+    // company is built from the same manifests, so ids recur across
+    // companies. A transcript left behind by a switch would paint the
+    // previous company's conversation onto the new company's identically
+    // named channel — and since the active-DM rail and unread counts derive
+    // from `transcripts`, a DM the previous company talked in would look
+    // active here before this company's own history has anything to say.
+    // Drop them; the hydration below repopulates this company's channels
+    // from its own history. The updater returns the same object when there
+    // is nothing to drop, so this does not re-render the shell for a no-op.
+    setTranscripts((t) => (Object.keys(t).length === 0 ? t : {}));
 
     // Then replace that mount-time floor with the one the host remembers for
     // this person (issue #755). Until this lands the browser floor stands, so
