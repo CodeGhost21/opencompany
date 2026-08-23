@@ -38,7 +38,7 @@ import {
 
 import type { OpenCompanyClient } from "@/api/client";
 import { GRANT_DURATIONS, type ApprovalSummary, type GrantScope } from "@/api/types";
-import type { Desk } from "@/lib/desks";
+import { defaultDesks, type Desk } from "@/lib/desks";
 import {
   approvalAction,
   approvalDeadline,
