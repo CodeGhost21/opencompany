@@ -639,17 +639,32 @@ pub fn extract_with_known(text: &str, dir: &[MentionAlias]) -> Vec<Mention> {
 ///   reader sees still matches what the author wrote, and only the notifying
 ///   stops.
 ///
+/// * **At most one target per span.** A structured caller can otherwise
+///   submit the same `(offset, text)` twice with two different live targets —
+///   two people who share an alias, say — and both would survive dedupe-by-
+///   target (which only catches the SAME target repeated) as separate,
+///   non-quiet mentions. One run of text cannot literally name two different
+///   people at once, so only the first target claiming a span is honoured;
+///   sorting by offset first (below) and Rust's stable sort is what makes
+///   "first" mean "first as the caller supplied it" for two entries at the
+///   same offset — the picker's own ordering, so it still decides which of an
+///   ambiguous pair a click meant.
+///
 /// Sorted by offset on the way out, so the order is the order a reader
 /// encounters them rather than the order the matcher happened to find them.
 pub fn normalize(mut mentions: Vec<Mention>, sender: Option<&Actor>) -> Vec<Mention> {
     mentions.sort_by_key(|m| m.offset);
 
     let mut seen: HashSet<MentionTarget> = HashSet::new();
+    let mut seen_spans: HashSet<usize> = HashSet::new();
     let mut pings = 0usize;
     let mut out = Vec::with_capacity(mentions.len());
 
     for mut mention in mentions {
         if is_sender(&mention.target, sender) {
+            continue;
+        }
+        if !seen_spans.insert(mention.offset) {
             continue;
         }
         let duplicate = !seen.insert(mention.target.clone());
