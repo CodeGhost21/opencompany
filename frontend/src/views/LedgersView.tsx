@@ -1322,7 +1322,7 @@ function EntryCard({
               return (
                 <div key={field.name} className="contents">
                   <dt className="text-muted-foreground">{field.name}</dt>
-                  <dd className="whitespace-pre-line">
+                  <dd className="whitespace-pre-wrap">
                     {compactFieldValue(value)}
                   </dd>
                 </div>
@@ -1362,7 +1362,9 @@ function EntryCard({
   );
 }
 
-/** Keep an empty paragraph from turning a compact list row into a document. */
+/** Keep an empty paragraph from turning a compact list row into a document.
+    Only the blank lines go: indentation and aligned columns inside a line are
+    part of what was recorded, so the row still renders with `pre-wrap`. */
 function compactFieldValue(value: string): string {
   return value
     .split(/\r?\n/)
