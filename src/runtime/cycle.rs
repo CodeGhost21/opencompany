@@ -7896,6 +7896,61 @@ mod test {
         assert!(rt.pending_approvals().is_empty());
     }
 
+    /// Issue #1458, the console half: a workflow-gate card must not offer a
+    /// standing **denial**.
+    ///
+    /// `check_broadly_scoped` refuses a workflow standing denial with a 400 —
+    /// the gate does not enforce a `Deny` verdict — so a card that advertised
+    /// the control would let the operator click "don't ask again" and get an
+    /// error that leaves the approval parked. The grant half is still offered:
+    /// a workflow *can* hold a standing permission. Only the deny control is
+    /// withheld.
+    #[tokio::test]
+    async fn a_workflow_gate_card_is_not_advertised_as_broadly_deniable() {
+        let home_dir = tmp_home();
+        let (rt, _) = park_one_blocked_tool_call(
+            home_dir.path().to_path_buf(),
+            Effect {
+                kind: crate::runtime::workflow_resume::WORKFLOW_APPROVE_KIND.to_string(),
+                group: EffectGroup::Other,
+                amount_usd: None,
+                established_thread: false,
+                first_time_counterparty: false,
+                payload: serde_json::json!({
+                    "workflow_id": "sports_digest",
+                    "node_id": "fetch_bbc",
+                    "tool": "web_fetch",
+                    "args": { "url": "https://docs.rs/x" },
+                }),
+                agent: None,
+                run_id: None,
+            },
+        )
+        .await;
+
+        assert!(
+            !rt.pending_approvals()[0].broadly_deniable,
+            "a workflow card must not advertise a standing refusal nothing enforces"
+        );
+        assert!(
+            rt.pending_approvals()[0].broadly_grantable,
+            "a workflow card can still hold a standing permission"
+        );
+
+        // The same tool, parked from an agent turn, offers the deny control.
+        let home_dir = tmp_home();
+        let (rt, _) = park_one_blocked_tool_call(
+            home_dir.path().to_path_buf(),
+            grantable_effect(
+                "ops",
+                crate::policy::consequence::WEB_FETCH,
+                serde_json::json!({ "url": "https://docs.rs/x" }),
+            ),
+        )
+        .await;
+        assert!(rt.pending_approvals()[0].broadly_deniable);
+    }
+
     /// The default scope is byte-identical to pre-#374 behaviour.
     ///
     /// The existing suite passing untouched is the real proof; this pins the
