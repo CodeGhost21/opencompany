@@ -26,7 +26,7 @@
 // its source named by id. A history that refused to render because a card title
 // could not be looked up would be withholding the very record it exists to show.
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Activity,
   ArrowLeft,
