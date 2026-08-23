@@ -70,6 +70,21 @@ const KIND_ICONS: Record<string, LucideIcon> = {
  * is the only layer that can know the actual consequence. `other` is the
  * internal catch-all, while an absent group means an older host: both stay
  * deliberately unmarked so the badge and tint retain their signal.
+ *
+ * The tints come from the identity palette (`--tone-1` … `--tone-5`), not from
+ * `--status-*`. A consequence group is a category, which is what that palette
+ * exists for — `docs/brand/README.md` ("Identity is not status") reserves the
+ * five status hues for run state and says not to reuse one for anything that
+ * is not that status. These badges did: a pending hire approval was painted
+ * the green that means "finished cleanly", and spend the red that means
+ * "failed". The identity palette deliberately holds no amber, green or red,
+ * so a queue of approvals can no longer read as a queue of run outcomes.
+ *
+ * Six groups over five tones, so `spend` and `hire` share tone 4 — the two
+ * that most often move the same money. Sharing is safe here and precedented
+ * (`lib/team.ts`, `lib/skills.ts` both fold more names onto these five): the
+ * badge always carries its own icon and label, so colour is never the only
+ * carrier of the distinction, which is the rule the brand doc actually sets.
  */
 const APPROVAL_CONSEQUENCES = {
   spend: { label: "Spends money", iconClass: "bg-tone-4/15 text-tone-4-text" },
