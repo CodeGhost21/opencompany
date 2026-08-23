@@ -3,10 +3,12 @@ import { X } from "lucide-react";
 import { Markdown } from "@/components/markdown";
 import { TeammateAvatar } from "@/components/teammate-avatar";
 import { Button } from "@/components/ui/button";
+import type { MessageIntent } from "@/api/tasks";
 import type { ChatMessage } from "@/lib/chat";
 import type { TeamMember } from "@/lib/team";
 import { MessageComposer } from "./MessageComposer";
 import { channelTitle, formatTime, senderOf, type Channel } from "./model";
+import { type Mention, type Mentionable } from "./mentions";
 
 interface Props {
   channel: Channel;
@@ -20,7 +22,14 @@ interface Props {
   parent: ChatMessage;
   replies: ChatMessage[];
   sending: boolean;
-  onSend: (text: string) => void;
+  /**
+   * Everything an `@` can name here (issue #1645). Drawn from the parent
+   * ChatView's directory so the thread composer shares the same roster.
+   * Absent when the host predates the route, or when the directory has not
+   * loaded — the composer degrades to plain-text typing.
+   */
+  mentionables?: Mentionable[];
+  onSend: (text: string, intent?: MessageIntent, mentions?: Mention[]) => void;
   onClose: () => void;
 }
 
@@ -31,7 +40,7 @@ interface Props {
  * channel apart. The parent message sits at the top under a rule, and the
  * panel carries its own composer scoped to the thread.
  */
-export function ThreadPanel({ channel, members, parent, replies, sending, onSend, onClose }: Props) {
+export function ThreadPanel({ channel, members, parent, replies, sending, mentionables, onSend, onClose }: Props) {
   return (
     <aside className="flex w-96 shrink-0 flex-col border-l bg-background">
       <header className="flex h-13 shrink-0 items-center gap-2 border-b px-3">
@@ -61,6 +70,7 @@ export function ThreadPanel({ channel, members, parent, replies, sending, onSend
         compact
         placeholder="Reply…"
         disabled={sending}
+        mentionables={mentionables}
         onSend={onSend}
       />
     </aside>

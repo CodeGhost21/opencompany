@@ -51,6 +51,7 @@ import { MembersPane } from "./chat/MembersPane";
 import { MessageComposer } from "./chat/MessageComposer";
 import {
   mentionablesFor,
+  mentionsOutsideChannel,
   type Mention,
   type Mentionable,
 } from "./chat/mentions";
@@ -720,6 +721,20 @@ export function ChatView({
     if (sending) return;
     const target = active.id;
     const chatId = activeThreadId;
+
+    // Warn about @-mentioning a teammate who is not on this channel.
+    if (mentions?.length && inChannel) {
+      const channelIds = inChannel.map((m) => m.id);
+      const outside = mentionsOutsideChannel(mentions, channelIds);
+      if (outside.length) {
+        toast.warning(
+          outside.length === 1
+            ? "A teammate you @-mentioned is not on this channel — they won't see the message."
+            : `${outside.length} teammates you @-mentioned are not on this channel — they won't see the message.`,
+        );
+      }
+    }
+
     const local = makeMessage("you", text, { parentId });
     append(target, local);
     setSending(true);
@@ -779,6 +794,7 @@ export function ChatView({
               steps: r.steps,
               taskId: r.taskId,
               messageId: r.messageId,
+              mentions: r.mentions,
             }),
           )
         : [makeMessage("system", "(no reply)", { parentId })];
@@ -1135,7 +1151,10 @@ export function ChatView({
               parent={parent}
               replies={threadReplies}
               sending={sending}
-              onSend={(text) => void send(text, undefined, parent.id)}
+              mentionables={mentionables}
+              onSend={(text, _intent, mentions) =>
+                void send(text, undefined, parent.id, mentions)
+              }
               onClose={() => setOpenThreadId(null)}
             />
           )}

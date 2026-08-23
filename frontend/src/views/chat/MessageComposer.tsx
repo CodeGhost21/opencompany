@@ -19,7 +19,9 @@ import { cn } from "@/lib/utils";
 import { MentionPicker } from "@/views/chat/MentionPicker";
 import {
   activeMentionQuery,
+  aliasSet,
   insertMention,
+  mentionsOutsideChannel,
   rankMentionables,
   reconcileMentions,
   type Mention,
@@ -30,6 +32,11 @@ interface Props {
   placeholder: string;
   disabled?: boolean;
   onSend: (text: string, intent?: MessageIntent, mentions?: Mention[]) => void;
+  /**
+   * The ids of the teammates on this channel, for the outside-channel warning.
+   * Absent when membership is unknown.
+   */
+  channelMemberIds?: string[];
   /**
    * Everything an `@` can name here, from `GET {scope}/chat/mentionables`.
    *
@@ -80,6 +87,7 @@ export function MessageComposer({
   disabled,
   onSend,
   compact,
+  channelMemberIds,
   deliverableChoice,
   mentionables,
 }: Props) {
@@ -92,6 +100,10 @@ export function MessageComposer({
   // state (not derived at render) because it has to survive the mouse leaving
   // the textarea to click a row.
   const [query, setQuery] = useState<{ start: number; query: string } | null>(null);
+  // Teammate ids the draft addresses who cannot see this channel. Checked on
+  // send; a non-empty list warns rather than sending, and a second send passes
+  // through after the user has confirmed.
+  const [outsideWarning, setOutsideWarning] = useState<string[] | null>(null);
   const [activeRow, setActiveRow] = useState(0);
   // What the NEXT line is for, and only the next one. It resets to "once"
   // after every send so neither a workflow request nor a "just chatting" mark
@@ -112,6 +124,11 @@ export function MessageComposer({
     () => (query && mentionables ? rankMentionables(mentionables, query.query) : []),
     [query, mentionables],
   );
+  // Built once per directory, not per keystroke.
+  const aliases = useMemo(
+    () => (mentionables ? aliasSet(mentionables) : undefined),
+    [mentionables],
+  );
   const pickerOpen = query !== null && rows.length > 0;
 
   function closePicker() {
@@ -125,7 +142,7 @@ export function MessageComposer({
       closePicker();
       return;
     }
-    const next = activeMentionQuery(text, caret);
+    const next = activeMentionQuery(text, caret, aliases);
     setQuery(next);
     setActiveRow(0);
   }
@@ -161,6 +178,13 @@ export function MessageComposer({
     // The trim can shift every span, so the list is re-anchored against exactly
     // what is being sent — never against the untrimmed draft.
     const sending = reconcileMentions(text, mentions);
+    // On first send with outside-channel mentions, warn instead of sending.
+    const outside = mentionsOutsideChannel(sending, channelMemberIds);
+    if (outside.length > 0 && !outsideWarning) {
+      setOutsideWarning(outside);
+      return;
+    }
+    setOutsideWarning(null);
     setDraft("");
     setMentions([]);
     closePicker();
@@ -273,6 +297,20 @@ export function MessageComposer({
           </div>
         )}
 
+        {outsideWarning && (
+          <p
+            role="alert"
+            className="flex items-center gap-1.5 border-b bg-warning/10 px-3 py-1.5 text-xs text-muted-foreground"
+          >
+            <svg className="size-3.5 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+              <path d="M12 9v4m0 4h.01M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" />
+            </svg>
+            <span className="min-w-0">
+              <span className="font-medium">{outsideWarning.join(", ")}</span>
+              {" "}can't see this channel — send again to notify anyway
+            </span>
+          </p>
+        )}
         {/* A native textarea rather than the design-system one: the composer
             needs a ref to wrap the selection, and `Textarea` is a plain
             function component (React 18 — no ref forwarding). */}
