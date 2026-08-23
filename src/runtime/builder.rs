@@ -2232,6 +2232,9 @@ impl RuntimeBuilder {
                         .agents
                         .iter()
                         .any(|agent| crate::company::grants_repo_explicit(&agent.tools))
+                    || overlay_agents
+                        .iter()
+                        .any(|agent| crate::company::grants_repo_explicit(&agent.tools))
                     || self
                         .manifest
                         .agents
