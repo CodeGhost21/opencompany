@@ -1049,6 +1049,25 @@ approval.]"
                 effect.kind
             )));
         }
+        // Issue #1458: a standing DENY is only enforced on the agent turn path,
+        // where openhuman treats a `Deny` verdict as fail-closed. The workflow
+        // gate deliberately does not honour `Deny` (`src/workflows/gate.rs`), so
+        // minting one for a workflow would advertise a refusal no run ever
+        // enforces — the operator clicks "don't ask again" and the next
+        // scheduled run sails through the gate. A workflow refusal stays a
+        // per-call decision until the gate learns to enforce the verdict.
+        if verdict == Verdict::Deny
+            && matches!(
+                crate::runtime::grants::subject_of(&effect),
+                Some(GrantSubject::Workflow(_))
+            )
+        {
+            return Err(OpenCompanyError::InvalidRequest(format!(
+                "'{}' is a workflow call, and the workflow path does not enforce a standing \
+                 refusal yet; deny it once instead",
+                effect.kind
+            )));
+        }
         Ok(())
     }
 
