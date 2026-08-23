@@ -98,7 +98,8 @@ test("capture settled graph layout + API data", async ({ page }) => {
           data[p] = { fetchError: String(e) };
         }
       }
-      return { count: groups.length, positions, data, trajectory };
+      const early = (window as unknown as { __kgCounts?: Array<{ t: number; n: number }> }).__kgCounts ?? [];
+      return { count: groups.length, positions, data, trajectory, early };
     },
     trajectory,
   );
