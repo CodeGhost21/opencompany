@@ -437,6 +437,39 @@ describe("finishing setup with no companies on the host", () => {
   });
 
   /**
+   * The "Use my own" escape hatch switches the gate too. Once the operator
+   * opts to supply their own key, an empty box must not test anything — a
+   * test with no key probes the host credential and would report a pass for a
+   * key they never provided.
+   */
+  it("requires a key once the operator opts to use their own", async () => {
+    await show(
+      clientWith({
+        ...status(),
+        inference: {
+          ready: true,
+          provider: "managed",
+          base_url: "https://api.tinyhumans.ai/openai/v1",
+        },
+      }),
+    );
+
+    // The host credential is testable as-is.
+    expect(button("Test connection").disabled).toBe(false);
+
+    await act(async () => {
+      (
+        container.querySelector('[data-testid="setup-key-override"]') as HTMLElement
+      ).click();
+    });
+    // Their own key, not yet provided, is nothing to test.
+    expect(button("Test connection").disabled).toBe(true);
+
+    await fill("setup-field-key", "own-key");
+    expect(button("Test connection").disabled).toBe(false);
+  });
+
+  /**
    * A regression guard for a bug that reached a screenshot: `\u2014` written
    * into JSX text, where nothing interprets it, so the operator read a literal
    * escape sequence where an em dash belonged.
