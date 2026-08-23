@@ -462,7 +462,11 @@ async fn evict_archives_rather_than_destroys() {
     let kept = mem.archived_traces(&id).await.unwrap();
     let mut ids: Vec<&str> = kept.iter().map(|t| t.cycle_id.as_str()).collect();
     ids.sort_unstable();
-    assert_eq!(ids, vec!["c2", "c3"], "evicted traces live on, bounded at n");
+    assert_eq!(
+        ids,
+        vec!["c2", "c3"],
+        "evicted traces live on, bounded at n"
+    );
 }
 
 #[tokio::test]

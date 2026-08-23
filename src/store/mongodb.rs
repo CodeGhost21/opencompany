@@ -4788,12 +4788,9 @@ mod test {
         let id = CompanyId::new("acme");
         // 33 traces: `next_seq` hands out 0..=32 in save order.
         for i in 0..=32 {
-            s.save_trace(
-                &id,
-                CompressedTrace::now(format!("c{i}"), format!("s{i}")),
-            )
-            .await
-            .unwrap();
+            s.save_trace(&id, CompressedTrace::now(format!("c{i}"), format!("s{i}")))
+                .await
+                .unwrap();
         }
         // Keeps the newest 32 (seqs 1..=32), evicting exactly seq 0.
         let removed = s
