@@ -16,10 +16,14 @@ import { SetupWizard } from "@/views/setup/SetupWizard";
  * carries the landing fragment (`#/company?from=setup`). The other three
  * outcomes — a host that asks nobody to sign in, a mailed link the operator
  * skips, and a link that could not be sent — all finish through the same
- * `setup-open-console` button, which remounts the shell in place (`onDone`
- * re-probes and boots a fresh `AppShell`). That remount must carry the same
- * fragment, or it lands on Overview with the tour free to open over the roster
- * setup just built — the exact miss the link path was fixed to avoid.
+ * `setup-open-console` button. When that button's `onDone` hands off to a
+ * fresh `AppShell` (the connection console's re-probe), it must write the same
+ * fragment first, or the fresh shell lands on Overview with the tour free to
+ * open over the roster setup just built — the exact miss the link path was
+ * fixed to avoid. When it instead completes in place (the in-shell dialog,
+ * whose running shell suppresses the welcome through `onCompleted`), the
+ * button must NOT write the marker: no mount is waiting to consume it, so it
+ * would be read as a fresh hand-off on the next reload.
  */
 
 function status(over: Partial<SetupStatus> = {}): SetupStatus {
