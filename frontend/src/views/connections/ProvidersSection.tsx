@@ -560,7 +560,7 @@ function ProviderTile({
           type="button"
           onClick={onOpen}
           title={title}
-          aria-label={`Open ${row.label}. ${state}.`}
+          aria-label={`Open ${row.label}. ${state}. Typical access: ${permissionHint(row.category)}.`}
           // Deliberately NOT prefixed `provider-`: `connections-one-list.spec.ts`
           // counts `[data-testid^='provider-']` nodes to prove a provider
           // renders exactly one tile, and a nested node sharing that prefix
