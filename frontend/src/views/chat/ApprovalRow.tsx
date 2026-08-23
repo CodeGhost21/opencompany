@@ -52,7 +52,7 @@ import {
 } from "@/components/approval-card";
 import { Button } from "@/components/ui/button";
 import { approvedLine } from "@/lib/approval-wording";
-import { approvalAction, money, payloadLeadLabel } from "@/lib/language";
+import { approvalAction, money, payloadLeadLabel, payloadLeadTruncated } from "@/lib/language";
 import { cn } from "@/lib/utils";
 
 /** One count written with the noun it qualifies. */
