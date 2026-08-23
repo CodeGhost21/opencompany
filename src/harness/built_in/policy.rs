@@ -1517,12 +1517,15 @@ impl ToolPolicy for ApprovalPolicy {
         let by_mode = match self.mode {
             PolicyMode::Full => ToolPolicyDecision::Allow,
             // `auto` sits between the two (issue #560): the agent's own sandbox
-            // writes and its outward reads run unattended, and anything that
-            // leaves the company or spends on submit still parks. The line is
-            // drawn by `parks_under_auto`, which reads the same declaration
-            // table this arm's neighbours read — see there for why it reuses
-            // `Standing` rather than introducing a second list, and for the two
-            // boundaries it deliberately does not draw.
+            // writes, its outward reads, and workspace mutations confined to its
+            // own nodes run unattended, and anything that leaves the company or
+            // spends on submit still parks. The line is drawn by
+            // `parks_under_auto`, which reads the same declaration table this
+            // arm's neighbours read — see there for why it reuses `Standing`
+            // rather than introducing a second list, and for the two boundaries
+            // it deliberately does not draw. The workspace exception is the one
+            // company-context downgrade, graded by `consequence_for` before the
+            // table verdict is taken (issue #877).
             PolicyMode::Auto => {
                 if consequence.parks_under_auto() {
                     self.require_approval(
