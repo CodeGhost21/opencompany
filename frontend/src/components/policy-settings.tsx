@@ -491,7 +491,9 @@ export function PolicySettings({ client, company }: Props) {
                     }}
                     data-testid="policy-tier-confirm"
                   >
-                    Use {pendingTier?.label}
+                    {pendingReset
+                      ? "Revert to the manifest's policy"
+                      : `Use ${pendingTier?.label}`}
                   </AlertDialogAction>
                 </AlertDialogFooter>
               </AlertDialogContent>
