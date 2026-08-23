@@ -252,6 +252,11 @@ const JOURNAL: &str = "journal";
 /// imported — the gate that makes the import happen exactly once.
 const JOURNAL_IMPORTS: &str = "journal_imports";
 
+/// How many legacy run rows [`MongoStore::backfill_run_agent_ids`] migrates in
+/// one pass. Bounds the memory a first boot's migration holds and gives the
+/// server's own run writes room to interleave between passes.
+const BACKFILL_BATCH_SIZE: usize = 200;
+
 /// A single MongoDB database implementing all five storage ports.
 #[derive(Clone)]
 pub struct MongoStore {
