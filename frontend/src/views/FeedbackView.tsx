@@ -133,7 +133,7 @@ export function FeedbackView({ client, company }: Props) {
             <CardHeader>
               <CardTitle className="text-base">Your reports</CardTitle>
               <CardDescription>
-                What you&apos;ve flagged from this company, newest first.
+                What this company has captured, newest first.
               </CardDescription>
             </CardHeader>
             <CardContent className="p-0">
@@ -186,7 +186,11 @@ function ReportRow({ report }: { report: FeedbackSummary }) {
         <p className="text-xs text-muted-foreground">
           {timeAgo(report.at_millis, Date.now())}
           {report.work_item && ` · ${report.work_item}`}
-          {report.issue_status && ` · ${STATUS_LABELS[report.issue_status] ?? report.issue_status}`}
+          {` · ${
+            report.issue_status
+              ? (STATUS_LABELS[report.issue_status] ?? report.issue_status)
+              : "saved locally"
+          }`}
         </p>
       </div>
       {report.filed_issue_url && (

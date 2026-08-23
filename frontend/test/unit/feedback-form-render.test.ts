@@ -71,7 +71,11 @@ describe("FeedbackForm", () => {
       note?.dispatchEvent(new Event("input", { bubbles: true }));
     });
 
-    expect(container.querySelector('button[type="button"]')?.textContent).not.toBe("Send");
+    expect(
+      [...container.querySelectorAll<HTMLButtonElement>("button")].find(
+        (button) => button.textContent === "Send",
+      ),
+    ).toBeUndefined();
     act(() => {
       [...container.querySelectorAll<HTMLButtonElement>("button")]
         .find((button) => button.textContent === "Preview")
