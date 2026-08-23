@@ -116,6 +116,41 @@ from = "start"
 to = "work"
 "#;
 
+/// A child whose gate is preceded by an ungated `http_request` POST — the
+/// #617 continuation hazard: approving restarts the child, and a restart
+/// re-calls the POST. `on_error = "continue"` keeps the SSRF guard's loopback
+/// refusal from halting the child before it reaches the gated `work` node.
+const SUB_WORKFLOW_CHILD_WITH_UPSTREAM: &str = r#"
+id = "child"
+name = "Child"
+[[node]]
+id = "start"
+kind = "trigger"
+name = "Start"
+[[node]]
+id = "fetch"
+kind = "http_request"
+name = "Fetch"
+[node.config]
+method = "POST"
+url = "http://127.0.0.1:9/notify"
+on_error = "continue"
+[[node]]
+id = "work"
+kind = "tool_call"
+name = "Work"
+[node.config]
+slug = "shell"
+[node.config.args]
+command = "echo ran > marker.txt"
+[[edge]]
+from = "start"
+to = "fetch"
+[[edge]]
+from = "fetch"
+to = "work"
+"#;
+
 /// A company that grants `shell` and gates it — under `full` autonomy, for the
 /// reasons in this module's docs.
 fn manifest(always_approve: &str) -> CompanyManifest {
