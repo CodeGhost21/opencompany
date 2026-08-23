@@ -3619,6 +3619,51 @@ mod tests {
         ));
     }
 
+    /// Issue #1458: a standing denial is only **enforced** on the agent turn
+    /// path, where openhuman treats a `Deny` verdict as fail-closed. The
+    /// workflow gate deliberately does not honour `Deny`
+    /// (`src/workflows/gate.rs`), so this policy must not advertise one for a
+    /// workflow subject — even if a stale denial is sitting in the set — or the
+    /// gate would be handed a verdict it is documented to ignore and the
+    /// operator's "don't ask again" would be silently dropped on the next run.
+    #[tokio::test]
+    async fn a_standing_deny_is_not_advertised_for_a_workflow_subject() {
+        let grants = GrantSet::default();
+        let queue = ApprovalRequestQueue::with_grants(grants.clone());
+        grants.grant_standing(crate::runtime::grants::StandingGrant {
+            id: crate::runtime::grants::GrantId::new("deny-1"),
+            agent: String::new(),
+            workflow: Some("sports_digest".to_string()),
+            tool: "web_fetch".to_string(),
+            verdict: Verdict::Deny,
+            granted_by: crate::ports::types::Actor {
+                kind: crate::ports::types::ActorKind::User,
+                id: "user-1".into(),
+            },
+            approval_id: crate::ports::types::ApprovalId::new("appr-1"),
+            at_millis: 1_000,
+            expires_at_millis: crate::ports::now_millis() + 60 * 60 * 1000,
+            origin_thread: None,
+            origin_parent: None,
+            origin_task: None,
+            scope: Some("https://docs.rs".to_string()),
+        });
+
+        let p = policy("full", &["web_fetch"], None)
+            .with_requests(queue)
+            .with_workflow("sports_digest");
+        let decision = p
+            .check(&request(
+                "web_fetch",
+                serde_json::json!({ "url": "https://docs.rs/x" }),
+            ))
+            .await;
+        assert!(
+            !matches!(decision, ToolPolicyDecision::Deny { .. }),
+            "a workflow standing denial must not be advertised on the gate path: {decision:?}"
+        );
+    }
+
     // --- The per-agent daily spend cap (issue #304) ---------------------------
 
     use crate::ports::usage::{SampleKind, UsageMeter, UsageSample};
