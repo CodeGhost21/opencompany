@@ -225,7 +225,7 @@ export function AgentRuns({
       Array.isArray(rows) ? rows.filter((run) => run.agentId === agentId) : [],
     );
     setFailed(false);
-  }, [client, company, agentId, wanted]);
+  }, [client, company, agentId, wanted, openId]);
 
   useEffect(() => {
     setRuns(null);
