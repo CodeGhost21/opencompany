@@ -212,9 +212,9 @@ const NAV_ALWAYS_PARENT = new Set<View>(["company"]);
  * `#/memory` is the Brain browser's legacy address after it moved under
  * Settings (issue #1416).
  *
- * It lands where the board actually lives now, so a bookmark, a habit, or a
- * link written before the move all still arrive at a board rather than at a
- * 404 — and so does `#/tasks/<malformed>`, which names no card either. A real
+ * Each retired route lands at its current home, so a bookmark, a habit, or a
+ * link written before the move still reaches the intended surface rather than
+ * a 404. `#/tasks/<malformed>` names no card, so it goes to the board; a real
  * `#/tasks/<id>` returns `null` from here and resolves untouched.
  *
  * Module scope, because `useHashView` holds this in a `useCallback` dependency
