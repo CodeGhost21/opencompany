@@ -35,7 +35,9 @@ import {
   type AgentFieldKey,
 } from "@/lib/agent";
 import { fetchBoardColumns } from "@/lib/board-columns";
-import { avatarFor, roleSubtitle, toneFor } from "@/lib/team";
+import { avatarRef } from "@/lib/avatar";
+import { AvatarPicker } from "@/components/avatar-picker";
+import { roleSubtitle, toneFor } from "@/lib/team";
 import { workloadByAssignee, type Workload } from "@/lib/team-workload";
 import { cn } from "@/lib/utils";
 import { AgentFields } from "@/views/team/AgentFields";
@@ -153,6 +155,7 @@ export function AgentDetailView({
   const [people, setPeople] = useState<Person[]>([]);
   /** Whether the daily-budget dialog is open. */
   const [budgetOpen, setBudgetOpen] = useState(false);
+  const [avatarOpen, setAvatarOpen] = useState(false);
 
   useEffect(() => {
     let live = true;
@@ -333,6 +336,29 @@ export function AgentDetailView({
     }
   }
 
+  /**
+   * Save a chosen face, or `undefined` to go back to the hashed default.
+   *
+   * Its own write rather than a field of the edit form: a face is picked by
+   * clicking it, and making that click wait for a Save button — in a form whose
+   * other fields are text — would be the only place in the console where
+   * choosing something visual is a two-step commit. Same identity guard as the
+   * budget and inbox writes, for the same reason.
+   */
+  async function saveAvatar(avatar: string | undefined) {
+    if (!agent) return;
+    try {
+      const updated = await client.updateAgent(agentId, { avatar: avatar ?? null }, company);
+      if (displayedAgentIdRef.current !== agentId) return;
+      setAgent(updated);
+      toast.success(avatar ? "Icon updated." : "Back to the default icon.");
+    } catch (error) {
+      toast.error(
+        error instanceof Error ? error.message : "Couldn't change this teammate's icon.",
+      );
+    }
+  }
+
   async function save() {
     if (!agent) return;
     const edits = agentEdits(agent, draft);
@@ -459,6 +485,7 @@ export function AgentDetailView({
           <>
             <Identity
               agent={agent}
+              onPickAvatar={() => setAvatarOpen(true)}
               action={
                 !editing ? (
                   <Button
@@ -601,6 +628,16 @@ export function AgentDetailView({
           </>
         )}
       </div>
+      <AvatarDialog
+        client={client}
+        company={company}
+        agent={avatarOpen ? agent : null}
+        onOpenChange={setAvatarOpen}
+        onPick={(avatar) => {
+          setAvatarOpen(false);
+          void saveAvatar(avatar);
+        }}
+      />
       <BudgetDialog
         agent={budgetOpen ? agent : null}
         onOpenChange={setBudgetOpen}
@@ -614,14 +651,24 @@ export function AgentDetailView({
 }
 
 /** Name, role, id, and the two facts that classify an agent. */
-function Identity({ agent, action }: { agent: AgentDetailDto; action?: ReactNode }) {
+function Identity({
+  agent,
+  action,
+  onPickAvatar,
+}: {
+  agent: AgentDetailDto;
+  action?: ReactNode;
+  /** Opens the icon picker. Absent leaves the tile inert — a read-only header. */
+  onPickAvatar?: () => void;
+}) {
   const display = agent.name?.trim() || agent.role;
   const seed = agent.id || display;
   const tone = toneFor(seed);
-  // Same seed as `tone` — the id where there is one — so a rename doesn't
+  // What this teammate wears: the chosen face, else the mascot hashed from the
+  // same seed as `tone` — the id where there is one — so a rename doesn't
   // change this teammate's face on the one screen that should never be
   // showing letters (issue #1181, and issue #1185 for the seed itself).
-  const avatar = avatarFor(seed);
+  const avatar = avatarRef(agent.avatar, seed);
   // #1208, on the page a teammate *is*. `display` already falls back to the
   // role, and a manifest-declared agent has no `name` at all, so the line under
   // the title was the title again on every teammate in every shipped company.
@@ -631,13 +678,37 @@ function Identity({ agent, action }: { agent: AgentDetailDto; action?: ReactNode
       <div className="flex items-start gap-4 min-w-0">
         {/* The header of the page a teammate *is* — the one screen that should
             never be the one showing letters (issue #1181). 56px. */}
-        <TeammateAvatar
-          name={display}
-          tone={tone}
-          avatar={avatar}
-          className="size-14 rounded-xl text-base"
-          data-testid="agent-avatar"
-        />
+        {/* The tile is the control. A face is a visual thing, so the way to
+            change it is to click the one on screen rather than to hunt for a
+            field named after it — and the hover ring is what says so, since an
+            avatar that looks identical to an inert one is a button nobody
+            finds. Falls back to a plain tile where there is no handler. */}
+        {onPickAvatar ? (
+          <button
+            type="button"
+            onClick={onPickAvatar}
+            aria-label="Change this teammate's icon"
+            title="Change icon"
+            className="rounded-xl ring-2 ring-transparent transition-colors hover:ring-primary focus-visible:ring-primary focus-visible:outline-none"
+            data-testid="agent-avatar-pick"
+          >
+            <TeammateAvatar
+              name={display}
+              tone={tone}
+              avatar={avatar}
+              className="size-14 rounded-xl text-base"
+              data-testid="agent-avatar"
+            />
+          </button>
+        ) : (
+          <TeammateAvatar
+            name={display}
+            tone={tone}
+            avatar={avatar}
+            className="size-14 rounded-xl text-base"
+            data-testid="agent-avatar"
+          />
+        )}
         <div className="min-w-0 flex-1 space-y-2">
           <div>
             <h1 className="truncate text-2xl font-semibold tracking-tight" data-testid="agent-name">
