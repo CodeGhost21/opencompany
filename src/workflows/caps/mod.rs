@@ -199,21 +199,21 @@ pub async fn build_capabilities(
     // created (issue #168). Read before `deps` may move into the agent runner.
     // REAL in both modes: it is a read, and a dry sub_workflow child runs under
     // this same (dry) bundle, so dry propagates rather than stopping here.
-    // Issue #617: a child's nodes never reach the gate pass, so the resolver
-    // carries the policy in order to *say* which of its calls were never
-    // offered for approval. `None` for a dry run — nothing executes, so there
-    // is nothing to disclose, and the resolver behaves exactly as before.
-    let audit = (!dry_run).then(|| self::resolver::ChildCallAudit {
-        policy: record.manifest.policy.clone(),
+    // Issue #617: child graphs are translated inside the engine, after the
+    // top-level gate pass. Give the resolver the same live policy and grants so
+    // it can mark those graphs before tinyflows runs them. `None` for a dry run
+    // because every effect slot is inert there.
+    let gates = (!dry_run).then(|| self::resolver::ChildPolicyGates {
+        policy: record.effective_policy(),
         run_id: run_id.to_string(),
-        events: deps.events.clone(),
+        grants: deps.approval_requests.grants(),
     });
     let resolver: Arc<dyn WorkflowResolver> = Arc::new(StoreWorkflowResolver::new(
         deps.workflow_source_dir.clone(),
         deps.store.clone(),
         company.clone(),
         workflow_id.to_string(),
-        audit,
+        gates,
     ));
 
     // The four effectful slots, chosen by mode at this one point.

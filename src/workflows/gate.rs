@@ -257,10 +257,36 @@ pub(crate) async fn apply_policy_gates(
     run_id: &str,
     grants: &GrantSet,
 ) -> Vec<GatedCall> {
+    apply_policy_gates_with_policy(
+        graph,
+        &record.effective_policy(),
+        &record.id,
+        workflow_id,
+        run_id,
+        grants,
+    )
+    .await
+}
+
+/// Applies the workflow policy gate using the effective policy already selected
+/// for this run.
+///
+/// A `sub_workflow` child is translated later by the resolver, after the
+/// top-level runner has applied its pass. The resolver has the run's effective
+/// policy and grants but not the original [`CompanyRecord`], so it uses this
+/// shared mutation half rather than reimplementing policy classification.
+pub(crate) async fn apply_policy_gates_with_policy(
+    graph: &mut WorkflowGraph,
+    policy: &Policy,
+    company: &CompanyId,
+    workflow_id: &str,
+    run_id: &str,
+    grants: &GrantSet,
+) -> Vec<GatedCall> {
     let gated = policy_gates(
         graph,
-        &record.manifest.policy,
-        &record.id,
+        policy,
+        company,
         workflow_id,
         run_id,
         Some(grants),

@@ -66,26 +66,22 @@ pub struct StoreWorkflowResolver {
     /// The id of the top-level workflow the current run started from — a child
     /// whose closure reaches back to it would loop the whole run.
     root_id: String,
-    /// What the company's policy would park, and where to record that it was
-    /// not asked (issue #617). `None` for a dry run, which executes nothing and
-    /// therefore has nothing to disclose.
-    audit: Option<ChildCallAudit>,
+    /// The live per-run policy inputs used to gate child graphs (issue #617).
+    /// `None` for a dry run, whose effect slots are all inert.
+    gates: Option<ChildPolicyGates>,
 }
 
-/// Everything the #617 audit line needs: the policy to ask, the run to name,
-/// and the log to write to.
+/// The policy inputs the top-level runner selected for this run.
 ///
-/// Grouped so [`StoreWorkflowResolver::new`] does not grow three more
-/// parameters for one concern, and so the whole concern is `Option` — a dry run
-/// passes `None` and the resolver behaves exactly as it did before.
-pub struct ChildCallAudit {
-    /// The company `[policy]` block, verbatim — the same input the top-level
-    /// gate pass reads, so the two can never disagree about the same call.
+/// Grouped so [`StoreWorkflowResolver::new`] does not grow more parameters for
+/// one concern. A dry run passes `None`, preserving its no-gate semantics.
+pub struct ChildPolicyGates {
+    /// The effective company policy, including any console override.
     pub policy: crate::company::Policy,
-    /// The run resolving this child, for the journal line.
+    /// The parent run resolving this child.
     pub run_id: String,
-    /// Where the line goes. Without it the disclosure is a log warning only.
-    pub events: Option<Arc<dyn crate::ports::EventLog>>,
+    /// The company's live standing permissions.
+    pub grants: crate::runtime::grants::GrantSet,
 }
 
 impl StoreWorkflowResolver {
@@ -96,86 +92,36 @@ impl StoreWorkflowResolver {
         store: Arc<dyn CompanyStore>,
         company: CompanyId,
         root_id: String,
-        audit: Option<ChildCallAudit>,
+        gates: Option<ChildPolicyGates>,
     ) -> Self {
         Self {
             source_dir,
             store,
             company,
             root_id,
-            audit,
+            gates,
         }
     }
 
-    /// Issue #617: say, on the record, that this child's calls were never
-    /// offered for approval.
+    /// Applies the same policy pass the top-level runner uses to a child graph.
     ///
-    /// # Why this discloses rather than gates
-    ///
-    /// The child is resolved and run *inside* the engine, so its nodes never
-    /// reach the gate pass #460 and #614 added. Gating them is not on the table:
-    /// tinyflows cannot resume a child across the sub-workflow boundary, and a
-    /// paused child halts the parent with an unresumable error — so marking the
-    /// node would turn a run that works into one that fails with **no card to
-    /// decide**, which is worse than the hole. Closing it properly is engine
-    /// work (#617).
-    ///
-    /// So the run proceeds and the omission is recorded. The value is exactly
-    /// the value #460 argued for: an operator auditing what the company was
-    /// asked to approve stops seeing a gap with nothing to explain it.
-    ///
-    /// Best-effort and never fails a resolve — a journal write must not be able
-    /// to stop a workflow that would otherwise run. The `warn!` lands either
-    /// way, so a build with no event log still says it out loud.
-    async fn disclose_ungated_calls(&self, child_id: &str, graph: &WorkflowGraph) {
-        let Some(audit) = self.audit.as_ref() else {
+    /// tinyflows now surfaces a child pause at the parent's `sub_workflow` node
+    /// using a namespaced id and forwards that approval when the parent re-runs.
+    /// Marking the child here therefore reaches the ordinary card and resume
+    /// path instead of silently executing an effect beneath the parent graph.
+    async fn apply_policy_gates(&self, child_id: &str, graph: &mut WorkflowGraph) {
+        let Some(gates) = self.gates.as_ref() else {
             return;
         };
-        let ungated = crate::workflows::gate::policy_gates(
+        crate::workflows::gate::apply_policy_gates_with_policy(
             graph,
-            &audit.policy,
+            &gates.policy,
             &self.company,
             child_id,
-            &audit.run_id,
-            // Issue #1098: the audit reports calls never offered for approval at
-            // all, so it deliberately does not consult standing permissions.
-            None,
+            &gates.run_id,
+            &gates.grants,
         )
         .await;
-
-        for call in ungated {
-            tracing::warn!(
-                company = %self.company,
-                workflow = %self.root_id,
-                child_workflow = child_id,
-                run_id = %audit.run_id,
-                node = %call.node_id,
-                tool = %call.slug,
-                "workflow: this call was NOT offered for approval because it is inside a \
-                 sub_workflow; the engine cannot resume a child across that boundary (issue \
-                 #617), so it runs unparked"
-            );
-            let Some(events) = audit.events.as_ref() else {
-                continue;
-            };
-            let event = crate::ports::types::CompanyEvent::WorkflowChildCallNotOffered {
-                workflow_id: self.root_id.clone(),
-                child_workflow_id: child_id.to_string(),
-                run_id: audit.run_id.clone(),
-                node: call.node_id,
-                tool: call.slug,
-                reason: call.reason,
-            };
-            if let Err(err) = events.append(&self.company, event).await {
-                tracing::warn!(
-                    company = %self.company,
-                    child_workflow = child_id,
-                    %err,
-                    "workflow: could not journal an ungated sub_workflow call; the run is \
-                     unaffected but the audit line is lost"
-                );
-            }
-        }
     }
 
     /// The **static** `workflow_id` references a graph makes — literal ids only.
@@ -323,10 +269,10 @@ impl WorkflowResolver for StoreWorkflowResolver {
         })??;
 
         // (e) Translate to a runnable tinyflows graph.
-        let graph = crate::workflows::translate::translate(&file);
-        // (f) Issue #617: the child's calls never reach the gate pass, so say
-        // so on the record before handing the graph to the engine.
-        self.disclose_ungated_calls(workflow_id, &graph).await;
+        let mut graph = crate::workflows::translate::translate(&file);
+        // (f) A child is translated inside tinyflows, after the top-level
+        // runner's gate pass. Apply that same pass before giving it back.
+        self.apply_policy_gates(workflow_id, &mut graph).await;
         Ok(graph)
     }
 }
