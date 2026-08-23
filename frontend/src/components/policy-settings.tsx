@@ -278,13 +278,17 @@ export function PolicySettings({ client, company }: Props) {
     if (!status || saving) return;
     // The manifest's tier can be MORE autonomous than the override an operator
     // set — resetting would restore that looser tier, so it earns the same
-    // widening confirmation as picking the tier directly.
+    // widening confirmation as picking the tier directly. So does dropping
+    // always-ask gates the manifest does not carry: a reset removes the whole
+    // override, and an effective entry the manifest list does not gate is a
+    // fence that silently comes down even when the tiers agree.
     const manifestTier = status.tiers.find(
       (tier) => tier.value === status.manifestMode,
     );
     if (
       manifestTier &&
-      widensAutonomy(status.tiers, status.mode, status.manifestMode)
+      (widensAutonomy(status.tiers, status.mode, status.manifestMode) ||
+        removedAlwaysAsk.length > 0)
     ) {
       setPendingReset(true);
       setPendingTier(manifestTier);
