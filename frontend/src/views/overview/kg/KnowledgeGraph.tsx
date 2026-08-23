@@ -264,6 +264,14 @@ export function KnowledgeGraph({
   const linksRef = useRef<SimLink[]>([]);
   const svgRef = useRef<SVGSVGElement | null>(null);
   const nodeRefs = useRef(new Map<string, SVGGElement>());
+  // The memory field is memoized so hover/selection never rebuilds it, but the
+  // roving-focus handlers are recreated every render. The notes read them
+  // through this ref: a note's handlers fire at event time, never at render
+  // time, so the memo can stay blind to them being re-created.
+  const memoryKeyNavRef = useRef<{ move: (direction: number) => void; select: (id: string) => void }>({
+    move: () => {},
+    select: () => {},
+  });
   const dragRef = useRef<{ id: string; moved: boolean; startX: number; startY: number } | null>(null);
   const suppressClickRef = useRef(false);
   // Drag-to-pan. `panRef` is an offset in viewBox units added to whatever the
