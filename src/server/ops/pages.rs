@@ -288,7 +288,11 @@ async fn page_bootstrap(
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, PAGE_COMPILED_MIME)
         .body(Body::from(PAGE_BOOTSTRAP))
-        .map_err(|e| ApiError(OpenCompanyError::Store(format!("page bootstrap failed: {e}")))?;
+        .map_err(|e| {
+            ApiError(OpenCompanyError::Store(format!(
+                "page bootstrap failed: {e}"
+            )))
+        })?;
     apply_pages_headers(response.headers_mut());
     apply_page_module_cors_headers(response.headers_mut());
     Ok(response)
