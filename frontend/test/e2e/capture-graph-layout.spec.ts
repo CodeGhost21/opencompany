@@ -39,18 +39,21 @@ test("capture settled graph layout", async ({ page }) => {
   const dump = await page.evaluate(() => {
     const svg = document.querySelector('svg[aria-label="Operating knowledge graph"]');
     if (!svg) return { error: "no svg" };
-    // Every node is a <g> carrying transform="translate(x,y)" and a text label.
+    const groups = svg.querySelectorAll("g[transform]");
     const positions: Record<string, number[]> = {};
-    for (const el of svg.querySelectorAll("g[transform]")) {
+    const titleNodes = svg.querySelectorAll("title");
+    for (const el of groups) {
       const m = el.getAttribute("transform")?.match(/translate\((-?[\d.]+)\s*[, ]\s*(-?[\d.]+)\)/);
-      if (m) {
-        const label = (el.textContent || "").trim().slice(0, 40) || el.getAttribute("id") || "?";
-        positions[label] = [Math.round(+m[1] * 10) / 10, Math.round(+m[2] * 10) / 10];
-      }
+      if (!m) continue;
+      const title = el.querySelector("title");
+      const label = title ? title.textContent : "";
+      const key = label || `noid@${Math.round(+m[1])},${Math.round(+m[2])}`;
+      positions[key] = [Math.round(+m[1] * 10) / 10, Math.round(+m[2] * 10) / 10];
     }
-    return { count: Object.keys(positions).length, positions };
+    // Also dump every <title> label present so we can see what nodes exist.
+    const labels = Array.from(titleNodes).map((t) => t.textContent);
+    return { count: groups.length, labeled: Object.keys(positions).filter((k) => !k.startsWith("noid@")).length, labels, positions };
   });
-  console.log("GRAPH_LAYOUT_JSON=" + JSON.stringify(dump));
   const out =
     process.env.CAPTURE_OUT ||
     "/tmp/graph-layout-" + (process.env.CAPTURE_TAG || "default") + ".json";
