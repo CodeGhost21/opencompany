@@ -51,7 +51,7 @@
 
 mod dry_run;
 mod http;
-mod resolver;
+pub(crate) mod resolver;
 mod state;
 mod tools;
 /// Issue #849: how much upstream output one agent node's turn may carry, and
