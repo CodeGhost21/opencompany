@@ -807,14 +807,14 @@ impl MemoryStore for ProviderMemoryStore {
     /// beside the 32 it keeps.
     async fn evict(&self, id: &CompanyId, policy: EvictionPolicy) -> Result<u64> {
         let traces = self.ordered_traces(id).await?;
-        let doomed: Vec<CompressedTrace> = match policy {
+        let doomed: Vec<CompressedTrace> = match &policy {
             EvictionPolicy::KeepRecent { n } => {
-                let keep_from = traces.len().saturating_sub(n);
+                let keep_from = traces.len().saturating_sub(*n);
                 traces.into_iter().take(keep_from).collect()
             }
             EvictionPolicy::OlderThan { before_millis } => traces
                 .into_iter()
-                .filter(|trace| trace.at_millis < before_millis)
+                .filter(|trace| trace.at_millis < *before_millis)
                 .collect(),
         };
         let mut evicted = 0u64;
