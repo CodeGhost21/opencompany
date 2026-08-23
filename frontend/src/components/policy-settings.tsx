@@ -529,9 +529,14 @@ export function PolicySettings({ client, company }: Props) {
               </div>
             )}
             <AlertDialog
-              open={tierAwaitingConfirmation !== null}
+              open={
+                tierAwaitingConfirmation !== null || resetAwaitingConfirmation
+              }
               onOpenChange={(open) => {
-                if (!open) setTierAwaitingConfirmation(null);
+                if (!open) {
+                  setTierAwaitingConfirmation(null);
+                  setResetAwaitingConfirmation(false);
+                }
               }}
             >
               <AlertDialogContent>
@@ -540,25 +545,50 @@ export function PolicySettings({ client, company }: Props) {
                     Give teammates more autonomy?
                   </AlertDialogTitle>
                   <AlertDialogDescription>
-                    {tierAwaitingConfirmation?.description} They will use the
-                    {" "}{tierAwaitingConfirmation?.label} setting on their next turn.
+                    {resetAwaitingConfirmation ? (
+                      <>
+                        Reverting clears the override set here and returns to
+                        the manifest's{" "}
+                        {status.tiers.find(
+                          (tier) => tier.value === status.manifestMode,
+                        )?.label ?? status.manifestMode}{" "}
+                        setting. They will use that setting on their next turn.
+                      </>
+                    ) : (
+                      <>
+                        {tierAwaitingConfirmation?.description} They will use
+                        the {tierAwaitingConfirmation?.label} setting on their
+                        next turn.
+                      </>
+                    )}
                   </AlertDialogDescription>
                 </AlertDialogHeader>
                 <AlertDialogFooter>
                   <AlertDialogCancel>Keep current setting</AlertDialogCancel>
                   <AlertDialogAction
                     disabled={saving}
-                    onClick={() => {
+                    onClick={(event) => {
+                      // The primitive's `Close` would dismiss the dialog
+                      // before the PUT resolves, so prevent it and close
+                      // explicitly only after a successful save — a failed
+                      // persistence keeps the dialog open for a retry.
+                      event.preventBaseUIHandler();
                       if (tierAwaitingConfirmation) {
                         void saveTier(tierAwaitingConfirmation.value).then(
                           (saved) => {
                             if (saved) setTierAwaitingConfirmation(null);
                           },
                         );
+                      } else if (resetAwaitingConfirmation) {
+                        void reset().then((saved) => {
+                          if (saved) setResetAwaitingConfirmation(false);
+                        });
                       }
                     }}
                   >
-                    Give more autonomy
+                    {resetAwaitingConfirmation
+                      ? "Revert and give more autonomy"
+                      : "Give more autonomy"}
                   </AlertDialogAction>
                 </AlertDialogFooter>
               </AlertDialogContent>
