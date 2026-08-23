@@ -99,6 +99,12 @@ export function SidebarControls({
   onNavigate,
 }: Props) {
   const { label, tone } = lifecycle(lifecycleState, emergencyPaused);
+  const { isMobile, setOpenMobile } = useSidebar();
+
+  const navigate = (next: View) => {
+    onNavigate(next);
+    if (isMobile) setOpenMobile(false);
+  };
 
   return (
     <SidebarMenu>
@@ -128,7 +134,7 @@ export function SidebarControls({
         <SidebarMenuButton
           tooltip="Feedback"
           isActive={view === "feedback"}
-          onClick={() => onNavigate("feedback")}
+          onClick={() => navigate("feedback")}
           className={RESTING_ROW}
         >
           <MessageSquareWarning />
@@ -316,4 +322,3 @@ export function SidebarCollapseButton() {
     </Tooltip>
   );
 }
-

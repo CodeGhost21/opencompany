@@ -327,8 +327,8 @@ function BuildOut({
         <DialogDescription>
           {finished
             ? fallback
-              ? "A general starting team for your industry — we couldn't reach a model to tailor it to your answers. Rename, retire, or add anyone from the Team page."
-              : "Built from your answers. A starting point — rename, retire, or add anyone from the Team page."
+              ? "A general starting team for your industry — we couldn't reach a model to tailor it to your answers. Rename, retire, or add anyone from the Company page."
+              : "Built from your answers. A starting point — rename, retire, or add anyone from the Company page."
             : buildOutLabel(created, agents.length)}
         </DialogDescription>
       </DialogHeader>
