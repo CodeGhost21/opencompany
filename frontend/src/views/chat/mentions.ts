@@ -41,11 +41,6 @@ export interface Mentionable {
   inChannel?: boolean;
 }
 
-/** Whether `ch` is word-like, for the mention boundary rules. */
-function isWord(ch: string | undefined): boolean {
-  return ch !== undefined && /[A-Za-z0-9_]/.test(ch);
-}
-
 /**
  * Whether the `@` at `i` opens a mention.
  *
