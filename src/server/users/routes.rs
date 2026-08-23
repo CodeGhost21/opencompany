@@ -79,7 +79,7 @@ pub fn router() -> Router<AppState> {
         .merge(public_scoped("/auth/verify", post(verify_code)))
         .merge(public_scoped("/auth/login", post(login_password)))
         .merge(public_scoped("/auth/logout", post(logout)))
-        .merge(public_scoped("/auth/me", get(me)))
+        .merge(public_scoped("/auth/me", get(me).patch(edit_me)))
         .merge(public_scoped(
             "/auth/hub",
             get(hub_providers).post(hub_sign_in),
@@ -165,6 +165,15 @@ pub struct MeResult {
     email: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     display_name: Option<String>,
+    /// The face this person chose (`docs/spec/runtime/avatars.md`), absent when
+    /// they have not chosen one.
+    ///
+    /// Absent is a real answer and is why the key is skipped rather than
+    /// defaulted: the console draws the mascot it hashes from `id` in that case,
+    /// and a client that could not tell the two apart would have no way to offer
+    /// "use the default face again".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    avatar: Option<String>,
     role: UserRole,
     company: String,
     /// Whether this user has a password set (vs magic-link only).
@@ -574,6 +583,7 @@ fn me_result(company: &CompanyId, user: &UserRecord) -> MeResult {
         id: user.id.clone(),
         email: user.email.clone(),
         display_name: user.display_name.clone(),
+        avatar: user.avatar.clone(),
         role: user.role,
         company: company.as_ref().to_string(),
         has_password: user.password_hash.is_some(),
@@ -1069,6 +1079,99 @@ async fn me(
         .await
         .map_err(|e| ApiError(e).into_response())?
         .ok_or_else(no_session)?;
+    Ok(Json(me_result(runtime.id(), &user)))
+}
+
+/// What a person may change about themselves.
+///
+/// Both fields are **double options**, the same three-state contract the
+/// team-edit routes use:
+///
+/// | body | parses as | means |
+/// |---|---|---|
+/// | `{}` | `None` | leave it alone |
+/// | `{"avatar": null}` | `Some(None)` | back to the default |
+/// | `{"avatar": "tiny:teal"}` | `Some(Some(…))` | this one |
+///
+/// Collapsing the first two would make every partial save erase the field it
+/// did not mention, which on a two-field profile form means saving a name wipes
+/// the face.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct EditMe {
+    #[serde(default, deserialize_with = "crate::server::ops::team::double_option")]
+    display_name: Option<Option<String>>,
+    #[serde(default, deserialize_with = "crate::server::ops::team::double_option")]
+    avatar: Option<Option<String>>,
+}
+
+/// `PATCH …/auth/me` — change your own name or face.
+///
+/// # Why this is not the admin route
+///
+/// `PATCH …/users/{id}` can already set somebody's `displayName`, and it is
+/// admin-only — correct for an admin making a roster of raw addresses legible,
+/// and useless for the case this route exists for. Naming yourself and choosing
+/// your own face are not administrative acts, and gating them behind an admin
+/// would mean a member's own identity in the company is something they have to
+/// ask for. So this route authorises on **being** the user rather than on a
+/// role: there is no `user_id` in the path at all, which is what makes it
+/// impossible to point at somebody else.
+///
+/// Every sign-in mode has it, including `none`: the single local owner of a
+/// company with no sign-in is still a person with a name and a face.
+async fn edit_me(
+    company: PublicCompany,
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
+    Json(body): Json<EditMe>,
+) -> Result<Json<MeResult>, Response> {
+    let runtime = company.runtime.clone();
+    let Some(principal) = current_user(&headers, &state, runtime.id(), peer).await else {
+        return Err(no_session());
+    };
+    let mut user = runtime
+        .users()
+        .get_user(runtime.id(), &principal.user_id)
+        .await
+        .map_err(|e| ApiError(e).into_response())?
+        .ok_or_else(no_session)?;
+
+    // A blank name is not a name: an emptied field is the person asking for the
+    // derived one back, which is the same intent `null` carries, so the two
+    // normalize to one stored state rather than to a name that renders as a gap.
+    if let Some(name) = body.display_name {
+        user.display_name = name
+            .map(|text| text.trim().to_string())
+            .filter(|text| !text.is_empty());
+    }
+    // Validated against what this host holds before it is stored — the value
+    // ends up in an `src=` on every surface that draws this person's face. See
+    // `crate::company::avatar`.
+    if let Some(avatar) = body.avatar {
+        user.avatar = match avatar
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+        {
+            Some(value) => Some(
+                crate::company::avatar::resolve(
+                    runtime.workspace().as_ref(),
+                    runtime.id(),
+                    &value,
+                )
+                .await
+                .map_err(|e| ApiError(e).into_response())?,
+            ),
+            None => None,
+        };
+    }
+    user.updated_at_millis = now_millis();
+    runtime
+        .users()
+        .upsert_user(runtime.id(), &user)
+        .await
+        .map_err(|e| ApiError(e).into_response())?;
     Ok(Json(me_result(runtime.id(), &user)))
 }
 
