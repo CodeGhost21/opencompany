@@ -363,15 +363,28 @@ export function approvalAction(a: ApprovalSummary): string {
  * and, when the card has one, the asker, makes each button name *this*
  * request.
  *
+ * A withheld card's contents are redacted to the same phrase for every hidden
+ * approval, so two hidden cards of the same kind from the same asker would
+ * read alike — the composition time (non-sensitive, already on the card body)
+ * rides in to keep their buttons distinguishable.
+ *
  * Both halves degrade: a card with no payload (an approval with no arguments)
  * omits the lead, and one with no `agent` (a native effect, or an old host)
  * omits the asker — leaving exactly the {@link approvalSummary} phrase the
  * card's headline already shows.
  */
-export function decisionLabel(a: ApprovalSummary, askerNames: Map<string, string>): string {
+export function decisionLabel(
+  a: ApprovalSummary,
+  askerNames: Map<string, string>,
+  now: number,
+): string {
   const parts = [approvalSummary(a)];
   const lead = payloadLead(a);
   if (lead != null) parts.push(lead);
+  // Two hidden cards of the same kind from the same asker carry identical
+  // redaction phrases, so the composition time is what tells their buttons
+  // apart — the same non-sensitive number the card's meta line already shows.
+  if (a.contents_hidden) parts.push(`composed ${timeAgo(a.at_millis, now)}`);
   const who = a.agent ? (askerNames.get(a.agent) ?? a.agent) : null;
   if (who != null) parts.push(`asked by ${who}`);
   return parts.join(" — ");
