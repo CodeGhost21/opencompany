@@ -85,6 +85,24 @@ use crate::Result;
 use crate::error::OpenCompanyError;
 use crate::ports::{CompanyId, ContextStore, FactStore, MemoryStore};
 
+#[async_trait::async_trait]
+impl crate::store::select::MemoryScopes for BoundMemory {
+    fn agent_context(&self, agent_id: &str) -> Arc<dyn ContextStore> {
+        Self::agent_context(self, agent_id)
+    }
+
+    fn desk_context(&self, desk_id: &str) -> Arc<dyn ContextStore> {
+        Self::desk_context(self, desk_id)
+    }
+
+    async fn archived_traces(
+        &self,
+        company: &CompanyId,
+    ) -> Result<Vec<crate::ports::CompressedTrace>> {
+        Self::archived_traces(self, company).await
+    }
+}
+
 pub use driver::{
     MemoryDriverConfig, MemoryDriverError, MemoryMode, RemoteDeployment, open_driver,
 };

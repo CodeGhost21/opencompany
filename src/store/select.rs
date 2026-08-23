@@ -42,6 +42,24 @@ use crate::ports::users::UserStore;
 use crate::ports::workflow_revisions::WorkflowRevisionStore;
 use crate::ports::workspace::WorkspaceStore;
 
+/// Safe access to the provider-only context partitions.
+///
+/// This is deliberately a facade, not the underlying `MemoryProvider`: every
+/// method still derives the company namespace from a [`CompanyId`], so wiring
+/// it onto a runtime cannot reopen the raw-namespace escape hatch.
+#[async_trait]
+pub trait MemoryScopes: Send + Sync {
+    /// One agent's private context partition.
+    fn agent_context(&self, agent_id: &str) -> Arc<dyn ContextStore>;
+    /// One desk's shared context partition.
+    fn desk_context(&self, desk_id: &str) -> Arc<dyn ContextStore>;
+    /// Traces retained when normal trace eviction archives them.
+    async fn archived_traces(
+        &self,
+        company: &CompanyId,
+    ) -> Result<Vec<crate::ports::CompressedTrace>>;
+}
+
 /// Which storage backend hosts the durable ports.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum StorageKind {
@@ -224,11 +242,14 @@ pub struct MemoryOverlay {
     /// The inbound-content partition: writes land taint-stamped
     /// `ExternalSync`, so third-party content can never launder into
     /// internal-trust memory. Carried on the overlay so the runtime can route
-    /// channel/web ingestion through it the day such a path exists — no
-    /// production writer yet, and that absence is tracked in #1113.
+    /// channel/web ingestion. External cycle puts use this port, so their
+    /// content cannot be reintroduced as internal-trust context.
     pub inbound_context: Option<Arc<dyn ContextStore>>,
     /// The scratch firewall: working-out that durable recall can never reach.
     pub scratch: Option<Arc<dyn ContextStore>>,
+    /// Provider-only scoped partitions and archive reads, with no raw
+    /// provider exposed to runtime consumers.
+    pub scopes: Option<Arc<dyn MemoryScopes>>,
     /// What is bound, for status output.
     pub descriptor: MemoryDescriptor,
     /// The bound provider, kept solely so [`Self::refresh_health`] can probe
@@ -260,6 +281,7 @@ impl MemoryOverlay {
             facts: None,
             inbound_context,
             scratch: None,
+            scopes: None,
             descriptor: MemoryDescriptor {
                 backend: MemoryBackend::Store,
                 driver_id: "test".into(),
@@ -906,6 +928,7 @@ fn open_provider(settings: &StorageSettings) -> Result<Option<MemoryOverlay>> {
         facts: Some(bound.facts()),
         inbound_context: Some(bound.inbound_context()),
         scratch: Some(bound.scratch()),
+        scopes: Some(Arc::new(bound.clone())),
         descriptor: MemoryDescriptor {
             backend: settings.memory_backend,
             driver_id: bound.driver_id().to_string(),
@@ -1030,6 +1053,7 @@ fn open_tinycortex(settings: &StorageSettings) -> Result<Option<MemoryOverlay>> 
         facts: None,
         inbound_context: None,
         scratch: None,
+        scopes: None,
         descriptor: MemoryDescriptor {
             backend: MemoryBackend::Tinycortex,
             // The literal rather than `tinymemory::registry::TINYCORTEX_DRIVER_ID`:

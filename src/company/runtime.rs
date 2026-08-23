@@ -202,6 +202,10 @@ pub struct CompanyRuntime {
     /// resolved at build time — same store as `context` when the engine
     /// cannot represent taint.
     pub(crate) inbound_context: Arc<dyn ContextStore>,
+    /// Isolated provisional working context from a provider-backed overlay.
+    pub(crate) scratch_context: Option<Arc<dyn ContextStore>>,
+    /// Safe agent/desk partitions and archive reads from that overlay.
+    pub(crate) memory_scopes: Option<Arc<dyn crate::store::MemoryScopes>>,
     pub(crate) tools: Arc<dyn ToolProvider>,
     pub(crate) channels: Vec<Arc<dyn ChannelAdapter>>,
     pub(crate) economy: Option<Arc<dyn AgentEconomy>>,
@@ -453,6 +457,8 @@ impl CompanyRuntime {
             memory,
             context,
             inbound_context,
+            scratch_context: None,
+            memory_scopes: None,
             tools,
             channels,
             economy,

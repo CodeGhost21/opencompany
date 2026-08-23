@@ -382,6 +382,11 @@ pub struct RuntimeBuilder {
     /// the legacy engine overlay, which cannot represent taint — falls back
     /// to `context` at build time: today's exact behavior, no regression.
     inbound_context: Option<Arc<dyn ContextStore>>,
+    /// Provisional working context, isolated from durable recall by the
+    /// provider-backed memory decorator. Absent on base and embedded stores.
+    scratch_context: Option<Arc<dyn ContextStore>>,
+    /// Safe agent/desk partitions and archive access from that decorator.
+    memory_scopes: Option<Arc<dyn crate::store::MemoryScopes>>,
     tools: Option<Arc<dyn ToolProvider>>,
     channels: Option<Vec<Arc<dyn ChannelAdapter>>>,
     economy: Option<Arc<dyn AgentEconomy>>,
@@ -523,6 +528,8 @@ impl RuntimeBuilder {
             memory: None,
             context: None,
             inbound_context: None,
+            scratch_context: None,
+            memory_scopes: None,
             tools: None,
             channels: None,
             economy: None,
@@ -667,6 +674,18 @@ impl RuntimeBuilder {
         self
     }
 
+    /// Swaps the isolated scratch context store.
+    pub fn with_scratch_context(mut self, scratch: Arc<dyn ContextStore>) -> Self {
+        self.scratch_context = Some(scratch);
+        self
+    }
+
+    /// Carries safe provider-only scoped context and archive access.
+    pub fn with_memory_scopes(mut self, scopes: Arc<dyn crate::store::MemoryScopes>) -> Self {
+        self.memory_scopes = Some(scopes);
+        self
+    }
+
     /// Swaps every durable port at once from one opened storage backend
     /// (see [`crate::store::select`]).
     pub fn with_stores(mut self, handles: &crate::store::StorageHandles) -> Self {
@@ -717,6 +736,12 @@ impl RuntimeBuilder {
         // nothing downstream ever saw it (issue #1113).
         if let Some(inbound) = &overlay.inbound_context {
             builder = builder.with_inbound_context(inbound.clone());
+        }
+        if let Some(scratch) = &overlay.scratch {
+            builder = builder.with_scratch_context(scratch.clone());
+        }
+        if let Some(scopes) = &overlay.scopes {
+            builder = builder.with_memory_scopes(scopes.clone());
         }
         match &overlay.facts {
             Some(facts) => builder.with_facts(facts.clone()),
@@ -1187,6 +1212,14 @@ impl RuntimeBuilder {
             .map(|h| h.inbound_context.clone())
             .or(self.inbound_context)
             .unwrap_or_else(|| context.clone());
+        let scratch_context = handover
+            .as_ref()
+            .and_then(|h| h.scratch_context.clone())
+            .or(self.scratch_context);
+        let memory_scopes = handover
+            .as_ref()
+            .and_then(|h| h.memory_scopes.clone())
+            .or(self.memory_scopes);
         // Effective grants narrow the company allow-list by per-agent tools.
         let grants = effective_grants(&self.manifest);
         let openhuman = self.openhuman;
@@ -3048,6 +3081,7 @@ impl RuntimeBuilder {
             filer,
             grants,
         );
+        runtime.set_memory_decorators(scratch_context, memory_scopes);
 
         // The seed dir is the company's on-disk source directory
         // (`companies/<name>`); record it so read resolvers can find committed
