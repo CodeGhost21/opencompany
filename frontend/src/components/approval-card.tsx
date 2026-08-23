@@ -278,13 +278,18 @@ export function ApprovalPayload({ approval }: { approval: ApprovalSummary }) {
     );
   }
 
-  if (lines.length === 0) {
+  // A named action can still be decided from its headline. The generic
+  // fallback cannot: without a payload it otherwise leaves the operator with
+  // no fact at all about what is being approved (#1419).
+  if (lines.length === 0 && approvalAction(approval) === "Do something that needs your sign-off") {
     return (
       <p className="text-xs text-muted-foreground">
         No further details were supplied.
       </p>
     );
   }
+
+  if (lines.length === 0) return null;
 
   const clampable =
     lines.length > PREVIEW_LINES || lines.some((l) => l.value.length > PREVIEW_VALUE_CHARS);

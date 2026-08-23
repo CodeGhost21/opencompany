@@ -604,8 +604,10 @@ function granterLabel(g: StandingGrant, granterNames: Map<string, string>): stri
  *
  * **An old host degrades to the pre-#372 card by construction.** It omits
  * `payload` and `agent` from the wire, so the payload block and the "Asked by"
- * line simply do not render and what is left is the headline, the amount and
- * the relative time — exactly what shipped before.
+ * line simply do not render when the action is named. An unlabelled native
+ * action instead says that no further details were supplied (#1419), because
+ * leaving its generic headline alone would not distinguish one request from
+ * another.
  */
 export function ApprovalCard({
   approval: a,
