@@ -799,6 +799,12 @@ impl MemoryStore for ProviderMemoryStore {
     /// error propagates and the traces already processed stay archived. That is
     /// the archive-then-delete order behaving as designed under partial failure
     /// — a duplicate the next read reconciles, never a loss.
+    ///
+    /// A `KeepRecent` eviction additionally bounds the archive itself to the
+    /// newest `n` evicted traces (see [`ProviderMemoryStore::prune_archive`]),
+    /// so the policy that bounds the live window also bounds storage: a company
+    /// that runs for years does not accumulate every trace it ever evicted
+    /// beside the 32 it keeps.
     async fn evict(&self, id: &CompanyId, policy: EvictionPolicy) -> Result<u64> {
         let traces = self.ordered_traces(id).await?;
         let doomed: Vec<CompressedTrace> = match policy {
@@ -820,7 +826,47 @@ impl MemoryStore for ProviderMemoryStore {
                 evicted += 1;
             }
         }
+        // Bound the archive only on the path production calls (`KeepRecent`).
+        // `OlderThan` has no `n` to bound by; its archive is left to retention
+        // policy or the Operator, exactly as the docs describe.
+        if let EvictionPolicy::KeepRecent { n } = policy {
+            self.prune_archive(id, n).await?;
+        }
         Ok(evicted)
+    }
+
+    /// Bounds the archive tier to the newest `n` archived traces.
+    ///
+    /// Eviction moves traces OUT of the live window rather than destroying
+    /// them; without a matching cap here the archive would retain every trace a
+    /// company ever evicted, so the documented retention policy would bound the
+    /// inspectable window but not storage. Keeping the newest `n` evicted
+    /// traces bounds the tier at `n` and total trace storage at `2n` — the live
+    /// window plus the eviction history nearest to it.
+    async fn prune_archive(&self, id: &CompanyId, n: usize) -> Result<()> {
+        if n == 0 {
+            let archived = self.archive.list::<CompressedTrace>(id).await?;
+            for trace in archived {
+                self.archive.forget(id, &trace.cycle_id).await?;
+            }
+            return Ok(());
+        }
+        let mut archived = self.archive.list::<CompressedTrace>(id).await?;
+        if archived.len() <= n {
+            return Ok(());
+        }
+        // Same total order as the live set, so "newest" is unambiguous even
+        // when two traces share a millisecond.
+        archived.sort_by(|a, b| {
+            a.at_millis
+                .cmp(&b.at_millis)
+                .then_with(|| a.cycle_id.cmp(&b.cycle_id))
+        });
+        let prune = archived.len() - n;
+        for trace in archived.into_iter().take(prune) {
+            self.archive.forget(id, &trace.cycle_id).await?;
+        }
+        Ok(())
     }
 }
 
