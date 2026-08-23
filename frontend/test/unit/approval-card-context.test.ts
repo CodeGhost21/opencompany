@@ -88,8 +88,8 @@ describe("an unlabelled approval without details (#1419)", () => {
     // the ":" into `%3A` would produce a segment no channel matches.
     await render(nativeApproval(), { channelId: "dm:ada-1f3k", label: "Ada" });
 
-    const thread = [...container.querySelectorAll("a")].find((link) =>
-      link.textContent?.includes("#dm:ada-1f3k"),
+    const thread = [...container.querySelectorAll("a")].find(
+      (link) => link.getAttribute("href") === "#/chat/dm:ada-1f3k",
     );
     expect(thread?.getAttribute("href")).toBe("#/chat/dm:ada-1f3k");
   });
