@@ -290,6 +290,7 @@ function InboxParkingNotice() {
       <AlertTitle>Inbox is not in the console navigation right now</AlertTitle>
       <AlertDescription>
         This page still works and shows live email data, but nothing in the console links to it.
+        Reach it with a direct link to this address.
       </AlertDescription>
     </Alert>
   );
