@@ -141,6 +141,14 @@ export function useStableList<T>(live: T[]): StableList<T> {
     [thawIfIdle],
   );
 
+  // Disabling the focused decide button clears `document.activeElement` without
+  // dispatching blur/focusout in Chromium. The parent render that disables it
+  // is the one reliable observation point left, so check after every commit;
+  // `thawIfIdle` still refuses to thaw while the pointer remains inside.
+  useEffect(() => {
+    thawIfIdle();
+  });
+
   return {
     items: frozen ?? live,
     holding: frozen !== null,
