@@ -73,8 +73,10 @@ summariser and a consumer; neither exists today.
   carry them; no `Brain` consumed the field, so it was removed rather than left
   looking functional.
 - The process-wide maintenance pass retains the newest 32 traces with
-  `MemoryStore::evict(KeepRecent)`. The policy bounds trace storage while the
-  summaries are still placeholders; it is not a claim that traces compound.
+  `MemoryStore::evict(KeepRecent)`. The policy bounds trace storage — including
+  on backends whose `evict` archives rather than destroys, where the archive
+  tier is capped by the same policy — while the summaries are still
+  placeholders; it is not a claim that traces compound.
   `ContextStore::delete` reaps an operator fact's mirror and forgets a dropped
   document, but nothing sweeps the chunk store on age, so it grows until
   something deletes by name.
