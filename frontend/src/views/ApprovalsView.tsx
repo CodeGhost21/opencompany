@@ -346,88 +346,90 @@ export function ApprovalsView({
             </a>
           </div>
         )}
-        {/* #1427: permissions are a separate operator task, not the last queue
-            row. Keeping them before the pending list makes revocation reachable
-            even when a backlog is several screens long. */}
-        <StandingPermissions
-          grants={grants}
-          now={now}
-          askerNames={askerNames}
-          granterNames={granterNames}
-          onRevoke={async (id) => {
-            try {
-              await client.revokeGrant(id, company);
-              toast.success("Permission revoked — this tool will ask again from its next call.");
-            } catch (err) {
-              // A 404 means it was already gone (revoked elsewhere, or expired).
-              // The operator's intent is satisfied either way, so this is not an
-              // error to them — only a stale list, which the refresh below fixes.
-              if (err instanceof ApiError && err.status === 404) {
-                toast.info("That permission was already gone.");
-              } else {
-                const msg = err instanceof ApiError ? err.message : "something went wrong";
-                toast.error(`Couldn't revoke it — ${msg}`);
-                throw err;
+        <div {...queueHold}>
+          {/* #1427: permissions are a separate operator task, not the last queue
+              row. Keeping them before the pending list makes revocation reachable
+              even when a backlog is several screens long. */}
+          <StandingPermissions
+            grants={grants}
+            now={now}
+            askerNames={askerNames}
+            granterNames={granterNames}
+            onRevoke={async (id) => {
+              try {
+                await client.revokeGrant(id, company);
+                toast.success("Permission revoked — this tool will ask again from its next call.");
+              } catch (err) {
+                // A 404 means it was already gone (revoked elsewhere, or expired).
+                // The operator's intent is satisfied either way, so this is not an
+                // error to them — only a stale list, which the refresh below fixes.
+                if (err instanceof ApiError && err.status === 404) {
+                  toast.info("That permission was already gone.");
+                } else {
+                  const msg = err instanceof ApiError ? err.message : "something went wrong";
+                  toast.error(`Couldn't revoke it — ${msg}`);
+                  throw err;
+                }
+              } finally {
+                void refreshGrants();
               }
-            } finally {
-              void refreshGrants();
-            }
-          }}
-        />
-        {/* Issue #1229: "nothing parked" and "we could not read what is parked"
-            are different facts, and only one of them is an instruction to stop
-            looking. The queue's own load state decides which is on screen —
-            `approvals` being empty cannot, because it is empty in both cases.
-            A queue that has been read once keeps its rows through a later
-            failure, so this branch is only ever the cold path. */}
-        {queue !== "ready" && approvals.length === 0 ? (
-          queue === "loading" ? (
-            <LoadingApprovals />
+            }}
+          />
+          {/* Issue #1229: "nothing parked" and "we could not read what is parked"
+              are different facts, and only one of them is an instruction to stop
+              looking. The queue's own load state decides which is on screen —
+              `approvals` being empty cannot, because it is empty in both cases.
+              A queue that has been read once keeps its rows through a later
+              failure, so this branch is only ever the cold path. */}
+          {queue !== "ready" && approvals.length === 0 ? (
+            queue === "loading" ? (
+              <LoadingApprovals />
+            ) : (
+              <UnreadableApprovals onRetry={() => void feed.refresh()} />
+            )
+          ) : rows.length === 0 ? (
+            focusTaskId !== null ? (
+              <ClearedForTask />
+            ) : (
+              <EmptyApprovals onGoToConversation={onGoToConversation} />
+            )
           ) : (
-            <UnreadableApprovals onRetry={() => void feed.refresh()} />
-          )
-        ) : rows.length === 0 ? (
-          focusTaskId !== null ? (
-            <ClearedForTask />
-          ) : (
-            <EmptyApprovals onGoToConversation={onGoToConversation} />
-          )
-        ) : (
-          <>
-            {/* #1427: the count and deadline rule orient every viewport, not
-                only the first one. The opaque background makes the header a
-                real reading boundary over cards that scroll beneath it. */}
-            <div className="sticky top-0 z-10 -mx-4 mb-3 border-b bg-background px-4 py-3">
-              <h2 className="text-sm font-medium text-muted-foreground">
-                {rows.length === 1
-                  ? "1 thing needs your approval"
-                  : `${rows.length} things need your approval`}
-              </h2>
-              {/* #971: nothing may vanish unannounced. Requests now age out on
-                  their own, so the queue says so once, up front. Each card
-                  carries its own deadline; this is the sentence that stops
-                  that deadline being a surprise. */}
-              <p className="mt-1 text-xs text-muted-foreground">
-                Each one has a deadline. Anything still undecided by then is
-                declined on its own, and the work behind it moves on.
-              </p>
-            </div>
-            <div className="flex flex-col gap-3" {...queueHold}>
-              {rows.map((a) => (
-                <ApprovalCard
-                  key={a.id}
-                  approval={a}
-                  now={now}
-                  askerNames={askerNames}
-                  deciding={inFlight.get(a.id) ?? null}
-                  batchIndex={batchPos.get(a.id)?.index ?? 1}
-                  batchTotal={batchPos.get(a.id)?.total ?? 1}
-                  onDecide={(verdict, scope) => void decide(a, verdict, scope)}
-                />
-              ))}
-            </div>
-          </>
-        )}
+            <>
+              {/* #1427: the count and deadline rule orient every viewport, not
+                  only the first one. The opaque background makes the header a
+                  real reading boundary over cards that scroll beneath it. */}
+              <div className="sticky top-0 z-10 -mx-4 mb-3 border-b bg-background px-4 py-3">
+                <h2 className="text-sm font-medium text-muted-foreground">
+                  {rows.length === 1
+                    ? "1 thing needs your approval"
+                    : `${rows.length} things need your approval`}
+                </h2>
+                {/* #971: nothing may vanish unannounced. Requests now age out on
+                    their own, so the queue says so once, up front. Each card
+                    carries its own deadline; this is the sentence that stops
+                    that deadline being a surprise. */}
+                <p className="mt-1 text-xs text-muted-foreground">
+                  Each one has a deadline. Anything still undecided by then is
+                  declined on its own, and the work behind it moves on.
+                </p>
+              </div>
+              <div className="flex flex-col gap-3">
+                {rows.map((a) => (
+                  <ApprovalCard
+                    key={a.id}
+                    approval={a}
+                    now={now}
+                    askerNames={askerNames}
+                    deciding={inFlight.get(a.id) ?? null}
+                    batchIndex={batchPos.get(a.id)?.index ?? 1}
+                    batchTotal={batchPos.get(a.id)?.total ?? 1}
+                    onDecide={(verdict, scope) => void decide(a, verdict, scope)}
+                  />
+                ))}
+              </div>
+            </>
+          )}
+        </div>
       </div>
     </div>
   );
