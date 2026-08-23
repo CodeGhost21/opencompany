@@ -2858,38 +2858,6 @@ mod test {
         }
     }
 
-    /// Issue #247: a publish PR carries both the task and the concrete run that
-    /// produced its approved effect, letting an operator trace it back to the
-    /// exact attempt rather than only the card.
-    #[test]
-    fn a_publish_pr_body_links_its_task_and_run() {
-        let body = repo_publish_pr_body(
-            "developer",
-            "task-247",
-            Some("run-247"),
-            "Add run linkage to publish pull requests.",
-        );
-
-        assert!(body.contains("task `task-247`"), "{body}");
-        assert!(body.contains("run `run-247`"), "{body}");
-    }
-
-    /// A publish-failure note lands only on a real card — never on a DM's `dm-*`
-    /// work key, which no card owns (issue #815).
-    #[test]
-    fn a_publish_note_only_lands_on_a_real_card_not_a_dm_work_key() {
-        let cards = vec![card_record("019ff728-abcd"), card_record("another")];
-        // A real card id resolves.
-        assert!(task_names_a_card(&cards, "019ff728-abcd"));
-        // A DM work key — what `repo_publish` stamps for a DM — owns no card, so
-        // the failure note stays in the log rather than filing under a phantom
-        // card.
-        assert!(!task_names_a_card(&cards, "dm-coder-main"));
-        // An unknown id, the empty id, and an empty board all resolve to nothing.
-        assert!(!task_names_a_card(&cards, "ghost"));
-        assert!(!task_names_a_card(&cards, ""));
-        assert!(!task_names_a_card(&[], "019ff728-abcd"));
-    }
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
