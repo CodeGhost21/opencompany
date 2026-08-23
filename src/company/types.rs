@@ -161,7 +161,7 @@ pub const CONNECTION_PRIORITIES: &[&str] = &["low", "medium", "high"];
 /// outside this set is a manifest error. Lives here (not the feature-gated
 /// harness) so manifest validation can see it in the default build.
 pub const GATEABLE_NAMESPACES: [&str; 8] = [
-    "shell", "code", "web", "subagent", "media", "composio", "search", "repo",
+    "shell", "code", "web", "subagent", "media", "composio", "search",
 ];
 
 /// Whether a tool-grant list **explicitly** grants the real-money `media`
@@ -252,27 +252,6 @@ pub fn grants_search_explicit(grants: &[String]) -> bool {
         .any(|grant| grant == "search" || grant.starts_with("search."))
 }
 
-/// Whether a tool-grant list **explicitly** grants the bound-repository `repo`
-/// namespace (issue #245, agent half).
-///
-/// Like [`grants_media_explicit`], [`grants_composio_explicit`] and
-/// [`grants_search_explicit`], the catch-all `*` does **not** confer it, and the
-/// reason is sharper here than for any of them: `repo_checkout` materializes a
-/// third party's source — and, through `repo_pr`, a third party's patch — inside
-/// an agent's sandbox, where the same agent may also hold `shell`. That is a
-/// company deciding to let its agents read real code under an operator-installed
-/// credential, and a decision of that size is made by name rather than inherited
-/// from a wildcard set for file and shell tools.
-///
-/// Matches the bare `repo` grant or any `repo.*` sub-grant. Lives here (always
-/// compiled) so both the feature-gated harness wiring (`build::build_agent`) and
-/// the always-compiled console capability route key off one source of truth.
-pub fn grants_repo_explicit(grants: &[String]) -> bool {
-    grants
-        .iter()
-        .any(|grant| grant == "repo" || grant.starts_with("repo."))
-}
-
 /// Whether a tool-grant list confers the **publishing** capability (issue #244)
 /// — the `files`/`docs` namespace on which both an agent's file tools and
 /// `publish_artifact` ride.
@@ -318,33 +297,6 @@ pub fn grants_files_or_docs(grants: &[String]) -> bool {
             || extends_on_boundary(grant, "files", NAMESPACE_SEPARATORS)
             || extends_on_boundary(grant, "docs", NAMESPACE_SEPARATORS)
     })
-}
-
-/// Whether a tool-grant list **explicitly** grants the repository *write* tier
-/// (issue #734) — the tier under which an agent's work can be pushed to a real
-/// remote and opened as a pull request.
-///
-/// This is the tightest predicate on this surface, and deliberately tighter than
-/// **both** of its neighbours. Do not "harmonise" it back toward either shape:
-///
-/// * Unlike [`grants_repo_explicit`], a **bare `repo` grant confers nothing
-///   here.** Every company adopting the read tier writes bare `repo`; if that
-///   silently carried push, a company that asked for agents *reading* code would
-///   get agents *pushing* it — exactly the outcome issue #247's write tier exists
-///   to prevent. Read and write are separate decisions, so they are separate
-///   grants. Widening this to the `repo` / `repo.*` shape reintroduces that
-///   footgun.
-/// * Unlike [`grants_workspace_write_explicit`], not even a *bare namespace*
-///   token confers it: only the **exact** string `repo.write` does. `repo`,
-///   `repo.read`, any other `repo.*` sub-grant, and the catch-all `*` all confer
-///   nothing. Matching a `repo.write` *prefix* (`starts_with`) would let a stray
-///   `repo.writer` slip through; the exact-string match is the point.
-///
-/// Lives here (always compiled) so the feature-gated harness wiring
-/// (`build::build_agent`) and always-compiled tooling share one source of truth,
-/// as with the read predicate above.
-pub fn grants_repo_write_explicit(grants: &[String]) -> bool {
-    grants.iter().any(|grant| grant == "repo.write")
 }
 
 /// Whether a tool-grant list **explicitly** grants writes to the company

@@ -161,13 +161,6 @@ pub fn namespace_of(tool_name: &str) -> Option<&'static str> {
         // set on one provider evaporates when the operator switches to another.
         "exa_find_similar" | "exa_get_contents" | "brave_news_search" | "brave_image_search"
         | "brave_video_search" => Some("search"),
-        // Bound repositories (issue #245, agent half). Lives in
-        // [`repo`](crate::harness::repo) rather than this module because it
-        // reaches a host-owned mirror and a forge, not the agent's own sandbox —
-        // but it is namespaced here for the same reason `search` is, and like
-        // `search` the arm is never inert: both tools compile under the plain
-        // `openhuman` feature, which is what CI builds and tests.
-        "repo_checkout" | "repo_pr" => Some("repo"),
         _ => None,
     }
 }
@@ -763,10 +756,6 @@ mod tests {
         // Metered web search (issue #238) maps to the `search` namespace, so a
         // token-budget plan can shed it under spend pressure.
         assert_eq!(namespace_of("web_search"), Some("search"));
-        // Bound repositories (issue #245) map to the `repo` namespace, so a
-        // token-budget plan can shed a checkout under spend pressure.
-        assert_eq!(namespace_of("repo_checkout"), Some("repo"));
-        assert_eq!(namespace_of("repo_pr"), Some("repo"));
         // Intrinsic tools are unmapped (always kept by the filter).
         assert_eq!(namespace_of("memory_store"), None);
         assert_eq!(namespace_of("memory_recall"), None);
@@ -808,8 +797,6 @@ mod tests {
             "brave_news_search",
             "brave_image_search",
             "brave_video_search",
-            "repo_checkout",
-            "repo_pr",
         ];
         for tool in mapped {
             let ns = namespace_of(tool).expect("mapped tool has a namespace");
@@ -833,10 +820,6 @@ mod tests {
         assert!(
             GATEABLE_NAMESPACES.contains(&"search"),
             "the metered search namespace must be gateable (issue #238)"
-        );
-        assert!(
-            GATEABLE_NAMESPACES.contains(&"repo"),
-            "the bound-repository namespace must be gateable (issue #245)"
         );
     }
 

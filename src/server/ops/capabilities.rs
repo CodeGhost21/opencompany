@@ -145,17 +145,6 @@ struct CapabilityStatusDto {
     /// (`[tools].search_daily_calls`, else the built-in default). Reaching it
     /// makes the tool refuse loudly rather than return an empty result set.
     search_daily_call_cap: u32,
-    /// Bound repositories (issue #245, agent half): whether this company
-    /// **explicitly** grants the `repo` namespace (a `*` wildcard does NOT
-    /// count).
-    ///
-    /// The grant alone is not the whole story, and the console says so: a
-    /// company can grant `repo` and bind nothing (the tools are not wired), or
-    /// bind repositories and grant nothing (nobody can read them). Both are
-    /// silent misconfigurations that look like a working setup from one page
-    /// each, which is why this flag travels beside the repositories list rather
-    /// than only inside the manifest.
-    repo_granted: bool,
     /// Publishing (issue #244, panel half #1192): whether this company's grants
     /// confer `publish_artifact` — the only way a file an agent wrote becomes a
     /// deliverable.
@@ -251,7 +240,6 @@ struct OptInFlags {
     search_granted: bool,
     search_daily_call_cap: u32,
     search_provider: String,
-    repo_granted: bool,
     /// Issue #1192. Carried on the flags rather than derived per DTO site for
     /// the reason the `composio_credential_source` note above already states:
     /// the DTO is built in two places, and a field wired into one of them alone
@@ -275,7 +263,6 @@ impl OptInFlags {
             search_granted: false,
             search_daily_call_cap: crate::company::DEFAULT_SEARCH_DAILY_CALLS,
             search_provider: crate::company::search::MANAGED_PROVIDER.to_string(),
-            repo_granted: false,
             publish_granted: false,
         }
     }
@@ -306,7 +293,6 @@ fn unconfigured(flags: OptInFlags) -> CapabilityStatusDto {
         search_credential_configured: search_credential_configured(),
         search_daily_call_cap: flags.search_daily_call_cap,
         search_provider: flags.search_provider.clone(),
-        repo_granted: flags.repo_granted,
         publish_granted: flags.publish_granted,
         publish_in_build: cfg!(feature = "openhuman"),
         mcp_in_build: cfg!(feature = "mcp"),
@@ -457,7 +443,6 @@ async fn effective_status(runtime: &CompanyRuntime) -> Result<CapabilityStatusDt
         // Issue #245: opt-in per tool grant like the three above, and read from
         // the same manifest field, so the repositories card can tell an operator
         // which half of the setup is missing.
-        repo_granted: crate::company::grants_repo_explicit(&record.manifest.tools.allow),
         // Issue #1192: the same predicate `build_agent`'s `wants_files` gate
         // calls, so the panel's verdict and the wired toolbelt cannot disagree.
         // Note the shape difference from its four neighbours above — this one is
@@ -523,7 +508,6 @@ async fn effective_status(runtime: &CompanyRuntime) -> Result<CapabilityStatusDt
         search_credential_configured: search_credential_configured(),
         search_daily_call_cap: flags.search_daily_call_cap,
         search_provider: flags.search_provider.clone(),
-        repo_granted: flags.repo_granted,
         publish_granted: flags.publish_granted,
         publish_in_build: cfg!(feature = "openhuman"),
         mcp_in_build: cfg!(feature = "mcp"),
