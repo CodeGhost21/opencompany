@@ -72,7 +72,7 @@ window.addEventListener("message", function onRelay(event: MessageEvent) {
   if (!isRelayMessage(event.data)) return;
 
   const element = document.elementFromPoint(event.data.x, event.data.y);
-  if (!element) return;
+  if (!(element instanceof HTMLElement || element instanceof SVGElement)) return;
 
   if (event.data.type === "oc:relay-click") {
     // Mirror the parent relay's own handling (`toast-click-through.ts`):
