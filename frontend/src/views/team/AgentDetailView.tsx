@@ -744,8 +744,36 @@ function FactLine({
  * asked for and did not get, which is the line an operator checking a tool
  * change is actually looking for and which no surface showed before.
  */
-function Tools({ agent }: { agent: AgentDetailDto }) {
+function Tools({
+  agent,
+  saving,
+  onSave,
+}: {
+  agent: AgentDetailDto;
+  saving: boolean;
+  onSave: (globs: string[]) => Promise<void>;
+}) {
   const summary = summarizeGrants(agent.tools);
+  const canEdit = isEditable(agent, "tools");
+  const [editing, setEditing] = useState(false);
+  const [field, setField] = useState(agent.tools.requested.join(", "));
+
+  // The teammate on screen can change under this card (a slow detail load, a
+  // sibling route swap), and a draft left over from the previous one would be
+  // saved onto the new teammate. Re-seed whenever the stored list changes.
+  useEffect(() => {
+    setField(agent.tools.requested.join(", "));
+    setEditing(false);
+  }, [agent.id, agent.tools.requested]);
+
+  const draft = parseToolGlobs(field);
+  const dirty = toolGlobsDiffer(agent.tools.requested, draft);
+  // Live, before the save rather than after it: the intersection is the thing
+  // operators get wrong, and a glob the company does not allow is stored
+  // happily and then confers nothing. Saying so while they type is the whole
+  // reason this card knows about `companyAllow`.
+  const willNotApply = draft.filter((glob) => !companyCovers(agent.tools.companyAllow, glob));
+
   return (
     <Section
       title="Tools"
@@ -754,7 +782,72 @@ function Tools({ agent }: { agent: AgentDetailDto }) {
           ? "This teammate lists no tools of its own, so it holds everything the company allows."
           : "What this teammate asked for, narrowed by what the company allows."
       }
+      action={
+        canEdit && !editing ? (
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => setEditing(true)}
+            data-testid="agent-tools-edit"
+          >
+            <Pencil className="size-4" /> Edit
+          </Button>
+        ) : undefined
+      }
     >
+      {editing && (
+        <div className="grid gap-2" data-testid="agent-tools-editor">
+          <Label htmlFor="agent-tools-field">Tool grants</Label>
+          <Input
+            id="agent-tools-field"
+            value={field}
+            onChange={(event) => setField(event.target.value)}
+            placeholder="workspace.read, docs.*, files.*"
+            className="font-mono text-xs"
+            data-testid="agent-tools-field"
+          />
+          <p className="text-xs text-muted-foreground">
+            One glob per grant, separated by commas or spaces. Each is narrowed by the company
+            tool list below, so this can only ever take capability away from what the company
+            allows — never add to it.
+          </p>
+          {draft.length === 0 && (
+            // Not a warning about losing tools — the opposite, and the
+            // inversion is exactly what an operator clearing this field
+            // expects to be told.
+            <p className="text-xs text-amber-600" data-testid="agent-tools-empty-warning">
+              An empty list means the company's standard grant, not "no tools" — this teammate
+              would hold everything the company allows.
+            </p>
+          )}
+          {willNotApply.length > 0 && (
+            <p className="text-xs text-amber-600" data-testid="agent-tools-uncovered">
+              The company tool list does not cover {willNotApply.join(", ")}, so it will be stored
+              and confer nothing.
+            </p>
+          )}
+          <div className="flex justify-end gap-2">
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => {
+                setField(agent.tools.requested.join(", "));
+                setEditing(false);
+              }}
+            >
+              Cancel
+            </Button>
+            <Button
+              size="sm"
+              disabled={saving || !dirty}
+              onClick={() => void onSave(draft).then(() => setEditing(false))}
+              data-testid="agent-tools-save"
+            >
+              Save
+            </Button>
+          </div>
+        </div>
+      )}
       {summary.effective.length === 0 ? (
         <p className="text-sm text-muted-foreground" data-testid="agent-tools-empty">
           {/* Both ways of holding nothing land here, and they are not the same
