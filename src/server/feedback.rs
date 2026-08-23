@@ -339,10 +339,20 @@ mod test {
         assert!(created[0].labels.contains(&"source/operator".to_string()));
         assert!(created[0].labels.contains(&"sev/annoyance".to_string()));
         assert!(created[0].labels.contains(&"type/wrong-output".to_string()));
-        // The preview and the confirm are one item, so the reports list shows it
-        // exactly once.
+        // The preview and the confirm are one item: the reports list shows the
+        // step-1 blocked capture plus exactly one filed report — no duplicate
+        // from previewing then sending.
         let (_, list) = get_json(&app, "/api/v1/company/feedback").await;
-        assert_eq!(list.as_array().expect("an array").len(), 1);
+        let items = list.as_array().expect("an array");
+        assert_eq!(items.len(), 2);
+        assert_eq!(
+            items
+                .iter()
+                .filter(|i| i["issue_status"] == "open")
+                .count(),
+            1,
+            "exactly one filed report"
+        );
 
         // 4. A fresh filing with the same title dedupes: it comments, does not
         //    create a duplicate.
