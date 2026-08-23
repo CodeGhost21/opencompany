@@ -68,6 +68,14 @@ function beneathAt(x: number, y: number): (HTMLElement | SVGElement) | null {
   return beneath;
 }
 
+/** A gesture handed to a page frame over the postMessage bridge. */
+type FrameRelayType =
+  | "oc:relay-click"
+  | "oc:relay-pointerdown"
+  | "oc:relay-pointermove"
+  | "oc:relay-pointerup"
+  | "oc:relay-pointercancel";
+
 /**
  * Hand a gesture over a page frame to the frame's own document.
  *
@@ -85,7 +93,7 @@ function beneathAt(x: number, y: number): (HTMLElement | SVGElement) | null {
 function relayToFrame(
   frame: HTMLIFrameElement,
   gesture: PointerEvent | MouseEvent,
-  type: "oc:relay-click" | "oc:relay-pointerdown",
+  type: FrameRelayType,
 ): void {
   const rect = frame.getBoundingClientRect();
   const payload: Record<string, unknown> = {
@@ -93,7 +101,7 @@ function relayToFrame(
     x: gesture.clientX - rect.left,
     y: gesture.clientY - rect.top,
   };
-  if (type === "oc:relay-pointerdown") {
+  if (type !== "oc:relay-click") {
     const pointer = gesture as PointerEvent;
     payload.pointerId = pointer.pointerId;
     payload.pointerType = pointer.pointerType;
@@ -104,6 +112,46 @@ function relayToFrame(
   }
   frame.contentWindow?.postMessage(payload, "*");
 }
+
+/**
+ * The presses this document has handed into a page frame, keyed by pointer id.
+ *
+ * Pointer capture is what completes a gesture for a control in the same
+ * document, but a frame is another document and the browser's capture cannot
+ * reach into it: the `pointermove`, `pointerup` and `pointercancel` of a press
+ * that started on a toast over a frame land back in *this* document and would
+ * otherwise be dropped, leaving a frame-side drag or press-state control
+ * stuck after `pointerdown`. This tracks which frame owns the rest of each
+ * press until it ends (`relayFramePressTail` posts the remainder over the same
+ * bridge, mirroring the capture the same-document path uses).
+ */
+const framePresses = new Map<number, HTMLIFrameElement>();
+
+/**
+ * Forward the tail of a press that was relayed into a page frame.
+ *
+ * Once a press has been handed to a frame, every following event of that
+ * pointer belongs to the same gesture and is posted to the same frame,
+ * shifted into its viewport, until the press ends — at which point the
+ * tracked gesture is closed out. A frame that left the document mid-gesture
+ * has nothing left to deliver to, so its tail is dropped.
+ */
+function relayFramePressTail(event: PointerEvent): void {
+  const frame = framePresses.get(event.pointerId);
+  if (!frame) return;
+  if (!frame.isConnected) {
+    framePresses.delete(event.pointerId);
+    return;
+  }
+  if (event.type === "pointerup" || event.type === "pointercancel") {
+    framePresses.delete(event.pointerId);
+  }
+  relayToFrame(frame, event, `oc:relay-${event.type}`);
+}
+
+window.addEventListener("pointermove", relayFramePressTail, true);
+window.addEventListener("pointerup", relayFramePressTail, true);
+window.addEventListener("pointercancel", relayFramePressTail, true);
 
 /**
  * Relay the pointerdown of a press on a toast's read-only surface to the page
