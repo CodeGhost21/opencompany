@@ -314,7 +314,10 @@ export function AgentRuns({
         run={open}
         source={runSource(open, index)}
         now={now}
-        onBack={() => setOpenId(null)}
+        onBack={() => {
+          openIdRef.current = null;
+          setOpenId(null);
+        }}
       />
     );
   }
