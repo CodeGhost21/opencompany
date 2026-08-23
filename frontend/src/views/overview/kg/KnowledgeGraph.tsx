@@ -1987,7 +1987,7 @@ export function KnowledgeGraph({
     move: moveActiveNode,
     select: (id: string) => {
       clearDetail();
-      setSelectedMemoryId((s) => (s === id ? null : s));
+      setSelectedMemoryId((s) => (s === id ? null : id));
     },
   };
 
