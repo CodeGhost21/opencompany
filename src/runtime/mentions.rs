@@ -583,7 +583,19 @@ pub fn extract_with_known(text: &str, dir: &[MentionAlias]) -> Vec<Mention> {
             if end > lowered.len() {
                 continue;
             }
-            if &&lowered[after..end] != alias || !closes_mention(bytes, end) {
+            // Byte comparison, not a `&lowered[after..end]` str slice: `end`
+            // is an arbitrary byte offset (`after` plus some alias's byte
+            // length), and nothing has proven it lands on a UTF-8 character
+            // boundary in `lowered`. A message that puts a multi-byte
+            // character where a shorter alias's end would fall — `@é` against
+            // a one-character alias `j`, for instance — slices mid-character
+            // and panics. Comparing `&[u8]` cannot panic on a partial
+            // character: two byte spans are equal or they are not, and
+            // `lowered`/`bytes` share `text`'s length either way (the fold
+            // above guarantees it), so the offsets still line up.
+            if &lowered.as_bytes()[after..end] != alias.as_bytes()
+                || !closes_mention(bytes, end)
+            {
                 continue;
             }
             match matched {
