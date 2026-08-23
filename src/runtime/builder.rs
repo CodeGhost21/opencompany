@@ -6530,6 +6530,7 @@ needs_reason = true
             description: None,
             tools: None,
             instructions: None,
+            avatar: None,
         });
         record.retire_agent("cto");
         store.save(&record).await.unwrap();
