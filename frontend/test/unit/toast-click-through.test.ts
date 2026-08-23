@@ -241,6 +241,116 @@ describe("toast click-through", () => {
     );
   });
 
+  it("forwards the tail of a frame press into the same frame", () => {
+    // Pointer capture cannot reach into another document, so the rest of a
+    // press that started on a toast over a frame lands back here and must be
+    // relayed the same way the press was — otherwise a frame-side drag or
+    // press-state control would receive a pointerdown it can never release.
+    const { frame, posted } = frameBeneath();
+    mockElementFromPoint(frame);
+
+    const text = document.createElement("span");
+    toast().append(text);
+    text.addEventListener("pointerdown", relayToastPointerDown);
+    press(text);
+
+    window.dispatchEvent(
+      new PointerEvent("pointermove", {
+        clientX: 60,
+        clientY: 70,
+        pointerId: 7,
+        pointerType: "mouse",
+        isPrimary: true,
+        button: -1,
+        buttons: 1,
+      }),
+    );
+
+    expect(posted).toHaveBeenLastCalledWith(
+      expect.objectContaining({ type: "oc:relay-pointermove", x: 50, y: 50, pointerId: 7 }),
+      "*",
+    );
+  });
+
+  it("closes a frame press out on pointerup", () => {
+    const { frame, posted } = frameBeneath();
+    mockElementFromPoint(frame);
+
+    const text = document.createElement("span");
+    toast().append(text);
+    text.addEventListener("pointerdown", relayToastPointerDown);
+    press(text);
+
+    window.dispatchEvent(
+      new PointerEvent("pointerup", {
+        clientX: 60,
+        clientY: 70,
+        pointerId: 7,
+        pointerType: "mouse",
+        button: 0,
+        buttons: 0,
+      }),
+    );
+
+    expect(posted).toHaveBeenLastCalledWith(
+      expect.objectContaining({ type: "oc:relay-pointerup", x: 50, y: 50, pointerId: 7 }),
+      "*",
+    );
+
+    // The press is over: a later move is no longer forwarded to the frame.
+    window.dispatchEvent(
+      new PointerEvent("pointermove", {
+        clientX: 80,
+        clientY: 90,
+        pointerId: 7,
+        pointerType: "mouse",
+        button: -1,
+        buttons: 0,
+      }),
+    );
+    expect(posted).toHaveBeenCalledTimes(2); // pointerdown + pointerup only
+  });
+
+  it("closes a frame press out on pointercancel", () => {
+    const { frame, posted } = frameBeneath();
+    mockElementFromPoint(frame);
+
+    const text = document.createElement("span");
+    toast().append(text);
+    text.addEventListener("pointerdown", relayToastPointerDown);
+    press(text);
+
+    window.dispatchEvent(
+      new PointerEvent("pointercancel", { clientX: 60, clientY: 70, pointerId: 7 }),
+    );
+
+    expect(posted).toHaveBeenLastCalledWith(
+      expect.objectContaining({ type: "oc:relay-pointercancel", x: 50, y: 50, pointerId: 7 }),
+      "*",
+    );
+    expect(framePressesEmpty(7)).toBe(true);
+  });
+
+  it("drops the tail of a frame press when the frame leaves the document", () => {
+    const { frame, posted } = frameBeneath();
+    mockElementFromPoint(frame);
+
+    const text = document.createElement("span");
+    toast().append(text);
+    text.addEventListener("pointerdown", relayToastPointerDown);
+    press(text);
+    posted.mockClear();
+
+    // The Pages view closed mid-press: nothing is left to deliver the tail to.
+    frame.remove();
+    window.dispatchEvent(
+      new PointerEvent("pointermove", { clientX: 60, clientY: 70, pointerId: 7 }),
+    );
+    window.dispatchEvent(new PointerEvent("pointerup", { clientX: 60, clientY: 70, pointerId: 7 }));
+
+    expect(posted).not.toHaveBeenCalled();
+  });
+
   it("does not relay a press into a frame with no loaded document", () => {
     // A detached or not-yet-loaded frame has no `contentWindow` to hand the
     // gesture to; the relay must simply give up rather than throw.
