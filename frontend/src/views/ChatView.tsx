@@ -1041,6 +1041,7 @@ export function ChatView({
           onOpenRail={() => setMobilePane("rail")}
           channelsCollapsed={channelsCollapsed}
           onToggleChannels={toggleChannels}
+          channelsToggleRef={channelsToggleRef}
         />
 
         <div className="flex min-h-0 flex-1">
