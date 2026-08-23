@@ -25,6 +25,7 @@ let host: HTMLDivElement;
 let root: Root;
 
 beforeEach(() => {
+  (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
   host = document.createElement("div");
   document.body.appendChild(host);
   root = createRoot(host);
