@@ -1196,27 +1196,16 @@ jobs:
       - name: Bin tests (tinymemory)
         run: cargo test --locked --features acp,runner,tinymemory --bin opencompany
 
-      # Issue #1113 gave `tinymemory-embedded` its own lane; these two steps are
-      # that lane moved onto the union of the openhuman+tinycortex core and the
-      # provider seam — the first lane that LINKS AND EXECUTES the two together
-      # (the shipped tenant set is neither a subset nor a superset of this lane;
-      # what matters is that the combination stops existing only as a
-      # typecheck). Until now that union existed only as
-      # `Check (--all-features)`: never linked as a
-      # binary, never executed, which is precisely the crack a feature-gated
-      # merge collision (the duplicated-struct-field kind that `fmt`, clippy and
-      # two green suites all missed once already) slips through. The union also
+      # These two steps run the same two halves under BARE `tinymemory` — the
+      # provider contract with no `acp`/`runner`/`openhuman` baggage — so the
+      # seam that hosted tenants actually bind LINKS AND EXECUTES on its own
+      # rather than only typechecking under `Check (--all-features)`. The union
       # runs the upstream driver-conformance suite against the providers
-      # `open_driver` constructs — the regression net for the namespace-driver
-      # defects #1201/#1238, which shipped while the driver's own upstream suite
-      # was green, because nothing ran it through THIS host's construction path.
+      # `open_driver` constructs, through THIS host's construction path.
       #
-      # The two `tinymemory`-ALONE steps above stay, deliberately: per the #914
-      # rationale, the contract-only build (no bundled SQLite) must keep
-      # compiling and running on its own, or a regression in exactly that
-      # separation hides. The old `acp,runner,tinymemory-embedded` steps this
-      # replaces are subsumed — same filters, wider build — and feature-lanes.txt
-      # permits one lane per feature, so the row moved here with them.
+      # The two `acp,runner,tinymemory` steps above stay, deliberately: the
+      # contract under the full shipped tool set must keep compiling and
+      # running, and the bare build must keep standing alone.
       - name: Test the memory engine union the tenant ships
         run: scripts/ci/run-scoped-suite.sh "memory provider contract" tinymemory store::memory
 
