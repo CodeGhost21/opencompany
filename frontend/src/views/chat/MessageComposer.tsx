@@ -6,10 +6,6 @@ import {
   CaseSensitive,
   Code,
   Italic,
-  Link2,
-  List,
-  Paperclip,
-  Smile,
   Strikethrough,
 } from "lucide-react";
 
@@ -21,6 +17,16 @@ interface Props {
   placeholder: string;
   disabled?: boolean;
   onSend: (text: string, intent?: MessageIntent) => void;
+  /**
+   * Called as the box is typed in, so the company can show a typing
+   * indicator.
+   *
+   * Fired on **every** change rather than on a timer: throttling is the
+   * caller's job, because it is per channel and this component does not know
+   * which channel it is in. Absent on the composers where a typing indicator
+   * would be noise.
+   */
+  onTyping?: () => void;
   /** Compact form, for the narrower thread panel. */
   compact?: boolean;
   /**
@@ -63,6 +69,7 @@ export function MessageComposer({
   onSend,
   compact,
   deliverableChoice,
+  onTyping,
 }: Props) {
   const [draft, setDraft] = useState("");
   // What the NEXT line is for, and only the next one. It starts and resets
@@ -129,27 +136,6 @@ export function MessageComposer({
                 <w.icon className="size-3.5" />
               </Button>
             ))}
-            <span className="mx-1 h-4 w-px bg-border" aria-hidden />
-            <Button
-              variant="ghost"
-              size="icon"
-              className="size-7 text-muted-foreground"
-              aria-label="Bulleted list"
-              title="Bulleted list"
-              disabled
-            >
-              <List className="size-3.5" />
-            </Button>
-            <Button
-              variant="ghost"
-              size="icon"
-              className="size-7 text-muted-foreground"
-              aria-label="Link"
-              title="Link"
-              disabled
-            >
-              <Link2 className="size-3.5" />
-            </Button>
           </div>
         )}
 
@@ -159,7 +145,10 @@ export function MessageComposer({
         <textarea
           ref={input}
           value={draft}
-          onChange={(e) => setDraft(e.target.value)}
+          onChange={(e) => {
+            setDraft(e.target.value);
+            onTyping?.();
+          }}
           onKeyDown={onKeyDown}
           aria-label={placeholder}
           placeholder={placeholder}
@@ -221,26 +210,6 @@ export function MessageComposer({
             onClick={() => wrap("@")}
           >
             <AtSign className="size-4" />
-          </Button>
-          <Button
-            variant="ghost"
-            size="icon"
-            className="size-7 text-muted-foreground"
-            aria-label="Attach a file"
-            title="Attach a file"
-            disabled
-          >
-            <Paperclip className="size-4" />
-          </Button>
-          <Button
-            variant="ghost"
-            size="icon"
-            className="size-7 text-muted-foreground"
-            aria-label="Add an emoji"
-            title="Add an emoji"
-            disabled
-          >
-            <Smile className="size-4" />
           </Button>
           {!compact && (
             <Button
