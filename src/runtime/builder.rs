@@ -2214,12 +2214,12 @@ impl RuntimeBuilder {
         // operator restarting a tenant finds out at the moment they can still
         // act on it.
         //
-        // Read over the **effective roster**, not `[tools].allow` alone: an
-        // agent naming `tools = ["repo"]` under a company allow-list of `["*"]`
-        // holds an explicit `repo` grant that `grants_repo_explicit(&allow)`
-        // does not see, because the wildcard deliberately does not confer the
-        // namespace. Checking only the company line would miss exactly the
-        // configuration a wildcard company is most likely to have.
+        // Read over both the effective roster and each raw per-agent request:
+        // an agent naming `tools = ["repo"]` under a company allow-list of
+        // `["*"]` is not granted the capability at runtime, but it is still a
+        // persisted request for a filesystem-backed repository credential and
+        // must be rejected before boot. Checking only the effective grants
+        // would silently erase that safety check while narrowing it.
         //
         // NOT feature-gated, for the reason `build_agent` states about the repo
         // tools themselves: a control compiled only under `openhuman` is a
