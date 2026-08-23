@@ -108,8 +108,10 @@ writes confined to the agent's own sandboxed workspace (`file_write`, `edit`,
 
 ### The `auto` tier
 
-That low-consequence middle is also the whole of the `auto` tier (issue #560).
-An operator had two settings and needed a third: `supervised` parks every write
+That low-consequence middle is the base of the `auto` tier (issue #560), with
+one company-context exception: a shared-workspace mutation confined to a node
+the calling agent created and last wrote runs unattended too (issue #877). An
+operator had two settings and needed a third: `supervised` parks every write
 including the agent's own scratch files, so companies drown in cards; `full`
 parks nothing but the always-ask list, so it stops asking before a shell
 command or a git push too. Companies ran one and suffered, or ran the other and
@@ -129,6 +131,21 @@ deadline" to "this runs unattended for everyone while the company sits in
 rather than by what it is called, and because the widening is exactly what the
 operator chooses when they select the tier. It is written down so that a later
 edit loosening `Grantable` knows it is loosening two things.
+
+The workspace exception is graded at the policy seam rather than in the
+declaration table, because it is not a property of the tool: `workspace_create`,
+`workspace_write`, `workspace_delete` and `workspace_rename` all stay
+`PerCall` in the table, and the harness policy asks the live company tree
+whether the resolved node was both created and last written by the calling
+agent. Only then does it lift that one call to `Grantable`, so the agent's own
+notes run unattended under `auto` while an operator- or teammate-authored node
+still parks. The lift never reaches the standing-grant mint path, which keeps
+reading the table — so the shared note tree stays non-grantable (above) however
+`auto` treats a call on it. Two extra bounds follow from what the tools
+themselves allow: `workspace_delete` parks on a folder that still holds
+anything (the tool refuses those anyway), and `workspace_rename` of a folder
+parks unless every node inside it is the agent's own, because the rename
+re-renders all of their paths.
 
 Three tools answer the reach question from their **arguments** rather than from
 their name, because the name is too coarse to be the answer. `composio_execute`
