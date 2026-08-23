@@ -983,6 +983,11 @@ export interface AgentDetailDto {
   tools: AgentToolsDto;
   desks: AgentDeskDto[];
   inboxEnabled: boolean;
+  /**
+   * The face somebody chose for this teammate, absent when nobody has — the
+   * same field and the same contract as `TeamMemberDto.avatar`.
+   */
+  avatar?: string;
   /** The cap in force and its attribution; same absent-means-uncapped contract as `TeamMemberDto`. */
   budgetUsdDaily?: number;
   spentTodayUsd?: number;
@@ -1036,6 +1041,13 @@ export interface EditAgentInput {
    * persona the operator did not touch.
    */
   instructions?: string | null;
+  /**
+   * The face this teammate wears, three-state exactly like `instructions`:
+   * `undefined` leaves it alone, `null` resets it to the mascot the console
+   * hashes from the id, and a reference (`tiny:<flavour>` / `blob:<nodeId>`)
+   * sets it. See `lib/avatar.ts`.
+   */
+  avatar?: string | null;
 }
 
 /**
