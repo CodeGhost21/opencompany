@@ -75,7 +75,15 @@ const APPROVAL_CONSEQUENCES = {
   spend: { label: "Spends money", iconClass: "bg-status-failed-soft text-status-failed-text" },
   send: { label: "Leaves the company", iconClass: "bg-status-blocked-soft text-status-blocked-text" },
   sign: { label: "Makes a commitment", iconClass: "bg-status-failed-soft text-status-failed-text" },
-  publish: { label: "Goes public", iconClass: "bg-status-running-soft text-status-running-text" },
+  // Not "Goes public". The group spans genuinely external publishing —
+  // `repo_publish`'s push to the real remote, `hosting_launch_site`,
+  // `hosting_add_domain` — *and* `publish_artifact`, which writes only into the
+  // company's own workspace and artifact chain and sends nothing anywhere. A
+  // card reading "Goes public" over that hand-off is the misleading label
+  // `language.ts` already refuses to print for the same tool. "Publishes work"
+  // is true under either reading: it is the step that makes finished work
+  // visible past the agent's sandbox, whoever is on the other side of it.
+  publish: { label: "Publishes work", iconClass: "bg-status-running-soft text-status-running-text" },
   hire: { label: "Changes who can act", iconClass: "bg-status-done-soft text-status-done-text" },
   identity: { label: "Changes who can act", iconClass: "bg-status-done-soft text-status-done-text" },
 } as const;
