@@ -2571,6 +2571,38 @@ pub async fn assert_secret_store(secrets: Arc<dyn crate::ports::secrets::SecretS
         "a distinct key with an underscore was overwritten by its space variant"
     );
 
+    // Letter case is the same hazard one level down: on case-insensitive
+    // volumes (macOS, Windows) `mcp/Acme/auth` and `mcp/acme/auth` are one
+    // path, and a backend that let them share a file would overwrite one
+    // server's credential with another's. `validate_servers` treats them as
+    // two valid names.
+    secrets
+        .set(
+            &alpha,
+            "mcp/Acme/auth",
+            SecretValue("token-for-upper-case".to_string()),
+        )
+        .await
+        .unwrap();
+    secrets
+        .set(
+            &alpha,
+            "mcp/acme/auth",
+            SecretValue("token-for-lower-case".to_string()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        read(&alpha, "mcp/Acme/auth").await.as_deref(),
+        Some("token-for-upper-case"),
+        "a distinct key that differs only in case was overwritten by its lower-case variant"
+    );
+    assert_eq!(
+        read(&alpha, "mcp/acme/auth").await.as_deref(),
+        Some("token-for-lower-case"),
+        "a distinct key that differs only in case was overwritten by its upper-case variant"
+    );
+
     // A key that is itself shaped like a legacy filename must not alias another
     // key. On the filesystem backend the canonical namespace and the legacy
     // slug fallback have to stay disjoint, so `key-foo` must not read the value
