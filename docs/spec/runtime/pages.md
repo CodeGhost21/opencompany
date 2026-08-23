@@ -173,8 +173,27 @@ exact iframe's `contentWindow`. That bridge forwards full GraphQL — queries
 authority the operator's own session has; the sandbox stops the page from
 touching cookies, the parent DOM, or making its own credentialed requests,
 but it does not limit what an authorized request can *do* once it crosses
-the bridge. The iframe embedding, the bridge, and the nav view that lists
-pages are frontend concerns and are not described further here.
+the bridge. The iframe embedding, the GraphQL bridge, and the nav view that
+lists pages are frontend concerns and are not described further here.
+
+**The gesture relay.** The one thing that travels the bridge the other way —
+parent to page — is a forwarded gesture. A toast in the console can cover a
+control inside the Pages view (issue #1303); a DOM event cannot cross the
+sandboxed-frame boundary, so when the toast is clicked the console posts the
+gesture's coordinates to the frame's document instead: `oc:relay-click` or
+`oc:relay-pointerdown`, with `x`/`y` shifted into frame-relative viewport
+coordinates, and the pointer's `pointerId`/`pointerType`/`button`/`buttons`
+fields on the pointerdown variant. The page SDK accepts a relay only from
+`window.parent` — a frame the page embeds itself surfaces as its own window,
+not the parent, so the source check is the whole trust boundary — and turns
+it back into a real click or `pointerdown` on whatever `elementFromPoint(x, y)`
+finds in the frame's own document. The re-dispatched event is programmatic
+and therefore untrusted: like the console's own synthetic clicks, it carries
+no transient user activation, so a control that requires activation (a file
+input, `showPicker()`, `window.open()`) stays unreachable through an overlay
+— a browser will not transfer activation across the sandbox boundary (that
+is the clickjacking defense) — and the relay targets the ordinary click- and
+pointer-driven controls a toast-over-page gesture is actually for.
 
 
 **Normative: pages require a same-origin console.** The page shell and its
