@@ -430,29 +430,56 @@ describe("the consolidated approval card", () => {
     expect(row?.textContent).not.toContain("+ 2 more");
   });
 
-  it("names every action and amount in a mixed compact batch", async () => {
+  it("names every action, call and amount in a mixed compact batch", async () => {
     // A fetch and a payment in one turn: "Fetch a web page + 1 more" would
     // hide the payment (and its amount) behind the lead. The line must say
-    // what the one Approve actually covers.
+    // what the one Approve actually covers — the distinct actions, and each
+    // call's own detail, so the operator sees which page and which recipient
+    // before clicking Approve.
     await render([ESPN, VENDOR], {}, {}, new Map(), true);
 
     const row = container.querySelector<HTMLElement>('[data-approval-inline="compact"]');
     expect(row?.textContent).toContain(
-      `2 actions need your sign-off — Fetch a web page and Send a payment · ${money(42.5)}`,
+      `2 actions need your sign-off — Fetch a web page and Send a payment — https://espn.com/nba, vendor@example.test · ${money(42.5)}`,
     );
   });
 
   it("counts a mixed compact batch with duplicate actions honestly", async () => {
-    // Two fetches and a payment: the distinct actions are named once each, and
-    // the count says there are three of them — the one Approve covers all.
+    // Two fetches and a payment: the distinct actions are named once each, the
+    // count says there are three of them, and every call's own URL or
+    // recipient is named — the one Approve covers all of it.
     await render([ESPN, BBC, VENDOR], {}, {}, new Map(), true);
 
     const row = container.querySelector<HTMLElement>('[data-approval-inline="compact"]');
     expect(row?.textContent).toContain(
-      `3 actions need your sign-off — Fetch a web page and Send a payment · ${money(42.5)}`,
+      `3 actions need your sign-off — Fetch a web page and Send a payment — https://espn.com/nba, https://bbc.com/sport, vendor@example.test · ${money(42.5)}`,
     );
-    // The duplicate fetch is not repeated on the line.
+    // The duplicate fetch is not repeated as a bare action on the line.
     expect(row?.textContent).not.toContain("Fetch a web page, Fetch a web page");
+  });
+
+  it("keeps a role-hidden call's warning in a mixed compact batch", async () => {
+    // A hidden payment beside a fetch: #618's flag must survive the mixed
+    // summary, or the operator would approve a call whose payload says nothing
+    // about what it does.
+    const HIDDEN: ApprovalSummary = {
+      id: "a6",
+      kind: "payment.send",
+      amount_usd: null,
+      at_millis: T0,
+      agent: "seo",
+      thread: "desk-marketing",
+      batch: "turn-1",
+      broadly_grantable: false,
+      payload: null,
+      contents_hidden: true,
+    };
+    await render([ESPN, HIDDEN], {}, {}, new Map(), true);
+
+    const row = container.querySelector<HTMLElement>('[data-approval-inline="compact"]');
+    expect(row?.textContent).toContain(
+      `2 actions need your sign-off — Fetch a web page and Send a payment — https://espn.com/nba, Send a payment — details hidden by your role`,
+    );
   });
 
   it("names a hidden approval once in the compact chat row", async () => {
