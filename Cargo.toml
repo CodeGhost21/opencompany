@@ -154,6 +154,14 @@ tinyagents = { path = "vendor/openhuman/vendor/tinyagents", optional = true, fea
 # workspace on a real hosting provider. Taken without OpenHuman's TinyBus
 # module: `tinyhosts` is linked as a library, so nothing here loads a cdylib.
 openhuman_core = { package = "openhuman", path = "vendor/openhuman", optional = true, default-features = false, features = ["skills", "mcp", "hosting"] }
+
+# The MCP client, extracted out of OpenHuman into its own crate. OpenHuman's
+# `oh::mcp::http_client` facade still re-exports the transport and the payload
+# types under their old spellings, but not `tinymcp::Error` — and the typed 401
+# the probe classifier reads (`Error::Unauthorized`, formerly the standalone
+# `McpUnauthorizedError`) is a variant of it. Same vendored path OpenHuman
+# itself depends on, so Cargo resolves one copy, not two.
+tinymcp = { path = "vendor/openhuman/vendor/tinymcp/crates/tinymcp", optional = true, default-features = false }
 # The openhuman `Provider`/`Memory` traits return `anyhow::Result` and log via
 # the `log` facade; both only link under the `openhuman` feature.
 anyhow = { version = "1", optional = true }
@@ -406,7 +414,7 @@ openhuman = ["tiny", "dep:openhuman_core", "dep:reqwest", "dep:anyhow", "dep:log
 # MCP server management and agent tools share OpenHuman's in-process registry.
 # Enabling it necessarily enables the embedded harness and OpenHuman MCP
 # domain, while the default build remains unchanged.
-mcp = ["openhuman", "openhuman_core/mcp", "dep:uuid", "dep:base64"]
+mcp = ["openhuman", "openhuman_core/mcp", "dep:tinymcp", "dep:uuid", "dep:base64"]
 # Image/video generation tools (issue #109, epic #26 Cell B). Bridges
 # OpenHuman's `media_generation` tools (`media_generate_image`,
 # `media_generate_video`, `media_list_models`) into a company agent's toolbelt
