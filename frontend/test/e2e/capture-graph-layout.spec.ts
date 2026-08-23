@@ -7,11 +7,7 @@ import { writeFileSync } from "node:fs";
 
 import { test, type Page } from "@playwright/test";
 
-import { VISUAL } from "./capabilities";
-
 const CONTENT_SURFACE = '[data-testid="content-surface"]';
-
-test.skip(!VISUAL, "visual lane off");
 
 async function settleKnowledgeGraph(page: Page) {
   const svg = page.getByRole("img", { name: "Operating knowledge graph" });
