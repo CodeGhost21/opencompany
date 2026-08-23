@@ -1375,9 +1375,9 @@ mod route_tests {
         let total = MAX_CONTEXT_ENTRIES + 2;
         let state = state_over(home.path(), ScriptedContext::with_chunks(total)).await;
 
-        let (status, rows) = get_memory(&state).await;
+        let (status, list) = get_memory(&state).await;
         assert_eq!(status, StatusCode::OK);
-        let rows = rows.as_array().expect("a JSON array");
+        let rows = list["items"].as_array().expect("a JSON items array");
         assert_eq!(rows.len(), MAX_CONTEXT_ENTRIES);
         let stamps: Vec<u64> = rows
             .iter()
