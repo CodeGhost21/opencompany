@@ -52,6 +52,7 @@ import { MessageComposer } from "./chat/MessageComposer";
 import {
   mentionablesFor,
   mentionsOutsideChannel,
+  utf8ByteLength,
   type Mention,
   type Mentionable,
 } from "./chat/mentions";
