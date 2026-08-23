@@ -1407,9 +1407,9 @@ mod route_tests {
         let context = ScriptedContext::with_chunks(3);
         let state = state_over(home.path(), context.clone()).await;
 
-        let (status, rows) = get_memory(&state).await;
+        let (status, list) = get_memory(&state).await;
         assert_eq!(status, StatusCode::OK);
-        let rows = rows.as_array().expect("a JSON array");
+        let rows = list["items"].as_array().expect("a JSON items array");
         assert_eq!(rows.len(), 3);
         // The bodies really flowed through the bulk read (newest first).
         assert_eq!(rows[0]["title"], "note 3");
