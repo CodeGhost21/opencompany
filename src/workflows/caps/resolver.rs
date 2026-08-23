@@ -1088,13 +1088,32 @@ to = "fetch"
             gate.reason
         );
 
-        // A namespaced pending id resolves through a parent graph to that same
-        // classification — the lookup the parking path performs. The child's
-        // gated node id is `run`, so tinyflows' `<parent node>::<child node>`
-        // shape reads `sub::run`.
-        let file =
-            crate::company::parse_workflow(&parent_of("parent", "child")).expect("parent parses");
-        let parent = crate::workflows::translate::translate(&file);
+        // The test graph is the post-gate graph. Populate a registry record
+        // manually so this unit test exercises the namespace lookup itself,
+        // rather than depending on a second engine resolve to reach a nested
+        // child.
+        let registry = Arc::new(ChildGateRegistry::default());
+        let child = crate::workflows::translate::translate(
+            &crate::company::parse_workflow(&child_with_shell("child")).expect("child parses"),
+        );
+        let gated = child
+            .nodes
+            .iter()
+            .find(|node| node.id == "run")
+            .map(|node| crate::workflows::gate::GatedCall {
+                node_id: node.id.clone(),
+                slug: "shell".to_string(),
+                reason: "shell requires approval".to_string(),
+                args: node.config.get("args").cloned().unwrap_or(Value::Null),
+                target: None,
+            })
+            .into_iter()
+            .collect();
+        registry.record("child", ChildGateRecord { graph: child, gated });
+
+        let parent = crate::workflows::translate::translate(
+            &crate::company::parse_workflow(&parent_of("parent", "child")).expect("parent parses"),
+        );
         let described = child_gate_call(&registry, &parent, "sub::run", None)
             .expect("a namespaced child gate resolves through the registry");
         assert_eq!(described.node_id, "run");
