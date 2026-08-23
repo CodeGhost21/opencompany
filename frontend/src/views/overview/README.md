@@ -46,12 +46,13 @@ except the node under the pointer. Every node keeps a `<title>`, so a native
 tooltip is the floor wherever a drawn label is suppressed. Tasks, workflow stages and tools are the numerous tiers, which is
 why they are bare until you point at one.
 
-Whatever that leaves is then decluttered: candidates are placed highest
-priority first and any label whose box overlaps one already placed is dropped
-rather than nudged. The pass measures in **screen px**, not graph units —
-labels hold one on-screen size at every camera depth (`fixedLabel` counter
-scales through `--kg-cam-k`), so zooming changes how far apart nodes are and
-never how wide a name is. `kg/label-plan.ts` holds both steps, pure.
+Whatever that leaves is then decluttered: candidates retain their full titles,
+are placed highest priority first, and any label whose box overlaps one already
+placed is dropped rather than nudged. The pass measures in **screen px**, not
+graph units — labels hold one on-screen size at every camera depth
+(`fixedLabel` counter-scales through `--kg-cam-k`), so zooming changes how far
+apart nodes are and never how wide a name is. `kg/label-plan.ts` holds both
+steps, pure.
 
 ## What is derived — read this before trusting the org chart
 
@@ -175,3 +176,9 @@ touch device. The chips wrap rather than scroll or clip; each carries the
 colour its pillar's node and label already carry. The docked directory index
 and the entity/function/action lenses were removed — with nothing else on the
 page competing for attention, they covered more of the graph than they earned.
+
+The legend is bounded by the graph canvas and wraps its kind chips rather than
+running beyond the clipped edge. Below 900px the paddles become 80px by 40px
+and inset 12px; below 640px they become 56px by 32px and inset 8px. Keyboard
+`←` / `→` remains available at every width, so the smaller touch targets do not
+remove a way to turn the pillar wheel.
