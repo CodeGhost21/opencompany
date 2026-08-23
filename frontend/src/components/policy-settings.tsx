@@ -584,13 +584,8 @@ export function PolicySettings({ client, company }: Props) {
                   ))}
                 </datalist>
               )}
-              {unmatchedWiredTools.length > 0 && (
-                <p className="text-xs text-muted-foreground">
-                  {unmatchedWiredTools.join(", ")}{" "}
-                  {unmatchedWiredTools.length === 1
-                    ? "doesn't match any of the workflow tools wired here. It may still be a wired agent tool or a hosted effect kind."
-                    : "don't match any of the workflow tools wired here. They may still be wired agent tools or hosted effect kinds."}
-                </p>
+              {unmatchedNote && (
+                <p className="text-xs text-muted-foreground">{unmatchedNote}</p>
               )}
               {dirty && (
                 <Button
