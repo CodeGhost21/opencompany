@@ -797,6 +797,15 @@ pub struct ApprovalPolicy {
     /// arrives here and the gate applies it through
     /// [`mcp_call_reach`](crate::policy::consequence::mcp_call_reach).
     mcp_reads: McpReadSet,
+    /// The shared workspace, when this harness has one. It is queried only for
+    /// the four mutation tools' authorship-aware auto-tier exception.
+    workspace: Option<WorkspaceReader>,
+}
+
+#[derive(Clone)]
+struct WorkspaceReader {
+    store: Arc<dyn crate::ports::WorkspaceStore>,
+    company: CompanyId,
 }
 
 /// Where the per-agent daily spend cap reads today's spend from (issue #304):
@@ -840,6 +849,7 @@ impl ApprovalPolicy {
             // No read declaration by default, so every MCP bridge call gates
             // exactly as before — see `with_mcp_reads`.
             mcp_reads: McpReadSet::default(),
+            workspace: None,
         }
     }
 
@@ -879,6 +889,18 @@ impl ApprovalPolicy {
     /// pure `consequence_of` cannot see.
     pub fn with_mcp_reads(mut self, reads: McpReadSet) -> Self {
         self.mcp_reads = reads;
+        self
+    }
+
+    /// Installs the company workspace for authorship-aware mutation grading.
+    /// Without it, or without an agent identity, every workspace mutation keeps
+    /// the conservative per-call verdict.
+    pub fn with_workspace(
+        mut self,
+        store: Arc<dyn crate::ports::WorkspaceStore>,
+        company: CompanyId,
+    ) -> Self {
+        self.workspace = Some(WorkspaceReader { store, company });
         self
     }
 
@@ -1304,11 +1326,36 @@ impl ApprovalPolicy {
     /// gated base otherwise — so an undeclared server, an unreadable argument, or
     /// a policy with no declaration all keep the parking verdict this arm read
     /// before.
-    fn consequence_for(&self, tool: &str, args: &serde_json::Value) -> crate::policy::Consequence {
+    async fn consequence_for(
+        &self,
+        tool: &str,
+        args: &serde_json::Value,
+    ) -> crate::policy::Consequence {
         if crate::policy::consequence::is_mcp_bridge_tool(tool) {
             return crate::policy::consequence::mcp_call_reach(tool, args, &self.mcp_reads);
         }
-        crate::policy::consequence_of(tool, args)
+        let consequence = crate::policy::consequence_of(tool, args);
+        let Some(workspace) = self.workspace.as_ref() else {
+            return consequence;
+        };
+        let Some(agent) = self.agent.as_deref() else {
+            return consequence;
+        };
+        if crate::harness::built_in::workspace_tools::mutation_is_owned_by_agent(
+            &workspace.store,
+            &workspace.company,
+            agent,
+            tool,
+            args,
+        )
+        .await
+        {
+            return crate::policy::Consequence {
+                standing: crate::policy::Standing::Grantable,
+                ..consequence
+            };
+        }
+        consequence
     }
 }
 
@@ -1456,7 +1503,7 @@ impl ToolPolicy for ApprovalPolicy {
         // operator who does want a per-call gate has
         // `[policy].always_approve = ["web_search"]`, which wins over every
         // tier including `full`.
-        let consequence = self.consequence_for(tool, &request.arguments);
+        let consequence = self.consequence_for(tool, &request.arguments).await;
         let reach = consequence.reach;
         let by_mode = match self.mode {
             PolicyMode::Full => ToolPolicyDecision::Allow,

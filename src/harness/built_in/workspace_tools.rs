@@ -2223,6 +2223,53 @@ pub fn workspace_tools(
     tools
 }
 
+/// Whether a workspace mutation is confined to work the calling agent owns.
+///
+/// This is deliberately a policy helper rather than a tool-execution shortcut:
+/// the tools still validate their full arguments and enforce their own scope.
+/// The approval path asks the narrower question needed to avoid prompting for
+/// an agent tidying its own work, and fails closed on every unresolved or stale
+/// shape. A node is owned only when both durable origins name this agent; an
+/// operator or teammate edit must restore the approval gate.
+pub(crate) async fn mutation_is_owned_by_agent(
+    store: &Arc<dyn WorkspaceStore>,
+    company: &CompanyId,
+    agent_id: &str,
+    tool: &str,
+    args: &Value,
+) -> bool {
+    let workspace = CompanyWorkspace::new(store.clone(), company.clone(), agent_id.to_string());
+
+    if tool.eq_ignore_ascii_case(WORKSPACE_CREATE_TOOL) {
+        let Some(path) = args.get("path").and_then(Value::as_str) else {
+            return false;
+        };
+        let Ok(segments) = split_logical_path(path.trim()) else {
+            return false;
+        };
+        // A creation has no existing node to inspect. Its only affirmative safe
+        // shape is a direct child of the caller's home: the tool stamps both
+        // origins with this agent and cannot overwrite another node.
+        return segments.len() == 3
+            && workspace.is_strictly_inside_own_home(&segments[..2]);
+    }
+
+    let path = args.get("path").and_then(Value::as_str).map(str::trim);
+    let path = path.filter(|path| !path.is_empty());
+    let id = args.get("id").and_then(Value::as_str).map(str::trim);
+    let id = id.filter(|id| !id.is_empty());
+    let Ok(index) = workspace.index().await else {
+        return false;
+    };
+    let Ok(entry) = index.resolve(path, id) else {
+        return false;
+    };
+    let own_origin = WorkspaceOrigin::Agent {
+        id: agent_id.to_string(),
+    };
+    entry.node.created_by == own_origin && entry.node.updated_by == own_origin
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
