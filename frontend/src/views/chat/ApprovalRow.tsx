@@ -403,7 +403,7 @@ function BatchHeadline({
       <div className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-muted text-foreground">
         <Icon className="size-5" />
       </div>
-      {/* Same container-capped 12rem floor as `ApprovalHeadline` (#1617 review). */}
+      {/* Same container-capped 12rem floor as `ApprovalHeadline`. */}
       <div className="min-w-[min(12rem,100%)] flex-1">
         <p className="font-medium">{title}</p>
         <p className="text-xs text-muted-foreground">
