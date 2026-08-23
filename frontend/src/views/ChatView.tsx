@@ -750,7 +750,31 @@ export function ChatView({
       }
     }
 
-    const local = makeMessage("you", text, { parentId });
+    // Chips need a label and a `mine` flag, which the wire mention (target +
+    // span) does not carry; the directory supplies the label. The optimistic
+    // row is never replaced by history — the id reconcile below makes the
+    // durable row "known", so `hydrateChannel` skips it — which means the
+    // metadata has to land on this row or the just-sent line renders without
+    // chips until reload.
+    const localMentions = mentions?.map((m) => {
+      const row = mentionables?.find(
+        (e) =>
+          e.target.kind === m.target.kind &&
+          (m.target.kind === "everyone" ? true : e.target.id === m.target.id),
+      );
+      return {
+        text: m.text,
+        offset: m.offset,
+        label: row?.label ?? m.text,
+        // `@everyone` addresses the room, the author included; a pick of a
+        // teammate or person names somebody else.
+        mine: m.target.kind === "everyone",
+      };
+    });
+    const local = makeMessage("you", text, {
+      parentId,
+      mentions: localMentions?.length ? localMentions : undefined,
+    });
     append(target, local);
     setSending(true);
     // Claim the thread for the duration of the POST. The backend journals an
