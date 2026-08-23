@@ -73,7 +73,7 @@ test("capture settled graph layout + API data", async ({ page }) => {
         data[p] = { fetchError: String(e) };
       }
     }
-    return { count: groups.length, positions, data };
+    return { count: groups.length, positions, data, trajectory };
   });
   const out =
     process.env.CAPTURE_OUT ||
