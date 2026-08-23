@@ -772,7 +772,7 @@ jobs:
   # branch-protection rule pinned to it is unaffected), and the two run in
   # parallel.
   #
-  # One combination, not a matrix. Cargo features are additive, and `tinycortex`
+  # One combination, not a matrix. Cargo features are additive, and `tinymemory`
   # adds no new compilation on top of an `openhuman` build — the crate is already
   # an unconditional dependency of `openhuman_core` — so `openhuman,tinymemory`
   # covers both rot areas in a single compile. A default/`openhuman`/
