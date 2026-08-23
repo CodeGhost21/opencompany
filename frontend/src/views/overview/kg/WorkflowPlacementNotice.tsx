@@ -31,7 +31,7 @@ import { DERIVED_NOTICE } from "./adapter";
 export function WorkflowPlacementNotice() {
   return (
     <details className="group flex flex-col-reverse border-l border-os-border pl-3 font-mono text-3xs text-os-dim">
-      <summary className="flex cursor-pointer list-none items-center gap-1 rounded-sm-t px-1 py-0.5 underline decoration-dotted underline-offset-2 outline-none hover:bg-os-bg/85 hover:text-os-muted focus-visible:ring-1 focus-visible:ring-os-accent [&::-webkit-details-marker]:hidden">
+      <summary className="flex cursor-pointer list-none items-center gap-1 whitespace-nowrap rounded-sm-t px-1 py-0.5 underline decoration-dotted underline-offset-2 outline-none hover:bg-os-bg/85 hover:text-os-muted focus-visible:ring-1 focus-visible:ring-os-accent [&::-webkit-details-marker]:hidden">
         <Info className="h-3 w-3 shrink-0" aria-hidden="true" strokeWidth={2} />
         workflow placement is inferred
       </summary>

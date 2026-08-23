@@ -1516,16 +1516,21 @@ export function KnowledgeGraph({
 
   // compact legend for the fullscreen wheel: color + icon per kind, with the
   // Notes core in its vault orange
-  // `flex-wrap` + `max-w-full` are load-bearing, not cosmetic: this strip is
-  // pinned bottom-left inside the field's `overflow-hidden` box, so a single
-  // non-wrapping row is silently cut off at narrow widths — on mobile, and on
-  // desktop whenever the 13.5rem sidebar is expanded. The trailing caveat is
-  // the last item, so it is the first thing to disappear, which would put the
-  // one control that explains the wheel out of reach exactly where the wheel
-  // is hardest to read. `items-end` keeps every label on the summary's line
-  // when the caveat is open and its explanation has grown the box upward.
+  // `flex-wrap` + `max-w-full` are load-bearing, not cosmetic (issue #1385):
+  // this strip is pinned bottom-left inside the field's `overflow-hidden` box,
+  // so a single non-wrapping row is silently cut off at narrow widths — on
+  // mobile, and on desktop whenever the 13.5rem sidebar is expanded. The
+  // trailing caveat is the last item, so it is the first thing to disappear,
+  // which would put the one control that explains the wheel out of reach
+  // exactly where the wheel is hardest to read.
+  //
+  // `gap-y-1` keeps the wrapped rows tighter than the 12px column gap, and
+  // `items-end` keeps every label on the caveat summary's line: that caveat is
+  // a disclosure whose explanation opens in flow ABOVE its summary, so an open
+  // caveat grows this box upward and `items-center` would drag the labels up
+  // with it (see `WorkflowPlacementNotice`).
   const compactLegend = (
-    <div className="flex max-w-full flex-wrap items-end gap-3 rounded-sm-t border border-os-border-strong bg-os-bg/85 px-2.5 py-1.5 backdrop-blur">
+    <div className="flex max-w-full flex-wrap items-end gap-x-3 gap-y-1 rounded-sm-t border border-os-border-strong bg-os-bg/85 px-2.5 py-1.5 backdrop-blur">
       {(
         [
           { label: 'Notes', color: HUB_COLOR, Icon: CAT.self.Icon },
@@ -1537,7 +1542,7 @@ export function KnowledgeGraph({
           { label: 'SOP task', color: CAT.task.color, Icon: CAT.task.Icon },
         ] as const
       ).map(({ label, color, Icon }) => (
-        <span key={label} className="flex items-center gap-1.5 font-mono text-3xs text-os-muted">
+        <span key={label} className="flex whitespace-nowrap items-center gap-1.5 font-mono text-3xs text-os-muted">
           <Icon className="h-3 w-3" style={{ color }} strokeWidth={2} />
           {label}
         </span>
