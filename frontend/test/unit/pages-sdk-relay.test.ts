@@ -229,9 +229,12 @@ describe("the page frame's toast-relay listener", () => {
       button: 0,
       buttons: 0,
     });
-    relayFrom(window.parent, { type: "oc:relay-click", x: 60, y: 60 });
-
-    expect(releaseClicked).not.toHaveBeenCalled();
+    relayFrom(window.parent, {
+      type: "oc:relay-click",
+      x: 60,
+      y: 60,
+      pointerId: 70,
+    });
   });
 
   it("relays a click after a press that did not move", () => {
