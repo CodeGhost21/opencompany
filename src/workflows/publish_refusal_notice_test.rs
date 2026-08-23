@@ -345,7 +345,7 @@ async fn concurrent_workflow_runs_do_not_take_each_others_publish_refusals() {
             Arc::clone(&pool),
             deps.clone(),
             &record,
-            &file,
+            &file_a,
             json!({ "request": "run-a" }),
             &a,
         ),
