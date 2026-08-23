@@ -794,7 +794,7 @@ mod test {
                 .contains("discard every record")
         );
         assert!(
-            resolve(&s, "banana", None, None)
+            resolve(&s, "banana", None)
                 .expect_err("unknown")
                 .to_string()
                 .contains("names no migratable driver")
