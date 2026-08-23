@@ -21,8 +21,11 @@ import {
   activeMentionQuery,
   aliasSet,
   insertMention,
+  mentionsOutsideChannel,
   rankMentionables,
   reconcileMentions,
+  resolvableMentions,
+  stripCodeRegions,
   type Mention,
   type Mentionable,
 } from "@/views/chat/mentions";
@@ -31,6 +34,11 @@ interface Props {
   placeholder: string;
   disabled?: boolean;
   onSend: (text: string, intent?: MessageIntent, mentions?: Mention[]) => void;
+  /**
+   * The ids of the teammates on this channel, for the outside-channel warning.
+   * Absent when membership is unknown.
+   */
+  channelMemberIds?: string[];
   /**
    * Everything an `@` can name here, from `GET {scope}/chat/mentionables`.
    *
@@ -69,6 +77,45 @@ const WRAPS = [
 ] as const;
 
 /**
+ * The end of the `@name` the caret sits inside, or `from` when nothing follows.
+ *
+ * Scans forward while the text still reads as a name the directory knows: a
+ * character is included only if the run up to it is a prefix of some alias.
+ * That keeps `@Jane Doe` whole (two words, one name) while stopping at the
+ * space in `@engineer and …` the moment "engineer and" ceases to be a name —
+ * so picking over an existing mention replaces the mention, not the sentence.
+ */
+function activeMentionEnd(
+  text: string,
+  from: number,
+  nameStart: number,
+  aliases: ReadonlySet<string>,
+): number {
+  let i = from;
+  while (i < text.length) {
+    const ch = text[i];
+    const next =
+      /[A-Za-z0-9_.-]/.test(ch)
+        ? i + 1
+        : ch === " " && /[A-Za-z0-9_]/.test(text[i + 1] ?? "")
+          ? i + 1
+          : null;
+    if (next === null) return i;
+    const name = text.slice(nameStart, next).toLowerCase();
+    let prefix = false;
+    for (const alias of aliases) {
+      if (alias.startsWith(name)) {
+        prefix = true;
+        break;
+      }
+    }
+    if (!prefix) return i;
+    i = next;
+  }
+  return i;
+}
+
+/**
  * The composer dock.
  *
  * A bordered box that owns its own toolbar rather than a bare input: the
@@ -81,6 +128,7 @@ export function MessageComposer({
   disabled,
   onSend,
   compact,
+  channelMemberIds,
   deliverableChoice,
   mentionables,
 }: Props) {
@@ -93,6 +141,10 @@ export function MessageComposer({
   // state (not derived at render) because it has to survive the mouse leaving
   // the textarea to click a row.
   const [query, setQuery] = useState<{ start: number; query: string } | null>(null);
+  // Teammate ids the draft addresses who cannot see this channel. Checked on
+  // send; a non-empty list warns rather than sending, and a second send passes
+  // through after the user has confirmed.
+  const [outsideWarning, setOutsideWarning] = useState<string[] | null>(null);
   const [activeRow, setActiveRow] = useState(0);
   // What the NEXT line is for, and only the next one. It resets to "once"
   // after every send so neither a workflow request nor a "just chatting" mark
@@ -131,7 +183,11 @@ export function MessageComposer({
       closePicker();
       return;
     }
-    const next = activeMentionQuery(text, caret, aliases);
+    // Code regions are masked so an `@` inside backticks never opens the picker
+    // (a supplied mention would survive revalidation, since the host's code
+    // mask only applies to its own extraction). Masking preserves offsets, so
+    // the range this returns is valid against the raw `text`.
+    const next = activeMentionQuery(stripCodeRegions(text), caret, aliases);
     setQuery(next);
     setActiveRow(0);
   }
@@ -147,7 +203,20 @@ export function MessageComposer({
   function pick(entry: Mentionable) {
     const el = input.current;
     if (!query || !el) return;
-    const range = { start: query.start, end: el.selectionStart ?? query.start };
+    const caret = el.selectionStart ?? query.start;
+    // Replace the whole `@name`, not just the part before the caret. Moving the
+    // caret into an existing `@engineer` (the onSelect path) opens the picker
+    // with `query.query` = "eng"; replacing only that would leave `@ceo ineer`.
+    // A selection the reader made is honoured, so replacing spans what they
+    // selected when the selection reaches past the token.
+    const selectionEnd = Math.max(el.selectionEnd ?? caret, caret);
+    const tokenEnd = activeMentionEnd(
+      draft,
+      caret,
+      query.start + 1,
+      aliases ?? new Set<string>(),
+    );
+    const range = { start: query.start, end: Math.max(selectionEnd, tokenEnd) };
     const result = insertMention(draft, range, entry);
     setDraft(result.text);
     setMentions((current) =>
@@ -166,7 +235,29 @@ export function MessageComposer({
     if (!text || disabled) return;
     // The trim can shift every span, so the list is re-anchored against exactly
     // what is being sent — never against the untrimmed draft.
-    const sending = reconcileMentions(text, mentions);
+    let sending = reconcileMentions(text, mentions);
+    // A mention completed by hand (`@ceo ` — the query closed on the finished
+    // name) never entered `mentions`. When anything was picked, the host uses
+    // the supplied list exclusively, so sending just the picks would silently
+    // skip the typed one and the person would never be notified. Resolve every
+    // span the directory can name and send the union, keeping the picker's
+    // explicit targets for names the host's extraction would refuse as
+    // ambiguous.
+    if (sending.length && mentionables) {
+      for (const m of resolvableMentions(text, mentionables)) {
+        if (!sending.some((s) => s.text === m.text && s.offset === m.offset)) {
+          sending = [...sending, m];
+        }
+      }
+      sending = reconcileMentions(text, sending);
+    }
+    // On first send with outside-channel mentions, warn instead of sending.
+    const outside = mentionsOutsideChannel(sending, channelMemberIds);
+    if (outside.length > 0 && !outsideWarning) {
+      setOutsideWarning(outside);
+      return;
+    }
+    setOutsideWarning(null);
     setDraft("");
     setMentions([]);
     closePicker();
@@ -279,6 +370,20 @@ export function MessageComposer({
           </div>
         )}
 
+        {outsideWarning && (
+          <p
+            role="alert"
+            className="flex items-center gap-1.5 border-b bg-warning/10 px-3 py-1.5 text-xs text-muted-foreground"
+          >
+            <svg className="size-3.5 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+              <path d="M12 9v4m0 4h.01M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" />
+            </svg>
+            <span className="min-w-0">
+              <span className="font-medium">{outsideWarning.join(", ")}</span>
+              {" "}can't see this channel — send again to notify anyway
+            </span>
+          </p>
+        )}
         {/* A native textarea rather than the design-system one: the composer
             needs a ref to wrap the selection, and `Textarea` is a plain
             function component (React 18 — no ref forwarding). */}

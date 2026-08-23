@@ -9,7 +9,9 @@ import {
   mentionsOutsideChannel,
   rankMentionables,
   reconcileMentions,
+  resolvableMentions,
   stripCodeRegions,
+  utf8ByteLength,
   type Mention,
   type Mentionable,
 } from "@/views/chat/mentions";
@@ -51,6 +53,18 @@ describe("activeMentionQuery", () => {
 
   it("does not open inside an email address", () => {
     expect(activeMentionQuery("jane@acme", 9)).toBeNull();
+  });
+
+  /**
+   * The host's `opens_mention` draws the line at start, whitespace, and an
+   * opening bracket — anything else means the `@` belongs to some other token,
+   * and a picker there would resolve a mention the server's fallback
+   * extraction would refuse.
+   */
+  it("does not open after punctuation that is not a bracket", () => {
+    expect(activeMentionQuery("/docs/@eng", 10)).toBeNull();
+    expect(activeMentionQuery("$@eng", 5)).toBeNull();
+    expect(activeMentionQuery("x=@eng", 6)).toBeNull();
   });
 
   it("keeps the query open across a space, so a two-word name is reachable", () => {
@@ -215,6 +229,22 @@ describe("reconcileMentions", () => {
     expect(out.map((m) => m.offset)).toEqual([0, 10]);
   });
 
+  /**
+   * Two identical literals can name two different targets. Deleting the first
+   * leaves the second's text — but at the first's old offset. A greedy forward
+   * scan sees "the first span still there", keeps it, and drops the survivor;
+   * the server then notifies the wrong person. The survivor has to keep its
+   * identity.
+   */
+  it("keeps the survivor when two identical spans collapse onto one", () => {
+    const a: Mention = { target: { kind: "user", id: "a" }, text: "@Sam", offset: 0 };
+    const b: Mention = { target: { kind: "user", id: "b" }, text: "@Sam", offset: 6 };
+    const out = reconcileMentions("@Sam", [a, b]);
+    expect(out).toHaveLength(1);
+    expect(out[0].target).toEqual(b.target);
+    expect(out[0].offset).toBe(0);
+  });
+
   it("returns them in reading order", () => {
     const out = reconcileMentions("@engineer and @engineer", [
       { ...mention, offset: 14 },
@@ -304,6 +334,64 @@ describe("mentionablesFor", () => {
     const rows = mentionablesFor(directory, []);
     expect(rows.find((r) => r.target.kind === "desk")?.hint).toContain("1 teammate");
   });
+
+  it("excludes the current user from the picker when selfId is provided", () => {
+    const rows = mentionablesFor(directory, [], "engineer");
+    const labels = rows.map((r) => r.label);
+    expect(labels).not.toContain("engineer");
+    expect(labels).toContain("ceo");
+    expect(labels).toContain("Jane Doe");
+    expect(labels).toContain("everyone");
+  });
+
+  it("excludes a person from the picker when selfId matches", () => {
+    const dirWithPerson = {
+      ...directory,
+      people: [
+        { id: "me", label: "Me Myself", slug: "me" },
+        { id: "u2", label: "Other Person", slug: "other" },
+      ],
+    };
+    const rows = mentionablesFor(dirWithPerson, [], "me");
+    const labels = rows.map((r) => r.label);
+    expect(labels).not.toContain("Me Myself");
+    expect(labels).toContain("Other Person");
+  });
+
+  /**
+   * Two people can share a display name; the host mints each a distinct slug
+   * so one can be told from the other. Rows that would otherwise be
+   * indistinguishable have to say which one they will ping.
+   */
+  it("shows the slug when two people share a display name", () => {
+    const dirWithSams = {
+      agents: [],
+      people: [
+        { id: "u1", label: "Sam", slug: "sam-1" },
+        { id: "u2", label: "Sam", slug: "sam-2" },
+      ],
+      desks: [],
+      everyone: { label: "everyone", aliases: ["everyone"] },
+    };
+    const rows = mentionablesFor(dirWithSams, []);
+    const hints = rows.filter((r) => r.target.kind === "user").map((r) => r.hint);
+    expect(hints).toEqual(["Person — @sam-1", "Person — @sam-2"]);
+  });
+
+  it("keeps the plain hint for a name nobody shares", () => {
+    const rows = mentionablesFor(directory, []);
+    const jane = rows.find((r) => r.target.kind === "user");
+    expect(jane?.hint).toBe("Person");
+  });
+
+  it("includes everyone when selfId is not provided", () => {
+    const rows = mentionablesFor(directory, []);
+    const labels = rows.map((r) => r.label);
+    expect(labels).toContain("engineer");
+    expect(labels).toContain("ceo");
+    expect(labels).toContain("Jane Doe");
+    expect(labels).toContain("everyone");
+  });
 });
 
 describe("mentionsOutsideChannel", () => {
@@ -335,5 +423,101 @@ describe("mentionsOutsideChannel", () => {
       offset: 0,
     };
     expect(mentionsOutsideChannel([person], ["engineer"])).toEqual([]);
+  });
+
+  it("deduplicates when the same teammate is mentioned twice", () => {
+    const dup: Mention = {
+      target: { kind: "agent", id: "ceo" },
+      text: "@ceo",
+      offset: 20,
+    };
+    expect(mentionsOutsideChannel([offChannel, dup], ["engineer"])).toEqual([
+      "ceo",
+    ]);
+  });
+});
+
+describe("resolvableMentions", () => {
+  const directory: Mentionable[] = [
+    {
+      target: { kind: "agent", id: "engineer" },
+      label: "engineer",
+      aliases: ["engineer"],
+      inChannel: true,
+    },
+    {
+      target: { kind: "user", id: "u1" },
+      label: "Jane Doe",
+      aliases: ["jane doe", "jane-doe"],
+    },
+    {
+      target: { kind: "everyone" },
+      label: "everyone",
+      aliases: ["everyone", "channel", "here"],
+    },
+  ];
+
+  it("resolves every span the directory can name", () => {
+    const out = resolvableMentions("@engineer @Jane Doe", directory);
+    expect(out.map((m) => m.text)).toEqual(["@engineer", "@Jane Doe"]);
+    expect(out[0].target).toEqual({ kind: "agent", id: "engineer" });
+  });
+
+  it("leaves a name shared by two targets as text", () => {
+    const sam1: Mentionable = {
+      target: { kind: "user", id: "u1" },
+      label: "Sam",
+      aliases: ["sam"],
+    };
+    const sam2: Mentionable = {
+      target: { kind: "user", id: "u2" },
+      label: "Sam",
+      aliases: ["sam"],
+    };
+    expect(resolvableMentions("@Sam", [sam1, sam2])).toEqual([]);
+  });
+
+  it("ignores code regions", () => {
+    expect(resolvableMentions("`@engineer`", directory)).toEqual([]);
+    expect(
+      resolvableMentions("before\n```\n@engineer\n```\nafter", directory),
+    ).toEqual([]);
+  });
+
+  it("does not resolve an @ inside another token", () => {
+    expect(resolvableMentions("jane@engineer", directory)).toEqual([]);
+    expect(resolvableMentions("/docs/@eng", directory)).toEqual([]);
+  });
+
+  it("prefers the longest alias when one name prefixes another", () => {
+    const ann: Mentionable = {
+      target: { kind: "user", id: "a" },
+      label: "Ann",
+      aliases: ["ann"],
+    };
+    const annLee: Mentionable = {
+      target: { kind: "user", id: "b" },
+      label: "Ann Lee",
+      aliases: ["ann lee"],
+    };
+    const out = resolvableMentions("@Ann Lee", [ann, annLee]);
+    expect(out).toHaveLength(1);
+    expect(out[0].text).toBe("@Ann Lee");
+    expect(out[0].target).toEqual(annLee.target);
+  });
+
+  it("requires a clean boundary after the name", () => {
+    expect(resolvableMentions("@engineerish", directory)).toEqual([]);
+    expect(resolvableMentions("@engineer, thanks", directory)).toHaveLength(1);
+  });
+});
+
+describe("utf8ByteLength", () => {
+  it("counts bytes, not UTF-16 units", () => {
+    expect(utf8ByteLength("")).toBe(0);
+    expect(utf8ByteLength("hey @engineer")).toBe(13);
+    expect(utf8ByteLength("👍 ")).toBe(5);
+    expect(utf8ByteLength("é")).toBe(2);
+    expect(utf8ByteLength("café")).toBe(5);
   });
 });

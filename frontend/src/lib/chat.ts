@@ -219,6 +219,8 @@ export function makeMessage(
     steps?: TurnStep[];
     taskId?: string;
     messageId?: string;
+    /** Mention spans the host resolved against this message, for chip rendering. */
+    mentions?: Mention[];
   } = {},
 ): ChatMessage {
   return {
@@ -230,6 +232,7 @@ export function makeMessage(
     parentId: opts.parentId,
     steps: opts.steps,
     taskId: opts.taskId,
+    mentions: opts.mentions?.length ? opts.mentions : undefined,
   };
 }
 

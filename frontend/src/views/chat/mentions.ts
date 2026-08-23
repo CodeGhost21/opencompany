@@ -41,30 +41,24 @@ export interface Mentionable {
   inChannel?: boolean;
 }
 
-/** Whether `ch` is word-like, for the mention boundary rules. */
-function isWord(ch: string | undefined): boolean {
-  return ch !== undefined && /[A-Za-z0-9_]/.test(ch);
-}
-
 /**
  * Whether the `@` at `i` opens a mention.
  *
  * The condition that keeps `jane@acme.com` from opening a picker mid-address:
  * an `@` counts only at the start or after whitespace or an opening bracket,
- * and never immediately after a `<`.
+ * and never immediately after a `<`. Anything else — `/docs/@eng`, `$@eng` —
+ * is part of some other token, and a picker there would resolve a mention the
+ * host's fallback extraction (`opens_mention`) would refuse.
  */
 function opensMention(text: string, i: number): boolean {
   if (text[i] !== "@") return false;
   const before = text[i - 1];
   // Start of text always opens.
   if (before === undefined) return true;
-  // Never inside an existing `<@id>` token.
+  // Never inside an existing `<@id>` token. The bracket check below would
+  // already refuse it, but the rule is documented, so it is stated.
   if (before === "<") return false;
-  // Anything word-like before it means this `@` is part of something else —
-  // overwhelmingly an email address. This is `vercel/chat`'s accept condition
-  // minus its `isWord(text[i + 1])` half, which a picker cannot have: the
-  // first keystroke of a mention is a bare `@` with nothing after it yet.
-  return !isWord(before);
+  return /[\s([{]/.test(before);
 }
 
 /**
@@ -241,32 +235,139 @@ export function insertMention(
  * A mention that still exists verbatim but has shifted — because text was
  * inserted before it — is re-anchored rather than dropped, so typing at the
  * start of a draft does not silently unresolve everything after the caret.
+ *
+ * Two mentions with the **same literal** are matched by their recorded order,
+ * not greedily by text. When `@Sam @Sam` names two people and the first span
+ * is deleted, the remaining text is the second Sam's — but a forward scan sees
+ * the first Sam's old span still sitting at offset 0, keeps it, and drops the
+ * survivor as overlapping. Processing from the last mention back lets the
+ * survivor claim the freed occurrence first, and a displaced mention re-anchors
+ * to the free occurrence closest to where it was rather than to the earliest.
  */
 export function reconcileMentions(text: string, mentions: Mention[]): Mention[] {
   const used: Array<[number, number]> = [];
   const out: Mention[] = [];
-  for (const mention of mentions) {
-    if (text.slice(mention.offset, mention.offset + mention.text.length) === mention.text) {
-      used.push([mention.offset, mention.offset + mention.text.length]);
-      out.push(mention);
+  const overlaps = (at: number, len: number) =>
+    used.some(([s, e]) => at < e && at + len > s);
+  const claim = (mention: Mention, at: number) => {
+    used.push([at, at + mention.text.length]);
+    out.push({ ...mention, offset: at });
+  };
+
+  for (let i = mentions.length - 1; i >= 0; i--) {
+    const mention = mentions[i];
+    // The span is exactly where it was recorded: keep it as-is.
+    if (
+      !overlaps(mention.offset, mention.text.length) &&
+      text.slice(mention.offset, mention.offset + mention.text.length) ===
+        mention.text
+    ) {
+      claim(mention, mention.offset);
       continue;
     }
-    // Re-anchor to the first occurrence not already claimed by another mention,
-    // so two mentions of the same person do not collapse onto one span.
+    // Re-anchor to the free occurrence closest to where it was. Editing shifts
+    // a mention's home by the edit's size, so the nearest same-text span is
+    // the one most likely to be it — greedy first-free would hand a displaced
+    // later mention an occurrence that still belongs to an intact earlier one.
+    let nearest: number | undefined;
     let from = 0;
     for (;;) {
       const at = text.indexOf(mention.text, from);
       if (at === -1) break;
-      const overlaps = used.some(([s, e]) => at < e && at + mention.text.length > s);
-      if (!overlaps) {
-        used.push([at, at + mention.text.length]);
-        out.push({ ...mention, offset: at });
-        break;
+      if (
+        !overlaps(at, mention.text.length) &&
+        (nearest === undefined ||
+          Math.abs(at - mention.offset) < Math.abs(nearest - mention.offset))
+      ) {
+        nearest = at;
       }
       from = at + 1;
     }
+    if (nearest !== undefined) claim(mention, nearest);
   }
   return out.sort((a, b) => a.offset - b.offset);
+}
+
+/**
+ * The length of `s` in UTF-8 bytes, not UTF-16 units.
+ *
+ * The host defines a mention's `offset` as a byte position into the message
+ * body, and `revalidate` checks it with `text.get(offset..)`. JavaScript string
+ * indices are UTF-16, so the prefix up to a non-ASCII char is shorter in bytes —
+ * `👍 ask @engineer` puts the mention at UTF-16 index 8 but byte index 12.
+ * Sending the UTF-16 index would make the server look at the wrong characters
+ * and demote the mention. The composer tracks UTF-16 indices internally (they
+ * drive textarea and reconcile operations); this converts at the wire only.
+ */
+export function utf8ByteLength(s: string): number {
+  return new TextEncoder().encode(s).length;
+}
+
+/** Whether the character at `idx` cleanly ends a mention — mirrors `closes_mention`. */
+function closesMention(text: string, idx: number): boolean {
+  const ch = text[idx];
+  if (ch === undefined) return true;
+  return /[\s,;.!?:)\]}'"]/.test(ch);
+}
+
+/**
+ * Every `@name` in `text` the directory can resolve to exactly one target.
+ *
+ * This is the composer side of the host's `extract_with_known`: longest alias
+ * first, a name shared by two targets resolves to nobody, and code regions are
+ * masked so an `@` inside backticks never names anyone. The composer sends the
+ * picker's picks *and* what this resolves, because the host uses a non-empty
+ * supplied list exclusively — a mention completed by hand (`@ceo ` — the query
+ * closed on the finished name) never enters the picker's `mentions`, and a
+ * partial supplied list would silently drop it.
+ */
+export function resolvableMentions(
+  text: string,
+  mentionables: readonly Mentionable[],
+): Mention[] {
+  const masked = stripCodeRegions(text);
+  const out: Mention[] = [];
+  let i = 0;
+  while (i < masked.length) {
+    if (masked[i] !== "@" || !opensMention(masked, i)) {
+      i += 1;
+      continue;
+    }
+    const after = i + 1;
+    let best: { end: number; target: MentionTarget } | undefined;
+    let ambiguous = false;
+    for (const entry of mentionables) {
+      for (const alias of entry.aliases) {
+        const end = after + alias.length;
+        if (end > masked.length) continue;
+        if (masked.slice(after, end).toLowerCase() !== alias) continue;
+        if (!closesMention(masked, end)) continue;
+        if (!best || end > best.end) {
+          best = { end, target: entry.target };
+        } else if (end === best.end && !sameTarget(best.target, entry.target)) {
+          // Two targets claiming the same span: nobody gets pinged. A shorter
+          // alias never overrides a longer one, so only equal lengths collide.
+          ambiguous = true;
+        }
+      }
+    }
+    if (best && !ambiguous) {
+      out.push({ target: best.target, text: masked.slice(i, best.end), offset: i });
+      i = best.end;
+      continue;
+    }
+    // Unresolved or ambiguous: leave it as text, and skip past this `@` so a
+    // longer alias starting mid-word cannot re-match inside it.
+    i = after;
+  }
+  return out;
+}
+
+/** Whether two mention targets name the same thing. */
+function sameTarget(a: MentionTarget, b: MentionTarget): boolean {
+  if (a.kind !== b.kind) return false;
+  if (a.kind === "everyone") return true;
+  return a.id === b.id;
 }
 
 /**
@@ -305,21 +406,37 @@ export function mentionablesFor(
     everyone: { label: string; aliases: string[] };
   },
   channelMemberIds?: string[],
+  selfId?: string,
 ): Mentionable[] {
   const inChannel = new Set(channelMemberIds ?? []);
-  const agents: Mentionable[] = directory.agents.map((a) => ({
-    target: { kind: "agent", id: a.id },
-    label: a.id,
-    aliases: [...new Set([a.id.toLowerCase(), a.name.toLowerCase()])],
-    hint: a.role,
-    inChannel: inChannel.has(a.id),
-  }));
-  const people: Mentionable[] = directory.people.map((p) => ({
-    target: { kind: "user", id: p.id },
-    label: p.label,
-    aliases: [...new Set([p.label.toLowerCase(), p.slug])],
-    hint: "Person",
-  }));
+  const agents: Mentionable[] = directory.agents
+    .filter((a) => a.id !== selfId)
+    .map((a) => ({
+      target: { kind: "agent", id: a.id },
+      label: a.id,
+      aliases: [...new Set([a.id.toLowerCase(), a.name.toLowerCase()])],
+      hint: a.role,
+      inChannel: inChannel.has(a.id),
+    }));
+  // Two people can share a display name ("Sam"); the host mints each a distinct
+  // slug precisely so one can be told from the other. Rows that would otherwise
+  // be indistinguishable show the slug as their hint — a user picking "Sam" has
+  // to be able to tell which Sam the row will ping.
+  const labelCounts = new Map<string, number>();
+  for (const p of directory.people) {
+    labelCounts.set(p.label, (labelCounts.get(p.label) ?? 0) + 1);
+  }
+  const people: Mentionable[] = directory.people
+    .filter((p) => p.id !== selfId)
+    .map((p) => ({
+      target: { kind: "user", id: p.id },
+      label: p.label,
+      aliases: [...new Set([p.label.toLowerCase(), p.slug])],
+      hint:
+        (labelCounts.get(p.label) ?? 0) > 1
+          ? `Person — @${p.slug}`
+          : "Person",
+    }));
   const desks: Mentionable[] = directory.desks.map((d) => ({
     target: { kind: "desk", id: d.id },
     label: d.id,

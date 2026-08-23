@@ -51,6 +51,8 @@ import { MembersPane } from "./chat/MembersPane";
 import { MessageComposer } from "./chat/MessageComposer";
 import {
   mentionablesFor,
+  mentionsOutsideChannel,
+  utf8ByteLength,
   type Mention,
   type Mentionable,
 } from "./chat/mentions";
@@ -499,6 +501,20 @@ export function ChatView({
    * previous behaviour rather than to a broken one.
    */
   const [directory, setDirectory] = useState<Mentionable[] | null>(null);
+  /**
+   * Re-read the mention directory.
+   *
+   * Called on mount and after a roster write, so a teammate added here appears
+   * in the picker at once and one removed does not stay selectable until the
+   * next reload (server revalidation would demote it, but offering a row that
+   * can only fail is a bad row).
+   */
+  const reloadDirectory = useCallback(() => {
+    void client
+      .mentionables(company)
+      .then((d) => setDirectory(mentionablesFor(d)))
+      .catch(() => setDirectory(null));
+  }, [client, company]);
   useEffect(() => {
     let live = true;
     void client
@@ -720,7 +736,45 @@ export function ChatView({
     if (sending) return;
     const target = active.id;
     const chatId = activeThreadId;
-    const local = makeMessage("you", text, { parentId });
+
+    // Warn about @-mentioning a teammate who is not on this channel.
+    if (mentions?.length && inChannel) {
+      const channelIds = inChannel.map((m) => m.id);
+      const outside = mentionsOutsideChannel(mentions, channelIds);
+      if (outside.length) {
+        toast.warning(
+          outside.length === 1
+            ? "A teammate you @-mentioned is not on this channel — they won't see the message."
+            : `${outside.length} teammates you @-mentioned are not on this channel — they won't see the message.`,
+        );
+      }
+    }
+
+    // Chips need a label and a `mine` flag, which the wire mention (target +
+    // span) does not carry; the directory supplies the label. The optimistic
+    // row is never replaced by history — the id reconcile below makes the
+    // durable row "known", so `hydrateChannel` skips it — which means the
+    // metadata has to land on this row or the just-sent line renders without
+    // chips until reload.
+    const localMentions = mentions?.map((m) => {
+      const row = mentionables?.find(
+        (e) =>
+          e.target.kind === m.target.kind &&
+          (m.target.kind === "everyone" ? true : e.target.id === m.target.id),
+      );
+      return {
+        text: m.text,
+        offset: m.offset,
+        label: row?.label ?? m.text,
+        // `@everyone` addresses the room, the author included; a pick of a
+        // teammate or person names somebody else.
+        mine: m.target.kind === "everyone",
+      };
+    });
+    const local = makeMessage("you", text, {
+      parentId,
+      mentions: localMentions?.length ? localMentions : undefined,
+    });
     append(target, local);
     setSending(true);
     // Claim the thread for the duration of the POST. The backend journals an
@@ -749,7 +803,14 @@ export function ChatView({
         // Who the picker resolved. The host re-validates every entry and
         // demotes what no longer exists, so this is a suggestion; omitting it
         // asks the host to extract from the text instead.
-        mentions,
+        //
+        // The composer tracks offsets as UTF-16 indices (they drive textarea
+        // and reconcile operations); the host reads them as UTF-8 bytes, so
+        // each is converted to the byte length of its prefix here.
+        mentions?.map((m) => ({
+          ...m,
+          offset: utf8ByteLength(text.slice(0, m.offset)),
+        })),
       );
       // Reconcile the optimistic id first, for BOTH shapes. On the detached one
       // this is strictly better than what came before: since #983 the message is
@@ -779,6 +840,7 @@ export function ChatView({
               steps: r.steps,
               taskId: r.taskId,
               messageId: r.messageId,
+              mentions: r.mentions,
             }),
           )
         : [makeMessage("system", "(no reply)", { parentId })];
@@ -960,6 +1022,9 @@ export function ChatView({
     if (created) {
       const member = fromDto(created);
       setMembers((m) => [...m, member]);
+      // The host directory is re-read so the new teammate can be @-mentioned
+      // from the picker immediately, rather than after the next reload.
+      void reloadDirectory();
       // A successful host add proves the write plane exists, even for a
       // company that opened on the starter roster (fromHost still false from
       // `boot`) — flip it so this and later actions (inbox, budget) target
@@ -1011,6 +1076,8 @@ export function ChatView({
     try {
       await client.removeTeamMember(member.id, company);
       setMembers((ms) => ms.filter((m) => m.id !== member.id));
+      // The removed teammate leaves the picker now, not on the next reload.
+      void reloadDirectory();
     } catch (error) {
       if (error instanceof ApiError && error.status === 409) {
         // The only 409 this route still answers: a company must keep at
@@ -1125,6 +1192,7 @@ export function ChatView({
               // thread and copilot composers below go without.
               deliverableChoice={offersDeliverableChoice(active.kind)}
               mentionables={mentionables}
+              channelMemberIds={inChannel?.map((m) => m.id)}
             />
           </div>
 
@@ -1135,7 +1203,11 @@ export function ChatView({
               parent={parent}
               replies={threadReplies}
               sending={sending}
-              onSend={(text) => void send(text, undefined, parent.id)}
+              mentionables={mentionables}
+              channelMemberIds={inChannel?.map((m) => m.id)}
+              onSend={(text, _intent, mentions) =>
+                void send(text, undefined, parent.id, mentions)
+              }
               onClose={() => setOpenThreadId(null)}
             />
           )}
