@@ -114,14 +114,24 @@ describe("ApprovalCard decide ordering (#1406)", () => {
     expect(position & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
-  it("names each decision with the action it affects (#1411)", async () => {
+  it("names each decision with the request it affects (#1411)", async () => {
     await render(APPROVAL);
 
-    expect(container.querySelector('button[aria-label="Approve: Run a terminal command"]')).not.toBeNull();
-    expect(container.querySelector('button[aria-label="Decline: Run a terminal command"]')).not.toBeNull();
+    // The action phrase alone ("Run a terminal command") is identical for two
+    // same-kind cards, so the label carries the command and the asker too.
+    expect(
+      container.querySelector(
+        'button[aria-label="Approve: Run a terminal command — rm -rf /tmp/build && make release — asked by Ops"]',
+      ),
+    ).not.toBeNull();
+    expect(
+      container.querySelector(
+        'button[aria-label="Decline: Run a terminal command — rm -rf /tmp/build && make release — asked by Ops"]',
+      ),
+    ).not.toBeNull();
   });
 
-  it("names each permission revocation with the grant it affects (#1411)", async () => {
+  it("names each permission revocation with the grantee it affects (#1411)", async () => {
     await act(async () => {
       root.render(
         createElement(StandingPermissions, {
@@ -135,7 +145,9 @@ describe("ApprovalCard decide ordering (#1406)", () => {
     });
 
     expect(
-      container.querySelector('button[aria-label="Revoke: Fetch a web page — https://docs.rs only"]'),
+      container.querySelector(
+        "button[aria-label=\"Revoke Ops's permission: Fetch a web page — https://docs.rs only\"]",
+      ),
     ).not.toBeNull();
   });
 });
