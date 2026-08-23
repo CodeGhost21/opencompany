@@ -170,7 +170,7 @@ export function ApprovalsView({
    */
   const { items: rows, containerProps: queueHold } = useStableList(visible);
   const askerNames = useAskerNames(client, company, approvals);
-  const threadLinks = useApprovalThreadLinks(client, company, approvals);
+  const threadLinks = useApprovalThreadLinks(client, company, rows);
   const { grants, granterNames, refreshGrants } = useStandingGrants(client, company);
   /**
    * How many rows each turn's batch still has waiting (#842).
