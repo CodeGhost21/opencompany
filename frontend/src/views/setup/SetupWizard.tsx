@@ -624,7 +624,23 @@ export function SetupWizard({ client, onDone, onCancel }: Props) {
               Sign in and open my company
             </Button>
           ) : (
-            <Button onClick={onDone} data-testid="setup-open-console">
+            <Button
+              onClick={() => {
+                // The link branch above carries the landing fragment inside its
+                // URL. This branch hands off by remounting the shell in place
+                // (`onDone` re-probes and boots a fresh `AppShell`), so write
+                // the same fragment first: the fresh shell reads it, routes to
+                // the roster setup just built, suppresses the tour welcome, and
+                // clears the one-shot marker. Without it a no-sign-in host —
+                // and the "anyway" escapes for a mailed sign-in — lands on
+                // Overview with the tour free to open over that roster.
+                if (window.location.hash !== SETUP_HANDOFF_FRAGMENT) {
+                  window.location.hash = SETUP_HANDOFF_FRAGMENT;
+                }
+                onDone();
+              }}
+              data-testid="setup-open-console"
+            >
               {/* "Anyway" wherever something is genuinely outstanding — a
                   staged setting, or a sign-in we could not arrange. That word is
                   the only thing saying this button does not finish the job. */}
