@@ -50,7 +50,7 @@ import {
   ApprovalScopeControl,
   approvalIcon,
 } from "@/components/approval-card";
-import { Button } from "@/components/ui/button";
+import { Button, buttonVariants } from "@/components/ui/button";
 import { approvedLine } from "@/lib/approval-wording";
 import { approvalAction, money, payloadLeadLabel, payloadLeadTruncated } from "@/lib/language";
 import { cn } from "@/lib/utils";
