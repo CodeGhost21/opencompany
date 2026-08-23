@@ -66,6 +66,7 @@ async function render(
   decided: Record<string, Verdict> = {},
   failed: Record<string, string> = {},
   deciding: ReadonlyMap<string, Verdict> = new Map(),
+  compact = false,
 ) {
   await act(async () => {
     root.render(
@@ -73,6 +74,7 @@ async function render(
         approvals,
         now: T0 + 60_000,
         askerNames: new Map([["seo", "SEO Specialist"]]),
+        compact,
         deciding,
         decided,
         failed,
@@ -342,5 +344,23 @@ describe("the consolidated approval card", () => {
     expect(container.textContent ?? "").not.toContain("sign-offs");
     await click(button("Approve"));
     expect(decisions).toEqual([{ id: "a1", verdict: "approve", scope: { kind: "once" } }]);
+  });
+
+  it("keeps a chat approval to a quiet, differentiating two-line interruption", async () => {
+    await render([ESPN], {}, {}, new Map(), true);
+
+    const row = container.querySelector<HTMLElement>('[data-approval-inline="compact"]');
+    expect(row).not.toBeNull();
+    expect(row?.textContent).toContain("Fetch web page — https://espn.com/nba");
+    expect(row?.textContent).toContain("Asked by SEO Specialist");
+    expect(row?.querySelector('a[href="#/approvals"]')?.textContent).toBe("View details");
+    // Payload and grant scope are detailed decisions, so they stay on the
+    // Approvals page instead of making every interruption a full card.
+    expect(row?.querySelectorAll('input[type="radio"]')).toHaveLength(0);
+    expect(row?.className).not.toContain("border");
+
+    const approve = button("Approve");
+    expect(approve.className).toContain("hover:bg-primary");
+    expect(approve.className).not.toContain("bg-primary ");
   });
 });

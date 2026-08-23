@@ -1,11 +1,11 @@
 // The gated calls one turn parked, raised inside the conversation that produced
 // them (#379, consolidated by #842).
 //
-// The same content the Approvals page shows — headline, payload, asker, waiting
-// time, and the grant-scope choice (#431), all from `@/components/approval-card`
-// — laid out as a channel row so it reads as part of the thread rather than as a
-// panel bolted beside it. Sharing the scope control rather than restating it is
-// what keeps the two surfaces from offering different things for one approval.
+// Chat is where an approval interrupts the work, not where an operator studies
+// it. The transcript therefore carries a compact summary and one-off controls;
+// the Approvals page remains the full decision surface, with the payload and
+// grant-scope choice (#431). Other callers can still use this component's full
+// card, because a workflow inspector is not a chat transcript.
 //
 // ## One card, however many calls (#842)
 //
@@ -145,6 +145,7 @@ export function ApprovalRow({
   approvals,
   now,
   askerNames,
+  compact = false,
   deciding,
   decided,
   failed,
@@ -154,6 +155,8 @@ export function ApprovalRow({
   approvals: ApprovalSummary[];
   now: number;
   askerNames: Map<string, string>;
+  /** Render as a quiet interruption inside a chat transcript (#1330). */
+  compact?: boolean;
   /** The verdict an item is waiting on, keyed by approval id; empty when idle. */
   deciding: ReadonlyMap<string, Verdict>;
   /** Verdicts already witnessed — from this console or from the page. */
@@ -210,7 +213,13 @@ export function ApprovalRow({
 
   const actions = done ? undefined : (
     <>
-      <Button variant="outline" size="sm" disabled={busy} onClick={() => decideAll("deny")}>
+      <Button
+        variant={compact ? "ghost" : "outline"}
+        size="sm"
+        className={compact ? COMPACT_ACTION_CLASS : undefined}
+        disabled={busy}
+        onClick={() => decideAll("deny")}
+      >
         {awaiting("deny") ? (
           <Loader2 className="size-4 animate-spin" />
         ) : (
@@ -218,7 +227,13 @@ export function ApprovalRow({
         )}{" "}
         Decline
       </Button>
-      <Button size="sm" disabled={busy} onClick={() => decideAll("approve")}>
+      <Button
+        variant={compact ? "ghost" : "default"}
+        size="sm"
+        className={compact ? COMPACT_ACTION_CLASS : undefined}
+        disabled={busy}
+        onClick={() => decideAll("approve")}
+      >
         {awaiting("approve") ? (
           <Loader2 className="size-4 animate-spin" />
         ) : (
@@ -236,6 +251,29 @@ export function ApprovalRow({
   if (done) {
     return (
       <SettledApprovalReceipt approvals={approvals} decided={decided} />
+    );
+  }
+
+  if (compact) {
+    return (
+      <CompactApprovalRow
+        approvals={approvals}
+        now={now}
+        askerNames={askerNames}
+        actions={actions}
+        busy={busy}
+        status={
+          busy
+            ? awaiting("approve")
+              ? "Waiting for the teammate…"
+              : "Recording…"
+            : failedCount > 0
+              ? failureLabel(failedCount, approvals.length)
+              : settledCount > 0
+                ? partialLabel(settledCount, approvals.length)
+                : undefined
+        }
+      />
     );
   }
 
@@ -327,6 +365,70 @@ export function ApprovalRow({
     </div>
   );
 }
+
+/** The deliberately quiet pending-approval interruption used in chat (#1330). */
+function CompactApprovalRow({
+  approvals,
+  now,
+  askerNames,
+  actions,
+  busy,
+  status,
+}: {
+  approvals: ApprovalSummary[];
+  now: number;
+  askerNames: Map<string, string>;
+  actions: React.ReactNode;
+  busy: boolean;
+  status?: React.ReactNode;
+}) {
+  const lead = approvals[0];
+  const Icon = approvalIcon(lead.kind);
+
+  return (
+    <div className="px-4 py-1.5">
+      <section
+        aria-label={approvals.length > 1 ? "Approval request for several actions" : "Approval request"}
+        data-approval-id={lead.id}
+        data-approval-count={approvals.length}
+        data-approval-inline="compact"
+        className="flex items-center gap-2 rounded-lg px-2 py-1.5 hover:bg-muted/50"
+      >
+        <div className="flex size-7 shrink-0 items-center justify-center rounded-md bg-muted text-muted-foreground">
+          <Icon className="size-3.5" aria-hidden />
+        </div>
+        <div className="min-w-0 flex-1">
+          <p className="truncate text-sm font-medium">{compactLabel(approvals)}</p>
+          <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+            <ApprovalMeta approval={lead} now={now} askerNames={askerNames} status={status} />
+            {!busy && (
+              <a
+                href="#/approvals"
+                className="text-xs text-muted-foreground underline-offset-4 hover:text-foreground hover:underline focus-visible:text-foreground focus-visible:underline"
+              >
+                View details
+              </a>
+            )}
+          </div>
+        </div>
+        <div className="flex shrink-0 items-center gap-1">{actions}</div>
+      </section>
+    </div>
+  );
+}
+
+/** A differentiating, one-line summary rather than a second full approval card. */
+function compactLabel(approvals: ApprovalSummary[]): string {
+  const lead = approvals[0];
+  const detail = itemLabel(lead);
+  const action = approvalAction(lead);
+  const prefix = detail === action ? action : `${action} — ${detail}`;
+  return approvals.length > 1 ? `${prefix} + ${approvals.length - 1} more` : prefix;
+}
+
+/** Quiet until an operator targets a decision; the composer keeps the emphasis. */
+const COMPACT_ACTION_CLASS =
+  "text-muted-foreground hover:bg-primary hover:text-primary-foreground focus-visible:bg-primary focus-visible:text-primary-foreground";
 
 /** The compact, inspectable receipt a settled turn leaves in chat (#970). */
 function SettledApprovalReceipt({
