@@ -1275,7 +1275,7 @@ mod tests {
                     "requires_approval": true,
                 }),
             ),
-            node("done", NodeKind::Output, json!({})),
+            node("done", NodeKind::Transform, json!({})),
         ]);
         g.edges = vec![
             tinyflows::model::Edge {
