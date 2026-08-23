@@ -32,8 +32,11 @@
 //! credential: the model's *choices*, via the scripted endpoint
 //! [`gated_tool_turn_test`](crate::workflows::gated_tool_turn_test) established.
 
-use std::sync::Arc;
+use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex};
 
+use axum::Json;
+use axum::routing::post;
 use serde_json::json;
 
 use crate::company::{CompanyManifest, parse_workflow};
@@ -173,6 +176,82 @@ async fn run_publishing(dir: &std::path::Path) -> crate::ports::WorkflowRun {
     .expect("the run settles — a refused publish is not a failed run")
 }
 
+/// A two-lane scripted endpoint that holds both runs after they have each
+/// received a refused-publish result, before either can complete and drain.
+///
+/// The lane comes from the run request, which stays in every provider request.
+/// This deliberately shares one endpoint, one deps handle, and one cached
+/// roster agent: separate pools would evade the construction-time queue handle
+/// that made the production bug possible.
+async fn spawn_interleaved_publish_script() -> String {
+    let steps = Arc::new(Mutex::new(BTreeMap::<String, usize>::new()));
+    let barrier = Arc::new(tokio::sync::Barrier::new(2));
+    let app = axum::Router::new().route(
+        "/chat/completions",
+        post(move |Json(body): Json<serde_json::Value>| {
+            let steps = Arc::clone(&steps);
+            let barrier = Arc::clone(&barrier);
+            async move {
+                let rendered = body.to_string();
+                let (lane, source) = if rendered.contains("run-a") {
+                    ("run-a", "run-a.md")
+                } else if rendered.contains("run-b") {
+                    ("run-b", "run-b.md")
+                } else {
+                    panic!("scripted workflow request did not name a lane: {rendered}");
+                };
+                let step = {
+                    let mut guard = steps.lock().expect("script steps");
+                    let step = guard.entry(lane.to_string()).or_default();
+                    let current = *step;
+                    *step += 1;
+                    current
+                };
+                let message = match step {
+                    0 => json!({
+                        "role": "assistant",
+                        "content": null,
+                        "tool_calls": [{
+                            "id": format!("write-{lane}"),
+                            "type": "function",
+                            "function": { "name": "file_write", "arguments": json!({ "path": source, "content": "draft" }).to_string() }
+                        }]
+                    }),
+                    1 => json!({
+                        "role": "assistant",
+                        "content": null,
+                        "tool_calls": [{
+                            "id": format!("publish-{lane}"),
+                            "type": "function",
+                            "function": { "name": "publish_artifact", "arguments": json!({ "path": source }).to_string() }
+                        }]
+                    }),
+                    2 => {
+                        // At this point both tool calls have executed and placed
+                        // their refusals in the queue; releasing either run before
+                        // the other would not reproduce the old cross-run drain.
+                        barrier.wait().await;
+                        json!({ "role": "assistant", "content": "could not publish" })
+                    }
+                    _ => json!({ "role": "assistant", "content": "done" }),
+                };
+                Json(json!({
+                    "choices": [{ "index": 0, "message": message }],
+                    "usage": { "prompt_tokens": 12, "completion_tokens": 4 }
+                }))
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind scripted provider");
+    let addr = listener.local_addr().expect("scripted provider address");
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    format!("http://{addr}")
+}
+
 /// **The headline.** A refused publish reaches the operator as a run notice that
 /// names the file.
 ///
@@ -235,6 +314,61 @@ async fn a_workflow_node_whose_publish_was_refused_says_so_on_the_run() {
         "the apology is still the node's text — this test asserts the notice is ADDITIONAL, \
          not that the prose was suppressed: {output}"
     );
+}
+
+/// Concurrent runs keep their refused-publish notices separate even though both
+/// dispatch through one cached roster agent and its one queue handle.
+#[tokio::test]
+async fn concurrent_workflow_runs_do_not_take_each_others_publish_refusals() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let base_url = spawn_interleaved_publish_script().await;
+    let (mut deps, _journal) = deps(base_url, dir.path());
+    deps.artifacts = Some(Arc::new(FsOps::new(dir.path())));
+    let record = record();
+    let pool = Arc::new(HarnessPool::new());
+    pool.ensure(&record, &deps)
+        .await
+        .expect("roster builds once");
+    let file = parse_workflow(AGENT_GRAPH).expect("graph parses");
+    let a = WorkflowRunContext::new(false);
+    let b = WorkflowRunContext::new(false);
+
+    let (run_a, run_b) = tokio::join!(
+        super::runner::run_workflow(
+            Arc::clone(&pool),
+            deps.clone(),
+            &record,
+            &file,
+            json!({ "request": "run-a" }),
+            &a,
+        ),
+        super::runner::run_workflow(
+            Arc::clone(&pool),
+            deps.clone(),
+            &record,
+            &file,
+            json!({ "request": "run-b" }),
+            &b,
+        ),
+    );
+    let run_a = run_a.expect("run A settles");
+    let run_b = run_b.expect("run B settles");
+
+    for (run, own, sibling) in [
+        (run_a, "run-a.md", "run-b.md"),
+        (run_b, "run-b.md", "run-a.md"),
+    ] {
+        assert!(
+            run.notices.iter().any(|notice| notice.contains(own)),
+            "the run must report its own refused publish: {:?}",
+            run.notices
+        );
+        assert!(
+            !run.notices.iter().any(|notice| notice.contains(sibling)),
+            "the run must not report its sibling's refused publish: {:?}",
+            run.notices
+        );
+    }
 }
 
 /// The run's notice does not come at the cost of the #244 unpublished-work scan:
