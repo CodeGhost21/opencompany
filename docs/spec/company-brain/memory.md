@@ -45,11 +45,14 @@ The console's Brain header needs it: agents write memory **only** through the
 both ports, alongside the facts-only `factsUpdatedAtMillis`.
 
 The same response exposes the Brain's full-store display partition:
-`facts`, `teammateMemory`, and `taskOutcomes` are disjoint, and `totalItems`
-is their sum. Operator-fact context mirrors remain agent-recallable but are
-not counted as teammate memory, because the corresponding fact is already the
-operator-visible row. Unlike `GET /memory`, these counts are never capped;
-the list may show only the newest 500 non-mirror context rows.
+`facts`, `teammateMemory`, `taskOutcomes`, and `documentMemory` are disjoint,
+and `totalItems` is their sum. Operator-fact context mirrors remain
+agent-recallable but are not counted as teammate memory, because the
+corresponding fact is already the operator-visible row. Dropped-document and
+link chunks (`document/…`) get their own bucket for the same reason: they are
+operator-supplied material, and counting them as teammate memory would read
+as something an agent learned. Unlike `GET /memory`, these counts are never
+capped; the list may show only the newest 500 non-mirror context rows.
 
 Read that stamp as a max across chunks, not as one row per body: one address
 carries one row per *label* claiming it (issue #1300), a new label on an

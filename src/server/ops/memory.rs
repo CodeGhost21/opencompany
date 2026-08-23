@@ -346,9 +346,14 @@ struct MemoryStats {
     /// Operator facts plus the non-mirrored context chunks displayed by the
     /// Brain. This stays authoritative even when the list caps context rows.
     total_items: usize,
-    /// Context chunks written by teammates, excluding task outcomes and the
-    /// mirrors of operator-authored facts.
+    /// Context chunks written by teammates, excluding task outcomes, the
+    /// mirrors of operator-authored facts, and operator-dropped documents.
     teammate_memory: usize,
+    /// Context chunks produced by an operator-dropped document or link (the
+    /// `document/…` prefix), disjoint from teammate memory — the console
+    /// renders these as their own origin, and counting them as teammate memory
+    /// would attribute operator-supplied knowledge to an agent.
+    document_memory: usize,
     /// Stored task outcomes, excluding operator-fact mirrors.
     task_outcomes: usize,
 }
@@ -474,29 +479,38 @@ async fn memory_stats(company: ScopedCompany) -> Result<Json<MemoryStats>, ApiEr
     let facts_updated_at_millis = facts.first().map(|f| f.updated_at_millis).unwrap_or(0);
     // Count the same disjoint context populations as `context_entries` without
     // its display cap: operator-fact mirrors duplicate FactStore rows and must
-    // not inflate teammate memory, while task outcomes get their own bucket.
+    // not inflate teammate memory, task outcomes get their own bucket, and
+    // document/link chunks are operator-supplied material with their own
+    // origin (never something a teammate learned).
     let chunks = company.runtime.context.list(company.id(), "").await?;
     // Chunks list in insertion order, not freshness order, and a backend that
     // predates the stamp reports `0` — so take the max rather than the head.
     let chunks_stored_at_millis = chunks.iter().map(|m| m.stored_at_millis).max().unwrap_or(0);
     let mirror_prefix = format!("{OPERATOR_FACT_PREFIX}/");
     let outcome_prefix = format!("{OUTCOME_LABEL_PREFIX}/");
-    let (teammate_memory, task_outcomes) = chunks
+    let document_prefix = format!("{}/", crate::ingest::DOCUMENT_LABEL_PREFIX);
+    let (teammate_memory, task_outcomes, document_memory) = chunks
         .iter()
         .filter(|chunk| !chunk.label.starts_with(&mirror_prefix))
-        .fold((0, 0), |(teammate_memory, task_outcomes), chunk| {
-            if chunk.label.starts_with(&outcome_prefix) {
-                (teammate_memory, task_outcomes + 1)
-            } else {
-                (teammate_memory + 1, task_outcomes)
-            }
-        });
+        .fold(
+            (0, 0, 0),
+            |(teammate_memory, task_outcomes, document_memory), chunk| {
+                if chunk.label.starts_with(&outcome_prefix) {
+                    (teammate_memory, task_outcomes + 1, document_memory)
+                } else if chunk.label.starts_with(&document_prefix) {
+                    (teammate_memory, task_outcomes, document_memory + 1)
+                } else {
+                    (teammate_memory + 1, task_outcomes, document_memory)
+                }
+            },
+        );
     Ok(Json(MemoryStats {
         facts: facts.len(),
         facts_updated_at_millis,
         last_updated_at_millis: facts_updated_at_millis.max(chunks_stored_at_millis),
-        total_items: facts.len() + teammate_memory + task_outcomes,
+        total_items: facts.len() + teammate_memory + task_outcomes + document_memory,
         teammate_memory,
+        document_memory,
         task_outcomes,
     }))
 }
@@ -1227,6 +1241,7 @@ mod route_tests {
             "agent-memory/ceo/note",
             "task-outcome/ceo",
             "operator-fact/fact-123",
+            "document/contract/0",
         ]);
         let state = state_over(home.path(), context).await;
 
@@ -1248,10 +1263,39 @@ mod route_tests {
         assert_eq!(stats["facts"], 1);
         assert_eq!(stats["teammateMemory"], 1);
         assert_eq!(stats["taskOutcomes"], 1);
-        assert_eq!(stats["totalItems"], 3);
+        assert_eq!(stats["documentMemory"], 1);
+        assert_eq!(stats["totalItems"], 4);
         assert!(
             stats.get("agentChunks").is_none(),
             "the ambiguous all-chunks count must not reach the display"
+        );
+    }
+
+    /// The document-label contract (`ingest::chunk`): a dropped document or
+    /// link is operator-supplied material, so its chunks must never inflate
+    /// teammate memory. One multi-chunk upload is several `document/…` rows;
+    /// they get their own bucket while `totalItems` still counts them.
+    #[tokio::test]
+    async fn brain_stats_keep_document_chunks_out_of_teammate_memory() {
+        let home = tempfile::tempdir().unwrap();
+        let context = ScriptedContext::with_labels(&[
+            "document/contract/0",
+            "document/contract/1",
+            "document/contract/2",
+            "agent-memory/ceo/note",
+        ]);
+        let state = state_over(home.path(), context).await;
+
+        let (status, stats) = get_stats(&state).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(stats["facts"], 0);
+        assert_eq!(stats["teammateMemory"], 1);
+        assert_eq!(stats["documentMemory"], 3);
+        assert_eq!(stats["taskOutcomes"], 0);
+        assert_eq!(
+            stats["totalItems"], 4,
+            "document chunks stay in the display partition, just not under teammate memory"
         );
     }
 

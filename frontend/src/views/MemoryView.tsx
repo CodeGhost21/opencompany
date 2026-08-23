@@ -185,7 +185,10 @@ export function MemoryView({ client, company }: Props) {
     () => entries.filter((entry) => entry.origin !== "fact").length,
     [entries],
   );
-  const totalContextItems = (stats?.teammateMemory ?? 0) + (stats?.taskOutcomes ?? 0);
+  const totalContextItems =
+    (stats?.teammateMemory ?? 0) +
+    (stats?.taskOutcomes ?? 0) +
+    (stats?.documentMemory ?? 0);
 
   // The one engine state the *writing* half of this page has to respect: the
   // null engine takes every write and throws it away, so a live "New memory"
@@ -313,8 +316,7 @@ export function MemoryView({ client, company }: Props) {
         {stats && totalContextItems > listedContextItems && (
           <Alert>
             <AlertDescription>
-              Showing the newest {listedContextItems} of {totalContextItems} teammate memory and
-              task outcome items.
+              Showing the newest {listedContextItems} of {totalContextItems} context memory items.
             </AlertDescription>
           </Alert>
         )}
@@ -382,6 +384,7 @@ function HealthStrip({
     { label: "Total items", value: String(stats?.totalItems ?? 0) },
     { label: "Operator facts", value: String(stats?.facts ?? 0) },
     { label: "Teammate memory", value: String(stats?.teammateMemory ?? 0) },
+    { label: "Document chunks", value: String(stats?.documentMemory ?? 0) },
     { label: "Task outcomes", value: String(stats?.taskOutcomes ?? 0) },
     // Across every memory source, not just operator facts — teammates write only
     // context chunks, so a facts-only figure left this stat at "—" forever.

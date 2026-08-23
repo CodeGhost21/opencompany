@@ -69,8 +69,10 @@ export interface MemoryStats {
   lastUpdatedAtMillis: number;
   /** All displayable memory: facts plus non-mirrored context chunks. */
   totalItems: number;
-  /** Context written by teammates, excluding outcomes and operator-fact mirrors. */
+  /** Context written by teammates, excluding outcomes, documents, and mirrors. */
   teammateMemory: number;
+  /** Context chunks from operator-dropped documents/links, disjoint from teammate memory. */
+  documentMemory: number;
   /** Stored task outcomes, disjoint from teammate memory. */
   taskOutcomes: number;
 }
