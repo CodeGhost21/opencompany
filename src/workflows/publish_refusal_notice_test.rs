@@ -335,8 +335,9 @@ async fn concurrent_workflow_runs_do_not_take_each_others_publish_refusals() {
         .await
         .expect("roster builds once");
     let file_a = parse_workflow(AGENT_GRAPH).expect("graph parses");
-    let mut graph_b = AGENT_GRAPH.replace("agent = \\\"ceo-a\\\"", "agent = \\\"ceo-b\\\"");
+    let graph_b = AGENT_GRAPH.replace("agent = \\\"ceo-a\\\"", "agent = \\\"ceo-b\\\"");
     let file_b = parse_workflow(&graph_b).expect("graph parses");
+    let a = WorkflowRunContext::new(false);
     let b = WorkflowRunContext::new(false);
 
     let (run_a, run_b) = tokio::join!(
