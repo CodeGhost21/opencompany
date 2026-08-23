@@ -210,7 +210,9 @@ export function AgentRuns({
   const read = useCallback(async () => {
     const rows = await listRuns(client, company, {
       agent: agentId,
-      ...(wanted ? { status: wanted } : {}),
+      // Keep the open run in the refreshed answer so a live run that settles
+      // remains inspectable instead of disappearing from its detail panel.
+      ...(!openId && wanted ? { status: wanted } : {}),
       limit: RUN_PAGE,
     });
     // Belt and braces against a host that predates `?agent=` (and so, being
