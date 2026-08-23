@@ -75,7 +75,7 @@ fn console_dir_from_env() -> Option<PathBuf> {
 /// Keyed on the response's own content type rather than the request path,
 /// because the SPA fallback serves the shell at paths that look like anything
 /// at all — including, in the failure above, paths under `/assets/`.
-fn cache_console_response(mut response: Response) -> Response {
+fn cache_console_response(path: &str, mut response: Response) -> Response {
     use axum::http::header::{CACHE_CONTROL, CONTENT_TYPE, HeaderValue};
 
     let is_html = response
@@ -95,6 +95,14 @@ fn cache_console_response(mut response: Response) -> Response {
     response
         .headers_mut()
         .insert(CACHE_CONTROL, HeaderValue::from_static(policy));
+    // The page shell is an opaque-origin iframe, so its ES module imports send
+    // `Origin: null` even though the console and host share a URL origin. The
+    // module graph therefore needs explicit CORS permission. These SDK files
+    // are only the fixed React/site runtime; the company-authenticated bundle
+    // receives the same headers in `ops::pages`.
+    if path.starts_with("/pages-sdk/") && !is_html {
+        crate::server::ops::pages::apply_page_module_cors_headers(response.headers_mut());
+    }
     response
 }
 
@@ -156,7 +164,7 @@ fn router_with_console(state: AppState, console_dir: Option<PathBuf>) -> Router 
                         return StatusCode::NOT_FOUND.into_response();
                     }
                     match serve.oneshot(request).await {
-                        Ok(response) => cache_console_response(response.into_response()),
+                        Ok(response) => cache_console_response(request.uri().path(), response.into_response()),
                         Err(err) => match err {},
                     }
                 }

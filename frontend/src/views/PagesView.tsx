@@ -61,10 +61,9 @@ export function PagesView({ client, company }: Props) {
   const [pages, setPages] = useState<PageManifestDto[]>([]);
   const [activeSlug, setActiveSlug] = useState("");
   const iframeRef = useRef<HTMLIFrameElement>(null);
-  // The per-document bridge capability. Rotated on every iframe `load`, so a
-  // document the page navigated itself to — which shares the same
-  // `contentWindow` and could not have received the current token — is rejected.
+  // The per-document bridge capability, granted only to the initial document.
   const capabilityRef = useRef<string>("");
+  const loadsRef = useRef(0);
 
   // Only nav-visible pages appear in the sidebar (`nav_visible = false` in
   // `page.toml` deliberately keeps one off the nav, reachable only by direct
@@ -80,13 +79,16 @@ export function PagesView({ client, company }: Props) {
   );
   const active = visible.find((p) => p.slug === activeSlug) ?? visible[0];
 
-  // Mint a fresh capability for the newly loaded iframe document and hand it
-  // to that document via postMessage. Because `sandbox="allow-scripts"` makes
-  // the frame opaque-origin, we cannot target it by origin — but any document
-  // the page later navigates itself to has no way to learn this token, so only
-  // the exact document we just minted it for can speak through the bridge.
+  // Grant a capability only to the document the console asked the frame to
+  // load. A self-navigation retains the same WindowProxy and sandbox flags,
+  // so it cannot be distinguished by message source or origin; the second
+  // load must revoke access rather than minting a token for its new occupant.
   const handleLoad = useCallback(() => {
     const frame = iframeRef.current;
+    if (++loadsRef.current > 1) {
+      capabilityRef.current = "";
+      return;
+    }
     const cap =
       typeof globalThis.crypto?.randomUUID === "function"
         ? globalThis.crypto.randomUUID()
@@ -94,6 +96,14 @@ export function PagesView({ client, company }: Props) {
     capabilityRef.current = cap;
     frame?.contentWindow?.postMessage({ type: "oc:init", capability: cap }, "*");
   }, []);
+
+  // Changing the selected page creates a new iframe document. Its first load
+  // is eligible for a capability; any later load in that browsing context is
+  // a navigation and remains revoked.
+  useEffect(() => {
+    loadsRef.current = 0;
+    capabilityRef.current = "";
+  }, [active?.slug]);
 
   const loadRun = useRef(0);
   const loadPages = useCallback(async () => {
@@ -136,14 +146,13 @@ export function PagesView({ client, company }: Props) {
       //   * `event.origin === "null"` — only an opaque-origin sandboxed iframe
       //     reports the literal `"null"` origin; any other frame or tab has a
       //     real origin.
-      //   * the per-document `capability` — rotated on every `load`, so a
-      //     document the page navigated itself to cannot replay it. This is
-      //     what closes the post-navigation exfiltration window that
-      //     `event.source` alone (which survives navigation) would leave open.
+      //   * the per-document `capability` — granted only to the initial load.
+      //     Navigation revokes it, closing the window that `event.source`
+      //     alone (which survives navigation) would leave open.
       if (event.source !== iframeRef.current?.contentWindow) return;
       if (event.origin !== "null") return;
       if (!isGraphQLBridgeMessage(event.data)) return;
-      if (event.data.capability !== capabilityRef.current) return;
+      if (!capabilityRef.current || event.data.capability !== capabilityRef.current) return;
       const { id, query, variables } = event.data;
       const replyTo = event.source as Window;
       void client

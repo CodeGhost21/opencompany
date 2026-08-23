@@ -166,7 +166,7 @@ describe("PagesView bridge", () => {
     expect(graphqlRequest).not.toHaveBeenCalled();
   });
 
-  it("rejects a same-source oc:graphql message carrying a stale capability", async () => {
+  it("revokes bridge access when the frame navigates itself", async () => {
     const graphqlRequest = vi.fn();
     await show(clientWith(graphqlRequest));
 
@@ -175,8 +175,9 @@ describe("PagesView bridge", () => {
     const contentWindow = frame!.contentWindow as Window;
     // Mint a capability for the current document.
     const current = mintedCapability(frame as HTMLIFrameElement);
-    // The page then navigates itself to a new document; the parent rotates the
-    // capability on the resulting load. The forged message replays the OLD one.
+    // The page then navigates itself to a new document. Its load must receive
+    // no replacement `oc:init`, and its WindowProxy can no longer use the
+    // original capability.
     loadFrame(frame as HTMLIFrameElement);
 
     window.dispatchEvent(
@@ -191,7 +192,7 @@ describe("PagesView bridge", () => {
     expect(graphqlRequest).not.toHaveBeenCalled();
   });
 
-  it("mints a fresh capability and hands it to the loaded iframe document via oc:init", async () => {
+  it("hands the initial iframe document one capability via oc:init", async () => {
     const graphqlRequest = vi.fn();
     await show(clientWith(graphqlRequest));
     const frame = iframe();
@@ -206,9 +207,9 @@ describe("PagesView bridge", () => {
       const msg = call[0] as { type?: string; capability?: string };
       if (msg?.type === "oc:init") caps.push(msg.capability as string);
     }
-    expect(caps.length).toBe(2);
+    expect(caps.length).toBe(1);
     expect(caps[0]).toBeTruthy();
-    // A second load must rotate the token — a stale one must not stay live.
-    expect(caps[0]).not.toEqual(caps[1]);
+    // The second load represents a frame navigation, not a new document the
+    // console selected, so it cannot be granted bridge access.
   });
 });

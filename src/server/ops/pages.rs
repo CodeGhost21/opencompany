@@ -252,7 +252,7 @@ fn page_shell_html(slug: &str) -> String {
 </head>
 <body>
 <div id="root"></div>
-<script type="module">
+<script type="module" crossorigin="use-credentials">
   import * as React from "react";
   import * as ReactDOM from "react-dom/client";
   import Page from "./{slug}/bundle.mjs";
@@ -291,6 +291,7 @@ async fn page_shell(
         .body(Body::from(html))
         .map_err(|e| ApiError(OpenCompanyError::Store(format!("page shell failed: {e}"))))?;
     apply_pages_headers(response.headers_mut());
+    apply_page_module_cors_headers(response.headers_mut());
     Ok(response)
 }
 
@@ -361,6 +362,27 @@ fn apply_pages_headers(headers: &mut axum::http::HeaderMap) {
     );
 }
 
+/// Allows the opaque-origin page iframe to load an authenticated module.
+///
+/// The shell deliberately omits `allow-same-origin`, which makes module
+/// imports send `Origin: null`. Module graphs are fetched with CORS, and the
+/// `crossorigin="use-credentials"` attribute on the shell's module script
+/// ensures the browser includes the same-origin session cookie. This precise
+/// response pair is therefore required for `bundle.mjs`; the general CORS
+/// middleware cannot provide it because same-origin console deployments leave
+/// that middleware disabled.
+pub(crate) fn apply_page_module_cors_headers(headers: &mut axum::http::HeaderMap) {
+    headers.insert(
+        header::ACCESS_CONTROL_ALLOW_ORIGIN,
+        HeaderValue::from_static("null"),
+    );
+    headers.insert(
+        header::ACCESS_CONTROL_ALLOW_CREDENTIALS,
+        HeaderValue::from_static("true"),
+    );
+    headers.insert(header::VARY, HeaderValue::from_static("Origin"));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -429,5 +451,31 @@ mod tests {
             html.contains("\"react/jsx-runtime\": \"/pages-sdk/react.mjs\""),
             "react/jsx-runtime must resolve to the SDK's React bundle"
         );
+    }
+
+    #[test]
+    fn shell_loads_its_module_graph_with_credentials() {
+        let html = page_shell_html("revenue");
+        assert!(
+            html.contains("<script type=\"module\" crossorigin=\"use-credentials\">")
+        );
+    }
+
+    #[test]
+    fn bundle_cors_headers_allow_the_opaque_origin_with_credentials() {
+        let mut headers = axum::http::HeaderMap::new();
+        apply_page_module_cors_headers(&mut headers);
+
+        assert_eq!(
+            headers.get(header::ACCESS_CONTROL_ALLOW_ORIGIN).unwrap(),
+            "null"
+        );
+        assert_eq!(
+            headers
+                .get(header::ACCESS_CONTROL_ALLOW_CREDENTIALS)
+                .unwrap(),
+            "true"
+        );
+        assert_eq!(headers.get(header::VARY).unwrap(), "Origin");
     }
 }
