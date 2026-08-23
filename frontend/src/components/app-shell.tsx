@@ -2185,7 +2185,6 @@ export function AppShell({
               company={company}
               feed={feed}
               sub={sub}
-              onNavigate={(page) => navigate("settings", page)}
               onFlag={() => setFeedbackOpen(true)}
             />
           )}
