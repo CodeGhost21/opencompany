@@ -60,8 +60,11 @@ any to it. Facts are never capped and are not counted in `totalContext`.
 Keeping the two beside the rows is what makes the console's "showing the
 newest N of M" notice consistent: N (the rows rendered) and M (the uncapped
 count) come from one server-side read, so a write between requests can never
-make them disagree. The stats counts above are never capped; the list may show
-only the newest 500 non-mirror context rows.
+make them disagree. A `?query=` request is the exception: its rows are search
+matches, not "the newest N", so the metadata is reported as not applicable
+(`totalContext: 0`, `contextTruncated: false`) rather than implying a search
+result was dropped by the cap. The stats counts above are never capped; the
+list may show only the newest 500 non-mirror context rows.
 
 Read that stamp as a max across chunks, not as one row per body: one address
 carries one row per *label* claiming it (issue #1300), a new label on an
