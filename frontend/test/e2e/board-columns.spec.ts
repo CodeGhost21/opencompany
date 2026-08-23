@@ -143,7 +143,7 @@ test("an empty board leaves its column affordances to explain the empty state", 
 
     // Declared ledgers open as list rows (issue #1351) — switch this one to
     // its board to exercise the empty-board copy this test is about.
-    await page.getByRole("button", { name: "Board" }).click();
+    await page.locator('button[title="Group rows by status"]').click();
     await expect(page.getByTestId("ledger-board")).toBeVisible({ timeout: 15_000 });
 
     // Board columns already say what an empty board is for. A second status
