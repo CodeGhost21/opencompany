@@ -922,10 +922,20 @@ pub fn build_agent(
     // the brief cannot describe a namespace this agent was not granted. `shell`
     // in particular was wired since Cell A and named in no brief anywhere: an
     // agent asked to run something recorded a task about running it.
+    //
+    // `shell_wired`/`wants_code` only reflect the GRANT, but `deps.capabilities`
+    // (the per-turn capability tier resolved by `capability_budget::resolve_filter`
+    // — live at `HarnessPool::ensure`, not a hypothetical future cell) is applied
+    // to the tool vector later by `filter_by_capabilities`, below. Without this
+    // check the brief would describe `shell`/`code` on a turn where the capability
+    // tier denied them (a fail-closed metering error, or an exhausted budget),
+    // telling the agent to call a tool `filter_by_capabilities` already removed.
+    let shell_capability_denied = toolbelt::namespace_denied(&deps.capabilities, "shell");
+    let code_capability_denied = toolbelt::namespace_denied(&deps.capabilities, "code");
     persona.push_str(&toolbelt::sandbox_brief(
         wants_files,
-        shell_wired,
-        wants_code,
+        shell_wired && !shell_capability_denied,
+        wants_code && !code_capability_denied,
     ));
 
     // Issue #244: what a deliverable is, and how to hand one over. Only when
