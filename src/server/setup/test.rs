@@ -223,7 +223,7 @@ async fn the_payload_reports_acp_as_build_state_not_a_setting() {
 
     assert_eq!(dto["build"]["acp_in_build"], cfg!(feature = "acp"));
     assert_eq!(
-        dto["build"]["acp_transport_mounted"], false,
+        dto["build"]["acp_transport_mounted"], cfg!(feature = "acp"),
         "no /acp handler is mounted anywhere in this tree"
     );
     assert!(
