@@ -210,47 +210,6 @@ async fn facade_round_trip(provider: Arc<dyn MemoryProvider>, class: DriverClass
     crate::store::conformance::assert_delete_label_scoped(bound.context()).await;
 }
 
-// ── The embedded `namespace` driver, on a real store ─────────────────────────
-
-#[cfg(feature = "tinymemory-embedded")]
-mod embedded {
-    use super::*;
-
-    fn namespace_config(dir: &std::path::Path) -> MemoryDriverConfig {
-        MemoryDriverConfig {
-            mode: MemoryMode::Embedded,
-            driver_id: Some("namespace".into()),
-            url: None,
-            api_key: None,
-            data_dir: Some(dir.to_path_buf()),
-            deployment: Default::default(),
-        }
-    }
-
-    /// #1201/#1238 regression net: the durable SQLite store this host binds
-    /// under `OPENCOMPANY_MEMORY=embedded` + `OPENCOMPANY_MEMORY_DRIVER=
-    /// namespace`, under the upstream suite, through `open_driver`.
-    #[tokio::test]
-    async fn the_namespace_driver_upholds_the_contract() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let (provider, _) = open(&namespace_config(dir.path()));
-        assert_retains_then_conforms(provider).await;
-    }
-
-    /// The #1201 regression net, armed. On the pre-#1248 driver the
-    /// card-shaped digits in `facade_round_trip` tripped the scrubber into
-    /// corrupting the stored envelope, and the record was silently gone.
-    /// Post-#1248 the scrubber may still redact the digits — that is its job
-    /// — but the record, its identity and its prose must survive, which is
-    /// exactly what the round-trip asserts.
-    #[tokio::test]
-    async fn the_namespace_driver_round_trips_the_facades() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let (provider, class) = open(&namespace_config(dir.path()));
-        facade_round_trip(provider, class).await;
-    }
-}
-
 // ── Vendor doubles ───────────────────────────────────────────────────────────
 //
 // Ported from the vendored `adapters/remote/src/conformance_test.rs` at

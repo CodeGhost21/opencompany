@@ -2016,7 +2016,7 @@ pub struct ChunkMeta {
     /// re-`put` of an identical (body, label) is a no-op everywhere (#1300).
     /// A *new* label on an existing body stamps per-label on fs/sqlite and
     /// reports the address's first-write stamp on the single-record backends
-    /// (mongodb, the provider facade, the tinycortex engine) — so read
+    /// (mongodb, the provider facade) — so read
     /// freshness as the max across chunks rather than assuming one row per
     /// body.
     #[serde(default)]

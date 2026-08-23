@@ -53,7 +53,7 @@ const here = dirname(fileURLToPath(import.meta.url));
  * # `PW_LIVE_BRAIN=1` — the second lane
  *
  * Four specs need an agent that actually executes, which needs a host built
- * with `--features openhuman,tinycortex,mcp` **and** something for that harness
+ * with `--features openhuman,mcp` **and** something for that harness
  * to think with. When we manage the host, this config supplies the second half:
  * it starts `test/e2e/mock-brain.mjs` and `test/e2e/mcp-server.mjs` alongside
  * the host, and hands the host the inference endpoint through

@@ -409,7 +409,7 @@ pub struct AppState {
     stores: Option<crate::store::StorageHandles>,
     /// The memory engine overlay selected by `OPENCOMPANY_MEMORY`, when it is
     /// not the base store's own memory. Provisioning and boot apply it after
-    /// `stores` so a dedicated engine (TinyCortex) backs recall on top of any
+    /// `stores` so a dedicated provider can back recall on top of any
     /// base backend. `None` means the base backend's memory is used unchanged.
     ///
     /// Behind a lock because the engine is no longer decided only at boot: the
@@ -1051,7 +1051,6 @@ impl AppState {
             display_name: self.config.instance_name.clone(),
             capabilities: self.capabilities(),
             storage: self.storage_kind.as_str(),
-            memory: self.memory_spec(),
             // Not the raw stamp: a host already serving a company is set up as
             // far as the console is concerned, whether or not it was this flow
             // that got it there. `--company` predates setup, so every existing
@@ -1066,28 +1065,6 @@ impl AppState {
             // There, "has companies" is what supplies an admin to check
             // against, so the two questions come apart.
             setup_complete: self.setup_complete() || !self.registry().is_empty(),
-        }
-    }
-
-    /// What memory engine is live, for [`AppSpec::memory`].
-    ///
-    /// No overlay means the base storage backend serves memory — the
-    /// `OPENCOMPANY_MEMORY=store` default — so there is no separate engine to
-    /// name and nothing was negotiated.
-    fn memory_spec(&self) -> MemorySpec {
-        match self.memory_overlay() {
-            None => MemorySpec {
-                backend: crate::store::MemoryBackend::Store.as_str(),
-                driver_id: None,
-                capabilities: Vec::new(),
-                healthy: None,
-            },
-            Some(overlay) => MemorySpec {
-                backend: overlay.descriptor.backend.as_str(),
-                driver_id: Some(overlay.descriptor.driver_id.clone()),
-                capabilities: overlay.descriptor.capabilities.clone(),
-                healthy: overlay.descriptor.healthy,
-            },
         }
     }
 
@@ -1144,8 +1121,6 @@ pub struct AppSpec {
     /// The storage backend kind. Deliberately the kind alone: `/spec` is
     /// unauthenticated, so a path or connection string here would be a gift.
     pub storage: &'static str,
-    /// Which memory engine is live, and what it can do (issue #914).
-    pub memory: MemorySpec,
     /// Whether the first-run setup flow has been completed on this instance.
     ///
     /// Reported here, on the unauthenticated handshake the console already
@@ -1154,44 +1129,6 @@ pub struct AppSpec {
     /// unreachable exactly when it is needed. A bare boolean is the whole
     /// disclosure: the configuration itself lives behind `/api/v1/setup`.
     pub setup_complete: bool,
-}
-
-/// The bound memory engine, as `/spec` reports it.
-///
-/// Carries the engine's *identity* and its negotiated capabilities, and nothing
-/// else. The endpoint and the credential are deliberately absent for the same
-/// reason [`AppSpec::storage`] is a kind rather than a connection string: this
-/// route is unauthenticated. `driver_id` is safe by the contract's own reading —
-/// it names an engine, it is not a secret.
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
-pub struct MemorySpec {
-    /// `store` | `embedded` | `remote` | `null`.
-    pub backend: &'static str,
-    /// The bound engine's own name, when one is bound through the provider
-    /// contract. Absent for `store`, where the base backend serves memory and
-    /// there is no separate engine to name.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub driver_id: Option<String>,
-    /// The capability families negotiated at bind time.
-    ///
-    /// Empty means "not negotiated" — either the base backend serves memory, or
-    /// the in-pod engine is driven directly rather than through a bound
-    /// provider. An operator reads this to see what a hosted engine does *not*
-    /// support before a cycle discovers it.
-    pub capabilities: Vec<String>,
-    /// Whether the boot-time reachability probe found the engine usable —
-    /// `Ready` or `Degraded` (reachable, possibly reduced); only `Down`
-    /// serializes as `false`.
-    ///
-    /// Absent means "not probed": the base backend serves memory, the in-pod
-    /// engine is driven directly, or this host predates the probe — a client
-    /// must treat absence as unknown, not unhealthy. `false` is a bound
-    /// engine whose probe failed at boot: still bound. A boot-time snapshot,
-    /// not a live gauge — the provider can recover (or fail) after boot
-    /// without this bit moving, so treat `false` as "was unreachable at
-    /// boot", never "the next operation will fail".
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub healthy: Option<bool>,
 }
 
 #[cfg(test)]
