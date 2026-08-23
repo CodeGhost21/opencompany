@@ -97,7 +97,12 @@ describe("FeedbackForm", () => {
     await settle();
 
     expect(feedback).toHaveBeenLastCalledWith(
-      { category: "wrong-output", note: "The total was wrong.", preview: false },
+      {
+        category: "wrong-output",
+        note: "The total was wrong.",
+        preview: false,
+        item_id: "preview",
+      },
       "acme",
     );
     expect(container.textContent).toContain("Shared — thanks!");
