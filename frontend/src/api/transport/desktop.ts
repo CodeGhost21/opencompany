@@ -43,25 +43,6 @@ export interface EmbeddedInfo {
   instanceId?: string;
 }
 
-/**
- * How a connection authenticates, in the shape `oc_connect` takes.
- *
- * Note what is absent: any device token. The core resolves a paired device's
- * session from the keychain by connection id, so the console has nothing to
- * pass and — more to the point — nothing to leak. Only the platform bearer
- * travels, because that one genuinely arrives in the URL.
- */
-export interface DesktopCredential {
-  platformToken?: string;
-}
-
-/** What pairing tells the console. Carries no secret. */
-export interface PairedDevice {
-  company: string;
-  deviceId: string;
-  expiresAtMillis: number;
-}
-
 /** Connections the core has been told about, by id. */
 const registrations = new Map<string, Promise<void>>();
 
@@ -342,42 +323,6 @@ export async function sshTunnels(): Promise<SshTunnel[] | null> {
     console.warn("[desktop] this shell has no ssh tunnels", error);
     return null;
   }
-}
-
-/**
- * Redeems a pairing code for this machine.
- *
- * The token never comes back. It exists for one HTTP response, and the core
- * keeps that response to itself: it writes the session to the OS keychain and
- * answers with only what a person needs to see. A console that received the
- * token — even to hand it straight back — would be a console an injected script
- * could read it from.
- */
-export async function pairDevice(
-  id: string,
-  baseUrl: string,
-  code: string,
-  label?: string,
-): Promise<PairedDevice> {
-  const desktop = tauriCore();
-  if (!desktop) throw new Error("pairing a device needs the desktop application");
-  return desktop.invoke<PairedDevice>("oc_pair_device", {
-    connectionId: id,
-    baseUrl,
-    code,
-    label: label ?? null,
-  });
-}
-
-/**
- * Forgets this machine's stored session for a connection.
- *
- * Local only: the session still exists on the host until someone revokes it
- * from the devices list there. Conflating the two would mean unpairing one
- * laptop cut off another.
- */
-export async function forgetDevice(id: string): Promise<void> {
-  await tauriCore()?.invoke("oc_forget_device", { connectionId: id });
 }
 
 /** Test seam: forget every registration. */
