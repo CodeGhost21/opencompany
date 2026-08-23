@@ -116,6 +116,14 @@ impl AsyncImapReceiver {
     /// process, which is fine, we only need *a* provider installed.
     fn tls_connector() -> Result<tokio_rustls::TlsConnector, OpenCompanyError> {
         let _ = tokio_rustls::rustls::crypto::aws_lc_rs::default_provider().install_default();
+        #[cfg(test)]
+        if std::env::var_os("OPENCOMPANY_MAIL_TEST_INSECURE_TLS").is_some() {
+            let config = tokio_rustls::rustls::ClientConfig::builder()
+                .dangerous()
+                .with_custom_certificate_verifier(std::sync::Arc::new(TestOnlyCertificateVerifier))
+                .with_no_client_auth();
+            return Ok(tokio_rustls::TlsConnector::from(std::sync::Arc::new(config)));
+        }
         let root_store: tokio_rustls::rustls::RootCertStore =
             webpki_roots::TLS_SERVER_ROOTS.iter().cloned().collect();
         let config = tokio_rustls::rustls::ClientConfig::builder()
@@ -273,6 +281,68 @@ impl MailReceiver for AsyncImapReceiver {
     }
 }
 
+// The CI-only Stalwart fixture creates its own certificate. Keep its explicit
+// opt-out from certificate validation test-only: production builds always use
+// the Mozilla root set configured above.
+#[cfg(all(test, feature = "imap"))]
+#[derive(Debug)]
+struct TestOnlyCertificateVerifier;
+
+#[cfg(all(test, feature = "imap"))]
+impl tokio_rustls::rustls::client::danger::ServerCertVerifier for TestOnlyCertificateVerifier {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &tokio_rustls::rustls::pki_types::CertificateDer<'_>,
+        _intermediates: &[tokio_rustls::rustls::pki_types::CertificateDer<'_>],
+        _server_name: &tokio_rustls::rustls::pki_types::ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: tokio_rustls::rustls::pki_types::UnixTime,
+    ) -> Result<tokio_rustls::rustls::client::danger::ServerCertVerified, tokio_rustls::rustls::Error>
+    {
+        Ok(tokio_rustls::rustls::client::danger::ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &tokio_rustls::rustls::pki_types::CertificateDer<'_>,
+        _dss: &tokio_rustls::rustls::DigitallySignedStruct,
+    ) -> Result<tokio_rustls::rustls::client::danger::HandshakeSignatureValid, tokio_rustls::rustls::Error>
+    {
+        Ok(tokio_rustls::rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        _message: &[u8],
+        _cert: &tokio_rustls::rustls::pki_types::CertificateDer<'_>,
+        _dss: &tokio_rustls::rustls::DigitallySignedStruct,
+    ) -> Result<tokio_rustls::rustls::client::danger::HandshakeSignatureValid, tokio_rustls::rustls::Error>
+    {
+        Ok(tokio_rustls::rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<tokio_rustls::rustls::SignatureScheme> {
+        use tokio_rustls::rustls::SignatureScheme;
+
+        vec![
+            SignatureScheme::RSA_PKCS1_SHA1,
+            SignatureScheme::ECDSA_SHA1_Legacy,
+            SignatureScheme::RSA_PKCS1_SHA256,
+            SignatureScheme::ECDSA_NISTP256_SHA256,
+            SignatureScheme::RSA_PKCS1_SHA384,
+            SignatureScheme::ECDSA_NISTP384_SHA384,
+            SignatureScheme::RSA_PKCS1_SHA512,
+            SignatureScheme::ECDSA_NISTP521_SHA512,
+            SignatureScheme::RSA_PSS_SHA256,
+            SignatureScheme::RSA_PSS_SHA384,
+            SignatureScheme::RSA_PSS_SHA512,
+            SignatureScheme::ED25519,
+            SignatureScheme::ED448,
+        ]
+    }
+}
+
 #[cfg(all(test, feature = "imap"))]
 mod imap_tests {
     use super::*;
@@ -317,9 +387,17 @@ mod live_smoke {
     #[tokio::test]
     #[ignore = "live: needs OPENCOMPANY_MAIL_* + a real Stalwart mailbox"]
     async fn send_then_receive_roundtrip() {
-        let cfg = TenantMailboxConfig::from_env()
+        let mut cfg = TenantMailboxConfig::from_env()
             .expect("OPENCOMPANY_MAIL_* parse failed")
             .expect("set OPENCOMPANY_MAIL_ADDRESS + the SMTP/IMAP vars first");
+
+        // Stalwart's ephemeral CI container has a self-signed certificate.
+        // This knob only exists in test builds, and leaves production's TLS
+        // verification path unchanged. SMTP stays plaintext in that fixture;
+        // IMAPS still performs a real TLS handshake via the test-only verifier.
+        if std::env::var_os("OPENCOMPANY_MAIL_TEST_INSECURE_TLS").is_some() {
+            cfg.smtp.security = crate::server::ops::smtp::SmtpSecurity::None;
+        }
 
         let token = format!(
             "SMOKE-{}",
