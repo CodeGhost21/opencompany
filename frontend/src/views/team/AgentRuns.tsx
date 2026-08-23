@@ -345,6 +345,7 @@ export function AgentRuns({
         run={open}
         source={runSource(open, index)}
         now={now}
+        onDetail={onRunDetail}
         onBack={() => {
           openIdRef.current = null;
           setOpenId(null);
