@@ -375,7 +375,6 @@ mod test {
         let home = home_dir.path().to_path_buf();
         let github = Arc::new(MockGitHubClient::new());
         let state = state_with_company(&home, github.clone()).await;
-        let app = router(state);
 
         // Capture the item the way the built-in feedback tool / chat intent
         // does — persisted locally, never previewed, words never surfaced.
@@ -390,6 +389,8 @@ mod test {
             })
             .await
             .expect("captured");
+
+        let app = router(state);
 
         let confirm_body = serde_json::json!({
             "category": "bug",
