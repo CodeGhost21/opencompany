@@ -53,6 +53,20 @@ describe("the page frame's toast-relay listener", () => {
     );
   });
 
+  it("focuses the control a relayed click on a leaf inside it activates", () => {
+    const below = document.createElement("button");
+    const leaf = document.createElement("span");
+    below.append(leaf);
+    document.body.append(below);
+    mockElementFromPoint(leaf);
+
+    relayFrom(window.parent, { type: "oc:relay-click", x: 12, y: 34 });
+
+    // A native click on the icon/leaf inside the button focuses the button; the
+    // relay must do the same rather than leaving keyboard focus where it was.
+    expect(document.activeElement).toBe(below);
+  });
+
   it("dispatches a pointerdown for a relayed press", () => {
     const below = document.createElement("button");
     const pressed = vi.fn();
