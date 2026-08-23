@@ -94,9 +94,12 @@ afterEach(() => {
   delete (window as unknown as { __TAURI__?: unknown }).__TAURI__;
 });
 
-async function show(client: OpenCompanyClient) {
+async function show(
+  client: OpenCompanyClient,
+  props: { expectsShellRemount?: boolean } = {},
+) {
   await act(async () => {
-    root.render(createElement(SetupWizard, { client, onDone: done }));
+    root.render(createElement(SetupWizard, { client, onDone: done, ...props }));
   });
 }
 
