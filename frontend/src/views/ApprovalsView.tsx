@@ -384,7 +384,8 @@ export function ApprovalsView({
                 below. Each card carries its own deadline; this is the sentence
                 that stops that deadline being a surprise. */}
             <p className="mb-3 text-xs text-muted-foreground">
-              Each one has a deadline — {approvalTtlHours} {approvalTtlHours === 1 ? "hour" : "hours"}. Anything still undecided by then is declined on its own, and the work behind it moves on.
+              Each one has a deadline — {approvalTtlHours} {approvalTtlHours === 1 ? "hour" : "hours"}.{" "}
+              Anything still undecided by then is declined on its own, and the work behind it moves on.
             </p>
             <div className="flex flex-col gap-3" {...queueHold}>
               {rows.map((a) => (
