@@ -238,6 +238,9 @@ describe("policy tier changes", () => {
   it("keeps tightening one click and softly flags unwired tool names", async () => {
     const client = makeClient({ status: { ...STATUS, mode: "full" } });
     await mount(client);
+    await act(async () => {
+      await Promise.resolve();
+    });
 
     const auto = Array.from(container.querySelectorAll<HTMLButtonElement>('[role="radio"]')).find(
       (button) => button.textContent?.includes("Auto"),
