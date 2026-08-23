@@ -486,7 +486,13 @@ export function AgentDetailView({
           <>
             <Identity
               agent={agent}
-              onPickAvatar={() => setAvatarOpen(true)}
+              // The host's own `editable` list decides, never this file: a host
+              // predating the field lists no `avatar`, and offering the picker
+              // there would be a click whose save is a 400. Same rule the edit
+              // form's fields follow.
+              onPickAvatar={
+                agent.editable.includes("avatar") ? () => setAvatarOpen(true) : undefined
+              }
               action={
                 !editing ? (
                   <Button
