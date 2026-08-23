@@ -194,7 +194,7 @@
 //!   cut away on precisely the listings long enough to need it. Both now sit
 //!   above the entries, and the entries stop on bytes rather than on a count.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 
