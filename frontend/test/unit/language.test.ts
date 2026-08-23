@@ -151,6 +151,65 @@ describe("the decide buttons' label (#1411)", () => {
       "Run a terminal command — make — asked by ceo",
     );
   });
+
+  it("tells same-first-lines cards apart by the dropped argument, not the id", () => {
+    // Two `http_request`s sharing url, method and headers differ only in the
+    // body, which is what the line cap omits. The button must name that body's
+    // start rather than the opaque card id — the same words the card body uses.
+    const first = decisionLabel(
+      approval({
+        kind: "http_request",
+        payload: {
+          url: "https://x.test",
+          method: "POST",
+          headers: "a: b",
+          body: '{"q": 1}',
+        },
+      }),
+      askers,
+    );
+    const second = decisionLabel(
+      approval({
+        kind: "http_request",
+        payload: {
+          url: "https://x.test",
+          method: "POST",
+          headers: "a: b",
+          body: '{"q": 2}',
+        },
+      }),
+      askers,
+    );
+    expect(first).not.toBe(second);
+    expect(first).toContain('body: {"q": 1}');
+    expect(second).toContain('body: {"q": 2}');
+    expect(first).not.toContain("card a1");
+  });
+
+  it("says why there is no lead when the host withheld the contents", () => {
+    // A non-admin's withheld card has no payload to lead with, but it must not
+    // read as an ordinary no-argument approval — the resolve route accepts any
+    // member, and the phrase is the one `ApprovalRow` already uses.
+    expect(
+      decisionLabel(approval({ kind: "payment.send", contents_hidden: true }), askers),
+    ).toBe("Send a payment — details hidden by your role — asked by Sam");
+  });
+
+  it("bounds one long value instead of becoming a wall of text", () => {
+    // The host bounds each value at 2,000 characters, so a long shell command
+    // must not stretch the button name into one. The clip keeps the command's
+    // start and end, with an ellipsis for the middle.
+    const label = decisionLabel(
+      approval({ kind: "shell", payload: { command: "x".repeat(2_000) } }),
+      askers,
+    );
+    expect(label.length).toBeLessThanOrEqual(160);
+    expect(label.startsWith("Run a terminal command — ")).toBe(true);
+    expect(label.endsWith(" — asked by Sam")).toBe(true);
+    const lead = label.slice("Run a terminal command — ".length, -" — asked by Sam".length);
+    expect(lead.startsWith("x".repeat(59))).toBe(true);
+    expect(lead.endsWith("…x".repeat(59))).toBe(true);
+  });
 });
 
 describe("a kind nobody has named", () => {
