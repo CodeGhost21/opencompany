@@ -417,7 +417,18 @@ function CompactApprovalRow({
   );
 }
 
-/** A differentiating, one-line summary rather than a second full approval card. */
+/**
+ * A differentiating, one-line summary rather than a second full approval card.
+ *
+ * A batch's line has to name what the one Approve covers, never just the first
+ * call. When every call is the same action, the lead's words plus the count
+ * still tell the truth — "Fetch a web page … + 2 more" is three of the same
+ * thing. The moment the batch mixes actions, that phrasing would hide a payment
+ * behind a fetch, so the line names every distinct action and states the count
+ * plainly, the way `BatchHeadline` does. Either way, every amount in the batch
+ * is named: an operator approving money must see its value whether the payment
+ * is first in the batch or not.
+ */
 function compactLabel(approvals: ApprovalSummary[]): string {
   const lead = approvals[0];
   const action = approvalAction(lead);
@@ -431,7 +442,36 @@ function compactLabel(approvals: ApprovalSummary[]): string {
   // also sent a payload line to describe it.
   const amount = lead.amount_usd != null ? ` · ${money(lead.amount_usd)}` : "";
   const label = `${prefix}${amount}`;
-  return approvals.length > 1 ? `${label} + ${approvals.length - 1} more` : label;
+
+  if (approvals.length === 1) return label;
+
+  const rest = approvals.slice(1);
+
+  // One action, many calls. The lead's words and the count stay — the rest are
+  // the same action — but any further amounts are appended so a second payment
+  // in the batch is seen before the one Approve is pressed.
+  if (rest.every((a) => a.kind === lead.kind)) {
+    const otherAmounts = rest
+      .filter((a) => a.amount_usd != null)
+      .map((a) => money(a.amount_usd as number));
+    const amounts = otherAmounts.length > 0 ? ` · ${otherAmounts.join(" · ")}` : "";
+    return `${label}${amounts} + ${rest.length} more`;
+  }
+
+  // Mixed actions: "Fetch a web page + 1 more" over a card that also sends a
+  // payment would hide it, so the line says how many actions and names each
+  // distinct one — never letting the lead speak for the rest. Amounts are
+  // named for the whole batch, wherever the money is.
+  const kinds = [...new Set(approvals.map(approvalAction))];
+  const named =
+    kinds.length === 2
+      ? `${kinds[0]} and ${kinds[1]}`
+      : `${kinds.slice(0, -1).join(", ")}, and ${kinds[kinds.length - 1]}`;
+  const amounts = approvals
+    .filter((a) => a.amount_usd != null)
+    .map((a) => money(a.amount_usd as number));
+  const amountText = amounts.length > 0 ? ` · ${amounts.join(" · ")}` : "";
+  return `${approvals.length} actions need your sign-off — ${named}${amountText}`;
 }
 
 /** Quiet until an operator targets a decision; the composer keeps the emphasis. */
