@@ -20,7 +20,7 @@
  *
  * Four of the suite's best specs sit behind `LIVE_BRAIN`, and they are the ones
  * that exercise the product rather than the console's own rendering. CI runs
- * them: `Console E2E (live brain)` builds `--features openhuman,tinycortex,mcp`
+ * them: `Console E2E (live brain)` builds `--features openhuman,mcp`
  * and `playwright.config.ts` stands up `mock-brain.mjs` and `mcp-server.mjs`
  * behind it. The default-feature `Console E2E` lane still skips them, because
  * on a host without the harness the thing they test is not compiled in — that
@@ -28,7 +28,7 @@
  */
 
 /**
- * A host built with `--features openhuman,tinycortex,mcp` **and** an inference
+ * A host built with `--features openhuman,mcp` **and** an inference
  * backend behind it — either the mock that echoes `__MOCK_LLM__` or one whose
  * tool choices are scripted (`SPAWNONE`).
  *
@@ -109,7 +109,7 @@ export const MCP_SERVER =
 
 /** The reason string a `LIVE_BRAIN` skip carries, so no skip is ever bare. */
 export const LIVE_BRAIN_REASON =
-  "needs a --features openhuman,tinycortex,mcp host plus an inference backend; " +
+  "needs a --features openhuman,mcp host plus an inference backend; " +
   "set PW_LIVE_BRAIN=1 to run. The `Console E2E (live brain)` CI lane does " +
   "(issue #467).";
 
@@ -146,7 +146,7 @@ export const LIVE_LLM_BIND = process.env.PW_LIVE_LLM_BIND || "127.0.0.1:8096";
 
 /** The reason string a `LIVE_LLM` skip carries, so no skip is ever bare. */
 export const LIVE_LLM_REASON =
-  "needs a --features openhuman,tinycortex,mcp host pointed at a real model; " +
+  "needs a --features openhuman,mcp host pointed at a real model; " +
   "run `npm run e2e:live-llm` (which sets PW_LIVE_LLM=1 and starts " +
   "test/e2e/live-brain-proxy.mjs in front of the configured router).";
 

@@ -2732,8 +2732,8 @@ pub async fn assert_fact_store(facts: Arc<dyn FactStore>) {
 /// backend keeps one claim per (addr, label) since #1300 (see
 /// [`assert_identical_body_two_labels`]), but a *new* label on an existing
 /// body stamps per-label on fs/sqlite and keeps the address's first-write
-/// stamp on the single-record backends (mongodb, the provider facade, the
-/// tinycortex engine). Readers of the stamp take the max across chunks for
+/// stamp on the single-record backends (mongodb, the provider facade).
+/// Readers of the stamp take the max across chunks for
 /// that reason.
 pub async fn assert_context_chunk_stamps(context: Arc<dyn ContextStore>) {
     let alpha = CompanyId::new("alpha");
