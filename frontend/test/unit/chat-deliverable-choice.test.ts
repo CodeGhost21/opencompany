@@ -87,11 +87,10 @@ async function chatBody(intent?: MessageIntent) {
  * `"chat"` is that control, and these pin the only thing the console decides
  * about it: which values reach the body.
  *
- * The omission half is the compatibility guarantee. "Do it once" is the default
- * *because nothing is sent for it*, so an unmarked message posts a body
- * byte-identical to one from a console that predates every one of these
- * controls — which is what lets the host treat an absent field as "no choice"
- * rather than having to tell two kinds of client apart.
+ * The omission half is the compatibility guarantee. Both "Do it once" and no
+ * selection send nothing, so an unmarked message posts a body byte-identical to
+ * one from a console that predates every one of these controls. The host can
+ * therefore apply its normal triage without having to distinguish client ages.
  */
 describe("client.chat — what the composer's choice puts on the wire", () => {
   it("sends the new chat intent explicitly, under the existing key", async () => {
