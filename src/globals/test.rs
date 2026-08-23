@@ -110,6 +110,7 @@ fn the_default_tool_belt_carries_every_namespace_the_wildcard_excludes() {
         vec![
             "*".to_string(),
             "workspace.*".to_string(),
+            "workspace.write".to_string(),
             "media".to_string(),
             "composio".to_string(),
             "search".to_string(),
