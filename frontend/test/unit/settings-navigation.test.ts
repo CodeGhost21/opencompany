@@ -36,11 +36,32 @@ describe("Settings navigation (issue #1468)", () => {
   });
 
   it("renders linkable rows and gives narrow-screen navigation its missing context", () => {
-    const settings = read("views/SettingsView.tsx");
+    const section = read("views/SettingsSection.tsx");
+    // The settings sub-pages (one view per SETTINGS_PAGES id). Devices and
+    // Connections became pages of their own elsewhere in the redesign, so the
+    // list tracks the ids settings-pages.ts actually declares.
+    const settingsPages = [
+      "SettingsView.tsx",
+      "PeopleView.tsx",
+      "OAuthView.tsx",
+      "McpServersView.tsx",
+      "InferenceView.tsx",
+      "HostingView.tsx",
+      "SearchView.tsx",
+      "SkillsView.tsx",
+      "UsageView.tsx",
+    ].map((page) => read(`views/${page}`));
 
-    expect(settings.match(/href=\{`#\/settings\/\$\{item\.id\}`\}/g)).toHaveLength(2);
-    expect(settings).toContain("title={item.hint}");
-    expect(settings).toContain("{activePage.hint}");
-    expect(settings).toContain('className="text-2xl font-semibold tracking-tight lg:sr-only"');
+    expect(section.match(/href=\{`#\/settings\/\$\{item\.id\}`\}/g)).toHaveLength(2);
+    expect(section).toContain("title={item.hint}");
+    expect(section).toContain("{activePage.hint}");
+    for (const page of settingsPages) {
+      expect(page).toContain('className="text-2xl font-semibold tracking-tight"');
+    }
+    // The General page draws no visible title of its own — the rail already
+    // says "Settings" (issue #1221) — so its heading is screen-reader-only.
+    expect(read("views/SettingsView.tsx")).toContain(
+      'className="text-2xl font-semibold tracking-tight lg:sr-only"',
+    );
   });
 });
