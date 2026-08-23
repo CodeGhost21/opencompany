@@ -112,11 +112,6 @@ pub mod publish;
 /// records a decline, and can never fail the run it follows. Test-only.
 #[cfg(test)]
 mod publish_turn_test;
-/// Issue #245, agent half: `repo_checkout` / `repo_pr` behind an explicit
-/// `repo` grant — a **confined** working tree cloned out of the host's mirror
-/// (a full object copy, then every reference back to the mirror severed), plus
-/// the per-turn ledger that deletes it again. See [`repo`].
-pub mod repo;
 pub mod run_trace;
 pub mod run_turn;
 pub mod search;

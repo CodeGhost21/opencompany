@@ -45,10 +45,6 @@ pub mod memory_ingest;
 pub mod pages;
 pub mod policy;
 pub mod read_state;
-/// Issue #245 (operator half): bind a real repository to a company, list what
-/// is bound, revoke one. The whole credential path, with **no agent surface**
-/// behind it â no grant, no tool. See [`repos`].
-pub mod repos;
 pub mod runs;
 pub mod scope;
 /// Per-company web search settings: which provider the agents search through,
@@ -205,7 +201,6 @@ pub fn router() -> Router<AppState> {
         .merge(mcp_config::router())
         .merge(mcp_registry::router())
         .merge(read_state::router())
-        .merge(repos::router())
         .merge(inference::router())
         .merge(team::router())
         .merge(setup::router())
