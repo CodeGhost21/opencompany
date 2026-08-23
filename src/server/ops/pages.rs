@@ -233,7 +233,7 @@ async fn list_pages(company: ScopedCompany) -> Result<Response, ApiError> {
 fn page_shell_html(slug: &str) -> String {
     format!(
         r#"<!doctype html>
-<html>
+<html data-page-slug="{slug}">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -252,13 +252,7 @@ fn page_shell_html(slug: &str) -> String {
 </head>
 <body>
 <div id="root"></div>
-<script type="module" crossorigin="use-credentials">
-  import * as React from "react";
-  import * as ReactDOM from "react-dom/client";
-  import Page from "./{slug}/bundle.mjs";
-  const root = ReactDOM.createRoot(document.getElementById("root"));
-  root.render(React.createElement(Page));
-</script>
+<script type="module" src="/pages-sdk/page-bootstrap.mjs" crossorigin="use-credentials"></script>
 </body>
 </html>
 "#,
@@ -398,19 +392,14 @@ mod tests {
     }
 
     #[test]
-    fn shell_imports_the_react_namespace_before_using_create_element() {
+    fn shell_loads_the_fixed_credentialed_bootstrap_module() {
         let html = page_shell_html("revenue");
-        // Bug this guards (PR #985): the shell called `React.createElement`
-        // without ever importing `React`, so every page threw a ReferenceError
-        // on first render.
-        let module_script = html
-            .split("<script type=\"module\">")
-            .nth(1)
-            .expect("the shell has a module script");
-        let react_import = module_script.lines().find(|l| l.contains("React"));
+        // An external module is required: `crossorigin=use-credentials` on an
+        // inline module does not set the module graph's credentials mode.
         assert!(
-            react_import.is_some(),
-            "no `React` import in: {module_script}"
+            html.contains(
+                "<script type=\"module\" src=\"/pages-sdk/page-bootstrap.mjs\" crossorigin=\"use-credentials\"></script>"
+            )
         );
     }
 
@@ -422,17 +411,9 @@ mod tests {
         // `…/pages/bundle.mjs` — the shell route with slug "bundle.mjs", which
         // fails `valid_slug` and 404s. `./{slug}/bundle.mjs` resolves to the
         // registered bundle route.
-        let module_script = html
-            .split("<script type=\"module\">")
-            .nth(1)
-            .expect("the shell has a module script");
         assert!(
-            module_script.contains("from \"./revenue/bundle.mjs\""),
-            "bundle import must name the slug explicitly: {module_script}"
-        );
-        assert!(
-            !module_script.contains("from \"./bundle.mjs\""),
-            "the bare `./bundle.mjs` form must not return: {module_script}"
+            html.contains("data-page-slug=\"revenue\""),
+            "the fixed bootstrap module must receive the validated slug"
         );
     }
 
@@ -456,7 +437,7 @@ mod tests {
     #[test]
     fn shell_loads_its_module_graph_with_credentials() {
         let html = page_shell_html("revenue");
-        assert!(html.contains("<script type=\"module\" crossorigin=\"use-credentials\">"));
+        assert!(html.contains("crossorigin=\"use-credentials\""));
     }
 
     #[test]
