@@ -136,6 +136,8 @@ use crate::ports::bound_node_output;
 
 use crate::runtime::workflow_resume::{PerformedCall, performed_in_input};
 
+use crate::workflows::caps::resolver::{ChildGateRegistry, GATE_NAMESPACE};
+
 /// The host-private slug a replayed node invokes instead of its real tool.
 ///
 /// Namespaced with a `__opencompany` prefix that no toolbelt tool carries and no
