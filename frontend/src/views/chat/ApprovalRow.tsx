@@ -48,7 +48,9 @@ import {
   ApprovalMeta,
   ApprovalPayload,
   ApprovalScopeControl,
+  approvalConsequence,
   approvalIcon,
+  batchConsequences,
 } from "@/components/approval-card";
 import { Button } from "@/components/ui/button";
 import { approvedLine } from "@/lib/approval-wording";
@@ -398,13 +400,45 @@ function BatchHeadline({
   const asker = lead.agent ? (askerNames.get(lead.agent) ?? lead.agent) : null;
   const title = sameKind ? approvalAction(lead) : `${approvals.length} actions need your sign-off`;
 
+  // Consolidating the asking must not consolidate away the warning (#1426).
+  // Batching is the common case for exactly the calls that carry one — a
+  // research turn parks several fetches, an outreach turn several sends — so a
+  // batch that showed no consequence would hide it precisely where it is most
+  // often earned, while the Approvals page went on showing it for the same
+  // parks.
+  //
+  // The tint follows the same rule as the glyph above: a batch that agrees
+  // with itself wears its one consequence, and a mixed batch stays neutral
+  // rather than letting the first item's colour speak for a card that also
+  // spends money. Either way every distinct label is listed, so nothing is
+  // lost to the mixed case — and `BatchItem` repeats each line's own label, so
+  // a mixed batch still says *which* call is the one that spends.
+  const consequences = batchConsequences(approvals);
+  const uniform = consequences.length === 1 ? consequences[0] : null;
+
   return (
     <div className="flex items-start gap-4">
-      <div className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-muted text-foreground">
+      <div
+        className={cn(
+          "flex size-10 shrink-0 items-center justify-center rounded-lg",
+          uniform?.iconClass ?? "bg-muted text-foreground",
+        )}
+      >
         <Icon className="size-5" />
       </div>
       <div className="min-w-0 flex-1">
-        <p className="font-medium">{title}</p>
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+          <p className="font-medium">{title}</p>
+          {consequences.map((c) => (
+            <span
+              key={c.label}
+              data-approval-consequence={c.label}
+              className="rounded-full bg-muted px-2 py-0.5 text-2xs font-medium text-foreground"
+            >
+              {c.label}
+            </span>
+          ))}
+        </div>
         <p className="text-xs text-muted-foreground">
           {asker ? `${asker} needs` : "This turn needs"} {approvals.length} sign-offs before it
           can carry on
