@@ -129,6 +129,12 @@ export function PolicySettings({ client, company }: Props) {
   const [dirty, setDirty] = useState(false);
   const [tierAwaitingConfirmation, setTierAwaitingConfirmation] =
     useState<PolicyStatus["tiers"][number] | null>(null);
+  // Reverting to the manifest's policy can *also* grant a higher tier — an
+  // override enforcing `readonly` or `supervised` while the manifest says
+  // `full` — so the same escalation confirmation guards that path too. See
+  // `requestReset`.
+  const [resetAwaitingConfirmation, setResetAwaitingConfirmation] =
+    useState(false);
   /**
    * The tool names this deployment can actually gate (issue #1226).
    *
