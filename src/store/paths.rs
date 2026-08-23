@@ -184,13 +184,47 @@ fn slug(id: &CompanyId) -> String {
     out
 }
 
-/// Encodes a secret key as an injective filesystem-safe filename.
+/// Longest percent-encoded secret-key filename component. `NAME_MAX` is 255
+/// bytes on common filesystems; the budget stays clear of it even after the
+/// digest suffix a long key needs.
+const SECRET_FILENAME_BUDGET: usize = 200;
+
+/// Bytes of the truncated SHA-256 digest appended to over-budget keys — 128
+/// bits, i.e. 32 hex characters.
+const SECRET_FILENAME_DIGEST_BYTES: usize = 16;
+
+/// Encodes a secret key as an injective, bounded, filesystem-safe filename.
 ///
-/// The `key-` prefix keeps the empty key distinct from every non-empty key,
-/// while percent-encoding `%` itself keeps the encoding unambiguous.
+/// The leading `%` is the namespace seam that keeps the canonical and legacy
+/// layouts apart: [`slug`] can only emit `[A-Za-z0-9._-]` (everything else
+/// folds to `_`), so no legacy file can ever be a canonical filename. The old
+/// `key-` prefix had no such guarantee — `key-foo` is a valid legacy slug, so
+/// a canonical file for `foo` was readable as the legacy fallback of
+/// `key-foo`, and writing `key-foo` deleted `foo`. Within the canonical
+/// namespace:
+///
+/// - **`%k-`** prefixes a percent-encoded key that fits the budget. Every
+///   byte has a unique encoding (`%` itself is encoded as `%25`), so distinct
+///   keys map to distinct filenames.
+/// - **`%l-`** prefixes an over-budget key: the encoded form is truncated and
+///   a digest of the *whole* key is appended, so two distinct long keys cannot
+///   collide through the truncation. The distinct `l` class keeps long keys
+///   structurally disjoint from short ones, so the digest only has to separate
+///   long keys from each other.
 fn secret_filename(key: &str) -> String {
-    let mut out = String::with_capacity("key-".len() + key.len());
-    out.push_str("key-");
+    let encoded = percent_encode(key);
+    if encoded.len() <= SECRET_FILENAME_BUDGET {
+        return format!("%k-{encoded}");
+    }
+    let digest = secret_digest(key);
+    let keep = SECRET_FILENAME_BUDGET - SECRET_FILENAME_DIGEST_BYTES * 2 - 1;
+    format!("%l-{}-{digest}", &encoded[..keep])
+}
+
+/// Percent-encodes every byte outside `[A-Za-z0-9.-]`. `%` itself is encoded
+/// so the output has one parse — and one file — per byte sequence.
+fn percent_encode(key: &str) -> String {
+    let mut out = String::with_capacity(key.len());
     for byte in key.bytes() {
         if byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-') {
             out.push(char::from(byte));
@@ -200,6 +234,19 @@ fn secret_filename(key: &str) -> String {
         }
     }
     out
+}
+
+/// 128-bit truncated SHA-256 of a key, hex-encoded.
+fn secret_digest(key: &str) -> String {
+    let digest = Sha256::digest(key.as_bytes());
+    digest.iter().take(SECRET_FILENAME_DIGEST_BYTES).fold(
+        String::with_capacity(SECRET_FILENAME_DIGEST_BYTES * 2),
+        |mut acc, byte| {
+            use std::fmt::Write as _;
+            let _ = write!(acc, "{byte:02x}");
+            acc
+        },
+    )
 }
 
 /// The on-disk directory layout for one company.
