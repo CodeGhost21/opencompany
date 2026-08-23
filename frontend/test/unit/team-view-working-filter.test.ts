@@ -59,7 +59,12 @@ const api = vi.hoisted(() => ({
 }));
 
 vi.mock("@/api/tasks", () => ({ listTasks: api.listTasks }));
-vi.mock("@/lib/board-columns", () => ({ fetchBoardColumns: api.fetchBoardColumns }));
+vi.mock("@/lib/board-columns", () => ({
+  fetchBoardColumns: api.fetchBoardColumns,
+  // `team-workload.ts` reads this beside the fetch — the "working" status it
+  // derives is what the Working filter judges against.
+  IN_FLIGHT_COLUMNS: ["planning", "in_progress"],
+}));
 vi.mock("@/api/auth", () => ({ me: api.fetchMe, listPeople: api.listPeople }));
 vi.mock("@/api/inbox", () => ({ setInboxEnabled: api.setInboxEnabled }));
 
