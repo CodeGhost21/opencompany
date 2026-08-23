@@ -272,9 +272,6 @@ impl OptInFlags {
             // there is no company record to resolve a credential for, which is
             // not the same answer as "no credential resolves".
             composio_credential_source: None,
-            // Likewise undetermined rather than `Some(None)`: no record means
-            // no secret store to ask.
-            mcp_directory_credential: None,
             search_granted: false,
             search_daily_call_cap: crate::company::DEFAULT_SEARCH_DAILY_CALLS,
             search_provider: crate::company::search::MANAGED_PROVIDER.to_string(),
@@ -304,7 +301,6 @@ fn unconfigured(flags: OptInFlags) -> CapabilityStatusDto {
         chargebee_in_build: cfg!(feature = "chargebee"),
         composio_token_configured: flags.composio_token_configured,
         composio_credential_source: flags.composio_credential_source,
-        mcp_directory_credential: flags.mcp_directory_credential,
         search_granted: flags.search_granted,
         search_in_build: cfg!(feature = "openhuman"),
         search_credential_configured: search_credential_configured(),
@@ -522,7 +518,6 @@ async fn effective_status(runtime: &CompanyRuntime) -> Result<CapabilityStatusDt
         chargebee_in_build: cfg!(feature = "chargebee"),
         composio_token_configured: flags.composio_token_configured,
         composio_credential_source: flags.composio_credential_source,
-        mcp_directory_credential: flags.mcp_directory_credential,
         search_granted: flags.search_granted,
         search_in_build: cfg!(feature = "openhuman"),
         search_credential_configured: search_credential_configured(),
@@ -1122,43 +1117,6 @@ mod tests {
             assert_eq!(
                 dto["composioCredentialSource"], "static",
                 "and a pasted token is the `static` tier: {dto}"
-            );
-        }
-    }
-
-    /// Issue #1287: both DTO construction sites carry the directory tier, and
-    /// it tracks the key that is actually set.
-    ///
-    /// Same #567 precedent as the test above — a field wired into one branch
-    /// alone tells the truth to a company with no plan and lies to every company
-    /// that has one, which is exactly the shape that makes such a bug survive
-    /// review.
-    #[tokio::test]
-    async fn both_response_paths_carry_the_mcp_directory_tier() {
-        use crate::company::smithery;
-
-        for manifest in [
-            GRANTS_COMPOSIO,
-            &format!("{GRANTS_COMPOSIO}[plan]\nname = \"starter\"\n"),
-        ] {
-            let home_dir = home();
-            let home = home_dir.path().to_path_buf();
-            let state = state_with_manifest(&home, manifest).await;
-            let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
-
-            let (_, dto) = get_capabilities(&state).await;
-            assert_eq!(
-                dto["mcpDirectoryCredential"], "none",
-                "nothing set anywhere, so the directory has only the open registry: {dto}"
-            );
-
-            smithery::store_key(runtime.id(), runtime.secrets().as_ref(), "smithery_key")
-                .await
-                .unwrap();
-            let (_, dto) = get_capabilities(&state).await;
-            assert_eq!(
-                dto["mcpDirectoryCredential"], "company",
-                "the company's own key is its own tier, not a shared one: {dto}"
             );
         }
     }
