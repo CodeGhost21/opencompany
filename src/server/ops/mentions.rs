@@ -380,6 +380,9 @@ mod tests {
     async fn a_person_row_carries_no_email_role_or_status() {
         let home = home();
         let state = state(home.path()).await;
+        // The caller's own row is dropped, so a second person is needed for the
+        // directory to have anyone to inspect.
+        crate::server::test_support::seed_fixed_member(&state, "acme").await;
         let (_, body) = call(&state, true).await;
 
         let person = &body["people"][0];
@@ -392,6 +395,34 @@ mod tests {
         assert!(
             !person.to_string().contains("example.test"),
             "the login identity must never reach a member: {person}"
+        );
+    }
+
+    /// A self-mention can never survive sending (`normalize` refuses it), so a
+    /// row that names the caller is not offered — offering it would look
+    /// pickable and then silently un-chip on reload.
+    #[tokio::test]
+    async fn a_person_never_sees_their_own_row() {
+        let home = home();
+        let state = state(home.path()).await;
+        crate::server::test_support::seed_fixed_member(&state, "acme").await;
+        let (status, body) = call_with_cookie(
+            &state,
+            Some(crate::server::test_support::fixed_cookie("acme")),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let labels: Vec<&str> = body["people"]
+            .as_array()
+            .expect("people")
+            .iter()
+            .map(|p| p["label"].as_str().expect("label"))
+            .collect();
+        assert_eq!(
+            labels,
+            vec!["harness-member"],
+            "the caller's own row is dropped and the other person's is offered: {labels:?}"
         );
     }
 
