@@ -251,6 +251,44 @@ mod test {
         tokio::fs::remove_dir_all(bundle.dir()).await.ok();
     }
 
+    #[tokio::test]
+    async fn get_returns_the_named_item_or_none() {
+        let (_root, bundle) = tmp_bundle();
+        let store = FeedbackStore::new(&bundle);
+        let a = item("a");
+        let b = item("b");
+        store.append(&a).await.unwrap();
+        store.append(&b).await.unwrap();
+
+        assert_eq!(store.get(&a.id).await.unwrap(), Some(a));
+        assert_eq!(store.get(&b.id).await.unwrap(), Some(b));
+        assert!(store.get("ghost").await.unwrap().is_none());
+        tokio::fs::remove_dir_all(bundle.dir()).await.ok();
+    }
+
+    #[tokio::test]
+    async fn record_preview_freeze_the_body_a_confirm_will_post() {
+        let (_root, bundle) = tmp_bundle();
+        let store = FeedbackStore::new(&bundle);
+        let it = item("a");
+        store.append(&it).await.unwrap();
+
+        store
+            .record_preview(&it.id, "**Category:** bug\n\nthe run crashed")
+            .await
+            .unwrap();
+
+        let stored = store.get(&it.id).await.unwrap().expect("item exists");
+        assert_eq!(
+            stored.scrubbed_body.as_deref(),
+            Some("**Category:** bug\n\nthe run crashed")
+        );
+        // The other fields are untouched.
+        assert!(stored.filed_issue_url.is_none());
+        assert_eq!(stored.operator_words, "a");
+        tokio::fs::remove_dir_all(bundle.dir()).await.ok();
+    }
+
     /// Two feedback stores over one bundle must not erase each other's writes
     /// (issue #388).
     ///
