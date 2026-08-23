@@ -129,6 +129,11 @@ pub struct RunContext<'a> {
     pub blocks: RunBlocks,
     /// Where an agent node records the approvals its turn parked (issue #880).
     pub approvals: RunApprovals,
+    /// Per-run record of every child graph the resolver gated, so the parent's
+    /// parking path can name a child pause (issue #617). Created by the runner
+    /// before the engine call, handed to the resolver through `ChildPolicyGates`,
+    /// and read back when the run pauses.
+    pub child_gates: Arc<resolver::ChildGateRegistry>,
 }
 
 /// Assembles the [`Capabilities`] bundle for a run of `workflow_id`.
