@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { approvalAction, grantHeadline, payloadLines, toolAction } from "@/lib/language";
+import { approvalAction, grantHeadline, payloadLeadTruncated, payloadLines, toolAction } from "@/lib/language";
 import type { ApprovalSummary, StandingGrant } from "@/api/types";
 
 /**
@@ -108,6 +108,37 @@ describe("the payload block underneath the label", () => {
       approval({ kind: "git_operations", payload: { message: "wip", operation: "commit" } }),
     );
     expect(lines[0]).toStrictEqual({ label: "operation", value: "commit" });
+  });
+});
+
+describe("whether a payload lead was cut to fit the compact row", () => {
+  const request = (body: string) =>
+    approval({ kind: "http_request", payload: { url: "https://x.test", method: "POST", body } });
+
+  it("is false when no promoted extra is previewed", () => {
+    expect(payloadLeadTruncated(request("small"))).toBe(false);
+  });
+
+  it("is false at exactly the preview bound", () => {
+    // `preview` cuts strictly past `EXTRA_PREVIEW_MAX`, so the boundary itself
+    // is the full value — nothing was hidden, and nothing may be gated.
+    expect(payloadLeadTruncated(request("x".repeat(60)))).toBe(false);
+  });
+
+  it("is true when a promoted extra is cut", () => {
+    // A body longer than the bound is shown as a preview, and a preview is not
+    // something an operator may one-click Approve.
+    expect(payloadLeadTruncated(request("x".repeat(61)))).toBe(true);
+  });
+
+  it("is false for a kind that promotes nothing past the lead", () => {
+    expect(
+      payloadLeadTruncated(approval({ kind: "web_fetch", payload: { url: "x".repeat(500) } })),
+    ).toBe(false);
+  });
+
+  it("is false when there is no payload to show", () => {
+    expect(payloadLeadTruncated(approval({ kind: "http_request" }))).toBe(false);
   });
 });
 

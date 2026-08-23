@@ -1752,6 +1752,8 @@ impl HarnessBrain {
             .append(
                 &self.record().id,
                 CompanyEvent::AgentReply {
+                    mentions: Vec::new(),
+                    mention_depth: 0,
                     parent: None,
                     chat_id: card.id.clone(),
                     agent_id: responder.to_string(),
@@ -3428,6 +3430,7 @@ description = "Runs Acme."
         let result = brain
             .run_cycle(
                 request(vec![CompanyEvent::OperatorMessage {
+                    mentions: Vec::new(),
                     parent: None,
                     text: "status?".into(),
                     by: None,
@@ -6173,6 +6176,7 @@ members = ["eng1", "eng2"]
         let result = brain
             .run_cycle(
                 request(vec![CompanyEvent::OperatorMessage {
+                    mentions: Vec::new(),
                     parent: None,
                     text: "we should announce this".into(),
                     by: None,
@@ -6232,6 +6236,7 @@ members = ["eng1", "eng2"]
         let result = brain
             .run_cycle(
                 request(vec![CompanyEvent::OperatorMessage {
+                    mentions: Vec::new(),
                     parent: None,
                     text: "two things".into(),
                     by: None,
@@ -6277,6 +6282,7 @@ members = ["eng1", "eng2"]
         let result = brain
             .run_cycle(
                 request(vec![CompanyEvent::OperatorMessage {
+                    mentions: Vec::new(),
                     parent: None,
                     text: "status?".into(),
                     by: None,
@@ -8481,6 +8487,7 @@ members = ["eng1", "eng2"]
         let result = brain
             .run_cycle(
                 request(vec![CompanyEvent::OperatorMessage {
+                    mentions: Vec::new(),
                     parent: None,
                     text: "why is the site down?".into(),
                     by: None,
@@ -8547,6 +8554,7 @@ members = ["eng1", "eng2"]
         let result = brain
             .run_cycle(
                 request(vec![CompanyEvent::OperatorMessage {
+                    mentions: Vec::new(),
                     parent: None,
                     text: "handle it".into(),
                     by: None,
@@ -8587,6 +8595,7 @@ members = ["eng1", "eng2"]
         let result = brain
             .run_cycle(
                 request(vec![CompanyEvent::OperatorMessage {
+                    mentions: Vec::new(),
                     parent: None,
                     text: "status?".into(),
                     by: None,

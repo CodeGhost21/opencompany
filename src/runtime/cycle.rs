@@ -1759,7 +1759,7 @@ async fn perform_effect(rt: &CompanyRuntime, effect: &Effect) -> Result<()> {
         // is on the remote regardless. It is reported instead: the operator is
         // told, on the task itself, that the branch is up but the PR did not open.
         let title = repo_publish_pr_title(message);
-        let body = repo_publish_pr_body(agent, task, message);
+        let body = repo_publish_pr_body(agent, task, effect.run_id.as_deref(), message);
         match repos.open_pull_request(repo, branch, &title, &body).await {
             Ok(pr) => tracing::info!(
                 number = pr.number,
@@ -1857,10 +1857,10 @@ fn repo_publish_pr_title(message: &str) -> String {
     }
 }
 
-/// The body of that pull request (issue #736): the agent's message, then task
-/// and agent linkage so an operator landing on the PR can get back to the card
-/// and the seat that produced it.
-fn repo_publish_pr_body(agent: &str, task: &str, message: &str) -> String {
+/// The body of that pull request (issue #736): the agent's message, then task,
+/// run, and agent linkage so an operator landing on the PR can get back to the
+/// card, attempt, and seat that produced it.
+fn repo_publish_pr_body(agent: &str, task: &str, run_id: Option<&str>, message: &str) -> String {
     let mut body = String::new();
     let message = message.trim();
     if !message.is_empty() {
@@ -1874,6 +1874,9 @@ fn repo_publish_pr_body(agent: &str, task: &str, message: &str) -> String {
     }
     if !task.is_empty() {
         body.push_str(&format!(" for task `{task}`"));
+    }
+    if let Some(run_id) = run_id.filter(|run_id| !run_id.is_empty()) {
+        body.push_str(&format!(" in run `{run_id}`"));
     }
     body.push('.');
     body
@@ -2925,6 +2928,7 @@ mod test {
     #[test]
     fn only_a_workflow_message_gets_the_builder_briefing() {
         let msg = |deliverable| CompanyEvent::OperatorMessage {
+            mentions: Vec::new(),
             text: "set up a weekly AEO audit".to_string(),
             by: None,
             chat: None,
@@ -3008,6 +3012,7 @@ mod test {
         );
 
         let ask = |deliverable| CompanyEvent::OperatorMessage {
+            mentions: Vec::new(),
             text: "set up a weekly AEO audit".into(),
             by: None,
             chat: None,
@@ -3102,6 +3107,22 @@ mod test {
             origin_run_id: None,
             origin_workflow_id: None,
         }
+    }
+
+    /// Issue #247: a publish PR carries both the task and the concrete run that
+    /// produced its approved effect, letting an operator trace it back to the
+    /// exact attempt rather than only the card.
+    #[test]
+    fn a_publish_pr_body_links_its_task_and_run() {
+        let body = repo_publish_pr_body(
+            "developer",
+            "task-247",
+            Some("run-247"),
+            "Add run linkage to publish pull requests.",
+        );
+
+        assert!(body.contains("task `task-247`"), "{body}");
+        assert!(body.contains("run `run-247`"), "{body}");
     }
 
     /// A publish-failure note lands only on a real card — never on a DM's `dm-*`
@@ -3295,6 +3316,7 @@ mod test {
             .unwrap();
 
         rt.run_cycle(vec![CompanyEvent::OperatorMessage {
+            mentions: Vec::new(),
             parent: None,
             text: "hand it off".into(),
             by: None,
@@ -3833,6 +3855,7 @@ mod test {
         context.lists.store(0, Ordering::SeqCst);
 
         rt.run_cycle(vec![CompanyEvent::OperatorMessage {
+            mentions: Vec::new(),
             parent: None,
             text: "hi".into(),
             by: None,
@@ -3869,6 +3892,7 @@ mod test {
 
         let report = rt
             .run_cycle(vec![CompanyEvent::OperatorMessage {
+                mentions: Vec::new(),
                 parent: None,
                 text: "hi".into(),
                 by: None,
@@ -3901,6 +3925,7 @@ mod test {
         assert_eq!(
             operator[0].event,
             CompanyEvent::OperatorMessage {
+                mentions: Vec::new(),
                 parent: None,
                 text: "hi".into(),
                 by: None,
@@ -3979,6 +4004,7 @@ mod test {
 
         let report = rt
             .run_cycle(vec![CompanyEvent::OperatorMessage {
+                mentions: Vec::new(),
                 parent: None,
                 text: "file it".into(),
                 by: None,
@@ -4040,6 +4066,7 @@ mod test {
         );
         let report = rt
             .run_cycle(vec![CompanyEvent::OperatorMessage {
+                mentions: Vec::new(),
                 parent: None,
                 text: "do it".into(),
                 by: None,
@@ -4105,6 +4132,7 @@ mod test {
         );
         let report = rt
             .run_cycle(vec![CompanyEvent::OperatorMessage {
+                mentions: Vec::new(),
                 parent: None,
                 text: "do it".into(),
                 by: None,
@@ -4417,6 +4445,7 @@ mod test {
         );
         let report = rt
             .run_cycle(vec![CompanyEvent::OperatorMessage {
+                mentions: Vec::new(),
                 parent: None,
                 text: "do it".into(),
                 by: None,
@@ -4462,6 +4491,7 @@ mod test {
         );
         let report = rt
             .run_cycle(vec![CompanyEvent::OperatorMessage {
+                mentions: Vec::new(),
                 parent: None,
                 text: "do it".into(),
                 by: None,
@@ -4794,6 +4824,7 @@ mod test {
 
         let report = rt
             .run_cycle(vec![CompanyEvent::OperatorMessage {
+                mentions: Vec::new(),
                 parent: None,
                 text: "file it".into(),
                 by: None,
@@ -4874,6 +4905,7 @@ mod test {
 
         let report = rt
             .run_cycle(vec![CompanyEvent::OperatorMessage {
+                mentions: Vec::new(),
                 parent: None,
                 text: "send that email".into(),
                 by: None,
@@ -4931,6 +4963,7 @@ mod test {
                 .unwrap();
             let report = rt
                 .run_cycle(vec![CompanyEvent::OperatorMessage {
+                    mentions: Vec::new(),
                     parent: None,
                     text: "file it".into(),
                     by: None,
@@ -4992,6 +5025,7 @@ mod test {
 
         let report = rt
             .run_cycle(vec![CompanyEvent::OperatorMessage {
+                mentions: Vec::new(),
                 parent: None,
                 text: "file it".into(),
                 by: None,
@@ -5063,6 +5097,7 @@ mod test {
 
         let report = rt
             .run_cycle(vec![CompanyEvent::OperatorMessage {
+                mentions: Vec::new(),
                 parent: None,
                 text: "file it".into(),
                 by: None,
@@ -5153,6 +5188,7 @@ mod test {
             .unwrap();
 
         rt.run_cycle(vec![CompanyEvent::OperatorMessage {
+            mentions: Vec::new(),
             parent: None,
             text: "how are we doing".into(),
             by: None,
@@ -5438,6 +5474,7 @@ mod test {
         );
         assert_eq!(
             cycle_trigger(&[CompanyEvent::OperatorMessage {
+                mentions: Vec::new(),
                 parent: None,
                 text: "hello".into(),
                 by: None,
@@ -5465,6 +5502,7 @@ mod test {
 
         let (ra, rb) = tokio::join!(
             one.run_cycle(vec![CompanyEvent::OperatorMessage {
+                mentions: Vec::new(),
                 parent: None,
                 text: "a".into(),
                 by: None,
@@ -5472,6 +5510,7 @@ mod test {
                 deliverable: None,
             }]),
             two.run_cycle(vec![CompanyEvent::OperatorMessage {
+                mentions: Vec::new(),
                 parent: None,
                 text: "b".into(),
                 by: None,
@@ -5523,6 +5562,7 @@ mod test {
             .unwrap();
 
         rt.run_cycle(vec![CompanyEvent::OperatorMessage {
+            mentions: Vec::new(),
             parent: None,
             text: "send it".into(),
             by: None,
@@ -5847,6 +5887,7 @@ mod test {
             body: serde_json::json!({"text": "raw payload"}),
         };
         let operator = CompanyEvent::OperatorMessage {
+            mentions: Vec::new(),
             text: "please do the thing".into(),
             by: Option::<Actor>::None,
             chat: None,
@@ -5877,6 +5918,7 @@ mod test {
             task: serde_json::json!({"text": "do the thing"}),
         };
         let operator = || CompanyEvent::OperatorMessage {
+            mentions: Vec::new(),
             text: "hi".into(),
             by: Option::<Actor>::None,
             chat: None,
@@ -6514,6 +6556,7 @@ mod test {
         };
 
         let chat = || CompanyEvent::OperatorMessage {
+            mentions: Vec::new(),
             parent: None,
             text: "hi".into(),
             by: None,
@@ -6720,6 +6763,7 @@ mod test {
             _ => None,
         };
         let addressed = |chat: &str| CompanyEvent::OperatorMessage {
+            mentions: Vec::new(),
             parent: None,
             text: "pay the invoice".into(),
             by: None,
@@ -6727,6 +6771,7 @@ mod test {
             deliverable: None,
         };
         let unaddressed = || CompanyEvent::OperatorMessage {
+            mentions: Vec::new(),
             parent: None,
             text: "hi".into(),
             by: None,
@@ -6872,6 +6917,8 @@ mod test {
                 origin_chat_id: None,
             },
             CompanyEvent::AgentReply {
+                mentions: Vec::new(),
+                mention_depth: 0,
                 parent: None,
                 chat_id: "desk-ops".into(),
                 agent_id: "ops".into(),
@@ -6934,6 +6981,7 @@ mod test {
             _ => None,
         };
         let in_thread = |chat: &str, parent: Option<u64>| CompanyEvent::OperatorMessage {
+            mentions: Vec::new(),
             parent: parent.map(EventSeq::new),
             text: "pay the invoice".into(),
             by: None,
@@ -7396,6 +7444,7 @@ mod test {
 
         // Asking the desk directly (by name) surfaces the handed task...
         rt.run_cycle(vec![CompanyEvent::OperatorMessage {
+            mentions: Vec::new(),
             parent: None,
             text: "what are you working on?".into(),
             by: None,
@@ -7408,6 +7457,7 @@ mod test {
         // ...and asking with no address (the orchestrator) does NOT get the
         // desk's briefing folded into it.
         rt.run_cycle(vec![CompanyEvent::OperatorMessage {
+            mentions: Vec::new(),
             parent: None,
             text: "status?".into(),
             by: None,
@@ -7469,6 +7519,7 @@ mod test {
             .await
             .unwrap();
         rt.run_cycle(vec![CompanyEvent::OperatorMessage {
+            mentions: Vec::new(),
             parent: None,
             text: "what's up?".into(),
             by: None,
@@ -7548,6 +7599,7 @@ mod test {
         );
         let report = rt
             .run_cycle(vec![CompanyEvent::OperatorMessage {
+                mentions: Vec::new(),
                 parent: None,
                 text: "do it".into(),
                 by: None,
@@ -7746,6 +7798,7 @@ mod test {
         for _ in 0..5 {
             let report = rt
                 .run_cycle(vec![CompanyEvent::OperatorMessage {
+                    mentions: Vec::new(),
                     parent: None,
                     text: "do it".into(),
                     by: None,
@@ -7973,6 +8026,7 @@ mod test {
             .unwrap();
 
         let ask = |text: &str| CompanyEvent::OperatorMessage {
+            mentions: Vec::new(),
             text: text.to_string(),
             by: None,
             chat: None,
@@ -8065,6 +8119,7 @@ mod test {
             .append(
                 rt.id(),
                 CompanyEvent::OperatorMessage {
+                    mentions: Vec::new(),
                     text: "hello".into(),
                     by: None,
                     chat: None,
@@ -8078,6 +8133,7 @@ mod test {
             vec![(
                 seq,
                 CompanyEvent::OperatorMessage {
+                    mentions: Vec::new(),
                     text: "hello".into(),
                     by: None,
                     chat: None,

@@ -65,8 +65,8 @@ const KIND_ICONS: Record<string, LucideIcon> = {
 
 /**
  * How much of a payload is shown before it is clamped. Past either bound the
- * block collapses behind a "Show everything" toggle — a queue of approvals has
- * to stay scannable, and a forty-line argument object buries the next card.
+ * block collapses behind a "Show everything" toggle — at a line boundary, so
+ * a queue of approvals stays scannable without clipping a line's glyphs.
  */
 const PREVIEW_LINES = 3;
 const PREVIEW_VALUE_CHARS = 160;
@@ -89,11 +89,14 @@ export function ApprovalHeadline({
 }) {
   const Icon = approvalIcon(a.kind);
   return (
-    <div className="flex items-start gap-4">
+    <div className="flex flex-wrap items-start gap-4">
       <div className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-muted text-foreground">
         <Icon className="size-5" />
       </div>
-      <div className="min-w-0 flex-1">
+      {/* 12rem floor, capped at the card's own width: a chat column can be
+          narrower than the icon plus a 12rem title, and a hard floor would
+          overflow the card there instead of wrapping. */}
+      <div className="min-w-[min(12rem,100%)] flex-1">
         <p className="font-medium">{approvalAction(a)}</p>
         {a.amount_usd != null && (
           <p className="text-xs font-medium text-muted-foreground">{money(a.amount_usd)}</p>
@@ -108,7 +111,11 @@ export function ApprovalHeadline({
           <p className="text-xs font-medium text-muted-foreground italic">Amount hidden</p>
         )}
       </div>
-      {actions && <div className="flex shrink-0 gap-2">{actions}</div>}
+      {actions && (
+        <div data-approval-actions className="flex shrink-0 gap-2">
+          {actions}
+        </div>
+      )}
     </div>
   );
 }
@@ -269,7 +276,7 @@ export function ApprovalPayload({ approval }: { approval: ApprovalSummary }) {
       <div
         className={cn(
           "space-y-1 font-mono text-xs break-all whitespace-pre-wrap",
-          clampable && !expanded && "max-h-24 overflow-hidden",
+          clampable && !expanded && "line-clamp-3",
         )}
       >
         {shown.map((line) => (

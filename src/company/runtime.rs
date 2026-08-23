@@ -30,7 +30,7 @@ use crate::feedback::types::{FeedbackInput, FeedbackItem, FeedbackSummary};
 use crate::policy::ManifestApprovalGate;
 use crate::ports::now_millis;
 use crate::ports::types::{
-    Actor, ActorKind, ApprovalId, CompanyEvent, CompanyId, EventSeq, Verdict,
+    Actor, ActorKind, ApprovalId, CompanyEvent, CompanyId, EventSeq, Mention, Verdict,
 };
 use crate::ports::{
     AgentEconomy, ApprovalGate, ArtifactStore, Brain, ChannelAdapter, CompanyStore, ContextStore,
@@ -411,6 +411,11 @@ fn continuation_failure_notice(thread: String, parent: Option<EventSeq>) -> Comp
             .to_string(),
         steps: Vec::new(),
         task_id: None,
+        // A runtime notice addressed to whoever is reading it. It names no
+        // teammate and no person, so there is nothing to chip and nobody to
+        // ping.
+        mentions: Vec::new(),
+        mention_depth: 0,
     }
 }
 
@@ -2015,6 +2020,22 @@ impl CompanyRuntime {
             // goes to the run or card the work belongs to, and a root belonging
             // to some other channel must not follow it there.
             let parent = self.resolvable_parent(conversation.parent, &chat_id).await;
+            // Scanned host-side from the reply text. The author is passed so a
+            // teammate naming itself in its own answer does not chip itself.
+            let reply_mentions = self
+                .resolve_mentions(
+                    &response.text,
+                    None,
+                    response
+                        .agent
+                        .as_deref()
+                        .map(|id| Actor {
+                            kind: ActorKind::Agent,
+                            id: id.to_string(),
+                        })
+                        .as_ref(),
+                )
+                .await;
             match self
                 .events
                 .append(
@@ -2032,6 +2053,10 @@ impl CompanyRuntime {
                         text: response.text.clone(),
                         steps: response.steps.clone(),
                         task_id: response.task_id.clone(),
+                        mentions: reply_mentions,
+                        // Zero, and stays zero: no reply's mentions reach
+                        // dispatch, so no reply is ever a mention hop.
+                        mention_depth: 0,
                     },
                 )
                 .await
@@ -2695,6 +2720,69 @@ impl CompanyRuntime {
         }
     }
 
+    /// Resolve the mentions in one chat message body.
+    ///
+    /// The single seam both journal sites go through, so an operator message
+    /// and an agent reply cannot end up obeying different rules about who
+    /// `@ada` is. Loads the record and the user directory and hands them to
+    /// [`crate::runtime::mentions::resolve`], which does the rest without
+    /// touching IO.
+    ///
+    /// **Never fails a send.** A store that cannot answer means mentions cannot
+    /// be resolved, not that the message cannot be delivered — so a read error
+    /// yields an empty list and is logged. The message still lands; it simply
+    /// draws no chips and pings nobody, which is the same state every message
+    /// journaled before this feature existed is in.
+    pub async fn resolve_mentions(
+        &self,
+        text: &str,
+        supplied: Option<Vec<Mention>>,
+        sender: Option<&Actor>,
+    ) -> Vec<Mention> {
+        // Issue: on the operator-message path this runs BEFORE the journal
+        // append (`mention_responder` reads the resolved mentions off the
+        // journaled event, so the append cannot go first), which puts these
+        // two store reads in front of every chat POST's accept latency. Run
+        // together rather than sequentially — they read different stores and
+        // neither depends on the other's result — to keep that addition close
+        // to the cost of the slower read alone rather than the sum of both.
+        let (record, user_list) =
+            tokio::join!(self.store.load(&self.id), self.users().list_users(&self.id));
+        let record = match record {
+            Ok(Some(record)) => record,
+            Ok(None) => return Vec::new(),
+            Err(err) => {
+                tracing::warn!(
+                    company = %self.id,
+                    error = %err,
+                    "[mentions] the company record could not be read; this message is \
+                     journaled with no mentions"
+                );
+                return Vec::new();
+            }
+        };
+        let mut users = user_list.unwrap_or_else(|err| {
+            tracing::warn!(
+                company = %self.id,
+                error = %err,
+                "[mentions] the user directory could not be read; only teammates and \
+                 desks are resolvable on this message"
+            );
+            Vec::new()
+        });
+        // Suspended users are retained only for attribution and are refused on
+        // every request — they must not be a live mention target here either.
+        users.retain(|u| u.status == crate::ports::users::UserStatus::Active);
+        // Sorted by the same stable key `GET .../chat/mentionables` uses before
+        // it mints slugs (`user_slugs`), so a collision between two same-named
+        // users gets the same `-2`/`-3` suffix here that the picker advertised —
+        // an unsorted `UserStore` order (most-recently-created first) could
+        // otherwise resolve `@sam-2` to a different person than the one the
+        // picker showed under that label.
+        users.sort_by(|a, b| a.id.cmp(&b.id));
+        crate::runtime::mentions::resolve(text, supplied, sender, &record, &users)
+    }
+
     /// A status snapshot, loading the company record for name and lifecycle.
     pub async fn status(&self) -> Result<CompanyStatus> {
         let record = self.store.load(&self.id).await?;
@@ -3107,6 +3195,8 @@ mod tests {
         use crate::server::chat_history::owns;
 
         let reply = |chat_id: String| CompanyEvent::AgentReply {
+            mentions: Vec::new(),
+            mention_depth: 0,
             parent: None,
             chat_id,
             agent_id: "copywriter".to_string(),
@@ -3896,6 +3986,7 @@ mod tests {
             .append(
                 &rt.id,
                 CompanyEvent::OperatorMessage {
+                    mentions: Vec::new(),
                     text: "pay the invoice".into(),
                     by: None,
                     chat: Some("desk-finance".into()),
@@ -3910,6 +4001,7 @@ mod tests {
             .append(
                 &rt.id,
                 CompanyEvent::OperatorMessage {
+                    mentions: Vec::new(),
                     text: "unrelated".into(),
                     by: None,
                     chat: Some("desk-ops".into()),
@@ -3969,6 +4061,7 @@ mod tests {
             .append(
                 &rt.id,
                 CompanyEvent::OperatorMessage {
+                    mentions: Vec::new(),
                     text: "and another thing".into(),
                     by: None,
                     chat: Some("desk-finance".into()),
@@ -4063,6 +4156,7 @@ mod tests {
                     .append(
                         &rt.id,
                         CompanyEvent::OperatorMessage {
+                            mentions: Vec::new(),
                             text: "ship it".into(),
                             by: None,
                             chat: chat.map(str::to_string),
@@ -4094,6 +4188,7 @@ mod tests {
             .append(
                 &rt.id,
                 CompanyEvent::OperatorMessage {
+                    mentions: Vec::new(),
                     text: "unrelated".into(),
                     by: None,
                     chat: Some("desk-ops".into()),
