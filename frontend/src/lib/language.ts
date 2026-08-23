@@ -619,14 +619,16 @@ const PAYLOAD_LEAD_EXTRA: Readonly<Record<string, string[]>> = {
  */
 export function payloadLeadLabel(a: ApprovalSummary): string | null {
   const lines = payloadLines(a);
-  const first = lines[0]?.value;
+  const first = lines[0];
   if (first == null) return null;
   const extras = PAYLOAD_LEAD_EXTRA[a.kind] ?? [];
-  if (extras.length === 0) return first;
+  if (extras.length === 0) return first.value;
+  // The extra keys are past the lead by definition, so a line whose label IS
+  // the lead's label is the lead itself and must not be repeated before it.
   const extraValues = lines
-    .filter((line) => extras.includes(line.label))
+    .filter((line) => line.label !== first.label && extras.includes(line.label))
     .map((line) => line.value);
-  return extraValues.length > 0 ? `${extraValues.join(" ")} ${first}` : first;
+  return extraValues.length > 0 ? `${extraValues.join(" ")} ${first.value}` : first.value;
 }
 
 function renderValue(value: unknown): string {
