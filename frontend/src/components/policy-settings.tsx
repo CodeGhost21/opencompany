@@ -393,12 +393,21 @@ export function PolicySettings({ client, company }: Props) {
       default:
         return;
     }
-    const index = status.tiers.findIndex((tier) => tier.value === status.mode);
-    if (index === -1) return;
-    const tier = status.tiers[index + step];
+    // Navigate from the radio that has focus, not the tier that happens to be
+    // selected — the two can differ. Pressing ArrowRight on Auto focuses Full
+    // and, because that is an escalation, parks the choice in a confirmation
+    // dialog; when the operator cancels, focus is back on Full while Auto is
+    // still selected, and the next arrow must compute from Full or it skips a
+    // tier. The keydown bubbles from the focused button to this container, so
+    // `event.target` is that button.
+    const focused = tierButtons.current.indexOf(
+      event.target as HTMLButtonElement,
+    );
+    if (focused === -1) return;
+    const tier = status.tiers[focused + step];
     if (!tier) return;
     event.preventDefault();
-    tierButtons.current[index + step]?.focus();
+    tierButtons.current[focused + step]?.focus();
     chooseTier(tier);
   };
 
