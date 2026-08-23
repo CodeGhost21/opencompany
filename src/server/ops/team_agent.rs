@@ -1767,6 +1767,208 @@ prompt = "Lead decisively."
         assert_eq!(blanked["instructionsOverridden"], false, "{blanked}");
     }
 
+    // ---- avatars (docs/spec/runtime/avatars.md) --------------------------
+
+    /// The smallest valid GIF, as bytes. Real enough to be sniffed as one,
+    /// which is the whole point — the upload route reads the signature rather
+    /// than believing the part's declared type.
+    const TINY_GIF: &[u8] = b"GIF89a\x01\x00\x01\x00\x00\xff\x00,\x00\x00\x00\x00\
+\x01\x00\x01\x00\x00\x02\x00;";
+
+    /// Posts `bytes` to the avatar upload route as a `file` part named `name`.
+    async fn upload_avatar(state: &AppState, name: &str, bytes: &[u8]) -> (StatusCode, Value) {
+        const BOUNDARY: &str = "----ocavatartest";
+        let mut body: Vec<u8> = Vec::new();
+        body.extend_from_slice(
+            format!(
+                "--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"file\"; \
+                 filename=\"{name}\"\r\nContent-Type: image/png\r\n\r\n"
+            )
+            .as_bytes(),
+        );
+        body.extend_from_slice(bytes);
+        body.extend_from_slice(format!("\r\n--{BOUNDARY}--\r\n").as_bytes());
+        let request = Request::builder()
+            .method("POST")
+            .uri("/api/v1/company/avatars")
+            .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+            .header(
+                "content-type",
+                format!("multipart/form-data; boundary={BOUNDARY}"),
+            )
+            .body(Body::from(body))
+            .unwrap();
+        let response = router(state.clone()).oneshot(request).await.unwrap();
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+        )
+    }
+
+    /// Picking one of the shipped mascots, and putting it back. `null` resets to
+    /// "nobody has chosen", which is what makes the console's hashed default
+    /// reachable again — a stored empty string could not express it.
+    #[tokio::test]
+    async fn a_teammate_can_wear_a_tiny_flavour_and_take_it_off() {
+        let home_dir = home();
+        let state = state_with_manifest(home_dir.path(), ROSTER).await;
+
+        let (status, worn) = patch_agent(&state, "ceo", json!({"avatar": "tiny:teal"})).await;
+        assert_eq!(status, StatusCode::OK, "{worn}");
+        assert_eq!(worn["avatar"], "tiny:teal", "{worn}");
+
+        // Persisted, not just echoed — and visible on the roster list, which is
+        // what every facepile in the console is drawn from.
+        let (_, reread) = get_agent(&state, "ceo").await;
+        assert_eq!(reread["avatar"], "tiny:teal", "{reread}");
+        let (_, roster) = send(&state, "GET", "/api/v1/company/team", None).await;
+        let row = roster
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["id"] == "ceo")
+            .expect("the ceo is on the roster");
+        assert_eq!(row["avatar"], "tiny:teal", "{row}");
+
+        let (status, bare) = patch_agent(&state, "ceo", json!({"avatar": null})).await;
+        assert_eq!(status, StatusCode::OK, "{bare}");
+        assert!(
+            bare.get("avatar").is_none(),
+            "a reset is absent, not empty: {bare}"
+        );
+    }
+
+    /// Resetting a face must not reset a persona, and vice versa. The two share
+    /// one override row, so this is the route-level net under the record-level
+    /// invariant.
+    #[tokio::test]
+    async fn resetting_a_face_leaves_the_persona_alone() {
+        let home_dir = home();
+        let state = state_with_manifest(home_dir.path(), PERSONA_MANIFEST).await;
+
+        patch_agent(&state, "ceo", json!({"instructions": "Answer in haiku."})).await;
+        patch_agent(&state, "ceo", json!({"avatar": "tiny:rose"})).await;
+
+        let (status, reset) = patch_agent(&state, "ceo", json!({"avatar": null})).await;
+        assert_eq!(status, StatusCode::OK, "{reset}");
+        assert_eq!(
+            reset["instructions"], "Answer in haiku.",
+            "the persona survives a face reset: {reset}"
+        );
+
+        let (_, persona_reset) = patch_agent(&state, "ceo", json!({"instructions": null})).await;
+        patch_agent(&state, "ceo", json!({"avatar": "tiny:rose"})).await;
+        let (_, after) = patch_agent(&state, "ceo", json!({"instructions": null})).await;
+        assert_eq!(
+            after["avatar"], "tiny:rose",
+            "the face survives a persona reset: {after} (first reset: {persona_reset})"
+        );
+    }
+
+    /// The rule the grammar exists for: an avatar names something this host
+    /// holds. A stored URL would be an instruction the console obeys, in an
+    /// `src=`, on every surface that draws a face.
+    #[tokio::test]
+    async fn a_url_is_not_an_avatar() {
+        let home_dir = home();
+        let state = state_with_manifest(home_dir.path(), ROSTER).await;
+
+        for hostile in [
+            "https://tracker.example/beacon.gif",
+            "javascript:alert(1)",
+            "data:image/gif;base64,R0lGOD",
+            "tiny:puce",
+        ] {
+            let (status, refused) = patch_agent(&state, "ceo", json!({"avatar": hostile})).await;
+            assert_eq!(
+                status,
+                StatusCode::BAD_REQUEST,
+                "{hostile} was accepted: {refused}"
+            );
+        }
+        // And nothing was stored on the way out.
+        let (_, reread) = get_agent(&state, "ceo").await;
+        assert!(reread.get("avatar").is_none(), "{reread}");
+    }
+
+    /// The custom-image path end to end: upload, then wear what came back.
+    /// A GIF specifically, because an animated face is the case the format
+    /// allowlist exists to admit.
+    #[tokio::test]
+    async fn an_uploaded_gif_becomes_a_wearable_face() {
+        let home_dir = home();
+        let state = state_with_manifest(home_dir.path(), ROSTER).await;
+
+        let (status, uploaded) = upload_avatar(&state, "wave.gif", TINY_GIF).await;
+        assert_eq!(status, StatusCode::OK, "{uploaded}");
+        assert_eq!(
+            uploaded["mime"], "image/gif",
+            "sniffed from the bytes, not taken from the part's `image/png`: {uploaded}"
+        );
+        let reference = uploaded["avatar"].as_str().expect("a reference").to_string();
+        assert!(reference.starts_with("blob:"), "{reference}");
+
+        let (status, worn) = patch_agent(&state, "ceo", json!({"avatar": reference})).await;
+        assert_eq!(status, StatusCode::OK, "{worn}");
+        assert_eq!(worn["avatar"], reference, "{worn}");
+
+        // And the bytes come back through the blob route the console reads.
+        let node = uploaded["nodeId"].as_str().unwrap();
+        let (status, _) = send(
+            &state,
+            "GET",
+            &format!("/api/v1/company/workspace/blob/{node}"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    /// What only claims to be an image is refused at the door — the reason the
+    /// route sniffs rather than trusting the declared type.
+    #[tokio::test]
+    async fn an_upload_that_is_not_an_image_is_refused() {
+        let home_dir = home();
+        let state = state_with_manifest(home_dir.path(), ROSTER).await;
+
+        let (status, refused) = upload_avatar(
+            &state,
+            "face.png",
+            b"<svg xmlns=\"http://www.w3.org/2000/svg\"><script/></svg>",
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
+    }
+
+    /// A `blob:` reference is just a node id, and any member can type one.
+    /// Pointing it at nothing — or at a prose note — is refused on the request
+    /// that asked for it, rather than becoming a broken image on every surface.
+    #[tokio::test]
+    async fn a_blob_reference_must_point_at_an_image() {
+        let home_dir = home();
+        let state = state_with_manifest(home_dir.path(), ROSTER).await;
+
+        let (status, refused) =
+            patch_agent(&state, "ceo", json!({"avatar": "blob:01NOSUCHNODE"})).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
+
+        // A real node that holds prose rather than bytes.
+        let (status, note) = send(
+            &state,
+            "POST",
+            "/api/v1/company/workspace",
+            Some(json!({"name": "notes.md", "kind": "file", "content": "hello"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{note}");
+        let id = note["id"].as_str().expect("a node id");
+        let (status, refused) =
+            patch_agent(&state, "ceo", json!({"avatar": format!("blob:{id}")})).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
+    }
+
     /// Issue #1530: an overlay teammate's persona is editable the same way. It
     /// has no manifest `prompt`, so `blueprintInstructions` is absent and a reset
     /// falls all the way to nothing.
