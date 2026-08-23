@@ -37,12 +37,14 @@ function useToastClickThrough(): void {
       if (event.button !== 0 || !(event.target instanceof Element)) return
       if (!event.target.closest("[data-sonner-toast]") || isToastControl(event.target)) return
 
-      const toasters = Array.from(document.querySelectorAll<HTMLElement>("[data-sonner-toaster]"))
-      const pointerEvents = toasters.map((toaster) => toaster.style.pointerEvents)
-      for (const toaster of toasters) toaster.style.pointerEvents = "none"
+      const toasterElements = Array.from(
+        document.querySelectorAll<HTMLElement>("[data-sonner-toaster], [data-sonner-toaster] *"),
+      )
+      const pointerEvents = toasterElements.map((element) => element.style.pointerEvents)
+      for (const element of toasterElements) element.style.pointerEvents = "none"
       const beneath = document.elementFromPoint(event.clientX, event.clientY)
-      for (const [index, toaster] of toasters.entries()) {
-        toaster.style.pointerEvents = pointerEvents[index]
+      for (const [index, element] of toasterElements.entries()) {
+        element.style.pointerEvents = pointerEvents[index]
       }
 
       if (!(beneath instanceof HTMLElement) || beneath.closest("[data-sonner-toaster]")) return
