@@ -187,10 +187,12 @@ async fn run_publishing(dir: &std::path::Path) -> crate::ports::WorkflowRun {
 /// without requiring the provider calls to rendezvous.
 async fn spawn_interleaved_publish_script() -> String {
     let steps = Arc::new(Mutex::new(BTreeMap::<String, usize>::new()));
+    let barrier = Arc::new(tokio::sync::Barrier::new(2));
     let app = axum::Router::new().route(
         "/chat/completions",
         post(move |Json(body): Json<serde_json::Value>| {
             let steps = Arc::clone(&steps);
+            let barrier = Arc::clone(&barrier);
             async move {
                 let rendered = body.to_string();
                 let (lane, source) = if rendered.contains("run-a") {
