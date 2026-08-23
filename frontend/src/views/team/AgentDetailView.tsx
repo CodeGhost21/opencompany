@@ -216,11 +216,13 @@ export function AgentDetailView({
    */
   useEffect(() => {
     let live = true;
-    if (!company) {
-      setWorkload(null);
-      setOpenTasks(null);
-      return;
-    }
+    // Drop the previous teammate's board reading before the new one is read.
+    // The view stays mounted across a hash change, and the agent-detail request
+    // races this one — without this the ready view can render agent B beside
+    // agent A's task links until (or unless) the board request lands.
+    setWorkload(null);
+    setOpenTasks(null);
+    if (!company) return;
     void (async () => {
       const [tasks, columns] = await Promise.all([
         listTasks(client, company).catch(() => null),
