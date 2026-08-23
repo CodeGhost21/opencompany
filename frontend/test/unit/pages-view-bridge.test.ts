@@ -48,9 +48,9 @@ function clientWith(graphqlRequest: OpenCompanyClient["graphqlRequest"]): OpenCo
 let container: HTMLDivElement;
 let root: Root;
 
-async function show(client: OpenCompanyClient) {
+async function show(client: OpenCompanyClient, company = "acme") {
   await act(async () => {
-    root.render(createElement(PagesView, { client, company: "acme" }));
+    root.render(createElement(PagesView, { client, company }));
   });
 }
 
