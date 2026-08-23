@@ -358,6 +358,13 @@ export default defineConfig({
   fullyParallel: false,
   workers: 1,
   timeout: 60_000,
+  // The visual lane compares pixels of a d3 physics sim in headless Chromium,
+  // whose frame clock can occasionally stall (`requestAnimationFrame` stops
+  // firing and the graph never ticks — `settleKnowledgeGraph` in visual.spec.ts
+  // now fails loudly on that). One retry absorbs the stall on a fresh page
+  // while still failing on a real diff, which survives two consecutive stalls
+  // only 1-in-80 times. Every other lane keeps Playwright's default of zero.
+  retries: VISUAL ? 1 : 0,
   reporter: [["list"]],
   use: {
     baseURL,
