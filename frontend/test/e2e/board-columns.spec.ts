@@ -144,7 +144,7 @@ test("an empty board leaves its column affordances to explain the empty state", 
     // A declared ledger defaults to list mode since issue #1336. Switch to
     // board mode so the columns render and the empty-state affordances are
     // visible where this test asserts them.
-    await page.getByRole("button", { name: "Board" }).click();
+    await page.getByTitle("Group rows by status").click();
     await expect(page.getByTestId("ledger-board")).toBeVisible({ timeout: 15_000 });
 
     // Board columns already say what an empty board is for. A second status
