@@ -6871,7 +6871,7 @@ budget_usd_daily = 0.0
             (&["*"][..], false, true),
             (&["*"][..], true, true),
             (
-                &["workspace", "search", "media", "composio", "repo"][..],
+                &["workspace", "search", "media", "composio"][..],
                 false,
                 true,
             ),
@@ -6886,7 +6886,6 @@ budget_usd_daily = 0.0
             "workspace_write",
             "file_read",
             "describe_skill",
-            "repo_checkout",
             #[cfg(feature = "mcp")]
             "mcp_list_servers",
             #[cfg(feature = "mcp")]
