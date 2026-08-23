@@ -23,6 +23,11 @@ export function mentionCountsByChannel(
   notifications: readonly NotificationDto[],
 ): Record<string, number> {
   const out: Record<string, number> = {};
+  // Defensive against a caller handing us something that is not a list. The
+  // types say it cannot happen; a host returning an unexpected shape says
+  // otherwise, and the consequence of being wrong here is a render-time throw
+  // that blanks the console rather than a missing badge.
+  if (!Array.isArray(notifications)) return out;
   for (const n of notifications) {
     // Unread only. A mention you have already dealt with is not a summons.
     if (n.readAt !== undefined) continue;

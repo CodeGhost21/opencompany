@@ -58,6 +58,24 @@ describe("mentionCountsByChannel", () => {
   it("is empty for an empty feed", () => {
     expect(mentionCountsByChannel([])).toEqual({});
   });
+
+  /**
+   * A host answering `GET {scope}/notifications` with something other than the
+   * documented shape must not take the console down.
+   *
+   * This is not hypothetical: a mocked host that returns a bare `[]` for
+   * unmatched routes made `feed.notifications` `undefined`, and iterating it
+   * threw during render — blanking the entire app and failing every unrelated
+   * spec in the file. The badge is the least important thing on the screen and
+   * has to fail like it.
+   */
+  it("survives a caller handing it something that is not a list", () => {
+    for (const bad of [undefined, null, "nope", 7, {}]) {
+      expect(
+        mentionCountsByChannel(bad as unknown as NotificationDto[]),
+      ).toEqual({});
+    }
+  });
 });
 
 describe("mentionsToClear", () => {

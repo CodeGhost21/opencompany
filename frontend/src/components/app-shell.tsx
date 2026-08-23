@@ -1120,7 +1120,13 @@ export function AppShell({
   const refreshMentions = useCallback(() => {
     void client
       .notifications(company)
-      .then((feed) => setMentionFeed(feed.notifications))
+      // A host that answers this route with something other than the documented
+      // shape must not take the console down with it. `?? []` rather than a
+      // trusted `feed.notifications`: an older or proxied host can return a bare
+      // array, or `null`, and iterating that throws during render — which blanks
+      // the whole app, not just the badge. The badge is the least important
+      // thing on the screen and must fail like it.
+      .then((feed) => setMentionFeed(Array.isArray(feed?.notifications) ? feed.notifications : []))
       .catch(() => setMentionFeed([]));
   }, [client, company]);
 
