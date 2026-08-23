@@ -667,8 +667,13 @@ async fn edit_agent(
             .filter(|value| !value.is_empty())
         {
             Some(value) => {
-                let stored = crate::company::avatar::normalize(&value)
-                    .map_err(|e| ApiError(e).into_response())?;
+                let stored = crate::company::avatar::resolve(
+                    company.runtime.workspace().as_ref(),
+                    company.id(),
+                    &value,
+                )
+                .await
+                .map_err(|e| ApiError(e).into_response())?;
                 record.upsert_agent_override(AgentOverride {
                     agent_id: agent_id.clone(),
                     avatar: Some(stored),
