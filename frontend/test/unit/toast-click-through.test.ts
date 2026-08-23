@@ -199,7 +199,7 @@ describe("toast click-through", () => {
     // the click to the frame over the bridge rather than click the host
     // (which nothing in the frame receives) or focus it (which steals
     // keyboard focus into the embedded document).
-    const frame = frameBeneath();
+    const { frame, posted } = frameBeneath();
     const frameClicked = vi.fn();
     frame.addEventListener("click", frameClicked);
     mockElementFromPoint(frame);
@@ -209,7 +209,6 @@ describe("toast click-through", () => {
     text.addEventListener("click", relayToastClick);
     clickAt(text, 40, 50);
 
-    const posted = (frame.contentWindow as Window).postMessage as ReturnType<typeof vi.fn>;
     expect(posted).toHaveBeenCalledWith(
       expect.objectContaining({ type: "oc:relay-click", x: 30, y: 30 }),
       "*",
@@ -219,7 +218,7 @@ describe("toast click-through", () => {
   });
 
   it("relays a press on toast text into a page frame beneath", () => {
-    const frame = frameBeneath();
+    const { frame, posted } = frameBeneath();
     mockElementFromPoint(frame);
 
     const text = document.createElement("span");
@@ -227,7 +226,6 @@ describe("toast click-through", () => {
     text.addEventListener("pointerdown", relayToastPointerDown);
     press(text);
 
-    const posted = (frame.contentWindow as Window).postMessage as ReturnType<typeof vi.fn>;
     expect(posted).toHaveBeenCalledWith(
       expect.objectContaining({
         type: "oc:relay-pointerdown",
