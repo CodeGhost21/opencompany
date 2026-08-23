@@ -198,6 +198,7 @@ async fn list_mentionables(company: ScopedCompany) -> Result<Json<MentionablesDt
     let people = users
         .iter()
         .zip(slugs)
+        .filter(|(u, _)| self_id.as_ref().is_none_or(|s| u.id != *s))
         .map(|(u, slug)| MentionablePersonDto {
             id: u.id.clone(),
             label: user_label(u),
