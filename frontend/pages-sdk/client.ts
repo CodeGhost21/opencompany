@@ -40,10 +40,18 @@ window.addEventListener("message", function onInit(event: MessageEvent) {
  * received, forwarded because DOM events cannot cross the sandboxed-frame
  * boundary from the parent document. The parent shifted the coordinates into
  * this document's viewport, so `elementFromPoint` here sees the page's own
- * tree.
+ * tree. A press is the first event of a gesture, not the whole of it: the
+ * parent relays the remainder — `pointermove`, `pointerup`, `pointercancel`
+ * — the same way, so a drag or press-state control sees a complete sequence
+ * instead of a `pointerdown` it can never release.
  */
 interface RelayMessage {
-  type: "oc:relay-click" | "oc:relay-pointerdown";
+  type:
+    | "oc:relay-click"
+    | "oc:relay-pointerdown"
+    | "oc:relay-pointermove"
+    | "oc:relay-pointerup"
+    | "oc:relay-pointercancel";
   x: number;
   y: number;
   pointerId?: number;
@@ -58,7 +66,11 @@ function isRelayMessage(value: unknown): value is RelayMessage {
   if (typeof value !== "object" || value === null) return false;
   const message = value as Record<string, unknown>;
   return (
-    (message.type === "oc:relay-click" || message.type === "oc:relay-pointerdown") &&
+    (message.type === "oc:relay-click" ||
+      message.type === "oc:relay-pointerdown" ||
+      message.type === "oc:relay-pointermove" ||
+      message.type === "oc:relay-pointerup" ||
+      message.type === "oc:relay-pointercancel") &&
     typeof message.x === "number" &&
     typeof message.y === "number"
   );
