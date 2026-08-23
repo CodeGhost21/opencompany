@@ -1337,7 +1337,10 @@ pub async fn assert_user_store(users: Arc<dyn UserStore>) {
         id: id.to_string(),
         email: email.to_string(),
         display_name: Some(format!("name {id}")),
-        avatar: None,
+        // Non-`None` so a backend that drops the column is caught here: a lost
+        // avatar reads as "never chose one", so the person's face would revert
+        // to the hashed default on the next read with nothing reporting it.
+        avatar: Some("tiny:indigo".to_string()),
         role: UserRole::Member,
         status: UserStatus::Active,
         password_hash: None,
