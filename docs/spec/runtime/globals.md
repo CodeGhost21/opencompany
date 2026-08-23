@@ -108,6 +108,15 @@ does, and an agent with no `files` grant is meant to be offered no file tools at
 all, so a floor would silently re-grant authority a company withheld on purpose.
 What is global here is where the starting belt is authored.
 
+The belt is **wide**: `["*", "workspace.*", "media", "composio", "search",
+"mcp:*"]` — every namespace a company can hold except `repo`, which an
+fs-storage host refuses to boot with. Turning one off is a company-level edit
+to `[tools].allow` (which replaces this list rather than extending it), and
+that is the only off switch there is. It used to be narrow, and what that
+bought was first-run companies whose teammates reported their own tools as "not
+enabled" for capabilities the operator had already installed — see
+`docs/spec/runtime/tools.md`.
+
 ## Provenance, and why it is persisted
 
 `Agent::global` and `WorkflowFile::global` mark what came from the baseline.

@@ -166,6 +166,43 @@ fn catalog_matches_driver_registry() {
     );
 }
 
+/// The hosted engines are available in a **default** build, not only in one
+/// somebody remembered to pass `--features tinymemory` to.
+///
+/// This is a regression pin with a support case behind it: the memory-engine
+/// catalog is a console surface in every build, and without `tinymemory` four
+/// of its tiles ("Supermemory", "Mem0", "Cognee", "No memory") render disabled
+/// with "this build was compiled without the `tinymemory` feature" — an
+/// instruction to go and find a differently compiled binary. For the desktop
+/// app and for anyone running the shipped container that is not an instruction
+/// they can follow, so the feature ships in the default set (see `Cargo.toml`)
+/// and this asserts it from a lane that passes no features at all.
+///
+/// Deliberately NOT quantified over the whole catalog: the in-pod engines
+/// (`embedded`, `namespace`) do cost a bundled SQLite build and stay opt-in.
+/// The desktop turns those on explicitly, and its own
+/// `the_desktop_build_includes_every_memory_engine` test is what holds it to
+/// the stronger claim.
+#[test]
+fn the_hosted_memory_engines_ship_in_the_default_build() {
+    let hosted = ["supermemory", "mem0", "cognee", "null"];
+    let disabled: Vec<String> = catalog()
+        .into_iter()
+        .filter(|option| hosted.contains(&option.id) && !option.available)
+        .map(|option| {
+            format!(
+                "{}: {}",
+                option.id,
+                option.unavailable_reason.unwrap_or_default()
+            )
+        })
+        .collect();
+    assert!(
+        disabled.is_empty(),
+        "a default build must offer the hosted memory engines: {disabled:?}"
+    );
+}
+
 /// Whether this build can bind an engine is answered separately from whether
 /// the operator filled the form in — so a build without the feature refuses
 /// with the reason that actually blocks it.

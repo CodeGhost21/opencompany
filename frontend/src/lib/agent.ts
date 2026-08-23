@@ -177,32 +177,47 @@ export interface ToolGrantSummary {
  * blank field is `[]` — which the caller must treat as "the company's standard
  * grant" rather than "no tools".
  */
+/** The characters that end a namespace segment in a tool name. */
+const TOOL_NAME_SEPARATORS = [".", "_", ":"];
+
+/**
+ * The host's `extends_on_boundary`: `name` is `prefix`, or extends it and
+ * breaks on a separator.
+ *
+ * The boundary is the whole point — without it a `docs` grant would cover
+ * `documentation.read`, and `file*` would cover `filesystem_wipe`.
+ */
+function extendsOnBoundary(name: string, prefix: string): boolean {
+  if (name === prefix) return true;
+  if (!name.startsWith(prefix)) return false;
+  if (TOOL_NAME_SEPARATORS.some((sep) => prefix.endsWith(sep))) return true;
+  const rest = name.slice(prefix.length);
+  return TOOL_NAME_SEPARATORS.some((sep) => rest.startsWith(sep));
+}
+
 /**
  * Whether a company's allow-list covers one requested grant glob — the
- * console's mirror of the host's `allow_covers`.
+ * console's mirror of the host's `allow_covers` / `grant_matches` pair, rule
+ * for rule.
  *
- * A trailing `*` on the request is stripped first (asking for `docs.*` is
- * asking about `docs.`), then each allow entry matches if it is the catch-all,
- * an exact hit, or a prefix that stops on a namespace separator. The
- * separator rule is what keeps `documentation.read` from being covered by a
- * `docs` grant.
+ * A trailing `*` is stripped from the *request* first (asking for `docs.*` is
+ * asking about `docs`), then an allow entry matches if it is the catch-all, an
+ * exact hit, or a `*`-suffixed prefix that stops on a namespace boundary. The
+ * two asymmetries worth knowing, because both look like bugs and are not:
+ * `workspace.*` does **not** cover a bare `workspace` request (which is why
+ * manifests list both), and a grant with no trailing `*` matches only itself.
  *
  * This is a *hint*, shown while an operator types. The host stays the
  * authority: it re-derives `effective` on every read, so a disagreement here
- * shows up as a grant that renders struck through rather than as a permission
- * the console invented.
+ * shows up as a grant rendered struck through rather than as a permission the
+ * console invented.
  */
 export function companyCovers(allow: string[], glob: string): boolean {
   const literal = glob.endsWith("*") ? glob.slice(0, -1) : glob;
   return allow.some((grant) => {
     if (grant === "*") return true;
-    const base = grant.endsWith("*") ? grant.slice(0, -1) : grant;
-    if (literal === base || literal.startsWith(base)) return true;
-    if (!base.startsWith(literal)) return false;
-    // `workspace` covers a request for `workspace.read`, and the other way
-    // round a request for `workspace` is covered by `workspace.*`.
-    const rest = base.slice(literal.length);
-    return rest.startsWith(".") || rest.startsWith(":");
+    if (grant.endsWith("*")) return extendsOnBoundary(literal, grant.slice(0, -1));
+    return grant === literal;
   });
 }
 

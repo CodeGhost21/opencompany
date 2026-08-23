@@ -139,7 +139,7 @@ const BASE_BELT: [&str; 6] = [
 ///
 /// [`manifest_from_setup`] builds its manifest from a name-only base, so
 /// `[tools]` took [`Tools::default`](crate::company::Tools) — the globals
-/// baseline `["*", "media", "composio"]` — and every agent left `tools` empty,
+/// baseline `default_allow` — and every agent left `tools` empty,
 /// which [`agent_effective_grants`](crate::runtime::builder) reads as *inherit
 /// the lot*. So each teammate a first-run operator created held shell, code,
 /// web, subagent, files, docs, **media** (which spends real money) and
@@ -406,7 +406,7 @@ impl AgentFocus {
 /// wrong default for a permission boundary, and it inverted the whole control:
 /// an empty `tools` list is read as *inherit the company belt* by
 /// [`agent_effective_grants`](crate::runtime::builder), and a setup-built
-/// company's belt is the globals default `["*", "media", "composio"]`. So an
+/// company's belt is the globals `default_allow`. So an
 /// **invalid** focus produced a wider agent than any valid one, and anything able
 /// to influence that string — the operator's own free text reaches a model that
 /// writes it — escaped the narrowing simply by being unrecognisable.
@@ -1369,7 +1369,7 @@ pub fn manifest_from_setup(
             built.description = non_empty(&agent.description);
             // Asked for explicitly, exactly as `globals/agents/*.toml` do. An
             // agent that requests nothing inherits the company belt whole —
-            // which here is the globals default `["*", "media", "composio"]`,
+            // which here is the globals `default_allow`,
             // so every teammate a first-run operator created held real-money
             // media and per-tenant Composio credentials. Intersected with
             // `[tools].allow`, so this can only ever narrow.
@@ -2019,6 +2019,63 @@ mod tests {
         }
     }
 
+    /// The end-to-end shape of the complaint this change answers, pinned on the
+    /// real flow rather than on `AgentFocus::tools` in isolation.
+    ///
+    /// A roster the wizard designs, run through `manifest_from_setup`, and then
+    /// through the *real* narrowing: what each teammate ends up holding must
+    /// include the capabilities it was reporting as not enabled — the workspace
+    /// it writes into, the web, web search, and the company's MCP servers.
+    #[test]
+    fn a_designed_roster_ends_up_holding_search_mcp_and_workspace_writes() {
+        let roster = vec![
+            ProposedAgent {
+                name: "Ada".into(),
+                role: "Writer".into(),
+                description: "Writes the things.".into(),
+                focus: Some(AgentFocus::Writing),
+            },
+            ProposedAgent {
+                name: "Ravi".into(),
+                role: "Analyst".into(),
+                description: "Measures the things.".into(),
+                focus: Some(AgentFocus::Analysis),
+            },
+        ];
+        let manifest = manifest_from_setup(&answers("a shop", ""), &roster, None);
+        assert_eq!(manifest.validate(), Vec::<String>::new());
+
+        for (index, agent) in manifest.agents.iter().enumerate() {
+            let mut solo = manifest.clone();
+            solo.agents = vec![manifest.agents[index].clone()];
+            let grants = crate::runtime::builder::effective_grants(&solo);
+
+            assert!(
+                crate::company::grants_search_explicit(&grants),
+                "{} ends up without `search`: {grants:?}",
+                agent.id
+            );
+            assert!(
+                crate::company::grants_workspace_write_explicit(&grants),
+                "{} ends up unable to write the workspace: {grants:?}",
+                agent.id
+            );
+            assert!(
+                grants.iter().any(|g| g == "mcp:*"),
+                "{} ends up unable to reach an MCP server: {grants:?}",
+                agent.id
+            );
+            // Nothing was dropped in the intersection: every glob the teammate
+            // asked for survives, so the Team screen shows no "asked for but
+            // not granted" line on a company this flow just minted.
+            assert_eq!(
+                grants, agent.tools,
+                "{} had part of its belt dropped by the company allow-list",
+                agent.id
+            );
+        }
+    }
+
     /// Every namespace a belt names is one the default company grant covers.
     ///
     /// The failure this rules out is silent and was the whole complaint: an
@@ -2047,7 +2104,7 @@ mod tests {
     /// The bug this whole seam exists to close.
     ///
     /// `manifest_from_setup` parses a name-only base, so `[tools]` takes the
-    /// globals default `["*", "media", "composio"]` — and an agent that asks for
+    /// globals `default_allow` — and an agent that asks for
     /// nothing inherits that belt whole. Every teammate a first-run operator
     /// created therefore held real-money media and per-tenant Composio
     /// credentials for a company described in three sentences.
@@ -2082,7 +2139,7 @@ mod tests {
         }
         // Fail CLOSED: never an empty list, because empty means "inherit the
         // company belt" — which for a setup-built company is
-        // `["*", "media", "composio"]`. An unrecognised value must not buy more
+        // the globals `default_allow`. An unrecognised value must not buy more
         // authority than a recognised one.
         let unknown = tools_for_focus(None);
         assert!(!unknown.is_empty(), "an empty belt inherits everything");

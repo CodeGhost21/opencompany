@@ -39,8 +39,25 @@ tool the gate refuses is the exact failure this single-source rule prevents.
 
 ### Levels in detail
 
-**Company — `[tools].allow`.** The ceiling. Defaults to
-`["*", "media", "composio"]`.
+**Company — `[tools].allow`.** The ceiling, and **the one place a capability is
+turned off for a whole company**. It defaults to `globals/globals.toml`'s
+`default_allow`:
+
+```toml
+default_allow = ["*", "workspace.*", "media", "composio", "search", "mcp:*"]
+```
+
+Everything a company can hold is on by default, and dropping an entry from this
+list is how it comes off — for every teammate at once, whatever their own
+`tools` line asks for. `allow` **replaces** the default rather than extending
+it, so a company that means to withhold one namespace writes the rest of the
+list out and leaves that one off.
+
+`repo` is the one gateable namespace the default withholds, and not as a
+preference: a host on filesystem storage refuses to boot a company whose
+allow-list names it, because a repository credential would sit on that
+filesystem in plaintext. A MongoDB-backed company that wants it adds `repo.*`
+here and on the teammates that need it.
 
 **Desk — `[[group_chat]].tools`.** A department's ceiling. A company organises
 its teammates into desks — a finance desk, a creative desk — and this is where
