@@ -38,9 +38,9 @@ describe("Settings navigation (issue #1468)", () => {
   it("renders linkable rows and gives narrow-screen navigation its missing context", () => {
     const settings = read("views/SettingsView.tsx");
 
-    expect(section.match(/href=\{`#\/settings\/\$\{item\.id\}`\}/g)).toHaveLength(2);
-    expect(section).toContain("title={item.hint}");
-    expect(section).toContain("{activePage.hint}");
+    expect(settings.match(/href=\{`#\/settings\/\$\{item\.id\}`\}/g)).toHaveLength(2);
+    expect(settings).toContain("title={item.hint}");
+    expect(settings).toContain("{activePage.hint}");
     expect(settings).toContain('className="text-2xl font-semibold tracking-tight lg:sr-only"');
   });
 });
