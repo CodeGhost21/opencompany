@@ -828,7 +828,7 @@ mod tests {
         assert_eq!(spec_body(restarted).await["instance_id"], id);
 
         let caps = body["capabilities"].as_array().expect("capabilities");
-        for expected in ["rest", "graphql", "sse", "devices"] {
+        for expected in ["rest", "graphql", "sse"] {
             assert!(caps.iter().any(|c| c == expected), "missing {expected}");
         }
         assert_eq!(body["storage"], "fs");

@@ -32,9 +32,9 @@
 //!
 //! A *paired device* is what that client holds — the same [`SessionRecord`]
 //! with [`SessionKind::Device`], a label, and a year-long TTL, minted by
-//! [`devices`] from a code a signed-in human pasted in. Deliberately not a
+//! a code a signed-in human pasted in. Deliberately not a
 //! separate credential system, so that suspension, admin reset and a user's own
-//! password change already revoke devices without any of them growing a second
+//! password change already revoke sessions without any of them growing a second
 //! code path to remember.
 //!
 //! [`SessionRecord`]: crate::ports::SessionRecord

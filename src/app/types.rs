@@ -1076,7 +1076,7 @@ impl AppState {
     /// capability rather than a version number. Growing the list must never
     /// break a client that has not heard of the new entry.
     fn capabilities(&self) -> Vec<&'static str> {
-        let mut out = vec!["rest", "graphql", "sse", "approvals", "devices"];
+        let mut out = vec!["rest", "graphql", "sse", "approvals"];
         if self.hub_identity.is_some() {
             out.push("hub-identity");
         }
