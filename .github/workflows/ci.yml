@@ -761,11 +761,11 @@ jobs:
   # Issue #202. The `Rust` job above builds DEFAULT FEATURES ONLY, so every line
   # behind `openhuman` (`src/harness/**`, `src/workflows/**`, `src/runtime/`
   # `delegation*`, and the `live_company_turn` example) and every line behind
-  # `tinycortex` (`src/store/tinycortex_engine.rs` plus its `src/store/select.rs`
-  # seam) is invisible to it — a green `Rust` check is not evidence for a diff
-  # whose lines are all feature-gated. That blind spot let a hard `E0062` in a
-  # test `HarnessDeps` literal and a failing harness test both sit on `main`.
-  # This job compiles, lints and tests that surface.
+  # `tinymemory` (`src/store/memory/**` plus its `src/store/select.rs` seam) is
+  # invisible to it — a green `Rust` check is not evidence for a diff whose lines
+  # are all feature-gated. That blind spot let a hard `E0062` in a test
+  # `HarnessDeps` literal and a failing harness test both sit on `main`. This job
+  # compiles, lints and tests that surface.
   #
   # Deliberately a SEPARATE job rather than extra steps on `rust`: the fast
   # default check keeps its ~3-minute turnaround and its `Rust` check name (any
