@@ -163,6 +163,20 @@ export function SetupController({
     setOpen(false);
   }, [scope]);
 
+  /**
+   * Close for a navigation that is *part of* setup, recording nothing.
+   *
+   * Following "Set up a model" is the operator starting this flow, not
+   * declining it. Routing that through `skip` persisted an "I'll do this later"
+   * they never expressed, so on return the company was still unstaffed and the
+   * dialog no longer offered itself — the flow they had just gone to enable was
+   * the flow they could no longer reach, short of finding the Team page's
+   * separate prompt.
+   */
+  const leave = useCallback(() => {
+    setOpen(false);
+  }, []);
+
   const done = useCallback(() => {
     // Clear the skip so it cannot outlive what it was suppressing: an operator
     // who skipped, later ran setup, then removed every agent should be offered
@@ -178,6 +192,13 @@ export function SetupController({
   if (!open) return null;
 
   return (
-    <SetupDialog open={open} client={client} company={company} onSkip={skip} onDone={done} />
+    <SetupDialog
+      open={open}
+      client={client}
+      company={company}
+      onSkip={skip}
+      onLeave={leave}
+      onDone={done}
+    />
   );
 }

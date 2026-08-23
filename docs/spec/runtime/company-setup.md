@@ -321,6 +321,25 @@ in with a roster that is only roughly right is dramatically better than not
 getting in. A person who cannot get past setup has had the worst possible first
 five minutes and is not coming back.
 
+**Decision D3a: say it before the questions, not after the roster.** A host with
+no model still answers — that is D3 — but the operator has by then spent three
+answers believing they were shaping something, so the dialog states the
+consequence beside question one. Three things keep that honest. It asks the
+**company** (`GET {scope}/inference`), whose cognition path is what decides
+whether a roster builder exists; `/api/v1/setup` reads the *host's* managed
+credential and refuses multi-company hosts, so a BYOK company reads as
+unavailable there while its design pass runs fine. The wait is **bounded**:
+nothing dismisses this dialog and the questions are withheld while the check is
+outstanding, so a host that stalls rather than rejecting would lock the operator
+out. And leaving to wire a model is **not a skip** — that is the operator
+starting this flow, so it closes the dialog and records nothing.
+
+**Decision D3b: the fallback says which fallback, because the next action
+differs.** `no_model` means nothing was reachable — wire a credential.
+`not_designable` means a model answered unusably, almost always because the
+answers were too sparse. "Add a model in Settings" shows only for `no_model`;
+elsewhere it would send someone to fix a credential that had just worked.
+
 ## How we know it is someone's first time
 
 The obvious approach is to tick a box in the browser. The tour does this today,

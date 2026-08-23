@@ -2,8 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ArrowLeft, Check, Loader2, Sparkles, Users } from "lucide-react";
 
 import type { OpenCompanyClient } from "@/api/client";
-import { proposeRoster, type ProposedAgent } from "@/api/company-setup";
-import { getSetup } from "@/api/setup";
+import { proposeRoster, type ProposedAgent, type RosterFallback } from "@/api/company-setup";
+import { getInferenceStatus } from "@/api/inference";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button, buttonVariants } from "@/components/ui/button";
 import {
@@ -45,12 +45,38 @@ const REVEAL_MS = 450;
 type Phase =
   | { kind: "asking"; step: number }
   | { kind: "thinking" }
-  | { kind: "building"; agents: ProposedAgent[]; created: number; fallback: boolean }
-  | { kind: "done"; agents: ProposedAgent[]; fallback: boolean }
+  | { kind: "building"; agents: ProposedAgent[]; created: number; fallback: Fallback }
+  | { kind: "done"; agents: ProposedAgent[]; fallback: Fallback }
   | { kind: "failed"; reason: string };
+
+/**
+ * Why the curated team shipped, or `null` when the model designed this one.
+ *
+ * `"unspecified"` covers a host that reported a fallback without saying why.
+ * It is not the same as `"no_model"` and must not be folded into it: the
+ * credential CTA is only ever correct when the host actually said no model was
+ * reachable, and guessing that on silence is how an operator gets sent to fix
+ * a key that already worked.
+ */
+type Fallback = RosterFallback | "unspecified" | null;
 
 /** What the host said about the model before we ask the questions it shapes. */
 type InferenceReadiness = "checking" | "ready" | "unavailable" | "unknown";
+
+/**
+ * How long to wait for the readiness answer before carrying on without it.
+ *
+ * The browser transport's `fetch` has no timeout of its own, and this dialog
+ * withholds the questions and refuses every dismissal while the answer is
+ * outstanding — so a host that *stalls* rather than rejecting would lock the
+ * operator out of the console for as long as it stalls. An unanswered check
+ * degrades to `unknown`, which is the same honest "we could not establish this"
+ * the rejection path already reports.
+ */
+const READINESS_TIMEOUT_MS = 6_000;
+
+/** The cognition path that has a roster builder on it — see the effect below. */
+const DESIGNING_COGNITION = "harness";
 
 /**
  * First-run company setup: three questions, then a team built on the host
@@ -73,6 +99,7 @@ export function SetupDialog({
   client,
   company,
   onSkip,
+  onLeave,
   onDone,
 }: {
   open: boolean;
@@ -80,6 +107,17 @@ export function SetupDialog({
   company: string | null;
   /** "I'll do this later" — records the skip and closes. */
   onSkip: () => void;
+  /**
+   * Close without recording any decision.
+   *
+   * Distinct from [`onSkip`] because the two mean opposite things. Skipping is
+   * "I'll do this later" and is *meant* to suppress the offer on the next load.
+   * Leaving to wire a model is the operator starting this flow, not declining
+   * it — recording a skip there would suppress the dialog exactly when they
+   * came back ready to use it, leaving an unstaffed company and no way back in
+   * short of finding the Team page's separate prompt.
+   */
+  onLeave: () => void;
   /** Setup finished; the caller refreshes the roster and hands off to the tour. */
   onDone: () => void;
 }) {
@@ -101,24 +139,50 @@ export function SetupDialog({
   // three answers can achieve. Learn that before asking for any of them: the
   // host's roster endpoint deliberately succeeds with a curated team on this
   // path, so waiting until its response would be an after-the-fact disclosure.
+  //
+  // ## Asked of the company, not the host
+  //
+  // The question is "will the design pass run for *this* company", and the only
+  // thing that decides it is whether the company's runtime carries a roster
+  // builder (`src/server/ops/setup.rs`). That builder is constructed in the same
+  // branch that builds the harness brain, so the company's own cognition path
+  // answers it exactly.
+  //
+  // The instance wizard's `/api/v1/setup` does not. It reports readiness from
+  // the *host's* managed credential alone, and rejects multi-company hosts
+  // outright — so a company holding a manifest or runtime BYOK config on a host
+  // with no managed key reads as `unavailable` there while its design pass runs
+  // perfectly well. Warning that operator about a model we are about to use is
+  // the same untrustworthy disclosure this notice exists to prevent, pointing
+  // the other way.
+  //
+  // ## The wait is bounded
+  //
+  // See `READINESS_TIMEOUT_MS`: an unanswered check must not hold the dialog
+  // shut, because there is no way out of it while it does.
   useEffect(() => {
     let cancelled = false;
     setInference("checking");
-    void getSetup(client).then(
-      (status) => {
-        if (!cancelled) setInference(status.inference.ready ? "ready" : "unavailable");
-      },
+    const settle = (value: InferenceReadiness) => {
+      if (cancelled) return;
+      cancelled = true;
+      setInference(value);
+    };
+    const timer = setTimeout(() => settle("unknown"), READINESS_TIMEOUT_MS);
+    void getInferenceStatus(client, company).then(
+      (status) => settle(status.cognition === DESIGNING_COGNITION ? "ready" : "unavailable"),
       () => {
         // Do not silently treat an unreadable status as a configured model.
         // The setup route may still work, but its result must not be promised
         // as tailored while we could not establish that.
-        if (!cancelled) setInference("unknown");
+        settle("unknown");
       },
     );
     return () => {
       cancelled = true;
+      clearTimeout(timer);
     };
-  }, [client]);
+  }, [client, company]);
 
   const step = phase.kind === "asking" ? SETUP_STEPS[phase.step] : undefined;
   const problem = useMemo(
@@ -147,7 +211,10 @@ export function SetupDialog({
         kind: "building",
         agents: proposal.agents,
         created: 0,
-        fallback: proposal.source === "fallback",
+        // `?? "unspecified"` rather than `?? "no_model"`: a fallback the host
+        // declined to explain must not be presented as a missing credential.
+        fallback:
+          proposal.source === "fallback" ? (proposal.reason ?? "unspecified") : null,
       });
     } catch {
       // A real transport or auth failure — the host answers with its reference
@@ -249,7 +316,7 @@ export function SetupDialog({
               <DialogDescription>{step.hint}</DialogDescription>
             </DialogHeader>
             {phase.step === 0 && inference !== "ready" && (
-              <InferenceNotice unavailable={inference === "unavailable"} onLeave={onSkip} />
+              <InferenceNotice unavailable={inference === "unavailable"} onLeave={onLeave} />
             )}
             <div className="grid gap-2 py-2">
               <Label htmlFor={`setup-${step.key}`} className="sr-only">
@@ -365,6 +432,23 @@ function InferenceNotice({ unavailable, onLeave }: { unavailable: boolean; onLea
   );
 }
 
+/**
+ * What to say about a curated team, and what to ask for next.
+ *
+ * Each arm names a different next action, which is the whole reason the host
+ * distinguishes them — see `RosterFallback`.
+ */
+function fallbackExplanation(fallback: NonNullable<Fallback>): string {
+  switch (fallback) {
+    case "no_model":
+      return "A general starting team for your industry — we couldn't reach a model to tailor it to your answers. Rename, retire, or add anyone from the Team page.";
+    case "not_designable":
+      return "A general starting team for your industry — we reached a model, but there wasn't enough in your answers to tailor one to them. Rename, retire, or add anyone from the Team page, or run setup again from the Team page with more about what your business does.";
+    case "unspecified":
+      return "A general starting team for your industry, rather than one tailored to your answers. Rename, retire, or add anyone from the Team page.";
+  }
+}
+
 /** The build-out: named teammates appearing one after another. */
 function BuildOut({
   agents,
@@ -376,8 +460,11 @@ function BuildOut({
   agents: ProposedAgent[];
   created: number;
   finished: boolean;
-  /** The curated team shipped instead of a designed one — said out loud below. */
-  fallback: boolean;
+  /**
+   * Why the curated team shipped instead of a designed one, or `null` when the
+   * model designed this one. Said out loud below, and it decides the CTA.
+   */
+  fallback: Fallback;
   onDone: () => void;
 }) {
   return (
@@ -396,7 +483,7 @@ function BuildOut({
         <DialogDescription>
           {finished
             ? fallback
-              ? "A general starting team for your industry — we couldn't reach a model to tailor it to your answers. Rename, retire, or add anyone from the Team page."
+              ? fallbackExplanation(fallback)
               : "Built from your answers. A starting point — rename, retire, or add anyone from the Team page."
             : buildOutLabel(created, agents.length)}
         </DialogDescription>
@@ -439,7 +526,14 @@ function BuildOut({
       </ul>
       {finished && (
         <DialogFooter>
-          {fallback && (
+          {/*
+            Only the one reason a credential would fix. A model that answered
+            and was not designable already had a working key, and sending that
+            operator to Settings is an instruction that cannot help them — what
+            they need is to say more about the business, which the description
+            above asks for instead.
+          */}
+          {fallback === "no_model" && (
             <a
               href="#/settings/connections"
               onClick={onDone}
