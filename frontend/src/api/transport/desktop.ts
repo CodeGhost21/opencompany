@@ -43,6 +43,18 @@ export interface EmbeddedInfo {
   instanceId?: string;
 }
 
+/**
+ * How a connection authenticates, in the shape `oc_connect` takes.
+ *
+ * Only the platform bearer travels, because that one genuinely arrives in the
+ * URL. A session the desktop holds is the client's own business — it lives in
+ * the OS keychain and the console never sees it, which is also why there is no
+ * device token here to leak.
+ */
+export interface DesktopCredential {
+  platformToken?: string;
+}
+
 /** Connections the core has been told about, by id. */
 const registrations = new Map<string, Promise<void>>();
 
