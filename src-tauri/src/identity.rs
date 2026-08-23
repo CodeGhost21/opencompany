@@ -34,7 +34,10 @@
 //! prefill that fails is a profile a person fills in themselves, which is
 //! exactly what happens today.
 
-use std::path::{Path, PathBuf};
+#[cfg(any(target_os = "linux", target_os = "windows", test))]
+use std::path::Path;
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+use std::path::PathBuf;
 
 /// The largest account picture worth carrying into the webview.
 ///
@@ -71,8 +74,7 @@ pub fn device_identity() -> DeviceIdentity {
         .filter(|name| !name.trim().is_empty());
     DeviceIdentity {
         full_name: username.as_deref().and_then(full_name),
-        picture_data_url: picture_path(username.as_deref())
-            .and_then(|path| encode_picture(&path)),
+        picture_data_url: picture(username.as_deref()),
         username,
     }
 }
@@ -114,32 +116,65 @@ fn full_name(_username: &str) -> Option<String> {
     None
 }
 
-/// Where this platform keeps the account picture, if it is there.
+/// The account picture as a data URL, per platform.
+///
+/// Two shapes, because the platforms differ in kind and not only in path: Linux
+/// and Windows keep a *file*, which is read and sniffed; macOS keeps the bytes
+/// **inside the directory record**, so there is nothing to open and they are
+/// extracted from `dscl` instead.
 #[cfg(target_os = "linux")]
-fn picture_path(username: Option<&str>) -> Option<PathBuf> {
+fn picture(username: Option<&str>) -> Option<String> {
     // `~/.face` is what GNOME, KDE and friends write; AccountsService keeps its
     // own copy, which is the one that survives a home directory the desktop
     // never wrote to.
     let home = std::env::var("HOME").ok()?;
-    let candidates = [
+    let mut candidates = vec![
         PathBuf::from(&home).join(".face"),
         PathBuf::from(&home).join(".face.icon"),
-        PathBuf::from("/var/lib/AccountsService/icons").join(username?),
     ];
-    candidates.into_iter().find(|path| path.is_file())
+    if let Some(username) = username {
+        candidates.push(PathBuf::from("/var/lib/AccountsService/icons").join(username));
+    }
+    candidates
+        .into_iter()
+        .find(|path| path.is_file())
+        .and_then(|path| encode_picture(&path))
 }
 
+/// macOS keeps the picture in the local directory record rather than in a file,
+/// so it is extracted rather than opened: `dscl` prints `JPEGPhoto` as
+/// whitespace-separated hex, which is decoded back to bytes here.
 #[cfg(target_os = "macos")]
-fn picture_path(username: Option<&str>) -> Option<PathBuf> {
-    let _ = username;
-    // macOS keeps the picture *inside* the directory record rather than as a
-    // file, so it is extracted rather than read: `dscl` prints `JPEGPhoto` as
-    // hex, which `encode_picture` cannot use. Handled in `macos_picture`.
-    None
+fn picture(username: Option<&str>) -> Option<String> {
+    let out = std::process::Command::new("/usr/bin/dscl")
+        .args([".", "-read", &format!("/Users/{}", username?), "JPEGPhoto"])
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let hex: String = text
+        .chars()
+        .filter(|c| c.is_ascii_hexdigit())
+        // The `JPEGPhoto:` label itself contains no hex digits beyond none, so
+        // filtering is enough to isolate the payload — but the count must be
+        // even for the pairs below to mean anything.
+        .collect();
+    if hex.len() < 2 || !hex.len().is_multiple_of(2) {
+        return None;
+    }
+    let bytes: Vec<u8> = hex
+        .as_bytes()
+        .chunks(2)
+        .filter_map(|pair| u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok())
+        .collect();
+    if bytes.len() as u64 > MAX_PICTURE_BYTES {
+        return None;
+    }
+    let mime = sniff(&bytes)?;
+    Some(format!("data:{mime};base64,{}", base64_encode(&bytes)))
 }
 
 #[cfg(target_os = "windows")]
-fn picture_path(username: Option<&str>) -> Option<PathBuf> {
+fn picture(username: Option<&str>) -> Option<String> {
     let _ = username;
     let public = std::env::var("PUBLIC").ok()?;
     let dir = PathBuf::from(public).join("AccountPictures");
@@ -155,7 +190,12 @@ fn picture_path(username: Option<&str>) -> Option<PathBuf> {
             best = Some((meta.len(), entry.path()));
         }
     }
-    best.map(|(_, path)| path)
+    best.and_then(|(_, path)| encode_picture(&path))
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+fn picture(_username: Option<&str>) -> Option<String> {
+    None
 }
 
 #[cfg(target_os = "windows")]
@@ -179,6 +219,7 @@ fn walk(dir: &Path, depth: usize) -> Vec<std::fs::DirEntry> {
 
 /// Reads a picture file into a `data:` URL, or `None` if it is missing,
 /// unreadable, over the ceiling, or not an image this host would accept anyway.
+#[cfg(any(target_os = "linux", target_os = "windows", test))]
 fn encode_picture(path: &Path) -> Option<String> {
     let meta = std::fs::metadata(path).ok()?;
     if !meta.is_file() || meta.len() > MAX_PICTURE_BYTES {
