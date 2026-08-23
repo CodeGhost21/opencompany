@@ -204,6 +204,29 @@ pub(crate) fn agent_scoped_grants(
 /// shows and what an agent can actually do that the catalog exists to end.
 pub(crate) fn allow_covers(allow: &[String], tool: &str) -> bool {
     let literal = tool.strip_suffix('*').unwrap_or(tool);
+
+    // These namespaces are intentionally opt-in: the generic matcher treats
+    // `*` as covering every literal, but these grants reach metered services,
+    // tenant credentials, or third-party source. Keep narrowing consistent with
+    // the wiring predicates so an agent cannot ask for one of them through a
+    // catch-all company grant.
+    match literal {
+        "media" => return crate::company::grants_media_explicit(allow),
+        "composio" => return crate::company::grants_composio_explicit(allow),
+        "search" => return crate::company::grants_search_explicit(allow),
+        "repo" => return crate::company::grants_repo_explicit(allow),
+        _ => {}
+    }
+
+    // MCP grants use a colon namespace, so `mcp:*` is the explicit opt-in for
+    // an agent asking for all company servers. A bare `*` must not confer it.
+    if literal == "mcp:" || literal.starts_with("mcp:") {
+        return allow
+            .iter()
+            .filter(|grant| grant.as_str() != "*")
+            .any(|grant| grant_matches(grant, literal));
+    }
+
     allow.iter().any(|grant| grant_matches(grant, literal))
 }
 
