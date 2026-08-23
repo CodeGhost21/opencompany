@@ -494,7 +494,6 @@ mod test {
     // not on one local to this module: all of these tests link into a single
     // test binary, so a module-local lock would leave every *other*
     // env-touching test in it free to race these.
-    use crate::test_support::EnvVarGuard;
 
     fn smtp_creds() -> SmtpCredentials {
         SmtpCredentials {
