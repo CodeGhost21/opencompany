@@ -4,6 +4,13 @@ import { expect, test, type Page } from "@playwright/test";
 // still under the visual lane's `reducedMotion: "reduce"` well enough that two
 // consecutive full-page screenshots are byte-identical — WITHOUT any mask?
 
+// Replicate the visual lane's pinned media-query settings for this probe.
+test.use({
+  viewport: { width: 1280, height: 720 },
+  deviceScaleFactor: 1,
+  reducedMotion: "reduce",
+});
+
 const CONTENT_SURFACE = '[data-testid="content-surface"]';
 
 async function skipTour(page: Page) {
