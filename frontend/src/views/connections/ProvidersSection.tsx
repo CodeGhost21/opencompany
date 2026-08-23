@@ -587,7 +587,7 @@ function ProviderTile({
               "Permission requested" would present that guess as the actual
               grant; "Typical access" labels it as the general shape instead
               (issue #1474). */}
-          <p className="mt-2 text-left text-xs text-muted-foreground">
+          <p className="mt-2 line-clamp-2 text-left text-xs text-muted-foreground">
             Typical access: {permissionHint(row.category)}.
           </p>
         </button>
