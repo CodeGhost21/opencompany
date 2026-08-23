@@ -157,7 +157,7 @@ test("an empty board leaves its column affordances to explain the empty state", 
 
     // The list has no per-status-column affordance, so it retains both forms
     // of the above-list notice.
-    await page.getByRole("button", { name: "List" }).click();
+    await page.getByRole("button", { name: "List", exact: true }).click();
     await expect(page.getByTestId("ledger-filtered-empty")).toBeVisible({ timeout: 15_000 });
     await search.fill("");
     await expect(page.getByTestId("ledger-empty")).toBeVisible({ timeout: 15_000 });
