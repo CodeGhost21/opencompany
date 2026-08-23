@@ -819,7 +819,7 @@ export function KnowledgeGraph({
     if (!sim) return;
     // TEMP-DIAGNOSTIC: log reheat invocations (visual-flake hunt).
     const prevLog = (window as unknown as { __simLog?: Array<object> }).__simLog ?? [];
-    prevLog.push({ ev: "reheat", t: performance.now(), alpha: Math.round(sim.alpha() * 1000) / 1000 });
+    prevLog.push({ ev: "reheat", t: performance.now(), alpha: Math.round(sim.alpha() * 1000) / 1000, nodes: sim.nodes().length });
     (window as unknown as { __simLog?: Array<object> }).__simLog = prevLog;
     configure(sim);
     // a soft reheat — enough to re-form the shape, gentle enough to drift, not
