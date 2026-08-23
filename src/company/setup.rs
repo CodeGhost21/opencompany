@@ -407,10 +407,11 @@ impl AgentFocus {
 /// [`WRITING`](AgentFocus::Writing)'s belt is the floor instead: the base belt
 /// plus workspace writes. A teammate that lands there can still do its work,
 /// and no unrecognised value can ever buy more authority than a recognised
-/// one. That property survives the widened belts — `writing` is still a strict
-/// subset of every other shape's reach, so it holds no shell, no code, no
-/// repository, no media budget and no Composio credential. Fail closed, then,
-/// in the only direction that still matters.
+/// one. That property survives the widened belts: `writing` adds workspace
+/// writes to the base belt and nothing else, so an unreadable focus still
+/// holds no shell, no code, no bound repository, no media budget and no
+/// Composio credential. Fail closed, then, in the only direction that still
+/// matters.
 pub fn tools_for_focus(focus: Option<AgentFocus>) -> Vec<String> {
     focus.unwrap_or(AgentFocus::Writing).tools()
 }
