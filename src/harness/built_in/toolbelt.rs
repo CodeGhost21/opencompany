@@ -798,9 +798,9 @@ mod tests {
     }
 
     /// The two things the sandbox brief exists to say, both of which the belt
-    /// enforces whether or not the agent knows them: paths are confined
-    /// (`exec_security` sets `workspace_only`), and producing the thing means
-    /// writing it rather than recording a task about it.
+    /// enforces whether or not the agent knows them: file/code paths are
+    /// confined (`exec_security` sets `workspace_only`), and producing the
+    /// thing means writing it rather than recording a task about it.
     #[test]
     fn the_brief_states_the_confinement_and_the_write_it_instruction() {
         let brief = sandbox_brief(true, true, true);
@@ -816,6 +816,38 @@ mod tests {
             brief.contains("Recording a task about the work"),
             "the observed failure must be named: {brief}"
         );
+    }
+
+    /// The confinement claim must be scoped to the tools that enforce it.
+    /// `workspace_only` refuses an absolute path or a `../` escape for the
+    /// file/code tools, but `action_dir` only sets the shell's *working
+    /// directory* — a same-uid command can read anywhere the server can
+    /// (docs/spec/security/agent-isolation.md). So the shell clause must
+    /// describe the directory as where commands start, never as a jail.
+    #[test]
+    fn the_shell_clause_does_not_claim_confinement() {
+        let shell_only = sandbox_brief(false, true, false);
+        assert!(!shell_only.contains("cannot leave"), "{shell_only}");
+        assert!(!shell_only.contains("nothing outside"), "{shell_only}");
+        assert!(shell_only.contains("starts in that same directory"), "{shell_only}");
+
+        // The refusal sentence stays with the file tools that enforce it.
+        let files_only = sandbox_brief(true, false, false);
+        assert!(files_only.contains("`../` escape is refused"), "{files_only}");
+    }
+
+    /// "Run the command" is a command-running instruction, and the only tool
+    /// that runs arbitrary commands is `shell`. A belt without `shell` must
+    /// not be told to run anything — that re-creates the unavailable-tool
+    /// prompt mismatch the namespace filtering exists to prevent.
+    #[test]
+    fn the_run_instruction_is_gated_on_shell() {
+        let files_only = sandbox_brief(true, false, false);
+        assert!(!files_only.contains("run the command"), "{files_only}");
+        assert!(!files_only.contains("or run"), "{files_only}");
+
+        let with_shell = sandbox_brief(true, true, false);
+        assert!(with_shell.contains("run the command"), "{with_shell}");
     }
 
     fn test_security(workspace: &Path, mode: PolicyMode) -> Arc<SecurityPolicy> {
