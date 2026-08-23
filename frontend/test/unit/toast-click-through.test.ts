@@ -193,4 +193,68 @@ describe("toast click-through", () => {
     // the guard after it returns without dispatching.
     expect(document.elementFromPoint).toHaveBeenCalledOnce();
   });
+
+  it("relays a click on toast text into a page frame beneath", () => {
+    // A control rendered inside the Pages view is another document's element;
+    // `elementFromPoint` answers with the frame host, and the relay must hand
+    // the click to the frame over the bridge rather than click the host
+    // (which nothing in the frame receives) or focus it (which steals
+    // keyboard focus into the embedded document).
+    const frame = frameBeneath();
+    const frameClicked = vi.fn();
+    frame.addEventListener("click", frameClicked);
+    mockElementFromPoint(frame);
+
+    const text = document.createElement("span");
+    toast().append(text);
+    text.addEventListener("click", relayToastClick);
+    clickAt(text, 40, 50);
+
+    const posted = (frame.contentWindow as Window).postMessage as ReturnType<typeof vi.fn>;
+    expect(posted).toHaveBeenCalledWith(
+      expect.objectContaining({ type: "oc:relay-click", x: 30, y: 30 }),
+      "*",
+    );
+    expect(frameClicked).not.toHaveBeenCalled();
+    expect(document.activeElement).not.toBe(frame);
+  });
+
+  it("relays a press on toast text into a page frame beneath", () => {
+    const frame = frameBeneath();
+    mockElementFromPoint(frame);
+
+    const text = document.createElement("span");
+    toast().append(text);
+    text.addEventListener("pointerdown", relayToastPointerDown);
+    press(text);
+
+    const posted = (frame.contentWindow as Window).postMessage as ReturnType<typeof vi.fn>;
+    expect(posted).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "oc:relay-pointerdown",
+        x: 30,
+        y: 30,
+        pointerId: 7,
+        pointerType: "mouse",
+        isPrimary: true,
+        button: 0,
+        buttons: 1,
+      }),
+      "*",
+    );
+  });
+
+  it("does not relay a press into a frame with no loaded document", () => {
+    // A detached or not-yet-loaded frame has no `contentWindow` to hand the
+    // gesture to; the relay must simply give up rather than throw.
+    const frame = document.createElement("iframe");
+    document.body.append(frame);
+    mockElementFromPoint(frame);
+
+    const text = document.createElement("span");
+    toast().append(text);
+    text.addEventListener("pointerdown", relayToastPointerDown);
+
+    expect(() => press(text)).not.toThrow();
+  });
 });
