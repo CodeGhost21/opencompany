@@ -123,7 +123,7 @@ is an internal dashboard page, not a public site):
 All four set:
 
 ```text
-Content-Security-Policy: default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'none'; frame-ancestors 'self'
+Content-Security-Policy: default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; font-src 'self' data:; connect-src 'none'; frame-ancestors 'self'
 X-Content-Type-Options: nosniff
 Cache-Control: no-store
 ```
