@@ -930,12 +930,12 @@ pub fn build_agent(
     // check the brief would describe `shell`/`code` on a turn where the capability
     // tier denied them (a fail-closed metering error, or an exhausted budget),
     // telling the agent to call a tool `filter_by_capabilities` already removed.
-    let shell_capability_denied = toolbelt::namespace_denied(&deps.capabilities, "shell");
-    let code_capability_denied = toolbelt::namespace_denied(&deps.capabilities, "code");
+    let (sandbox_files, sandbox_shell, sandbox_code) =
+        sandbox_brief_flags(wants_files, shell_wired, wants_code, &deps.capabilities);
     persona.push_str(&toolbelt::sandbox_brief(
-        wants_files,
-        shell_wired && !shell_capability_denied,
-        wants_code && !code_capability_denied,
+        sandbox_files,
+        sandbox_shell,
+        sandbox_code,
     ));
 
     // Issue #244: what a deliverable is, and how to hand one over. Only when
