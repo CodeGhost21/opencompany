@@ -4240,7 +4240,6 @@ async fn mcp_add_probes_without_rollback_and_persists_health() {
     );
 }
 
-
 /// #187: the Artifacts tab's full loop — an agent draft, a human edit appended
 /// as a new version, and the diff between them.
 ///

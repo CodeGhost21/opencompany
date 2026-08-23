@@ -60,7 +60,6 @@ use crate::server::ops::mailer::{MailCredentials, OutboundEmail};
 /// park cards that silently do nothing when approved.
 pub(crate) const EMAIL_SEND_KIND: &str = "email.send";
 
-
 /// The `error` the terminality backstop stamps on an attempt row whose cycle
 /// ended without settling it (issue #242) — a brain that ignored the dispatch,
 /// not a brain that failed at it.

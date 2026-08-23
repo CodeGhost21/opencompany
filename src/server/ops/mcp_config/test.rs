@@ -29,10 +29,17 @@ fn lower(name: &str) -> McpServer {
 /// The smallest useful entry is a URL; everything else takes its default.
 #[test]
 fn a_bare_url_is_a_complete_entry() {
-    let server = server_from("notion", &entry(serde_json::json!({"url": "https://x/mcp"})), None)
-        .expect("a URL is enough");
+    let server = server_from(
+        "notion",
+        &entry(serde_json::json!({"url": "https://x/mcp"})),
+        None,
+    )
+    .expect("a URL is enough");
     assert_eq!(server.endpoint, "https://x/mcp");
-    assert!(server.enabled, "a server is exposed unless it says otherwise");
+    assert!(
+        server.enabled,
+        "a server is exposed unless it says otherwise"
+    );
     assert_eq!(server.timeout_secs, 30);
     assert!(server.allowed_tools.is_empty());
 }
@@ -42,8 +49,12 @@ fn a_bare_url_is_a_complete_entry() {
 #[test]
 fn an_entry_inherits_what_it_does_not_mention() {
     let declared = lower("notion");
-    let server = server_from("notion", &entry(serde_json::json!({"enabled": false})), Some(&declared))
-        .expect("the lower layer supplies the rest");
+    let server = server_from(
+        "notion",
+        &entry(serde_json::json!({"enabled": false})),
+        Some(&declared),
+    )
+    .expect("the lower layer supplies the rest");
     assert!(!server.enabled);
     assert_eq!(server.endpoint, declared.endpoint);
     assert_eq!(server.allowed_tools, declared.allowed_tools);
@@ -56,8 +67,12 @@ fn an_entry_inherits_what_it_does_not_mention() {
 /// `enabled` wins when a document carries both.
 #[test]
 fn claudes_disabled_spelling_is_honoured() {
-    let off = server_from("notion", &entry(serde_json::json!({"url": "https://x/mcp", "disabled": true})), None)
-        .expect("parses");
+    let off = server_from(
+        "notion",
+        &entry(serde_json::json!({"url": "https://x/mcp", "disabled": true})),
+        None,
+    )
+    .expect("parses");
     assert!(!off.enabled);
 
     let both = server_from(
@@ -79,8 +94,12 @@ fn a_stdio_entry_is_refused_by_name() {
     assert!(message.contains("HTTP only"), "{message}");
     assert!(message.contains("`command`"), "{message}");
 
-    let err = server_from("local", &entry(serde_json::json!({"type": "stdio", "url": "https://x"})), None)
-        .expect_err("an explicit stdio transport is refused too");
+    let err = server_from(
+        "local",
+        &entry(serde_json::json!({"type": "stdio", "url": "https://x"})),
+        None,
+    )
+    .expect_err("an explicit stdio transport is refused too");
     assert!(err.0.to_string().contains("stdio"), "the refusal names it");
 }
 
@@ -90,12 +109,20 @@ fn a_stdio_entry_is_refused_by_name() {
 #[test]
 fn an_unedited_entry_is_not_an_override() {
     let declared = lower("notion");
-    let same = server_from("notion", &entry(serde_json::json!({})), Some(&declared)).expect("parses");
+    let same =
+        server_from("notion", &entry(serde_json::json!({})), Some(&declared)).expect("parses");
     assert!(!differs(&same, &declared), "nothing was said");
 
-    let edited = server_from("notion", &entry(serde_json::json!({"timeoutSecs": 10})), Some(&declared))
-        .expect("parses");
-    assert!(differs(&edited, &declared), "a changed timeout is an override");
+    let edited = server_from(
+        "notion",
+        &entry(serde_json::json!({"timeoutSecs": 10})),
+        Some(&declared),
+    )
+    .expect("parses");
+    assert!(
+        differs(&edited, &declared),
+        "a changed timeout is an override"
+    );
 }
 
 /// Whitespace and blank entries in a tool list are not a difference: the
@@ -118,8 +145,8 @@ fn tool_list_whitespace_is_not_a_difference() {
 #[test]
 fn a_bearer_header_is_stored_as_a_bearer_token() {
     let headers = serde_json::json!({"Authorization": "Bearer sk-live-1"});
-    let material = auth_from_headers("notion", headers.as_object().expect("object"))
-        .expect("one header");
+    let material =
+        auth_from_headers("notion", headers.as_object().expect("object")).expect("one header");
     assert_eq!(material, AuthMaterial::Bearer("sk-live-1".to_string()));
 }
 
@@ -127,8 +154,8 @@ fn a_bearer_header_is_stored_as_a_bearer_token() {
 #[test]
 fn a_custom_header_is_stored_verbatim() {
     let headers = serde_json::json!({"X-Api-Key": "abc"});
-    let material = auth_from_headers("notion", headers.as_object().expect("object"))
-        .expect("one header");
+    let material =
+        auth_from_headers("notion", headers.as_object().expect("object")).expect("one header");
     assert_eq!(
         material,
         AuthMaterial::Header {
@@ -143,8 +170,8 @@ fn a_custom_header_is_stored_verbatim() {
 #[test]
 fn several_credential_headers_are_refused() {
     let headers = serde_json::json!({"Authorization": "Bearer a", "X-Api-Key": "b"});
-    let err = auth_from_headers("notion", headers.as_object().expect("object"))
-        .expect_err("ambiguous");
+    let err =
+        auth_from_headers("notion", headers.as_object().expect("object")).expect_err("ambiguous");
     assert!(err.0.to_string().contains("one outbound credential header"));
 }
 
@@ -154,5 +181,8 @@ fn several_credential_headers_are_refused() {
 fn an_empty_headers_object_is_refused() {
     let headers = serde_json::Map::new();
     let err = auth_from_headers("notion", &headers).expect_err("says nothing");
-    assert!(err.0.to_string().contains("Omit it"), "the refusal says how");
+    assert!(
+        err.0.to_string().contains("Omit it"),
+        "the refusal says how"
+    );
 }

@@ -187,10 +187,7 @@ fn wildcard_covers(namespace: &str) -> bool {
 mod tests {
     use super::*;
     use crate::company::GATEABLE_NAMESPACES;
-    use crate::company::{
-        grants_composio_explicit, grants_media_explicit,
-        grants_search_explicit,
-    };
+    use crate::company::{grants_composio_explicit, grants_media_explicit, grants_search_explicit};
 
     fn manifest(toml: &str) -> CompanyManifest {
         toml::from_str(toml).expect("valid toml")

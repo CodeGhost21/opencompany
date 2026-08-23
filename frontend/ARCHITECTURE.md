@@ -308,6 +308,19 @@ it. Responses mirror the TypeScript models in `src/lib/*` and `src/api/types.ts`
   remembered copy is only a second answer that can disagree with the
   authoritative one, and the SMTP password was in it. `src/lib/domain.ts` is now
   a domain pre-flight plus a one-shot purge of what older builds already wrote.
+### MCP Servers (Settings) — `src/views/McpServersView.tsx`
+- Two tabs over one configuration: **Connections**, a row per server with its
+  status and its controls as icons (`src/views/mcp/McpIconButton.tsx` —
+  credential, connect, re-check, tools, enable/disable, remove), and
+  **mcp.json** (`src/views/mcp/McpJsonEditor.tsx`), the declared set as one
+  editable document.
+- **Source:** ✅ real — `…/mcp/servers` per row, `…/mcp/config` for the file.
+  Both write the same store, so the two tabs cannot describe different
+  configurations; a save re-mounts the rows so the list re-reads.
+- Credentials stay write-only in both: the document reports `authConfigured` and
+  never a token, and an entry with no `headers` leaves the stored credential
+  alone rather than clearing it.
+
 ### Settings sub-pages — `src/views/settings-pages.ts`
 - The table lives in its own module rather than in `SettingsSection.tsx`, so
   prose that sends someone to a sub-page can name one without importing the

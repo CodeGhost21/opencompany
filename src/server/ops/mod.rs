@@ -155,7 +155,6 @@ impl ConnectionsRuntime {
         self.mail_credentials = Some(creds);
         self
     }
-
 }
 
 impl std::fmt::Debug for ConnectionsRuntime {

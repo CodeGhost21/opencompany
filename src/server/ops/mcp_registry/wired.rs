@@ -203,10 +203,7 @@ pub(super) async fn entry(company: ScopedCompany, Query(query): Query<EntryQuery
         ))
         .into_response();
     }
-    let raw = match mcp
-        .registry_get(qualified_name.clone())
-        .await
-    {
+    let raw = match mcp.registry_get(qualified_name.clone()).await {
         Ok(raw) => raw,
         Err(error) => return ApiError(error).into_response(),
     };
@@ -243,10 +240,7 @@ pub(super) async fn install(
         .into_response();
     }
 
-    let raw = match mcp
-        .registry_get(qualified_name.clone())
-        .await
-    {
+    let raw = match mcp.registry_get(qualified_name.clone()).await {
         Ok(raw) => raw,
         Err(error) => return ApiError(error).into_response(),
     };
@@ -260,10 +254,7 @@ pub(super) async fn install(
         return ApiError(OpenCompanyError::InvalidRequest(refusal)).into_response();
     }
 
-    let server = match mcp
-        .install_from_directory(qualified_name, body.env)
-        .await
-    {
+    let server = match mcp.install_from_directory(qualified_name, body.env).await {
         Ok(server) => server,
         Err(error) => return ApiError(error).into_response(),
     };

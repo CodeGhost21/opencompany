@@ -48,9 +48,9 @@
 //! rendering them here would invite an edit that silently does nothing. They
 //! stay on the rows, where their own routes manage them.
 
+use axum::Json;
 use axum::Router;
 use axum::routing::get;
-use axum::Json;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
@@ -163,7 +163,9 @@ struct WriteResponse {
 
 /// The company's declared MCP servers (manifest ∪ install defaults ∪ runtime),
 /// merged and projected into the three layers' effective bodies.
-async fn declared(runtime: &CompanyRuntime) -> Result<Vec<crate::company::mcp::McpServerDecl>, ApiError> {
+async fn declared(
+    runtime: &CompanyRuntime,
+) -> Result<Vec<crate::company::mcp::McpServerDecl>, ApiError> {
     let manifest = manifest_servers(runtime).await?;
     let index = load_runtime_index(runtime.id(), runtime.secrets().as_ref())
         .await
@@ -464,7 +466,10 @@ fn auth_from_headers(name: &str, headers: &Map<String, Value>) -> Result<AuthMat
     {
         return Ok(AuthMaterial::Bearer(token.to_string()));
     }
-    Ok(AuthMaterial::Header { name: header, value })
+    Ok(AuthMaterial::Header {
+        name: header,
+        value,
+    })
 }
 
 #[cfg(test)]
