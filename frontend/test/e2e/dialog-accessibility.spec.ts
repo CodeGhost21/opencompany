@@ -76,5 +76,5 @@ test("the mobile sidebar sheet is modal", async ({ page }) => {
 
   const sheet = page.getByRole("dialog", { name: "Sidebar" });
   await expect(sheet).toBeVisible();
-  await expectModal(sheet, page.getByRole("button", { name: "Toggle sidebar" }));
+  await expectModal(sheet, page.getByRole("main"));
 });
