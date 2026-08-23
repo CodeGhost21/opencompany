@@ -112,6 +112,7 @@ impl Ctx {
             .next()
             .unwrap_or("")
             .to_string();
+        eprintln!("[[PROBE]] role={role:?}");
         Ctx {
             role,
             tool_results: msgs
