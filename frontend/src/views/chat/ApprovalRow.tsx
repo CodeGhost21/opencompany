@@ -420,10 +420,18 @@ function CompactApprovalRow({
 /** A differentiating, one-line summary rather than a second full approval card. */
 function compactLabel(approvals: ApprovalSummary[]): string {
   const lead = approvals[0];
-  const detail = itemLabel(lead);
   const action = approvalAction(lead);
-  const prefix = detail === action ? action : `${action} — ${detail}`;
-  return approvals.length > 1 ? `${prefix} + ${approvals.length - 1} more` : prefix;
+  const detail = itemLabel(lead);
+  // `itemLabel` already names the action for a role-hidden payload (#618);
+  // restating it here would print the action twice.
+  const prefix =
+    lead.contents_hidden || detail === action ? detail : `${action} — ${detail}`;
+  // A monetary effect shows its value beside whatever else it is doing — an
+  // operator approving a payment must see its amount, whether or not the host
+  // also sent a payload line to describe it.
+  const amount = lead.amount_usd != null ? ` · ${money(lead.amount_usd)}` : "";
+  const label = `${prefix}${amount}`;
+  return approvals.length > 1 ? `${label} + ${approvals.length - 1} more` : label;
 }
 
 /** Quiet until an operator targets a decision; the composer keeps the emphasis. */
