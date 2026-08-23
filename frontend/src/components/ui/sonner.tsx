@@ -4,6 +4,7 @@ import { Toaster as Sonner, toast, useSonner, type ToasterProps } from "sonner"
 import { CircleCheckIcon, InfoIcon, TriangleAlertIcon, OctagonXIcon, Loader2Icon } from "lucide-react"
 
 import { reconcileTracked, sweepToasts, type TrackedToast } from "@/lib/toast-lifetime"
+import { relayToastClick, relayToastPointerDown } from "@/lib/toast-click-through"
 
 /** How often the dismissal guard re-checks the toasts that are up. */
 const SWEEP_INTERVAL_MS = 500
@@ -13,6 +14,28 @@ function toasterHovered(): boolean {
   return Array.from(document.querySelectorAll("[data-sonner-toaster]")).some((el) =>
     el.matches(":hover"),
   )
+}
+
+/**
+ * Let a click on a toast's read-only surface reach the page behind it (issue #1303).
+ *
+ * The toast still receives pointer movement, which keeps sonner's useful
+ * hover-to-read pause intact. Only a press or click on its non-interactive
+ * content is relayed — `pointerdown` so pointer-driven controls beneath (the
+ * workflow minimap pans on `pointerdown`) react to the gesture itself, and
+ * `click` for the event path that starts later. Its close button and any
+ * action button remain ordinary controls, so a notification can still offer a
+ * one-click recovery without eating nearby page controls.
+ */
+function useToastClickThrough(): void {
+  useEffect(() => {
+    document.addEventListener("click", relayToastClick, true)
+    document.addEventListener("pointerdown", relayToastPointerDown, true)
+    return () => {
+      document.removeEventListener("click", relayToastClick, true)
+      document.removeEventListener("pointerdown", relayToastPointerDown, true)
+    }
+  }, [])
 }
 
 /**
@@ -61,6 +84,7 @@ function useToastDismissalCeiling(): void {
 const Toaster = ({ ...props }: ToasterProps) => {
   const { theme = "system" } = useTheme()
   useToastDismissalCeiling()
+  useToastClickThrough()
 
   return (
     <Sonner

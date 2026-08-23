@@ -1191,14 +1191,14 @@ jobs:
       # MANAGED platform credential), and what they are gated on is the belt
       # entry that decides whether an agent can reach them at all. An unrun
       # namespace pin is the wrong thing to have never executed.
-      - name: Test tool-belt contract (openhuman, mcp, telegram, media)
-        run: scripts/ci/run-scoped-suite.sh "tool-belt contract" openhuman,mcp,telegram,media harness::built_in::build::tests
+      - name: Test tool-belt contract (openhuman, mcp, media)
+        run: scripts/ci/run-scoped-suite.sh "tool-belt contract" openhuman,mcp,media harness::built_in::build::tests
 
       # The `media` toolbelt's other half: the three tool names and their single
       # `media` namespace. Same feature set as the step above, so this costs a
       # filtered re-run of an already-compiled tree and no fourth resolution.
       - name: Test the media toolbelt
-        run: scripts/ci/run-scoped-suite.sh "media toolbelt" openhuman,mcp,telegram,media harness::built_in::toolbelt
+        run: scripts/ci/run-scoped-suite.sh "media toolbelt" openhuman,mcp,media harness::built_in::toolbelt
 
       # The `mcp` OAuth-flow state, which the belt filter above never reached.
       # `app::types` holds two gated tests — a parked flow is SINGLE-USE (a
@@ -1213,7 +1213,7 @@ jobs:
       # to nothing — the trap the ACP step already documents, and the reason
       # `run-scoped-suite.sh` takes exactly one filter.
       - name: Test the MCP OAuth flow state
-        run: scripts/ci/run-scoped-suite.sh "mcp oauth state" openhuman,mcp,telegram,media app::types
+        run: scripts/ci/run-scoped-suite.sh "mcp oauth state" openhuman,mcp,media app::types
 
       # Issue #770. `composio` gated TWENTY-FOUR tests that ran nowhere — the
       # largest single pocket found. `src/harness/composio_catalog.rs` says so in

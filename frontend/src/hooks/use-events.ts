@@ -897,7 +897,7 @@ export function handleEvent(
         // injected line and its later rehydrated twin share an identity.
         seq: event.seq,
         // Issue #246: a reply injected from the stream — one this console did
-        // not POST for, e.g. an inbound Telegram turn — carries its "card
+        // not POST for, e.g. an inbound channel turn — carries its "card
         // opened" chip too, rather than only the locally-awaited copy.
         taskId: event.taskId,
         // Issue #364: and lands in the same thread a reload would put it in,

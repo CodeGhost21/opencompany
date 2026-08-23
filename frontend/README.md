@@ -27,7 +27,7 @@ and survives a refresh.
 | **Tasks** | A built-in Kanban board (drag cards between columns) |
 | **Approvals** | The inbox of things parked for your decision, with approve/decline |
 | **Workflows** | A read-only [React Flow](https://reactflow.dev) canvas of how work is routed (lazy-loaded) |
-| **Settings** | A section with its own nav: General (connection, lifecycle, domain, mail), People, Connections, MCP Servers |
+| **Settings** | A section with its own nav: General (connection, lifecycle, domain, mail), People, OAuth, MCP Servers, Inference |
 | **Feedback** | The scrub-then-preview feedback flow, plus a Join-our-Discord nudge |
 
 ## Run it

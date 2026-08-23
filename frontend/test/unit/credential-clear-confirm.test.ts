@@ -10,8 +10,6 @@ const api = vi.hoisted(() => ({
   clearBilling: vi.fn(),
   clearHosting: vi.fn(),
   getHosting: vi.fn(),
-  getMcpDirectoryCredential: vi.fn(),
-  setMcpDirectoryCredential: vi.fn(),
 }));
 
 vi.mock("@/api/billing", () => ({
@@ -25,20 +23,12 @@ vi.mock("@/api/hosting", () => ({
   saveHosting: vi.fn(),
 }));
 
-vi.mock("@/api/mcp-registry", () => ({
-  getMcpDirectoryCredential: api.getMcpDirectoryCredential,
-  setMcpDirectoryCredential: api.setMcpDirectoryCredential,
-}));
-
 vi.mock("sonner", () => ({
   toast: { error: vi.fn(), info: vi.fn(), success: vi.fn() },
 }));
 
 const { ChargebeeForm } = await import("@/views/finance/ChargebeeForm");
 const { HostingView } = await import("@/views/HostingView");
-const { McpDirectoryCredentialCard } = await import(
-  "@/views/connections/McpDirectoryCredentialCard"
-);
 
 let container: HTMLDivElement;
 let root: Root;
@@ -95,32 +85,6 @@ describe("credential clearing confirmation (issue #1471)", () => {
 
     await act(async () => button("Disconnect Chargebee").click());
     expect(api.clearBilling).toHaveBeenCalledOnce();
-  });
-
-  it("does not clear a Smithery key until confirmation", async () => {
-    api.getMcpDirectoryCredential.mockResolvedValue({
-      configured: true,
-      source: "company",
-      notice: "Configured for this company.",
-    });
-    api.setMcpDirectoryCredential.mockResolvedValue({
-      status: { configured: false, source: "none", notice: "Not configured." },
-      note: "Smithery key cleared.",
-    });
-    const fakeClient = client();
-    await act(async () => {
-      root.render(createElement(McpDirectoryCredentialCard, { client: fakeClient, company: "acme" }));
-      await Promise.resolve();
-    });
-
-    await act(async () => button("Clear key").click());
-    expect(api.setMcpDirectoryCredential).not.toHaveBeenCalled();
-    expect(document.body.textContent).toContain("cannot be shown or recovered");
-
-    await act(async () => {
-      (document.querySelector("[data-slot=alert-dialog-action]") as HTMLButtonElement).click();
-    });
-    expect(api.setMcpDirectoryCredential).toHaveBeenCalledWith(fakeClient, "acme", "");
   });
 
   it("does not disconnect hosting until confirmation", async () => {
