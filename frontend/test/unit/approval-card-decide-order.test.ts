@@ -119,16 +119,17 @@ describe("ApprovalCard decide ordering (#1406)", () => {
 
     // The action phrase alone ("Run a terminal command") is identical for two
     // same-kind cards, so the label carries the command and the asker too.
-    expect(
-      container.querySelector(
-        'button[aria-label="Approve: Run a terminal command — rm -rf /tmp/build && make release — asked by Ops"]',
-      ),
-    ).not.toBeNull();
-    expect(
-      container.querySelector(
-        'button[aria-label="Decline: Run a terminal command — rm -rf /tmp/build && make release — asked by Ops"]',
-      ),
-    ).not.toBeNull();
+    // Compared by attribute, not CSS selector: the command's `&&` is legal in
+    // an attribute value but trips jsdom's selector engine.
+    const labelled = Array.from(container.querySelectorAll("button")).map((b) =>
+      b.getAttribute("aria-label"),
+    );
+    expect(labelled).toContain(
+      "Approve: Run a terminal command — rm -rf /tmp/build && make release — asked by Ops",
+    );
+    expect(labelled).toContain(
+      "Decline: Run a terminal command — rm -rf /tmp/build && make release — asked by Ops",
+    );
   });
 
   it("names each permission revocation with the grantee it affects (#1411)", async () => {
