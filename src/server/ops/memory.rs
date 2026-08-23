@@ -375,7 +375,10 @@ struct MemoryList {
 }
 
 /// `GET /memory` — everything the company remembers, so the console lists what
-/// the Brain header counts. Two sources, in this order:
+/// the Brain header counts. Returns `items` (the rows) with the context
+/// truncation metadata for the same read (`totalContext`, `contextTruncated`)
+/// so the console's "newest N of M" notice never compares the capped rows
+/// against a count taken at a different moment. Two sources, in this order:
 ///
 /// 1. **Operator facts** (FactStore) — newest-first, editable/deletable.
 /// 2. **Context rows** (ContextStore chunks that are not operator-fact
