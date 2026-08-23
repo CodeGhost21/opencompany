@@ -137,23 +137,16 @@ window.addEventListener("message", function onRelay(event: MessageEvent) {
   if (!isRelayMessage(event.data)) return;
 
   if (event.data.type === "oc:relay-click") {
-    // A click that ends a drag must not activate whatever is under the release
-    // point: the press's tail was routed to the element that took it (capture
-    // semantics), and a press that moved is a drag, which produces no click.
-    // A click arrives immediately after the `pointerup` of its own press and
-    // before any newer press starts, which is the only correlation available
-    // (the click message has no pointer id).
+    // A pointer-originated click carries the pointer id. Preserve the target
+    // that took that press (pointer-capture semantics), rather than activating
+    // whatever element happens to be under the release point now. Clicks with
+    // no pointer id are direct/keyboard clicks and use the point as usual.
     const pointerId = event.data.pointerId;
-    const lastPressEnd = pointerId === undefined ? undefined : lastPressEnds.get(pointerId);
-    if (
-      pointerId !== undefined &&
-      lastPressEnd?.dragged &&
-      Math.hypot(event.data.x - lastPressEnd.x, event.data.y - lastPressEnd.y) <= 4
-    ) {
-      lastPressEnds.delete(pointerId);
-      return;
-    }
-    const element = document.elementFromPoint(event.data.x, event.data.y);
+    const pressed = pointerId === undefined ? undefined : lastPressTargets.get(pointerId);
+    if (pointerId !== undefined) lastPressTargets.delete(pointerId);
+    const element = pressed?.isConnected
+      ? pressed
+      : document.elementFromPoint(event.data.x, event.data.y);
     if (!(element instanceof HTMLElement || element instanceof SVGElement)) return;
     // Dispatch the click with the relayed coordinates: a canvas, chart or
     // image-style control reads them, and a dispatched `MouseEvent` still runs
