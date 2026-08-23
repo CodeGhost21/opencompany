@@ -127,6 +127,15 @@ authenticated, company-specific content, so a browser — or an intermediary —
 must never serve a cached copy of one company's (or one session's) page to
 another request.
 
+The bundle's module response additionally carries `Access-Control-Allow-Origin:
+null` and `Access-Control-Allow-Credentials: true`; the fixed shell's module
+script uses `crossorigin="use-credentials"`. The sandbox makes the shell an
+opaque origin, so every module in its graph is otherwise a CORS request with
+`Origin: null` and no session cookie. The console's fixed `/pages-sdk/*.mjs`
+assets carry the same CORS response headers. This is narrowly for the
+same-origin console deployment: it lets the opaque frame obtain the session
+only while loading the authenticated module graph, never from page JavaScript.
+
 as defense in depth, on top of the iframe sandbox described below, which is
 the boundary that actually holds.
 

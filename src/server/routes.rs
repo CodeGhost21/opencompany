@@ -487,6 +487,12 @@ mod tests {
             "export const x = 1;\n",
         )
         .unwrap();
+        std::fs::create_dir(dir.path().join("pages-sdk")).unwrap();
+        std::fs::write(
+            dir.path().join("pages-sdk").join("react.mjs"),
+            "export const createElement = () => null;\n",
+        )
+        .unwrap();
         let path = dir.path().to_path_buf();
         (dir, path)
     }
@@ -577,6 +583,39 @@ mod tests {
             cache_control(&response),
             "public, max-age=31536000, immutable"
         );
+    }
+
+    #[tokio::test]
+    async fn page_sdk_modules_allow_credentialed_imports_from_opaque_frames() {
+        let (_guard, dir) = console_fixture();
+        let app = router_with_console(AppState::new(AppConfig::default()), Some(dir));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/pages-sdk/react.mjs")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get(axum::http::header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                .unwrap(),
+            "null"
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get(axum::http::header::ACCESS_CONTROL_ALLOW_CREDENTIALS)
+                .unwrap(),
+            "true"
+        );
+        assert_eq!(response.headers().get(axum::http::header::VARY).unwrap(), "Origin");
     }
 
     /// The failure that made issue #979 a blank page rather than a 404: a
