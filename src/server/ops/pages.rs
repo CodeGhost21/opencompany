@@ -424,20 +424,26 @@ root.render(React.createElement(Page));
 }
 
 async fn page_bootstrap(
-    company: ScopedCompany,
+    ModuleScopedCompany { runtime }: ModuleScopedCompany,
+    Query(query): Query<ModuleCapQuery>,
     Path(SlugPath { slug }): Path<SlugPath>,
 ) -> Result<Response, ApiError> {
     if !valid_slug(&slug) {
         return Err(ApiError(OpenCompanyError::NotFound(format!("page {slug}"))));
     }
-    let pages = all_pages(company.runtime.workspace().as_ref(), company.id()).await?;
+    let company = runtime.id();
+    if !validate_module_cap(&query.oc_cap, company, &slug) {
+        return Err(ApiError(OpenCompanyError::NotFound(format!("page {slug}"))));
+    }
+    let pages = all_pages(runtime.workspace().as_ref(), company).await?;
     if !pages.iter().any(|(name, _)| name == &slug) {
         return Err(ApiError(OpenCompanyError::NotFound(format!("page {slug}"))));
     }
+    let body = page_bootstrap_body(&query.oc_cap);
     let mut response = Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, PAGE_COMPILED_MIME)
-        .body(Body::from(PAGE_BOOTSTRAP))
+        .body(Body::from(body))
         .map_err(|e| {
             ApiError(OpenCompanyError::Store(format!(
                 "page bootstrap failed: {e}"
