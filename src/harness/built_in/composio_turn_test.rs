@@ -41,7 +41,7 @@
 //! Gated on the `composio` feature, which CI builds (`--all-features`) but never
 //! *runs*; the narrowing and truncation logic these tests exercise therefore
 //! also carries its own tests in [`composio_catalog`], which the
-//! `--features openhuman,tinycortex` test lane does run.
+//! `--features openhuman,tinymemory` test lane does run.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
