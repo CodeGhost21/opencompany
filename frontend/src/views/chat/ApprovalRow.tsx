@@ -476,6 +476,11 @@ function BatchItem({
   failure: string | null;
 }) {
   const label = itemLabel(a);
+  // Repeated per line, not only in the headline: a mixed batch's headline says
+  // the card both spends money and leaves the company, and this is what says
+  // which of the three calls does which. A settled line drops it — the warning
+  // is there to inform a decision that has already been made.
+  const consequence = approvalConsequence(a.group);
 
   // A failed decision outranks the pending look, and says which item and why.
   // Silence here is the failure mode worth designing against: the operator
@@ -531,6 +536,14 @@ function BatchItem({
       >
         {label}
       </span>
+      {!verdict && consequence && (
+        <span
+          data-approval-consequence={consequence.label}
+          className="shrink-0 rounded-full bg-muted px-2 py-0.5 text-2xs font-medium text-foreground"
+        >
+          {consequence.label}
+        </span>
+      )}
       {deciding ? (
         <Loader2 className="size-3.5 shrink-0 animate-spin" />
       ) : (
