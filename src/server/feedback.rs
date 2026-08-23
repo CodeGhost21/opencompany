@@ -349,7 +349,7 @@ mod test {
         let (status, value) = post_json(
             &app,
             "/api/v1/company/feedback",
-            r#"{"category":"wrong-output","note":"the invoice total was wrong"}"#,
+            r#"{"category":"wrong-output","note":"email dana@acme.co bounced"}"#,
         )
         .await;
         assert_eq!(status, StatusCode::OK);
