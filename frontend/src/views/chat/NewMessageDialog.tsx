@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react";
+import { useState, type ReactElement } from "react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -14,7 +14,7 @@ import type { Channel } from "./model";
 interface Props {
   directMessages: Channel[];
   onSelect: (id: string) => void;
-  trigger: ReactNode;
+  trigger: ReactElement;
 }
 
 /** Pick any teammate to open a direct-message composer. */
