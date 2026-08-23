@@ -459,6 +459,7 @@ mod tests {
             description: None,
             tools: None,
             instructions: None,
+            avatar: None,
         });
         store.save(&record).await.expect("save");
 
