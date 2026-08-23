@@ -193,14 +193,14 @@ describe("ApprovalCard decide ordering (#1406)", () => {
       id: "pay-40",
       kind: "payment.send",
       amount_usd: 40,
-      payload: { recipient: "acme", note: "invoice" },
+      payload: { recipient: "acme" },
     };
     const big: ApprovalSummary = {
       ...APPROVAL,
       id: "pay-4000",
       kind: "payment.send",
       amount_usd: 4000,
-      payload: { recipient: "acme", note: "invoice" },
+      payload: { recipient: "acme" },
     };
 
     await act(async () => {
@@ -235,11 +235,13 @@ describe("ApprovalCard decide ordering (#1406)", () => {
     );
     // Identical payload and asker — the amount is the only thing that tells
     // the $40 decision from the $4,000 one, so it has to ride in the name.
+    // The amount is formatted via `money`, so the expectation uses it rather
+    // than a locale-hardcoded literal.
     expect(labelled).toContain(
-      "Approve: Send a payment — $40 — recipient: acme — note: invoice — asked by Ops",
+      `Approve: Send a payment — ${money(40)} — acme — asked by Ops`,
     );
     expect(labelled).toContain(
-      "Approve: Send a payment — $4,000 — recipient: acme — note: invoice — asked by Ops",
+      `Approve: Send a payment — ${money(4000)} — acme — asked by Ops`,
     );
   });
 
