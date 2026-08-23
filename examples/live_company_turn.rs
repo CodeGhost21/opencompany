@@ -156,9 +156,6 @@ async fn main() -> anyhow::Result<()> {
         search: None,
         tenant_search: None,
         workspace: None,
-        repos: None,
-        repo_bindings: Vec::new(),
-        checkouts: Default::default(),
     };
 
     let pool = HarnessPool::new();

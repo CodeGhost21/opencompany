@@ -1901,9 +1901,6 @@ description = "Runs Acme."
             search: None,
             tenant_search: None,
             workspace: None,
-            repos: None,
-            repo_bindings: Vec::new(),
-            checkouts: crate::harness::repo::CheckoutLedger::default(),
         }
     }
 

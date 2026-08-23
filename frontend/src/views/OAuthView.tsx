@@ -25,14 +25,10 @@ import {
   type GridProvider,
 } from "@/lib/provider-grid";
 import { ProviderDetail, type ConnectionSubject } from "@/views/connections/ProviderDetail";
-import { InferenceSection } from "@/views/connections/InferenceSection";
-import { McpServersSection } from "@/views/connections/McpServersSection";
 import { AccountChoiceSection } from "@/views/connections/AccountChoiceSection";
 import { CompanyCredentialCard } from "@/views/connections/CompanyCredentialCard";
 import { ComposioSection } from "@/views/connections/ComposioSection";
 import { ProvidersSection } from "@/views/connections/ProvidersSection";
-import { RepositoriesCard } from "@/views/connections/RepositoriesCard";
-import { ChannelsSection } from "./connections/ChannelsSection";
 
 interface Props {
   client: OpenCompanyClient;
@@ -57,8 +53,17 @@ const COMPOSIO_PROBE_TIMEOUT_MS = 5_000;
  */
 const PROBE_TIMED_OUT = Symbol("composio-probe-timed-out");
 
-/** Wire the third-party accounts your company can act through. */
-export function ConnectionsView({ client, company }: Props) {
+/**
+ * OAuth: the third-party accounts this company signs in to and acts through.
+ *
+ * One question per page. This page used to be "Connections" and carried five
+ * unrelated ones — the accounts below, the MCP tool servers, which model the
+ * company thinks with, its Telegram channel and its bound repositories — so
+ * every one of them was something an operator scrolled past on the way to
+ * another. MCP (`#/settings/mcp`) and inference (`#/settings/inference`) are
+ * their own pages now; channels and repositories left the product entirely.
+ */
+export function OAuthView({ client, company }: Props) {
   const [load, setLoad] = useState<Load>("loading");
   const [states, setStates] = useState<Record<string, ConnectionState>>({});
   // The Composio connection objects behind those booleans, keyed by normalized
@@ -523,9 +528,10 @@ export function ConnectionsView({ client, company }: Props) {
       <div className="mx-auto w-full max-w-5xl space-y-6 px-4 py-6">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="space-y-1">
-            <h1 className="text-2xl font-semibold tracking-tight">Connections</h1>
+            <h1 className="text-2xl font-semibold tracking-tight">OAuth</h1>
             <p className="text-sm text-muted-foreground">
-              Wire in the accounts your company acts through. It only uses what you connect.
+              The third-party accounts your company signs in to and acts through. It only uses
+              what you connect.
             </p>
           </div>
           {load === "ready" && connectedCount > 0 && (
@@ -536,7 +542,7 @@ export function ConnectionsView({ client, company }: Props) {
         {load === "unavailable" && (
           <Alert>
             <Info className="size-4" />
-            <AlertTitle>Connections aren&apos;t wired on this host yet</AlertTitle>
+            <AlertTitle>OAuth connections aren&apos;t wired on this host yet</AlertTitle>
             <AlertDescription>
               The catalog below shows what your company can connect once the host exposes its OAuth
               endpoints. Connecting is disabled until then.
@@ -568,10 +574,6 @@ export function ConnectionsView({ client, company }: Props) {
           </Alert>
         )}
 
-        <McpServersSection client={client} company={company} canManage={canManage} />
-
-        <InferenceSection client={client} company={company} canManage={canManage} />
-
         {/* The general answer sits above the Composio-specific one: this key
             authorizes every brokered surface, and the Composio token below is
             the escape hatch (issue #586). */}
@@ -593,10 +595,6 @@ export function ConnectionsView({ client, company }: Props) {
           canManage={canManage}
           onChanged={() => setCredentialGeneration((n) => n + 1)}
         />
-
-        <ChannelsSection client={client} company={company} canManage={canManage} />
-
-        <RepositoriesCard client={client} company={company} canManage={canManage} />
 
         {/* The page's one provider list (issue #582). It used to be two — this
             grid and a categorised grid of eleven hardcoded tiles below it — and

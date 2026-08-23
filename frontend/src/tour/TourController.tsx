@@ -80,7 +80,7 @@ export function TourController({
   hold,
 }: {
   company: string | null;
-  /** `sub` names a section's sub-page, e.g. `#/settings/connections`. */
+  /** `sub` names a section's sub-page, e.g. `#/settings/oauth`. */
   setView: (view: View, sub?: string) => void;
   /**
    * Hold the tour back while first-run setup is on screen
