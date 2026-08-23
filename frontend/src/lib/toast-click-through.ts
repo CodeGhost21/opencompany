@@ -146,7 +146,9 @@ function relayFramePressTail(event: PointerEvent): void {
   if (event.type === "pointerup" || event.type === "pointercancel") {
     framePresses.delete(event.pointerId);
   }
-  relayToFrame(frame, event, `oc:relay-${event.type}`);
+  // The listener is registered only for the three pointer-tail events, so the
+  // relay type is always `oc:relay-pointermove`/`up`/`cancel` here.
+  relayToFrame(frame, event, `oc:relay-${event.type}` as FrameRelayType);
 }
 
 window.addEventListener("pointermove", relayFramePressTail, true);
