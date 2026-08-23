@@ -168,7 +168,12 @@ export function ApprovalMeta({
           <span>
             Asked in{" "}
             <a
-              href={`#/chat/${encodeURIComponent(thread.channelId)}`}
+              // Written raw, not `encodeURIComponent`-ed: a DM's channel id is
+              // `dm:<agent-id>`, and the hash router splits `#/chat/…` on "/"
+              // without decoding, so an encoded `:` would look up a channel
+              // that does not exist. Every channel id is a slug or `dm:<uuid>`,
+              // which the hash already allows unescaped.
+              href={`#/chat/${thread.channelId}`}
               className="font-medium text-foreground underline-offset-2 hover:underline"
             >
               {thread.label}
