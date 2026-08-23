@@ -1272,7 +1272,7 @@ function EntryCard({
 }: {
   entry: LedgerEntry;
   ledger: LedgerSummary;
-  /** Leaves for the row's own screen, when it has one. Only the board does. */
+  /** Opens the row's own screen, when it has one. Only native Tasks do. */
   onOpen?: () => void;
   /** Native task-detail address, including the List return context. */
   detailHref?: string;
@@ -1287,6 +1287,9 @@ function EntryCard({
         onOpen && "cursor-pointer transition-colors hover:bg-accent/50",
         entry.closed && "opacity-75",
       )}
+      onClick={(event) => {
+        if (!(event.target as HTMLElement).closest("a, button")) onOpen?.();
+      }}
     >
       <CardContent className="space-y-2 p-4">
         <div className="flex flex-wrap items-start gap-2">
