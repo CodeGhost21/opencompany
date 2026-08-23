@@ -99,6 +99,7 @@ import { TaskDetailRoute } from "@/views/TaskDetailRoute";
 import { InboxView } from "@/views/InboxView";
 import { MemoryView } from "@/views/MemoryView";
 import { FeedbackView } from "@/views/FeedbackView";
+import { UnknownRouteView } from "@/views/UnknownRouteView";
 import { SettingsSection } from "@/views/SettingsSection";
 import { useLocalScope } from "@/connections/ConnectionContext";
 
@@ -239,6 +240,11 @@ const REWRITE_RETIRED = (
   // detail sub-page (issue #264), it is what the org chart's rows and the chat
   // pane's chips link to, and it is deliberately a page so it can be linked.
   if (head === "team" && !sub) return ["company", null];
+  // Retired routes above have a real replacement. Everything else is a typo or
+  // a stale address, and must say so rather than quietly masquerading as
+  // Overview (issue #1417). Keep the head as the sub-page so the explanation
+  // can identify what failed without accepting it as a real view.
+  if (!VIEWS.includes(head as View)) return ["not-found", head || null];
   return null;
 };
 
@@ -407,6 +413,12 @@ export function AppShell({
   const [setupOpen, setSetupOpen] = useState(true);
   /** Set by the Team page's prompt to reopen setup after a skip. */
   const [setupForced, setSetupForced] = useState(false);
+  // `#/setup` is an intentional, manual recovery path. It is a route rather
+  // than a nav page: setup remains a dialog over the ordinary console, but the
+  // address works for staffed companies and after someone has skipped.
+  useEffect(() => {
+    if (view === "setup") setSetupForced(true);
+  }, [view]);
   /**
    * Did this mount start on a view the operator named?
    *
@@ -1865,7 +1877,7 @@ export function AppShell({
             console's one `<main>` landmark, and a second nested one gave every
             page two identical "skip to content" destinations (issue #1221). */}
         <ContentSurface>
-          {view === "overview" && (
+          {(view === "overview" || view === "setup") && (
             <Overview client={client} company={company} companyName={feed.status.name} />
           )}
           {view === "company" && (
@@ -2189,6 +2201,7 @@ export function AppShell({
             />
           )}
           {view === "feedback" && <FeedbackView client={client} company={company} />}
+          {view === "not-found" && <UnknownRouteView address={sub} />}
         </ContentSurface>
 
         {/* Mobile only: dedicated chrome for the way back to navigation, not an

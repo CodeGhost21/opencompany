@@ -96,11 +96,12 @@ describe("resolving an address", () => {
     expect(window.location.hash).toBe("#/team/agent-1");
   });
 
-  it("still collapses an address that names nothing onto Overview", async () => {
-    // The fallback is what makes a typo or a genuinely retired address safe;
-    // widening the allow-list must not have widened it into accepting anything.
+  it("explains an address that names nothing instead of silently showing Overview (#1417)", async () => {
+    // The route remains safe — an unknown head is never accepted as a real
+    // page — but it now reaches a named explanation rather than pretending the
+    // operator asked for Overview.
     await visit("#/nope");
-    expect(seen).toEqual(["overview", null]);
-    expect(window.location.hash).toBe("#/overview");
+    expect(seen).toEqual(["not-found", "nope"]);
+    expect(window.location.hash).toBe("#/not-found/nope");
   });
 });

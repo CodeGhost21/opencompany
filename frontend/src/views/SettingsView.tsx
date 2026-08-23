@@ -159,22 +159,27 @@ export function SettingsView({ client, company, feed, onFlag }: Props) {
         <Card>
           <CardHeader>
             <CardTitle className="text-base">Product tour</CardTitle>
-            <CardDescription>Replay the guided walkthrough of the console.</CardDescription>
+            <CardDescription>Replay the guided walkthrough or set up your company again.</CardDescription>
             <CardAction>
-              <Button
-                variant="outline"
-                // The tour's code is lazily loaded, so without this the download
-                // starts on the click and the button appears to do nothing until
-                // it lands. Pointing at it is intent enough to fetch.
-                onPointerEnter={preloadTour}
-                onFocus={preloadTour}
-                onClick={() => {
-                  restartTour(scope);
-                  toast.success("Starting the product tour.");
-                }}
-              >
-                <Compass className="size-4" /> Replay tour
-              </Button>
+              <div className="flex flex-wrap gap-2">
+                <Button
+                  variant="outline"
+                  // The tour's code is lazily loaded, so without this the download
+                  // starts on the click and the button appears to do nothing until
+                  // it lands. Pointing at it is intent enough to fetch.
+                  onPointerEnter={preloadTour}
+                  onFocus={preloadTour}
+                  onClick={() => {
+                    restartTour(scope);
+                    toast.success("Starting the product tour.");
+                  }}
+                >
+                  <Compass className="size-4" /> Replay tour
+                </Button>
+                <Button variant="outline" render={<a href="#/setup" />}>
+                  Set up company
+                </Button>
+              </div>
             </CardAction>
           </CardHeader>
         </Card>
