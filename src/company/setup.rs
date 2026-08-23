@@ -96,6 +96,33 @@ pub struct TemplateAgent {
     pub focus: AgentFocus,
 }
 
+/// What every setup-minted teammate asks for, whatever shape it is.
+///
+/// The floor, not the ceiling: [`AgentFocus::tools`] adds each shape's own
+/// namespaces on top, and every entry here is still intersected with the
+/// company's `[tools].allow`, so a company that withholds one withholds it
+/// from the whole roster.
+///
+/// * `workspace.read` — see the company's own guidance tree. Writes are per
+///   shape, because a researcher that rewrites the tree it is reporting on is
+///   a different job.
+/// * `docs.*` / `files.*` — produce and publish the actual deliverables.
+/// * `web.*` — read a page somebody linked.
+/// * `search` — find the page nobody linked. It bills per call, which is why
+///   it was withheld here; the company's allow-list is where that call is now
+///   made, once, for every teammate rather than silently per shape.
+/// * `mcp:*` — the servers the company installed. A grant on a server that
+///   does not exist confers nothing, so this is only ever as wide as the
+///   operator's own MCP registry.
+const BASE_BELT: [&str; 6] = [
+    "workspace.read",
+    "docs.*",
+    "files.*",
+    "web.*",
+    "search",
+    "mcp:*",
+];
+
 /// The shape of work a teammate does, and the only thing that decides its tool
 /// belt.
 ///
@@ -145,33 +172,6 @@ pub struct TemplateAgent {
 /// it from that one list and every teammate loses it at once. The narrowing is
 /// still real — no shape asks for everything, and a belt can only ever be a
 /// subset of what the company allows.
-/// What every setup-minted teammate asks for, whatever shape it is.
-///
-/// The floor, not the ceiling: [`AgentFocus::tools`] adds each shape's own
-/// namespaces on top, and every entry here is still intersected with the
-/// company's `[tools].allow`, so a company that withholds one withholds it
-/// from the whole roster.
-///
-/// * `workspace.read` — see the company's own guidance tree. Writes are per
-///   shape, because a researcher that rewrites the tree it is reporting on is
-///   a different job.
-/// * `docs.*` / `files.*` — produce and publish the actual deliverables.
-/// * `web.*` — read a page somebody linked.
-/// * `search` — find the page nobody linked. It bills per call, which is why
-///   it was withheld here; the company's allow-list is where that call is now
-///   made, once, for every teammate rather than silently per shape.
-/// * `mcp:*` — the servers the company installed. A grant on a server that
-///   does not exist confers nothing, so this is only ever as wide as the
-///   operator's own MCP registry.
-const BASE_BELT: [&str; 6] = [
-    "workspace.read",
-    "docs.*",
-    "files.*",
-    "web.*",
-    "search",
-    "mcp:*",
-];
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AgentFocus {
