@@ -20,11 +20,34 @@
 # can override is the version of "global tools" that does not quietly widen
 # anyone's blast radius.
 #
-# `*` covers files/docs/shell/code/web/subagent. `media` and `composio` are
-# listed literally because `*` excludes the real-money and
-# per-tenant-credential namespaces. `search` is deliberately absent: it is
-# opt-in, so a company that never asked for web search never spends on it.
-default_allow = ["*", "media", "composio"]
+# `*` covers files/docs/shell/code/web/subagent. Every other entry is listed
+# literally because `*` deliberately excludes it: `workspace.*` because a bare
+# `*` confers workspace *reads* only, `media` and `composio` because they are
+# the real-money and per-tenant-credential namespaces, `search` because it
+# bills per call, `repo.*` because it materializes third-party source in a
+# sandbox, and `mcp:*` because MCP grants are named per server.
+#
+# All of them are on by default, and the way to turn one off is this list. A
+# company's own `[tools].allow` **replaces** this default rather than extending
+# it, so dropping `search` (or `media`, or `repo.*`) means writing the rest of
+# the list out and leaving that one entry off — and every teammate in that
+# company loses it at once, whatever its own `tools` line asks for.
+#
+# The previous default withheld `search`, `repo.*`, `mcp:*` and workspace
+# writes. What that bought was a first-run company whose teammates reported
+# their own tools as "not enabled" — the ask showed up on the Team screen under
+# "asked for but not granted" — for capabilities the operator had already
+# installed. Withholding by default only works when somebody is there to grant
+# it; on a company minted from three sentences in a wizard, nobody is.
+default_allow = [
+    "*",
+    "workspace.*",
+    "media",
+    "composio",
+    "search",
+    "repo.*",
+    "mcp:*",
+]
 
 [skills]
 # Shared-library skills installed in every company, by slug.
