@@ -2997,7 +2997,6 @@ impl RuntimeBuilder {
                 AuthMode::from_str(&self.manifest.users.mode).unwrap_or_default()
             }),
         );
-        runtime.set_repos(repos);
         // Install-wide MCP defaults (issue #527) — set before anything resolves
         // the effective server set, so the first resolution already sees them.
         runtime.set_default_mcp_servers(self.default_mcp_servers.clone());
