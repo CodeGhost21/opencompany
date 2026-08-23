@@ -2778,7 +2778,7 @@ mod tests {
         store
             .create(
                 &company,
-                &node("mixed", "mixed", NodeKind::Folder, None, own),
+                &node("mixed", "mixed", NodeKind::Folder, None, own.clone()),
                 None,
             )
             .await
@@ -2791,7 +2791,7 @@ mod tests {
                     "own-note.md",
                     NodeKind::File,
                     Some("own"),
-                    own,
+                    own.clone(),
                 ),
                 Some("mine"),
             )
