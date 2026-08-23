@@ -1071,17 +1071,6 @@ impl HarnessBrain {
             }
         };
 
-        // Issue #796: if this dispatch parked (a step it ran needs approval),
-        // hold whatever checkout it built across that park so the approved step
-        // resumes on the same tree. A dispatch that ended without parking keeps
-        // the pre-#796 behaviour — the janitor's `Drop` deletes its checkout.
-        // Orphan cleanup for the denied/expired case is the `sweep_orphans` at
-        // the next claim, which is safe against a still-pending approval in a way
-        // an unconditional purge here would not be.
-        if self.deps.approval_requests.queued() > approvals_before {
-            self.deps.checkouts.retain_for_task(&card.id);
-        }
-
         // ── Issue #244: the deliverable gate, and the one nudge ─────────────
         //
         // This sits between the primary turn and the completion bookkeeping —
@@ -2810,22 +2799,6 @@ impl HarnessBrain {
                                 .pending_publishes
                                 .claim(publish::PublishDestination::Conversation)
                         });
-                    // Issue #245: the chat half of the checkout lifecycle. An
-                    // operator conversation runs the same toolbelt a card does,
-                    // so it can clone a repository, and the guard's `Drop`
-                    // Issue #796: sweep any task checkout orphaned by a
-                    // denied/expired approval, on this turn's claim like every
-                    // other.
-                    {
-                        let grants = self.deps.approval_requests.grants();
-                        self.deps
-                            .checkouts
-                            .sweep_orphans(|task| grants.any_for_task(task));
-                    }
-                    // Issue #735: a conversation is not a task card, so clear any
-                    // task a prior turn stamped — `repo_publish` requires a task
-                    // and refuses on a chat turn (task turns only, this tier).
-                    self.deps.checkouts.set_task(None);
                     // Drive the brain-agnostic delegation seam (issue #176): the
                     // orchestrator turn, its queued delegations, and the CEO-relay
                     // hand-back all run behind the `RunTurn` impl. `HarnessDeps` is
