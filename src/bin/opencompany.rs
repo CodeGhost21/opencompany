@@ -510,6 +510,11 @@ fn company_builder(
     // `[users].mode` to answer, which is the normal case.
     .with_auth_mode_override(state.auth_mode_override())
     .with_skills_registry(state.shared_skill_registry()?)
+    // The setup cards a real operator should find waiting on a real board. Turned
+    // on here rather than inferred from the seed directory, so a test or a
+    // fixture that builds a company gets the empty board it is asserting about —
+    // see `RuntimeBuilder::with_task_seeding`. First boot only.
+    .with_task_seeding(true)
     .with_id(company_id.clone());
     if let Some(source_dir) = source_dir {
         builder = builder.with_seed_dir(source_dir);
@@ -646,6 +651,16 @@ fn spawn_maintenance_ticker(
     shutdown: &Arc<Notify>,
 ) -> tokio::task::JoinHandle<()> {
     MaintenanceTicker::new(state.registry().clone(), Arc::new(SystemClock)).spawn(shutdown.clone())
+}
+
+/// Starts the process-wide presence sweep (issue: "Bound client-supplied
+/// console leases"). See [`opencompany::server::presence::PresenceSweeper`]
+/// for why this is a separate task from the maintenance ticker above rather
+/// than folded into it: presence is host-global, not scoped to a registered
+/// company.
+fn spawn_presence_sweeper(state: &AppState, shutdown: &Arc<Notify>) -> tokio::task::JoinHandle<()> {
+    opencompany::server::presence::PresenceSweeper::new(state.presence_handle())
+        .spawn(shutdown.clone())
 }
 
 /// Starts a company's IMAP mailbox poller as a background task, if the
@@ -1978,6 +1993,7 @@ async fn async_main() -> Result<()> {
             // and fire claims are retired, and it covers a company registered
             // after boot — which the per-company scheduler spawn above does not.
             scheduler_handles.push(spawn_maintenance_ticker(&state, &shutdown));
+            scheduler_handles.push(spawn_presence_sweeper(&state, &shutdown));
 
             // Stop the schedulers on a termination signal so background cycle
             // work halts with the process (lifecycle shutdown).

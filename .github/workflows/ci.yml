@@ -584,11 +584,9 @@ jobs:
       # no gated test of its own yet (see scripts/ci/feature-lanes.txt), and
       # building both means a mail test added on either side has a lane already.
       #
-      # `live_smoke::send_then_receive_roundtrip` stays `#[ignore]`d and is NOT
-      # covered by this step. It dials a real mailbox with real credentials, so
-      # it is one `--ignored` flag away from running in a lane that now compiles
-      # it — and still executes nowhere. Issue #798 tracks giving it a mail
-      # service container; until then, say so rather than imply otherwise.
+      # The live transport smoke test needs its own service-backed job below.
+      # Keeping this offline parser step here makes the fast lane's boundary
+      # explicit instead of charging every Rust change for a container startup.
       - name: Test the mail surface
         run: scripts/ci/run-scoped-suite.sh "mail (imap)" imap,smtp server::ops::imap
 
@@ -621,6 +619,99 @@ jobs:
           path: target/debug/opencompany
           # Consumed minutes later by one job in the same run and never again.
           retention-days: 1
+
+  # Issue #798. `send_then_receive_roundtrip` is the only test that exercises
+  # both real mail transports. It remains ignored for local runs because it
+  # needs a mailbox, then this job supplies one and opts into ignored tests.
+  # Services are job-scoped, so this stays separate from the fast Rust lane —
+  # and below the `rust` job's binary build, so the e2e artifact stays where
+  # the `Console E2E` jobs expect it.
+  rust-mail:
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    name: Rust (mail)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    services:
+      stalwart:
+        image: stalwartlabs/mail-server:v0.9.4
+        ports:
+          - 25:25
+          - 993:993
+          - 8080:8080
+        # The image writes this file only after its first-run configuration has
+        # completed. The provisioning step below retries the management request
+        # until the server has also bound its HTTP listener.
+        options: >-
+          --health-cmd "test -s /opt/stalwart-mail/etc/config.toml"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          submodules: true
+
+      - name: Init vendored openhuman crate submodules
+        run: scripts/ci/init-vendored-submodules.sh
+
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+        with:
+          toolchain: "1.98.0"
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          cache-on-failure: true
+
+      # Stalwart's first-run output (including the generated admin password)
+      # goes to stderr, and the management API binds the published port, so the
+      # provisioning commands below run from the runner against 127.0.0.1.
+      #
+      # The account's address domain must already exist — `account create
+      # --addresses` resolves it up front and fails with "<domain> not found"
+      # otherwise — so create `localhost.test` first. `domain create` is
+      # idempotent (exit 0 even when the domain already exists), which keeps
+      # this retry loop from wedging on a partial run.
+      - name: Create the smoke-test mailbox
+        run: |
+          container="${{ job.services.stalwart.id }}"
+          admin_secret="$(docker logs "${container}" 2>&1 \
+            | sed -n "s/.*password '\(.*\)'\./\1/p" \
+            | tail -n 1)"
+          test -n "${admin_secret}"
+          for attempt in $(seq 1 20); do
+            if docker exec "${container}" \
+              stalwart-cli --url http://127.0.0.1:8080 \
+              --credentials "admin:${admin_secret}" \
+              domain create localhost.test \
+              && docker exec "${container}" \
+              stalwart-cli --url http://127.0.0.1:8080 \
+              --credentials "admin:${admin_secret}" \
+              account create smoke ci-mail-password \
+              --addresses smoke@localhost.test; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "Stalwart did not accept the smoke-test account within 20 seconds" >&2
+          exit 1
+
+      - name: Run the live SMTP to IMAP round trip
+        env:
+          OPENCOMPANY_MAIL_ADDRESS: smoke@localhost.test
+          OPENCOMPANY_MAIL_SMTP_HOST: localhost
+          OPENCOMPANY_MAIL_SMTP_PORT: "25"
+          OPENCOMPANY_MAIL_IMAP_HOST: localhost
+          OPENCOMPANY_MAIL_IMAP_PORT: "993"
+          OPENCOMPANY_MAIL_USER: smoke
+          OPENCOMPANY_MAIL_PASSWORD: ci-mail-password
+          # The server generates an ephemeral self-signed certificate. The
+          # bypass is compiled only into tests; production keeps WebPKI roots.
+          OPENCOMPANY_MAIL_TEST_INSECURE_TLS: "1"
+        run: scripts/ci/run-scoped-suite.sh "mail live round trip" imap,smtp send_then_receive_roundtrip --ignored
 
   # Issue #555. The MongoDB backend's conformance suite, which until now RAN
   # NOWHERE — the same defect as the SQLite step above, in the backend that
@@ -1145,57 +1236,12 @@ jobs:
       # `composio` adds no `openhuman_core/*` subfeature, so there is no vendored
       # rebuild at all.
       #
-      # TWO NARROW FILTERS RATHER THAN THE BARE WORD `composio`, which would be a
-      # substring match sweeping every composio module at once. That wider
-      # selection is what this lane should eventually be, and it cannot be yet:
-      # of the 24, two FAIL. `server::ops::composio::tests::an_admin_is_unaffected`
-      # dials `api.tinyhumans.ai` for real once the feature is on (it passes today
-      # only because the un-gated stub stands in), and the scripted two-toolkit
-      # turn reaches neither provider. Issue #801 has both diagnoses; the wider
-      # filter lands with the fix, not as a red lane (#428).
-      #
-      # These two groups are chosen because they are the ones whose silence cost
-      # the most. `isolation_tests` is per-tenant token isolation — each tenant
-      # only ever carries its own token and sees its own accounts, a rotated
-      # token is scrubbed per call, an error body reflecting the token is
-      # scrubbed. That is the property keeping one company out of another's
-      # Gmail, and it had no runner at all. `ops_helper_tests` is the allowlist
-      # refusals that must happen BEFORE any network call, plus the catalog and
-      # connection projections.
-      #
-      # Separate invocations, each with its own asserted count, for the reason
-      # the ACP step above states: the first bare argument is the filter and a
-      # second would narrow the selection to nothing.
-      - name: Test Composio tenant isolation
-        run: scripts/ci/run-scoped-suite.sh "composio isolation" openhuman,chargebee,paypal,composio harness::built_in::composio::isolation_tests
-
-      - name: Test the Composio ops helpers
-        run: scripts/ci/run-scoped-suite.sh "composio ops helpers" openhuman,chargebee,paypal,composio harness::built_in::composio::ops_helper_tests
-
-      # Issue #820 — which connected account an agent acts as. A third narrow
-      # filter for the same reason the two above are narrow, and the same reason
-      # they exist at all: these assert on the `composio_execute` REQUEST BODY —
-      # that an unpinned toolkit still carries no connection id, and a pinned one
-      # carries the operator's. Both are decidable only under `composio`, so
-      # without a lane they would be twenty-four's worth of silence again, and
-      # the negative half is the one protecting every existing single-account
-      # company from having its account resolution changed.
-      - name: Test which Composio account an execute acts as
-        run: scripts/ci/run-scoped-suite.sh "composio account choice" openhuman,chargebee,paypal,composio harness::built_in::composio::live::live_tests
-
-      # Issue #820 — a fourth narrow filter, and the first outside `harness::`.
-      # The console-plane half of the same decision: the grouping the choice is
-      # reported through, and the cleanup that drops a choice naming an account
-      # Composio no longer lists. Both are gated on `composio`, so before this
-      # step they were compiled by `Check (--all-features)` and run by nothing.
-      #
-      # `…::tests::gated_tests` and not `server::ops::composio`, which would
-      # sweep in `an_admin_is_unaffected` — the one that dials
-      # `api.tinyhumans.ai` for real once the feature is on (#801). The module
-      # exists to be nameable here: a gated ops test added later joins it and is
-      # run, rather than depending on somebody remembering this file.
-      - name: Test the Composio account choice on the console plane
-        run: scripts/ci/run-scoped-suite.sh "composio choice ops" openhuman,chargebee,paypal,composio server::ops::composio::tests::gated_tests
+      # Issue #801 makes the two formerly-red cases hermetic: the console test
+      # uses a loopback authorization endpoint and the scripted turn reaches
+      # both loopback providers. One broad filter therefore covers every
+      # Composio test, including future tests that join this surface.
+      - name: Test Composio
+        run: scripts/ci/run-scoped-suite.sh "composio" openhuman,chargebee,paypal,composio composio
 
       # Issue #914. The `tinymemory` feature binds the engine-neutral
       # `MemoryProvider` contract and adds the `remote`/`null` selection modes

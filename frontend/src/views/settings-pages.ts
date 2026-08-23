@@ -73,8 +73,13 @@ export const SETTINGS_PAGE_GROUPS = [
 export const DEFAULT_SETTINGS_PAGE: SettingsPage = "general";
 
 /** Whether a hash segment names a real sub-page. */
+export function isSettingsPage(sub: string | null): sub is SettingsPage {
+  return SETTINGS_PAGES.some((page) => page.id === sub);
+}
+
+/** Whether a hash segment names a real sub-page. */
 export function resolveSettingsPage(sub: string | null): SettingsPage {
-  return SETTINGS_PAGES.some((p) => p.id === sub) ? (sub as SettingsPage) : DEFAULT_SETTINGS_PAGE;
+  return isSettingsPage(sub) ? sub : DEFAULT_SETTINGS_PAGE;
 }
 
 /**

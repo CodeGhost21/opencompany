@@ -4422,6 +4422,8 @@ async fn task_detail_assembles_timeline_and_lineage() {
         },
         // Tagged to this task — admitted.
         CompanyEvent::AgentReply {
+            mentions: Vec::new(),
+            mention_depth: 0,
             parent: None,
             chat_id: "t-1".into(),
             agent_id: "ceo".into(),
@@ -4431,6 +4433,8 @@ async fn task_detail_assembles_timeline_and_lineage() {
         },
         // An ordinary chat reply — excluded.
         CompanyEvent::AgentReply {
+            mentions: Vec::new(),
+            mention_depth: 0,
             parent: None,
             chat_id: "General".into(),
             agent_id: "ceo".into(),
@@ -4440,6 +4444,8 @@ async fn task_detail_assembles_timeline_and_lineage() {
         },
         // Tagged to a different task — excluded.
         CompanyEvent::AgentReply {
+            mentions: Vec::new(),
+            mention_depth: 0,
             parent: None,
             chat_id: "t-other".into(),
             agent_id: "ceo".into(),
@@ -5277,6 +5283,8 @@ async fn task_export_serves_a_readable_document_and_alters_nothing() {
             run_id: None,
         },
         CompanyEvent::AgentReply {
+            mentions: Vec::new(),
+            mention_depth: 0,
             parent: None,
             chat_id: "t-1".into(),
             agent_id: "writer".into(),

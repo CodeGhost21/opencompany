@@ -516,7 +516,7 @@ async fn add_server(
     let manifest = manifest_servers(runtime).await?;
     if manifest.iter().any(|m| m.name.trim() == name) {
         return Err(ApiError(OpenCompanyError::Conflict(format!(
-            "`{name}` is declared in company.toml — update it to override, don't re-add it."
+            "`{name}` is declared in this company's bundle (`company.toml` or `mcp.json`) — update it to override, don't re-add it."
         ))));
     }
 
@@ -661,7 +661,7 @@ async fn delete_server(
     let manifest = manifest_servers(runtime).await?;
     if manifest.iter().any(|m| m.name.trim() == name) {
         return Err(ApiError(OpenCompanyError::Conflict(format!(
-            "`{name}` is declared in company.toml — disable it instead of deleting."
+            "`{name}` is declared in this company's bundle (`company.toml` or `mcp.json`) — disable it instead of deleting."
         ))));
     }
     // Same guard, same reason, for an install-wide default (issue #527): the

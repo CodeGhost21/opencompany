@@ -1050,6 +1050,9 @@ export function McpServersSection({ client, company, canManage, chrome = "inline
                       )}
                       {envFor === server.name && canManage && (
                         <div className="space-y-2 rounded-md bg-muted/40 p-2" data-testid="mcp-env-inline">
+                          <p className="text-xs text-muted-foreground">
+                            Saving merges these values with the stored credentials and reconnects this server.
+                          </p>
                           {envFields.kind === "loading" ? (
                             <p className="flex items-center gap-1 text-xs text-muted-foreground">
                               <Loader2 className="size-3 animate-spin" /> Reading this
@@ -1220,6 +1223,11 @@ export function McpServersSection({ client, company, canManage, chrome = "inline
                     Add
                   </Button>
                 </div>
+                <p className="text-xs text-muted-foreground">
+                  Adding saves the server now. {bridge === "absent"
+                    ? "It stays unavailable to teammates until this deployment is rebuilt with MCP support."
+                    : "Teammates pick up its tools on their next turn."}
+                </p>
               </div>
             )}
 

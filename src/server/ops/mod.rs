@@ -42,8 +42,14 @@ pub mod mcp_registry;
 pub mod memory;
 pub mod memory_engine;
 pub mod memory_ingest;
+/// The `@` picker's directory: every teammate, person, desk and broadcast token
+/// a mention can name, in one member-safe read. See [`mentions`].
+pub mod mentions;
 pub mod pages;
 pub mod policy;
+/// Who is here and who is typing: heartbeat, clean disconnect, typing ping.
+/// Ephemeral, leased, never journaled. See [`presence`].
+pub mod presence;
 pub mod read_state;
 pub mod runs;
 pub mod scope;
@@ -200,6 +206,8 @@ pub fn router() -> Router<AppState> {
         .merge(mcp_config::router())
         .merge(mcp_registry::router())
         .merge(read_state::router())
+        .merge(presence::router())
+        .merge(mentions::router())
         .merge(inference::router())
         .merge(team::router())
         .merge(setup::router())
