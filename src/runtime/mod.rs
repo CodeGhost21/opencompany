@@ -84,6 +84,10 @@ pub mod mailbox_poller;
 /// expired approvals, expired grants and stale fire claims for EVERY registered
 /// company, not only those with a manifest `[[schedule]]`. See [`maintenance`].
 pub mod maintenance;
+/// Resolving `@name` in chat to a teammate, a person, a desk, or the whole
+/// room — and deciding what that addresses. Pure and brain-agnostic, for the
+/// same reason [`delegation_tools`] is. See [`mentions`].
+pub mod mentions;
 /// Issue #290: replacing a registered company's runtime in place, so first-time
 /// BYOK setup takes effect without a process restart. See [`rebuild`].
 pub mod rebuild;
