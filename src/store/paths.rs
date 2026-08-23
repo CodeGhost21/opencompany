@@ -247,7 +247,8 @@ fn percent_encode(key: &str) -> String {
     for (index, byte) in bytes.iter().copied().enumerate() {
         if byte == b'.' && index == last {
             out.push_str("%2E");
-        } else if byte.is_ascii_digit() || byte.is_ascii_lowercase() || matches!(byte, b'.' | b'-') {
+        } else if byte.is_ascii_digit() || byte.is_ascii_lowercase() || matches!(byte, b'.' | b'-')
+        {
             out.push(char::from(byte));
         } else {
             use std::fmt::Write;
