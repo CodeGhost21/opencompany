@@ -410,11 +410,11 @@ tiny = ["tinyagents"]
 # Enables `tiny` so the `tinyagents` crate is in scope: the harness's inference
 # models implement its `ChatModel<()>` trait (openhuman's old `Provider` trait
 # was deleted upstream); it is the same vendored crate `openhuman_core` uses.
-openhuman = ["tiny", "dep:openhuman_core", "dep:reqwest", "dep:anyhow", "dep:log", "dep:tinyflows", "dep:regex", "dep:uuid", "dep:swc_core"]
+openhuman = ["tiny", "dep:openhuman_core", "dep:tinymcp", "dep:reqwest", "dep:anyhow", "dep:log", "dep:tinyflows", "dep:regex", "dep:uuid", "dep:swc_core"]
 # MCP server management and agent tools share OpenHuman's in-process registry.
 # Enabling it necessarily enables the embedded harness and OpenHuman MCP
 # domain, while the default build remains unchanged.
-mcp = ["openhuman", "openhuman_core/mcp", "dep:tinymcp", "dep:uuid", "dep:base64"]
+mcp = ["openhuman", "openhuman_core/mcp", "dep:uuid", "dep:base64"]
 # Image/video generation tools (issue #109, epic #26 Cell B). Bridges
 # OpenHuman's `media_generation` tools (`media_generate_image`,
 # `media_generate_video`, `media_list_models`) into a company agent's toolbelt
