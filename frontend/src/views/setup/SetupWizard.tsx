@@ -165,9 +165,18 @@ interface Props {
    * run, where there is no console to go back to.
    */
   onCancel?: () => void;
+  /**
+   * Whether `onDone` hands off to a **fresh** shell mount. The connection
+   * console's re-probe does (it boots a new `AppShell`), so its completion
+   * button writes the one-shot hand-off marker for that shell to consume. The
+   * in-shell dialog does not — it closes in place and the running shell
+   * suppresses the welcome through `onCompleted` — and a marker with no
+   * consuming mount would be read as a fresh hand-off on the next reload.
+   */
+  expectsShellRemount?: boolean;
 }
 
-export function SetupWizard({ client, onDone, onCancel }: Props) {
+export function SetupWizard({ client, onDone, onCancel, expectsShellRemount }: Props) {
   const [status, setStatus] = useState<SetupStatus | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   /**
