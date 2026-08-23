@@ -713,6 +713,78 @@ mod tests {
         tools.iter().map(|t| t.name()).collect()
     }
 
+    /// The brief must name every tool the flag it rides on actually wires, or
+    /// it re-creates the bug it exists to fix one namespace at a time. Each
+    /// list is read off the matching constructor above rather than retyped, so
+    /// a belt that grows a tool fails here instead of shipping a brief that
+    /// silently omits it.
+    #[test]
+    fn each_flag_names_exactly_the_tools_its_constructor_wires() {
+        let ws = Path::new("/tmp/agent-ws");
+        let security = test_security(ws, PolicyMode::Full);
+
+        let shell = sandbox_brief(false, true, false);
+        for tool in names(&shell_tools(
+            security.clone(),
+            native_runtime(),
+            Some(ShellAudit::disabled()),
+            ws,
+        )) {
+            assert!(shell.contains(tool), "the shell brief never names `{tool}`");
+        }
+
+        let code = sandbox_brief(false, false, true);
+        for tool in names(&code_tools(security, ws)) {
+            assert!(code.contains(tool), "the code brief never names `{tool}`");
+        }
+
+        // `file_tools` lives in `build` (behind the same feature as this
+        // module), so its belt is named literally here and pinned by
+        // `build::file_tools_are_sandboxed_to_the_workspace` on the other side.
+        let files = sandbox_brief(true, false, false);
+        for tool in ["file_read", "file_write", "edit", "list", "glob", "grep"] {
+            assert!(files.contains(tool), "the file brief never names `{tool}`");
+        }
+    }
+
+    /// A brief that describes an ungranted namespace costs a turn per
+    /// hallucinated call, so each clause must be absent when its flag is.
+    #[test]
+    fn a_clause_is_absent_when_its_namespace_is_not_granted() {
+        let files_only = sandbox_brief(true, false, false);
+        assert!(!files_only.contains("`shell`"), "{files_only}");
+        assert!(!files_only.contains("apply_patch"), "{files_only}");
+
+        let shell_only = sandbox_brief(false, true, false);
+        assert!(!shell_only.contains("file_write"), "{shell_only}");
+        assert!(!shell_only.contains("csv_export"), "{shell_only}");
+    }
+
+    /// An agent holding none of the three gets no section at all — not an empty
+    /// heading, which would read as a surface it has and cannot find.
+    #[test]
+    fn an_agent_with_no_sandbox_namespace_gets_no_section() {
+        assert_eq!(sandbox_brief(false, false, false), "");
+    }
+
+    /// The two things the sandbox brief exists to say, both of which the belt
+    /// enforces whether or not the agent knows them: paths are confined
+    /// (`exec_security` sets `workspace_only`), and producing the thing means
+    /// writing it rather than recording a task about it.
+    #[test]
+    fn the_brief_states_the_confinement_and_the_write_it_instruction() {
+        let brief = sandbox_brief(true, true, true);
+        assert!(brief.contains("../"), "the escape rule must be shown: {brief}");
+        assert!(
+            brief.contains("actually write the file"),
+            "the instruction that motivates this brief is missing: {brief}"
+        );
+        assert!(
+            brief.contains("Recording a task about the work"),
+            "the observed failure must be named: {brief}"
+        );
+    }
+
     fn test_security(workspace: &Path, mode: PolicyMode) -> Arc<SecurityPolicy> {
         Arc::new(exec_security(workspace, mode))
     }
