@@ -550,12 +550,8 @@ export function PolicySettings({ client, company }: Props) {
                 <p className="text-xs text-muted-foreground">
                   {unmatchedWiredTools.join(", ")}{" "}
                   {unmatchedWiredTools.length === 1
-                    ? "is not a tool"
-                    : "are not tools"}{" "}
-                  this deployment wires. {unmatchedWiredTools.length === 1
-                    ? "It may"
-                    : "They may"}{" "}
-                  still be hosted effect kinds.
+                    ? "doesn't match any of the workflow tools wired here. It may still be a wired agent tool or a hosted effect kind."
+                    : "don't match any of the workflow tools wired here. They may still be wired agent tools or hosted effect kinds."}
                 </p>
               )}
               {dirty && (
