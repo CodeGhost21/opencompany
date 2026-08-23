@@ -9,7 +9,7 @@ const composer = readFileSync(resolve(here, "../../src/views/chat/MessageCompose
 
 describe("composer intent emphasis (issue #1341)", () => {
   it("uses a subtle primary tint for the selected intent instead of a solid fill", () => {
-    expect(composer).toContain('? "bg-primary/10 text-primary"');
+    expect(composer).toContain('? "bg-primary/10 text-brand-700 dark:text-brand-300"');
     expect(composer).not.toContain('? "bg-primary text-primary-foreground"');
   });
 
