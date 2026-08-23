@@ -213,10 +213,6 @@ enum MemoryCmd {
         /// Target credential (hosted engines only).
         #[arg(long)]
         to_api_key: Option<String>,
-        /// Target data root (`namespace` only). Defaults to the env data dir —
-        /// refused when that resolves to the source's own store.
-        #[arg(long)]
-        to_data_dir: Option<PathBuf>,
         /// Records per page.
         #[arg(long, default_value_t = 500)]
         page_size: usize,
@@ -240,7 +236,6 @@ impl std::fmt::Debug for MemoryCmd {
                 to,
                 to_url,
                 to_api_key,
-                to_data_dir,
                 page_size,
                 dry_run,
                 resume_cursor,
@@ -249,7 +244,6 @@ impl std::fmt::Debug for MemoryCmd {
                 .field("to", to)
                 .field("to_url", &to_url.as_ref().map(|_| "<set>"))
                 .field("to_api_key", &to_api_key.as_ref().map(|_| "<set>"))
-                .field("to_data_dir", to_data_dir)
                 .field("page_size", page_size)
                 .field("dry_run", dry_run)
                 .field("resume_cursor", &resume_cursor.is_some())
@@ -1231,18 +1225,17 @@ async fn import_from_dir(dir: &std::path::Path, home: Option<PathBuf>) -> Result
 /// what a boot would bind — you migrate *before* flipping the environment, so
 /// the environment still names the source. Only provider-backed engines can
 /// migrate (the seam is what `export_page`/`import_records` live on); the
-/// `store` default and the EngineCortex overlay are refused by name.
+/// `store` default is refused by name.
 #[cfg(feature = "tinymemory")]
 async fn run_memory_cmd(cmd: MemoryCmd) -> Result<()> {
     use opencompany::store::StorageSettings;
-    use opencompany::store::memory::driver::{MemoryMode, open_driver};
+    use opencompany::store::memory::driver::open_driver;
     use opencompany::store::memory::migrate::migrate;
 
     let MemoryCmd::Migrate {
         to,
         to_url,
         to_api_key,
-        to_data_dir,
         page_size,
         dry_run,
         resume_cursor,
@@ -1263,27 +1256,12 @@ async fn run_memory_cmd(cmd: MemoryCmd) -> Result<()> {
     // (`store::memory::migrate::resolve_migrate_configs`), where the feature
     // lanes execute the guards' tests; the bin drives the loop and reports.
     let (from_config, to_config) = opencompany::store::memory::migrate::resolve_migrate_configs(
-        &settings,
-        &to,
-        to_url,
-        to_api_key,
-        to_data_dir,
+        &settings, &to, to_url, to_api_key,
     )?;
 
-    // The same exclusive root lock serve holds, whenever an embedded store is
-    // on either side: a migration reading a SQLite store a live host is
-    // writing walks a shifting export cursor (skipped or repeated records).
-    // Hosted-to-hosted has no local store to lock; the pause-first
-    // precondition printed below still applies to the remote writer.
-    let _home_lock = if matches!(from_config.mode, MemoryMode::Embedded)
-        || matches!(to_config.mode, MemoryMode::Embedded)
-    {
-        Some(opencompany::store::lock::acquire(&resolve_home_migrated(
-            None,
-        )?)?)
-    } else {
-        None
-    };
+    // Hosted providers have no local memory store to lock. The pause-first
+    // precondition printed below still applies to remote writers.
+    let _home_lock: Option<()> = None;
 
     let (from, _) = open_driver(&from_config)?.ok_or_else(|| {
         opencompany::error::OpenCompanyError::Config(

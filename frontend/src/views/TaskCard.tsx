@@ -145,8 +145,11 @@ export function TaskItem({
         }
       }}
       className={cn(
-        "cursor-grab rounded-lg border bg-card p-3 shadow-sm transition-shadow hover:shadow active:cursor-grabbing",
-        dragging && "opacity-50",
+        "cursor-grab rounded-lg border bg-card p-3 shadow-sm transition-[transform,box-shadow] hover:shadow active:cursor-grabbing",
+        // A card being carried needs to read as being in the operator's hand,
+        // not as unavailable. The small rise, rotation, and shadow make that
+        // state distinct from a disabled card without changing the gesture.
+        dragging && "-translate-y-1 rotate-1 shadow-xl",
       )}
     >
       <div className="flex items-start justify-between gap-2">

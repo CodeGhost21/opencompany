@@ -37,9 +37,11 @@ import {
   AlertDialogTrigger,
 } from "@/components/ui/alert-dialog";
 import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
+import { withHostParam } from "@/hooks/use-host-route";
 import type { LedgerNav } from "@/hooks/use-ledger-nav";
 import { RESERVED_SEGMENTS } from "@/views/LedgersView";
 import { BOARD_LEDGER } from "@/lib/board-columns";
@@ -164,9 +166,13 @@ export function ManageListsView({ client, company, ledgerNav, onBack }: Props) {
         ) : (
           ordered.map((held) => (
             <Card key={held.slug}>
-              <CardContent className="flex flex-wrap items-center justify-between gap-3 py-3">
-                <div className="min-w-[16rem] flex-1 space-y-0.5">
-                  <div className="flex items-center gap-2 font-medium">
+              <CardContent className="flex flex-wrap items-center justify-between gap-3 py-2">
+                <a
+                  href={withHostParam(`ledgers/${held.slug}`)}
+                  data-testid={`managed-ledger-${held.slug}`}
+                  className="min-w-[16rem] flex-1 rounded-md outline-none hover:text-primary focus-visible:ring-2 focus-visible:ring-ring"
+                >
+                  <div className="flex flex-wrap items-center gap-2 text-sm font-medium">
                     {held.title}
                     {held.source === "native" && (
                       <Lock
@@ -174,21 +180,18 @@ export function ManageListsView({ client, company, ledgerNav, onBack }: Props) {
                         aria-label="written elsewhere"
                       />
                     )}
+                    <span className="rounded-full bg-muted px-2 py-0.5 text-xs font-medium tabular-nums text-foreground">
+                      {held.open} open · {held.closed} closed
+                    </span>
                   </div>
-                  <p className="max-w-prose text-xs text-muted-foreground">
+                  <p className="mt-0.5 max-w-prose text-xs text-muted-foreground">
                     {inlineCode(held.purpose)}
                   </p>
-                  <p className="text-xs text-muted-foreground">
-                    {held.open} open · {held.closed} closed
-                  </p>
-                </div>
+                </a>
                 {held.builtin ? (
-                  <span
-                    className="text-xs text-muted-foreground"
-                    title="Built into every company"
-                  >
+                  <Badge variant="secondary" title="Built into every company">
                     Built in
-                  </span>
+                  </Badge>
                 ) : (
                   <AlertDialog
                     open={confirmRetire?.slug === held.slug}
@@ -199,9 +202,8 @@ export function ManageListsView({ client, company, ledgerNav, onBack }: Props) {
                     <AlertDialogTrigger
                       render={
                         <Button
-                          variant="ghost"
+                          variant="destructive"
                           size="sm"
-                          className="text-destructive hover:text-destructive"
                         >
                           Retire
                         </Button>

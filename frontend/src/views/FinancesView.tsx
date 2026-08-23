@@ -77,7 +77,7 @@ export function FinancesView({ client, company }: Props) {
     <div className="flex-1 overflow-y-auto">
       <div className="mx-auto w-full max-w-6xl space-y-6 px-4 py-6">
         <div className="space-y-1">
-          <h2 className="text-2xl font-semibold tracking-tight">Finances</h2>
+          <h1 className="text-2xl font-semibold tracking-tight">Finances</h1>
           <p className="text-sm text-muted-foreground">
             What your company is earning and spending this month.
           </p>
