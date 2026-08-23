@@ -121,12 +121,6 @@ pub(in crate::server::ops) struct CatalogueSearchDto {
     pub(in crate::server::ops) servers: Vec<CatalogueEntryDto>,
     pub(in crate::server::ops) page: u32,
     pub(in crate::server::ops) total_pages: u32,
-    /// Which Smithery credential the search presented (issue #1287).
-    ///
-    /// Set by the route, not by this projection — the raw payload upstream
-    /// returns cannot know it. It rides on the search response rather than
-    /// forcing a second request because the console needs it in exactly the
-    /// moment it renders zero rows, and a separate fetch would let the two
 }
 
 /// One directory entry in full, with the install decision already made.
