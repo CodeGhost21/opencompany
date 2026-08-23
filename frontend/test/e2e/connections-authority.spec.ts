@@ -1,8 +1,14 @@
 import { expect, test } from "@playwright/test";
 
 /**
- * Issue #403 — the Connections page must not offer a member controls the host
+ * Issue #403 — the connection pages must not offer a member controls the host
  * refuses.
+ *
+ * Since the Connections split there are three of them: OAuth (`#/settings/oauth`),
+ * MCP (`#/settings/mcp`) and Inference (`#/settings/inference`). Each carries
+ * its own read-only banner and its own credential fields, so each is driven
+ * here — a split that left one page still inviting a member to paste a token
+ * would be exactly the regression this spec is about.
  *
  * The host is the boundary: every write on this page answers `403` for a
  * member whatever the console renders. What this spec covers is the other
@@ -24,8 +30,8 @@ type APIRequestContext = import("@playwright/test").APIRequestContext;
 
 const MEMBER_EMAIL = "member-403@example.test";
 
-async function openConnections(page: Page) {
-  await page.goto("/#/settings/oauth");
+async function openSettingsPage(page: Page, sub: string) {
+  await page.goto(`/#/settings/${sub}`);
   const skip = page.getByRole("button", { name: "Skip for now" });
   await skip
     .waitFor({ state: "visible", timeout: 10_000 })
