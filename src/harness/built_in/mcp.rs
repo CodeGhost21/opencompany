@@ -1068,9 +1068,9 @@ mod tests {
         let endpoint = format!("http://{addr}/mcp");
         let mut d = decl("fixture", &endpoint);
         d.auth = AuthMaterial::Bearer(CANARY.into());
-        let agent = agent(&["mcp:*"]);
-        let secrets = granted_secrets(std::slice::from_ref(&d), &agent);
-        let registry = registry_for_agent(&[d], &grants(&["mcp:*"])).expect("registry");
+        let grants = grants(&["mcp:*"]);
+        let secrets = granted_secrets(std::slice::from_ref(&d), &grants);
+        let registry = registry_for_agent(std::slice::from_ref(&d), &grants).expect("registry");
 
         let queue = McpFailureQueue::default();
         let tool = OcMcpCallTool::new(
