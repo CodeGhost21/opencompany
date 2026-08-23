@@ -4,8 +4,8 @@ import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import type { ApprovalSummary, GrantScope, Verdict } from "@/api/types";
-import { ApprovalCard } from "@/views/ApprovalsView";
+import type { ApprovalSummary, GrantScope, StandingGrant, Verdict } from "@/api/types";
+import { ApprovalCard, StandingPermissions } from "@/views/ApprovalsView";
 
 /**
  * Issue #1406: Approve and Decline must not sit above the evidence and the
@@ -75,6 +75,16 @@ function approveButton(): HTMLButtonElement {
   return btn as HTMLButtonElement;
 }
 
+const GRANT: StandingGrant = {
+  id: "grant-1",
+  agent: "ops",
+  tool: "web_fetch",
+  scope: "https://docs.rs",
+  granted_by: { kind: "user", id: "operator" },
+  at_millis: T0,
+  expires_at_millis: T0 + 60 * 60_000,
+};
+
 describe("ApprovalCard decide ordering (#1406)", () => {
   it("renders the scope control before the decide buttons in DOM order", async () => {
     await render(APPROVAL);
@@ -102,5 +112,30 @@ describe("ApprovalCard decide ordering (#1406)", () => {
     const scope = container.querySelector("fieldset")!;
     const position = scope.compareDocumentPosition(footer!);
     expect(position & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it("names each decision with the action it affects (#1411)", async () => {
+    await render(APPROVAL);
+
+    expect(container.querySelector('button[aria-label="Approve: Run a terminal command"]')).not.toBeNull();
+    expect(container.querySelector('button[aria-label="Decline: Run a terminal command"]')).not.toBeNull();
+  });
+
+  it("names each permission revocation with the grant it affects (#1411)", async () => {
+    await act(async () => {
+      root.render(
+        createElement(StandingPermissions, {
+          grants: [GRANT],
+          now: T0,
+          askerNames: new Map([["ops", "Ops"]]),
+          granterNames: new Map([["operator", "you"]]),
+          onRevoke: async () => {},
+        }),
+      );
+    });
+
+    expect(
+      container.querySelector('button[aria-label="Revoke: Fetch a web page — https://docs.rs only"]'),
+    ).not.toBeNull();
   });
 });

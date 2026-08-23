@@ -29,7 +29,14 @@ import {
   batchPositions,
   staleDecisionLine,
 } from "@/lib/approval-wording";
-import { approvalSummary, grantHeadline, timeAgo, toolAction, untilLabel } from "@/lib/language";
+import {
+  approvalAction,
+  approvalSummary,
+  grantHeadline,
+  timeAgo,
+  toolAction,
+  untilLabel,
+} from "@/lib/language";
 import { approvalsForTask } from "@/lib/task-approvals";
 import { startVisiblePolling } from "@/lib/visible-poll";
 import { isRecord, parseNodeMessages } from "@/views/workflows/run-output";
@@ -498,7 +505,7 @@ function useStandingGrants(client: OpenCompanyClient, company: string | null) {
  * that has no grants route at all, which reads back as an empty list. The
  * section appearing is itself the signal that something is open.
  */
-function StandingPermissions({
+export function StandingPermissions({
   grants,
   now,
   askerNames,
@@ -551,6 +558,7 @@ function StandingPermissions({
                 <Button
                   variant="outline"
                   size="sm"
+                  aria-label={`Revoke: ${grantHeadline(g)}`}
                   disabled={busy}
                   onClick={() => {
                     mark(g.id, true);
@@ -700,6 +708,7 @@ export function ApprovalCard({
           <Button
             variant="outline"
             size="sm"
+            aria-label={`Decline: ${approvalAction(a)}`}
             disabled={deciding !== null}
             /* A decline never carries a scope — there is nothing to grant,
                and the host refuses the pairing anyway. */
@@ -714,6 +723,7 @@ export function ApprovalCard({
           </Button>
           <Button
             size="sm"
+            aria-label={`Approve: ${approvalAction(a)}`}
             disabled={deciding !== null}
             onClick={() => onDecide("approve", scope)}
           >
