@@ -593,6 +593,42 @@ const PAYLOAD_KEY_ORDER: Readonly<Record<string, string[]>> = {
   git_operations: ["operation"],
 };
 
+/**
+ * Payload keys, past the lead, that change what approving the call does.
+ *
+ * `PAYLOAD_KEY_ORDER` promotes the argument an operator is consenting to, and
+ * for most tools the first alone is the whole decision — the shell command, the
+ * glob pattern, the fetch URL. One tool carries a second key that re-describes
+ * the first: `http_request`'s method is the difference between a read and a
+ * delete on the same URL, so a row that shows only the URL cannot tell them
+ * apart. This is that list, and {@link payloadLeadLabel} appends these values
+ * ahead of the first line.
+ */
+const PAYLOAD_LEAD_EXTRA: Readonly<Record<string, string[]>> = {
+  http_request: ["method"],
+};
+
+/**
+ * The payload's lead line, with any consequential later keys in front — the
+ * per-item label for a batch row.
+ *
+ * `null` when the host sent no payload (an old host) or withheld it, so callers
+ * fall back to the action's own words rather than rendering blank. Unlisted
+ * arguments still follow the lead, exactly as in {@link payloadLines}: this
+ * promotes, it never hides.
+ */
+export function payloadLeadLabel(a: ApprovalSummary): string | null {
+  const lines = payloadLines(a);
+  const first = lines[0]?.value;
+  if (first == null) return null;
+  const extras = PAYLOAD_LEAD_EXTRA[a.kind] ?? [];
+  if (extras.length === 0) return first;
+  const extraValues = lines
+    .filter((line) => extras.includes(line.label))
+    .map((line) => line.value);
+  return extraValues.length > 0 ? `${extraValues.join(" ")} ${first}` : first;
+}
+
 function renderValue(value: unknown): string {
   if (typeof value === "string") return value;
   return JSON.stringify(value) ?? String(value);
