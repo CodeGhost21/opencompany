@@ -233,8 +233,10 @@ describe("the page frame's toast-relay listener", () => {
       type: "oc:relay-click",
       x: 60,
       y: 60,
-      pointerId: 70,
+      pointerId: 7,
     });
+
+    expect(releaseClicked).not.toHaveBeenCalled();
   });
 
   it("relays a click after a press that did not move", () => {
