@@ -926,8 +926,9 @@ export function McpServersSection({ client, company, canManage, chrome = "inline
                               disabled={busy !== null}
                               onClick={() => void remove(server)}
                               aria-label={`Remove ${server.name}`}
+                              title={`Remove ${server.name}. This deletes its saved server configuration and credentials.`}
                             >
-                              <Trash2 className="size-4" />
+                              <Trash2 className="size-4" /> Remove
                             </Button>
                           )}
                         </span>

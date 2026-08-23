@@ -5,6 +5,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import type { ApprovalSummary, GrantScope, Verdict } from "@/api/types";
+import type { ApprovalThreadLink } from "@/components/approval-card";
 import { money } from "@/lib/language";
 import { ApprovalRow } from "@/views/chat/ApprovalRow";
 
@@ -104,6 +105,7 @@ async function render(
   failed: Record<string, string> = {},
   deciding: ReadonlyMap<string, Verdict> = new Map(),
   compact = false,
+  thread?: ApprovalThreadLink | null,
 ) {
   await act(async () => {
     root.render(
@@ -112,6 +114,7 @@ async function render(
         now: T0 + 60_000,
         askerNames: new Map([["seo", "SEO Specialist"]]),
         compact,
+        thread,
         deciding,
         decided,
         failed,
@@ -420,6 +423,26 @@ describe("the consolidated approval card", () => {
     const approve = button("Approve");
     expect(approve.className).toContain("hover:bg-primary");
     expect(approve.className.split(" ")).not.toContain("bg-primary");
+  });
+
+  it("links the compact chat row back to its conversation when the thread resolves", async () => {
+    // The compact branch used to return before the `ApprovalMeta` call that
+    // receives `thread`, so the value MessageTimeline constructs for it was
+    // discarded and an inline card never said where the request was asked
+    // (#1419). Forwarding it keeps the compact row linked too.
+    await render(
+      [ESPN],
+      {},
+      {},
+      new Map(),
+      true,
+      { channelId: "marketing", label: "#marketing" },
+    );
+
+    const row = container.querySelector<HTMLElement>('[data-approval-inline="compact"]');
+    expect(row?.textContent).toContain("Asked in");
+    const link = row?.querySelector<HTMLAnchorElement>('a[href="#/chat/marketing"]');
+    expect(link?.textContent).toBe("#marketing");
   });
 
   it("shows the amount beside a monetary approval in the compact chat row", async () => {

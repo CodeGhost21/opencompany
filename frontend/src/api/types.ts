@@ -1545,7 +1545,11 @@ export interface TransactionDto {
  */
 export interface FinancesDto {
   balanceUsd: number;
-  budgetUsd: number;
+  /**
+   * The monthly budget cap. `null` when the manifest sets no `[budget]`;
+   * `0` when it is explicitly capped at zero — a hard cap, not an absence.
+   */
+  budgetUsd: number | null;
   spentUsd: number;
   revenueUsd: number;
   netUsd: number;
