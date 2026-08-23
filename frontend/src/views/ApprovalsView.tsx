@@ -506,14 +506,12 @@ function StandingPermissions({
   grants,
   now,
   askerNames,
-  chatChannelByThread,
   granterNames,
   onRevoke,
 }: {
   grants: StandingGrant[];
   now: number;
   askerNames: Map<string, string>;
-  chatChannelByThread?: Readonly<Record<string, string>>;
   /** Actor id → display name; empty when the roster read was not permitted. */
   granterNames: Map<string, string>;
   onRevoke: (id: string) => Promise<void>;
@@ -612,6 +610,7 @@ export function ApprovalCard({
   approval: a,
   now,
   askerNames,
+  chatChannelByThread,
   deciding,
   batchIndex,
   batchTotal,
@@ -620,6 +619,7 @@ export function ApprovalCard({
   approval: ApprovalSummary;
   now: number;
   askerNames: Map<string, string>;
+  chatChannelByThread?: Readonly<Record<string, string>>;
   /** The verdict this card is waiting on, or `null` when it is idle (#373). */
   deciding: Verdict | null;
   /**
@@ -668,7 +668,6 @@ export function ApprovalCard({
         <ApprovalScopeControl
           approval={a}
           askerNames={askerNames}
-          chatChannelByThread={chatChannelByThread}
           scope={scope}
           onChange={setScope}
           disabled={deciding !== null}
@@ -678,6 +677,7 @@ export function ApprovalCard({
           approval={a}
           now={now}
           askerNames={askerNames}
+          chatChannelByThread={chatChannelByThread}
           /* Honest copy for a request that spans an agent turn (#373): an
              approve is not done when the button stops spinning, it is handed
              to the agent. A decline IS terminal, so it only has to record. */
