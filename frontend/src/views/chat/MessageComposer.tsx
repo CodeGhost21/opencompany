@@ -164,6 +164,7 @@ export function MessageComposer({
           value={draft}
           onChange={(e) => setDraft(e.target.value)}
           onKeyDown={onKeyDown}
+          aria-label={placeholder}
           placeholder={placeholder}
           rows={1}
           className="field-sizing-content max-h-48 min-h-10 w-full resize-none bg-transparent px-3 py-2 text-sm outline-none placeholder:text-muted-foreground"
