@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { ChevronRight, CircleDot, Hash, Lock, SquarePen } from "lucide-react";
+import { ChevronRight, CircleDot, Hash, Lock, PanelRight, SquarePen } from "lucide-react";
 
 import { TeammateAvatar } from "@/components/teammate-avatar";
 import { Button } from "@/components/ui/button";
@@ -23,6 +23,8 @@ interface Props {
   /** Channel id → unread count. Absent or 0 reads as caught up. */
   unread: Record<string, number>;
   onSelect: (id: string) => void;
+  collapsed?: boolean;
+  onExpand?: () => void;
   className?: string;
 }
 
@@ -35,7 +37,48 @@ interface Props {
  * screen — the app's own nav is to its left — so it stays visually quieter
  * than that one: no group headers in caps, no badges except unread.
  */
-export function ChannelRail({ sections, activeId, unread, onSelect, className }: Props) {
+export function ChannelRail({
+  sections,
+  activeId,
+  unread,
+  onSelect,
+  collapsed = false,
+  onExpand,
+  className,
+}: Props) {
+  if (collapsed) {
+    return (
+      <aside
+        className={cn(
+          "w-14 shrink-0 flex-col items-center overflow-y-auto border-r bg-sidebar/40 py-3",
+          className,
+        )}
+      >
+        <Button
+          variant="ghost"
+          size="icon"
+          className="size-8 text-muted-foreground"
+          onClick={onExpand}
+          aria-label="Expand channels"
+          title="Expand channels"
+        >
+          <PanelRight className="size-4" />
+        </Button>
+        <nav aria-label="Channels" className="mt-3 flex w-full flex-col items-center gap-1 px-2">
+          {sections.flatMap((section) => section.channels).map((channel) => (
+            <CompactChannelRow
+              key={channel.id}
+              channel={channel}
+              active={channel.id === activeId}
+              unread={unread[channel.id] ?? 0}
+              onSelect={onSelect}
+            />
+          ))}
+        </nav>
+      </aside>
+    );
+  }
+
   return (
     <aside
       className={cn(
@@ -67,6 +110,42 @@ export function ChannelRail({ sections, activeId, unread, onSelect, className }:
         />
       ))}
     </aside>
+  );
+}
+
+function CompactChannelRow({
+  channel,
+  active,
+  unread,
+  onSelect,
+}: {
+  channel: Channel;
+  active: boolean;
+  unread: number;
+  onSelect: (id: string) => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={() => onSelect(channel.id)}
+      aria-current={active ? "page" : undefined}
+      aria-label={channel.name}
+      title={channel.name}
+      className={cn(
+        "relative flex size-9 shrink-0 items-center justify-center rounded-md transition-colors",
+        active
+          ? "bg-sidebar-accent text-sidebar-accent-foreground"
+          : "text-muted-foreground hover:bg-sidebar-accent/50 hover:text-foreground",
+      )}
+    >
+      <ChannelIcon channel={channel} />
+      {unread > 0 && !active && (
+        <span
+          title={UNREAD_IS_LOCAL}
+          className="absolute -right-0.5 -top-0.5 size-2 rounded-full bg-primary"
+        />
+      )}
+    </button>
   );
 }
 

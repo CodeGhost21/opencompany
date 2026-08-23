@@ -35,6 +35,7 @@ import {
 } from "@/lib/chat";
 import { defaultDesks, type Desk } from "@/lib/desks";
 import { readLastChannel } from "@/lib/last-channel";
+import { readChannelRailCollapsed, writeChannelRailCollapsed } from "@/lib/chat-rail";
 import {
   addMemberFailure,
   reportAddMember,
@@ -240,6 +241,7 @@ export function ChatView({
   const [membersOpen, setMembersOpen] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
   const [mobilePane, setMobilePane] = useState<"rail" | "chat">("chat");
+  const [channelsCollapsed, setChannelsCollapsed] = useState(() => readChannelRailCollapsed(scope));
   const [isAdmin, setIsAdmin] = useState(false);
   // Who set which cap (issue #360, ported from the retired Team page). Only
   // an admin may read the user directory, so this stays empty for a member —
@@ -247,6 +249,20 @@ export function ChatView({
   const [people, setPeople] = useState<Person[]>([]);
   // The member whose budget dialog is open, if any.
   const [budgetFor, setBudgetFor] = useState<TeamMember | null>(null);
+
+  // A host switch keeps this mounted briefly, so replace rather than carry the
+  // previous connection's layout preference into the next company.
+  useEffect(() => {
+    setChannelsCollapsed(readChannelRailCollapsed(scope));
+  }, [scope]);
+
+  function toggleChannels() {
+    setChannelsCollapsed((collapsed) => {
+      const next = !collapsed;
+      writeChannelRailCollapsed(scope, next);
+      return next;
+    });
+  }
 
   const boot = useCallback(async () => {
     try {
@@ -990,7 +1006,16 @@ export function ChatView({
         activeId={channel.id}
         unread={unread ?? {}}
         onSelect={selectChannel}
-        className={cn("lg:flex", mobilePane === "rail" ? "flex" : "hidden")}
+        className={cn("lg:hidden", mobilePane === "rail" ? "flex" : "hidden")}
+      />
+      <ChannelRail
+        sections={sections}
+        activeId={channel.id}
+        unread={unread ?? {}}
+        onSelect={selectChannel}
+        collapsed={channelsCollapsed}
+        onExpand={toggleChannels}
+        className="hidden lg:flex"
       />
 
       <div
@@ -1005,6 +1030,8 @@ export function ChatView({
           membersOpen={membersOpen}
           onToggleMembers={() => setMembersOpen((o) => !o)}
           onOpenRail={() => setMobilePane("rail")}
+          channelsCollapsed={channelsCollapsed}
+          onToggleChannels={toggleChannels}
         />
 
         <div className="flex min-h-0 flex-1">
