@@ -193,7 +193,7 @@ port returns the crate `Result<T>`.
 | *(default)* | kernel, fs store, hosted brain client, operator API |
 | `tiny` | TinyAgents embedding (existing flag; used by stub brain and local workers) |
 | `sqlite` | SQLite store implementations |
-| `tinycortex` | TinyCortex `MemoryStore`/`ContextStore` adapters |
+| `tinymemory` | Hosted/null memory engine seam (`MemoryProvider` contract) |
 | `tinyplace` | tiny.place economy adapter and A2A routes |
 | `sidecar` | Node sidecar brain for self-hosters |
 

@@ -443,6 +443,17 @@ pub struct RuntimeBuilder {
     /// the next container replacement.
     journal_store: Option<Arc<dyn crate::ports::journal::JournalStore>>,
     seed_dir: Option<PathBuf>,
+    /// Whether this company's board is seeded with setup cards on first boot.
+    ///
+    /// Off by default, and deliberately **not** inferred from `seed_dir` the way
+    /// workspace seeding is. Ledger seeding runs on every company because a
+    /// company that tracks nothing is broken; a company with an empty board is
+    /// merely new. Cards, meanwhile, are visible state that tests and fixtures
+    /// count — `tests/one_card_per_message.rs` asserts exact board sizes against
+    /// a company built straight from this builder — so an unconditional baseline
+    /// would quietly turn those assertions into statements about the baseline.
+    /// The product entry points turn it on; nothing else does.
+    seed_tasks: bool,
     /// The repo-level shared skill library, passed to the harness so a pre-fix
     /// registry install (whose stored `SKILL.md` is a one-line stub) is healed
     /// from the live library. Empty when no repo checkout backs the host.
@@ -557,6 +568,7 @@ impl RuntimeBuilder {
             login_codes: None,
             journal_store: None,
             seed_dir: None,
+            seed_tasks: false,
             skills_registry: Arc::from([]),
             template_provenance: None,
             feedback: None,
@@ -879,6 +891,17 @@ impl RuntimeBuilder {
     /// tree is seeded from on first build. Without it, no seeding runs.
     pub fn with_seed_dir(mut self, dir: impl Into<PathBuf>) -> Self {
         self.seed_dir = Some(dir.into());
+        self
+    }
+
+    /// Seeds the board with the baseline's setup cards, plus whatever the seed
+    /// directory's own `tasks.toml` adds, on this company's **first** boot.
+    ///
+    /// Opt-in, so a test or a fixture that boots a company gets the empty board
+    /// it is asserting about. Call it from a product entry point — where a real
+    /// operator is about to look at a real board — and nowhere else.
+    pub fn with_task_seeding(mut self, seed: bool) -> Self {
+        self.seed_tasks = seed;
         self
     }
 
@@ -1924,6 +1947,27 @@ impl RuntimeBuilder {
         // company.toml + meta.json; the append-only ledger file is left untouched,
         // so an existing ledger survives a rebuild.
         let existing = store.load(&id).await?;
+
+        // Boot lifecycle: the setup work this company starts with, put on the
+        // board once and never again.
+        //
+        // Gated on `existing.is_none()` — this `store.load` is the last moment a
+        // first boot is distinguishable, because the `store.save` at the end of
+        // this function makes every later boot a returning one. That is a
+        // stronger gate than "the board is empty", which the ledger seeder can
+        // afford and this cannot: clearing the board is routine, and a card an
+        // operator deleted coming back on the next restart is the runtime
+        // arguing with them.
+        //
+        // `handover` is the rebuild arm: a rebuilt company is already running
+        // and already has whatever board it has.
+        if self.seed_tasks
+            && handover.is_none()
+            && existing.is_none()
+            && ops.tasks.list(&id).await?.is_empty()
+        {
+            seed_tasks(&ops, &self.manifest, &id, self.seed_dir.as_deref()).await?;
+        }
         let lifecycle = existing
             .as_ref()
             .map(|r| r.lifecycle.clone())
@@ -3337,6 +3381,105 @@ async fn seed_ledgers(
     Ok(())
 }
 
+/// Seeds a company's board with the setup work it starts with: the global
+/// baseline ([`crate::globals::tasks`]) plus whatever its own bundle adds under
+/// `companies/<name>/tasks.toml`.
+///
+/// Runs only on a company's first boot, and only when the caller opted in — see
+/// the call site and [`RuntimeBuilder::with_task_seeding`].
+///
+/// # Why this cannot dispatch anything
+///
+/// Two independent reasons, because one would be a footgun:
+///
+/// * A seed card has no authorable column ([`crate::company::task_file`]), so
+///   every card written here is [`COLUMN_TODO`](crate::ports::tasks::COLUMN_TODO).
+/// * The write goes through `ops.tasks.upsert` — the plain store — and never
+///   through [`CompanyRuntime::upsert_task`](crate::company::CompanyRuntime::upsert_task),
+///   which is the single site that edge-fires a dispatch or a planning pass.
+///
+/// So a company can boot with fifty cards on it and spend nothing.
+///
+/// # Precedence and ordering
+///
+/// A company's own card **wins** on a shared id: bundle cards are applied after
+/// the baseline's, replacing rather than duplicating, which is how every other
+/// global surface resolves an id collision. A baseline card the manifest
+/// disables (`[globals] disable = ["task:<id>"]`) is dropped before either.
+///
+/// Timestamps are staggered **descending** so the authored order is the order
+/// the board shows. The board sorts by `updated_at_millis` descending, and cards
+/// written inside one millisecond tie — a tie the fs backend happens to break by
+/// insertion order and SQLite does not, which would make the board's reading
+/// order depend on which backend a tenant runs.
+///
+/// A malformed bundle file is a warning and not a boot failure, exactly as it is
+/// for a bundle ledger: `content_test` fails CI on a shipped template that has
+/// one, so this arm is for a hand-edited bundle, where reaching the console to
+/// fix it beats refusing to start.
+async fn seed_tasks(
+    ops: &OpsStores,
+    manifest: &CompanyManifest,
+    id: &CompanyId,
+    seed_dir: Option<&std::path::Path>,
+) -> Result<()> {
+    let seeds = resolve_seed_cards(&manifest.globals.disable, seed_dir, |err| {
+        tracing::warn!(company = %id, "company setup cards not seeded ({err})");
+    });
+
+    // Descending from now, one millisecond apart, so the first card authored is
+    // the first card read.
+    let now = crate::ports::now_millis();
+    for (index, seed) in seeds.iter().enumerate() {
+        let at = now.saturating_sub(index as u64);
+        let card = seed.to_record(at);
+        debug_assert_eq!(card.column, crate::ports::tasks::COLUMN_TODO);
+        ops.tasks.upsert(id, &card).await?;
+    }
+
+    Ok(())
+}
+
+/// The cards a company would be seeded with: the baseline minus what the
+/// manifest disables, with the bundle's own applied over the top.
+///
+/// Split out from [`seed_tasks`] so the precedence and the opt-out are testable
+/// without standing up a store — the write loop above is the only part that
+/// needs one, and it does nothing a test could not read off this list.
+///
+/// `on_error` is called with a bundle file that would not load. It is a callback
+/// rather than a `Result` because a bad bundle file must not stop a boot: the
+/// company still gets the baseline, and `content_test` is what makes a shipped
+/// template's bad file fatal.
+fn resolve_seed_cards(
+    disable: &[String],
+    seed_dir: Option<&std::path::Path>,
+    on_error: impl FnOnce(crate::error::OpenCompanyError),
+) -> Vec<crate::company::TaskSeed> {
+    let mut seeds: Vec<crate::company::TaskSeed> = crate::globals::tasks()
+        .iter()
+        .filter(|seed| !crate::globals::disabled(disable, "task", &seed.id))
+        .cloned()
+        .collect();
+
+    if let Some(dir) = seed_dir {
+        match crate::company::load_dir_tasks(dir) {
+            Ok(bundled) => {
+                for seed in bundled {
+                    // A company's own card wins outright rather than merging
+                    // field by field, the way its own ledger and its own agent
+                    // supersede the baseline's.
+                    seeds.retain(|global| global.id != seed.id);
+                    seeds.push(seed);
+                }
+            }
+            Err(err) => on_error(err),
+        }
+    }
+
+    seeds
+}
+
 /// Auto-wires the tiny.place economy for a discoverable company (feature build).
 ///
 /// Returns `None` unless `[place].discoverable` is set and a `@handle` is
@@ -3581,6 +3724,124 @@ mod test {
             .prefix(prefix)
             .tempdir()
             .expect("tempdir")
+    }
+
+    mod seed_cards {
+        use super::*;
+
+        fn bundle(body: &str) -> tempfile::TempDir {
+            let dir = tmp_home("opencompany-seed-cards-");
+            std::fs::write(dir.path().join("tasks.toml"), body).expect("write tasks.toml");
+            dir
+        }
+
+        fn resolve(disable: &[&str], dir: Option<&std::path::Path>) -> Vec<String> {
+            let disable: Vec<String> = disable.iter().map(|d| (*d).to_string()).collect();
+            resolve_seed_cards(&disable, dir, |err| {
+                panic!("unexpected load failure: {err}")
+            })
+            .into_iter()
+            .map(|seed| seed.id)
+            .collect()
+        }
+
+        /// A company with no bundle still gets the baseline: a
+        /// platform-provisioned tenant carries no `companies/<name>` directory
+        /// and is still a company somebody has to start using.
+        #[test]
+        fn a_company_with_no_bundle_gets_the_baseline() {
+            let ids = resolve(&[], None);
+            assert!(!ids.is_empty(), "the baseline must seed something");
+            let baseline: Vec<String> = crate::globals::tasks()
+                .iter()
+                .map(|seed| seed.id.clone())
+                .collect();
+            assert_eq!(ids, baseline);
+        }
+
+        /// The bundle's cards land after the baseline's, so the setup work every
+        /// company shares is read first.
+        #[test]
+        fn a_bundle_appends_its_own_cards_after_the_baseline() {
+            let dir = bundle("[[task]]\nid = \"set-up-the-thing\"\ntitle = \"Set up the thing\"\n");
+            let ids = resolve(&[], Some(dir.path()));
+            assert_eq!(
+                ids.last().map(String::as_str),
+                Some("set-up-the-thing"),
+                "{ids:?}"
+            );
+            assert_eq!(ids.len(), crate::globals::tasks().len() + 1);
+        }
+
+        /// A bundle card of the same id **replaces** the baseline's rather than
+        /// duplicating it — the precedence every other global surface uses.
+        #[test]
+        fn a_bundle_card_supersedes_the_baseline_card_of_the_same_id() {
+            let shared = &crate::globals::tasks()[0].id;
+            let dir = bundle(&format!(
+                "[[task]]\nid = \"{shared}\"\ntitle = \"Ours instead\"\n"
+            ));
+            let seeds = resolve_seed_cards(&[], Some(dir.path()), |err| panic!("{err}"));
+            let matching: Vec<&crate::company::TaskSeed> =
+                seeds.iter().filter(|s| &s.id == shared).collect();
+            assert_eq!(matching.len(), 1, "the id must not appear twice");
+            assert_eq!(matching[0].title, "Ours instead");
+            assert_eq!(seeds.len(), crate::globals::tasks().len());
+        }
+
+        /// `[globals].disable` drops a baseline card, using the same
+        /// `<kind>:<id>` vocabulary that already drops a baseline agent,
+        /// workflow, skill or ledger.
+        #[test]
+        fn disable_drops_one_baseline_card_and_keeps_the_rest() {
+            let dropped = crate::globals::tasks()[0].id.clone();
+            let ids = resolve(&[&format!("task:{dropped}")], None);
+            assert!(!ids.contains(&dropped), "{ids:?}");
+            assert_eq!(ids.len(), crate::globals::tasks().len() - 1);
+        }
+
+        /// A bundle file that will not load costs its own cards and nothing
+        /// else. Refusing the boot would strand a hand-edited bundle where the
+        /// console that could fix it is unreachable.
+        #[test]
+        fn a_malformed_bundle_file_still_leaves_the_baseline() {
+            let dir = bundle("[[task]\nid = ");
+            let mut reported = None;
+            let seeds = resolve_seed_cards(&[], Some(dir.path()), |err| {
+                reported = Some(err.to_string());
+            });
+            assert!(
+                reported.is_some(),
+                "the failure must be reported, not swallowed"
+            );
+            assert_eq!(seeds.len(), crate::globals::tasks().len());
+        }
+
+        /// Every seeded card is To-do, whatever it came from. `in_progress`
+        /// dispatches a run and `planning` bills a pass, so this is the property
+        /// that keeps a freshly provisioned company from spending money at boot.
+        #[test]
+        fn every_seeded_card_is_todo() {
+            let dir = bundle("[[task]]\nid = \"ours\"\ntitle = \"Ours\"\n");
+            for seed in resolve_seed_cards(&[], Some(dir.path()), |err| panic!("{err}")) {
+                let card = seed.to_record(0);
+                assert_eq!(card.column, crate::ports::tasks::COLUMN_TODO, "{}", seed.id);
+            }
+        }
+
+        /// Seeding is opt-in. `tests/one_card_per_message.rs` asserts exact board
+        /// sizes against a company built straight from this builder, so a
+        /// baseline that arrived unasked would quietly turn those assertions into
+        /// statements about the baseline.
+        #[test]
+        fn task_seeding_is_off_unless_a_caller_asks_for_it() {
+            let home = tmp_home("opencompany-seed-flag-");
+            let manifest: CompanyManifest =
+                toml::from_str("[company]\nname = \"Acme\"\n").expect("manifest");
+            let builder = RuntimeBuilder::new(home.path().to_path_buf(), manifest);
+            assert!(!builder.seed_tasks, "board seeding must default to off");
+            assert!(builder.with_task_seeding(true).seed_tasks);
+        }
     }
 
     /// Automatic Git checkpoints are opt-in and stay off unless the operator
@@ -6689,6 +6950,7 @@ needs_reason = true
             .unwrap();
 
         let desk_turn = |text: &'static str| CompanyEvent::OperatorMessage {
+            mentions: Vec::new(),
             parent: None,
             text: text.to_string(),
             by: None,
@@ -6837,6 +7099,7 @@ needs_reason = true
 
         runtime
             .run_cycle(vec![CompanyEvent::OperatorMessage {
+                mentions: Vec::new(),
                 parent: None,
                 text: "hello design".to_string(),
                 by: None,
@@ -6955,6 +7218,7 @@ needs_reason = true
         // lead `eng2`, not the blueprint lead `eng1`.
         runtime
             .run_cycle(vec![CompanyEvent::OperatorMessage {
+                mentions: Vec::new(),
                 parent: None,
                 text: "who leads?".to_string(),
                 by: None,

@@ -9,7 +9,7 @@
 // dialog at all, so creating a desk was impossible outside the manifest.
 
 import { useEffect, useId, useRef, useState } from "react";
-import { Crown } from "lucide-react";
+import { Check, Crown } from "lucide-react";
 
 import type { OpenCompanyClient } from "@/api/client";
 import type { DeskDto, TeamMemberDto } from "@/api/types";
@@ -49,6 +49,7 @@ export function DeskCreateDialog({
   // The chosen member ids, in selection order — the first is the desk lead.
   const [members, setMembers] = useState<string[]>([]);
   const [roster, setRoster] = useState<TeamMemberDto[]>([]);
+  const [memberFilter, setMemberFilter] = useState("");
   const [submitting, setSubmitting] = useState(false);
   // Two kinds of message, deliberately kept apart (issue #1100). `nameError` is
   // about one field and renders at that field; `error` is the host's refusal of
@@ -68,6 +69,7 @@ export function DeskCreateDialog({
     setName("");
     setDescription("");
     setMembers([]);
+    setMemberFilter("");
     setNameError(null);
     setError(null);
     let live = true;
@@ -96,6 +98,12 @@ export function DeskCreateDialog({
     const member = roster.find((r) => r.id === id);
     return member?.name ?? member?.role ?? id;
   }
+
+  const memberFilterNeedle = memberFilter.trim().toLowerCase();
+  const visibleRoster = roster.filter((member) => {
+    const label = member.name ?? member.role ?? member.id;
+    return !memberFilterNeedle || label.toLowerCase().includes(memberFilterNeedle);
+  });
 
   async function submit() {
     if (!name.trim()) {
@@ -192,7 +200,17 @@ export function DeskCreateDialog({
             </p>
           ) : (
             <div className="flex flex-col gap-1.5">
-              {roster.map((member) => {
+              {roster.length > 8 && (
+                <Input
+                  value={memberFilter}
+                  onChange={(e) => setMemberFilter(e.target.value)}
+                  placeholder="Filter teammates…"
+                  aria-label="Filter teammates"
+                  data-testid="desk-member-filter"
+                  className="h-8 text-sm"
+                />
+              )}
+              {visibleRoster.map((member) => {
                 const order = members.indexOf(member.id);
                 const selected = order !== -1;
                 return (
@@ -209,6 +227,17 @@ export function DeskCreateDialog({
                     )}
                   >
                     <span className="flex min-w-0 items-center gap-1.5">
+                      <span
+                        aria-hidden="true"
+                        className={cn(
+                          "flex size-4 shrink-0 items-center justify-center rounded-sm border",
+                          selected
+                            ? "border-primary bg-primary text-primary-foreground"
+                            : "border-muted-foreground/50",
+                        )}
+                      >
+                        {selected && <Check className="size-3" />}
+                      </span>
                       <TeammateAvatar
                         name={member.name ?? member.role}
                         avatar={avatarRef(member.avatar, member.id ?? member.name ?? "")}
@@ -222,12 +251,17 @@ export function DeskCreateDialog({
                     </span>
                     {selected && (
                       <span className="shrink-0 text-xs text-muted-foreground">
-                        {order === 0 ? "lead" : order + 1}
+                        {order === 0 ? "1 · Lead" : order + 1}
                       </span>
                     )}
                   </button>
                 );
               })}
+              {visibleRoster.length === 0 && (
+                <p className="rounded-lg border border-dashed p-3 text-center text-xs text-muted-foreground">
+                  No teammates match “{memberFilter.trim()}”.
+                </p>
+              )}
             </div>
           )}
           {members.length > 0 && (

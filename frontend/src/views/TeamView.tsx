@@ -114,6 +114,8 @@ export function TeamView({
    */
   const [hostEmpty, setHostEmpty] = useState(false);
   const [members, setMembers] = useState<TeamMember[]>([]);
+  const [nameQuery, setNameQuery] = useState("");
+  const [workingOnly, setWorkingOnly] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
   const [isAdmin, setIsAdmin] = useState(false);
   // Who set which cap. Only an admin may read the user directory, so this stays
@@ -129,6 +131,14 @@ export function TeamView({
    * every teammate is free on a host that never said so. See `lib/team-workload.ts`.
    */
   const [workload, setWorkload] = useState<Map<string, Workload> | null>(null);
+  /**
+   * A monotonic run id for the workload read. The effect below bumps it on every
+   * re-read, and `loadWorkload` only commits a result whose run is still
+   * current. Clearing `workload` alone is not enough: a superseded read still in
+   * flight can resolve *after* a newer one and repopulate the state with a map
+   * the roster no longer describes.
+   */
+  const workloadRun = useRef(0);
 
   /**
    * Hiding the budget controls from a non-admin is **courtesy, not enforcement**.
@@ -217,10 +227,15 @@ export function TeamView({
       setWorkload(null);
       return;
     }
+    const run = workloadRun.current;
     const [tasks, columns] = await Promise.all([
       listTasks(client, company).catch(() => null),
       fetchBoardColumns(client, company).catch(() => null),
     ]);
+    // Superseded: a newer read started while this one was in flight (the effect
+    // re-ran on a `refreshKey` change, say), so this map must not overwrite the
+    // newer read's answer — one read's board cannot determine another's roster.
+    if (run !== workloadRun.current) return;
     // `columns.length === 0` is a *third* failure and the easiest to miss:
     // `fetchBoardColumns` resolves empty — it does not reject — for a host whose
     // ledger list carries no `tasks` ledger at all. Treating that as a known
@@ -232,12 +247,34 @@ export function TeamView({
 
   useEffect(() => {
     setLoad("loading");
+    // Drop the previous read's workload before the new reads start. A stale
+    // non-null map must never filter a roster it does not describe: on a
+    // `refreshKey` re-run the new roster can land while `loadWorkload` is still
+    // in flight, and one company's board cannot determine another's visible
+    // roster. `null` also disables the Working switch, so the filter cannot
+    // strand the roster mid-re-read.
+    setWorkload(null);
+    workloadRun.current += 1;
     void boot();
     void loadViewer();
     void loadWorkload();
     // `refreshKey` re-runs the read after setup staffs the company; without it
     // the operator lands on the roster they had before their team was built.
   }, [boot, loadViewer, loadWorkload, refreshKey]);
+
+  /**
+   * A "Working" filter is only answerable while the workload is readable.
+   *
+   * If the workload read fails after the operator turned the filter on —
+   * a re-run setup that hits a dropped network, say — every member reads as
+   * not working, and the switch below is disabled while `workload` is null,
+   * so the filter would hide the whole roster with no way to turn it off.
+   * Reset it when the workload becomes unavailable so the roster always has a
+   * way back.
+   */
+  useEffect(() => {
+    if (workload === null) setWorkingOnly(false);
+  }, [workload]);
 
   /**
    * Re-read the roster on the way back from the agent sub-page (issue #264).
@@ -374,6 +411,13 @@ export function TeamView({
     );
   }
 
+  const normalizedNameQuery = nameQuery.trim().toLocaleLowerCase();
+  const visibleMembers = members.filter((member) => {
+    const matchesName = !normalizedNameQuery || member.name.toLocaleLowerCase().includes(normalizedNameQuery);
+    const isWorking = workload?.get(member.id)?.status === "working";
+    return matchesName && (!workingOnly || isWorking);
+  });
+
   return (
     <div className="flex-1 overflow-y-auto">
       <div className="mx-auto w-full max-w-5xl space-y-6 px-4 py-6">
@@ -443,37 +487,68 @@ export function TeamView({
             ))}
           </div>
         ) : (
-          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-            {members.map((m) => (
-              <MemberCard
-                key={m.id}
-                member={m}
-                onRemove={() => void removeMember(m)}
-                // Only a host-backed teammate can be opened: a starter-team
-                // card is a local placeholder with no record behind it, so its
-                // id would 404 and the detail view would report a teammate that
-                // was never removed.
-                onOpen={fromHost ? () => onOpenAgent(m.id) : undefined}
-                setByLabel={m.budgetSetBy ? whoSet(m.budgetSetBy) : undefined}
-                // Looked up by roster id, so a card the board assigned to a
-                // *desk* is never attributed to the people on it.
-                //
-                // The two ways of having no entry are different facts and are
-                // kept apart here: the board answered and this teammate is on
-                // nothing (idle, zero — worth saying), versus the board never
-                // answered (undefined — the card says nothing at all).
-                workload={workload ? (workload.get(m.id) ?? IDLE) : undefined}
-                onNavigateToDesk={onNavigateToDesk}
-              />
-            ))}
-            <button
-              onClick={() => setAddOpen(true)}
-              className="flex min-h-32 flex-col items-center justify-center gap-2 rounded-xl border border-dashed text-sm text-muted-foreground transition-colors hover:border-primary/40 hover:bg-accent/40 hover:text-foreground"
-            >
-              <Plus className="size-5" />
-              Add teammate
-            </button>
-          </div>
+          <>
+            <div className="flex flex-wrap items-center gap-3" data-testid="team-roster-filters">
+              <div className="min-w-52 flex-1">
+                <Label htmlFor="team-roster-search" className="sr-only">
+                  Search teammates by name
+                </Label>
+                <Input
+                  id="team-roster-search"
+                  value={nameQuery}
+                  onChange={(event) => setNameQuery(event.target.value)}
+                  placeholder="Search teammates by name…"
+                  data-testid="team-roster-search"
+                />
+              </div>
+              <Label className="flex items-center gap-2 text-sm font-medium">
+                <Switch
+                  checked={workingOnly}
+                  onCheckedChange={setWorkingOnly}
+                  disabled={workload === null}
+                  aria-label="Show working teammates only"
+                  data-testid="team-roster-working"
+                />
+                Working
+              </Label>
+            </div>
+            <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+              {visibleMembers.map((m) => (
+                <MemberCard
+                  key={m.id}
+                  member={m}
+                  onRemove={() => void removeMember(m)}
+                  // Only a host-backed teammate can be opened: a starter-team
+                  // card is a local placeholder with no record behind it, so its
+                  // id would 404 and the detail view would report a teammate that
+                  // was never removed.
+                  onOpen={fromHost ? () => onOpenAgent(m.id) : undefined}
+                  setByLabel={m.budgetSetBy ? whoSet(m.budgetSetBy) : undefined}
+                  // Looked up by roster id, so a card the board assigned to a
+                  // *desk* is never attributed to the people on it.
+                  //
+                  // The two ways of having no entry are different facts and are
+                  // kept apart here: the board answered and this teammate is on
+                  // nothing (idle, zero — worth saying), versus the board never
+                  // answered (undefined — the card says nothing at all).
+                  workload={workload ? (workload.get(m.id) ?? IDLE) : undefined}
+                  onNavigateToDesk={onNavigateToDesk}
+                />
+              ))}
+              {visibleMembers.length === 0 && (
+                <p className="col-span-full text-sm text-muted-foreground" data-testid="team-roster-empty">
+                  No teammates match these filters.
+                </p>
+              )}
+              <button
+                onClick={() => setAddOpen(true)}
+                className="flex min-h-32 flex-col items-center justify-center gap-2 rounded-xl border border-dashed text-sm text-muted-foreground transition-colors hover:border-primary/40 hover:bg-accent/40 hover:text-foreground"
+              >
+                <Plus className="size-5" />
+                Add teammate
+              </button>
+            </div>
+          </>
         )}
       </div>
 
@@ -538,32 +613,7 @@ function MemberCard({
   return (
     <Card
       data-testid="team-card"
-      // Issue #1206: the whole card is the way in, not just the name. Both the
-      // Inbox switch (#1190) and the menu's "View teammate"/budget items are
-      // gone now, so there is nothing left inside the card that a whole-card
-      // click would swallow — the earlier "deliberately this block rather than
-      // the card" tradeoff no longer applies. Cursor and hover say so before
-      // the click does; `role`/`tabIndex`/`onKeyDown` keep it reachable and
-      // activatable from the keyboard, the same pattern `TaskItem` already uses
-      // for a whole-card click target.
-      onClick={onOpen}
-      role={onOpen ? "button" : undefined}
-      tabIndex={onOpen ? 0 : undefined}
-      onKeyDown={
-        onOpen
-          ? (e) => {
-              if (e.target !== e.currentTarget) return;
-              if (e.key === "Enter" || e.key === " ") {
-                e.preventDefault();
-                onOpen();
-              }
-            }
-          : undefined
-      }
-      className={cn(
-        onOpen &&
-          "cursor-pointer transition-colors hover:border-primary/40 hover:shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
-      )}
+      className="transition-colors"
     >
       <CardContent className="flex h-full flex-col gap-3 py-4">
         <div className="flex items-start gap-3">
@@ -577,28 +627,45 @@ function MemberCard({
             smudge and the bare tone tile is the honest fallback.
           */}
           <TeammateAvatar name={member.name} tone={member.tone} avatar={member.avatar} className="size-11 rounded-xl text-sm" />
-          {/*
-            Plain text, not its own button (issue #1206): the whole card above
-            is now the single click/keyboard target, so a second nested
-            interactive element here would just be a second tab stop for the
-            same action. `data-testid` stays for the e2e specs that click this
-            block by name — a click here still reaches the host, it just
-            bubbles to the card's own handler rather than firing one of its own.
-          */}
-          <div className="min-w-0 flex-1" data-testid="team-card-open">
-            <p className="truncate font-medium">{member.name}</p>
-            {subtitle && (
-              <p className="truncate text-xs text-muted-foreground">{subtitle}</p>
-            )}
-          </div>
-          {/*
-            Stops every click inside — the trigger and, since Base UI portals
-            the menu content elsewhere in the DOM but React still bubbles
-            synthetic events along the *component* tree, every item inside it
-            too — from reaching the card's own onClick above. Without this,
-            opening the menu (or clicking Remove) would also navigate.
-          */}
-          <div onClick={(e) => e.stopPropagation()}>
+          {onOpen ? (
+            <button
+              type="button"
+              onClick={onOpen}
+              className="-m-1 min-w-0 flex-1 rounded-sm p-1 text-left hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              data-testid="team-card-open"
+            >
+              <span className="block truncate font-medium">{member.name}</span>
+              {subtitle && (
+                <span className="block truncate text-xs text-muted-foreground">{subtitle}</span>
+              )}
+              {member.global && (
+                <Badge
+                  variant="secondary"
+                  className="mt-1 text-3xs"
+                  data-testid="team-card-global"
+                >
+                  Global baseline
+                </Badge>
+              )}
+            </button>
+          ) : (
+            <div className="min-w-0 flex-1" data-testid="team-card-open">
+              <p className="truncate font-medium">{member.name}</p>
+              {subtitle && (
+                <p className="truncate text-xs text-muted-foreground">{subtitle}</p>
+              )}
+              {member.global && (
+                <Badge
+                  variant="secondary"
+                  className="mt-1 text-3xs"
+                  data-testid="team-card-global"
+                >
+                  Global baseline
+                </Badge>
+              )}
+            </div>
+          )}
+          <div>
             <DropdownMenu>
               <DropdownMenuTrigger
                 render={<Button variant="ghost" size="icon" className="-mr-1 -mt-1 size-7" aria-label="Teammate actions" />}
@@ -622,8 +689,8 @@ function MemberCard({
 
                   That leaves exactly one item. It stays a menu rather than a
                   bare button: Remove is destructive, and a deliberate extra
-                  click before it is worth keeping now that the rest of the
-                  card is one big click target. Unlike "View teammate" it does
+                  click before it is worth keeping beside the title action.
+                  Unlike "View teammate" it does
                   not duplicate the card's own action, and unlike Budget it is
                   not per-teammate configuration that reads better on a
                   detail page — it is the one roster-level action an operator
@@ -667,10 +734,7 @@ function MemberCard({
                 data-testid={`team-card-desk-${desk.id}`}
                 onClick={
                   onNavigateToDesk
-                    ? (e) => {
-                        e.stopPropagation();
-                        onNavigateToDesk(desk.id);
-                      }
+                    ? () => onNavigateToDesk(desk.id)
                     : undefined
                 }
               >
