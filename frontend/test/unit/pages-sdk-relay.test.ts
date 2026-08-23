@@ -279,9 +279,11 @@ describe("the page frame's toast-relay listener", () => {
     expect(clicked).toHaveBeenCalledOnce();
   });
 
-  it("suppresses the drag-tail click only for the press that just ended", () => {
-    // A click is correlated to the press that ended right before it; a newer
-    // press invalidates the correlation, so a later click is relayed normally.
+  it("keeps a click tied to its own pointer press", () => {
+    // Pointer ids let the frame correlate a compatibility click with its
+    // completed press, even when another pointer press ended more recently.
+    // The first drag's click must target its press element, while the second
+    // press's click must target its own element.
     const below = document.createElement("button");
     const clicked = vi.fn();
     below.addEventListener("click", clicked);
