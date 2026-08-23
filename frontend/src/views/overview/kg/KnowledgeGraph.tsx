@@ -1911,7 +1911,6 @@ export function KnowledgeGraph({
         className="h-full w-full cursor-grab touch-none active:cursor-grabbing"
         role="img"
         aria-label="Operating knowledge graph"
-        data-visual-volatile
         onPointerDown={onCanvasPointerDown}
         onPointerMove={onCanvasPointerMove}
         onPointerUp={onCanvasPointerUp}
