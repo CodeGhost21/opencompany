@@ -992,11 +992,24 @@ async fn run_workflow_inner(
     // Only when the run actually paused: a run that reached the end has no
     // continuation coming, so there is nothing to guard against and nothing to
     // warn about.
-    let (performed, unreplayable) = if outcome.pending_approvals.is_empty() {
+    let (performed, mut unreplayable) = if outcome.pending_approvals.is_empty() {
         (Vec::new(), Vec::new())
     } else {
         super::replay::outward_calls_performed(&graph, &outcome.output, workflow)
     };
+    // Issue #617: a child that paused namespaced gates (`sub::work`) will
+    // restart when its gate is approved, and a restart re-runs the child's
+    // ungated outward calls. Their results are not carried up when the child
+    // pauses, so nothing can be replayed — report them exactly like the
+    // top-level unreplayable calls above, so the operator is warned that
+    // approving restarts the child from the top.
+    if !outcome.pending_approvals.is_empty() {
+        unreplayable.extend(super::replay::child_calls_to_repeat(
+            &graph,
+            &outcome.pending_approvals,
+            &child_gates,
+        ));
+    }
     for call in &unreplayable {
         tracing::warn!(
             company = %record.id,
@@ -1027,6 +1040,9 @@ async fn run_workflow_inner(
             // sign-off.
             output: &outcome.output,
             edges: &workflow.edges,
+            // Issue #617: the resolver's per-child gate record, so a namespaced
+            // child gate's card can name the child's tool and reason.
+            child_gates: &child_gates,
         },
     )
     .await;
