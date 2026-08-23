@@ -117,7 +117,7 @@ export function FinancesView({ client, company }: Props) {
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
           <Kpi icon={Wallet} label="Wallet balance" value={usd(data.balanceUsd)} hint="Ledger balance" />
           <Kpi icon={TrendingUp} label="Revenue" value={usd(data.revenueUsd, 0)} hint="This month" />
-          <Kpi icon={Coins} label="Spend" value={usd(data.spentUsd, 0)} hint={`of ${usd(data.budgetUsd, 0)} budget`} />
+          <Kpi icon={Coins} label="Spend" value={usd(data.spentUsd, 0)} hint={budgetUsd === null ? "This month" : `of ${usd(budgetUsd, 0)} budget`} />
           <Kpi
             icon={PiggyBank}
             label="Net"
