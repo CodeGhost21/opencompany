@@ -173,7 +173,9 @@ impl axum::extract::FromRequestParts<AppState> for VerifiedDelivery {
             .await
             .map_err(IntoResponse::into_response)?;
         let runtime = resolve(state, &company).map_err(IntoResponse::into_response)?;
-        verify(&runtime, &parts.headers).await?;
+        verify(&runtime, &parts.headers)
+            .await
+            .map_err(IntoResponse::into_response)?;
         Ok(Self(runtime))
     }
 }
@@ -193,8 +195,8 @@ async fn verify(
         .await
     {
         Ok(Some(secret)) if !secret.expose().is_empty() => secret.expose().to_string(),
-        Ok(_) => return Err(unauthorized()),
-        Err(err) => return Err(crate::server::error::ApiError(err).into_response()),
+        Ok(_) => return Err(unauthorized().into()),
+        Err(err) => return Err(crate::server::error::ApiError(err).into_response().into()),
     };
 
     let Some(provided) = headers
@@ -202,10 +204,10 @@ async fn verify(
         .and_then(|v| v.to_str().ok())
         .and_then(decode_basic)
     else {
-        return Err(unauthorized());
+        return Err(unauthorized().into());
     };
     if !constant_time_eq(provided.as_bytes(), expected.as_bytes()) {
-        return Err(unauthorized());
+        return Err(unauthorized().into());
     }
     Ok(())
 }

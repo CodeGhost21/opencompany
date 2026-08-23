@@ -242,7 +242,7 @@ async fn vote_single(
         .vote_feedback_board(&item, body.value)
         .await
         .map(Json)
-        .map_err(|e| ApiError(e).into_response())
+        .map_err(|e| ApiError(e).into_response().into())
 }
 
 /// `POST /api/v1/companies/{id}/feedback/board/{item}/comments`.
@@ -258,7 +258,7 @@ async fn comment(
         .comment_feedback_board(&item, text)
         .await
         .map(Json)
-        .map_err(|e| ApiError(e).into_response())
+        .map_err(|e| ApiError(e).into_response().into())
 }
 
 /// `POST /api/v1/company/feedback/board/{item}/comments` (single-company alias).
@@ -274,7 +274,7 @@ async fn comment_single(
         .comment_feedback_board(&item, text)
         .await
         .map(Json)
-        .map_err(|e| ApiError(e).into_response())
+        .map_err(|e| ApiError(e).into_response().into())
 }
 
 #[cfg(test)]
