@@ -1447,4 +1447,3 @@ mod test {
         refuse_bundle_env(&blank_tenant, false).expect("blank tenant id is unset");
     }
 }
-}
