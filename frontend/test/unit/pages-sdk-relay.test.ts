@@ -36,7 +36,7 @@ function relayFrom(source: MessageEventSource | null, data: unknown): void {
 }
 
 describe("the page frame's toast-relay listener", () => {
-  it("clicks the element under a relayed click point", () => {
+  it("clicks the element under a relayed click point with the relayed coordinates", () => {
     const below = document.createElement("button");
     const clicked = vi.fn();
     below.addEventListener("click", clicked);
@@ -46,6 +46,11 @@ describe("the page frame's toast-relay listener", () => {
     relayFrom(window.parent, { type: "oc:relay-click", x: 12, y: 34 });
 
     expect(clicked).toHaveBeenCalledOnce();
+    // A canvas, chart or image-style control reads the click coordinates; the
+    // relay must not hand it a zeroed click.
+    expect(clicked).toHaveBeenCalledWith(
+      expect.objectContaining({ clientX: 12, clientY: 34 }),
+    );
   });
 
   it("dispatches a pointerdown for a relayed press", () => {
