@@ -155,17 +155,35 @@ window.addEventListener("message", function onRelay(event: MessageEvent) {
   if (!isRelayMessage(event.data)) return;
 
   if (event.data.type === "oc:relay-click") {
+    // A click that ends a drag must not activate whatever is under the release
+    // point: the press's tail was routed to the element that took it (capture
+    // semantics), and a press that moved is a drag, which produces no click.
+    // A click arrives immediately after the `pointerup` of its own press and
+    // before any newer press starts, which is the only correlation available
+    // (the click message has no pointer id).
+    if (
+      lastPressEnd !== null &&
+      lastPressEnd.press === relayedPressCount &&
+      Math.hypot(event.data.x - lastPressEnd.x, event.data.y - lastPressEnd.y) <= 4 &&
+      lastPressEnd.dragged
+    ) {
+      return;
+    }
     const element = document.elementFromPoint(event.data.x, event.data.y);
     if (!(element instanceof HTMLElement || element instanceof SVGElement)) return;
-    // Mirror the parent relay's own handling (`toast-click-through.ts`):
-    // `HTMLElement.click()` runs default actions, and an `SVGElement` has no
-    // `click()` in the DOM, so the event is dispatched to reach its handlers.
+    // Dispatch the click with the relayed coordinates: a canvas, chart or
+    // image-style control reads them, and a dispatched `MouseEvent` still runs
+    // an element's click default actions (link navigation, form submission,
+    // checkbox toggle), so ordinary controls behave as if clicked directly.
     element.focus({ preventScroll: true });
-    if (element instanceof HTMLElement) {
-      element.click();
-    } else {
-      element.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
-    }
+    element.dispatchEvent(
+      new MouseEvent("click", {
+        clientX: event.data.x,
+        clientY: event.data.y,
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
     return;
   }
 
