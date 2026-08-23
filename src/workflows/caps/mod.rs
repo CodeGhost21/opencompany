@@ -188,6 +188,7 @@ pub async fn build_capabilities(
         board,
         blocks,
         approvals,
+        child_gates,
     } = run;
     let company = record.id.clone();
     // Issue #562: the tier actually in force — the operator's console override
