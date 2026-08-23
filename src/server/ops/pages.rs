@@ -253,6 +253,7 @@ fn page_shell_html(slug: &str) -> String {
 <body>
 <div id="root"></div>
 <script type="module">
+  import "@opencompany/site";
   import * as React from "react";
   import * as ReactDOM from "react-dom/client";
   import Page from "./{slug}/bundle.mjs";
