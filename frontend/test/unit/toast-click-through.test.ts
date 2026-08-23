@@ -48,17 +48,16 @@ function clickAt(element: Element, x: number, y: number): void {
 }
 
 /** A page frame beneath the toast, relaying back to a stubbed `postMessage`. */
-function frameBeneath(): HTMLIFrameElement {
+function frameBeneath(): { frame: HTMLIFrameElement; posted: ReturnType<typeof vi.fn> } {
   const frame = document.createElement("iframe");
-  Object.defineProperty(frame, "contentWindow", {
-    value: { postMessage: vi.fn() },
-  });
+  const posted = vi.fn();
+  Object.defineProperty(frame, "contentWindow", { value: { postMessage: posted } });
   // jsdom has no layout; pin the frame's viewport offset so the relay's
   // frame-relative coordinates are observable.
   frame.getBoundingClientRect = () =>
     ({ left: 10, top: 20, width: 100, height: 100 }) as DOMRect;
   document.body.append(frame);
-  return frame;
+  return { frame, posted };
 }
 
 function toast(): HTMLElement {
