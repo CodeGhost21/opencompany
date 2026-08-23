@@ -28,6 +28,7 @@
 //   `#/company`            the teammates
 //   `#/company/desks`      the org chart
 //   `#/company/<deskId>`   the org chart, arriving at that desk (issue #485)
+//   `#/company/graph`      the knowledge graph (issue #1321)
 //
 // which means the chart survives a reload, can be linked, and is reached by
 // asking for it rather than by flipping a switch and hoping.
