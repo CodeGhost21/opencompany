@@ -598,25 +598,28 @@ mod tests {
     }
 
     #[test]
-    fn shell_loads_the_fixed_credentialed_bootstrap_module() {
-        let html = page_shell_html("revenue");
-        // An external module is required: `crossorigin=use-credentials` on an
-        // inline module does not set the module graph's credentials mode.
+    fn shell_embeds_the_minted_capability_in_the_bootstrap_url() {
+        let html = page_shell_html("revenue", "cap-abc123");
+        // The module graph is fetched by the opaque-origin iframe without a
+        // session cookie, so the shell hands the capability it minted over in
+        // the bootstrap module's URL — the only authenticated party in the
+        // load chain is the shell route itself.
         assert!(
             html.contains(
-                "<script type=\"module\" src=\"./revenue/bootstrap.mjs\" crossorigin=\"use-credentials\"></script>"
-            )
+                "<script type=\"module\" src=\"./revenue/bootstrap.mjs?oc_cap=cap-abc123\"></script>"
+            ),
+            "the bootstrap module URL must carry the shell-minted capability"
         );
     }
 
     #[test]
     fn shell_bundle_path_is_relative_to_the_shells_own_url() {
-        let html = page_shell_html("revenue");
+        let html = page_shell_html("revenue", "cap");
         // Bug this guards (PR #985): the shell imported `./bundle.mjs`, which
         // resolves against `…/pages/{slug}` (no trailing slash) to
         // `…/pages/bundle.mjs` — the shell route with slug "bundle.mjs", which
-        // fails `valid_slug` and 404s. `./{slug}/bundle.mjs` resolves to the
-        // registered bundle route.
+        // fails `valid_slug` and 404s. `./{slug}/bootstrap.mjs` resolves to the
+        // registered bootstrap route.
         assert!(
             html.contains("src=\"./revenue/bootstrap.mjs\""),
             "the bootstrap module must be relative to the shell URL"
@@ -625,7 +628,7 @@ mod tests {
 
     #[test]
     fn shell_links_the_sdk_css_and_maps_react_jsx_runtime_to_the_sdk_bundle() {
-        let html = page_shell_html("revenue");
+        let html = page_shell_html("revenue", "cap");
         // Bug this guards (PR #985): the SDK's `index.css` was built and
         // shipped but never linked, so every page rendered unstyled.
         assert!(
@@ -641,9 +644,42 @@ mod tests {
     }
 
     #[test]
-    fn shell_loads_its_module_graph_with_credentials() {
-        let html = page_shell_html("revenue");
-        assert!(html.contains("crossorigin=\"use-credentials\""));
+    fn bootstrap_threads_the_capability_to_the_bundle_import() {
+        let body = page_bootstrap_body("cap-def456");
+        // A static import's URL is resolved against the importing module's own
+        // URL, so the `?oc_cap` query on the bootstrap URL does NOT propagate
+        // to its `./bundle.mjs` import — the bootstrap must pass the validated
+        // capability along explicitly or the bundle request would 404.
+        assert!(
+            body.contains("from \"./bundle.mjs?oc_cap=cap-def456\""),
+            "the bootstrap must thread the capability into the bundle import"
+        );
+    }
+
+    #[test]
+    fn capability_is_bound_to_its_company_and_slug() {
+        let company = CompanyId::new("acme");
+        let other_company = CompanyId::new("globex");
+        let cap = mint_module_cap(&company, "revenue");
+
+        assert!(validate_module_cap(&cap, &company, "revenue"));
+        // A capability minted for one company cannot open another company's
+        // module graph…
+        assert!(!validate_module_cap(&cap, &other_company, "revenue"));
+        // …nor another page in the same company.
+        assert!(!validate_module_cap(&cap, &company, "finance"));
+        assert!(!validate_module_cap(&cap, &company, "revenue-2"));
+        // An unknown token is never valid.
+        assert!(!validate_module_cap("deadbeef", &company, "revenue"));
+    }
+
+    #[test]
+    fn capability_tokens_are_url_safe() {
+        let cap = mint_module_cap(&CompanyId::new("acme"), "revenue");
+        assert!(
+            cap.bytes().all(|b| b.is_ascii_hexdigit()),
+            "capability must be hex-encoded to ride a URL: {cap}"
+        );
     }
 
     #[test]
