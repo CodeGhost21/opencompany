@@ -45,6 +45,9 @@ pub mod memory_ingest;
 /// The `@` picker's directory: every teammate, person, desk and broadcast token
 /// a mention can name, in one member-safe read. See [`mentions`].
 pub mod mentions;
+/// The notification feed, and the mention badge it backs. The first consumer
+/// of `NotificationStore`. See [`notifications`].
+pub mod notifications;
 pub mod pages;
 pub mod policy;
 pub mod read_state;
@@ -223,6 +226,7 @@ pub fn router() -> Router<AppState> {
         .merge(mcp::router())
         .merge(mcp_registry::router())
         .merge(read_state::router())
+        .merge(notifications::router())
         .merge(mentions::router())
         .merge(repos::router())
         .merge(inference::router())

@@ -1816,6 +1816,24 @@ async fn accept_chat_turn(
         .await
         .map_err(ApiError)?;
 
+    // The durable half of a mention (issue: mentions).
+    //
+    // The SSE feed only reaches a browser that is open, so without this a
+    // mention is invisible to everyone who was not watching when it landed —
+    // which is most of the point of mentioning somebody. Filed here, right
+    // after the journal write, so the notification and the message share a
+    // sequence and a turn that later fails still leaves the mention recorded.
+    //
+    // Deliberately not fatal: a notification store that will not answer must
+    // not fail somebody's message. The mention still renders as a chip and is
+    // still in the transcript; only the badge is missing, and the warning says
+    // so.
+    if let CompanyEvent::OperatorMessage { mentions, .. } = &message_event
+        && !mentions.is_empty()
+    {
+        notify_mentioned(runtime, id, mentions, &message_seq, by, desk).await;
+    }
+
     let turn_id = crate::ports::generate_id();
     let turn_id = match runtime
         .runs()
@@ -1917,6 +1935,79 @@ async fn settle_chat_turn(
             turn = %turn_id,
             error = %err,
             "could not journal a turn's failure; its row still records it"
+        );
+    }
+}
+
+/// Files one "you were mentioned" notification for the people a message names.
+///
+/// **One row, many recipients** — not one row each. Read state is already per
+/// `(company, user, notification)`, so a single row carrying an audience gives
+/// every recipient independent read state for free, and the feed does not grow
+/// by the size of the room every time somebody types `@everyone`.
+///
+/// Teammates produce no notification. An agent has no inbox to badge and no
+/// person to interrupt; a mention of one is already handled by routing.
+async fn notify_mentioned(
+    runtime: &CompanyRuntime,
+    id: &CompanyId,
+    mentions: &[crate::ports::types::Mention],
+    message_seq: &EventSeq,
+    by: Option<&Actor>,
+    desk: &str,
+) {
+    let users = match runtime.users().list_users(id).await {
+        Ok(users) => users,
+        Err(err) => {
+            tracing::warn!(
+                company = %id,
+                error = %err,
+                "[mentions] the user directory could not be read; this message badges nobody"
+            );
+            return;
+        }
+    };
+    let mut audience = crate::runtime::mentions::mentioned_users(&users, mentions);
+    // Never notify the author, even when they wrote `@everyone`. `normalize`
+    // already drops a direct self-mention, but a broadcast expands to the whole
+    // company *after* that, so this is the only place the author can be removed
+    // from one.
+    if let Some(Actor {
+        kind: ActorKind::User,
+        id: author,
+    }) = by
+    {
+        audience.retain(|u| u != author);
+    }
+    if audience.is_empty() {
+        return;
+    }
+
+    let who = by
+        .filter(|a| a.kind == ActorKind::User)
+        .and_then(|a| users.iter().find(|u| u.id == a.id))
+        .map(crate::runtime::mentions::user_label)
+        .unwrap_or_else(|| "Someone".to_string());
+    let note = crate::ports::notifications::Notification {
+        id: crate::ports::generate_id(),
+        kind: "mention".to_string(),
+        subject: crate::ports::notifications::Subject {
+            kind: crate::ports::notifications::SubjectKind::Message,
+            id: message_seq.value().to_string(),
+        },
+        created_at: crate::ports::now_millis(),
+        title: format!("{who} mentioned you in {desk}"),
+        audience: Some(audience),
+        // The console's channel-id space, so a badge lands without the browser
+        // having loaded that transcript.
+        context: Some(desk.to_string()),
+    };
+    if let Err(err) = runtime.notifications().append(id, &note).await {
+        tracing::warn!(
+            company = %id,
+            error = %err,
+            "[mentions] a mention could not be recorded; the message still lands and \
+             still renders, but nobody is badged for it"
         );
     }
 }
