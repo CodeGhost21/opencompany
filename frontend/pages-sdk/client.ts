@@ -105,9 +105,12 @@ function query<T = unknown>(
       reject(new Error("oc:graphql timed out waiting for a reply from the console"));
     }, TIMEOUT_MS);
 
-    pending.set(id, (result) => {
+    pending.set(id, (result: GraphQLResult) => {
       window.clearTimeout(timeout);
-      resolve(result);
+      // The reply's payload is opaque to the bridge — it is whatever GraphQL
+      // returned for this document — so the unknown only becomes `T` here, at
+      // the point the caller's generic names it. This is the one cast.
+      resolve(result as GraphQLResult<T>);
     });
 
     // `targetOrigin` is deliberately `"*"` on the outgoing `oc:init` that
