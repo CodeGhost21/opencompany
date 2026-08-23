@@ -347,6 +347,48 @@ export function approvalAction(a: ApprovalSummary): string {
   );
 }
 
+/**
+ * What the decide buttons are deciding on, told with enough of the request to
+ * tell two same-kind cards apart (#1411).
+ *
+ * {@link approvalAction} names the *kind* — "Run a terminal command" — and that
+ * is identical for every card of that kind. A screen-reader user tabbing
+ * button-to-button hears only each button's accessible name, never the card
+ * body, so a queue holding two shell commands would offer two "Approve: Run a
+ * terminal command" buttons with no way to tell which request each one
+ * decides. Appending the payload's lead argument — the command itself, the
+ * URL, the pattern — and, when the card has one, the asker, makes each button
+ * name *this* request.
+ *
+ * Both halves degrade: a card with no payload (an approval with no arguments)
+ * omits the lead, and one with no `agent` (a native effect, or an old host)
+ * omits the asker — leaving exactly the {@link approvalAction} phrase the
+ * card's headline already shows.
+ */
+export function decisionLabel(a: ApprovalSummary, askerNames: Map<string, string>): string {
+  const parts = [approvalAction(a)];
+  const lead = payloadLead(a);
+  if (lead != null) parts.push(lead);
+  const who = a.agent ? (askerNames.get(a.agent) ?? a.agent) : null;
+  if (who != null) parts.push(`asked by ${who}`);
+  return parts.join(" — ");
+}
+
+/**
+ * The one payload argument that says most about what a call will do — the
+ * command line, the URL, the pattern — or `null` when the card carries no
+ * payload.
+ *
+ * Just the value, not `label: value`: for a shell card the label is "command",
+ * so including it would read "command: command". The value is the thing being
+ * consented to, and it is already redacted and bounded host-side
+ * (`src/runtime/approval_display.rs`).
+ */
+function payloadLead(a: ApprovalSummary): string | null {
+  const first = payloadLines(a)[0];
+  return first ? first.value : null;
+}
+
 /** The effect kind a paused workflow gate parks as — mirrors
  * `WORKFLOW_APPROVE_KIND` in `src/runtime/workflow_resume.rs`. */
 const WORKFLOW_APPROVE_KIND = "workflow.approve";
