@@ -53,7 +53,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Skeleton } from "@/components/ui/skeleton";
 import { personName } from "@/lib/person";
-import { avatarFor, roleSubtitle, toneFor, type TeamMember } from "@/lib/team";
+import { roleSubtitle, toneFor, type TeamMember } from "@/lib/team";
 import {
   addMemberFailure,
   addOutcome,
