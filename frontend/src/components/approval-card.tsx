@@ -378,7 +378,10 @@ export function useApprovalThreadLinks(
     setLinks(new Map());
     if (!threadKey) return;
     let live = true;
-    void Promise.all([client.listDesks(company), client.listTeam(company)])
+    void Promise.all([
+      client.listDesks(company).catch(() => []),
+      client.listTeam(company).catch(() => []),
+    ])
       .then(([deskDtos, roster]) => {
         if (!live) return;
         const desks = deskDtos.map(deskFromDto);
@@ -392,9 +395,6 @@ export function useApprovalThreadLinks(
           ),
         );
       })
-      .catch(() => {
-        if (live) setLinks(new Map());
-      });
     return () => {
       live = false;
     };
