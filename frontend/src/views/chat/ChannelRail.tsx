@@ -5,6 +5,7 @@ import { TeammateAvatar } from "@/components/teammate-avatar";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { channelSubtitle, dmFace, type Channel, type ChannelSection } from "./model";
+import { NewMessageDialog } from "./NewMessageDialog";
 
 /**
  * What an unread badge actually claims (issue #364).
@@ -23,6 +24,8 @@ interface Props {
   /** Channel id → unread count. Absent or 0 reads as caught up. */
   unread: Record<string, number>;
   onSelect: (id: string) => void;
+  directMessages: Channel[];
+  onStartDirectMessage: (id: string) => void;
   className?: string;
 }
 
@@ -35,7 +38,15 @@ interface Props {
  * screen — the app's own nav is to its left — so it stays visually quieter
  * than that one: no group headers in caps, no badges except unread.
  */
-export function ChannelRail({ sections, activeId, unread, onSelect, className }: Props) {
+export function ChannelRail({
+  sections,
+  activeId,
+  unread,
+  onSelect,
+  directMessages,
+  onStartDirectMessage,
+  className,
+}: Props) {
   return (
     <aside
       className={cn(
@@ -45,16 +56,22 @@ export function ChannelRail({ sections, activeId, unread, onSelect, className }:
     >
       <div className="flex items-center justify-between gap-2 px-3 py-3">
         <h2 className="truncate text-sm font-semibold tracking-tight">Chat</h2>
-        <Button
-          variant="ghost"
-          size="icon"
-          className="size-7 text-muted-foreground"
-          aria-label="New message"
-          disabled
-          title="New message — coming soon"
-        >
-          <SquarePen className="size-4" />
-        </Button>
+        <NewMessageDialog
+          directMessages={directMessages}
+          onSelect={onStartDirectMessage}
+          trigger={
+            <Button
+              variant="ghost"
+              size="icon"
+              className="size-7 text-muted-foreground"
+              aria-label="New message"
+              disabled={directMessages.length === 0}
+              title={directMessages.length ? "New message" : "No teammates to message"}
+            >
+              <SquarePen className="size-4" />
+            </Button>
+          }
+        />
       </div>
 
       {sections.map((section) => (
@@ -122,7 +139,9 @@ function Section({
             </li>
           ))}
           {section.channels.length === 0 && (
-            <li className="px-2 py-1 text-xs text-muted-foreground">Nothing here yet.</li>
+            <li className="px-2 py-1 text-xs text-muted-foreground">
+              {section.id === "dms" ? "No direct messages yet." : "Nothing here yet."}
+            </li>
           )}
         </ul>
       )}

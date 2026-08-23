@@ -8,7 +8,9 @@ the desks the two shared without ever being connected.
 ## Routing
 
 `#/chat/<channelId>` — the channel id is the hash's second segment, so a
-channel is linkable and survives a refresh.
+channel is linkable and survives a refresh. The rail shows only direct messages
+with at least one line, newest first; **New message** opens the full roster to
+start an otherwise absent DM.
 
 - A desk's channel id is the host's desk id, which is also its chat thread id.
 - A DM is `dm:<teammate-id>` — e.g. `#/chat/dm:designer` for a host roster

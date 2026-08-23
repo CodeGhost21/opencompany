@@ -60,6 +60,8 @@ import {
   channelTitle,
   deskFromDto,
   dmChannelId,
+  directMessageChannels,
+  directMessageForId,
   findChannel,
   firstChannel,
   historyReady,
@@ -184,8 +186,8 @@ interface Props {
  *
  * One screen replaces what used to be three: the Conversation page's thread
  * list, the Team page's roster, and the desks those two shared without ever
- * being connected. Here the desks are channels, every teammate has a DM, and
- * the roster sits in a pane you can open beside the transcript.
+ * being connected. Here the desks are channels, active teammate conversations
+ * are DMs, and the roster sits in a pane you can open beside the transcript.
  *
  * Every channel posts to the same company chat endpoint — a channel scopes a
  * transcript and fixes the company side's identity, it is not a separate
@@ -434,8 +436,8 @@ export function ChatView({
   // No channels exist until the host has answered. Resolving against a
   // half-built list is exactly the first-paint swap issue #370 describes.
   const sections = useMemo(
-    () => (desks ? buildChannels(members, desks) : []),
-    [members, desks],
+    () => (desks ? buildChannels(members, desks, transcripts) : []),
+    [members, desks, transcripts],
   );
   // The hash's channel, else the first one that exists. There used to be a
   // literal "main" between the two — an id only the *fallback* desks carry, so
@@ -451,10 +453,13 @@ export function ChatView({
    * nothing is ever addressed or stored under the old id, so this shim can be
    * deleted without leaving anything stranded.
    */
-  const resolvedSub =
-    sub && !findChannel(sections, sub) ? resolveDmChannelId(sub, members) : null;
+  const resolvedSub = sub ? resolveDmChannelId(sub, members) : null;
   const channel = desks
-    ? (findChannel(sections, resolvedSub ?? sub) ?? firstChannel(sections))
+    ? (
+        findChannel(sections, resolvedSub ?? sub)
+        ?? directMessageForId(members, resolvedSub ?? sub)
+        ?? firstChannel(sections)
+      )
     : null;
   /**
    * The hash named a channel this company doesn't have, and the first-channel
@@ -990,6 +995,8 @@ export function ChatView({
         activeId={channel.id}
         unread={unread ?? {}}
         onSelect={selectChannel}
+        directMessages={directMessageChannels(members)}
+        onStartDirectMessage={selectChannel}
         className={cn("lg:flex", mobilePane === "rail" ? "flex" : "hidden")}
       />
 
