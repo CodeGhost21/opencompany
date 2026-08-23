@@ -208,7 +208,7 @@ describe("the decide buttons' label (#1411)", () => {
     expect(label.endsWith(" — asked by Sam")).toBe(true);
     const lead = label.slice("Run a terminal command — ".length, -" — asked by Sam".length);
     expect(lead.startsWith("x".repeat(59))).toBe(true);
-    expect(lead.endsWith("…x".repeat(59))).toBe(true);
+    expect(lead.endsWith("…" + "x".repeat(59))).toBe(true);
   });
 });
 
