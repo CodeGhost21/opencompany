@@ -390,11 +390,14 @@ platform teaches people to reach for `--update-snapshots` without looking,
 which is how a baseline suite stops meaning anything. Run it either side of a
 styling change and read the diff Playwright writes into `playwright-report/`.
 
-The false-positive rate is what makes this worth having, so the spec pins the
-clock, disables animations, waits on `document.fonts.ready`, hides the fading
-overlay scrollbar, and masks regions whose *value* legitimately changes between
-runs. To exempt something new, put `data-visual-volatile` on it at the call
-site rather than adding a CSS path to the mask list — a path stops masking
+The false-positive rate is what makes this worth having, so the spec leaves the
+page on the real clock — the console paints time-derived labels *relative to
+now*, and a frozen page clock against a host that keeps real time would make
+those labels less stable, not more — and masks the labels that would otherwise
+drift. It also disables animations, waits on `document.fonts.ready`, hides the
+fading overlay scrollbar, and masks regions whose *value* legitimately changes
+between runs. To exempt something new, put `data-visual-volatile` on it at the
+call site rather than adding a CSS path to the mask list — a path stops masking
 anything the day it changes, and a mask that matches nothing looks exactly like
 a mask that was not needed.
 
