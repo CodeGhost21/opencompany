@@ -118,17 +118,48 @@ describe("ApprovalCard decide ordering (#1406)", () => {
     await render(APPROVAL);
 
     // The action phrase alone ("Run a terminal command") is identical for two
-    // same-kind cards, so the label carries the command and the asker too.
-    // Compared by attribute, not CSS selector: the command's `&&` is legal in
-    // an attribute value but trips jsdom's selector engine.
+    // same-kind cards, so the label carries the command, the distinguishing
+    // follow-ups (here `cwd`), and the asker too. Compared by attribute, not
+    // CSS selector: the command's `&&` is legal in an attribute value but
+    // trips jsdom's selector engine.
     const labelled = Array.from(container.querySelectorAll("button")).map((b) =>
       b.getAttribute("aria-label"),
     );
     expect(labelled).toContain(
-      "Approve: Run a terminal command — rm -rf /tmp/build && make release — asked by Ops",
+      "Approve: Run a terminal command — rm -rf /tmp/build && make release — cwd: /srv/app — asked by Ops",
     );
     expect(labelled).toContain(
-      "Decline: Run a terminal command — rm -rf /tmp/build && make release — asked by Ops",
+      "Decline: Run a terminal command — rm -rf /tmp/build && make release — cwd: /srv/app — asked by Ops",
+    );
+  });
+
+  it("distinguishes two same-URL http_request cards by method (#1411)", async () => {
+    const get: ApprovalSummary = {
+      ...APPROVAL,
+      id: "get",
+      kind: "http_request",
+      payload: { url: "https://api.example.com/items", method: "GET" },
+    };
+    const del: ApprovalSummary = {
+      ...APPROVAL,
+      id: "del",
+      kind: "http_request",
+      payload: { url: "https://api.example.com/items", method: "DELETE" },
+    };
+
+    await render(get);
+    await render(del);
+
+    const labelled = Array.from(container.querySelectorAll("button")).map((b) =>
+      b.getAttribute("aria-label"),
+    );
+    // Same URL, different method — the accessible names must not collide: the
+    // method rides after the URL with its label so the two buttons read apart.
+    expect(labelled).toContain(
+      "Approve: Make a network request — https://api.example.com/items — method: GET — asked by Ops",
+    );
+    expect(labelled).toContain(
+      "Approve: Make a network request — https://api.example.com/items — method: DELETE — asked by Ops",
     );
   });
 
