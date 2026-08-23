@@ -3,6 +3,8 @@
  * two fresh-host runs can be compared for determinism. NOT part of the suite;
  * deleted after use.
  */
+import { writeFileSync } from "node:fs";
+
 import { test, type Page } from "@playwright/test";
 
 import { VISUAL } from "./capabilities";
