@@ -223,6 +223,26 @@ pub fn persona_prompt(
     crate::company::prompt::persona_prompt(company_name, agent, instructions)
 }
 
+/// The `(files, shell, code)` flags [`toolbelt::sandbox_brief`] renders from,
+/// each true only when the namespace both (a) was wired from the agent's
+/// GRANT (`wants_files`/`shell_wired`/`wants_code`) and (b) is not denied by
+/// the per-turn capability tier in `capabilities`.
+///
+/// Pulled out of [`build_agent`] as a pure function so the capability-denial
+/// case — the brief must not describe `shell`/`code` on a turn where
+/// `filter_by_capabilities` is about to strip them — is unit-testable without
+/// standing up a full agent build.
+fn sandbox_brief_flags(
+    wants_files: bool,
+    shell_wired: bool,
+    wants_code: bool,
+    capabilities: &toolbelt::CapabilityFilter,
+) -> (bool, bool, bool) {
+    let shell = shell_wired && !toolbelt::namespace_denied(capabilities, "shell");
+    let code = wants_code && !toolbelt::namespace_denied(capabilities, "code");
+    (wants_files, shell, code)
+}
+
 /// Build one openhuman [`Agent`] for `manifest_agent` within `company`.
 ///
 /// `skill_deltas` are the company's operator skill overrides. When the harness
