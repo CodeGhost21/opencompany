@@ -69,4 +69,14 @@ describe("the consequence on an approval card", () => {
     expect(container.textContent).not.toContain("Leaves the company");
     expect(container.querySelector(".bg-muted.text-foreground")).not.toBeNull();
   });
+
+  // The `publish` group covers `publish_artifact`, which writes only into the
+  // company's own workspace and artifact chain and sends nothing anywhere, as
+  // well as the genuinely external `repo_publish` and `hosting_*` effects. A
+  // label claiming the first of those goes public is the misleading-label
+  // failure `language.ts` refuses for the same tool, so it stays refused here.
+  it("does not claim a publish approval goes public", async () => {
+    await render(approval({ group: "publish" }));
+    expect(container.textContent).not.toMatch(/public/i);
+  });
 });
