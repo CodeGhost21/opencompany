@@ -82,10 +82,10 @@ struct EngineOption {
     /// `null`.
     ///
     /// Deliberately flatter than the `(backend, driver)` pair the runtime
-    /// takes: "embedded, driver namespace" and "remote, driver mem0" are one
-    /// choice to an operator and two knobs to the host, and asking a console
-    /// to model that correctly is how a UI ends up offering `remote` with no
-    /// driver — a combination the host refuses at bind.
+    /// takes: "remote, driver mem0" is one choice to an operator and two knobs
+    /// to the host, and asking a console to model that correctly is how a UI
+    /// ends up offering `remote` with no driver — a combination the host
+    /// refuses at bind.
     id: &'static str,
     /// Human label for the tile.
     label: &'static str,
