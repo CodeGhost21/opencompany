@@ -3064,6 +3064,22 @@ mod test {
         }
     }
 
+    /// Issue #247: a publish PR carries both the task and the concrete run that
+    /// produced its approved effect, letting an operator trace it back to the
+    /// exact attempt rather than only the card.
+    #[test]
+    fn a_publish_pr_body_links_its_task_and_run() {
+        let body = repo_publish_pr_body(
+            "developer",
+            "task-247",
+            Some("run-247"),
+            "Add run linkage to publish pull requests.",
+        );
+
+        assert!(body.contains("task `task-247`"), "{body}");
+        assert!(body.contains("run `run-247`"), "{body}");
+    }
+
     /// A publish-failure note lands only on a real card — never on a DM's `dm-*`
     /// work key, which no card owns (issue #815).
     #[test]
