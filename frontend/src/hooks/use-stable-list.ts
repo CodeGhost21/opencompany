@@ -29,8 +29,9 @@ import type { FocusEvent } from "react";
  * `deciding` map keyed on id, not by this snapshot, so the button a hovering
  * operator is about to press does not move, yet still shows its spinner.
  *
- * Spread {@link StableList.containerProps} onto the element wrapping the rows —
- * the region whose bounds define "over the queue". It also carries a `ref`:
+ * Spread {@link StableList.containerProps} onto the element wrapping the
+ * interaction region — the permissions and rows together in the approvals
+ * view — whose bounds define "over the queue". It also carries a `ref`:
  * see the note on `focusInsideNow` below for why the thaw check needs the
  * actual container node rather than trusting the focus flag alone.
  */
