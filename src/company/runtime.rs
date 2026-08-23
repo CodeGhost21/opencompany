@@ -458,7 +458,6 @@ impl CompanyRuntime {
             workflow_runner: None,
             steer: crate::company::steer::InflightRegistry::new(),
             run_supervisor: crate::runtime::RunSupervisor::new(),
-            repos: None,
             grants,
             continuations: ContinuationQueue::default(),
             workflow_gates: WorkflowGateQueue::default(),
