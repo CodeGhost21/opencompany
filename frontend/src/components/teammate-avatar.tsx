@@ -1,6 +1,9 @@
+import { useEffect, useState } from "react";
 import { Building2 } from "lucide-react";
 
-import { TEAM_TONES, avatarFor, avatarSrc, initials } from "@/lib/team";
+import { useConsole } from "@/lib/console-context";
+import { resolveAvatarSrc, staticAvatarSrc } from "@/lib/avatar";
+import { TEAM_TONES, avatarFor, initials } from "@/lib/team";
 import { cn } from "@/lib/utils";
 
 interface Props {
@@ -19,9 +22,12 @@ interface Props {
    */
   markOnly?: boolean;
   /**
-   * The mascot key from `avatarFor`. Optional: a caller holding a `Member`
-   * passes the id-seeded one so the face matches everywhere that teammate
-   * appears, and a caller with only a name falls back to seeding on that.
+   * The avatar reference to draw (`lib/avatar.ts`) — `tiny:<flavour>` for a
+   * shipped mascot, `blob:<nodeId>` for an image somebody uploaded.
+   *
+   * Optional: a caller holding a `Member` passes its resolved `avatar` so the
+   * face matches everywhere that teammate appears, and a caller with only a name
+   * falls back to the mascot hashed from that.
    */
   avatar?: string;
   className?: string;
@@ -85,6 +91,33 @@ export function TeammateAvatar({
     );
   }
 
+  return <AvatarTile name={name} tone={tone} avatar={avatar} className={className} testId={testId} />;
+}
+
+/**
+ * The tile itself, once the company-mark and mark-only cases are out of the way.
+ *
+ * Split out because it holds a hook and the two cases above return before it:
+ * a hook cannot sit behind an early return, and hoisting it into the component
+ * would mean every 16px facepile tile subscribed to console context and ran an
+ * effect to draw nothing.
+ */
+function AvatarTile({
+  name,
+  tone,
+  avatar,
+  className,
+  testId,
+}: {
+  name: string;
+  tone?: string;
+  avatar?: string;
+  className?: string;
+  testId?: string;
+}) {
+  const ref = avatar ?? avatarFor(name);
+  const src = useAvatarSrc(ref);
+
   // The tone tile stays underneath the image on purpose: it is what shows if
   // the avatar 404s or has not loaded yet, so the gutter never collapses to a
   // blank square mid-scroll.
@@ -99,15 +132,58 @@ export function TeammateAvatar({
       data-testid={testId}
     >
       <span className="absolute inset-0 flex items-center justify-center">{initials(name)}</span>
-      <img
-        src={avatarSrc(avatar ?? avatarFor(name))}
-        alt=""
-        loading="lazy"
-        decoding="async"
-        className="relative size-full object-cover"
-      />
+      {/* Nothing is drawn until there is something to draw. An uploaded face is
+          fetched through the authenticated client, so its `src` arrives a tick
+          late — rendering an `img` with no source in the meantime would paint
+          the browser's broken-image glyph over the initials this tile is showing
+          precisely so that the gap is never empty. */}
+      {src && (
+        <img
+          src={src}
+          alt=""
+          loading="lazy"
+          decoding="async"
+          className="relative size-full object-cover"
+        />
+      )}
     </span>
   );
+}
+
+/**
+ * The `src` for an avatar reference, fetching an uploaded one if that is what it
+ * names.
+ *
+ * A mascot resolves synchronously on the first render — which is what keeps the
+ * common case free of a flash — and only a `blob:` reference goes through the
+ * client. The fetch is cached module-wide (`resolveAvatarSrc`), so the same
+ * uploaded face appearing forty times on a screen costs one request.
+ */
+function useAvatarSrc(ref: string): string | null {
+  const { client, company } = useConsole();
+  const immediate = staticAvatarSrc(ref);
+  const [src, setSrc] = useState<string | null>(immediate);
+
+  useEffect(() => {
+    const resolved = resolveAvatarSrc(client, company, ref);
+    if (typeof resolved === "string") {
+      setSrc(resolved);
+      return;
+    }
+    // A reference that changed while a fetch was in flight must not have the
+    // stale result written over it — the tile would show the previous person's
+    // face, which is worse than showing none.
+    let live = true;
+    setSrc(null);
+    void resolved.then((url) => {
+      if (live) setSrc(url);
+    });
+    return () => {
+      live = false;
+    };
+  }, [client, company, ref]);
+
+  return src;
 }
 
 /** Fall back to a hashed tone so an unnamed voice still gets a stable color. */
