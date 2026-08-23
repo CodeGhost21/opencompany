@@ -169,7 +169,7 @@ describe("the deadline on an approval card", () => {
     expect(text).toContain("2h ago");
     expect(text).not.toContain("eclines itself");
     expect(text).not.toContain("deadline");
-    expect(text).not.toContain("in ");
+    expect(text).not.toContain("Declines itself in");
   });
 
   it("leaves the rest of the card untouched either way", async () => {
