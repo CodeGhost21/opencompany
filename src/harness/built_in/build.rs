@@ -322,10 +322,19 @@ pub fn build_agent(
     let mut tools: Vec<Box<dyn Tool>> = memory_tools(deps, company, &manifest_agent.id);
     #[cfg(feature = "mcp")]
     {
-        // These config-free tools read OpenHuman's live process registry, so
-        // installs and lifecycle changes are visible without rebuilding agents.
-        tools.push(Box::new(oh::mcp::registry::tools::McpRegistryListToolsTool));
-        tools.push(Box::new(oh::mcp::registry::tools::McpRegistryToolCallTool));
+        // These read the installed-server registry, so installs and lifecycle
+        // changes are visible without rebuilding agents. They take the config
+        // that selects the store now rather than reading a process global —
+        // hand them this company's own, the one REST writes through.
+        if let Some(mcp_home) = deps.mcp_home.clone() {
+            let config = std::sync::Arc::new(crate::harness::mcp::McpRuntime::config_for(mcp_home));
+            tools.push(Box::new(
+                oh::mcp::registry::tools::McpRegistryListToolsTool::new(config.clone()),
+            ));
+            tools.push(Box::new(
+                oh::mcp::registry::tools::McpRegistryToolCallTool::new(config),
+            ));
+        }
     }
 
     // Granted file tools, sandboxed to this agent's own workspace directory. An
@@ -2000,6 +2009,10 @@ mod tests {
         // root here would let a test pass while the audit sink sat inside the
         // workspace tree — the exact defect issue #775 fixed.
         let workspace_root = root.join("harness");
+        // Production sets this to `<home>/mcp` (see `runtime::builder`); mirror
+        // it so the pinned belt reflects a real company rather than the
+        // degraded no-MCP-home shape.
+        let mcp_home = Some(root.join("mcp"));
         let audit_root = root;
         HarnessDeps {
             ledgers: None,
@@ -2011,6 +2024,7 @@ mod tests {
             store: Arc::new(PinStore),
             meter: None,
             workspace_root,
+            mcp_home,
             workspace_git_enabled: false,
             audit_root,
             model_override: None,
@@ -3004,9 +3018,11 @@ mod tests {
         // belt now — including a company with no skills source of its own.
         expected.extend(["describe_skill", "list_skills", "read_skill_resource"]);
         expected.sort();
-        // Mirrors the unconditional `#[cfg(feature = "mcp")]` push in
-        // `build_agent`. These two are intrinsic (unmapped by `namespace_of`),
-        // so no grant gates them — enabling the feature is the whole condition.
+        // Mirrors the `#[cfg(feature = "mcp")]` push in `build_agent`. These two
+        // are intrinsic (unmapped by `namespace_of`), so no grant gates them:
+        // the feature plus a configured `HarnessDeps::mcp_home` is the whole
+        // condition. The home is what selects the company's own registry store,
+        // and a tool built without it would read a different one.
         #[cfg(feature = "mcp")]
         {
             expected.push("mcp_registry_list_tools");

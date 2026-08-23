@@ -214,6 +214,7 @@ pub(super) fn deps(base_url: String, dir: &std::path::Path) -> (HarnessDeps, Arc
         store: Arc::new(FsCompanyStore::new(dir)),
         meter: None,
         workspace_root: dir.to_path_buf(),
+        mcp_home: None,
         workspace_git_enabled: false,
         audit_root: dir.to_path_buf(),
         model_override: Some("stub-model".to_string()),

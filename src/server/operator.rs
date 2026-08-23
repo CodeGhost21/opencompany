@@ -4093,6 +4093,7 @@ mode = "full"
             store: Arc::new(FsCompanyStore::new(home.to_path_buf())),
             meter: Some(Arc::new(FsOps::new(home.to_path_buf()))),
             workspace_root: home.to_path_buf(),
+            mcp_home: None,
             workspace_git_enabled: false,
             audit_root: home.to_path_buf(),
             model_override: None,
