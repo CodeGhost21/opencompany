@@ -94,7 +94,7 @@ pub fn finances_from(
 
     Finances {
         balance_usd,
-        budget_usd: budget.monthly_usd.unwrap_or(0.0),
+        budget_usd: budget.monthly_usd,
         spent_usd,
         revenue_usd,
         net_usd: revenue_usd - spent_usd,
