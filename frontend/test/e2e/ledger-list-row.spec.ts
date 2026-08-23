@@ -47,7 +47,7 @@ test("a list row leads with its title and shows one readable status", async ({
     expect(recorded.ok()).toBeTruthy();
 
     await page.goto(`/#/ledgers/${slug}`);
-    await page.getByRole("button", { name: "List" }).click();
+    await page.getByRole("button", { name: "List", exact: true }).click();
 
     const row = page.getByTestId(`ledger-entry-${id}`);
     await expect(row).toBeVisible({ timeout: 15_000 });
