@@ -478,7 +478,7 @@ async fn edit_agent(
     crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
     Path(AgentPath { agent_id }): Path<AgentPath>,
     Json(body): Json<EditAgent>,
-) -> Result<Json<AgentDetailDto>, Response> {
+) -> Result<Json<AgentDetailDto>, crate::server::Rejection> {
     // Serialize with every other write to `overlay_agents`, so a console edit
     // and a concurrent `add_agent` cannot clobber one another's roster.
     let write_lock = company_write_lock(company.id());

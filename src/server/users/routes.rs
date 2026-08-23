@@ -508,7 +508,7 @@ async fn mint_session(
     runtime: &CompanyRuntime,
     user: &UserRecord,
     headers: &HeaderMap,
-) -> Result<Response, Response> {
+) -> Result<Response, crate::server::Rejection> {
     let company = runtime.id();
     // A company whose id cannot safely name a cookie cannot hold a session;
     // refuse rather than emit a header its id could have chosen attributes for.
@@ -590,7 +590,7 @@ async fn request_code(
     company: PublicCompany,
     State(state): State<AppState>,
     Json(body): Json<RequestCode>,
-) -> Result<Json<RequestCodeResult>, Response> {
+) -> Result<Json<RequestCodeResult>, crate::server::Rejection> {
     let runtime = company.runtime.clone();
     if let Some(refusal) = wrong_mode_for_email(&runtime) {
         return Err(refusal);
@@ -764,7 +764,7 @@ async fn verify_code(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(body): Json<VerifyCode>,
-) -> Result<Response, Response> {
+) -> Result<Response, crate::server::Rejection> {
     let runtime = company.runtime.clone();
     if let Some(refusal) = wrong_mode_for_email(&runtime) {
         return Err(refusal);
@@ -910,7 +910,7 @@ async fn hub_sign_in(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(body): Json<HubToken>,
-) -> Result<Response, Response> {
+) -> Result<Response, crate::server::Rejection> {
     let runtime = company.runtime.clone();
     if let Some(refusal) = wrong_mode_for_email(&runtime) {
         return Err(refusal);
@@ -971,7 +971,7 @@ async fn login_password(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(body): Json<LoginPassword>,
-) -> Result<Response, Response> {
+) -> Result<Response, crate::server::Rejection> {
     let runtime = company.runtime.clone();
     if let Some(refusal) = wrong_mode_for_email(&runtime) {
         return Err(refusal);
@@ -1017,7 +1017,7 @@ async fn logout(
     State(state): State<AppState>,
     headers: HeaderMap,
     crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
-) -> Result<Response, Response> {
+) -> Result<Response, crate::server::Rejection> {
     let runtime = company.runtime.clone();
     // Nothing to revoke where nothing was minted. A `none`-mode principal is
     // resolved from the request, not from a stored session, so "log out" has no
@@ -1056,7 +1056,7 @@ async fn me(
     State(state): State<AppState>,
     headers: HeaderMap,
     crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
-) -> Result<Json<MeResult>, Response> {
+) -> Result<Json<MeResult>, crate::server::Rejection> {
     let runtime = company.runtime.clone();
     let Some(principal) = current_user(&headers, &state, runtime.id(), peer).await else {
         return Err(no_session());
@@ -1081,7 +1081,7 @@ async fn set_password(
     headers: HeaderMap,
     crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
     Json(body): Json<SetPassword>,
-) -> Result<Json<MeResult>, Response> {
+) -> Result<Json<MeResult>, crate::server::Rejection> {
     let runtime = company.runtime.clone();
     // A password is an alternative to a mailbox round trip, so it only exists
     // where the mailbox does. In wallet mode the key is the credential; in
@@ -1151,7 +1151,7 @@ async fn wallet_challenge(
     company: PublicCompany,
     State(state): State<AppState>,
     Json(body): Json<wallet::ChallengeRequest>,
-) -> Result<Json<wallet::ChallengeResult>, Response> {
+) -> Result<Json<wallet::ChallengeResult>, crate::server::Rejection> {
     let runtime = company.runtime.clone();
     if let Some(refusal) = wrong_mode_for_wallet(&runtime) {
         return Err(refusal);
@@ -1200,7 +1200,7 @@ async fn wallet_verify(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(body): Json<wallet::VerifyRequest>,
-) -> Result<Response, Response> {
+) -> Result<Response, crate::server::Rejection> {
     let runtime = company.runtime.clone();
     if let Some(refusal) = wrong_mode_for_wallet(&runtime) {
         return Err(refusal);

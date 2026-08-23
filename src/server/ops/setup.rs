@@ -149,7 +149,7 @@ async fn propose_roster(
     company: ScopedCompany,
     State(_state): State<AppState>,
     Json(body): Json<SetupRequest>,
-) -> Result<Json<RosterProposalDto>, Response> {
+) -> Result<Json<RosterProposalDto>, crate::server::Rejection> {
     let answers: SetupAnswers = body.into();
 
     // Remember the answers first. The proposal below may take seconds and the
@@ -182,7 +182,7 @@ async fn propose_roster(
 /// does: this is a read-modify-write of the whole record, and a concurrent
 /// `POST …/team` from the build-out step of a *previous* attempt would otherwise
 /// lose one of the two writes.
-async fn store_answers(company: &ScopedCompany, answers: &SetupAnswers) -> Result<(), Response> {
+async fn store_answers(company: &ScopedCompany, answers: &SetupAnswers) -> Result<(), crate::server::Rejection> {
     let write_lock = company_write_lock(company.id());
     let _lock = write_lock.lock().await;
 
@@ -231,7 +231,7 @@ async fn build_proposal(_company: &ScopedCompany, answers: &SetupAnswers) -> Ros
 }
 
 /// Loads the addressed company's record, or 404s.
-async fn load_record(company: &ScopedCompany) -> Result<CompanyRecord, Response> {
+async fn load_record(company: &ScopedCompany) -> Result<CompanyRecord, crate::server::Rejection> {
     company
         .runtime
         .store()

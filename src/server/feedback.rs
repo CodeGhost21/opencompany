@@ -87,7 +87,7 @@ async fn submit(
     State(state): State<AppState>,
     Path(id): Path<String>,
     Json(body): Json<FeedbackRequest>,
-) -> Result<Json<FeedbackResponse>, Response> {
+) -> Result<Json<FeedbackResponse>, crate::server::Rejection> {
     let company = CompanyId::new(&id);
     if let Some(resp) = authorize_address(&state, &auth, &company) {
         return Err(resp);
@@ -103,7 +103,7 @@ async fn submit_single(
     CompanyAuth(auth): CompanyAuth,
     State(state): State<AppState>,
     Json(body): Json<FeedbackRequest>,
-) -> Result<Json<FeedbackResponse>, Response> {
+) -> Result<Json<FeedbackResponse>, crate::server::Rejection> {
     let runtime = sole(&state).map_err(IntoResponse::into_response)?;
     // The sole company IS the addressed one, so the principal is checked
     // against it exactly as on the `{id}` form.
@@ -126,7 +126,7 @@ async fn list(
     CompanyAuth(auth): CompanyAuth,
     State(state): State<AppState>,
     Path(id): Path<String>,
-) -> Result<Json<Vec<FeedbackSummary>>, Response> {
+) -> Result<Json<Vec<FeedbackSummary>>, crate::server::Rejection> {
     let company = CompanyId::new(&id);
     if let Some(resp) = authorize_address(&state, &auth, &company) {
         return Err(resp);
@@ -143,7 +143,7 @@ async fn list(
 async fn list_single(
     CompanyAuth(auth): CompanyAuth,
     State(state): State<AppState>,
-) -> Result<Json<Vec<FeedbackSummary>>, Response> {
+) -> Result<Json<Vec<FeedbackSummary>>, crate::server::Rejection> {
     let runtime = sole(&state).map_err(IntoResponse::into_response)?;
     if let Some(resp) = authorize_address(&state, &auth, runtime.id()) {
         return Err(resp);

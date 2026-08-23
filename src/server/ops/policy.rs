@@ -251,7 +251,7 @@ struct SetPolicy {
 
 /// `GET {scope}/policy` — the tier in force, what the manifest would restore,
 /// and the selectable tiers with their consequences.
-async fn read_policy(company: ScopedCompany) -> Result<Json<PolicyDto>, Response> {
+async fn read_policy(company: ScopedCompany) -> Result<Json<PolicyDto>, crate::server::Rejection> {
     let record = load_record(&company).await?;
     Ok(Json(PolicyDto::build(&record)))
 }
@@ -264,7 +264,7 @@ async fn set_policy(
     headers: HeaderMap,
     crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
     Json(body): Json<SetPolicy>,
-) -> Result<Json<PolicyDto>, Response> {
+) -> Result<Json<PolicyDto>, crate::server::Rejection> {
     let admin = require_admin(&headers, &state, &company.runtime, peer).await?;
 
     if body.mode.is_none() && body.always_approve.is_none() {
@@ -338,7 +338,7 @@ async fn clear_policy(
     State(state): State<AppState>,
     headers: HeaderMap,
     crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
-) -> Result<Json<PolicyDto>, Response> {
+) -> Result<Json<PolicyDto>, crate::server::Rejection> {
     require_admin(&headers, &state, &company.runtime, peer).await?;
 
     let write_lock = company_write_lock(company.id());
@@ -354,7 +354,7 @@ fn refusal(message: &str) -> Response {
     (StatusCode::UNPROCESSABLE_ENTITY, message.to_string()).into_response()
 }
 
-async fn load_record(company: &ScopedCompany) -> Result<CompanyRecord, Response> {
+async fn load_record(company: &ScopedCompany) -> Result<CompanyRecord, crate::server::Rejection> {
     company
         .runtime
         .store()
@@ -366,7 +366,7 @@ async fn load_record(company: &ScopedCompany) -> Result<CompanyRecord, Response>
         })
 }
 
-async fn save(company: &ScopedCompany, record: &CompanyRecord) -> Result<(), Response> {
+async fn save(company: &ScopedCompany, record: &CompanyRecord) -> Result<(), crate::server::Rejection> {
     company
         .runtime
         .store()

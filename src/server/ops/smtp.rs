@@ -429,7 +429,7 @@ async fn run_test(
     state: &AppState,
     runtime: Arc<CompanyRuntime>,
     body: TestSend,
-) -> Result<Json<TestResult>, Response> {
+) -> Result<Json<TestResult>, crate::server::Rejection> {
     use axum::response::IntoResponse;
     // Not wired without a sender (default build / no `smtp` feature).
     let Some(sender) = state.connections().mail.clone() else {
@@ -546,7 +546,7 @@ async fn test_smtp(
     company: AdminScopedCompany,
     State(state): State<AppState>,
     body: Option<Json<TestSend>>,
-) -> Result<Json<TestResult>, Response> {
+) -> Result<Json<TestResult>, crate::server::Rejection> {
     run_test(
         &state,
         company.runtime,

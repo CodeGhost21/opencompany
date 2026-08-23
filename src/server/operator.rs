@@ -148,7 +148,7 @@ struct DeskDto {
 /// chats with any operator-added overlay members merged in (issue #72). Empty
 /// when the company defines none (the console then falls back to its static
 /// default threads).
-async fn list_desks(scope: ScopedCompany) -> Result<Json<Vec<DeskDto>>, Response> {
+async fn list_desks(scope: ScopedCompany) -> Result<Json<Vec<DeskDto>>, crate::server::Rejection> {
     let record = scope
         .runtime
         .store()
@@ -1211,7 +1211,7 @@ async fn company_status(
     CompanyAuth(auth): CompanyAuth,
     State(state): State<AppState>,
     Path(id): Path<String>,
-) -> Result<Json<CompanyStatus>, Response> {
+) -> Result<Json<CompanyStatus>, crate::server::Rejection> {
     let company = CompanyId::new(&id);
     if let Some(resp) = authorize_address(&state, &auth, &company) {
         return Err(resp);
@@ -2156,7 +2156,7 @@ async fn chat_actor(
     state: &AppState,
     company: &CompanyId,
     peer: Option<std::net::SocketAddr>,
-) -> Result<Option<Actor>, Response> {
+) -> Result<Option<Actor>, crate::server::Rejection> {
     use crate::server::graphql::auth::{GqlAuth, resolve_principal};
 
     // `peer` is threaded from every one of this function's callers, all the
@@ -2196,7 +2196,7 @@ async fn operator_chat(
     headers: HeaderMap,
     crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
     Json(message): Json<ChatMessage>,
-) -> Result<ChatOk, Response> {
+) -> Result<ChatOk, crate::server::Rejection> {
     let company = CompanyId::new(&id);
     let by = chat_actor(&headers, &state, &company, peer).await?;
     let runtime = lookup(&state, &id).map_err(IntoResponse::into_response)?;
@@ -2211,7 +2211,7 @@ async fn operator_chat_single(
     headers: HeaderMap,
     crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
     Json(message): Json<ChatMessage>,
-) -> Result<ChatOk, Response> {
+) -> Result<ChatOk, crate::server::Rejection> {
     let runtime = sole(&state).map_err(IntoResponse::into_response)?;
     let id = runtime.id().clone();
     let by = chat_actor(&headers, &state, &id, peer).await?;
@@ -2360,7 +2360,7 @@ async fn history_viewer(
     state: &AppState,
     company: &CompanyId,
     peer: Option<std::net::SocketAddr>,
-) -> Result<Viewer, Response> {
+) -> Result<Viewer, crate::server::Rejection> {
     let actor = chat_actor(headers, state, company, peer).await?;
     Ok(match actor {
         Some(actor) if actor.kind == ActorKind::User => Viewer::User(actor.id),
@@ -2376,7 +2376,7 @@ async fn chat_history_response(
     headers: &HeaderMap,
     peer: Option<std::net::SocketAddr>,
     query: ChatHistoryQuery,
-) -> Result<Json<Vec<ChatHistoryMessageDto>>, Response> {
+) -> Result<Json<Vec<ChatHistoryMessageDto>>, crate::server::Rejection> {
     let viewer = history_viewer(headers, state, company, peer).await?;
     let (desk_id, desk_name) = resolve_desk(&runtime, query.desk.as_deref())
         .await
@@ -2405,7 +2405,7 @@ async fn chat_history(
     headers: HeaderMap,
     crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
     Query(query): Query<ChatHistoryQuery>,
-) -> Result<Json<Vec<ChatHistoryMessageDto>>, Response> {
+) -> Result<Json<Vec<ChatHistoryMessageDto>>, crate::server::Rejection> {
     let company = CompanyId::new(&id);
     let runtime = lookup(&state, &id).map_err(IntoResponse::into_response)?;
     chat_history_response(&state, &company, runtime, &headers, peer, query).await
@@ -2417,7 +2417,7 @@ async fn chat_history_single(
     headers: HeaderMap,
     crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
     Query(query): Query<ChatHistoryQuery>,
-) -> Result<Json<Vec<ChatHistoryMessageDto>>, Response> {
+) -> Result<Json<Vec<ChatHistoryMessageDto>>, crate::server::Rejection> {
     let runtime = sole(&state).map_err(IntoResponse::into_response)?;
     let id = runtime.id().clone();
     chat_history_response(&state, &id, runtime, &headers, peer, query).await
@@ -2453,7 +2453,7 @@ async fn attribution_audit_response(
     runtime: Arc<CompanyRuntime>,
     headers: &HeaderMap,
     peer: Option<std::net::SocketAddr>,
-) -> Result<Json<AttributionAuditDto>, Response> {
+) -> Result<Json<AttributionAuditDto>, crate::server::Rejection> {
     let _viewer = history_viewer(headers, state, company, peer).await?;
     let record = runtime
         .store()
@@ -2478,7 +2478,7 @@ async fn attribution_audit(
     Path(id): Path<String>,
     headers: HeaderMap,
     crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
-) -> Result<Json<AttributionAuditDto>, Response> {
+) -> Result<Json<AttributionAuditDto>, crate::server::Rejection> {
     let company = CompanyId::new(&id);
     let runtime = lookup(&state, &id).map_err(IntoResponse::into_response)?;
     attribution_audit_response(&state, &company, runtime, &headers, peer).await
@@ -2489,7 +2489,7 @@ async fn attribution_audit_single(
     State(state): State<AppState>,
     headers: HeaderMap,
     crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
-) -> Result<Json<AttributionAuditDto>, Response> {
+) -> Result<Json<AttributionAuditDto>, crate::server::Rejection> {
     let runtime = sole(&state).map_err(IntoResponse::into_response)?;
     let id = runtime.id().clone();
     attribution_audit_response(&state, &id, runtime, &headers, peer).await
@@ -2554,7 +2554,7 @@ async fn react_to_message(
     peer: Option<std::net::SocketAddr>,
     seq: String,
     body: ReactionBody,
-) -> Result<StatusCode, Response> {
+) -> Result<StatusCode, crate::server::Rejection> {
     let by = chat_actor(headers, state, company, peer).await?;
     let message_seq = parse_message_id(&seq).map_err(IntoResponse::into_response)?;
     validate_emoji(&body.emoji).map_err(IntoResponse::into_response)?;
@@ -2605,7 +2605,7 @@ async fn react_to_message_scoped(
     headers: HeaderMap,
     crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
     Json(body): Json<ReactionBody>,
-) -> Result<StatusCode, Response> {
+) -> Result<StatusCode, crate::server::Rejection> {
     let company = CompanyId::new(&id);
     let runtime = lookup(&state, &id).map_err(IntoResponse::into_response)?;
     react_to_message(&state, &company, runtime, &headers, peer, seq, body).await
@@ -2618,7 +2618,7 @@ async fn react_to_message_single(
     headers: HeaderMap,
     crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
     Json(body): Json<ReactionBody>,
-) -> Result<StatusCode, Response> {
+) -> Result<StatusCode, crate::server::Rejection> {
     let runtime = sole(&state).map_err(IntoResponse::into_response)?;
     let id = runtime.id().clone();
     react_to_message(&state, &id, runtime, &headers, peer, seq, body).await
@@ -2629,7 +2629,7 @@ async fn list_approvals(
     CompanyAuth(auth): CompanyAuth,
     State(state): State<AppState>,
     Path(id): Path<String>,
-) -> Result<Json<Vec<ApprovalSummary>>, Response> {
+) -> Result<Json<Vec<ApprovalSummary>>, crate::server::Rejection> {
     let company = CompanyId::new(&id);
     if let Some(resp) = authorize_address(&state, &auth, &company) {
         return Err(resp);
@@ -2647,7 +2647,7 @@ async fn list_approvals(
 async fn list_approvals_single(
     CompanyAuth(auth): CompanyAuth,
     State(state): State<AppState>,
-) -> Result<Json<Vec<ApprovalSummary>>, Response> {
+) -> Result<Json<Vec<ApprovalSummary>>, crate::server::Rejection> {
     let runtime = sole(&state).map_err(IntoResponse::into_response)?;
     // The sole company IS the addressed one, so the principal is checked
     // against it exactly as on the `{id}` form.
@@ -3013,7 +3013,7 @@ async fn resolve_approval(
     State(state): State<AppState>,
     Path((id, aid)): Path<(String, String)>,
     Json(body): Json<ResolveApproval>,
-) -> Result<Response, Response> {
+) -> Result<Response, crate::server::Rejection> {
     let company = CompanyId::new(&id);
     if let Some(resp) = authorize_address(&state, &auth, &company) {
         return Err(resp);
@@ -3050,7 +3050,7 @@ async fn resolve_approval_single(
     State(state): State<AppState>,
     Path(aid): Path<String>,
     Json(body): Json<ResolveApproval>,
-) -> Result<Response, Response> {
+) -> Result<Response, crate::server::Rejection> {
     let runtime = sole(&state).map_err(IntoResponse::into_response)?;
     let id = runtime.id().clone();
     if let Some(resp) = authorize_address(&state, &auth, &id) {

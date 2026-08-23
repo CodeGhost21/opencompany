@@ -121,7 +121,7 @@ fn no_repo_surface() -> Response {
 async fn bind_repo(
     company: AdminScopedCompany,
     Json(body): Json<BindRequest>,
-) -> Result<Json<MutationResponse>, Response> {
+) -> Result<Json<MutationResponse>, crate::server::Rejection> {
     use axum::response::IntoResponse;
     let Some(repos) = manager(&company.runtime) else {
         return Err(no_repo_surface());
@@ -153,7 +153,7 @@ async fn bind_repo(
 /// server list: which repositories a company reads is part of knowing what the
 /// company is, and the response carries no credential material for a member to
 /// learn anything from.
-async fn list_repos(company: ScopedCompany) -> Result<Json<RepoList>, Response> {
+async fn list_repos(company: ScopedCompany) -> Result<Json<RepoList>, crate::server::Rejection> {
     use axum::response::IntoResponse;
     let Some(repos) = manager(&company.runtime) else {
         return Err(no_repo_surface());
@@ -211,7 +211,7 @@ async fn granted_agents(runtime: &CompanyRuntime) -> Vec<RosterAgentDto> {
 async fn revoke_repo(
     company: AdminScopedCompany,
     Path(params): Path<RevokePath>,
-) -> Result<Json<MutationResponse>, Response> {
+) -> Result<Json<MutationResponse>, crate::server::Rejection> {
     use axum::response::IntoResponse;
     let Some(repos) = manager(&company.runtime) else {
         return Err(no_repo_surface());

@@ -111,7 +111,7 @@ pub(crate) async fn require_admin(
     state: &AppState,
     runtime: &CompanyRuntime,
     peer: Option<std::net::SocketAddr>,
-) -> Result<UserPrincipal, Response> {
+) -> Result<UserPrincipal, crate::server::Rejection> {
     let principal = current_user(headers, state, runtime.id(), peer)
         .await
         .ok_or_else(unauthorized)?;
@@ -161,7 +161,7 @@ async fn list_users(
     State(state): State<AppState>,
     headers: HeaderMap,
     crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
-) -> Result<Json<Vec<UserSummary>>, Response> {
+) -> Result<Json<Vec<UserSummary>>, crate::server::Rejection> {
     let runtime = company.runtime.clone();
     require_admin(&headers, &state, &runtime, peer).await?;
     let users = runtime
@@ -178,7 +178,7 @@ async fn list_invites(
     State(state): State<AppState>,
     headers: HeaderMap,
     crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
-) -> Result<Json<Vec<InviteRecord>>, Response> {
+) -> Result<Json<Vec<InviteRecord>>, crate::server::Rejection> {
     let runtime = company.runtime.clone();
     require_admin(&headers, &state, &runtime, peer).await?;
     let now = now_millis();
@@ -400,7 +400,7 @@ async fn invite(
     headers: HeaderMap,
     crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
     Json(body): Json<InviteBody>,
-) -> Result<Json<InviteResult>, Response> {
+) -> Result<Json<InviteResult>, crate::server::Rejection> {
     let runtime = company.runtime.clone();
     // Refused before authenticating the caller is checked, because the answer
     // does not depend on who is asking: a company with no sign-in has no second
@@ -490,7 +490,7 @@ async fn revoke_invite(
     headers: HeaderMap,
     crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
     Path(params): Path<std::collections::HashMap<String, String>>,
-) -> Result<Json<serde_json::Value>, Response> {
+) -> Result<Json<serde_json::Value>, crate::server::Rejection> {
     let runtime = company.runtime.clone();
     if let Some(refusal) = wrong_mode_for_admin(&runtime) {
         return Err(refusal);
@@ -542,7 +542,7 @@ async fn update_user(
     crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
     Path(params): Path<std::collections::HashMap<String, String>>,
     Json(body): Json<UpdateUser>,
-) -> Result<Json<UserSummary>, Response> {
+) -> Result<Json<UserSummary>, crate::server::Rejection> {
     let runtime = company.runtime.clone();
     if let Some(refusal) = wrong_mode_for_admin(&runtime) {
         return Err(refusal);
@@ -606,7 +606,7 @@ async fn reset_password(
     crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
     Path(params): Path<std::collections::HashMap<String, String>>,
     Json(body): Json<ResetPassword>,
-) -> Result<Json<UserSummary>, Response> {
+) -> Result<Json<UserSummary>, crate::server::Rejection> {
     let runtime = company.runtime.clone();
     // A password is an alternative to a mailbox round trip, so it exists only
     // where the mailbox does. Issuing one in wallet mode would create a
@@ -651,7 +651,7 @@ async fn revoke_sessions(
     headers: HeaderMap,
     crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
     Path(params): Path<std::collections::HashMap<String, String>>,
-) -> Result<Json<serde_json::Value>, Response> {
+) -> Result<Json<serde_json::Value>, crate::server::Rejection> {
     let runtime = company.runtime.clone();
     // Nothing to revoke: a `none`-mode principal is resolved from configuration
     // on every request, so there is no session whose deletion would sign anyone
@@ -670,7 +670,7 @@ async fn revoke_sessions(
     Ok(Json(serde_json::json!({ "revoked": revoked })))
 }
 
-async fn load_user(runtime: &CompanyRuntime, user_id: &str) -> Result<UserRecord, Response> {
+async fn load_user(runtime: &CompanyRuntime, user_id: &str) -> Result<UserRecord, crate::server::Rejection> {
     runtime
         .users()
         .get_user(runtime.id(), user_id)
@@ -688,7 +688,7 @@ async fn load_user(runtime: &CompanyRuntime, user_id: &str) -> Result<UserRecord
 async fn ensure_not_last_admin(
     runtime: &CompanyRuntime,
     target: &UserRecord,
-) -> Result<(), Response> {
+) -> Result<(), crate::server::Rejection> {
     if target.role != UserRole::Admin || target.status != UserStatus::Active {
         return Ok(());
     }

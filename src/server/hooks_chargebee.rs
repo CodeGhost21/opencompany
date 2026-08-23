@@ -186,7 +186,7 @@ impl axum::extract::FromRequestParts<AppState> for VerifiedDelivery {
 async fn verify(
     runtime: &Arc<CompanyRuntime>,
     headers: &HeaderMap,
-) -> std::result::Result<(), Response> {
+) -> std::result::Result<(), crate::server::Rejection> {
     let expected = match runtime
         .secrets()
         .get(runtime.id(), WEBHOOK_SECRET_KEY)

@@ -428,7 +428,7 @@ async fn add_member(
     headers: HeaderMap,
     crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
     Json(body): Json<AddMember>,
-) -> Result<Json<TeamMemberDto>, Response> {
+) -> Result<Json<TeamMemberDto>, crate::server::Rejection> {
     // Setting a cap is admin-only, so an add that carries one is too — but an
     // add that does not keeps working for any member, exactly as before. The
     // check is deliberately conditional: adding this field must not quietly
@@ -627,7 +627,7 @@ async fn set_budget(
     crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
     Path(AgentPath { agent_id }): Path<AgentPath>,
     Json(body): Json<SetBudget>,
-) -> Result<Json<TeamMemberDto>, Response> {
+) -> Result<Json<TeamMemberDto>, crate::server::Rejection> {
     let admin = require_admin(&headers, &state, &company.runtime, peer).await?;
     // `Some(_)` is guaranteed by `SetBudget`'s missing-key rejection; the inner
     // option is the cap-or-uncap the operator asked for.
@@ -680,7 +680,7 @@ async fn clear_budget(
     headers: HeaderMap,
     crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
     Path(AgentPath { agent_id }): Path<AgentPath>,
-) -> Result<Json<TeamMemberDto>, Response> {
+) -> Result<Json<TeamMemberDto>, crate::server::Rejection> {
     require_admin(&headers, &state, &company.runtime, peer).await?;
 
     let write_lock = company_write_lock(company.id());
@@ -731,7 +731,7 @@ fn validate_cap(cap: f64) -> Option<Response> {
 }
 
 /// Loads the addressed company's record, or 404s.
-async fn load_record(company: &ScopedCompany) -> Result<CompanyRecord, Response> {
+async fn load_record(company: &ScopedCompany) -> Result<CompanyRecord, crate::server::Rejection> {
     company
         .runtime
         .store()
@@ -766,7 +766,7 @@ async fn updated_row(
     company: &ScopedCompany,
     record: &CompanyRecord,
     agent_id: &str,
-) -> Result<Json<TeamMemberDto>, Response> {
+) -> Result<Json<TeamMemberDto>, crate::server::Rejection> {
     let spend_today = daily_spend_samples(company, Some(record))
         .await
         .map_err(|e| e.into_response())?;

@@ -1477,7 +1477,7 @@ async fn run_workflow(
     company: ScopedCompany,
     Path(WorkflowPath { wid }): Path<WorkflowPath>,
     body: Option<Json<RunWorkflowBody>>,
-) -> Result<RunWorkflowOk, Response> {
+) -> Result<RunWorkflowOk, crate::server::Rejection> {
     // No runner wired. THREE very different causes look identical from here —
     // `workflow_runner() == None` — and each points the operator at a different
     // next step (issues #266, #514):
@@ -1897,7 +1897,7 @@ enum DraftFromDescriptionResponse {
 async fn draft_from_description(
     company: ScopedCompany,
     Json(body): Json<DraftFromDescriptionBody>,
-) -> Result<Json<DraftFromDescriptionResponse>, Response> {
+) -> Result<Json<DraftFromDescriptionResponse>, crate::server::Rejection> {
     let description = body.description.trim();
     if description.is_empty() {
         return Err(ApiError(OpenCompanyError::InvalidRequest(
@@ -1959,7 +1959,7 @@ async fn draft_from_description(
 async fn draft_from_description(
     company: ScopedCompany,
     Json(body): Json<DraftFromDescriptionBody>,
-) -> Result<Json<DraftFromDescriptionResponse>, Response> {
+) -> Result<Json<DraftFromDescriptionResponse>, crate::server::Rejection> {
     let _ = &company;
     if body.description.trim().is_empty() {
         return Err(ApiError(OpenCompanyError::InvalidRequest(
@@ -2118,7 +2118,7 @@ async fn fix_from_run(
     company: ScopedCompany,
     Path(WorkflowPath { wid }): Path<WorkflowPath>,
     Json(body): Json<FixFromRunBody>,
-) -> Result<Json<FixFromRunResponse>, Response> {
+) -> Result<Json<FixFromRunResponse>, crate::server::Rejection> {
     // `wid` becomes a filename on the read below — reject anything that could
     // escape `workflows/`.
     if !safe_wid(&wid) {
@@ -2262,7 +2262,7 @@ async fn fix_from_run(
     company: ScopedCompany,
     Path(WorkflowPath { wid }): Path<WorkflowPath>,
     Json(body): Json<FixFromRunBody>,
-) -> Result<Json<FixFromRunResponse>, Response> {
+) -> Result<Json<FixFromRunResponse>, crate::server::Rejection> {
     let _ = (&company, &wid, &body.run_id, &body.error_hint);
     Err(super::not_wired("the workflow copilot"))
 }
@@ -2325,7 +2325,7 @@ struct UnwiredWorkflowTool {
 #[cfg(feature = "openhuman")]
 async fn workflow_tool_slugs(
     company: ScopedCompany,
-) -> Result<Json<WorkflowToolSlugsResponse>, Response> {
+) -> Result<Json<WorkflowToolSlugsResponse>, crate::server::Rejection> {
     let record = company
         .runtime
         .store()
@@ -2400,7 +2400,7 @@ async fn workflow_tool_slugs(
 #[cfg(not(feature = "openhuman"))]
 async fn workflow_tool_slugs(
     company: ScopedCompany,
-) -> Result<Json<WorkflowToolSlugsResponse>, Response> {
+) -> Result<Json<WorkflowToolSlugsResponse>, crate::server::Rejection> {
     let _ = &company;
     Ok(Json(WorkflowToolSlugsResponse {
         slugs: Vec::new(),

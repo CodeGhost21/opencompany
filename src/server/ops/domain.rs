@@ -113,7 +113,7 @@ async fn put_domain(
 async fn run_verify(
     state: &AppState,
     runtime: Arc<CompanyRuntime>,
-) -> Result<Json<DomainStatus>, Response> {
+) -> Result<Json<DomainStatus>, crate::server::Rejection> {
     use axum::response::IntoResponse;
     let Some(resolver) = state.connections().dns.clone() else {
         return Err(super::not_wired("domain verification"));
@@ -140,6 +140,6 @@ async fn run_verify(
 async fn verify_domain(
     company: ScopedCompany,
     State(state): State<AppState>,
-) -> Result<Json<DomainStatus>, Response> {
+) -> Result<Json<DomainStatus>, crate::server::Rejection> {
     run_verify(&state, company.runtime).await
 }
