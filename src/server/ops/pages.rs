@@ -228,8 +228,8 @@ async fn list_pages(company: ScopedCompany) -> Result<Response, ApiError> {
 /// The fixed HTML shell that mounts a page's compiled module (not agent
 /// content). Extracted from the route so the shell's load-bearing invariants
 /// — the React namespace import, the slug-relative bundle path, the absolute
-/// SDK CSS link, the import map — are unit-testable instead of living only in
-/// a route that needs a full workspace to exercise.
+/// SDK CSS link, the import map, the SDK load — are unit-testable instead of
+/// living only in a route that needs a full workspace to exercise.
 fn page_shell_html(slug: &str) -> String {
     format!(
         r#"<!doctype html>
