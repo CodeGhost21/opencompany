@@ -76,11 +76,17 @@ describe("companyCovers", () => {
 
   it("does not let the catch-all cover the explicit opt-in namespaces", () => {
     // The host's `allow_covers` rejects these under a bare `*`, and the hint
-    // must agree or it would promise a grant that never lands.
+    // must agree or it would promise a grant that never lands. A dotted
+    // descendant ask is as much an opt-in as the bare namespace — it must not
+    // fall through to the generic matcher, where the wildcard would cover it.
     expect(companyCovers(["*"], "search")).toBe(false);
+    expect(companyCovers(["*"], "search.web")).toBe(false);
     expect(companyCovers(["*"], "media")).toBe(false);
+    expect(companyCovers(["*"], "media.image")).toBe(false);
     expect(companyCovers(["*"], "composio")).toBe(false);
+    expect(companyCovers(["*"], "composio.gmail")).toBe(false);
     expect(companyCovers(["*"], "repo")).toBe(false);
+    expect(companyCovers(["*"], "repo.read")).toBe(false);
     expect(companyCovers(["*"], "mcp:*")).toBe(false);
     expect(companyCovers(["*"], "mcp:notion")).toBe(false);
   });
@@ -100,6 +106,11 @@ describe("companyCovers", () => {
     // `search.web` does confer a bare `search` request — unlike the generic
     // matcher, where `docs.read` would not confer `docs`.
     expect(companyCovers(["search.web"], "search")).toBe(true);
+    // …and the bare namespace grant covers its dotted descendants, matching
+    // `grants_search_explicit` (which `search` and `search.web` both satisfy).
+    expect(companyCovers(["search"], "search.web")).toBe(true);
+    expect(companyCovers(["media"], "media.image")).toBe(true);
+    expect(companyCovers(["composio"], "composio.gmail")).toBe(true);
   });
 
   it("covers a sub-grant from a starred namespace", () => {
