@@ -676,7 +676,8 @@ export function InferenceSection({
                 </div>
                 <p className="text-xs text-muted-foreground">
                   Reset removes this company&apos;s provider override, endpoint, model choices, and stored
-                  key, then falls back to the managed configuration. Remove key keeps the displayed
+                  key, then falls back to the committed manifest configuration — or the platform
+                  default when the manifest declares none. Remove key keeps the displayed
                   provider, endpoint, and models as a runtime override, but clears only its stored key.
                   Both changes apply on teammates&apos; next turn unless this card says a restart is required.
                 </p>
