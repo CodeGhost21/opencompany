@@ -318,26 +318,33 @@ mod test {
         // Signed with the company @handle for provenance.
         assert!(preview.contains("— filed by @acme"));
         assert!(github.created().is_empty());
+        let preview_item = value["item_id"].as_str().expect("item id");
 
-        // 3. Filing (auto consent) creates one issue. The `POST .../feedback`
-        //    route is operator-driven, so it carries the `source/operator`
-        //    label from the four-axis triage taxonomy.
-        let (status, value) = post_json(
-            &app,
-            "/api/v1/company/feedback",
-            r#"{"category":"wrong-output","note":"the invoice total was wrong"}"#,
-        )
-        .await;
+        // 3. Send confirms the PREVIEWED item by id — it must not capture a
+        //    second item and must post the exact previewed bytes. Auto consent
+        //    files one issue.
+        let confirm_body = serde_json::json!({
+            "category": "wrong-output",
+            "note": "email dana@acme.co bounced",
+            "item_id": preview_item,
+        })
+        .to_string();
+        let (status, value) = post_json(&app, "/api/v1/company/feedback", &confirm_body).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(value["filed"], true);
+        assert_eq!(value["item_id"], preview_item);
         assert!(value["issue_url"].is_string());
         let created = github.created();
         assert_eq!(created.len(), 1);
         assert!(created[0].labels.contains(&"source/operator".to_string()));
         assert!(created[0].labels.contains(&"sev/annoyance".to_string()));
         assert!(created[0].labels.contains(&"type/wrong-output".to_string()));
+        // The preview and the confirm are one item, so the reports list shows it
+        // exactly once.
+        let (_, list) = get_json(&app, "/api/v1/company/feedback").await;
+        assert_eq!(list.as_array().expect("an array").len(), 1);
 
-        // 4. A second filing with the same title dedupes: it comments, does not
+        // 4. A fresh filing with the same title dedupes: it comments, does not
         //    create a duplicate.
         let (status, value) = post_json(
             &app,
