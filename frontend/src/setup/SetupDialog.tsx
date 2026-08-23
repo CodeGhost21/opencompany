@@ -3,6 +3,8 @@ import { ArrowLeft, Check, Loader2, Sparkles, Users } from "lucide-react";
 
 import type { OpenCompanyClient } from "@/api/client";
 import { proposeRoster, type ProposedAgent } from "@/api/company-setup";
+import { getSetup } from "@/api/setup";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -47,6 +49,9 @@ type Phase =
   | { kind: "done"; agents: ProposedAgent[]; fallback: boolean }
   | { kind: "failed"; reason: string };
 
+/** What the host said about the model before we ask the questions it shapes. */
+type InferenceReadiness = "checking" | "ready" | "unavailable" | "unknown";
+
 /**
  * First-run company setup: three questions, then a team built on the host
  * (docs/spec/runtime/company-setup.md).
@@ -80,6 +85,7 @@ export function SetupDialog({
 }) {
   const [draft, setDraft] = useState<SetupDraft>(emptySetupDraft);
   const [phase, setPhase] = useState<Phase>({ kind: "asking", step: 0 });
+  const [inference, setInference] = useState<InferenceReadiness>("checking");
   const [touched, setTouched] = useState(false);
   /**
    * Guards the build-out against a second run.
@@ -90,6 +96,29 @@ export function SetupDialog({
    * on the next render.
    */
   const building = useRef(false);
+
+  // A missing model is a supported configuration, but it changes what all
+  // three answers can achieve. Learn that before asking for any of them: the
+  // host's roster endpoint deliberately succeeds with a curated team on this
+  // path, so waiting until its response would be an after-the-fact disclosure.
+  useEffect(() => {
+    let cancelled = false;
+    setInference("checking");
+    void getSetup(client).then(
+      (status) => {
+        if (!cancelled) setInference(status.inference.ready ? "ready" : "unavailable");
+      },
+      () => {
+        // Do not silently treat an unreadable status as a configured model.
+        // The setup route may still work, but its result must not be promised
+        // as tailored while we could not establish that.
+        if (!cancelled) setInference("unknown");
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [client]);
 
   const step = phase.kind === "asking" ? SETUP_STEPS[phase.step] : undefined;
   const problem = useMemo(
@@ -205,13 +234,23 @@ export function SetupDialog({
         className="sm:max-w-lg"
         data-testid="setup-dialog"
       >
-        {phase.kind === "asking" && step && (
+        {inference === "checking" && phase.kind === "asking" && (
+          <div className="flex flex-col items-center gap-3 py-10" data-testid="setup-inference-check">
+            <Loader2 className="size-6 animate-spin text-primary" />
+            <p className="text-sm text-muted-foreground">Checking whether this host can design your team…</p>
+          </div>
+        )}
+
+        {inference !== "checking" && phase.kind === "asking" && step && (
           <>
             <DialogHeader>
               <StepDots total={SETUP_STEPS.length} at={phase.step} />
               <DialogTitle data-testid="setup-question">{step.question}</DialogTitle>
               <DialogDescription>{step.hint}</DialogDescription>
             </DialogHeader>
+            {phase.step === 0 && inference !== "ready" && (
+              <InferenceNotice unavailable={inference === "unavailable"} onLeave={onSkip} />
+            )}
             <div className="grid gap-2 py-2">
               <Label htmlFor={`setup-${step.key}`} className="sr-only">
                 {step.question}
@@ -300,6 +339,32 @@ export function SetupDialog({
   );
 }
 
+/**
+ * The no-model path is an intentional escape hatch, not a surprise on the
+ * completion screen. This is kept beside the first question so every answer
+ * after it is given with its consequence visible.
+ */
+function InferenceNotice({ unavailable, onLeave }: { unavailable: boolean; onLeave: () => void }) {
+  return (
+    <Alert data-testid="setup-inference-notice">
+      <AlertTitle>{unavailable ? "This host can't reach a model right now" : "We couldn't check this host's model"}</AlertTitle>
+      <AlertDescription>
+        {unavailable
+          ? "Your answers will create a standard team for your industry rather than tailor one to them."
+          : "Your answers may create a standard team rather than a tailored one."}{" "}
+        <a
+          href="#/settings/connections"
+          onClick={onLeave}
+          className="font-medium underline underline-offset-4"
+        >
+          Set up a model
+        </a>{" "}
+        or carry on with the standard team.
+      </AlertDescription>
+    </Alert>
+  );
+}
+
 /** The build-out: named teammates appearing one after another. */
 function BuildOut({
   agents,
@@ -322,7 +387,11 @@ function BuildOut({
           {finished ? <Check className="size-5" /> : <Users className="size-5" />}
         </div>
         <DialogTitle data-testid="setup-buildout-title">
-          {finished ? "Your team is ready" : "Creating your team…"}
+          {finished
+            ? fallback
+              ? "A solid standard team for your industry"
+              : "Your starting team is ready"
+            : "Creating your team…"}
         </DialogTitle>
         <DialogDescription>
           {finished
@@ -370,6 +439,13 @@ function BuildOut({
       </ul>
       {finished && (
         <DialogFooter>
+          {fallback && (
+            <Button variant="outline" asChild>
+              <a href="#/settings/connections" onClick={onDone} data-testid="setup-add-model">
+                Add a model in Settings
+              </a>
+            </Button>
+          )}
           <Button onClick={onDone} data-testid="setup-finish">
             <Sparkles className="size-4" />
             Show me my company
