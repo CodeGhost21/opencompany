@@ -1319,6 +1319,34 @@ mod test {
         );
     }
 
+    /// Issue #1458: a standing **denial** must not keep a task's checkout alive.
+    ///
+    /// A denied approval is never re-dispatched — the brain's `ApprovalResolved`
+    /// arm runs only on `Approve` — so nothing will ever reclaim the held tree,
+    /// and counting the deny's `origin_task` would retain it for the denial's
+    /// full duration. Only an approving grant names a task that may still resume.
+    #[test]
+    fn a_standing_deny_does_not_keep_a_task_checkout_alive() {
+        let set = GrantSet::default();
+        let mut deny = standing("deny-1", "ops", "shell", 10_000);
+        deny.verdict = crate::ports::types::Verdict::Deny;
+        deny.origin_task = Some("t-1".to_string());
+        set.grant_standing(deny);
+        assert!(
+            !set.any_for_task("t-1"),
+            "a deny is never resumed, so it must not hold the task's checkout"
+        );
+
+        // An approving standing grant for the same task is still a live reason.
+        let mut grant = standing("grant-1", "ops", "shell", 10_000);
+        grant.origin_task = Some("t-1".to_string());
+        set.grant_standing(grant);
+        assert!(
+            set.any_for_task("t-1"),
+            "an approving standing grant still keeps the checkout live"
+        );
+    }
+
     #[test]
     fn a_standing_grant_is_scoped_to_its_agent_and_its_tool() {
         let set = GrantSet::default();
