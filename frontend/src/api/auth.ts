@@ -182,13 +182,19 @@ export interface HubProvider {
  * An empty list is the normal answer on a self-hosted host and is not an
  * error — it means "no ecosystem here, show the magic-link form alone". So this
  * never throws for that case; callers only need to handle the network failing.
+ *
+ * `from`, when present, is the destination the host should put on the sign-in's
+ * return URI — the console's own fragment cannot cross the OAuth round trip, so
+ * the host carries it as a query parameter the landing reads back. Only setup's
+ * dead-link recovery asks for one today (`from=setup`).
  */
 export async function fetchHubProviders(
   client: OpenCompanyClient,
   company: string | null,
+  from?: string,
 ): Promise<HubProvider[]> {
   const result = await client.get<{ providers: HubProvider[] }>(
-    `${client.scopeFor(company)}/auth/hub`,
+    `${client.scopeFor(company)}/auth/hub${from ? `?from=${encodeURIComponent(from)}` : ""}`,
   );
   return result.providers ?? [];
 }
