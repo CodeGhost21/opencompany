@@ -2520,6 +2520,7 @@ mod test {
                 log.append(
                     &id,
                     CompanyEvent::OperatorMessage {
+                        mentions: Vec::new(),
                         parent: None,
                         text: format!("event {i}"),
                         by: None,
@@ -2848,6 +2849,7 @@ mod test {
             .append(
                 &id,
                 CompanyEvent::OperatorMessage {
+                    mentions: Vec::new(),
                     parent: None,
                     text: "a".into(),
                     by: None,
@@ -2861,6 +2863,7 @@ mod test {
             .append(
                 &id,
                 CompanyEvent::OperatorMessage {
+                    mentions: Vec::new(),
                     parent: None,
                     text: "b".into(),
                     by: None,
@@ -2891,6 +2894,7 @@ mod test {
         log.append(
             &id,
             CompanyEvent::OperatorMessage {
+                mentions: Vec::new(),
                 parent: None,
                 text: "hi".into(),
                 by: None,
@@ -2907,6 +2911,7 @@ mod test {
         assert_eq!(
             received.event,
             CompanyEvent::OperatorMessage {
+                mentions: Vec::new(),
                 parent: None,
                 text: "hi".into(),
                 by: None,

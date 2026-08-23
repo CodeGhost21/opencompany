@@ -588,18 +588,23 @@ function BatchHeadline({
   const title = sameKind ? approvalAction(lead) : `${approvals.length} actions need your sign-off`;
 
   return (
-    <div className="flex items-start gap-4">
+    <div className="flex flex-wrap items-start gap-4">
       <div className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-muted text-foreground">
         <Icon className="size-5" />
       </div>
-      <div className="min-w-0 flex-1">
+      {/* Same container-capped 12rem floor as `ApprovalHeadline`. */}
+      <div className="min-w-[min(12rem,100%)] flex-1">
         <p className="font-medium">{title}</p>
         <p className="text-xs text-muted-foreground">
           {asker ? `${asker} needs` : "This turn needs"} {approvals.length} sign-offs before it
           can carry on
         </p>
       </div>
-      {actions && <div className="flex shrink-0 gap-2">{actions}</div>}
+      {actions && (
+        <div data-approval-actions className="flex shrink-0 gap-2">
+          {actions}
+        </div>
+      )}
     </div>
   );
 }

@@ -6687,6 +6687,7 @@ needs_reason = true
             .unwrap();
 
         let desk_turn = |text: &'static str| CompanyEvent::OperatorMessage {
+            mentions: Vec::new(),
             parent: None,
             text: text.to_string(),
             by: None,
@@ -6835,6 +6836,7 @@ needs_reason = true
 
         runtime
             .run_cycle(vec![CompanyEvent::OperatorMessage {
+                mentions: Vec::new(),
                 parent: None,
                 text: "hello design".to_string(),
                 by: None,
@@ -6953,6 +6955,7 @@ needs_reason = true
         // lead `eng2`, not the blueprint lead `eng1`.
         runtime
             .run_cycle(vec![CompanyEvent::OperatorMessage {
+                mentions: Vec::new(),
                 parent: None,
                 text: "who leads?".to_string(),
                 by: None,
