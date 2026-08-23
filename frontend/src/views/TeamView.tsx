@@ -558,9 +558,9 @@ function MemberCard({
               className="-m-1 min-w-0 flex-1 rounded-sm p-1 text-left hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
               data-testid="team-card-open"
             >
-              <p className="truncate font-medium">{member.name}</p>
+              <span className="block truncate font-medium">{member.name}</span>
               {subtitle && (
-                <p className="truncate text-xs text-muted-foreground">{subtitle}</p>
+                <span className="block truncate text-xs text-muted-foreground">{subtitle}</span>
               )}
             </button>
           ) : (
@@ -595,8 +595,8 @@ function MemberCard({
 
                   That leaves exactly one item. It stays a menu rather than a
                   bare button: Remove is destructive, and a deliberate extra
-                  click before it is worth keeping now that the rest of the
-                  card is one big click target. Unlike "View teammate" it does
+                  click before it is worth keeping beside the title action.
+                  Unlike "View teammate" it does
                   not duplicate the card's own action, and unlike Budget it is
                   not per-teammate configuration that reads better on a
                   detail page — it is the one roster-level action an operator
