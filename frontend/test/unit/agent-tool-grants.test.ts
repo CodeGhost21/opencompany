@@ -129,9 +129,9 @@ describe("companyCovers", () => {
     // lines up — and an unstarred grant matches only itself.
     expect(companyCovers(["docs*"], "documentation.read")).toBe(false);
     // And an unstarred grant matches only itself, sub-grants included — the
-    // same rule that makes a manifest list `"workspace", "workspace.*"`.
+    // same rule that makes a manifest list `"workspace", "workspace.*"`. The
+    // opt-in namespaces are the exception, exercised in the test above.
     expect(companyCovers(["docs"], "docs.read")).toBe(false);
-    expect(companyCovers(["search"], "search.web")).toBe(false);
   });
 
   it("reports an uncovered ask, which is the whole warning", () => {
