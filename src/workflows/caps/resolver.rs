@@ -414,8 +414,8 @@ pub(crate) fn descend(
     node_id: &str,
     trigger_input: Option<&Value>,
 ) -> Option<(ChildGateRecord, String)> {
-    let mut segments = node_id.split(GATE_NAMESPACE);
-    let gate = segments.next_back()?;
+    let mut segments: Vec<&str> = node_id.split(GATE_NAMESPACE).collect();
+    let gate = segments.pop()?;
     let mut record: Option<ChildGateRecord> = None;
     for node in segments {
         let graph = match &record {
