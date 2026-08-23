@@ -356,4 +356,38 @@ mod test {
     fn reading_this_machine_answers_something() {
         let _ = device_identity();
     }
+
+    /// The `JPEGPhoto:` label contains a hex digit — `E` — so the payload must
+    /// be the hex *after* the label. Filtering the whole response prepends that
+    /// digit to an even-length payload, making the count odd and the picture
+    /// absent on every macOS machine. This is the regression for that bug.
+    #[test]
+    fn jpegphoto_decodes_the_hex_after_the_label() {
+        let payload = b"\xff\xd8\xff\xe0"; // a JPEG signature, four bytes
+        let hex: String = payload.iter().map(|b| format!("{b:02X}")).collect();
+        let out = format!("JPEGPhoto: {hex}");
+        let url = decode_jpegphoto(&out).expect("a data url");
+        assert_eq!(
+            url,
+            format!("data:image/jpeg;base64,{}", base64_encode(payload)),
+            "{out}"
+        );
+    }
+
+    /// Long values make `dscl` put the label on its own line and wrap the hex
+    /// beneath it — the same shape the `RealName` reader handles.
+    #[test]
+    fn jpegphoto_handles_a_wrapped_payload() {
+        let out = "JPEGPhoto:\n  FFD8\n  FFE0\n";
+        let url = decode_jpegphoto(out).expect("a data url");
+        assert_eq!(url, "data:image/jpeg;base64,/9j/4AA=");
+    }
+
+    /// A payload whose bytes are not one of the accepted images is absent, like
+    /// every other picture source on this file.
+    #[test]
+    fn jpegphoto_that_is_not_an_image_is_absent() {
+        assert_eq!(decode_jpegphoto("JPEGPhoto: 4141"), None);
+        assert_eq!(decode_jpegphoto("JPEGPhoto:"), None);
+    }
 }
