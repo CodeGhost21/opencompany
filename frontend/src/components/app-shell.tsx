@@ -296,8 +296,42 @@ const REWRITE_RETIRED = (
   // detail sub-page (issue #264), it is what the org chart's rows and the chat
   // pane's chips link to, and it is deliberately a page so it can be linked.
   if (head === "team" && !sub) return ["company", null];
+  if (head === "connections") return ["settings", "connections"];
+  if (head === "mcp") return ["settings", "mcp"];
+  if (head === "people") return ["settings", "people"];
   return null;
 };
+
+const LEGACY_CONNECT_QUERY_KEYS = ["connected", "connect_error", "provider"] as const;
+
+/**
+ * Reads a former native OAuth callback's query whether it was appended to the
+ * path or, in a bookmarked hash address, to the hash itself.
+ *
+ * `useHashView` canonicalizes a retired hash before the shell's effects run,
+ * so this must happen during the initial render while the fragment query is
+ * still present. Path-query values take precedence if an address has both.
+ */
+function legacyConnectParams(): URLSearchParams {
+  const params = new URLSearchParams(window.location.search);
+  const [, hashQuery = ""] = window.location.hash.split("?");
+  const hashParams = new URLSearchParams(hashQuery);
+  for (const key of LEGACY_CONNECT_QUERY_KEYS) {
+    if (!params.has(key) && hashParams.has(key)) params.set(key, hashParams.get(key)!);
+  }
+  return params;
+}
+
+/** Removes consumed legacy OAuth callback values without disturbing hash flags. */
+function stripLegacyConnectParams(hash: string): string {
+  const separator = hash.indexOf("?");
+  if (separator === -1) return hash;
+  const path = hash.slice(0, separator);
+  const params = new URLSearchParams(hash.slice(separator + 1));
+  for (const key of LEGACY_CONNECT_QUERY_KEYS) params.delete(key);
+  const query = params.toString().replace(/=(?=&|$)/g, "");
+  return query ? `${path}?${query}` : path;
+}
 
 /** How many workflow run-progress frames (issue #371) the shell keeps for the
  * Workflows canvas. A run emits roughly one per node, so this holds many runs'
@@ -388,6 +422,7 @@ export function AppShell({
     "overview",
     REWRITE_RETIRED,
   );
+  const legacyConnectParamsRef = useRef(legacyConnectParams());
   // Track the latest non-default segment per view so returning to a tab with
   // sub-pages restores operator context (for example `#/workflows/<id>`), instead
   // of always dropping it to the parent view.
@@ -726,7 +761,7 @@ export function AppShell({
   // back into the console. Preserve the readable landing for legacy URLs even
   // though #838 no longer redirects new native OAuth callbacks here.
   useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
+    const params = legacyConnectParamsRef.current;
     const connected = params.get("connected");
     const failed = params.get("connect_error");
     if (!connected && !failed) return;
@@ -740,7 +775,7 @@ export function AppShell({
     window.history.replaceState(
       {},
       "",
-      window.location.pathname + (query ? `?${query}` : "") + window.location.hash,
+      window.location.pathname + (query ? `?${query}` : "") + stripLegacyConnectParams(window.location.hash),
     );
     setView("settings", "connections");
     // The callback param carries the raw provider id (e.g. "slack"); show the
