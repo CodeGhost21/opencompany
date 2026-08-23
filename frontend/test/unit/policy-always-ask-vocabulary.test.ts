@@ -298,17 +298,14 @@ describe("what the always-ask field suggests", () => {
       setValue?.call(input, "SHELL");
       input.dispatchEvent(new Event("input", { bubbles: true }));
     });
-    expect(container.textContent).not.toContain("is not a tool");
+    expect(container.textContent).not.toContain("match any");
   });
 
   it("does not call a real gateable agent tool a mistake", async () => {
     // `publish_artifact` is a tool the approval gate covers (it parks), but it
     // is not one of the workflow-authorable slugs served by
-    // `/workflows/tool-slugs` — the exact gap the note's wording exists for.
-    // It is still flagged, because the served set cannot prove it wired, but
-    // the note is scoped to that set ("doesn't match … workflow tools wired
-    // here") and hedges that it may still be a wired agent tool — not a
-    // blanket "not a tool this deployment wires" claim.
+    // `/workflows/tool-slugs`. The complete registry (`knownTools`) carries it,
+    // so the note must not flag it at all — the gate would match it by name.
     const client = makeClient();
     await mount(client);
     await act(async () => {
@@ -325,10 +322,58 @@ describe("what the always-ask field suggests", () => {
       setValue?.call(input, "publish_artifact");
       input.dispatchEvent(new Event("input", { bubbles: true }));
     });
-    expect(container.textContent).not.toContain("is not a tool");
+    expect(container.textContent).not.toContain("match any");
+  });
+
+  it("flags a typo against the complete registry, not just the workflow set", async () => {
+    // `shel` gates nothing in `knownTools` (a case-insensitive, segment-bound
+    // match), so the note speaks — with the confident wording the full registry
+    // earns.
+    const client = makeClient();
+    await mount(client);
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    const input = field()!;
+    await act(async () => {
+      const setValue = Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        "value",
+      )?.set;
+      setValue?.call(input, "shel");
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
     expect(container.textContent).toContain(
-      "publish_artifact doesn't match any of the workflow tools wired here.",
+      "shel doesn't match any tool the approval gate recognizes.",
     );
+    expect(container.textContent).toContain("It may still be a hosted effect kind.");
+  });
+
+  it("still hedges an unmatched dotted kind as possibly hosted", async () => {
+    // `invoice.send` matches no declared tool, but the effect namespace is open
+    // on purpose — the note says so rather than calling it a mistake.
+    const client = makeClient();
+    await mount(client);
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    const input = field()!;
+    await act(async () => {
+      const setValue = Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        "value",
+      )?.set;
+      setValue?.call(input, "invoice.send");
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    expect(container.textContent).toContain(
+      "invoice.send doesn't match any tool the approval gate recognizes.",
+    );
+    expect(container.textContent).toContain("It may still be a hosted effect kind.");
   });
 });
 
