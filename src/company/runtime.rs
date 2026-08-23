@@ -2595,13 +2595,26 @@ impl CompanyRuntime {
     /// previews the exact final issue body or files it (per consent). The
     /// scrubber fails closed, so a report that cannot be safely scrubbed is
     /// blocked rather than risked.
+    ///
+    /// `item_id` carries the previewed item on the confirm (Send-after-Preview)
+    /// path: the same item is finalized — never a second capture — so the report
+    /// appears once in the feedback family and the posted body is the exact
+    /// previewed bytes (see [`crate::feedback::service::finalize`]).
     pub async fn submit_feedback(
         &self,
         input: FeedbackInput,
         preview: bool,
+        item_id: Option<String>,
     ) -> Result<FeedbackResponse> {
-        let item = self.capture_feedback(input).await?;
         let manifest = self.store.load(&self.id).await?.map(|r| r.manifest);
+        let item = match item_id {
+            Some(id) => self
+                .feedback
+                .get(&id)
+                .await?
+                .ok_or_else(|| OpenCompanyError::NotFound(format!("feedback item {id}")))?,
+            None => self.capture_feedback(input).await?,
+        };
         crate::feedback::service::finalize(
             &self.feedback,
             self.secrets.as_ref(),
