@@ -184,11 +184,11 @@ function neverDispatched(task: Task): boolean {
 /**
  * Extends a host-computed duration to `now` while its span is still open.
  *
- * The worked arithmetic used to live here *and* in the exporter
+ * The worked/waiting arithmetic used to live here *and* in the exporter
  * (`src/server/ops/task_export.rs`), so the screen and the exported record of
  * the same task could disagree with nothing failing. The host now computes the
- * total once in `TaskDurations` and hands it to whoever reads the task; this is
- * all that is left client-side.
+ * totals once in `TaskDurations` and hands them to whoever reads the task; this
+ * is all that is left client-side.
  *
  * The extension is exact rather than an approximation, which is why the merge
  * does not have to be repeated here: every closed span ends in the past, so past
@@ -443,6 +443,20 @@ export function TaskDetailView({
         : null,
     [detail, now],
   );
+  // This remains an input to the worked-time calculation below, but is not a
+  // second current-wait presentation. Pending approvals own that display.
+  const waiting = useMemo(
+    () =>
+      detail
+        ? extend(
+            detail.durations.waitingMillis,
+            detail.durations.waitingLive,
+            detail.durations.asOfMillis,
+            now,
+          )
+        : null,
+    [detail, now],
+  );
   // Only tick the 1s clock while something is actually running: a dispatch
   // window is open, an attempt has not settled, or this task still owns a
   // pending approval. Pending approvals are the one source for the current
@@ -508,7 +522,12 @@ export function TaskDetailView({
         <ScrollArea className="min-h-0 flex-1">
           <div className="w-full space-y-4 p-4">
             <section className="overflow-hidden rounded-xl border bg-card">
-              <DetailHeader task={detail.task} worked={worked} columns={columns} />
+              <DetailHeader
+                task={detail.task}
+                worked={worked}
+                waiting={waiting}
+                columns={columns}
+              />
 
               <ControlBar
                 task={detail.task}
@@ -684,10 +703,12 @@ export function TaskDetailView({
 function DetailHeader({
   task,
   worked,
+  waiting,
   columns,
 }: {
   task: Task;
   worked: { millis: number; live: boolean } | null;
+  waiting: { millis: number; live: boolean } | null;
   /** The board's columns, for the status badge's label. Passed rather than
       read here: they come from the `tasks` ledger, so the one component that
       can fetch them is the one that already holds the client. */
@@ -699,6 +720,9 @@ function DetailHeader({
   // was journaled for it, so claiming otherwise beside a settled status is the
   // self-contradiction the report caught.
   const neverStarted = !hasDispatch && neverDispatched(task);
+  // A run window contains its approval waits, so the time the agent actually
+  // worked is the remainder. Waiting itself is stated once in the approval row.
+  const workingMs = Math.max(0, (worked?.millis ?? 0) - (waiting?.millis ?? 0));
   return (
     <div className="p-4">
       <div className="flex items-start justify-between gap-3">
@@ -760,7 +784,7 @@ function DetailHeader({
             {hasDispatch ? (
               <>
                 <span className="font-medium text-foreground">
-                  Worked {formatDuration(worked!.millis)}
+                  Worked {formatDuration(workingMs)}
                 </span>
                 {worked!.live && (
                   <span className="inline-flex items-center gap-1 text-status-done-text">
@@ -1229,7 +1253,7 @@ interface TimelineGroup {
  */
 type TimelineItem =
   | { row: "group"; key: string; group: TimelineGroup }
-  | { row: "wait"; key: string; millis: number; live: boolean };
+  | { row: "wait"; key: string; millis: number };
 
 /**
  * Folds a timeline into rows, coalescing consecutive same-label `tool_failed`
@@ -1359,7 +1383,7 @@ function TimelineList({ entries }: { entries: TimelineEntry[] }) {
     <ol className="space-y-1.5">
       {items.map((item) =>
         item.row === "wait" ? (
-          <WaitingBand key={item.key} millis={item.millis} live={item.live} />
+          <WaitingBand key={item.key} millis={item.millis} />
         ) : (
           <TimelineRow key={item.key} group={item.group} />
         ),
