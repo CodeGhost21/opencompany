@@ -212,9 +212,12 @@ across in `heal_runs_agent_id` (an `ALTER`, one `UPDATE … WHERE agent_id IS
 NULL`, then the index — idempotent, and matching nothing on every open after
 the first); MongoDB does the same in `backfill_run_agent_ids` at connect,
 document by document, because the desk lives inside a *string* of JSON there
-and the server cannot reach it. Both are best-effort at their call site: a
-company that will not start is worse than one whose oldest rows are not yet
-filterable by desk.
+and the server cannot reach it. The two differ in how a failure lands: sqlite
+runs the heal synchronously in `SqliteStore::from_conn` with a propagated
+error, so a backfill that cannot run prevents store initialization; MongoDB's
+is best-effort at its call site — a company that will not start is worse than
+one whose oldest rows are not yet filterable by desk, and the migration is
+spawned so a slow first boot never sits in front of `/healthz`.
 
 Three things the wire shape refuses to imply, each a state the write path really
 produces:
