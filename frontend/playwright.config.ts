@@ -125,14 +125,18 @@ const managesHost = !providedBaseURL;
  * other worktree's. `test/e2e/host.sh` derives the identical default from the
  * same path, so running it directly agrees with running it through Playwright.
  *
- * 8100-8899 avoids 8080 itself, and stays clear of the ephemeral range so the
- * kernel does not hand a derived port to something else first.
+ * 8100-16899 avoids 8080 itself and stays below the ephemeral range
+ * (net.ipv4.ip_local_port_range starts at 32768), so the kernel cannot hand a
+ * derived port to something else first. The width matters: this repository has
+ * ~200 worktrees, and birthday collisions over 800 ports put ~23 of them on a
+ * shared number. Over 8800 it is closer to two, and two worktrees that do
+ * collide are still only as broken as every worktree is today.
  */
 const repoRoot = resolve(here, "..");
 const derivedPort =
   8100 +
-  (parseInt(createHash("sha256").update(repoRoot).digest("hex").slice(0, 4), 16) %
-    800);
+  (parseInt(createHash("sha256").update(repoRoot).digest("hex").slice(0, 8), 16) %
+    8800);
 
 const baseURL = providedBaseURL || `http://127.0.0.1:${derivedPort}`;
 
