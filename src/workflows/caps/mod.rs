@@ -2365,6 +2365,7 @@ mod tests {
                 board: RunBoard::default(),
                 blocks: Default::default(),
                 approvals: Default::default(),
+                child_gates: Default::default(),
             },
         )
         .await
@@ -2411,6 +2412,7 @@ mod tests {
                 board: RunBoard::default(),
                 blocks: Default::default(),
                 approvals: Default::default(),
+                child_gates: Default::default(),
             },
         )
         .await
@@ -2574,6 +2576,7 @@ mod tests {
                 board: RunBoard::default(),
                 blocks: Default::default(),
                 approvals: Default::default(),
+                child_gates: Default::default(),
             },
         )
         .await
@@ -2627,6 +2630,7 @@ mod tests {
                 board: RunBoard::default(),
                 blocks: Default::default(),
                 approvals: Default::default(),
+                child_gates: Default::default(),
             },
         )
         .await
