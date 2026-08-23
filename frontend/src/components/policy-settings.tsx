@@ -325,6 +325,16 @@ export function PolicySettings({ client, company }: Props) {
    * is in the Tab order, and arrows move and select in one step).
    */
   const tierButtons = useRef<Array<HTMLButtonElement | null>>([]);
+  /**
+   * Which control launched the confirmation dialog, so closing it can return
+   * focus somewhere sensible. A tier escalation is opened from the radio the
+   * operator pressed — which may not be the tier that ends up selected — so
+   * closing re-syncs focus to the checked tier; the reset flow's trigger is a
+   * plain button whose own focus restore is right. A ref, not state, because
+   * the dialog's close handler reads it after `onOpenChange` has cleared the
+   * confirmation state.
+   */
+  const confirmSource = useRef<"tier" | "reset">("tier");
 
   const reset = async () => {
     if (!status || saving) return false;
