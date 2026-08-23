@@ -2847,6 +2847,7 @@ impl HarnessBrain {
                     text,
                     chat,
                     deliverable,
+                    mentions,
                     ..
                 } => {
                     // Issue #416: a workflow copilot thread is answered by a
@@ -2879,8 +2880,38 @@ impl HarnessBrain {
                         channel_responses.push(confined_bubble(outcome));
                         continue;
                     }
-                    // Route to the addressed desk's lead, else the orchestrator.
-                    let responder = self.responder_for(chat.as_deref());
+                    // Route to the teammate the message named, else to the
+                    // addressed desk's lead, else the orchestrator.
+                    //
+                    // Naming somebody in a room is a stronger address than the
+                    // room's default answerer, so a mention outranks the desk
+                    // lead. That is the same explicit-beats-implicit ordering
+                    // `responder_for` already applies between an addressed desk
+                    // and the orchestrator (issue #884) — one more rung at the
+                    // top of the existing ladder, not a second competing notion
+                    // of who a message is for.
+                    //
+                    // Resolves nothing on a message that mentions no teammate,
+                    // which is every message journaled before mentions existed,
+                    // so routing is unchanged byte-for-byte for them.
+                    let responder = crate::runtime::mentions::mention_responder(
+                        &self.record(),
+                        mentions,
+                    )
+                    .unwrap_or_else(|| self.responder_for(chat.as_deref()));
+                    // Everyone else the message named, for the answering turn's
+                    // context. A list, not a fan-out: one operator message still
+                    // spawns exactly one turn, and this teammate spreads the
+                    // work — if it should — through the existing gated
+                    // delegation seam rather than through a new uncontrolled
+                    // one. `@everyone` expands here, against the addressed
+                    // desk's membership.
+                    let also_mentioned = crate::runtime::mentions::mentioned_agents(
+                        &self.record(),
+                        chat.as_deref().unwrap_or(crate::server::ops::language::DEFAULT_DESK),
+                        mentions,
+                        Some(&responder),
+                    );
                     // The chat/desk thread this turn answers — the same id the
                     // reply is journaled under (`AgentReply.chat_id`). Passed into
                     // the pool so the live turn-stream frames carry it and the
@@ -2957,6 +2988,9 @@ impl HarnessBrain {
                         // "this is not work", which the runtime has to honour or
                         // the console's promise holds on one surface only.
                         .requested(*deliverable)
+                        // Who else this message named (issue: mentions). Context
+                        // for the turn, never a second dispatch.
+                        .also_mentioned(also_mentioned)
                         .handle_operator_message(&responder, text, chat_id)
                         .await?;
                     let mut operator_steps = turn.steps;
@@ -5728,6 +5762,93 @@ members = ["engineer"]
             cycle.is_err(),
             "a cycle must fail when the record cannot be read, rather than \
              quietly routing on a stale one"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Mention routing: naming somebody outranks the desk lead
+    // -----------------------------------------------------------------------
+
+    fn mention_of(id: &str) -> crate::ports::types::Mention {
+        crate::ports::types::Mention {
+            target: crate::ports::types::MentionTarget::Agent { id: id.to_string() },
+            text: format!("@{id}"),
+            offset: 0,
+            quiet: false,
+        }
+    }
+
+    /// The whole point of the feature: `@engineer` in the main line is answered
+    /// by the engineer, not by the orchestrator that would otherwise take it.
+    #[test]
+    fn a_mentioned_teammate_answers_instead_of_the_default_responder() {
+        let dir = tempfile::tempdir().unwrap();
+        let (brain, _tasks) = brain_with_desk(dir.path());
+        // Without a mention, the orchestrator answers an unaddressed message.
+        assert_eq!(brain.responder_for(None), "chief");
+        // With one, the named teammate does.
+        assert_eq!(
+            crate::runtime::mentions::mention_responder(&brain.record(), &[mention_of("engineer")]),
+            Some("engineer".to_string()),
+        );
+    }
+
+    /// And it outranks the *desk lead*, which is the stronger claim: a message
+    /// addressed to a desk still goes to the teammate it names.
+    #[test]
+    fn a_mention_outranks_the_addressed_desks_lead() {
+        let dir = tempfile::tempdir().unwrap();
+        let (brain, _tasks) = brain_with_desk(dir.path());
+        assert_eq!(brain.responder_for(Some("eng_desk")), "engineer");
+        assert_eq!(
+            crate::runtime::mentions::mention_responder(&brain.record(), &[mention_of("ceo")]),
+            Some("ceo".to_string()),
+            "the named teammate answers even on a desk with its own lead",
+        );
+    }
+
+    /// A message that mentions nobody routes exactly as it did before mentions
+    /// existed — which is every message already in every journal.
+    #[test]
+    fn a_message_with_no_mentions_routes_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let (brain, _tasks) = brain_with_desk(dir.path());
+        assert_eq!(
+            crate::runtime::mentions::mention_responder(&brain.record(), &[]),
+            None,
+            "so the caller falls through to responder_for",
+        );
+        assert_eq!(brain.responder_for(Some("eng_desk")), "engineer");
+        assert_eq!(brain.responder_for(None), "chief");
+    }
+
+    /// `@everyone` names the addressed desk's teammates for the turn's context
+    /// — and still leaves exactly one responder, because it is a list and not a
+    /// fan-out.
+    #[test]
+    fn everyone_names_the_desk_without_choosing_a_responder() {
+        let dir = tempfile::tempdir().unwrap();
+        let (brain, _tasks) = brain_with_desk(dir.path());
+        let mentions = [crate::ports::types::Mention {
+            target: crate::ports::types::MentionTarget::Everyone,
+            text: "@everyone".to_string(),
+            offset: 0,
+            quiet: false,
+        }];
+        assert_eq!(
+            crate::runtime::mentions::mention_responder(&brain.record(), &mentions),
+            None,
+            "a broadcast names no single teammate, so the desk lead still answers",
+        );
+        assert_eq!(
+            crate::runtime::mentions::mentioned_agents(
+                &brain.record(),
+                "eng_desk",
+                &mentions,
+                Some("engineer"),
+            ),
+            Vec::<String>::new(),
+            "the only member is the responder, and it is not told it was mentioned",
         );
     }
 

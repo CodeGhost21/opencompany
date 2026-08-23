@@ -550,6 +550,18 @@ pub(crate) struct DelegationRunner<'a> {
     /// (issues #1035, #1152). `None` for every path that is not an operator chat
     /// turn, and for a message whose sender expressed no preference.
     requested_intent: Option<crate::ports::types::MessageIntent>,
+    /// The other teammates this message named, when it named any.
+    ///
+    /// Context for the turn, **never a second dispatch**: one operator message
+    /// spawns exactly one turn, and this is how the teammate answering it
+    /// learns who else was addressed. It decides whether the work should
+    /// actually spread, and spreads it through the delegation tools it already
+    /// has — so a mention cannot become a way to start N turns with no approval
+    /// in sight.
+    ///
+    /// Empty on every path that is not a person typing into the composer, and
+    /// on every message that names nobody.
+    also_mentioned: Vec<String>,
     /// The cycle's approval queue, read (never written) to tell whether a turn
     /// this runner drove parked an approval (issue #465).
     ///
@@ -606,6 +618,7 @@ impl<'a> DelegationRunner<'a> {
             task: None,
             run_sink: None,
             requested_intent: None,
+            also_mentioned: Vec::new(),
             approvals: None,
             workflow_run: None,
             workflow_refs: None,
@@ -655,6 +668,7 @@ impl<'a> DelegationRunner<'a> {
             // A workflow run has no operator message and therefore no composer
             // choice; `None` is the only honest value here.
             requested_intent: None,
+            also_mentioned: Vec::new(),
             approvals: None,
             workflow_run: Some(run),
             workflow_refs: None,
@@ -858,6 +872,17 @@ impl<'a> DelegationRunner<'a> {
     /// make a dozen test call sites restate `None` to say nothing.
     pub(crate) fn requested(mut self, intent: Option<crate::ports::types::MessageIntent>) -> Self {
         self.requested_intent = intent;
+        self
+    }
+
+    /// Carries the other teammates this message named.
+    ///
+    /// A builder for the same reason [`requested`](Self::requested) is: optional
+    /// context about the turn, absent on every path that is not an operator
+    /// message, and threading it as an argument would make a dozen test call
+    /// sites restate an empty vector to say nothing.
+    pub(crate) fn also_mentioned(mut self, agents: Vec<String>) -> Self {
+        self.also_mentioned = agents;
         self
     }
 
@@ -1100,6 +1125,27 @@ impl<'a> DelegationRunner<'a> {
         // what *this* turn parked, not what the cycle was already holding from
         // an earlier one.
         let approvals_before = self.approvals_queued();
+        // Who else the message named, told to the teammate answering it.
+        //
+        // Appended to the turn input only — **not** to the journaled message,
+        // which is already stored verbatim with its own mention rows. A reader
+        // sees exactly what the author typed; the model additionally sees who
+        // that resolved to, which it otherwise could not know, because a mention
+        // is a structured fact about the message rather than a word in it.
+        //
+        // Deliberately phrased as context rather than an instruction: the turn
+        // decides whether the work needs to spread, and spreads it through the
+        // delegation tools it already has. Nothing here dispatches.
+        let with_mentions;
+        let message = if operator_turn && !self.also_mentioned.is_empty() {
+            with_mentions = format!(
+                "{message}\n\n[Also mentioned in this message: {}. They have not been asked to answer — you have. Hand work to them only if it genuinely needs them.]",
+                self.also_mentioned.join(", ")
+            );
+            with_mentions.as_str()
+        } else {
+            message
+        };
         let outcome = self
             .run_turn
             .run(self.company, responder, message, chat_id)
