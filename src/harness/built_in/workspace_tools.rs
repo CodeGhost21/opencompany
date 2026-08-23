@@ -2808,7 +2808,7 @@ mod tests {
         operator_hidden.created_by = WorkspaceOrigin::Operator;
         operator_hidden.updated_by = WorkspaceOrigin::Operator;
         let store: Arc<dyn WorkspaceStore> =
-            Arc::new(FixedTree(vec![agent_folder, operator_hidden]));
+            Arc::new(FixedWorkspaceTree(vec![agent_folder, operator_hidden]));
 
         let owned = mutation_is_owned_by_agent(
             &store,
@@ -2840,7 +2840,7 @@ mod tests {
         agent_hidden.created_by = own.clone();
         agent_hidden.updated_by = own;
         let store: Arc<dyn WorkspaceStore> =
-            Arc::new(FixedTree(vec![agent_folder, agent_hidden]));
+            Arc::new(FixedWorkspaceTree(vec![agent_folder, agent_hidden]));
 
         let owned = mutation_is_owned_by_agent(
             &store,
