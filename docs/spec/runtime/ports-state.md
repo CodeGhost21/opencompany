@@ -184,8 +184,8 @@ that keeps growing: these files own the port *traits*, that one owns the
 
 ## MemoryStore
 
-The equivalent of Medulla's `CyclePersistence`; TinyCortex is the target
-backend ([integrations/tinycortex.md](../integrations/tinycortex.md)).
+The equivalent of Medulla's `CyclePersistence`; a hosted provider is the
+target backend ([memory-engine.md](memory-engine.md)).
 
 ```rust
 // src/ports/memory.rs
