@@ -1424,6 +1424,10 @@ struct PausedGates<'a> {
     /// untouched.
     output: &'a Value,
     edges: &'a [crate::company::WorkflowEdgeDef],
+    /// Issue #617: the resolver's per-child gate record, so a namespaced child
+    /// gate (`sub::work`) is described from what the gate pass classified
+    /// rather than falling back to an unclassified parent-graph lookup.
+    child_gates: &'a super::caps::resolver::ChildGateRegistry,
 }
 
 /// Parks one approval card per gate the run paused on (issue #395).
