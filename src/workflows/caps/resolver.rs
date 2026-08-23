@@ -163,19 +163,38 @@ impl StoreWorkflowResolver {
     /// using a namespaced id and forwards that approval when the parent re-runs.
     /// Marking the child here therefore reaches the ordinary card and resume
     /// path instead of silently executing an effect beneath the parent graph.
+    ///
+    /// The gate pass runs against the run's **root** workflow id, not the
+    /// child's own: `policy_gates` binds its standing-permission subject to the
+    /// workflow it is gating, and the card the parent parks is minted with the
+    /// root's id (issue #617). Binding the child to its own id would make a
+    /// permission the operator granted the top-level workflow invisible to the
+    /// child's checks, so a child call would park again under a grant that
+    /// should have admitted it.
+    ///
+    /// The resulting gates — and the gated graph itself — are recorded per child
+    /// id so the parent's parking path can name them after the run pauses (see
+    /// [`ChildGateRegistry`]).
     async fn apply_policy_gates(&self, child_id: &str, graph: &mut WorkflowGraph) {
         let Some(gates) = self.gates.as_ref() else {
             return;
         };
-        crate::workflows::gate::apply_policy_gates_with_policy(
+        let gated = crate::workflows::gate::apply_policy_gates_with_policy(
             graph,
             &gates.policy,
             &self.company,
-            child_id,
+            &self.root_id,
             &gates.run_id,
             &gates.grants,
         )
         .await;
+        gates.registry.record(
+            child_id,
+            ChildGateRecord {
+                graph: graph.clone(),
+                gated,
+            },
+        );
     }
 
     /// The **static** `workflow_id` references a graph makes — literal ids only.
