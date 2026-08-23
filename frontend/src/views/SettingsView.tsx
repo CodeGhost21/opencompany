@@ -34,7 +34,6 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
-import { DevicePairing } from "@/components/device-pairing";
 import { DomainSettings } from "@/components/domain-settings";
 import { PolicySettings } from "@/components/policy-settings";
 import { StatusPill } from "@/components/status-pill";
@@ -65,9 +64,9 @@ export function SettingsView({ client, company, feed, onFlag }: Props) {
         {/* This sub-page draws no visible title of its own — the sub-nav rail
             beside it already says "Settings" (issue #1221). */}
         <h1 className="text-2xl font-semibold tracking-tight lg:sr-only">General settings</h1>
-        {/* Pairing this machine. Renders nothing in a browser, where the
-            session cookie already works. */}
-        <DevicePairing />
+        {/* Device pairing was here. Sessions are the frontend client's own
+            business now — the desktop app holds its session the same way the
+            browser does — so there is no machine for this page to pair. */}
 
         {/* Approvals: the autonomy tier and the always-ask list (issue #562).
             High in the page on purpose — an operator who comes to settings
