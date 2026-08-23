@@ -406,15 +406,28 @@ describe("the consolidated approval card", () => {
     expect(row?.textContent).toContain(`Send a payment — vendor@example.test · ${money(42.5)}`);
   });
 
-  it("names every amount in a same-kind compact batch, not just the lead's", async () => {
+  it("names every call and amount in a same-kind compact batch, not just the lead's", async () => {
     // Two payments from one turn: the lead's line already shows its own value,
     // and the second's has to appear too — one Approve authorizes both.
     await render([VENDOR, SUPPLIER], {}, {}, new Map(), true);
 
     const row = container.querySelector<HTMLElement>('[data-approval-inline="compact"]');
     expect(row?.textContent).toContain(
-      `Send a payment — vendor@example.test · ${money(42.5)} · ${money(12)} + 1 more`,
+      `Send a payment — vendor@example.test, supplier@example.test · ${money(42.5)} · ${money(12)}`,
     );
+  });
+
+  it("names every same-kind call in a compact batch, not just the lead's", async () => {
+    // Three fetches from one turn: the second and third URLs are the
+    // consequential ones — one Approve authorizes all three. "+ 2 more" would
+    // hide a sketchy destination behind a harmless first fetch.
+    await render([ESPN, BBC, GUARDIAN], {}, {}, new Map(), true);
+
+    const row = container.querySelector<HTMLElement>('[data-approval-inline="compact"]');
+    expect(row?.textContent).toContain(
+      `Fetch a web page — https://espn.com/nba, https://bbc.com/sport, https://theguardian.com/uk`,
+    );
+    expect(row?.textContent).not.toContain("+ 2 more");
   });
 
   it("names every action and amount in a mixed compact batch", async () => {
