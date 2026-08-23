@@ -21,10 +21,11 @@
 # anyone's blast radius.
 #
 # `*` covers files/docs/shell/code/web/subagent. Every other entry is listed
-# literally because `*` deliberately excludes it: `workspace.*` because a bare
-# `*` confers workspace *reads* only, `media` and `composio` because they are
-# the real-money and per-tenant-credential namespaces, `search` because it
-# bills per call, and `mcp:*` because MCP grants are named per server.
+# literally because `*` deliberately excludes it: `workspace.*` plus the
+# explicit `workspace.write` grant for workspace reads and writes, `media` and
+# `composio` because they are the real-money and per-tenant-credential
+# namespaces, `search` because it bills per call, and `mcp:*` because MCP grants
+# are named per server.
 #
 # `repo` is the one namespace that is NOT here, and it is not an oversight: a
 # host on filesystem storage (`OPENCOMPANY_STORAGE=fs`, the default and the
