@@ -132,12 +132,14 @@ export function FinancesView({ client, company }: Props) {
           <CardHeader>
             <CardTitle className="text-base">Monthly budget</CardTitle>
             <CardDescription>
-              {data.budgetUsd > 0
-                ? `${usd(data.spentUsd, 0)} of ${usd(data.budgetUsd, 0)} used · ${usd(data.budgetUsd - data.spentUsd, 0)} left`
-                : "No monthly budget is set."}
+              {budgetUsd === null
+                ? "No monthly budget is set."
+                : budgetUsd === 0
+                  ? "Spending is capped at $0.00 this month."
+                  : `${usd(data.spentUsd, 0)} of ${usd(budgetUsd, 0)} used · ${usd(budgetUsd - data.spentUsd, 0)} left`}
             </CardDescription>
           </CardHeader>
-          {data.budgetUsd > 0 && (
+          {hasBudget && (
             <CardContent className="space-y-2">
               <div className="h-2.5 w-full overflow-hidden rounded-full bg-muted">
                 <div
