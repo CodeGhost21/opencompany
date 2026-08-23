@@ -626,6 +626,7 @@ mod test {
         .await
         .unwrap();
         assert!(preview.preview_body.unwrap().contains("dana_roe"));
+        let stored = store.get(&it.id).await.unwrap().expect("item exists");
 
         // The roster now lists dana_roe: re-gating the approved body would alter
         // it, so the confirm blocks with a re-preview reason and posts nothing.
@@ -635,7 +636,7 @@ mod test {
             &filer,
             &company,
             Some(&manifest(true)),
-            &it,
+            &stored,
             Severity::Annoyance,
             FeedbackSource::Operator,
             false,
