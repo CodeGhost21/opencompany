@@ -433,7 +433,8 @@ function CompactApprovalRow({
 }
 
 /**
- * The compact row's one-line summary, split so the amounts survive truncation.
+ * The compact row's summary, split so nothing an Approve covers is ever
+ * ellipsized away.
  *
  * A batch's line has to name what the one Approve covers, never just the first
  * call. When every call is the same action, each call's own detail is named —
@@ -442,10 +443,13 @@ function CompactApprovalRow({
  * When the batch mixes actions, that phrasing would hide a payment behind a
  * fetch, so the line names every distinct action and states the count plainly,
  * the way `BatchHeadline` does — and names every call's own detail too, so a
- * URL or recipient is never hidden behind a count. Either way, every amount is
+ * URL or recipient is never hidden behind a count, and a role-hidden call
+ * keeps its warning. Either way, every amount is
  * returned separately from the text so the row can keep it outside the
  * truncating region: an operator approving money must see its value whether
- * the payment is first in the batch or not.
+ * the payment is first in the batch or not, and on a narrow pane the text
+ * wraps rather than ellipsizing, so a later call's detail survives to the next
+ * line instead of vanishing behind "…".
  */
 function compactLabel(approvals: ApprovalSummary[]): { text: string; amounts: string } {
   const lead = approvals[0];
