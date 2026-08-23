@@ -78,9 +78,19 @@ use crate::server::error::ApiError;
 use crate::server::ops::composio_toolkits::{self, CatalogSource, OpenModeToolkits};
 use crate::server::ops::{AdminScopedCompany, ScopedCompany, scoped};
 
-/// The reminder attached to every mutating response.
+/// The reminder attached to a set / rotate response.
 const SWITCH_NOTE: &str =
     "Agents pick up the new Composio token on their next turn — no restart needed.";
+
+/// The reminder attached to a clear response.
+///
+/// A clear does not hand agents a new token — it withdraws the BYO override, so
+/// what they present next is whatever tier remains (a company key, the instance
+/// identity, or none). Reusing [`SWITCH_NOTE`] here would tell the operator that
+/// a new token exists when the effective credential has fallen back to nothing
+/// (issue #1471).
+const CLEAR_NOTE: &str =
+    "Composio token cleared. Agents use whatever credential remains on their next turn.";
 
 /// The toolkits the console should offer for a company, whether that answer
 /// came from open mode, and where the list came from.
