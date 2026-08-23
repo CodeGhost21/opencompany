@@ -380,7 +380,7 @@ mod test {
     fn jpegphoto_handles_a_wrapped_payload() {
         let out = "JPEGPhoto:\n  FFD8\n  FFE0\n";
         let url = decode_jpegphoto(out).expect("a data url");
-        assert_eq!(url, "data:image/jpeg;base64,/9j/4AA=");
+        assert_eq!(url, "data:image/jpeg;base64,/9j/4A==");
     }
 
     /// A payload whose bytes are not one of the accepted images is absent, like
