@@ -1092,7 +1092,7 @@ to = "fetch"
         let file =
             crate::company::parse_workflow(&parent_of("parent", "child")).expect("parent parses");
         let parent = crate::workflows::translate::translate(&file);
-        let described = child_gate_call(&registry, &parent, "sub::run")
+        let described = child_gate_call(&registry, &parent, "sub::run", None)
             .expect("a namespaced child gate resolves through the registry");
         assert_eq!(described.node_id, "run");
         assert_eq!(described.slug, "shell");
