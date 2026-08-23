@@ -15,7 +15,6 @@ import {
   AlertDialogFooter,
   AlertDialogHeader,
   AlertDialogTitle,
-  AlertDialogTrigger,
 } from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -77,6 +76,7 @@ export function RepositoriesCard({ client, company, canManage }: Props) {
   const [token, setToken] = useState("");
   const [branches, setBranches] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
+  const [revokeTarget, setRevokeTarget] = useState<Repo | null>(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -171,9 +171,9 @@ export function RepositoriesCard({ client, company, canManage }: Props) {
   return (
     <section className="space-y-3">
       <div className="flex items-center justify-between gap-3">
-        <h3 className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
+        <h2 className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
           Repositories
-        </h3>
+        </h2>
         {load === "ready" && repos.length > 0 && (
           <Badge variant="secondary" className="gap-1">
             <Check className="size-3" /> {repos.length} bound
@@ -258,42 +258,19 @@ export function RepositoriesCard({ client, company, canManage }: Props) {
                     </p>
                   </div>
                   {canManage && (
-                    <AlertDialog>
-                      <AlertDialogTrigger
-                        render={
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            disabled={busy !== null}
-                            title={`Unbind ${repo.owner}/${repo.repo}. This deletes its mirror and stored credential.`}
-                          >
-                            {busy === repo.key ? (
-                              <Loader2 className="size-4 animate-spin" />
-                            ) : (
-                              <Trash2 className="size-4" />
-                            )}
-                            Unbind
-                          </Button>
-                        }
-                      />
-                      <AlertDialogContent>
-                        <AlertDialogHeader>
-                          <AlertDialogTitle>
-                            Unbind {repo.owner}/{repo.repo}?
-                          </AlertDialogTitle>
-                          <AlertDialogDescription>
-                            This permanently deletes this host&apos;s repository mirror and stored
-                            access token. Bind the repository again with a new token to restore it.
-                          </AlertDialogDescription>
-                        </AlertDialogHeader>
-                        <AlertDialogFooter>
-                          <AlertDialogCancel>Cancel</AlertDialogCancel>
-                          <AlertDialogAction variant="destructive" onClick={() => void revoke(repo.key)}>
-                            Unbind repository
-                          </AlertDialogAction>
-                        </AlertDialogFooter>
-                      </AlertDialogContent>
-                    </AlertDialog>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      disabled={busy !== null}
+                      onClick={() => setRevokeTarget(repo)}
+                      aria-label={`Unbind ${repo.owner}/${repo.repo}`}
+                    >
+                      {busy === repo.key ? (
+                        <Loader2 className="size-4 animate-spin" />
+                      ) : (
+                        <Trash2 className="size-4" />
+                      )}
+                    </Button>
                   )}
                 </li>
               ))}
@@ -377,6 +354,28 @@ export function RepositoriesCard({ client, company, canManage }: Props) {
         </CardContent>
       </Card>
       )}
+      <AlertDialog open={revokeTarget !== null} onOpenChange={(open) => !open && setRevokeTarget(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Unbind {revokeTarget?.owner}/{revokeTarget?.repo}?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This permanently removes the host&apos;s mirror and stored credential. Teammates lose access
+              to this repository; bind it again with a new token to restore it.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Keep repository</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => {
+                if (revokeTarget) void revoke(revokeTarget.key);
+                setRevokeTarget(null);
+              }}
+            >
+              Unbind repository
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </section>
   );
 }

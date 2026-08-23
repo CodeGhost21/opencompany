@@ -282,6 +282,32 @@ async fn the_default_host_reports_the_built_in_store_as_editable() {
     );
 }
 
+/// A health answer is useful only if it is current. The engine route is
+/// operator-authenticated and re-probes its overlay for each read, while the
+/// unauthenticated `/spec` handshake carries no memory block at all.
+#[cfg(feature = "tinymemory")]
+#[tokio::test]
+async fn read_reprobes_the_live_memory_engine() {
+    let dir = tempfile::tempdir().unwrap();
+    let overlay = crate::store::open_memory_overlay(&crate::store::StorageSettings {
+        memory_backend: MemoryBackend::Null,
+        ..Default::default()
+    })
+    .expect("null binds")
+    .expect("null yields an overlay");
+    assert_eq!(
+        overlay.descriptor.healthy, None,
+        "the overlay starts unprobed"
+    );
+
+    let state = state_at(dir.path()).await.with_memory_overlay(overlay);
+    let (status, body) = call(&state, "GET", "/api/v1/company/memory/engine", None).await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["active"], "null");
+    assert_eq!(body["healthy"], true, "GET must return its fresh probe");
+}
+
 /// The refusal this surface exists for: a deployment that injects
 /// `OPENCOMPANY_MEMORY` owns the engine, so the console renders read-only and
 /// a write is refused rather than accepted-and-dropped.

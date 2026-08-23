@@ -243,7 +243,10 @@ test("a second company can be created on this computer", async ({ page, baseURL 
   await page.goto("/");
   await openTheRoster(page);
 
-  await page.getByLabel("Name").fill("Acme");
+  // The graph behind the roster now exposes its node labels as accessible
+  // names (e.g. "SOP tasks: e2e rename …"), which the substring form of
+  // `getByLabel` would match — so pin the exact label of the form field.
+  await page.getByLabel("Name", { exact: true }).fill("Acme");
   await page.getByTestId("local-instance-add").click();
 
   await expect(page.getByTestId("local-instance-acme")).toHaveAttribute(

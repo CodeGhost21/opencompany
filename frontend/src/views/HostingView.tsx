@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { Check, Globe, Loader2, TriangleAlert } from "lucide-react";
+import { Check, Loader2, TriangleAlert } from "lucide-react";
 import { toast } from "sonner";
 
 import {
@@ -165,9 +165,7 @@ export function HostingView({ client, company }: Props) {
     <div className="flex-1 overflow-y-auto" data-testid="hosting-view">
       <div className="mx-auto w-full max-w-5xl space-y-6 px-4 py-6">
         <div>
-          <h1 className="flex items-center gap-2 text-lg font-medium">
-            <Globe className="size-5" /> Hosting
-          </h1>
+          <h1 className="text-2xl font-semibold tracking-tight">Hosting</h1>
           <p className="text-sm text-muted-foreground">
             Connect a hosting provider so your teammates can put a site from this
             company&rsquo;s workspace on the internet — with a managed database

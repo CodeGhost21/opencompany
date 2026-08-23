@@ -1008,7 +1008,7 @@ pub struct McpServer {
 }
 
 fn default_mcp_timeout_secs() -> u64 {
-    30
+    super::mcp::DEFAULT_TIMEOUT_SECS
 }
 
 fn default_true() -> bool {

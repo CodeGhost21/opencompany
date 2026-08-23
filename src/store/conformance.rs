@@ -318,6 +318,7 @@ pub async fn assert_isolation_by_company(
         .append(
             &alpha,
             CompanyEvent::OperatorMessage {
+                mentions: Vec::new(),
                 parent: None,
                 text: "a".into(),
                 by: None,
@@ -552,6 +553,7 @@ pub async fn assert_append_only_event_and_ledger(
         .append(
             &id,
             CompanyEvent::OperatorMessage {
+                mentions: Vec::new(),
                 parent: None,
                 text: "e0".into(),
                 by: None,
@@ -565,6 +567,7 @@ pub async fn assert_append_only_event_and_ledger(
         .append(
             &id,
             CompanyEvent::OperatorMessage {
+                mentions: Vec::new(),
                 parent: None,
                 text: "e1".into(),
                 by: None,
@@ -584,6 +587,7 @@ pub async fn assert_append_only_event_and_ledger(
         .append(
             &id,
             CompanyEvent::OperatorMessage {
+                mentions: Vec::new(),
                 parent: None,
                 text: "e2".into(),
                 by: None,
@@ -619,6 +623,7 @@ pub async fn assert_monotonic_event_seq(events: Arc<dyn EventLog>) {
             .append(
                 &alpha,
                 CompanyEvent::OperatorMessage {
+                    mentions: Vec::new(),
                     parent: None,
                     text: format!("a{expected}"),
                     by: None,
@@ -636,6 +641,7 @@ pub async fn assert_monotonic_event_seq(events: Arc<dyn EventLog>) {
         .append(
             &beta,
             CompanyEvent::OperatorMessage {
+                mentions: Vec::new(),
                 parent: None,
                 text: "b0".into(),
                 by: None,
@@ -680,6 +686,7 @@ pub async fn assert_event_subscription_surfaces_gap(events: Arc<dyn EventLog>) {
             .append(
                 &id,
                 CompanyEvent::OperatorMessage {
+                    mentions: Vec::new(),
                     parent: None,
                     text: format!("event {seq}"),
                     by: None,
@@ -714,6 +721,7 @@ pub async fn assert_event_read_before(events: Arc<dyn EventLog>) {
                 .append(
                     &id,
                     CompanyEvent::OperatorMessage {
+                        mentions: Vec::new(),
                         parent: None,
                         text: text.to_string(),
                         by: None,
@@ -985,6 +993,7 @@ pub async fn assert_export_totality(
     let mut appended = Vec::new();
     for i in 0..4 {
         let ev = CompanyEvent::OperatorMessage {
+            mentions: Vec::new(),
             parent: None,
             text: format!("event {i}"),
             by: None,
@@ -2717,8 +2726,8 @@ pub async fn assert_fact_store(facts: Arc<dyn FactStore>) {
 /// backend keeps one claim per (addr, label) since #1300 (see
 /// [`assert_identical_body_two_labels`]), but a *new* label on an existing
 /// body stamps per-label on fs/sqlite and keeps the address's first-write
-/// stamp on the single-record backends (mongodb, the provider facade, the
-/// tinycortex engine). Readers of the stamp take the max across chunks for
+/// stamp on the single-record backends (mongodb, the provider facade).
+/// Readers of the stamp take the max across chunks for
 /// that reason.
 pub async fn assert_context_chunk_stamps(context: Arc<dyn ContextStore>) {
     let alpha = CompanyId::new("alpha");

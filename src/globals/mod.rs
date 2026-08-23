@@ -52,7 +52,7 @@ mod test;
 /// Closed, and each variant maps to exactly one surface below. A free-form kind
 /// would let a typo (`agents:researcher`) read as a disable that never fires,
 /// which is the one failure mode an opt-out list must not have.
-pub const DISABLE_KINDS: &[&str] = &["agent", "workflow", "skill", "ledger"];
+pub const DISABLE_KINDS: &[&str] = &["agent", "workflow", "skill", "ledger", "task"];
 
 /// The parsed `globals/globals.toml`.
 #[derive(Debug, Default, serde::Deserialize)]
@@ -81,6 +81,7 @@ struct Baseline {
     agents: Vec<Agent>,
     workflows: Vec<WorkflowFile>,
     ledgers: Vec<LedgerSpec>,
+    tasks: Vec<crate::company::TaskSeed>,
     skills: Vec<SkillDoc>,
     default_tool_allow: Vec<String>,
     faults: Vec<String>,
@@ -106,6 +107,7 @@ fn build() -> Baseline {
         agents: build_agents(&mut faults),
         workflows: build_workflows(&mut faults),
         ledgers: build_ledgers(&mut faults),
+        tasks: build_tasks(&mut faults),
         skills: build_skills(&manifest.skills.always, &mut faults),
         default_tool_allow: manifest.tools.default_allow,
         faults,
@@ -208,6 +210,24 @@ fn build_ledgers(faults: &mut Vec<String>) -> Vec<LedgerSpec> {
     specs
 }
 
+/// Parses `globals/tasks.toml` into the baseline's seed cards.
+///
+/// Fault-isolated like every other global surface: a malformed baseline costs
+/// its own cards and nothing else, because the alternative is one bad line
+/// stopping every company on the install from booting.
+fn build_tasks(faults: &mut Vec<String>) -> Vec<crate::company::TaskSeed> {
+    let (tasks, problems) = crate::company::task_file::parse_tasks(
+        "globals/tasks.toml",
+        generated::EMBEDDED_GLOBAL_TASKS,
+    );
+    faults.extend(
+        problems
+            .into_iter()
+            .map(|problem| format!("a global seed card is malformed: {problem}")),
+    );
+    tasks
+}
+
 fn build_skills(always: &[String], faults: &mut Vec<String>) -> Vec<SkillDoc> {
     let mut out = Vec::new();
     for slug in always {
@@ -246,6 +266,17 @@ pub fn workflows() -> &'static [WorkflowFile] {
 /// back. See `runtime::builder`.
 pub fn ledgers() -> &'static [LedgerSpec] {
     &baseline().ledgers
+}
+
+/// The setup cards every company starts with on its board.
+///
+/// Seeded once, at first boot, alongside whatever its own bundle seeds — and
+/// never re-seeded, for the reason [`ledgers`] is not: clearing a card is a
+/// person's call, and a baseline that re-asserted it on the next restart would
+/// take that call back. Clearing the board is routine, so this matters more
+/// here than it does for a ledger. See `runtime::builder`.
+pub fn tasks() -> &'static [crate::company::TaskSeed] {
+    &baseline().tasks
 }
 
 /// The shared-library skills installed in every company.
@@ -296,6 +327,7 @@ pub fn has(key: &str) -> bool {
         "workflow" => workflows().iter().any(|workflow| workflow.id == id),
         "skill" => skills().iter().any(|skill| skill.slug == id),
         "ledger" => ledgers().iter().any(|ledger| ledger.slug == id),
+        "task" => tasks().iter().any(|task| task.id == id),
         _ => false,
     }
 }

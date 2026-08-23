@@ -685,14 +685,22 @@ export function McpServersSection({ client, company, canManage, chrome = "inline
 
   return (
     <section className="space-y-3">
-      {chrome === "inline" && (
-        <div className="flex items-center gap-2">
-          <Server className="size-4 text-muted-foreground" />
-          <h3 className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
-            MCP Servers
-          </h3>
-        </div>
-      )}
+      {/* `h2` in both chromes, and it lands one level under the page's `h1`
+          either way (issue #1392). Inline on Connections it is a peer of
+          Inference, the company key, Composio, Channels, repositories and
+          providers, which all head their sections at the same level —
+          `test/unit/connections-section-heading-level.test.ts` holds them
+          together, because promoting this one alone would read to a screen
+          reader as though every section after it were a subsection of MCP
+          Servers. Standalone on `#/settings/mcp` the page's own `h1` is "MCP
+          Servers", so this names what it actually heads there instead of
+          repeating it. */}
+      <div className="flex items-center gap-2">
+        {chrome === "inline" && <Server className="size-4 text-muted-foreground" />}
+        <h2 className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
+          {chrome === "inline" ? "MCP Servers" : "Installed servers"}
+        </h2>
+      </div>
       <p className="text-sm text-muted-foreground">
         Remote MCP tool servers your teammates can call. Add an HTTP endpoint and (optionally) a
         token — the token is stored securely and never shown again.
@@ -792,12 +800,18 @@ export function McpServersSection({ client, company, canManage, chrome = "inline
                         />
                         <span className="ml-auto flex items-center gap-2">
                           {controls.toggle && (
-                            <Switch
-                              checked={server.enabled}
-                              disabled={busy !== null || !canManage}
-                              onCheckedChange={(v) => void toggle(server, v)}
-                              aria-label={`Enable ${server.name}`}
-                            />
+                            <span className="flex items-center gap-1.5">
+                              <Label htmlFor={`mcp-enabled-${server.name}`} className="text-xs">
+                                {server.enabled ? "Enabled" : "Disabled"}
+                              </Label>
+                              <Switch
+                                id={`mcp-enabled-${server.name}`}
+                                checked={server.enabled}
+                                disabled={busy !== null || !canManage}
+                                onCheckedChange={(v) => void toggle(server, v)}
+                                aria-label={`${server.enabled ? "Disable" : "Enable"} ${server.name}`}
+                              />
+                            </span>
                           )}
                           {/* Issue #1260: `oauth_required` means the server asked for
                               OAuth; it does NOT mean this console can complete one. A
@@ -919,6 +933,18 @@ export function McpServersSection({ client, company, canManage, chrome = "inline
                         </span>
                       </div>
                       <p className="truncate text-xs text-muted-foreground">{server.endpoint}</p>
+                      {controls.toggle && (
+                        <p className="text-xs text-muted-foreground">
+                          {server.enabled
+                            ? "Turning this off stops teammates from receiving this server's tools on their next turn."
+                            : "Turning this on makes this server's tools available on teammates' next turn, subject to their tool grants."}
+                        </p>
+                      )}
+                      {dial === "disconnect" && (
+                        <p className="text-xs text-muted-foreground">
+                          Disconnect keeps this install and its stored credentials. Reconnect it to use its tools again.
+                        </p>
+                      )}
                       {/* Reachability (issue #568): who can actually call this server. An
                           enabled server no agent reaches is almost always a misconfiguration,
                           so that empty case is flagged loudly rather than shown as a blank list.
@@ -1009,6 +1035,9 @@ export function McpServersSection({ client, company, canManage, chrome = "inline
                       )}
                       {envFor === server.name && canManage && (
                         <div className="space-y-2 rounded-md bg-muted/40 p-2" data-testid="mcp-env-inline">
+                          <p className="text-xs text-muted-foreground">
+                            Saving merges these values with the stored credentials and reconnects this server.
+                          </p>
                           {envFields.kind === "loading" ? (
                             <p className="flex items-center gap-1 text-xs text-muted-foreground">
                               <Loader2 className="size-3 animate-spin" /> Reading this
@@ -1179,6 +1208,11 @@ export function McpServersSection({ client, company, canManage, chrome = "inline
                     Add
                   </Button>
                 </div>
+                <p className="text-xs text-muted-foreground">
+                  Adding saves the server now. {bridge === "absent"
+                    ? "It stays unavailable to teammates until this deployment is rebuilt with MCP support."
+                    : "Teammates pick up its tools on their next turn."}
+                </p>
               </div>
             )}
 
