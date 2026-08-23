@@ -488,6 +488,46 @@ mod test {
         assert_eq!(hub.forwarded().len(), 1, "no second ingest");
     }
 
+    // Two confirms of the same item fired concurrently must file only once:
+    // the per-item confirm lock serialises them, and the loser returns the
+    // winner's recorded result instead of filing a second issue.
+    #[tokio::test]
+    async fn concurrent_confirms_file_once() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let github = Arc::new(MockGitHubClient::new());
+        let state = state_with_company(&home, github.clone()).await;
+        let app = router(state);
+
+        let (_, preview) = post_json(
+            &app,
+            "/api/v1/company/feedback",
+            r#"{"category":"bug","note":"the run crashed","preview":true}"#,
+        )
+        .await;
+        let item_id = preview["item_id"].as_str().expect("item id").to_string();
+        let confirm_body = serde_json::json!({
+            "category": "bug",
+            "note": "the run crashed",
+            "item_id": item_id,
+        })
+        .to_string();
+
+        let (a, b) = tokio::join!(
+            post_json(&app, "/api/v1/company/feedback", &confirm_body),
+            post_json(&app, "/api/v1/company/feedback", &confirm_body),
+        );
+
+        assert_eq!(a.0, StatusCode::OK);
+        assert_eq!(b.0, StatusCode::OK);
+        // Both report the outcome, but only one issue was filed and no
+        // duplicate comment was added.
+        assert_eq!(a.1["filed"], true);
+        assert_eq!(b.1["filed"], true);
+        assert_eq!(github.created().len(), 1, "only one issue filed");
+        assert_eq!(github.comments().len(), 0, "no duplicate comment");
+    }
+
     // A provisioned instance forwards to the hub instead of filing, and what
     // crosses the boundary is the scrubbed body — not the operator's raw words.
     #[tokio::test]
