@@ -113,10 +113,13 @@ describe("the payload block underneath the label", () => {
 
 describe("the decide buttons' label (#1411)", () => {
   const askers = new Map([["ceo", "Sam"]]);
+  // Sixty seconds after the default `at_millis: 1_000` — a bucket the hidden
+  // card tests can also read off (`composed 1m ago`).
+  const NOW = 61_000;
 
   it("names the request behind the action, not just its kind", () => {
     expect(
-      decisionLabel(approval({ kind: "shell", payload: { command: "make release" } }), askers),
+      decisionLabel(approval({ kind: "shell", payload: { command: "make release" } }), askers, NOW),
     ).toBe("Run a terminal command — make release — asked by Sam");
   });
 
@@ -126,28 +129,34 @@ describe("the decide buttons' label (#1411)", () => {
     const first = decisionLabel(
       approval({ kind: "shell", payload: { command: "make release" } }),
       askers,
+      NOW,
     );
     const second = decisionLabel(
       approval({ kind: "shell", payload: { command: "npm run deploy" } }),
       askers,
+      NOW,
     );
     expect(first).not.toBe(second);
   });
 
   it("omits the asker when the card has no agent", () => {
     expect(
-      decisionLabel(approval({ kind: "shell", payload: { command: "make release" }, agent: null }), askers),
+      decisionLabel(
+        approval({ kind: "shell", payload: { command: "make release" }, agent: null }),
+        askers,
+        NOW,
+      ),
     ).toBe("Run a terminal command — make release");
   });
 
   it("omits the payload lead when the card has none", () => {
-    expect(decisionLabel(approval({ kind: "payment.send" }), askers)).toBe(
+    expect(decisionLabel(approval({ kind: "payment.send" }), askers, NOW)).toBe(
       "Send a payment — asked by Sam",
     );
   });
 
   it("falls back to the asker id when the roster does not know it", () => {
-    expect(decisionLabel(approval({ kind: "shell", payload: { command: "make" } }), new Map())).toBe(
+    expect(decisionLabel(approval({ kind: "shell", payload: { command: "make" } }), new Map(), NOW)).toBe(
       "Run a terminal command — make — asked by ceo",
     );
   });
