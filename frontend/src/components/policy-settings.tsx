@@ -285,22 +285,28 @@ export function PolicySettings({ client, company }: Props) {
   // pending, and on hosts predating the route, the empty array is "unknown", not
   // "none of these are wired".
   //
-  // The set served here (`/workflows/tool-slugs`) is the *workflow* tool set,
-  // which is narrower than what the approval gate covers: an agent may be wired
-  // a tool that cannot be a workflow node (`hosting_launch_site`,
-  // `publish_artifact`), and the effect namespace is open to hosted kinds
-  // besides. So the note is scoped to what the set can prove — the entry does
-  // not match a workflow tool wired here, and it may still be a wired agent
-  // tool or a hosted effect kind. An entry counts as matching when it would
-  // gate a wired slug under the backend's own matcher (`SHELL` for the `shell`
-  // tool), so a fence the gate accepts is never called a mistake outright.
-  const unmatchedWiredTools = wiredToolsLoaded
+  // The best set to compare against is the policy response's `knownTools` — the
+  // complete gateable registry, which is broader than the workflow tool set
+  // served by `/workflows/tool-slugs`: an agent may be wired a tool that cannot
+  // be a workflow node (`hosting_launch_site`, `publish_artifact`), and the
+  // gate matches it by name. Comparing against the workflow subset alone would
+  // call such a fence a mistake. So when the host serves the complete registry
+  // the note is confident; a host predating it falls back to the workflow set,
+  // and the note scopes itself to what that set can prove.
+  //
+  // An entry counts as matching when it would gate a known tool under the
+  // backend's own matcher (`SHELL` for the `shell` tool, `invoice` for a
+  // `invoice.send` kind), so a fence the gate accepts is never called a mistake
+  // outright.
+  const knownTools = status?.knownTools ?? null;
+  const gateableSet = knownTools ?? (wiredToolsLoaded ? wiredTools : null);
+  const unmatchedWiredTools = gateableSet
     ? draftAlways
         .split(",")
         .map((kind) => kind.trim())
         .filter(
           (kind) =>
-            kind && !wiredTools.some((slug) => alwaysApproveGates(kind, slug)),
+            kind && !gateableSet.some((tool) => alwaysApproveGates(kind, tool)),
         )
     : [];
 
