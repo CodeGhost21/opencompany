@@ -2626,8 +2626,7 @@ impl CompanyRuntime {
         let mut _confirm_guard = None;
         let item = match item_id {
             Some(id) => {
-                _confirm_guard =
-                    Some(crate::feedback::store::confirm_lock(&id).lock_owned().await);
+                _confirm_guard = Some(crate::feedback::store::confirm_lock(&id).lock_owned().await);
                 let item = self
                     .feedback
                     .get(&id)
