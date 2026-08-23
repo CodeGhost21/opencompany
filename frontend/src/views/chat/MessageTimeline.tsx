@@ -286,6 +286,7 @@ export function MessageTimeline({
               approvals={item.approvals}
               now={now ?? Date.now()}
               askerNames={askerNames ?? EMPTY_NAMES}
+              compact
               thread={
                 item.approvals[0]?.thread
                   ? { channelId: channel.id, label: channelTitle(channel) }
