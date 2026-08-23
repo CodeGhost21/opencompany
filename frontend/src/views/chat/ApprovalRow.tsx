@@ -517,6 +517,23 @@ function BatchItem({
       >
         <TriangleAlert className="size-3.5 shrink-0" aria-hidden />
         <span className="min-w-0 flex-1 truncate font-mono text-xs">{label}</span>
+        {/*
+         * Carried into this branch too. A failed item is still pending and the
+         * card's buttons are still live, so the retry is a decision the
+         * operator has yet to make — and in a mixed batch the headline says the
+         * card both sends and spends without saying which row is which. Two
+         * argument-classified calls sharing a kind (`composio_execute`) are
+         * indistinguishable by their label alone, so dropping it here is
+         * exactly where the attribution is needed most.
+         */}
+        {consequence && (
+          <span
+            data-approval-consequence={consequence.label}
+            className="shrink-0 rounded-full bg-muted px-2 py-0.5 text-2xs font-medium text-foreground"
+          >
+            {consequence.label}
+          </span>
+        )}
         <span className="shrink-0 text-xs">Not recorded — {failure}</span>
       </li>
     );
