@@ -226,10 +226,15 @@ export function TeamView({
       setWorkload(null);
       return;
     }
+    const run = workloadRun.current;
     const [tasks, columns] = await Promise.all([
       listTasks(client, company).catch(() => null),
       fetchBoardColumns(client, company).catch(() => null),
     ]);
+    // Superseded: a newer read started while this one was in flight (the effect
+    // re-ran on a `refreshKey` change, say), so this map must not overwrite the
+    // newer read's answer — one read's board cannot determine another's roster.
+    if (run !== workloadRun.current) return;
     // `columns.length === 0` is a *third* failure and the easiest to miss:
     // `fetchBoardColumns` resolves empty — it does not reject — for a host whose
     // ledger list carries no `tasks` ledger at all. Treating that as a known
@@ -248,6 +253,7 @@ export function TeamView({
     // roster. `null` also disables the Working switch, so the filter cannot
     // strand the roster mid-re-read.
     setWorkload(null);
+    workloadRun.current += 1;
     void boot();
     void loadViewer();
     void loadWorkload();
