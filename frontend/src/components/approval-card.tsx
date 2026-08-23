@@ -256,16 +256,18 @@ export function ApprovalMeta({
  * The only workflow approval shape that carries both parts of the run address.
  *
  * `workflow_run_id` names a run but the console route also needs its workflow.
- * Native `workflow.approve` effects carry that id in their host-projected
- * payload; a tool call parked by a workflow does not. Never infer the latter
- * from a run id: it has no global namespace and could send the operator to a
+ * Native `workflow.approve` effects carry that id as a **top-level summary
+ * field** (`ApprovalSummary.workflow_id`), projected by the host from the raw
+ * parked effect rather than from the display payload — the payload is redacted
+ * and role redaction (#618) strips it from a member reader, and the run link
+ * must survive for the member holding the stalled workflow up. A tool call
+ * parked by a workflow carries neither field. Never infer the workflow from a
+ * run id: it has no global namespace and could send the operator to a
  * different workflow.
  */
 function workflowIdForApproval(approval: ApprovalSummary): string | null {
-  if (approval.kind !== "workflow.approve" || !approval.payload) return null;
-  const payload = approval.payload;
-  if (typeof payload !== "object" || Array.isArray(payload)) return null;
-  const workflowId = (payload as Record<string, unknown>).workflow_id;
+  if (approval.kind !== "workflow.approve") return null;
+  const workflowId = approval.workflow_id;
   return typeof workflowId === "string" && workflowId.length > 0 ? workflowId : null;
 }
 
