@@ -51,5 +51,12 @@ describe("the overview graph keyboard control", () => {
       "Notes: Acme. Press Enter or Space to select.",
       "Pillars: Engineering. Press Enter or Space to select.",
     ]);
+
+    act(() => {
+      nodes[0].focus();
+      nodes[0].dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
+    });
+    expect(nodes[1].tabIndex).toBe(0);
+    expect(document.activeElement).toBe(nodes[1]);
   });
 });
