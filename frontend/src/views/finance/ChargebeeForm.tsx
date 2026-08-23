@@ -204,8 +204,9 @@ export function ChargebeeForm({ client, company, status, onStatus }: Props) {
               <AlertDialogHeader>
                 <AlertDialogTitle>Disconnect Chargebee?</AlertDialogTitle>
                 <AlertDialogDescription>
-                  This clears the write-only Chargebee API key and payment-notification credential.
-                  They cannot be recovered; reconnect with new credentials to restore billing.
+                  This clears the Chargebee site, the write-only Chargebee API key and the
+                  payment-notification credential. They cannot be recovered; reconnect with new
+                  credentials to restore billing.
                 </AlertDialogDescription>
               </AlertDialogHeader>
               <AlertDialogFooter>
