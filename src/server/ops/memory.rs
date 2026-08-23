@@ -360,17 +360,21 @@ struct MemoryStats {
 
 /// `GET /memory` — the rows together with the context-truncation metadata for
 /// the SAME read, so the console's "newest N of M" notice never compares the
-/// capped rows against a count taken at a different moment.
+/// capped rows against a count taken at a different moment. The metadata
+/// describes the unqueried browse list; a `?query=` request returns search
+/// matches, not "the newest N", so it reports the metadata as not applicable.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct MemoryList {
     items: Vec<MemoryEntry>,
     /// The non-mirror context chunk population before the 500-row display
     /// cap — the "M" in the console's "showing the newest N of M" notice.
-    /// Facts are never capped, so they are not counted here.
+    /// Facts are never capped, so they are not counted here. `0` for a
+    /// `?query=` request, whose rows are search matches the metadata does not
+    /// describe.
     total_context: usize,
     /// Whether the context rows dropped any to [`MAX_CONTEXT_ENTRIES`], from
-    /// this same read.
+    /// this same read. Always `false` for a `?query=` request.
     context_truncated: bool,
 }
 
