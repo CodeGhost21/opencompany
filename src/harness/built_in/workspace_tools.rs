@@ -2640,6 +2640,69 @@ mod tests {
         );
     }
 
+    /// A rename re-renders the path of every node under a folder, so the
+    /// ownership gate must see descendants the path maps omit. This is the
+    /// rename-side half of the emptiness test above: `entries_under` reads
+    /// `by_path`, which cannot see `hidden` at all, while a parent-id walk must
+    /// hand the gate exactly that node — and its own descendants too.
+    #[test]
+    fn a_folder_rename_sees_unaddressable_descendants() {
+        let nodes = vec![
+            folder("f", "archive", None),
+            // Name carries a separator: no renderable path, absent from the
+            // address maps, but still moved by a parent-id `rename_move`.
+            file("hidden", "quarterly/report.md", Some("f")),
+            // A grandchild under the unaddressable node is itself unaddressable
+            // (its chain carries an illegal name), and must also be found.
+            file("nested", "nested.md", Some("hidden")),
+            // An ordinary addressable sibling stays included as before.
+            file("plain", "plain.md", Some("f")),
+        ];
+        let index = PathIndex::build(nodes);
+
+        assert_eq!(index.unaddressable, 2, "hidden and nested must be excluded");
+        assert!(
+            !index.by_id.contains_key("hidden") && !index.by_id.contains_key("nested"),
+            "an unaddressable node must not be reachable by id either"
+        );
+
+        let mut subtree = index.subtree_ids("f");
+        subtree.sort_unstable();
+        assert_eq!(
+            subtree,
+            vec!["hidden", "nested", "plain"],
+            "the walk must see the addressable child and both unaddressable ones"
+        );
+    }
+
+    /// The parent-id walk used by the rename gate must terminate on a
+    /// hand-edited backing store that cycles, exactly as the path renderer's
+    /// depth limit does — a cycle inside a subtree would otherwise hang the
+    /// walk on a folder rename.
+    #[test]
+    fn subtree_ids_terminates_on_a_cycle() {
+        let nodes = vec![
+            folder("f", "archive", None),
+            folder("a", "A", Some("f")),
+            folder("b", "B", Some("a")),
+            folder("c", "C", Some("b")),
+            // `b` already names `a` as its parent, so this edge folds the two
+            // into a cycle; the visited set must keep the walk finite.
+            folder("d", "D", Some("b")),
+        ];
+        let index = PathIndex::build(nodes);
+        // Re-wire: c → b, b → a, a → c would be a 3-cycle, but `a`'s parent is
+        // already `f`. Build the cycle explicitly instead.
+        let _ = index;
+        let cyclic = vec![
+            folder("x", "X", Some("y")),
+            folder("y", "Y", Some("x")),
+        ];
+        let index = PathIndex::build(cyclic);
+        // The walk from a root that reaches the cycle must finish, not loop.
+        let _ = index.subtree_ids("x");
+    }
+
     #[test]
     fn a_dangling_or_cyclic_ancestor_chain_is_not_path_addressable() {
         // Parent id names a node that is not in the tree.
