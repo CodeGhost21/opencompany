@@ -31,6 +31,7 @@ import {
 } from "@/lib/approval-wording";
 import { approvalSummary, grantHeadline, timeAgo, toolAction, untilLabel } from "@/lib/language";
 import { approvalsForTask } from "@/lib/task-approvals";
+import { approvalsByDeadline } from "@/lib/approval-order";
 import { startVisiblePolling } from "@/lib/visible-poll";
 import { isRecord, parseNodeMessages } from "@/views/workflows/run-output";
 
@@ -156,6 +157,16 @@ export function ApprovalsView({
     [approvals, focusTaskId],
   );
   /**
+   * The queue's priority order, before its pointer-stable snapshot (#1427).
+   *
+   * A deadline is the one ordering signal the host enforces without operator
+   * input, so the earliest one must not be stranded beneath arbitrary response
+   * order. Sorting before `useStableList` keeps #1414's guarantee intact: a
+   * polling response can update the intended order, but cannot rearrange cards
+   * while the operator is pointing at or tabbing through the queue.
+   */
+  const orderedVisible = useMemo(() => approvalsByDeadline(visible), [visible]);
+  /**
    * The same rows, but in a pointer-stable order (#1414).
    *
    * A poll swaps `visible` wholesale every 5s, and mapping that straight to
@@ -167,7 +178,7 @@ export function ApprovalsView({
    * branch below reads `rows` rather than `visible` so the count, the empty
    * state and the list all agree on the one frozen view.
    */
-  const { items: rows, containerProps: queueHold } = useStableList(visible);
+  const { items: rows, containerProps: queueHold } = useStableList(orderedVisible);
   const askerNames = useAskerNames(client, company, approvals);
   const { grants, granterNames, refreshGrants } = useStandingGrants(client, company);
   /**
@@ -335,62 +346,9 @@ export function ApprovalsView({
             </a>
           </div>
         )}
-        {/* Issue #1229: "nothing parked" and "we could not read what is parked"
-            are different facts, and only one of them is an instruction to stop
-            looking. The queue's own load state decides which is on screen —
-            `approvals` being empty cannot, because it is empty in both cases.
-            A queue that has been read once keeps its rows through a later
-            failure, so this branch is only ever the cold path. */}
-        {queue !== "ready" && approvals.length === 0 ? (
-          queue === "loading" ? (
-            <LoadingApprovals />
-          ) : (
-            <UnreadableApprovals onRetry={() => void feed.refresh()} />
-          )
-        ) : rows.length === 0 ? (
-          focusTaskId !== null ? (
-            <ClearedForTask />
-          ) : (
-            <EmptyApprovals onGoToConversation={onGoToConversation} />
-          )
-        ) : (
-          <>
-            <div className="mb-4 flex items-baseline justify-between">
-              <h2 className="text-sm font-medium text-muted-foreground">
-                {rows.length === 1
-                  ? "1 thing needs your approval"
-                  : `${rows.length} things need your approval`}
-              </h2>
-            </div>
-            {/* #971: nothing may vanish unannounced. Requests now age out on
-                their own, so the queue says so once, up front — mirroring the
-                standing-permissions section's "Each one expires on its own"
-                below. Each card carries its own deadline; this is the sentence
-                that stops that deadline being a surprise. */}
-            <p className="mb-3 text-xs text-muted-foreground">
-              Each one has a deadline. Anything still undecided by then is
-              declined on its own, and the work behind it moves on.
-            </p>
-            <div className="flex flex-col gap-3" {...queueHold}>
-              {rows.map((a) => (
-                <ApprovalCard
-                  key={a.id}
-                  approval={a}
-                  now={now}
-                  askerNames={askerNames}
-                  deciding={inFlight.get(a.id) ?? null}
-                  batchIndex={batchPos.get(a.id)?.index ?? 1}
-                  batchTotal={batchPos.get(a.id)?.total ?? 1}
-                  onDecide={(verdict, scope) => void decide(a, verdict, scope)}
-                />
-              ))}
-            </div>
-          </>
-        )}
-
-        {/* Below the queue, and shown even when the queue is empty — a standing
-            permission with nothing currently parked is exactly the state an
-            operator most needs to be able to find and take back. */}
+        {/* #1427: permissions are a separate operator task, not the last queue
+            row. Keeping them before the pending list makes revocation reachable
+            even when a backlog is several screens long. */}
         <StandingPermissions
           grants={grants}
           now={now}
@@ -416,6 +374,60 @@ export function ApprovalsView({
             }
           }}
         />
+        {/* Issue #1229: "nothing parked" and "we could not read what is parked"
+            are different facts, and only one of them is an instruction to stop
+            looking. The queue's own load state decides which is on screen —
+            `approvals` being empty cannot, because it is empty in both cases.
+            A queue that has been read once keeps its rows through a later
+            failure, so this branch is only ever the cold path. */}
+        {queue !== "ready" && approvals.length === 0 ? (
+          queue === "loading" ? (
+            <LoadingApprovals />
+          ) : (
+            <UnreadableApprovals onRetry={() => void feed.refresh()} />
+          )
+        ) : rows.length === 0 ? (
+          focusTaskId !== null ? (
+            <ClearedForTask />
+          ) : (
+            <EmptyApprovals onGoToConversation={onGoToConversation} />
+          )
+        ) : (
+          <>
+            {/* #1427: the count and deadline rule orient every viewport, not
+                only the first one. The opaque background makes the header a
+                real reading boundary over cards that scroll beneath it. */}
+            <div className="sticky top-0 z-10 -mx-4 mb-3 border-b bg-background px-4 py-3">
+              <h2 className="text-sm font-medium text-muted-foreground">
+                {rows.length === 1
+                  ? "1 thing needs your approval"
+                  : `${rows.length} things need your approval`}
+              </h2>
+              {/* #971: nothing may vanish unannounced. Requests now age out on
+                  their own, so the queue says so once, up front. Each card
+                  carries its own deadline; this is the sentence that stops
+                  that deadline being a surprise. */}
+              <p className="mt-1 text-xs text-muted-foreground">
+                Each one has a deadline. Anything still undecided by then is
+                declined on its own, and the work behind it moves on.
+              </p>
+            </div>
+            <div className="flex flex-col gap-3" {...queueHold}>
+              {rows.map((a) => (
+                <ApprovalCard
+                  key={a.id}
+                  approval={a}
+                  now={now}
+                  askerNames={askerNames}
+                  deciding={inFlight.get(a.id) ?? null}
+                  batchIndex={batchPos.get(a.id)?.index ?? 1}
+                  batchTotal={batchPos.get(a.id)?.total ?? 1}
+                  onDecide={(verdict, scope) => void decide(a, verdict, scope)}
+                />
+              ))}
+            </div>
+          </>
+        )}
       </div>
     </div>
   );
