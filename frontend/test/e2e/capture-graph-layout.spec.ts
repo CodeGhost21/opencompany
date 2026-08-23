@@ -12,13 +12,20 @@ const CONTENT_SURFACE = '[data-testid="content-surface"]';
 async function settleKnowledgeGraph(page: Page) {
   const svg = page.getByRole("img", { name: "Operating knowledge graph" });
   await svg.waitFor({ state: "visible", timeout: 30_000 });
+  // Record the node-count trajectory from first visibility — detects whether the
+  // graph mounted empty (chunk won the load race) and grew, or mounted full
+  // (data won), which changes the sim's alpha trajectory.
+  const trajectory: Array<{ t: number; n: number }> = [];
   let previous = "";
+  const t0 = Date.now();
   for (let attempt = 0; attempt < 24; attempt += 1) {
     const current = await svg.evaluate((el) => el.innerHTML);
-    if (current === previous) return;
+    trajectory.push({ t: Date.now() - t0, n: (current.match(/<g transform=/g) || []).length });
+    if (current === previous) break;
     previous = current;
     await page.waitForTimeout(750);
   }
+  return trajectory;
 }
 
 test("capture settled graph layout + API data", async ({ page }) => {
