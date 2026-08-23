@@ -1168,16 +1168,11 @@ jobs:
         run: scripts/ci/run-scoped-suite.sh "composio choice ops" openhuman,chargebee,paypal,composio server::ops::composio::tests::gated_tests
 
       # Issue #914. The `tinymemory` feature binds the engine-neutral
-      # `MemoryProvider` contract and adds the `remote`/`null` selection modes.
-      #
-      # Both steps pass `tinymemory` ALONE, deliberately. The feature does not
-      # imply `tinycortex` and must not be made to: `remote`/`null` bind a
-      # provider through this contract while `embedded` uses the `tinycortex`
-      # overlay, and keeping them apart is what lets a hosted-memory tenant build
-      # without linking a bundled SQLite it will never call (tinymemory#18 §D).
-      # Adding `tinycortex` here to "make the build match the lane" would hide a
-      # regression in exactly that separation, because the contract path would
-      # never again be compiled on its own.
+      # `MemoryProvider` contract and adds the `remote`/`null` selection modes
+      # (the embedded backend and its tinycortex overlay were removed in
+      # #1568). `tinymemory` is passed ALONE, deliberately, so a hosted-memory
+      # tenant build compiles only the provider contract, never an engine that
+      # selection will not bind.
       #
       # The lane is a placement choice, not a requirement — every Rust job runs
       # `init-vendored-submodules.sh`, so the `vendor/openhuman/vendor/tinymemory`
