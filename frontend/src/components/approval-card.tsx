@@ -387,6 +387,41 @@ export function ApprovalScopeControl({
   );
 }
 
+/** The matching, opt-in scope for a refusal (issue #1458). */
+export function DeclineScopeControl({
+  approval: a,
+  scope,
+  onChange,
+  disabled,
+}: {
+  approval: ApprovalSummary;
+  scope: GrantScope;
+  onChange: (scope: GrantScope) => void;
+  disabled?: boolean;
+}) {
+  if (!a.broadly_deniable) return null;
+  const name = `decline-scope-${a.id}`;
+  return (
+    <fieldset disabled={disabled} className="rounded-lg border bg-muted/30 px-3 py-2 text-sm disabled:opacity-60">
+      <legend className="px-1 text-xs text-muted-foreground">If you decline</legend>
+      <div className="flex flex-col gap-1.5">
+        <label className="flex items-center gap-2">
+          <input type="radio" name={name} checked={scope.kind === "once"} onChange={() => onChange({ kind: "once" })} className="size-3.5 accent-primary" />
+          <span>Just this once</span>
+        </label>
+        <label className="flex flex-wrap items-center gap-2">
+          <input type="radio" name={name} checked={scope.kind === "tool"} onChange={() => onChange({ kind: "tool", expiresInMillis: GRANT_DURATIONS[0].millis })} className="size-3.5 accent-primary" />
+          <span>Don't ask again for this tool for</span>
+          <select value={scope.kind === "tool" ? scope.expiresInMillis : GRANT_DURATIONS[0].millis} disabled={scope.kind !== "tool"} onChange={(e) => onChange({ kind: "tool", expiresInMillis: Number(e.target.value) })} aria-label="How long this refusal lasts" className="rounded-md border bg-background px-1.5 py-0.5 text-xs disabled:opacity-50">
+            {GRANT_DURATIONS.map((d) => <option key={d.millis} value={d.millis}>{d.label}</option>)}
+          </select>
+        </label>
+      </div>
+      {scope.kind === "tool" && <p className="mt-1.5 px-1 text-xs text-muted-foreground">It won't ask again for this tool until then. You can take it back from Standing permissions at any time.</p>}
+    </fieldset>
+  );
+}
+
 /**
  * Who the broader scope would be granted to, by name.
  *

@@ -14,6 +14,7 @@ import {
 } from "@/api/types";
 import {
   ApprovalHeadline,
+  DeclineScopeControl,
   ApprovalMeta,
   ApprovalPayload,
   ApprovalScopeControl,
@@ -634,6 +635,7 @@ export function ApprovalCard({
   // card decided without touching the control behaves exactly as it did before
   // #374 — the scope is opt-in at every level, including this one.
   const [scope, setScope] = useState<GrantScope>({ kind: "once" });
+  const [declineScope, setDeclineScope] = useState<GrantScope>({ kind: "once" });
 
   // No cross-card dimming: another card being decided is not this card's
   // business, and treating it as such is the visual half of the #373 bug.
@@ -666,6 +668,7 @@ export function ApprovalCard({
           onChange={setScope}
           disabled={deciding !== null}
         />
+        <DeclineScopeControl approval={a} scope={declineScope} onChange={setDeclineScope} disabled={deciding !== null} />
 
         <ApprovalMeta
           approval={a}
@@ -703,7 +706,7 @@ export function ApprovalCard({
             disabled={deciding !== null}
             /* A decline never carries a scope — there is nothing to grant,
                and the host refuses the pairing anyway. */
-            onClick={() => onDecide("deny", { kind: "once" })}
+            onClick={() => onDecide("deny", declineScope)}
           >
             {deciding === "deny" ? (
               <Loader2 className="size-4 animate-spin" />

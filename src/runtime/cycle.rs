@@ -948,11 +948,17 @@ approval.]"
         self.rt.journal.record_resolved(id).await?;
         match outcome {
             ResolveOutcome::Approved(effect) => {
-                self.settle_approved_effect(id, effect, by.clone(), scope).await?;
+                self.settle_approved_effect(id, effect, by.clone(), scope)
+                    .await?;
             }
             ResolveOutcome::Denied if matches!(scope, GrantScope::Tool { .. }) => {
-                let effect = self.rt.journal.approval_effect(id).expect("resolved approval retains effect");
-                self.mint_standing_deny(id, effect, by.clone(), scope).await?;
+                let effect = self
+                    .rt
+                    .journal
+                    .approval_effect(id)
+                    .expect("resolved approval retains effect");
+                self.mint_standing_deny(id, effect, by.clone(), scope)
+                    .await?;
             }
             _ => {}
         }
@@ -1053,9 +1059,14 @@ approval.]"
         by: Actor,
         scope: GrantScope,
     ) -> Result<()> {
-        let GrantScope::Tool { expires_at_millis } = scope else { unreachable!() };
-        let Some(subject) = crate::runtime::grants::subject_of(&effect) else { unreachable!() };
-        self.mint_standing_policy(id, subject, effect, by, expires_at_millis, Verdict::Deny).await
+        let GrantScope::Tool { expires_at_millis } = scope else {
+            unreachable!()
+        };
+        let Some(subject) = crate::runtime::grants::subject_of(&effect) else {
+            unreachable!()
+        };
+        self.mint_standing_policy(id, subject, effect, by, expires_at_millis, Verdict::Deny)
+            .await
     }
 
     async fn settle_approved_effect(
@@ -1096,7 +1107,7 @@ approval.]"
         match scope {
             GrantScope::Once => self.mint_grant(id, agent, effect).await,
             GrantScope::Tool { expires_at_millis } => {
-        self.mint_standing_grant(
+                self.mint_standing_grant(
                     id,
                     GrantSubject::Agent(agent),
                     effect,
@@ -1128,7 +1139,8 @@ approval.]"
         by: Actor,
         expires_at_millis: u64,
     ) -> Result<()> {
-        self.mint_standing_policy(id, subject, effect, by, expires_at_millis, Verdict::Approve).await
+        self.mint_standing_policy(id, subject, effect, by, expires_at_millis, Verdict::Approve)
+            .await
     }
 
     async fn mint_standing_policy(

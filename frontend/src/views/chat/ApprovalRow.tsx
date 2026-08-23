@@ -48,6 +48,7 @@ import {
   ApprovalMeta,
   ApprovalPayload,
   ApprovalScopeControl,
+  DeclineScopeControl,
   approvalIcon,
 } from "@/components/approval-card";
 import { Button } from "@/components/ui/button";
@@ -175,6 +176,7 @@ export function ApprovalRow({
   // without touching the control behaves as it did before #431 — the scope is
   // opt-in here too.
   const [scope, setScope] = useState<GrantScope>({ kind: "once" });
+  const [declineScope, setDeclineScope] = useState<GrantScope>({ kind: "once" });
 
   const lead = approvals[0];
   const pending = useMemo(() => approvals.filter((a) => !decided[a.id]), [approvals, decided]);
@@ -204,7 +206,7 @@ export function ApprovalRow({
    */
   const decideAll = (verdict: Verdict) => {
     for (const a of pending) {
-      onDecide(a, verdict, verdict === "approve" ? scope : { kind: "once" });
+      onDecide(a, verdict, verdict === "approve" ? scope : declineScope);
     }
   };
 
@@ -301,6 +303,7 @@ export function ApprovalRow({
               disabled={busy}
             />
           )}
+          {!done && <DeclineScopeControl approval={pending[0]} scope={declineScope} onChange={setDeclineScope} disabled={busy} />}
 
           <ApprovalMeta
             approval={lead}

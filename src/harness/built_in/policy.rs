@@ -1096,6 +1096,7 @@ impl ApprovalPolicy {
             &subject,
             tool,
             scope.as_deref(),
+            Verdict::Approve,
             crate::ports::now_millis(),
         ) else {
             return false;
@@ -1108,6 +1109,25 @@ impl ApprovalPolicy {
             grant.expires_at_millis
         );
         true
+    }
+
+    fn standing_deny_applies(&self, tool: &str, args: &serde_json::Value) -> bool {
+        let subject = match (self.agent.as_deref(), self.workflow.as_deref()) {
+            (Some(agent), _) => GrantSubject::Agent(agent.to_string()),
+            (None, Some(workflow)) => GrantSubject::Workflow(workflow.to_string()),
+            (None, None) => return false,
+        };
+        let scope = crate::policy::consequence::standing_scope_of(tool, args);
+        self.requests
+            .grants()
+            .match_standing(
+                &subject,
+                tool,
+                scope.as_deref(),
+                Verdict::Deny,
+                crate::ports::now_millis(),
+            )
+            .is_some()
     }
 
     /// Does this tool call **spend money**? The predicate the daily budget arm
@@ -1381,6 +1401,12 @@ impl ToolPolicy for ApprovalPolicy {
                 grant.agent
             );
             return ToolPolicyDecision::Allow;
+        }
+
+        if self.standing_deny_applies(tool, &request.arguments) {
+            return ToolPolicyDecision::deny(format!(
+                "'{tool}' is denied by a standing permission; it will ask again when that refusal expires or is revoked"
+            ));
         }
 
         // 2b. A live STANDING grant: the operator opened this tool up for this
