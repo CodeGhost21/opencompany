@@ -2558,6 +2558,7 @@ impl CompanyRuntime {
                 // cannot disagree.
                 broadly_grantable: crate::runtime::grants::subject_of(&p.effect).is_some()
                     && p.effect.may_be_granted_standing(),
+                broadly_deniable: crate::runtime::grants::subject_of(&p.effect).is_some(),
                 // Always false here. Whether a *reader* may see the contents is
                 // a property of who is asking, and this projection is
                 // deliberately principal-free (issue #618) — the redaction

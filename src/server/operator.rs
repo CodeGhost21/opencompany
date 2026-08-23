@@ -2673,10 +2673,6 @@ async fn list_approvals_single(
 struct ResolveApproval {
     /// `approve` or `deny`.
     verdict: Verdict,
-    /// An optional operator note (reserved; not yet surfaced to the brain).
-    #[allow(dead_code)]
-    #[serde(default)]
-    note: Option<String>,
     /// An optional payload edit; overlaid onto the parked effect on `approve`.
     #[serde(default)]
     amended_payload: Option<serde_json::Value>,
@@ -2734,8 +2730,6 @@ enum ResolveScope {
 /// request leaves the approval parked and journals no verdict. The contradictions
 /// are refused rather than resolved in the caller's favour:
 ///
-/// * **with a deny** — a scope describes what an approval grants, and a deny
-///   grants nothing. Honouring one would be inventing consent out of a refusal.
 /// * **with `amended_payload`** — an argument edit is by definition an
 ///   exact-call approval ("this, but with my correction"), and a standing grant
 ///   admits any arguments. The two say opposite things about the same request.
@@ -2759,10 +2753,7 @@ fn grant_scope(body: &ResolveApproval) -> Result<GrantScope, ApiError> {
             Ok(GrantScope::Once)
         }
         ResolveScope::Tool => {
-            if body.verdict == Verdict::Deny {
-                return Err(bad("a scope cannot accompany a deny verdict"));
-            }
-            if body.amended_payload.is_some() {
+            if body.verdict == Verdict::Approve && body.amended_payload.is_some() {
                 return Err(bad(
                     "amended_payload cannot accompany scope \"tool\": editing the arguments \
                      approves one exact call, while a standing grant admits any arguments",
@@ -2803,6 +2794,7 @@ struct StandingGrantDto {
     agent: String,
     /// The tool it admits.
     tool: String,
+    verdict: Verdict,
     /// Who granted it: a signed-in user, or the platform credential.
     granted_by: Actor,
     /// Epoch-millis it was granted.
@@ -2827,6 +2819,7 @@ impl From<crate::runtime::grants::StandingGrant> for StandingGrantDto {
             id: g.id.to_string(),
             agent: g.agent,
             tool: g.tool,
+            verdict: g.verdict,
             granted_by: g.granted_by,
             at_millis: g.at_millis,
             expires_at_millis: g.expires_at_millis,

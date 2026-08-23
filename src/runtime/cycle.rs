@@ -911,7 +911,7 @@ approval.]"
         // request changes nothing at all: the approval stays parked, no verdict
         // is journaled, and the operator can simply approve it "once" instead.
         if let GrantScope::Tool { .. } = scope {
-            self.check_broadly_grantable(id)?;
+            self.check_broadly_scoped(id, verdict)?;
         }
         let outcome = self
             .rt
@@ -946,9 +946,15 @@ approval.]"
         // deny nothing does, so its held checkout becomes sweepable.
         self.rt.grants.clear_pending(id);
         self.rt.journal.record_resolved(id).await?;
-        if let ResolveOutcome::Approved(effect) = outcome {
-            self.settle_approved_effect(id, effect, by.clone(), scope)
-                .await?;
+        match outcome {
+            ResolveOutcome::Approved(effect) => {
+                self.settle_approved_effect(id, effect, by.clone(), scope).await?;
+            }
+            ResolveOutcome::Denied if matches!(scope, GrantScope::Tool { .. }) => {
+                let effect = self.rt.journal.approval_effect(id).expect("resolved approval retains effect");
+                self.mint_standing_deny(id, effect, by.clone(), scope).await?;
+            }
+            _ => {}
         }
         // The follow-up event, so the brain learns the verdict. Returning it
         // (rather than appending it here) keeps the event logged exactly once:
@@ -1015,7 +1021,7 @@ approval.]"
     /// An unknown or already-resolved id falls through to the ordinary
     /// already-resolved path rather than erroring here — a double-click on the
     /// scoped button must stay the no-op it is on the plain one.
-    fn check_broadly_grantable(&self, id: &ApprovalId) -> Result<()> {
+    fn check_broadly_scoped(&self, id: &ApprovalId, verdict: Verdict) -> Result<()> {
         let Some(effect) = self.rt.approval_gate.parked_effect(id) else {
             return Ok(());
         };
@@ -1030,7 +1036,7 @@ approval.]"
                 effect.kind
             )));
         }
-        if !effect.may_be_granted_standing() {
+        if verdict == Verdict::Approve && !effect.may_be_granted_standing() {
             return Err(OpenCompanyError::InvalidRequest(format!(
                 "'{}' cannot be granted for a period — it can reach further than a standing \
                  permission can describe, so it stays a per-call decision; approve it once instead",
@@ -1038,6 +1044,18 @@ approval.]"
             )));
         }
         Ok(())
+    }
+
+    async fn mint_standing_deny(
+        &self,
+        id: &ApprovalId,
+        effect: Effect,
+        by: Actor,
+        scope: GrantScope,
+    ) -> Result<()> {
+        let GrantScope::Tool { expires_at_millis } = scope else { unreachable!() };
+        let Some(subject) = crate::runtime::grants::subject_of(&effect) else { unreachable!() };
+        self.mint_standing_policy(id, subject, effect, by, expires_at_millis, Verdict::Deny).await
     }
 
     async fn settle_approved_effect(
@@ -1078,7 +1096,7 @@ approval.]"
         match scope {
             GrantScope::Once => self.mint_grant(id, agent, effect).await,
             GrantScope::Tool { expires_at_millis } => {
-                self.mint_standing_grant(
+        self.mint_standing_grant(
                     id,
                     GrantSubject::Agent(agent),
                     effect,
@@ -1109,6 +1127,18 @@ approval.]"
         effect: Effect,
         by: Actor,
         expires_at_millis: u64,
+    ) -> Result<()> {
+        self.mint_standing_policy(id, subject, effect, by, expires_at_millis, Verdict::Approve).await
+    }
+
+    async fn mint_standing_policy(
+        &self,
+        id: &ApprovalId,
+        subject: GrantSubject,
+        effect: Effect,
+        by: Actor,
+        expires_at_millis: u64,
+        verdict: Verdict,
     ) -> Result<()> {
         let conversation = self
             .rt
@@ -1142,6 +1172,7 @@ approval.]"
             // The tool, and nothing about the arguments. A standing grant has no
             // `args` field to copy them into — that is the type's whole point.
             tool,
+            verdict,
             granted_by: by,
             approval_id: id.clone(),
             at_millis: now_millis(),

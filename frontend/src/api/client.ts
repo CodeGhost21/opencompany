@@ -679,12 +679,10 @@ export class OpenCompanyClient {
   ): Promise<ChatResponse | ResolveReceipt> {
     const body: {
       verdict: Verdict;
-      note?: string;
       detach?: boolean;
       scope?: "once" | "tool";
       expires_in_millis?: number;
     } = { verdict };
-    if (note) body.note = note;
     if (options.detach) body.detach = true;
     // Issue #374. The `once` scope is sent as *nothing at all*, not as
     // `scope: "once"`: the omitted-field form is what an old host understands,

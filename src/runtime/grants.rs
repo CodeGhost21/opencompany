@@ -347,6 +347,9 @@ pub struct StandingGrant {
     pub workflow: Option<String>,
     /// The tool it admits, with any arguments.
     pub tool: String,
+    /// Whether this standing policy admits or refuses matching calls.
+    #[serde(default = "default_standing_verdict")]
+    pub verdict: crate::ports::types::Verdict,
     /// Who granted it. Journaled so "who opened this up" is answerable later.
     pub granted_by: Actor,
     /// The approval whose resolution minted it — the provenance the brain's
@@ -434,6 +437,10 @@ pub struct StandingGrant {
     /// behaviour exactly — see [`admits_scope`](Self::admits_scope).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope: Option<String>,
+}
+
+fn default_standing_verdict() -> crate::ports::types::Verdict {
+    crate::ports::types::Verdict::Approve
 }
 
 impl StandingGrant {
@@ -729,6 +736,7 @@ impl GrantSet {
         subject: &GrantSubject,
         tool: &str,
         scope: Option<&str>,
+        verdict: crate::ports::types::Verdict,
         now_millis: u64,
     ) -> Option<StandingGrant> {
         let state = self.inner.lock().expect("grant set poisoned");
@@ -739,6 +747,7 @@ impl GrantSet {
                 &g.subject() == subject
                     && g.tool == tool
                     && g.admits_scope(scope)
+                    && g.verdict == verdict
                     && g.is_live_at(now_millis)
             })
             .max_by_key(|g| g.expires_at_millis)
