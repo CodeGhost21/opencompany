@@ -388,6 +388,54 @@ describe("policy tier changes", () => {
     );
   });
 
+  it("navigates from the focused radio, not the selected tier", async () => {
+    const THREE_TIERS: PolicyStatus = {
+      ...STATUS,
+      mode: "auto",
+      tiers: [
+        {
+          value: "supervised",
+          label: "Supervised",
+          description: "Asks before every change.",
+        },
+        {
+          value: "auto",
+          label: "Auto",
+          description: "Works alone, stops before money.",
+        },
+        {
+          value: "full",
+          label: "Full",
+          description: "Acts without asking.",
+        },
+      ],
+    };
+    const client = makeClient({ status: THREE_TIERS });
+    await mount(client);
+    const radios = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('[role="radio"]'),
+    );
+    const full = radios.find((button) =>
+      button.textContent?.includes("Full"),
+    )!;
+    const auto = radios.find((button) =>
+      button.textContent?.includes("Auto"),
+    )!;
+    // Focus on Full while Auto is still selected — the state a cancelled
+    // escalation leaves behind. ArrowUp must move to Auto, Full's own
+    // neighbour, not to Supervised, which is Auto's neighbour. Auto is
+    // already selected, so nothing persists; the point is where focus (and
+    // the next key's arithmetic) land.
+    full.focus();
+    await act(async () => {
+      full.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "ArrowUp", bubbles: true }),
+      );
+    });
+    expect(document.activeElement).toBe(auto);
+    expect((client.put as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled();
+  });
+
   it("keeps the escalation confirmation open when saving fails", async () => {
     const failingPut = vi.fn(async () => {
       throw new Error("host refused");
