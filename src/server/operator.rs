@@ -8513,6 +8513,10 @@ mode = "full"
     /// must be refused at the edge, so the fact that resolving a missing
     /// approval would otherwise be a harmless no-op never gets a chance to mask
     /// a body that should not have been accepted.
+    ///
+    /// A deny may now ride the tool scope (issue #1458 — a standing refusal),
+    /// so that pairing is asserted as *accepted* at the bottom rather than
+    /// listed among the refusals.
     #[tokio::test]
     async fn a_contradictory_or_unbounded_scope_is_refused() {
         let home_dir = home();
@@ -8520,10 +8524,6 @@ mode = "full"
 
         let day: u64 = 24 * 60 * 60 * 1000;
         for (label, body) in [
-            (
-                "a scope cannot ride a deny",
-                format!(r#"{{"verdict":"deny","scope":"tool","expires_in_millis":{day}}}"#),
-            ),
             (
                 "an argument edit and a standing grant contradict",
                 format!(
