@@ -951,12 +951,13 @@ approval.]"
                 self.settle_approved_effect(id, effect, by.clone(), scope)
                     .await?;
             }
-            ResolveOutcome::Denied if matches!(scope, GrantScope::Tool { .. }) => {
-                let effect = self
-                    .rt
-                    .journal
-                    .approval_effect(id)
-                    .expect("resolved approval retains effect");
+            // Issue #1458: a standing denial is minted from the effect the
+            // resolve carried, not `journal.approval_effect` — the journal keeps
+            // a payload-scrubbed copy (issue #351), and `standing_scope_of` read
+            // against a scrubbed payload answers `None`, which `admits_scope`
+            // treats as a wildcard. A refusal prompted by one web origin would
+            // then block every origin for that teammate.
+            ResolveOutcome::Denied(effect) if matches!(scope, GrantScope::Tool { .. }) => {
                 self.mint_standing_deny(id, effect, by.clone(), scope)
                     .await?;
             }
