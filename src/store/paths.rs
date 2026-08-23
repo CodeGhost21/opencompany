@@ -223,12 +223,21 @@ fn secret_filename(key: &str) -> String {
     format!("%l-{}-{digest}", &encoded[..keep])
 }
 
-/// Percent-encodes every byte outside `[A-Za-z0-9.-]`. `%` itself is encoded
-/// so the output has one parse — and one file — per byte sequence.
+/// Percent-encodes every byte outside `[a-z0-9.-]`. `%` itself is encoded so
+/// the output has one parse — and one file — per byte sequence.
+///
+/// ASCII upper-case letters are encoded, not passed through verbatim. On a
+/// case-insensitive filesystem `A` and `a` are one directory entry, so a
+/// passthrough that kept `[A-Za-z0-9.-]` let two keys differing only in case —
+/// two distinct MCP server names, per [`validate_servers`](crate::company::mcp)
+/// — share one file and overwrite each other. Encoding every `A`–`Z` keeps the
+/// output injective under case-folding: the only upper-case bytes it can ever
+/// contain are the hex digits of its own `%`-escapes, which are emitted in one
+/// fixed case, so no two distinct keys fold to the same filename.
 fn percent_encode(key: &str) -> String {
     let mut out = String::with_capacity(key.len());
     for byte in key.bytes() {
-        if byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-') {
+        if byte.is_ascii_digit() || byte.is_ascii_lowercase() || matches!(byte, b'.' | b'-') {
             out.push(char::from(byte));
         } else {
             use std::fmt::Write;
