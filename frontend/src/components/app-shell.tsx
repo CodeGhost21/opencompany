@@ -1770,9 +1770,15 @@ export function AppShell({
   });
 
   return (
-    // `SidebarProvider` paints the chrome layer itself — see its own note on
-    // why that fill lives there and not here (issue #1178).
-    <SidebarProvider className="h-svh overflow-hidden">
+    // The ambient `(client, company)` for the leaves that have to fetch and are
+    // drawn from too many parents to thread props to — today, the avatar tile,
+    // which fetches an uploaded face through the client because an `<img>`
+    // cannot carry a credential. See `lib/console-context.tsx` for why this is
+    // deliberately not a general escape from props.
+    <ConsoleProvider client={client} company={company}>
+      {/* `SidebarProvider` paints the chrome layer itself — see its own note on
+          why that fill lives there and not here (issue #1178). */}
+      <SidebarProvider className="h-svh overflow-hidden">
       <Sidebar collapsible="icon">
         <SidebarHeader>
           {/* The header is the column talking about itself: which host this
@@ -2229,6 +2235,7 @@ export function AppShell({
       />
 
       <TourController company={company} setView={setView} hold={setupOpen} />
-    </SidebarProvider>
+      </SidebarProvider>
+    </ConsoleProvider>
   );
 }
