@@ -115,7 +115,7 @@ const CURL_DEST_SUBDIR: &str = "downloads";
 /// The canonical list lives in [`crate::company::GATEABLE_NAMESPACES`] (always
 /// compiled, so manifest validation can see it in the default build); this is a
 /// re-export for the harness call sites that key off it.
-pub const GATEABLE_NAMESPACES: [&str; 8] = crate::company::GATEABLE_NAMESPACES;
+pub const GATEABLE_NAMESPACES: [&str; 7] = crate::company::GATEABLE_NAMESPACES;
 
 /// Map a tool's runtime `name()` onto its grant namespace, or `None` when the
 /// tool is **intrinsic** (memory / MCP / orchestrator / file / skill tools),
