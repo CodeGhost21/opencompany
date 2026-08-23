@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   ArrowUp,
   AtSign,
@@ -21,6 +21,8 @@ interface Props {
   placeholder: string;
   disabled?: boolean;
   onSend: (text: string, intent?: MessageIntent) => void;
+  /** A new revision replaces the draft and focuses the composer. */
+  prefill?: { text: string; revision: number };
   /** Compact form, for the narrower thread panel. */
   compact?: boolean;
   /**
@@ -61,6 +63,7 @@ export function MessageComposer({
   placeholder,
   disabled,
   onSend,
+  prefill,
   compact,
   deliverableChoice,
 }: Props) {
@@ -79,6 +82,15 @@ export function MessageComposer({
   // dock on four buttons most lines never use.
   const [formatting, setFormatting] = useState(false);
   const input = useRef<HTMLTextAreaElement>(null);
+
+  // A first-run card lives above the timeline, outside this component. The
+  // revision lets it request the same prompt more than once after an operator
+  // edits or clears it; comparing text alone would make the second click inert.
+  useEffect(() => {
+    if (!prefill) return;
+    setDraft(prefill.text);
+    input.current?.focus();
+  }, [prefill]);
 
   function send() {
     const text = draft.trim();
@@ -191,15 +203,28 @@ export function MessageComposer({
                   // happening, and a control you press to prevent an action
                   // belongs before the ones that cause it. It is NOT pre-pressed
                   // — "Do it once" stays the default.
-                  { value: "chat", label: "Just chatting" },
-                  { value: "once", label: "Do it once" },
-                  { value: "workflow", label: "Build me the workflow" },
+                  {
+                    value: "chat",
+                    label: "Just chatting",
+                    hint: "Chat without automatically creating a task.",
+                  },
+                  {
+                    value: "once",
+                    label: "Do it once",
+                    hint: "Ask the team to do this once.",
+                  },
+                  {
+                    value: "workflow",
+                    label: "Build me the workflow",
+                    hint: "Turn this into a repeating workflow.",
+                  },
                 ] as const
               ).map((option) => (
                 <button
                   key={option.value}
                   type="button"
                   aria-pressed={intent === option.value}
+                  title={option.hint}
                   onClick={() => setIntent(option.value)}
                   data-testid={`composer-deliverable-${option.value}`}
                   className={cn(
