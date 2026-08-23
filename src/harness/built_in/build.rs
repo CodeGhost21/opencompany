@@ -1504,6 +1504,73 @@ mod tests {
         assert_eq!(rows[0].label, "agent-memory/ceo/pin");
     }
 
+    /// The grant alone is not enough: a wired `shell`/`code` namespace the
+    /// capability tier denies must not be described in the sandbox brief,
+    /// because `filter_by_capabilities` is about to strip the matching tools
+    /// from the vector handed to the builder. This is the fix for the P1
+    /// codex found on PR #1670 — before it, `sandbox_brief_flags` did not
+    /// exist and the brief was built from the grant flags alone.
+    #[test]
+    fn sandbox_brief_flags_withhold_a_capability_denied_namespace() {
+        use std::collections::HashSet;
+
+        let deny_shell =
+            toolbelt::CapabilityFilter::DenyNamespaces(HashSet::from(["shell"]));
+        assert_eq!(
+            sandbox_brief_flags(true, true, true, &deny_shell),
+            (true, false, true),
+            "a denied `shell` must not be reported even though it was wired"
+        );
+
+        let deny_code = toolbelt::CapabilityFilter::DenyNamespaces(HashSet::from(["code"]));
+        assert_eq!(
+            sandbox_brief_flags(true, true, true, &deny_code),
+            (true, true, false),
+            "a denied `code` must not be reported even though it was granted"
+        );
+
+        let deny_both =
+            toolbelt::CapabilityFilter::DenyNamespaces(HashSet::from(["shell", "code"]));
+        assert_eq!(
+            sandbox_brief_flags(true, true, true, &deny_both),
+            (true, false, false)
+        );
+    }
+
+    /// The identity filter changes nothing — the flags are exactly the wired
+    /// grant flags, files included (files are never a gateable namespace).
+    #[test]
+    fn sandbox_brief_flags_pass_through_under_allow_all() {
+        assert_eq!(
+            sandbox_brief_flags(true, true, true, &toolbelt::CapabilityFilter::AllowAll),
+            (true, true, true)
+        );
+        assert_eq!(
+            sandbox_brief_flags(false, false, false, &toolbelt::CapabilityFilter::AllowAll),
+            (false, false, false)
+        );
+    }
+
+    /// An ungranted/unwired namespace stays absent regardless of the capability
+    /// filter — denial can only ever narrow, never widen, what the grant wired.
+    #[test]
+    fn sandbox_brief_flags_never_add_a_namespace_the_grant_did_not_wire() {
+        use std::collections::HashSet;
+
+        let allow_all = toolbelt::CapabilityFilter::AllowAll;
+        assert_eq!(
+            sandbox_brief_flags(false, false, false, &allow_all),
+            (false, false, false)
+        );
+
+        // Denying a namespace that was never wired is a no-op on that flag.
+        let deny_shell = toolbelt::CapabilityFilter::DenyNamespaces(HashSet::from(["shell"]));
+        assert_eq!(
+            sandbox_brief_flags(false, false, false, &deny_shell),
+            (false, false, false)
+        );
+    }
+
     #[test]
     fn grants_cover_matches_namespace_glob_and_star() {
         assert!(grants_cover(&["docs.*".into()], "docs"));
