@@ -2250,7 +2250,7 @@ async fn journal_chat_replies(
                     // Who this reply names. Rendered as chips and — unlike an
                     // operator message's — never consulted by dispatch, which
                     // is the mention-loop fuse.
-                    mentions: reply_mentions,
+                    mentions: reply_mentions.clone(),
                     // Zero, and stays zero while that edge does not exist.
                     mention_depth: 0,
                     // The answer joins the thread its question was asked in,
@@ -2288,7 +2288,18 @@ async fn journal_chat_replies(
         // its durable id, which the console reads as "not saved" and refuses to
         // thread or react on — the honest degradation.
         match journaled {
-            Ok(seq) => response.message_id = Some(seq.value().to_string()),
+            Ok(seq) => {
+                response.message_id = Some(seq.value().to_string());
+                // The durable half of a reply's mention, same as an operator
+                // message's (issue: mentions). Without this an `@user` an agent
+                // types back renders as a chip and nothing else — the badge and
+                // the notification both silently missing for whoever it named,
+                // which is worst for exactly the person it is meant to reach:
+                // offline when the reply lands.
+                if !reply_mentions.is_empty() {
+                    notify_mentioned(runtime, id, &reply_mentions, &seq, None, desk).await;
+                }
+            }
             Err(err) => tracing::warn!(
                 error = %err,
                 "failed to journal a chat reply; the bubble has no durable id"
@@ -9327,6 +9338,113 @@ mode = "full"
             authors,
             vec![crate::ports::SYSTEM_AUTHOR.to_string()],
             "the runtime authored this notice, so it must not be stored under its destination"
+        );
+    }
+
+    /// A brain whose every reply names `@everyone` — the fixed shape for
+    /// proving an agent reply's mentions file a notification, same as an
+    /// operator message's already does.
+    struct MentioningReplyBrain;
+
+    #[async_trait::async_trait]
+    impl crate::ports::brain::Brain for MentioningReplyBrain {
+        async fn run_cycle(
+            &self,
+            req: crate::ports::types::CycleRequest,
+            _host: &dyn crate::ports::brain::CycleHost,
+        ) -> crate::Result<crate::ports::types::CycleResult> {
+            let mut channel_responses = Vec::new();
+            for event in &req.events {
+                if matches!(event, CompanyEvent::OperatorMessage { .. }) {
+                    channel_responses.push(crate::ports::types::OutboundMessage {
+                        message_id: None,
+                        task_id: None,
+                        channel: "operator".into(),
+                        agent: None,
+                        text: "cc @everyone on this".into(),
+                        steps: Vec::new(),
+                        reply_to: None,
+                    });
+                }
+            }
+            Ok(crate::ports::types::CycleResult {
+                channel_responses,
+                new_traces: vec![crate::ports::types::CompressedTrace::now(
+                    &req.cycle_id,
+                    "mentioning reply",
+                )],
+                ledger_deltas: Vec::new(),
+                token_usage: crate::ports::types::TokenUsage::default(),
+            })
+        }
+    }
+
+    /// **The Codex P1 finding:** `journal_chat_replies` resolved an agent
+    /// reply's mentions and stored them on `CompanyEvent::AgentReply`, but never
+    /// called `notify_mentioned` — so an `@user` an agent typed *back* rendered
+    /// as a chip and left the named person with no durable notification and no
+    /// rail badge, unlike the operator's own message a few lines above it in
+    /// the very same function. Missing it worst for exactly the person it is
+    /// meant to reach: offline when the reply lands.
+    #[tokio::test]
+    async fn a_mention_in_an_agent_reply_notifies_the_person_it_names() {
+        let home_dir = home();
+        let state = build_state_with_brain(
+            home_dir.path(),
+            "running",
+            AppConfig::default(),
+            Some(Arc::new(MentioningReplyBrain)),
+        )
+        .await;
+        // A second person for `@everyone` to reach — the sender is always
+        // excluded from their own broadcast, so proving this needs somebody
+        // else on the roster.
+        crate::server::test_support::seed_fixed_member(&state, "acme").await;
+        let app = router(state.clone());
+        let id = CompanyId::new("acme");
+        let runtime = state.registry().get(&id).expect("company registered");
+
+        let member_id = runtime
+            .users()
+            .list_users(&id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|u| u.email == "harness-member@example.test")
+            .expect("seeded member")
+            .id;
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/company/chat")
+                    .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"text":"status?"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let notified = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let notes = runtime.notifications().list(&id, &member_id).await.unwrap();
+                if !notes.is_empty() {
+                    return notes;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the mentioned member was notified");
+
+        assert_eq!(notified.len(), 1);
+        assert_eq!(
+            notified[0].notification.kind, "mention",
+            "the reply's @everyone mention has to file the same kind of row an \
+             operator message's does"
         );
     }
 }
