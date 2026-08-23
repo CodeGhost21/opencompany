@@ -312,6 +312,7 @@ mod tests {
 
     fn operator_message(text: &str) -> CompanyEvent {
         CompanyEvent::OperatorMessage {
+            mentions: Vec::new(),
             text: text.into(),
             by: Some(Actor {
                 kind: ActorKind::Operator,

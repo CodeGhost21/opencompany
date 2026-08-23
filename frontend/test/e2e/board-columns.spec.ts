@@ -140,11 +140,11 @@ test("an empty board leaves its column affordances to explain the empty state", 
   try {
     await page.goto(`/#/ledgers/${slug}`);
     await dismissTour(page);
-
-    // A declared ledger defaults to list mode since issue #1336. Switch to
-    // board mode so the columns render and the empty-state affordances are
-    // visible where this test asserts them.
-    await page.getByTitle("Group rows by status").click();
+    // Declared ledgers open as readable rows (issue #1351); this test is
+    // about the board's empty-state affordances, so switch to the board
+    // view before asserting them. `exact` keeps the ledger's own title in
+    // the list-switcher trigger — `E2E empty board …` — out of the match.
+    await page.getByRole("button", { name: "Board", exact: true }).click();
     await expect(page.getByTestId("ledger-board")).toBeVisible({ timeout: 15_000 });
 
     // Board columns already say what an empty board is for. A second status
@@ -158,7 +158,7 @@ test("an empty board leaves its column affordances to explain the empty state", 
 
     // The list has no per-status-column affordance, so it retains both forms
     // of the above-list notice.
-    await page.getByRole("button", { name: "List" }).click();
+    await page.getByRole("button", { name: "List", exact: true }).click();
     await expect(page.getByTestId("ledger-filtered-empty")).toBeVisible({ timeout: 15_000 });
     await search.fill("");
     await expect(page.getByTestId("ledger-empty")).toBeVisible({ timeout: 15_000 });
