@@ -1583,8 +1583,13 @@ async fn park_pending_gates(
                 // top-level policy gate's do. Falls back to the parent-graph
                 // read for every other gate (an authored child gate, which the
                 // registry never sees, keeps its pre-existing behaviour).
-                described = super::caps::resolver::child_gate_call(child_gates, graph, node_id)
-                    .or_else(|| super::gate::describe_call(graph, node_id));
+                described = super::caps::resolver::child_gate_call(
+                    child_gates,
+                    graph,
+                    node_id,
+                    Some(trigger_input),
+                )
+                .or_else(|| super::gate::describe_call(graph, node_id));
                 described.as_ref()
             }
         };
