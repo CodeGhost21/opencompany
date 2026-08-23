@@ -1,8 +1,8 @@
 import { expect, test, type Page } from "@playwright/test";
 
 /**
- * Proof for issue #1573: a teammate's run history is reachable, populated, and
- * says where each attempt came from — against the live host.
+ * Proof for issue #1573: a teammate's run history is reachable against the
+ * live host.
  *
  * The claim under test is one no unit render can make, because it spans the
  * whole stack: the console asks for `?agent=`, a real `RunStore` answers it
@@ -10,12 +10,13 @@ import { expect, test, type Page } from "@playwright/test";
  * nobody else's. A stubbed `listRuns` proves the component; only a host proves
  * the selector.
  *
- * The walk dispatches a card to `engineer` and then reads the attempt back on
- * the teammate's own page — which is the operator's journey the section exists
- * for, and the one that had no surface at all before this.
+ * The walk navigates to `/#/team/engineer` and accepts either a populated
+ * attempt list or the "hasn't run yet" state — whether the host's data
+ * directory holds any attempts decides which, and both are correct. The
+ * journey is the operator's, and it had no surface at all before this.
  *
  * Default features are enough: the harness company boots on the offline echo
- * brain, and a dispatched card records an attempt whatever answers it.
+ * brain, and whichever state the section lands in must render without error.
  */
 
 async function dismissOnboarding(page: Page) {
