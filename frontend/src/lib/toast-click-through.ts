@@ -109,6 +109,12 @@ function relayToFrame(
     payload.button = pointer.button;
     payload.buttons = pointer.buttons;
     payload.detail = pointer.detail;
+  } else if ("pointerId" in gesture && typeof gesture.pointerId === "number") {
+    // Chromium and other Pointer Events implementations expose the originating
+    // pointer id on the compatibility click. Keeping it lets the frame side
+    // correlate the click with its press and suppress a drag's compatibility
+    // click without confusing an unrelated direct click.
+    payload.pointerId = gesture.pointerId;
   }
   frame.contentWindow?.postMessage(payload, "*");
 }
