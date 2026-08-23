@@ -2008,6 +2008,48 @@ prompt = "Lead decisively."
         assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
     }
 
+    /// The gap between the avatar route and the generic workspace upload: a
+    /// `blob:` reference must be judged on the bytes, not on the type an upload
+    /// declared. A non-image binary uploaded through the workspace route with
+    /// an `image/png` label is stored under that declared type, so a referent
+    /// check that believed it would let arbitrary or oversized bytes ride every
+    /// avatar surface. The reference is refused instead.
+    #[tokio::test]
+    async fn a_blob_reference_is_refused_when_the_bytes_are_not_an_image() {
+        let home_dir = home();
+        let state = state_with_manifest(home_dir.path(), ROSTER).await;
+
+        // A PDF labelled `image/png` — stored as a binary node whose declared
+        // type is exactly the claim the referent check must not trust.
+        let (status, uploaded) =
+            upload_workspace_binary(&state, "face.png", b"%PDF-1.7 not an image").await;
+        assert_eq!(status, StatusCode::OK, "{uploaded}");
+        let id = uploaded["id"].as_str().expect("a node id");
+
+        let (status, refused) =
+            patch_agent(&state, "ceo", json!({"avatar": format!("blob:{id}")})).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
+    }
+
+    /// The positive half of the same rule: a real image uploaded through the
+    /// generic workspace route under a *wrong* declared type is accepted,
+    /// because the bytes sniff as an image. This is what keeps a face pickable
+    /// whatever label the upload carried.
+    #[tokio::test]
+    async fn a_blob_reference_is_accepted_when_the_bytes_are_an_image() {
+        let home_dir = home();
+        let state = state_with_manifest(home_dir.path(), ROSTER).await;
+
+        let (status, uploaded) = upload_workspace_binary(&state, "face.png", TINY_GIF).await;
+        assert_eq!(status, StatusCode::OK, "{uploaded}");
+        let id = uploaded["id"].as_str().expect("a node id");
+
+        let (status, worn) =
+            patch_agent(&state, "ceo", json!({"avatar": format!("blob:{id}")})).await;
+        assert_eq!(status, StatusCode::OK, "{worn}");
+        assert_eq!(worn["avatar"], format!("blob:{id}"), "{worn}");
+    }
+
     /// Issue #1530: an overlay teammate's persona is editable the same way. It
     /// has no manifest `prompt`, so `blueprintInstructions` is absent and a reset
     /// falls all the way to nothing.
