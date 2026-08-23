@@ -266,6 +266,9 @@ export function ChatView({
     setChannelsCollapsed((collapsed) => {
       const next = !collapsed;
       writeChannelRailCollapsed(scope, next);
+      // Expanding from the compact rail unmounts the button that carried focus;
+      // hand it to the header toggle, which is mounted on both density states.
+      if (next) channelsToggleRef.current?.focus();
       return next;
     });
   }
