@@ -132,8 +132,9 @@ pub struct RunContext<'a> {
     /// Per-run record of every child graph the resolver gated, so the parent's
     /// parking path can name a child pause (issue #617). Created by the runner
     /// before the engine call, handed to the resolver through `ChildPolicyGates`,
-    /// and read back when the run pauses.
-    pub child_gates: Arc<resolver::ChildGateRegistry>,
+    /// and read back when the run pauses. Crate-internal plumbing: the registry
+    /// type is not part of the public surface, so the field is not `pub`.
+    pub(crate) child_gates: Arc<resolver::ChildGateRegistry>,
 }
 
 /// Assembles the [`Capabilities`] bundle for a run of `workflow_id`.
