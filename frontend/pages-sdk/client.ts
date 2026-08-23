@@ -216,7 +216,6 @@ window.addEventListener("message", function onRelay(event: MessageEvent) {
 
   if (event.data.type === "oc:relay-pointerdown") {
     pressOrigins.set(pointerId, { x: event.data.x, y: event.data.y });
-    relayedPressCount++;
     relayPressTargets.set(pointerId, element);
   }
   dispatchRelayedPointer(event.data, element);
