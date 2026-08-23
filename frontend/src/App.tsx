@@ -41,6 +41,7 @@ import { HostsProvider, useHosts, type HostsValue } from "@/connections/HostsCon
 import { firstHostCopy } from "@/connections/first-host";
 import type { ConnectionId } from "@/connections/types";
 import { useHostAddress, useHostRoute } from "@/hooks/use-host-route";
+import { absorbHubSetupHandoff } from "@/setup/state";
 import { ConnectionConsole } from "@/views/ConnectionConsole";
 import { AddHostPage } from "@/views/setup/AddHostPage";
 import { cn } from "@/lib/utils";
