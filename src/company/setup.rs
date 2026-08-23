@@ -404,11 +404,13 @@ impl AgentFocus {
 /// to influence that string — the operator's own free text reaches a model that
 /// writes it — escaped the narrowing simply by being unrecognisable.
 ///
-/// [`WRITING`](AgentFocus::Writing)'s belt is the floor instead: the workspace,
-/// documents and files. A teammate that lands there can still do its work, and
-/// no unrecognised value can ever buy more authority than a recognised one.
-/// Fail closed, then, in the only direction that matters — the failure mode is a
-/// teammate that cannot browse, not one holding a spend authority.
+/// [`WRITING`](AgentFocus::Writing)'s belt is the floor instead: the base belt
+/// plus workspace writes. A teammate that lands there can still do its work,
+/// and no unrecognised value can ever buy more authority than a recognised
+/// one. That property survives the widened belts — `writing` is still a strict
+/// subset of every other shape's reach, so it holds no shell, no code, no
+/// repository, no media budget and no Composio credential. Fail closed, then,
+/// in the only direction that still matters.
 pub fn tools_for_focus(focus: Option<AgentFocus>) -> Vec<String> {
     focus.unwrap_or(AgentFocus::Writing).tools()
 }
