@@ -1301,10 +1301,6 @@ function EntryCard({
             <a
               href={detailHref}
               className="flex-1 font-medium hover:underline"
-              onClick={(event) => {
-                event.preventDefault();
-                onOpen();
-              }}
             >
               {entry.title}
             </a>
