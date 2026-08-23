@@ -1528,7 +1528,7 @@ function ReviewStep({
               </ul>
               <p className="mt-2 text-sm leading-snug text-muted-foreground">
                 You can still continue — add someone for it here, or later from
-                the team page.
+                the Company page.
               </p>
             </>
           )}
