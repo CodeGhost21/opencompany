@@ -1145,57 +1145,12 @@ jobs:
       # `composio` adds no `openhuman_core/*` subfeature, so there is no vendored
       # rebuild at all.
       #
-      # TWO NARROW FILTERS RATHER THAN THE BARE WORD `composio`, which would be a
-      # substring match sweeping every composio module at once. That wider
-      # selection is what this lane should eventually be, and it cannot be yet:
-      # of the 24, two FAIL. `server::ops::composio::tests::an_admin_is_unaffected`
-      # dials `api.tinyhumans.ai` for real once the feature is on (it passes today
-      # only because the un-gated stub stands in), and the scripted two-toolkit
-      # turn reaches neither provider. Issue #801 has both diagnoses; the wider
-      # filter lands with the fix, not as a red lane (#428).
-      #
-      # These two groups are chosen because they are the ones whose silence cost
-      # the most. `isolation_tests` is per-tenant token isolation — each tenant
-      # only ever carries its own token and sees its own accounts, a rotated
-      # token is scrubbed per call, an error body reflecting the token is
-      # scrubbed. That is the property keeping one company out of another's
-      # Gmail, and it had no runner at all. `ops_helper_tests` is the allowlist
-      # refusals that must happen BEFORE any network call, plus the catalog and
-      # connection projections.
-      #
-      # Separate invocations, each with its own asserted count, for the reason
-      # the ACP step above states: the first bare argument is the filter and a
-      # second would narrow the selection to nothing.
-      - name: Test Composio tenant isolation
-        run: scripts/ci/run-scoped-suite.sh "composio isolation" openhuman,chargebee,paypal,composio harness::built_in::composio::isolation_tests
-
-      - name: Test the Composio ops helpers
-        run: scripts/ci/run-scoped-suite.sh "composio ops helpers" openhuman,chargebee,paypal,composio harness::built_in::composio::ops_helper_tests
-
-      # Issue #820 — which connected account an agent acts as. A third narrow
-      # filter for the same reason the two above are narrow, and the same reason
-      # they exist at all: these assert on the `composio_execute` REQUEST BODY —
-      # that an unpinned toolkit still carries no connection id, and a pinned one
-      # carries the operator's. Both are decidable only under `composio`, so
-      # without a lane they would be twenty-four's worth of silence again, and
-      # the negative half is the one protecting every existing single-account
-      # company from having its account resolution changed.
-      - name: Test which Composio account an execute acts as
-        run: scripts/ci/run-scoped-suite.sh "composio account choice" openhuman,chargebee,paypal,composio harness::built_in::composio::live::live_tests
-
-      # Issue #820 — a fourth narrow filter, and the first outside `harness::`.
-      # The console-plane half of the same decision: the grouping the choice is
-      # reported through, and the cleanup that drops a choice naming an account
-      # Composio no longer lists. Both are gated on `composio`, so before this
-      # step they were compiled by `Check (--all-features)` and run by nothing.
-      #
-      # `…::tests::gated_tests` and not `server::ops::composio`, which would
-      # sweep in `an_admin_is_unaffected` — the one that dials
-      # `api.tinyhumans.ai` for real once the feature is on (#801). The module
-      # exists to be nameable here: a gated ops test added later joins it and is
-      # run, rather than depending on somebody remembering this file.
-      - name: Test the Composio account choice on the console plane
-        run: scripts/ci/run-scoped-suite.sh "composio choice ops" openhuman,chargebee,paypal,composio server::ops::composio::tests::gated_tests
+      # Issue #801 makes the two formerly-red cases hermetic: the console test
+      # uses a loopback authorization endpoint and the scripted turn reaches
+      # both loopback providers. One broad filter therefore covers every
+      # Composio test, including future tests that join this surface.
+      - name: Test Composio
+        run: scripts/ci/run-scoped-suite.sh "composio" openhuman,chargebee,paypal,composio composio
 
       # Issue #914. The `tinymemory` feature binds the engine-neutral
       # `MemoryProvider` contract and adds the `remote`/`null` selection modes

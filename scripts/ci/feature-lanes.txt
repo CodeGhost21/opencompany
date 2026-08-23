@@ -60,7 +60,7 @@ acp            | partial      | acp,runner,tinymemory | server::acp harness::acp
 runner         | partial      | acp,runner,tinymemory | runner
 mcp            | partial      | openhuman,mcp,telegram,media    | harness::built_in::build::tests app::types
 media          | partial      | openhuman,mcp,telegram,media    | harness::built_in::build::tests harness::built_in::toolbelt
-composio       | partial      | openhuman,chargebee,paypal,composio | harness::built_in::composio::isolation_tests harness::built_in::composio::ops_helper_tests harness::built_in::composio::live::live_tests server::ops::composio::tests::gated_tests
+composio       | partial      | openhuman,chargebee,paypal,composio | composio
 export         | partial      | export                          | store::export
 imap           | partial      | imap,smtp                       | server::ops::imap
 chargebee      | partial      | openhuman,chargebee,paypal,composio | chargebee server::ops::finance
