@@ -2671,8 +2671,6 @@ impl RuntimeBuilder {
                                 // binding a repository is what the next turn's
                                 // `repo_checkout` resolves against — and the
                                 // one thing in this process holding the token.
-                                repos: Some(repos.clone()),
-                                repo_bindings,
                             };
                             workflow_harness_deps = Some(deps.clone());
                             let record = CompanyRecord {
