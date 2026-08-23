@@ -3899,6 +3899,33 @@ mod test {
             values.iter().map(|v| v.to_string()).collect()
         }
 
+        /// A catch-all company grant must not satisfy opt-in namespaces that
+        /// carry billing, tenant credentials, or third-party source access.
+        #[test]
+        fn wildcard_does_not_cover_special_namespaces() {
+            let allow = strings(&["*"]);
+            for grant in ["media", "composio", "search", "repo", "mcp:*"] {
+                assert!(
+                    !allow_covers(&allow, grant),
+                    "catch-all must not cover opt-in grant `{grant}`"
+                );
+            }
+            assert!(allow_covers(&allow, "workspace.write"));
+            assert!(allow_covers(&allow, "docs.read"));
+        }
+
+        /// Explicit special grants still cover the corresponding setup belt.
+        #[test]
+        fn explicit_special_grants_cover_their_namespaces() {
+            let allow = strings(&["media", "composio", "search", "repo.*", "mcp:*"]);
+            for grant in ["media", "composio", "search", "repo", "mcp:*"] {
+                assert!(
+                    allow_covers(&allow, grant),
+                    "explicit grant must cover `{grant}`"
+                );
+            }
+        }
+
         /// Runs the three-level narrowing over `&str` slices, so each case below
         /// reads as the table row it is.
         fn scope(company: &[&str], desks: &[&[&str]], agent: &[&str]) -> Vec<String> {
