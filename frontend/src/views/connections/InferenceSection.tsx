@@ -655,7 +655,7 @@ export function InferenceSection({
                   </Button>
                   <Button variant="outline" disabled={busy !== null} onClick={() => void reset()}>
                     {busy === "reset" ? <Loader2 className="size-4 animate-spin" /> : <RotateCcw className="size-4" />}
-                    Reset to managed
+                    Reset to default
                   </Button>
                   {status?.keyConfigured && (
                     <Button
