@@ -383,6 +383,7 @@ async fn upsert_from_eligibility(
         id: generate_id(),
         email: email.to_string(),
         display_name: None,
+        avatar: None,
         role,
         status: UserStatus::Active,
         password_hash: None,
@@ -426,6 +427,7 @@ pub(crate) async fn local_owner_record(
         id: generate_id(),
         email: key,
         display_name: None,
+        avatar: None,
         role: UserRole::Admin,
         status: UserStatus::Active,
         // No password and no way to set one: `auth/password` refuses outside

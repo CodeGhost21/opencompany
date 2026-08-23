@@ -4267,6 +4267,7 @@ mod test {
                     id: "u1".into(),
                     email: "ada@example.com".into(),
                     display_name: None,
+                    avatar: None,
                     role: UserRole::Admin,
                     status: UserStatus::Active,
                     password_hash: None,

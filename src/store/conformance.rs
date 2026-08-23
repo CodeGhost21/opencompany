@@ -1337,6 +1337,7 @@ pub async fn assert_user_store(users: Arc<dyn UserStore>) {
         id: id.to_string(),
         email: email.to_string(),
         display_name: Some(format!("name {id}")),
+        avatar: None,
         role: UserRole::Member,
         status: UserStatus::Active,
         password_hash: None,

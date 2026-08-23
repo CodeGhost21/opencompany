@@ -83,6 +83,7 @@ async fn seed_signed_in(state: &AppState, company: &str, status: UserStatus) -> 
                 id: "u1".into(),
                 email: "ada@example.com".into(),
                 display_name: None,
+                avatar: None,
                 role: UserRole::Member,
                 status,
                 password_hash: None,
