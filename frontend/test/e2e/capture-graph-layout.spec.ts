@@ -53,4 +53,8 @@ test("capture settled graph layout", async ({ page }) => {
     return { count: positions.length, positions };
   });
   console.log("GRAPH_LAYOUT_JSON=" + JSON.stringify(dump));
+  const out =
+    process.env.CAPTURE_OUT ||
+    "/tmp/graph-layout-" + (process.env.CAPTURE_TAG || "default") + ".json";
+  writeFileSync(out, JSON.stringify(dump, null, 1));
 });
