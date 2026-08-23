@@ -1565,7 +1565,13 @@ mod test {
     #[test]
     fn a_new_wildcard_policy_supersedes_an_older_scoped_opposite() {
         let set = GrantSet::default();
-        set.grant_standing(scoped("approve-1", "ops", "web_fetch", "https://docs.rs", 10_000));
+        set.grant_standing(scoped(
+            "approve-1",
+            "ops",
+            "web_fetch",
+            "https://docs.rs",
+            10_000,
+        ));
 
         let drained = set.opposite_polarity(
             &GrantSubject::agent("ops"),
