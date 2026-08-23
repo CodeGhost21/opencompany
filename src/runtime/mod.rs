@@ -101,9 +101,6 @@ pub mod repo_manager;
 pub mod run_events;
 pub mod run_supervisor;
 pub mod scheduler;
-/// Issue #203: the Telegram `getUpdates` long-polling listener — the inbound
-/// path that needs no public URL, mirroring OpenHuman. See [`telegram_poller`].
-pub mod telegram_poller;
 pub mod tools;
 /// Issue #983: settling chat turns a previous host process left open, the
 /// transcript-side twin of the run reaper. See [`turn_sweep`].

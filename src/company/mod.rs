@@ -83,7 +83,6 @@ mod skill_file;
 // control plane can steer in any build and no agent tool can ever reach it.
 pub mod steer;
 pub mod task_intent;
-pub mod telegram;
 // The one list of tools a company can grant — built-ins, MCP servers and
 // Composio toolkits in a single vocabulary. Always compiled: it is a projection
 // over the manifest, and the console route that renders it is in the default

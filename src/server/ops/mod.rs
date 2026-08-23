@@ -18,7 +18,6 @@
 pub mod artifacts;
 pub mod billing;
 pub mod capabilities;
-pub mod channels;
 pub mod company_key;
 pub mod composio;
 pub mod composio_toolkits;
@@ -135,11 +134,6 @@ pub struct ConnectionsRuntime {
     /// `SecretStore`, so a tenant never sees this credential. `None` means the
     /// host sends no platform mail.
     pub mail_credentials: Option<MailCredentials>,
-    /// Outbound Telegram transport used by the inbound webhook to deliver a
-    /// reply and by the channel ops to call `setWebhook`. When `None`, Telegram
-    /// delivery is "not wired yet" (the default offline build); the inbound
-    /// webhook still verifies + runs the turn, it just can't post the reply.
-    pub telegram: Option<Arc<dyn crate::company::telegram::TelegramApi>>,
 }
 
 impl ConnectionsRuntime {
@@ -195,7 +189,6 @@ pub fn router() -> Router<AppState> {
         .merge(capabilities::router())
         .merge(tool_catalog::router())
         .merge(connections_read::router())
-        .merge(channels::router())
         .merge(billing::router())
         .merge(hosting::router())
         .merge(search::router())
