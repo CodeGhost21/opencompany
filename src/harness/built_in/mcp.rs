@@ -38,7 +38,7 @@ use crate::harness::mcp_probe::{
 };
 use crate::ports::types::CompanyId;
 use crate::ports::usage::UsageMeter;
-use crate::runtime::tools::{grant_matches, grants_cover_server};
+use crate::runtime::tools::grants_cover_server;
 
 /// Builds a registry from a set of decls, keeping only the enabled ones.
 ///
