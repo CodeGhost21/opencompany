@@ -244,4 +244,100 @@ describe("a teammate's run history", () => {
     await act(async () => back!.click());
     expect(container.querySelector('[data-testid="agent-runs"]')).not.toBeNull();
   });
+
+  it("keeps a filtered older run's detail open when the poll omits it", async () => {
+    vi.useFakeTimers();
+    // The desk has more than a page of attempts, so a failed run the operator
+    // reaches through the Failed filter can sit older than the newest 50. Once
+    // it is open, the poll drops the status filter (a live run may settle out
+    // of its bucket) and the unfiltered page omits the older run — the detail
+    // must stay up anyway, held from the previously-known summary.
+    const older = run({
+      id: "old-failed-1",
+      status: "failed",
+      createdAtMillis: 1_500_000_000_000,
+    });
+    const get = vi.fn(async (path: string) => {
+      if (path.startsWith("/runs/")) return { run: older, steps: [] };
+      if (path.includes("status=failed")) return [older];
+      if (path.startsWith("/runs")) return [run()];
+      if (path.startsWith("/tasks")) return [];
+      if (path.startsWith("/workflows")) return [];
+      throw new Error(`no route for ${path}`);
+    });
+    const client = {
+      get,
+      scopeFor: () => "",
+    } as unknown as OpenCompanyClient & { get: typeof get };
+
+    await mount(client);
+
+    const failed = container.querySelector<HTMLButtonElement>(
+      '[data-testid="agent-runs-filter-failed"]',
+    );
+    await act(async () => failed!.click());
+    await act(async () => {});
+
+    const row = container.querySelector<HTMLButtonElement>(
+      '[data-testid="agent-run-old-failed-1"]',
+    );
+    expect(row).not.toBeNull();
+    await act(async () => row!.click());
+    await act(async () => {});
+    expect(
+      container.querySelector('[data-testid="agent-run-detail"]'),
+    ).not.toBeNull();
+
+    // A poll tick. The unfiltered newest page does not contain the open run;
+    // the section holds the selected summary rather than closing the panel.
+    await act(async () => {
+      vi.advanceTimersByTime(POLL_MS);
+    });
+    expect(
+      container.querySelector('[data-testid="agent-run-detail"]'),
+    ).not.toBeNull();
+  });
+
+  it("discards a stale list response after the operator switches teammates", async () => {
+    // The engineer's list read is slow; the operator moves to Dana before it
+    // resolves. The late answer was filtered against the old agentId and must
+    // not render the engineer's rows beneath Dana's name.
+    let releaseEngineer!: (rows: RunSummary[]) => void;
+    const engineerGate = new Promise<RunSummary[]>((resolve) => {
+      releaseEngineer = resolve;
+    });
+
+    const get = vi.fn(async (path: string) => {
+      if (path.includes("agent=engineer")) return engineerGate;
+      if (path.includes("agent=designer"))
+        return [run({ id: "designer-run", agentId: "designer" })];
+      if (path.startsWith("/tasks")) return [];
+      if (path.startsWith("/workflows")) return [];
+      throw new Error(`no route for ${path}`);
+    });
+    const client = {
+      get,
+      scopeFor: () => "",
+    } as unknown as OpenCompanyClient & { get: typeof get };
+
+    await mount(client);
+    await mount(client, { agentId: "designer", agentName: "Dana" });
+
+    expect(
+      container.querySelector('[data-testid="agent-run-designer-run"]'),
+    ).not.toBeNull();
+
+    // The engineer's answer arrives after the switch.
+    await act(async () => {
+      releaseEngineer([run({ id: "engineer-run" })]);
+    });
+    await act(async () => {});
+
+    expect(
+      container.querySelector('[data-testid="agent-run-engineer-run"]'),
+    ).toBeNull();
+    expect(
+      container.querySelector('[data-testid="agent-run-designer-run"]'),
+    ).not.toBeNull();
+  });
 });
