@@ -287,21 +287,75 @@ export function PolicySettings({ client, company }: Props) {
     }
   };
 
+  /**
+   * The tier buttons, in `status.tiers` order, so the radio group's arrow keys
+   * can move focus between them (a roving-tabindex group: only the checked tier
+   * is in the Tab order, and arrows move and select in one step).
+   */
+  const tierButtons = useRef<Array<HTMLButtonElement | null>>([]);
+
   const reset = async () => {
-    if (!status || saving) return;
+    if (!status || saving) return false;
     setSaving(true);
     try {
       apply(
         await resetPolicy(client, company),
         "Reverted to the manifest's policy",
       );
+      return true;
     } catch (error) {
       toast.error(
         error instanceof Error ? error.message : "Could not reset the policy.",
       );
+      return false;
     } finally {
       setSaving(false);
     }
+  };
+
+  /**
+   * The "Use the manifest's policy" button. A reset that gives the company
+   * *more* autonomy than the override it replaces is an escalation like any
+   * other tier change, so it gets the same confirmation; a reset that tightens
+   * or holds the tier lands immediately, the way a downgrade does.
+   */
+  const requestReset = () => {
+    if (!status || saving) return;
+    if (isAutonomyEscalation(status.tiers, status.mode, status.manifestMode)) {
+      setResetAwaitingConfirmation(true);
+      return;
+    }
+    void reset();
+  };
+
+  /**
+   * Radio-group arrow keys: move focus to the neighbour and select it in the
+   * same step, the way native radios behave. Without this, every tier stays in
+   * the Tab order and no Arrow key moves between them — a screen reader
+   * announces radio-group controls whose keyboard behavior does not exist.
+   */
+  const handleTierKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (!status || saving) return;
+    let step = 0;
+    switch (event.key) {
+      case "ArrowDown":
+      case "ArrowRight":
+        step = 1;
+        break;
+      case "ArrowUp":
+      case "ArrowLeft":
+        step = -1;
+        break;
+      default:
+        return;
+    }
+    const index = status.tiers.findIndex((tier) => tier.value === status.mode);
+    if (index === -1) return;
+    const tier = status.tiers[index + step];
+    if (!tier) return;
+    event.preventDefault();
+    tierButtons.current[index + step]?.focus();
+    chooseTier(tier);
   };
 
   return (
