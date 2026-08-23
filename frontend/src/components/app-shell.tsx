@@ -209,6 +209,8 @@ const NAV_ALWAYS_PARENT = new Set<View>(["company"]);
 
 /**
  * `#/tasks` with no card named the board page, which is retired (issue #1140).
+ * `#/memory` is the Brain browser's legacy address after it moved under
+ * Settings (issue #1416).
  *
  * It lands where the board actually lives now, so a bookmark, a habit, or a
  * link written before the move all still arrive at a board rather than at a
@@ -224,6 +226,7 @@ const REWRITE_RETIRED = (
   sub: string | null,
 ): [View, string | null] | null => {
   if (head === "tasks" && taskIdFromSegment(sub) === null) return ["ledgers", BOARD_LEDGER];
+  if (head === "memory") return ["settings", "brain"];
   // Bare `#/team` is the Company page now (issue #1141). It rendered the
   // teammate card grid from a route with no nav entry, so nobody arrived at it;
   // the grid is Company's Cards half, and leaving `#/team` answering as well

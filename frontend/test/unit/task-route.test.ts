@@ -43,15 +43,19 @@ describe("taskIdFromSegment", () => {
  * The shell's own rewrite, verbatim (`app-shell.tsx`). Duplicated rather than
  * exported because exporting it would make the shell's route table part of its
  * public surface for one test's benefit; what matters here is the rule, and the
- * rule is two lines.
+ * rule is three lines.
  */
 const REWRITE = (
   head: string,
   sub: string | null,
 ): [string, string | null] | null =>
-  head === "tasks" && taskIdFromSegment(sub) === null ? ["ledgers", "tasks"] : null;
+  head === "tasks" && taskIdFromSegment(sub) === null
+    ? ["ledgers", "tasks"]
+    : head === "memory"
+      ? ["settings", "brain"]
+      : null;
 
-const VIEWS = ["overview", "ledgers", "tasks"] as const;
+const VIEWS = ["overview", "ledgers", "tasks", "memory", "settings"] as const;
 
 describe("the retired #/tasks address", () => {
   let container: HTMLDivElement;
@@ -120,5 +124,45 @@ describe("the retired #/tasks address", () => {
     await visit("#/ledgers/goals");
     expect(seen).toEqual(["ledgers", "goals"]);
     expect(window.location.hash).toBe("#/ledgers/goals");
+  });
+});
+
+describe("the legacy #/memory address", () => {
+  let container: HTMLDivElement;
+  let root: Root;
+  let seen: [string, string | null];
+
+  function Probe() {
+    const [view, sub] = useHashView<string>(
+      VIEWS as unknown as readonly string[],
+      "overview",
+      REWRITE,
+    );
+    seen = [view, sub];
+    return null;
+  }
+
+  beforeEach(() => {
+    (
+      globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }
+    ).IS_REACT_ACT_ENVIRONMENT = true;
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+  });
+
+  afterEach(async () => {
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
+  it("lands on Settings → Brain", async () => {
+    window.history.replaceState(null, "", "#/memory");
+    await act(async () => {
+      root.render(createElement(Probe));
+    });
+
+    expect(seen).toEqual(["settings", "brain"]);
+    expect(window.location.hash).toBe("#/settings/brain");
   });
 });
