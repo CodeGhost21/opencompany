@@ -1961,6 +1961,8 @@ export function KnowledgeGraph({
     setActiveNodeId(navigableNodes[0]?.id ?? null);
   }, [activeNodeId, navigableNodes]);
   const moveActiveNode = (direction: number) => {
+    // eslint-disable-next-line no-console
+    console.log('[kg-debug] moveActiveNode', { direction, activeNodeId, len: navigableNodes.length, ids: navigableNodes.map((n) => n.id) });
     if (navigableNodes.length === 0) return;
     const current = navigableNodes.findIndex((n) => n.id === activeNodeId);
     const next = navigableNodes[(current + direction + navigableNodes.length) % navigableNodes.length];
