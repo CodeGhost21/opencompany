@@ -75,6 +75,47 @@ from = "work"
 to = "done"
 "#;
 
+/// The parent for the #617 regression. Its child carries the effectful node,
+/// which means only the resolver can apply the policy gate before tinyflows
+/// runs it.
+const SUB_WORKFLOW_PARENT: &str = r#"
+id = "parent"
+name = "Parent"
+[[node]]
+id = "start"
+kind = "trigger"
+name = "Start"
+[[node]]
+id = "sub"
+kind = "sub_workflow"
+name = "Child workflow"
+[node.config]
+workflow_id = "child"
+[[edge]]
+from = "start"
+to = "sub"
+"#;
+
+const SUB_WORKFLOW_CHILD: &str = r#"
+id = "child"
+name = "Child"
+[[node]]
+id = "start"
+kind = "trigger"
+name = "Start"
+[[node]]
+id = "work"
+kind = "tool_call"
+name = "Work"
+[node.config]
+slug = "shell"
+[node.config.args]
+command = "echo ran > marker.txt"
+[[edge]]
+from = "start"
+to = "work"
+"#;
+
 /// A company that grants `shell` and gates it — under `full` autonomy, for the
 /// reasons in this module's docs.
 fn manifest(always_approve: &str) -> CompanyManifest {
@@ -205,6 +246,73 @@ async fn a_policy_gated_tool_call_node_parks_instead_of_running() {
             .is_some_and(|reason| reason.contains("shell")),
         "the card must carry the policy's own reason: {:?}",
         card.effect.payload[PAYLOAD_REASON]
+    );
+}
+
+/// Issue #617. A policy gate inside a resolved child must surface at the parent
+/// boundary, where it is visible and resumable, rather than silently running.
+#[tokio::test]
+async fn a_policy_gated_child_tool_call_parks_and_resumes_through_its_parent() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("company");
+    let workflows = source.join("workflows");
+    std::fs::create_dir_all(&workflows).expect("create child workflow directory");
+    std::fs::write(workflows.join("child.toml"), SUB_WORKFLOW_CHILD)
+        .expect("write child workflow");
+
+    let (mut deps, journal) =
+        super::gated_tool_turn_test::deps("http://127.0.0.1:1/unused".to_string(), dir.path());
+    deps.workflow_source_dir = Some(source);
+    let record = record("\"shell\"");
+    let pool = Arc::new(HarnessPool::new());
+    pool.ensure(&record, &deps).await.expect("roster builds");
+    let file = parse_workflow(SUB_WORKFLOW_PARENT).expect("parent parses");
+
+    let first = super::runner::run_workflow(
+        pool.clone(),
+        deps.clone(),
+        &record,
+        &file,
+        json!({}),
+        &WorkflowRunContext::new(false),
+    )
+    .await
+    .expect("the parent pauses cleanly");
+    assert_eq!(first.pending_approvals, vec!["sub::work".to_string()]);
+    assert!(
+        !marker_written(dir.path()),
+        "the child shell call must not execute before approval"
+    );
+
+    let card = journal
+        .pending()
+        .into_iter()
+        .find(|pending| pending.effect.kind == WORKFLOW_APPROVE_KIND)
+        .expect("the child gate is parked for the operator")
+        .effect;
+    assert_eq!(card.payload[PAYLOAD_WORKFLOW_ID], "parent");
+    assert_eq!(card.payload[PAYLOAD_NODE_ID], "sub::work");
+
+    let continuation = crate::runtime::workflow_resume::continuation_input(
+        &card,
+        &["sub::work".to_string()],
+        &[],
+    )
+    .expect("the namespaced child gate is a valid continuation");
+    let second = super::runner::run_workflow(
+        pool,
+        deps,
+        &record,
+        &file,
+        continuation,
+        &WorkflowRunContext::new(false),
+    )
+    .await
+    .expect("approval resumes the child through its parent");
+    assert!(second.pending_approvals.is_empty(), "{second:?}");
+    assert!(
+        marker_written(dir.path()),
+        "the approved child shell call must execute"
     );
 }
 

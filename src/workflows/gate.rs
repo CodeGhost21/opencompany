@@ -310,24 +310,10 @@ pub(crate) async fn apply_policy_gates_with_policy(
 /// Which of `graph`'s nodes the company's policy would stop — **classification
 /// only**, no mutation.
 ///
-/// Split out from [`apply_policy_gates`] for issue #617's audit line: a
-/// `sub_workflow` child is resolved and run inside the engine, so its nodes
-/// never reach the gate pass and a call the policy would park at the top level
-/// runs unparked one level down. The resolver cannot *fix* that — the engine
-/// cannot resume across the boundary — but it can ask the same question and say
-/// what it found, so an operator reviewing what was approved is not left with a
-/// hole they cannot account for. One classifier, so the audit line and the gate
-/// can never disagree about the same call.
-///
-/// `grants` is the company's live permission set (issue #1098). `Some` on the
-/// gate path, so a standing permission the operator gave this workflow is
-/// honoured and the node does not park again. **`None` on the #617 audit line**,
-/// deliberately: that line discloses calls this run never offered for approval
-/// at all, and a permission is about not asking *again*. Passing the set there
-/// would suppress a disclosure on the grounds that a *different* question had
-/// once been answered. The two can only differ by the audit naming a call the
-/// gate would have let through, which over-discloses — the safe direction for a
-/// line that reports rather than enforces.
+/// `grants` is the company's live permission set (issue #1098). The top-level
+/// runner and the `sub_workflow` resolver both pass `Some`, so a standing
+/// permission the operator gave this workflow is honoured consistently at every
+/// nesting level.
 pub(crate) async fn policy_gates(
     graph: &WorkflowGraph,
     company_policy: &Policy,
