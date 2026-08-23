@@ -668,26 +668,36 @@ impl GrantSet {
             .remove(approval_id);
     }
 
-    /// Whether a live grant, a standing grant, **or a still-parked approval**
-    /// names `task` as its origin (issue #796).
+    /// Whether a live grant, an **approving** standing grant, **or a
+    /// still-parked approval** names `task` as its origin (issue #796).
     ///
     /// The harness asks this to decide whether a task's checkout held across an
     /// approval park is still awaiting a resume or has been orphaned by a denied
     /// or expired approval, so
     /// [`CheckoutLedger::sweep_orphans`](crate::harness::repo::CheckoutLedger::sweep_orphans)
     /// can reclaim the disk. Three states keep it live: a live grant names it (an
-    /// approved step waiting to be re-issued), a standing grant names it, or an
-    /// approval it parked is **still pending** — that last case mints no grant
-    /// yet, so without `pending` the checkout would be swept in the window
-    /// between the park and the operator's decision. A spent grant is already
-    /// removed from every map, so this reads `false` the moment the resume is
-    /// under way — which is safe because the resuming turn has reclaimed the tree
-    /// onto its turn-scoped list by then.
+    /// approved step waiting to be re-issued), an **approving** standing grant
+    /// names it, or an approval it parked is **still pending** — that last case
+    /// mints no grant yet, so without `pending` the checkout would be swept in
+    /// the window between the park and the operator's decision.
+    ///
+    /// A standing **denial** is deliberately not a live state (issue #1458). A
+    /// denied approval is never re-dispatched to reclaim its checkout — the
+    /// brain's `ApprovalResolved` arm runs only on `Approve` — so counting the
+    /// deny's `origin_task` would hold the tree for the denial's full duration,
+    /// up to a week, and repeated denials would accumulate disk that nothing
+    /// ever resumes. A spent grant is already removed from every map, so this
+    /// reads `false` the moment the resume is under way — which is safe because
+    /// the resuming turn has reclaimed the tree onto its turn-scoped list by
+    /// then.
     pub fn any_for_task(&self, task: &str) -> bool {
         let state = self.inner.lock().expect("grant set poisoned");
         let names_task = |t: &Option<String>| t.as_deref() == Some(task);
         state.live.values().any(|g| names_task(&g.origin_task))
-            || state.standing.values().any(|g| names_task(&g.origin_task))
+            || state
+                .standing
+                .values()
+                .any(|g| g.verdict == crate::ports::types::Verdict::Approve && names_task(&g.origin_task))
             || state.pending.values().any(|t| t == task)
     }
 
