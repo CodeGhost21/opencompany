@@ -2561,6 +2561,10 @@ impl RuntimeBuilder {
                                 store: store.clone(),
                                 meter: Some(fs_ops.clone()),
                                 workspace_root: home.join("harness"),
+                                // The company's own MCP store, so the
+                                // registry tools on the belt read the same
+                                // installs REST does.
+                                mcp_home: Some(home.join("mcp")),
                                 workspace_git_enabled: self.workspace_git_enabled,
                                 // Issue #775: the shell audit sink is HOST-owned
                                 // and hangs off the data root, resolving to

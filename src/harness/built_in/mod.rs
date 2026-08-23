@@ -233,6 +233,14 @@ pub struct HarnessDeps {
     /// Root under which per-agent workspace directories are created
     /// (`{root}/{company}/{agent}/workspace`).
     pub workspace_root: PathBuf,
+    /// The company home's MCP store directory — `<home>/mcp`, the same one
+    /// [`McpRuntime`](crate::harness::mcp::McpRuntime) is built over.
+    ///
+    /// Carried because OpenHuman's `mcp_registry_*` tools take a config now
+    /// instead of reading a process global, and the toolbelt has to hand them
+    /// the config that selects *this* company's store. `None` leaves those two
+    /// tools off the belt, which is what a caller with no MCP home should get.
+    pub mcp_home: Option<PathBuf>,
     /// Whether each private agent workspace is initialized as a Git repository
     /// and checkpointed after tool calls. Host-level `[workspace]` config owns
     /// this switch; false preserves the pre-checkpoint behavior exactly.
@@ -3449,6 +3457,7 @@ pub(crate) fn workflow_wiring_deps(
         store: runtime.store.clone(),
         meter,
         workspace_root: std::env::temp_dir(),
+        mcp_home: None,
         workspace_git_enabled: false,
         audit_root: std::env::temp_dir(),
         model_override: None,
@@ -4032,6 +4041,7 @@ description = "Builds the product."
                 store: store.clone(),
                 meter: Some(meter.clone()),
                 workspace_root: dir.path().to_path_buf(),
+                mcp_home: None,
                 workspace_git_enabled: false,
                 audit_root: dir.path().to_path_buf(),
                 model_override: None,
@@ -4247,6 +4257,7 @@ description = "Builds the product."
             store: Arc::new(RecordingStore::default()),
             meter: None,
             workspace_root: dir.path().to_path_buf(),
+            mcp_home: None,
             workspace_git_enabled: false,
             audit_root: dir.path().to_path_buf(),
             model_override: None,
@@ -5015,6 +5026,7 @@ description = "Builds the product."
             store: Arc::new(RecordingStore::default()),
             meter: None,
             workspace_root: dir.path().to_path_buf(),
+            mcp_home: None,
             workspace_git_enabled: false,
             audit_root: dir.path().to_path_buf(),
             model_override: None,
@@ -5203,6 +5215,7 @@ description = "Builds the product."
             store: Arc::new(RecordingStore::default()),
             meter: None,
             workspace_root: dir.path().to_path_buf(),
+            mcp_home: None,
             workspace_git_enabled: false,
             audit_root: dir.path().to_path_buf(),
             model_override: None,
@@ -5877,6 +5890,7 @@ description = "Builds the product."
             store: live_store.clone(),
             meter: None,
             workspace_root: dir.path().to_path_buf(),
+            mcp_home: None,
             workspace_git_enabled: false,
             audit_root: dir.path().to_path_buf(),
             model_override: None,
@@ -6062,6 +6076,7 @@ description = "Sets direction."
             store: Arc::new(RecordingStore::default()),
             meter: Some(meter.clone()),
             workspace_root: dir.path().to_path_buf(),
+            mcp_home: None,
             workspace_git_enabled: false,
             audit_root: dir.path().to_path_buf(),
             model_override: None,
@@ -6223,6 +6238,7 @@ description = "Sets direction."
             store: Arc::new(RecordingStore::default()),
             meter,
             workspace_root: dir.to_path_buf(),
+            mcp_home: None,
             workspace_git_enabled: false,
             audit_root: dir.to_path_buf(),
             model_override: None,
