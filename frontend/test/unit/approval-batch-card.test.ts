@@ -104,6 +104,7 @@ async function render(
   failed: Record<string, string> = {},
   deciding: ReadonlyMap<string, Verdict> = new Map(),
   compact = false,
+  thread?: ApprovalThreadLink | null,
 ) {
   await act(async () => {
     root.render(
@@ -112,6 +113,7 @@ async function render(
         now: T0 + 60_000,
         askerNames: new Map([["seo", "SEO Specialist"]]),
         compact,
+        thread,
         deciding,
         decided,
         failed,
