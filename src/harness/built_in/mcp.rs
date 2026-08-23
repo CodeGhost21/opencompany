@@ -57,7 +57,10 @@ pub fn registry_from_decls(decls: &[McpServerDecl]) -> McpServerRegistry {
         .filter(|decl| decl.enabled)
         .map(server_config)
         .collect();
-    McpServerRegistry::from_config(&config)
+    // `from_config` takes `tinymcp`'s own client config now, not OpenHuman's
+    // `Config`. `host::static_registry` is the conversion, and it already
+    // degrades an unbuildable set to an empty one rather than failing.
+    oh::mcp::host::static_registry(&config)
 }
 
 /// The MCP registry scoped to one agent, or `None` when the agent is granted no
@@ -257,7 +260,7 @@ impl Tool for OcMcpListServersTool {
                     "allowed_tools": server.allowed_tools,
                     "disallowed_tools": server.disallowed_tools,
                     // Non-secret status ONLY — the credential is never emitted.
-                    "auth_configured": !matches!(server.auth, McpAuthConfig::None),
+                    "auth_configured": !matches!(server.auth, tinymcp::McpAuthConfig::None),
                 })
             })
             .collect::<Vec<_>>();
@@ -269,9 +272,12 @@ impl Tool for OcMcpListServersTool {
             for server in self.registry.list() {
                 let source = match server.source {
                     McpRegistrySource::Config => "config",
-                    McpRegistrySource::LegacyGitbooks => "legacy_gitbooks",
+                    // Renamed upstream: the host-seeded source is no longer
+                    // gitbooks-specific. The wire value is unchanged so an
+                    // operator's existing filters keep matching.
+                    McpRegistrySource::Host => "legacy_gitbooks",
                 };
-                let auth = if matches!(server.auth, McpAuthConfig::None) {
+                let auth = if matches!(server.auth, tinymcp::McpAuthConfig::None) {
                     "none"
                 } else {
                     "configured"
@@ -385,7 +391,7 @@ impl OcMcpCallTool {
     fn auth_configured(&self, server: &str) -> bool {
         self.registry
             .get(server)
-            .map(|s| !matches!(s.auth, McpAuthConfig::None))
+            .map(|s| !matches!(s.auth, tinymcp::McpAuthConfig::None))
             .unwrap_or(false)
     }
 
@@ -490,7 +496,7 @@ impl Tool for OcMcpCallTool {
                     )
                     .await;
                 }
-                let mut result = result.rendered;
+                let mut result: ToolResult = result.rendered.into();
                 if options.prefer_markdown && result.markdown_formatted.is_none() {
                     result.markdown_formatted = Some(result.output());
                 }
@@ -809,7 +815,7 @@ impl McpRuntime {
     }
 }
 
-fn store_error(error: anyhow::Error) -> OpenCompanyError {
+fn store_error(error: impl std::fmt::Display) -> OpenCompanyError {
     OpenCompanyError::Store(format!("MCP registry: {error}"))
 }
 
