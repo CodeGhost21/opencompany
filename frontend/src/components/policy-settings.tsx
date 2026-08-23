@@ -87,6 +87,32 @@ export function isAutonomyEscalation(
     tiers.findIndex((tier) => tier.value === currentMode);
 }
 
+/**
+ * Whether an `always_approve` entry gates a target under the backend's matcher
+ * (`src/policy/always_approve.rs`).
+ *
+ * The matcher accepts more than an exact tool name: the comparison is
+ * ASCII-case-insensitive, and a leading dotted segment gates the rest, so
+ * `SHELL` is the wired `shell` tool and `invoice` covers `invoice.send`. The
+ * "is not a tool" warning under the field must not contradict the gate it
+ * describes — an entry the backend would match is a valid fence, not a
+ * mistake — so the same two rules decide whether an entry counts as known.
+ */
+export function alwaysApproveGates(entry: string, target: string): boolean {
+  const e = entry.trim().toLowerCase();
+  const t = target.trim().toLowerCase();
+  if (!e) return false;
+  if (t === e) return true;
+  // Leading dotted segment: `invoice` gates `invoice.send`, but a bare prefix
+  // (`pay` for `payroll.export`) does not — the segment boundary is load
+  // bearing, exactly as it is in the backend.
+  return (
+    t.length > e.length &&
+    t[e.length] === "." &&
+    t.slice(0, e.length) === e
+  );
+}
+
 interface Props {
   client: OpenCompanyClient;
   company: string | null;
