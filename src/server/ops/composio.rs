@@ -1561,7 +1561,10 @@ mod tests {
         )
         .await;
         let clear_note = resp["note"].as_str().expect("a note").to_string();
-        assert_ne!(clear_note, set_note, "set and clear are told apart: {clear_note}");
+        assert_ne!(
+            clear_note, set_note,
+            "set and clear are told apart: {clear_note}"
+        );
         assert!(
             !clear_note.contains("new Composio token"),
             "a clear must not invent a token that no longer exists: {clear_note}"
