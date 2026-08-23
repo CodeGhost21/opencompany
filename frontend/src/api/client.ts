@@ -673,7 +673,7 @@ export class OpenCompanyClient {
   async resolveApproval(
     approvalId: string,
     verdict: Verdict,
-    note?: string,
+    _note?: string,
     company?: string | null,
     options: { detach?: boolean; scope?: GrantScope } = {},
   ): Promise<ChatResponse | ResolveReceipt> {
