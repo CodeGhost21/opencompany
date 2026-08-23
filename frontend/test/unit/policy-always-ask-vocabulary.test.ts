@@ -49,20 +49,6 @@ vi.mock("sonner", () => {
 
 const { PolicySettings } = await import("@/components/policy-settings");
 
-const STATUS: PolicyStatus = {
-  mode: "auto",
-  alwaysApprove: [],
-  manifestMode: "auto",
-  manifestAlwaysApprove: [],
-  overridden: false,
-  takesEffect: "on the next turn",
-  tiers: [
-    { value: "auto", label: "Auto", description: "Works alone, stops before money." },
-    { value: "full", label: "Full", description: "Acts without asking." },
-  ],
-  knownTools: KNOWN_TOOLS,
-} as unknown as PolicyStatus;
-
 const WIRED = ["shell", "apply_patch", "git_operations", "web_fetch", "http_request"];
 
 /**
@@ -84,6 +70,20 @@ const KNOWN_TOOLS = [
   "repo_publish",
   "workspace_write",
 ];
+
+const STATUS: PolicyStatus = {
+  mode: "auto",
+  alwaysApprove: [],
+  manifestMode: "auto",
+  manifestAlwaysApprove: [],
+  overridden: false,
+  takesEffect: "on the next turn",
+  tiers: [
+    { value: "auto", label: "Auto", description: "Works alone, stops before money." },
+    { value: "full", label: "Full", description: "Acts without asking." },
+  ],
+  knownTools: KNOWN_TOOLS,
+} as unknown as PolicyStatus;
 
 /** A client serving the policy and, optionally, the wired tool slugs. */
 function makeClient({
