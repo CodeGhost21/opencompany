@@ -1,0 +1,112 @@
+# Tickets that left the queue: what was escalated, to whom, and what came back.
+#
+# An escalation is the point where support stops being able to answer and hands
+# the customer's problem to somebody who does not work in the queue. Everything
+# about it is different from a ticket — it has an owner outside support, a
+# customer who has already been disappointed once, and a clock the customer is
+# counting rather than the queue.
+
+title = "Escalations"
+purpose = """
+Every ticket support could not resolve: why it was escalated, who holds it now, \
+what the customer was told, and how it ended. Read it before escalating — the \
+same problem escalated twice is usually one nobody closed the loop on.\
+"""
+written_by = "`record_entry` to raise or update an escalation, `close_entry` when it is resolved or returned"
+checks = ["required-field", "known-status", "closed-needs-reason"]
+
+[[field]]
+name = "id"
+role = "id"
+required = true
+
+[[field]]
+name = "escalation"
+role = "title"
+required = true
+description = "The customer's problem, from their side."
+
+[[field]]
+name = "status"
+role = "status"
+required = true
+
+[[field]]
+name = "customer"
+role = "prose"
+required = true
+
+[[field]]
+name = "why"
+role = "prose"
+required = true
+description = "What support tried and why it was not enough. An escalation with no attempt behind it is a queue transfer."
+
+[[field]]
+name = "handed_to"
+role = "owner"
+description = "Who holds it now — a person or a desk outside support."
+
+[[field]]
+name = "told_customer"
+role = "prose"
+description = "What the customer has been told, and when. Silence after an escalation is the failure they remember."
+
+[[field]]
+name = "promised_by"
+role = "date"
+description = "Any date given to the customer. If one was given, it also belongs on `commitments`."
+
+[[field]]
+name = "reason"
+role = "prose"
+description = "How it ended — resolved, returned to support, or the customer left. Required when it closes."
+
+[[field]]
+name = "refs"
+role = "refs"
+
+[[status]]
+name = "raised"
+
+[[status]]
+name = "accepted"
+aliases = ["stalled"]
+
+[[status]]
+name = "resolved"
+closed = true
+needs_reason = true
+
+[[status]]
+name = "returned"
+closed = true
+needs_reason = true
+
+[[status]]
+name = "lost_customer"
+label = "Customer left"
+closed = true
+needs_reason = true
+
+[[section]]
+heading = "Stalled"
+blurb = "Escalated and not moving. These are where customers are actively being let down."
+statuses = ["accepted"]
+order = "recent"
+
+[[section]]
+heading = "Open"
+blurb = "Raised or accepted. Check `told_customer` — silence is the failure they remember."
+statuses = ["raised", "accepted"]
+order = "recent"
+
+[[section]]
+heading = "Closed"
+blurb = """
+Resolved, returned, or the customer left — each with the reason. A lost \
+customer is kept here deliberately: it is the only place this company records \
+what an unanswered escalation actually cost.\
+"""
+statuses = ["resolved", "returned", "lost_customer"]
+cap = 20

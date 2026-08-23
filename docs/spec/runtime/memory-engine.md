@@ -326,19 +326,48 @@ OPENCOMPANY_MONGODB_URI=mongodb://…
 # → boots; engine memory persists under /data/memory/<workspace>/ as usual.
 ```
 
-## Selection scope — a decision, not a gap (2026-08-20)
+## Choosing an engine from the console
 
-Engine selection is **infra-operator only**: instance-wide, expressed through
-the `OPENCOMPANY_MEMORY*` environment, read once at boot. There is no
-per-company selection, no per-agent selection, no API setter, and no Console
-setter — the Console's Brain and Settings panels are read-only views of
-`/spec` by design, so a console admin can see the engine but never repoint a
-deployment's storage. This deliberately does **not** follow the per-company
-`[inference]` model, for the reason recorded at the selection site in
-`src/store/select.rs`: memory is storage, and nothing model-shaped may ever
-repoint it. A deployment with mixed needs runs the engine that fits its
-dominant workload; splitting workloads across engines (traces local, facts
-hosted) is a possible future refinement of *routing*, not of selection.
+Engine selection stays **instance-wide** — one engine per host, every company
+on it sharing that engine — but it is no longer environment-only. `config.toml`
+gained a `[memory]` section, and `…/memory/engine` is the surface that writes
+it:
+
+```text
+GET  …/memory/engine        what is bound, what is saved, what may be picked
+POST …/memory/engine/test   probe a candidate without saving it
+PUT  …/memory/engine        save it, bind it, and put it in force
+```
+
+Three properties make this safe to hand an admin, and each is a refusal rather
+than a convention:
+
+- **The environment still wins.** `OPENCOMPANY_MEMORY` set at all makes the
+  file layer inert, the console read-only, and a `PUT` a `409` naming the
+  variable. A hosted tenant's control plane injects those variables, so a
+  console that accepted the edit would write a file, report success, and change
+  nothing at the next boot.
+- **An engine that does not answer is not bound.** The route opens the
+  candidate, probes it, and refuses on a failed probe, leaving the previous
+  overlay in force — the opposite of boot, which binds and warns because a
+  transient vendor outage must not crash-loop a tenant. `?force=true` is the
+  escape hatch.
+- **It applies live, or says which companies it did not reach.** The new
+  overlay is swapped onto the `AppState` and every registered company is
+  rebuilt through `RuntimeRebuilder`; a company that cannot be rebuilt is
+  *named* in `restartRequiredFor` rather than covered by a blanket "restart
+  required". The credential is never read back out — the route reports whether
+  a key is set, never its bytes.
+
+What has **not** changed, and is still a decision rather than a gap: there is
+no per-company and no per-agent selection. Memory is storage, and nothing
+model-shaped may repoint it — this deliberately does not follow the
+per-company `[inference]` model, for the reason recorded at the selection site
+in `src/store/select.rs`. Splitting workloads across engines (traces local,
+facts hosted) remains a possible refinement of *routing*, not of selection.
+
+**Switching still moves no data.** A new engine starts empty; see the runbook
+below, whose migration step is the only thing that moves records.
 
 ## Depth: taint, deliberate memory, and what is deliberately not wired
 
@@ -363,11 +392,15 @@ re-derives them:
   `memory_recall`, `memory_forget` — over the company's own `ContextStore`,
   company and agent captured at build time, never a model-supplied
   namespace. Forget reaches only the agent's own `agent-memory/<id>/` rows;
-  task outcomes and operator facts are not an agent's to delete. And because
-  chunks are content-addressed with an ADDRESS-level `ContextStore::delete`,
-  a forget whose identical content is indexed under any other label (another
-  agent's byte-identical memory, a task outcome with the same text) refuses
-  rather than deleting theirs too — store a correction instead. The
+  task outcomes and operator facts are not an agent's to delete. Chunks are
+  content-addressed, and since #1300 every backend keeps one claim per
+  (addr, label) with a **label-scoped** `ContextStore::delete_label`: a
+  forget whose identical content is indexed under other labels (another
+  agent's byte-identical memory, a task outcome with the same text) removes
+  exactly the agent's own claims, the other labels keep the body, and the
+  body is reaped — atomically inside the port — only with its last claim.
+  (Before #1300 this case refused outright, which let anyone make an
+  agent's memory permanently un-forgettable by storing identical text.) The
   vendored upstream memory tools stay unwired: they resolve their store
   ambiently, which under multi-tenant-in-one-process is a cross-company
   leak (`src/harness/built_in/build.rs`, `memory_tools`).
@@ -382,10 +415,10 @@ re-derives them:
 
 ## Switching engines — the operator runbook
 
-Selection is infra-operator only (previous section), so switching is an env
-flip plus a restart — and because **the flip alone moves no data** (a
-switched engine starts empty until something puts records in it), the
-migration below is the step that moves it, and it comes first.
+Whether the switch is a console apply or an env flip plus a restart, **the
+switch alone moves no data** — a switched engine starts empty until something
+puts records in it — so the migration below is the step that moves it, and it
+comes first.
 
 0. **Stop the writes.** Pause the workload (or scale the tenant to zero)
    before migrating: the copy is page-by-page with no dual-write, so anything

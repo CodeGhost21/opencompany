@@ -44,11 +44,12 @@ The console's Brain header needs it: agents write memory **only** through the
 `GET /memory/stats` therefore reports `lastUpdatedAtMillis` as the max across
 both ports, alongside the facts-only `factsUpdatedAtMillis`.
 
-Read that stamp as a max across chunks, not as one row per body: the backends
-differ on a re-`put` of an identical body (sqlite and mongo dedupe on the
-content address and keep the first write; the fs index appends a second line),
-and neither the export bundle nor a restore preserves it — a restored chunk is
-stamped when it lands.
+Read that stamp as a max across chunks, not as one row per body: one address
+carries one row per *label* claiming it (issue #1300), a new label on an
+existing body stamps per-label on fs/sqlite and keeps the address's first
+stamp on the single-record backends (mongodb, the provider facade, the
+tinycortex engine), and neither the export bundle nor a restore preserves it
+— a restored chunk is stamped when it lands.
 
 **TinyCortex is the intended backend for `MemoryStore` and `ContextStore`**
 ([integrations/tinycortex.md](../integrations/tinycortex.md)) but is a
@@ -74,10 +75,48 @@ not wired:
   carry them; no `Brain` consumed the field, so it was removed rather than left
   looking functional.
 - `evict` is implemented on every backend and called from no production path,
-  so the trace window is unbounded. `ContextStore` has no delete verb at all,
-  so the chunk store only grows — which is also why deleting an operator fact
-  leaves its `ContextStore` mirror agent-recallable
-  (`src/server/ops/memory.rs`), against the Delete right below.
+  so the trace window is unbounded. `ContextStore::delete` does exist (it is
+  what reaps an operator fact's mirror and what forgets a dropped document),
+  but nothing sweeps the chunk store on age, so it grows until something
+  deletes by name.
+
+## Dropping documents and links in (the Brain drop zone)
+
+An operator can put a file, a whole folder, or a link into memory by dropping
+it on the Brain page. The host extracts its text, chunks it, and writes the
+chunks to the `ContextStore` under a `document/{slug}/{index}` label — the
+same store agent recall reads, so a dropped handbook reaches a teammate on its
+next turn with no further step (`src/ingest`,
+`src/server/ops/memory_ingest.rs`).
+
+Four properties are normative, because each is a way this could quietly lie:
+
+- **The text is stored, the file is not.** Memory keeps what the document
+  *said*. Files an operator wants back live in the workspace tree; a second
+  copy of every upload there would make the Brain page a silently diverging
+  file manager. Re-dropping is how a document is corrected.
+- **Extraction never guesses.** A format the build cannot read is reported as
+  unsupported per file, never stored as decoded noise that would count as a
+  memory and recall as nothing. Text, Markdown, HTML, JSON and CSV need no
+  parser; PDF, `.docx`, `.xlsx` and `.pptx` ride the `documents` feature (in
+  the default set). A scanned PDF with no text layer is *empty*, which is a
+  different answer from *failed* and is said differently.
+- **Every file gets its own row in the answer.** A real folder always contains
+  a `.DS_Store`, an image, or a scanned page; failing the batch over one would
+  make folder drops unusable, and skipping it silently would leave the
+  operator believing the whole folder is in memory.
+- **A drop can be taken back.** `DELETE …/memory/document/{slug}` forgets every
+  chunk of one document — the Delete right below, applied to the one context
+  origin an operator authored. The delete is label-scoped (#1300): a chunk
+  whose byte-identical body is also indexed under another label loses only
+  this document's claim on it, so somebody else's row survives and the body
+  is reaped with its last claim. It previously *skipped* such a chunk, which
+  left a forgotten document's own rows listed for good.
+
+Links are fetched **by the host** (a browser cannot, cross-origin), so the URL
+path is guarded server-side: `http`/`https` only, and never a loopback,
+link-local or private address — "remember this page" must not become a read
+primitive against the deployment's own network.
 
 ## Operator rights (normative)
 

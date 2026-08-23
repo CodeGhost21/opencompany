@@ -24,6 +24,7 @@ pub mod composio;
 pub mod composio_toolkits;
 pub mod connections_read;
 pub mod domain;
+pub mod finance;
 pub mod finances;
 pub mod hosting;
 pub mod imap;
@@ -39,6 +40,8 @@ pub mod mailer;
 pub mod mcp;
 pub mod mcp_registry;
 pub mod memory;
+pub mod memory_engine;
+pub mod memory_ingest;
 pub mod pages;
 pub mod policy;
 pub mod read_state;
@@ -48,6 +51,9 @@ pub mod read_state;
 pub mod repos;
 pub mod runs;
 pub mod scope;
+/// Per-company web search settings: which provider the agents search through,
+/// and the write-only key behind it. See [`crate::company::search`].
+pub mod search;
 /// First-run company setup: propose a starting roster from three answers
 /// (`docs/spec/runtime/company-setup.md`). Proposes only — the console creates
 /// each teammate through [`team`], so setup has no second write path.
@@ -191,9 +197,11 @@ pub fn router() -> Router<AppState> {
         .merge(channels::router())
         .merge(billing::router())
         .merge(hosting::router())
+        .merge(search::router())
         .merge(company_key::router())
         .merge(composio::router())
         .merge(domain::router())
+        .merge(finance::router())
         .merge(finances::router())
         .merge(usage::router())
         .merge(smtp::router())
@@ -204,6 +212,8 @@ pub fn router() -> Router<AppState> {
         .merge(runs::router())
         .merge(artifacts::router())
         .merge(memory::router())
+        .merge(memory_engine::router())
+        .merge(memory_ingest::router())
         .merge(workspace::router())
         .merge(pages::router())
         .merge(skills::router())

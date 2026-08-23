@@ -506,7 +506,7 @@ delegates_to = ["research"]
 budget_usd_daily = 5.0
 prompt = "Be specific about what would change your mind."
 prompt_files = ["prompts/rubric.md"]
-context = ["GOAL.md", "CLAIMS.md"]
+context = ["GOAL.md", "claims.md"]
 classes = ["judge", "evidence"]
 "#,
             ),
@@ -528,7 +528,7 @@ classes = ["judge", "evidence"]
             Some(
                 &[
                     crate::company::ContextEntry::from("GOAL.md"),
-                    crate::company::ContextEntry::from("CLAIMS.md")
+                    crate::company::ContextEntry::from("claims.md")
                 ][..]
             )
         );

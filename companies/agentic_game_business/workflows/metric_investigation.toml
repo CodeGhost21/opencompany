@@ -1,0 +1,91 @@
+# Workflow graph: metric_investigation
+#
+# Referenced by `[workflows].enabled` in ../company.toml. A metric moves, the
+# changes that could explain it are enumerated from the ledgers *before* anybody
+# theorises, and a cause is established — or the honest answer that several
+# changes are confounded is reported instead of a confident story.
+
+id = "metric_investigation"
+name = "Metric investigation"
+description = "A metric moves; the candidate causes are enumerated and a cause is established or honestly declared confounded."
+
+[[node]]
+id = "moved"
+kind = "trigger"
+name = "A metric moved"
+summary = "Retention, ARPDAU, conversion or installs moved enough to notice."
+
+[[node]]
+id = "candidates"
+kind = "agent"
+name = "Enumerate the candidates"
+summary = "Every economy change and event in the window. Five things usually shipped that fortnight."
+agent = "analytics_analyst"
+
+[[node]]
+id = "mix"
+kind = "agent"
+name = "Check whether the population changed"
+summary = "A UA campaign that brought cheaper users moves everything at once with no product change. The commonest false alarm."
+agent = "user_acquisition"
+
+[[node]]
+id = "attributable"
+kind = "condition"
+name = "Attributable?"
+summary = "Branch on whether a single cause can be isolated."
+[node.config]
+field = "=item.attributable"
+
+[[node]]
+id = "act"
+kind = "agent"
+name = "Recommend an action"
+summary = "With the cohort evidence behind it. Anything touching price goes to the operator."
+agent = "monetization_designer"
+
+[[node]]
+id = "isolate"
+kind = "agent"
+name = "Plan how to separate them"
+summary = "Confounded is an honest result; the next step is a schedule that does not confound."
+agent = "liveops_manager"
+
+[[node]]
+id = "report"
+kind = "output"
+name = "Report the cause"
+summary = "A cause with its confidence, or an honest statement that nothing can be attributed yet."
+[node.destination]
+kind = "channel"
+target = "liveops"
+
+[[edge]]
+from = "moved"
+to = "candidates"
+
+[[edge]]
+from = "candidates"
+to = "mix"
+
+[[edge]]
+from = "mix"
+to = "attributable"
+
+[[edge]]
+from = "attributable"
+to = "act"
+label = "yes"
+
+[[edge]]
+from = "attributable"
+to = "isolate"
+label = "no"
+
+[[edge]]
+from = "act"
+to = "report"
+
+[[edge]]
+from = "isolate"
+to = "report"

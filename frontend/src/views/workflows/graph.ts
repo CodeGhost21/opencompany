@@ -47,7 +47,7 @@ export const NODE_H = 64;
 const MINIMAP_WIDTH = 200;
 const MINIMAP_MAX_HEIGHT = 150;
 /** Floor so the minimap never shrinks to an unusable, unclickable strip. */
-const MINIMAP_MIN_HEIGHT = 32;
+const MINIMAP_MIN_HEIGHT = 96;
 /**
  * The minimum fraction of the minimap's own rendered height that a laid-out
  * node's real height should occupy (issue #1259).

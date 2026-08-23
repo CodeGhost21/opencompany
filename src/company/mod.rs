@@ -37,6 +37,11 @@ pub mod credentials;
 pub mod dns;
 pub mod hosting;
 pub mod inference;
+/// Ledger declaration files: `companies/<name>/ledgers/<slug>.toml`. A vertical
+/// ships the axes it is about — a matter list, a deal pipeline, an experiment
+/// log — the way it already ships its roster, rather than waiting for some turn
+/// to think of declaring one.
+pub mod ledger_file;
 /// Dynamic ledgers: the one place a ledger is read, written, declared or
 /// retired. Every surface routes through it, because the rules that matter —
 /// only a person deletes, a close says why, the derived file follows the
@@ -56,7 +61,16 @@ pub mod mcp_oauth;
 // rules are ordinary text handling with real edge cases, and they are worth
 // testing in the default build rather than only where the agent runtime links.
 pub mod prompt;
+// Rendering that composition back out for a human, from a manifest alone. Same
+// always-compiled argument as `prompt` above, one step further: a debugging
+// surface that only existed in a `--features openhuman` build is one nobody
+// runs, so the default build renders what it can and names the rest.
+pub mod prompt_dump;
 pub mod runtime;
+// Per-company web search configuration: which provider a company's agents
+// search through, and the BYO credential behind it. Keys only — the tools that
+// spend them live behind `openhuman` in `crate::harness::search_byo`.
+pub mod search;
 // First-run company setup (issue: docs/spec/runtime/company-setup.md): the
 // curated starting rosters and the rules a proposed roster obeys. Always
 // compiled and model-free on purpose — it is both the input to the optional
@@ -101,19 +115,24 @@ pub(crate) mod workspace_paths;
 // beside it is: its only caller is the console's REST route, and it touches
 // nothing but the `WorkspaceStore` port.
 pub mod workspace_repair;
+// The one naming rule for everything the runtime puts in a workspace: lowercase,
+// dashed. Always compiled and dependency-free — the scaffold, the publish
+// mirror, the page tools and the workspace write tools all mint names, and one
+// shared rule is what stops them minting four different spellings.
+pub mod workspace_names;
 // Issue #607: text search over the shared tree, behind the agent
 // `workspace_search` tool, the REST `GET …/workspace/search` route and the
 // GraphQL `Company.workspaceSearch` resolver. Always compiled and openhuman-free
 // for the same reason `workspace_links` is: two of its three callers are in the
 // default build, and one shared scan is what stops them answering differently.
 pub mod workspace_search;
-// The workspace's `Agents/` + `Desks/` system roots, and the folders minted
+// The workspace's `agents/` + `desks/` system roots, and the folders minted
 // beneath them on first use (issue #551). Always compiled and openhuman-free:
 // the scaffold is called from the runtime builder at boot, which is in the
 // default build, and it touches nothing but the `WorkspaceStore` port.
 pub mod workspace_scaffold;
 pub mod workspace_seed;
-// Issue #700: the operator-triggered removal of the empty `Agents/<id>/` folders
+// Issue #700: the operator-triggered removal of the empty `agents/<id>/` folders
 // a pre-#570 company still carries. Always compiled and openhuman-free, like the
 // scaffold whose fail-closed root lookup it shares: its only caller is the
 // console's REST route, and it touches nothing but the `WorkspaceStore` port.
@@ -122,6 +141,7 @@ pub mod workspace_sweep;
 use std::path::Path;
 
 pub use credentials::{Credential, CredentialSource, TinyhumansTokenSource, TokenTier};
+pub use ledger_file::{LEDGERS_DIR, has_ledger_files, load_dir_ledgers};
 /// The roster-id grammar check, shared with the runtime id minter so a slug and
 /// a hand-authored `[[agent]].id` are held to one rule (issue #686). Not `pub`:
 /// outside the crate the validator speaks through `CompanyManifest::validate`.
@@ -172,14 +192,19 @@ pub(crate) use workflow_create::{
     rollback_company_workflow, seed_file_exists, set_company_workflow_enabled,
     update_company_workflow, workflow_version,
 };
-// Issue #580: the builder pass's courtesy validation, gated with the harness
-// builder that is its only caller. Issue #753 adds the copilot's tool grounding
-// on the same footing, split by #874 into the effective set a proposal may name
+// Issue #580: the builder pass's courtesy validation. Ungated since issue #1074
+// for the same reason `create_company_workflow` above is: its second caller is
+// the REST `POST …/workflows/validate` route, which is in the default build, and
+// a shared validator gated behind a feature its caller lacks is how the two
+// create surfaces drifted apart in #168.
+pub(crate) use workflow_create::courtesy_validate_draft;
+// Issue #753: the copilot's tool grounding, gated with the harness builder that
+// is its only caller. Split by #874 into the effective set a proposal may name
 // and the granted-but-unwired remainder that is reported, not offered.
 #[cfg(feature = "openhuman")]
 pub(crate) use workflow_create::{
-    courtesy_validate_draft, workflow_effective_tool_slugs,
-    workflow_granted_but_unwired_tool_slugs, workflow_graph_from_spec, workflow_spec_from_graph,
+    workflow_effective_tool_slugs, workflow_granted_but_unwired_tool_slugs,
+    workflow_graph_from_spec, workflow_spec_from_graph,
 };
 pub use workspace_seed::{NodeKind, SeedNode, extract_wikilinks, walk_workspace};
 

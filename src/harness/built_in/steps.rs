@@ -1046,7 +1046,7 @@ mod tests {
     /// the class for a remote one.
     #[test]
     fn a_non_intrinsic_tools_output_is_still_collapsed_to_its_class() {
-        let output = "Could not read `Standards/Engineering standards.md`: the workspace store \
+        let output = "Could not read `standards/engineering-standards.md`: the workspace store \
                       failed (store_io).";
         let classified = oh::tools::status::classify(output, false);
 
@@ -1389,7 +1389,7 @@ mod tests {
     ///
     /// `grep`'s comes from openhuman's `validate_path`, which joins the
     /// caller's sub-path onto the agent's *own* workspace and canonicalizes it —
-    /// so a company note path like `Agents/…`, which the sandboxed file tools
+    /// so a company note path like `agents/…`, which the sandboxed file tools
     /// cannot see, fails here rather than anywhere more informative.
     /// `read_skill_resource`'s comes from its `symlink_metadata` pre-check on a
     /// `references/` file that the skill does not bundle.
@@ -1401,7 +1401,7 @@ mod tests {
         for (tool, output) in [
             (
                 "grep",
-                format!("Failed to resolve path 'Agents/Product Manager/notes': {ENOENT}"),
+                format!("Failed to resolve path 'agents/Product Manager/notes': {ENOENT}"),
             ),
             (
                 crate::harness::skills::READ_SKILL_RESOURCE_TOOL,

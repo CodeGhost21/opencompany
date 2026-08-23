@@ -316,11 +316,12 @@ fn row_from_install(
         description: install.description,
         source: McpSource::Registry,
         enabled: install.enabled,
-        // The directory does not express per-tool allow/deny, and OpenHuman's
-        // bridge tools do not consult one. Empty is the truthful projection, not
-        // a placeholder.
+        // The directory does not express per-tool allow/deny or a read-only
+        // declaration (issue #1124), and OpenHuman's bridge tools do not consult
+        // one here. Empty is the truthful projection, not a placeholder.
         allowed_tools: Vec::new(),
         disallowed_tools: Vec::new(),
+        read_only_tools: Vec::new(),
         timeout_secs: REGISTRY_TIMEOUT_SECS,
         auth_configured: install.auth_configured,
         server_id: Some(install.server_id),

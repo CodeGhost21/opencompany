@@ -30,16 +30,6 @@ pub struct EmbeddedInfo {
     /// identity: keyed on the address, the console reads every launch as a
     /// first meeting and leaves the previous launch's row behind, dead (#615).
     pub instance_id: String,
-    /// The address this host admits, for the sign-in form to offer (#632).
-    ///
-    /// A desktop install has no mail transport and one standing admin, so the
-    /// person in front of it cannot discover what to type and the host will
-    /// answer every other address with the same silent 202. Carrying it is what
-    /// turns the login form from a guessing game into a click.
-    ///
-    /// Not a credential: it names who may sign in, and the code that actually
-    /// does it is minted per attempt and returned only on a loopback host.
-    pub operator_email: String,
 }
 
 /// Registers (or re-registers) a host this client talks to.
@@ -325,7 +315,6 @@ pub async fn oc_embedded(
             base_url: instance.base_url?,
             data_dir: instance.data_dir,
             instance_id: instance.instance_id?,
-            operator_email: instance.operator_email?,
         })
     }))
 }
@@ -435,6 +424,18 @@ pub async fn oc_forget_local_instance(
     local.forget(&id)
 }
 
+/// Permanently deletes a desktop-created host and everything in its data root.
+///
+/// This is intentionally distinct from [`oc_forget_local_instance`], whose
+/// recoverable contract leaves the data root intact.
+#[tauri::command]
+pub async fn oc_delete_local_instance(
+    state: State<'_, crate::AppHandleState>,
+    id: String,
+) -> Result<(), String> {
+    state.local.lock().await.delete(&id).await
+}
+
 /// Every coding harness this shell knows how to drive over ACP, and whether
 /// each is actually usable right now.
 ///
@@ -506,7 +507,6 @@ mod test {
             running: true,
             base_url: Some("http://127.0.0.1:1234".into()),
             instance_id: Some("inst-1".into()),
-            operator_email: Some("operator@opencompany.local".into()),
             companies: vec!["acme".into()],
             error: None,
         })
@@ -536,7 +536,6 @@ mod test {
                 "id",
                 "instanceId",
                 "label",
-                "operatorEmail",
                 "running",
             ],
             "the instance row answers in exactly these keys: {wire}"
@@ -554,7 +553,6 @@ mod test {
             running: false,
             base_url: None,
             instance_id: None,
-            operator_email: None,
             companies: Vec::new(),
             error: Some("the data root is in use".into()),
         })
@@ -667,15 +665,20 @@ mod test {
     /// The console reads these keys by name, and a rename here is silent on
     /// both sides: TypeScript has nothing to check a Rust struct against, and
     /// every field is optional in the console precisely so an older shell
-    /// degrades instead of failing. A wrong key would therefore land as "the
-    /// sign-in form is blank again" (#632) rather than as an error.
+    /// degrades instead of failing. A wrong `instanceId` therefore lands as a
+    /// sidebar accumulating one dead connection per launch (#615), not as an
+    /// error anybody sees.
+    ///
+    /// The set is deliberately *shrinking* here: `operatorEmail` left with the
+    /// desktop's sign-in. A console built before that still reads it as
+    /// optional and simply finds nothing, which is the same degrade an older
+    /// shell has always got from the other direction.
     #[test]
     fn the_embedded_record_answers_in_the_keys_the_console_reads() {
         let wire = serde_json::to_value(EmbeddedInfo {
             base_url: "http://127.0.0.1:1234".into(),
             data_dir: "/data".into(),
             instance_id: "inst-1".into(),
-            operator_email: "operator@opencompany.local".into(),
         })
         .expect("serialise");
 
@@ -692,7 +695,7 @@ mod test {
         keys.sort_unstable();
         assert_eq!(
             keys,
-            ["baseUrl", "dataDir", "instanceId", "operatorEmail"],
+            ["baseUrl", "dataDir", "instanceId"],
             "the embedded record answers in exactly these keys: {wire}"
         );
     }

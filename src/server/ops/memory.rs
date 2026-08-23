@@ -10,15 +10,16 @@
 //! the `EventLog` per the Operator-rights section of
 //! `docs/spec/company-brain/memory.md`.
 //!
-//! ## Known limitation (flagged seam)
+//! ## The delete → reap seam
 //!
 //! Deleting a fact removes it from the `FactStore` AND reaps its mirrored
 //! `operator-fact/{id}` context chunk — the delete port this comment once
 //! said was missing landed with #1290, and leaving the reap unwired would
 //! have kept showing the operator "deleted" while agents still recalled it.
-//! The reap honors the shared-address rule: chunks are content-addressed, so
-//! a mirror whose byte-identical body is indexed under any OTHER label is
-//! left in place rather than deleting someone else's row.
+//! The reap is label-scoped since #1300: chunks are content-addressed, so a
+//! mirror whose byte-identical body is indexed under any OTHER label loses
+//! exactly the mirror's own claim — the other label keeps the body, and the
+//! body goes only with its last claim, atomically inside the port.
 
 use axum::extract::{Path, Query};
 use axum::http::StatusCode;
@@ -62,8 +63,8 @@ mod label_lockstep_test {
 }
 
 /// Label prefix for the [`ContextStore`](crate::ports::ContextStore) mirror of
-/// an operator-authored fact. Keyed by fact id so a future delete port can reap
-/// the mirror when the fact is deleted (today it lingers — see the module doc).
+/// an operator-authored fact. Keyed by fact id so [`reap_fact_mirror`] can
+/// find and remove the mirror's claim when the fact is deleted.
 const OPERATOR_FACT_PREFIX: &str = "operator-fact";
 
 /// Label prefix under which the harness stores completed task outcomes.
@@ -102,6 +103,13 @@ enum MemoryOrigin {
     AgentMemory,
     /// A stored task outcome the harness wrote (ContextStore). Read-only.
     TaskOutcome,
+    /// A chunk of a document or link an operator dropped on the Brain page
+    /// (`crate::server::ops::memory_ingest`). Its own origin rather than
+    /// folded into [`AgentMemory`](MemoryOrigin::AgentMemory): an operator has
+    /// to be able to see what their upload became, and rendering it as
+    /// something a teammate learned would say the wrong thing about where the
+    /// knowledge came from.
+    Document,
 }
 
 /// A durable memory entry as the console renders it.
@@ -119,7 +127,8 @@ struct MemoryEntry {
     kind: Option<FactKind>,
     /// Which backend the row came from; drives editable-vs-read-only rendering.
     origin: MemoryOrigin,
-    /// Whether the operator may edit/delete this row (true only for facts).
+    /// Whether the operator may delete this row: facts, and the documents
+    /// they dropped on the Brain page. Never the agents' own memory.
     editable: bool,
     title: String,
     body: String,
@@ -187,12 +196,14 @@ fn split_title_body(body: &str) -> (String, String) {
 /// symptom reached by a second route, and past the cap the sort in
 /// [`capped_newest_first`] was the only thing keeping it out of the list at
 /// all. The console filters by origin client-side, so the grouping bought
-/// nothing. The `id` tie-break carries the addr, so chunks sharing a
-/// millisecond keep a total, call-stable order, as the cap's sort does.
+/// nothing. The `id` tie-break carries the addr AND the label, so chunks
+/// sharing a millisecond — including two labels claiming one address (#1300)
+/// — keep a total, call-stable order, as the cap's sort does.
 fn context_entries(chunks: Vec<RawChunk>, query: Option<&str>) -> Vec<MemoryEntry> {
     let needle = query.map(|q| q.to_lowercase());
     let mirror_prefix = format!("{OPERATOR_FACT_PREFIX}/");
     let outcome_prefix = format!("{OUTCOME_LABEL_PREFIX}/");
+    let document_prefix = format!("{}/", crate::ingest::DOCUMENT_LABEL_PREFIX);
 
     let mut entries: Vec<MemoryEntry> = Vec::new();
 
@@ -208,29 +219,43 @@ fn context_entries(chunks: Vec<RawChunk>, query: Option<&str>) -> Vec<MemoryEntr
             continue;
         }
 
-        let (origin, source): (MemoryOrigin, String) =
-            if let Some(agent) = chunk.label.strip_prefix(&outcome_prefix) {
-                let who = if agent.is_empty() { "an agent" } else { agent };
-                (MemoryOrigin::TaskOutcome, who.to_string())
-            } else {
-                // Deliberate memories live one segment deeper —
-                // `agent-memory/<agent>/<slug>` — so the naive first-segment
-                // parse attributed every one of them to the literal
-                // "agent-memory" (the #1290 review's M2).
-                let who = match chunk.label.strip_prefix(const_format_prefix()) {
-                    Some(rest) => rest.split('/').next().filter(|s| !s.is_empty()),
-                    None => chunk.label.split('/').next().filter(|s| !s.is_empty()),
-                };
-                (
-                    MemoryOrigin::AgentMemory,
-                    who.unwrap_or("an agent").to_string(),
-                )
+        let (origin, source): (MemoryOrigin, String) = if chunk.label.starts_with(&document_prefix)
+        {
+            // The document's own name, which `ingest::chunk_document`
+            // writes as the chunk's first line for exactly this reason: a
+            // label is slugged and truncated, so it cannot be rendered
+            // back as the file the operator dropped.
+            let named = chunk
+                .body
+                .lines()
+                .next()
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .unwrap_or("a document");
+            (MemoryOrigin::Document, named.to_string())
+        } else if let Some(agent) = chunk.label.strip_prefix(&outcome_prefix) {
+            let who = if agent.is_empty() { "an agent" } else { agent };
+            (MemoryOrigin::TaskOutcome, who.to_string())
+        } else {
+            // Deliberate memories live one segment deeper —
+            // `agent-memory/<agent>/<slug>` — so the naive first-segment
+            // parse attributed every one of them to the literal
+            // "agent-memory" (the #1290 review's M2).
+            let who = match chunk.label.strip_prefix(const_format_prefix()) {
+                Some(rest) => rest.split('/').next().filter(|s| !s.is_empty()),
+                None => chunk.label.split('/').next().filter(|s| !s.is_empty()),
             };
+            (
+                MemoryOrigin::AgentMemory,
+                who.unwrap_or("an agent").to_string(),
+            )
+        };
 
         let (mut title, body) = split_title_body(&chunk.body);
         if title.is_empty() {
             title = match origin {
                 MemoryOrigin::TaskOutcome => "Task outcome".to_string(),
+                MemoryOrigin::Document => "Document".to_string(),
                 _ => "Agent memory".to_string(),
             };
         }
@@ -238,10 +263,20 @@ fn context_entries(chunks: Vec<RawChunk>, query: Option<&str>) -> Vec<MemoryEntr
         entries.push(MemoryEntry {
             // Prefix so a context row's id can never collide with a fact id
             // (delete targets fact ids only; this keeps React keys unique too).
-            id: format!("ctx:{}", chunk.addr),
+            // The LABEL is part of the id, not just the address: chunks are
+            // content-addressed and one address carries one row per label
+            // claiming it (#1300), so two rows here can share an address —
+            // byte-identical text two agents both remembered. Keyed by address
+            // alone they would collide, and the console renders these by id.
+            id: format!("ctx:{}:{}", chunk.addr, chunk.label),
             kind: None,
             origin,
-            editable: false,
+            // A document is material the operator supplied, so they may take
+            // it back — through `…/memory/document/{slug}`, which forgets the
+            // whole document rather than this one chunk of it. The two agent
+            // origins stay read-only: they are the record of what the company
+            // did, not something anybody typed.
+            editable: matches!(origin, MemoryOrigin::Document),
             title,
             body,
             source,
@@ -405,8 +440,10 @@ async fn list_facts(
 /// Every backend lists oldest-first, so capping the head would pin the Brain
 /// view to the oldest `cap` chunks forever — once a company crossed the cap, a
 /// new memory could never appear again. Sort newest-first BEFORE capping; the
-/// addr tie-break keeps the order total, so chunks stamped in the same
-/// millisecond cannot swap places between calls.
+/// (addr, label) tie-break keeps the order total, so chunks stamped in the
+/// same millisecond cannot swap places between calls. The label is part of
+/// that tie-break because one address carries one row per label claiming it
+/// (#1300), so the addr alone no longer separates two rows.
 fn capped_newest_first(metas: Vec<ChunkMeta>, mirror_prefix: &str, cap: usize) -> Vec<ChunkMeta> {
     let mut metas: Vec<ChunkMeta> = metas
         .into_iter()
@@ -416,6 +453,7 @@ fn capped_newest_first(metas: Vec<ChunkMeta>, mirror_prefix: &str, cap: usize) -
         b.stored_at_millis
             .cmp(&a.stored_at_millis)
             .then_with(|| a.addr.as_ref().cmp(b.addr.as_ref()))
+            .then_with(|| a.label.cmp(&b.label))
     });
     metas.truncate(cap);
     metas
@@ -517,7 +555,7 @@ async fn delete_fact(
                 fact_id = %fact_id,
                 error = %err,
                 "fact deleted but its context mirror could not be reaped; \
-                 recall may keep serving it until a retry or #1300's reaper"
+                 recall may keep serving it until a retry"
             );
         }
         // Journal the operator deletion to the event log (audit trail).
@@ -539,17 +577,15 @@ async fn delete_fact(
     }
 }
 
-/// Removes the `operator-fact/{fact_id}` mirror chunk(s), shared-address
-/// aware: an address also carrying any label OUTSIDE this mirror's own is
-/// skipped — deleting it would delete that other row too (content
-/// addressing; the same rule `memory_forget` enforces).
-///
-/// KNOWN RACE (#1300): the shared-label check is a snapshot; a write of
-/// byte-identical content landing between the check and the delete loses its
-/// row. The port has no conditional delete to close this — that is exactly
-/// the label-scoped-delete work item in #1300, which fixes it by
-/// construction. Until then the window is one operator HTTP call wide and
-/// requires an adversarially-timed identical-content write.
+/// Removes the `operator-fact/{fact_id}` mirror's claim on its chunk(s),
+/// label-scoped (`ContextStore::delete_label`, issue #1300): exactly the
+/// mirror's own index entry goes, and the body is reaped only when no other
+/// label claims it — decided atomically inside the port, so a write of
+/// byte-identical content landing mid-reap keeps its row by construction
+/// (this function used to snapshot-check for shared labels and then delete
+/// the whole address, which both raced that write and left a shared mirror's
+/// row behind forever; now the shared case removes the mirror's claim and
+/// the other label keeps the body).
 pub(crate) async fn reap_fact_mirror(
     context: &dyn crate::ports::ContextStore,
     company: &crate::ports::CompanyId,
@@ -558,12 +594,9 @@ pub(crate) async fn reap_fact_mirror(
     let mirror_label = format!("{OPERATOR_FACT_PREFIX}/{fact_id}");
     let all = context.list(company, "").await?;
     for meta in all.iter().filter(|m| m.label == mirror_label) {
-        let shared = all
-            .iter()
-            .any(|m| m.addr == meta.addr && m.label != mirror_label);
-        if !shared {
-            context.delete(company, &meta.addr).await?;
-        }
+        context
+            .delete_label(company, &meta.addr, &mirror_label)
+            .await?;
     }
     Ok(())
 }
@@ -576,10 +609,13 @@ mod reap_test {
     use crate::store::FsContextStore;
     use std::sync::Arc;
 
-    /// Deleting a fact reaps its mirror; a mirror whose content is shared
-    /// with another label survives (the other row must not vanish).
+    /// Deleting a fact reaps its mirror. A mirror whose content is shared
+    /// with another label loses exactly the mirror's own claim (label-scoped
+    /// delete, #1300): the other label keeps the body, and — unlike the old
+    /// shared-address skip — the mirror row itself no longer lingers in the
+    /// index serving a deleted fact.
     #[tokio::test]
-    async fn the_mirror_is_reaped_unless_its_address_is_shared() {
+    async fn the_mirror_is_reaped_and_a_shared_body_survives_under_its_other_label() {
         let dir = tempfile::tempdir().unwrap();
         let context: Arc<dyn ContextStore> =
             Arc::new(FsContextStore::new(dir.path().to_path_buf()));
@@ -603,7 +639,8 @@ mod reap_test {
             "the unshared mirror must be reaped"
         );
 
-        // Identical bodies share one address: the reap must leave it.
+        // Identical bodies share one address: the reap removes the mirror's
+        // claim, and the agent's row keeps the body.
         let shared = context
             .put(
                 &company,
@@ -630,7 +667,20 @@ mod reap_test {
         context
             .peek(&company, &shared, None)
             .await
-            .expect("a shared-address mirror must survive the reap");
+            .expect("the body must survive under the agent's label");
+        let labels: Vec<String> = context
+            .list(&company, "")
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|m| m.addr == shared)
+            .map(|m| m.label)
+            .collect();
+        assert_eq!(
+            labels,
+            ["agent-memory/ceo/note"],
+            "the mirror's claim must be gone; only the agent's remains"
+        );
     }
 }
 
@@ -805,7 +855,35 @@ mod combined_list_tests {
             None,
         );
         let ids: Vec<&str> = entries.iter().map(|e| e.id.as_str()).collect();
-        assert_eq!(ids, vec!["ctx:a", "ctx:z"]);
+        assert_eq!(
+            ids,
+            vec!["ctx:a:task-outcome/agent-1", "ctx:z:agent-1/z"],
+            "the id carries addr then label, so the tie-break stays addr-first"
+        );
+    }
+
+    /// One address, two labels — the #1300 shape — renders as two rows with
+    /// DISTINCT ids. Keyed by address alone they collided, and the console
+    /// renders these rows by id (React keys, row identity).
+    #[test]
+    fn two_labels_on_one_address_render_as_two_distinct_rows() {
+        let entries = context_entries(
+            vec![
+                chunk_at_addr("shared", "agent-memory/ann/note", "same text", 500),
+                chunk_at_addr("shared", "agent-memory/bob/note", "same text", 500),
+            ],
+            None,
+        );
+        let ids: Vec<&str> = entries.iter().map(|e| e.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec![
+                "ctx:shared:agent-memory/ann/note",
+                "ctx:shared:agent-memory/bob/note"
+            ],
+        );
+        let sources: Vec<&str> = entries.iter().map(|e| e.source.as_str()).collect();
+        assert_eq!(sources, vec!["ann", "bob"], "each row keeps its own author");
     }
 
     #[test]
@@ -1021,6 +1099,15 @@ mod route_tests {
         async fn delete(&self, _id: &CompanyId, _addr: &ChunkAddr) -> crate::Result<bool> {
             Ok(false)
         }
+
+        async fn delete_label(
+            &self,
+            _id: &CompanyId,
+            _addr: &ChunkAddr,
+            _label: &str,
+        ) -> crate::Result<bool> {
+            Ok(false)
+        }
     }
 
     /// An [`AppState`] whose company runtime reads context from `context`,
@@ -1033,6 +1120,8 @@ mod route_tests {
         let id = CompanyId::new("acme");
         store
             .save(&CompanyRecord {
+                overlay_retired_agents: Vec::new(),
+                overlay_agent_edits: Vec::new(),
                 id: id.clone(),
                 manifest: manifest.clone(),
                 ledger: Vec::new(),

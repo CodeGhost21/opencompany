@@ -32,8 +32,31 @@ export type AuthMode = "email" | "wallet" | "none";
 /** What the console must know before it can draw a sign-in screen. */
 export interface AuthConfig {
   mode: AuthMode;
+  /**
+   * What this company calls itself, so the sign-in screen can name what a
+   * credential is being handed to.
+   *
+   * It has to arrive here rather than from `status`: every route that reports
+   * the name is behind the very sign-in being drawn, and on the hosted platform
+   * each tenant is a separate company on its own URL, so "which one is this"
+   * is a real question at that moment.
+   *
+   * Optional only for a host predating the field. The console draws a heading
+   * with no name there — the same one it drew before this existed.
+   */
+  name?: string;
   /** Whether a password may be offered. Only ever true in `email` mode. */
   passwords: boolean;
+  /**
+   * Whether a magic link asked for here reaches anybody: the host has a mail
+   * transport, or it is loopback-bound and hands the code straight back.
+   *
+   * False is a routable host with no transport, and the console has to act on
+   * it — `auth/request` answers `sent: true` there exactly as it does on a host
+   * that delivered, so nothing else in the flow will ever reveal that the link
+   * went nowhere.
+   */
+  magicLink: boolean;
 }
 
 /**
@@ -46,15 +69,27 @@ export interface AuthConfig {
  *
  * Defaults to `email` if the host cannot answer, which is what every host
  * predating this route does.
+ *
+ * `magicLink` defaults to true through both kinds of rollout skew — no route,
+ * and a route that omits the field — because a host old enough not to report it
+ * either mails links or echoes them. Assuming false there would withdraw a
+ * working sign-in from every deployment that has not updated yet.
  */
 export async function fetchAuthConfig(
   client: OpenCompanyClient,
   company: string | null,
 ): Promise<AuthConfig> {
   try {
-    return await client.get<AuthConfig>(`${client.scopeFor(company)}/auth/config`);
+    const config = await client.get<AuthConfig>(`${client.scopeFor(company)}/auth/config`);
+    // A blank name is not a name. Normalised here, once, so no view has to
+    // decide whether `""` means "unnamed" or "not reported".
+    return {
+      ...config,
+      name: config.name?.trim() || undefined,
+      magicLink: config.magicLink ?? true,
+    };
   } catch {
-    return { mode: "email", passwords: true };
+    return { mode: "email", passwords: true, magicLink: true };
   }
 }
 

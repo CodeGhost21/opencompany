@@ -5,6 +5,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import type { WorkflowNode } from "@/api/workflows";
+import type { TeamMemberDto } from "@/api/types";
 import { NodeDetailPanel } from "@/views/workflows/NodeDetailPanel";
 
 /**
@@ -18,9 +19,9 @@ import { NodeDetailPanel } from "@/views/workflows/NodeDetailPanel";
 let container: HTMLDivElement;
 let root: Root;
 
-function render(node: WorkflowNode) {
+function render(node: WorkflowNode, roster: TeamMemberDto[] = []) {
   act(() => {
-    root.render(createElement(NodeDetailPanel, { node, onClose: () => {} }));
+    root.render(createElement(NodeDetailPanel, { node, roster, onClose: () => {} }));
   });
 }
 
@@ -62,5 +63,32 @@ describe("NodeDetailPanel — repeatable and the empty-details state", () => {
   it("does not show the empty-details message when another field also carries a detail", () => {
     render(baseNode({ repeatable: false, onError: "continue" }));
     expect(container.textContent).not.toContain("This node has no extra details");
+  });
+});
+
+describe("NodeDetailPanel — operator-facing identity", () => {
+  it("uses the shared readable kind label and humanises a newer unknown kind", () => {
+    render(baseNode({ kind: "output_parser" }));
+    expect(container.textContent).toContain("Output parser");
+    expect(container.textContent).not.toContain("coerces to a schema");
+    expect(container.textContent).not.toContain("output_parser");
+
+    render(baseNode({ kind: "future_magic" }));
+    expect(container.textContent).toContain("Future magic");
+    expect(container.textContent).not.toContain("future_magic");
+  });
+
+  it("shows an assigned teammate's display name and demotes roster ids", () => {
+    render(baseNode({ kind: "agent", agent: "research-lead" }), [
+      { id: "research-lead", name: "Maya Chen", role: "Research lead" },
+    ]);
+
+    expect(container.textContent).toContain("Maya Chen");
+    expect(container.textContent).toContain("Roster ID: research-lead");
+    expect(container.textContent).toContain("Node ID");
+    expect(
+      container.querySelector('[data-testid="workflow-node-detail"] > div:first-child')
+        ?.textContent,
+    ).not.toContain("research-lead");
   });
 });

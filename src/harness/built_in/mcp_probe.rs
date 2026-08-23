@@ -535,6 +535,7 @@ mod tests {
             description: None,
             allowed_tools: Vec::new(),
             disallowed_tools: Vec::new(),
+            read_only_tools: Vec::new(),
             timeout_secs: 30,
             enabled: true,
             source: McpSource::Runtime,

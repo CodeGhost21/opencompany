@@ -1,12 +1,12 @@
 //! Live create/read/write/delete tools over the company [`WorkspaceStore`],
-//! scoped to `Pages/<slug>/` — agent-authored internal dashboard pages.
+//! scoped to `pages/<slug>/` — agent-authored internal dashboard pages.
 //!
 //! An agent's page is real React/TSX, compiled server-side: this repo's
 //! runtime image has no Node (only the separate frontend Docker build stage
-//! does), so turning `Page.tsx` into something a browser can run has to be a
+//! does), so turning `page.tsx` into something a browser can run has to be a
 //! Rust-native step, done here inside [`PagesWriteTool::execute`] with
 //! `swc_core`. See `docs/spec/runtime/pages.md` for the full design — the
-//! `Pages/<slug>/` convention, the compile contract, and the two halves of the
+//! `pages/<slug>/` convention, the compile contract, and the two halves of the
 //! isolation story (server: CSP headers over trusted compiled output; client:
 //! a sandboxed iframe, in `src/server/ops/pages.rs` and the frontend).
 //!
@@ -16,7 +16,7 @@
 //! ([`CompanyPages`]), and a [`pages_tools`] constructor. Four tools:
 //!
 //! * [`PagesListTool`] (`pages_list`) — every slug's [`PageManifest`].
-//! * [`PagesReadTool`] (`pages_read`) — one slug's manifest and `Page.tsx`
+//! * [`PagesReadTool`] (`pages_read`) — one slug's manifest and `page.tsx`
 //!   source.
 //! * [`PagesWriteTool`] (`pages_write`) — create or update a slug's manifest
 //!   and/or source; a source write compiles it (see [`compile_page`]) and
@@ -29,8 +29,8 @@
 //! `CompanyWorkspace` (`workspace_tools.rs`) is built around free-form
 //! navigation of an arbitrary tree — a [`PathIndex`](workspace_tools) over
 //! every node, `path` **or** `id` addressing, folders anywhere. A page bundle
-//! is a fixed three-file shape (`page.toml`, `Page.tsx`,
-//! `Page.compiled.mjs`) under one slug folder, so [`CompanyPages`] is a
+//! is a fixed three-file shape (`page.toml`, `page.tsx`,
+//! `page.compiled.mjs`) under one slug folder, so [`CompanyPages`] is a
 //! smaller, purpose-built handle: it knows exactly one root
 //! ([`PAGES_ROOT`]) and addresses everything by `slug`, never by a raw node
 //! id an agent could otherwise pass for any node in the company's tree.
@@ -52,7 +52,7 @@ use serde_json::{Value, json};
 use oh::tools::traits::{PermissionLevel, Tool, ToolResult};
 use openhuman_core::openhuman as oh;
 
-// The workspace layout — `Pages/<slug>/{page.toml,Page.tsx,Page.compiled.mjs}`
+// The workspace layout — `pages/<slug>/{page.toml,page.tsx,page.compiled.mjs}`
 // — is shared with `crate::server::ops::pages`, which is always compiled and
 // therefore cannot import from this `openhuman`-gated module. Both sides
 // import the same constants from `workspace_scaffold` instead.
@@ -77,11 +77,11 @@ pub const PAGES_WRITE_TOOL: &str = "pages_write";
 pub const PAGES_DELETE_TOOL: &str = "pages_delete";
 
 /// Headroom reserved out of [`TOOL_RESULT_BUDGET_BYTES`] for `pages_read`'s
-/// preamble and its `--- BEGIN/END Page.tsx ---` fences, mirroring the
+/// preamble and its `--- BEGIN/END page.tsx ---` fences, mirroring the
 /// `workspace_tools` read-overhead convention.
 const READ_OVERHEAD_BYTES: usize = 1024;
 
-/// Max bytes of `Page.tsx` source one `pages_write` call accepts.
+/// Max bytes of `page.tsx` source one `pages_write` call accepts.
 ///
 /// A page's source is read back whole for the next edit turn the same way a
 /// workspace note is, so the same "a write must stay a write the agent can
@@ -95,7 +95,7 @@ const MAX_SOURCE_BYTES: usize = TOOL_RESULT_BUDGET_BYTES - READ_OVERHEAD_BYTES;
 
 const _: () = assert!(MAX_SOURCE_BYTES + READ_OVERHEAD_BYTES <= TOOL_RESULT_BUDGET_BYTES);
 
-/// A slug: the path segment naming one page, `Pages/<slug>/`.
+/// A slug: the path segment naming one page, `pages/<slug>/`.
 ///
 /// Validated once, at the top of every tool — not reused from
 /// [`crate::company::workspace_paths`], because a page slug is a narrower
@@ -152,7 +152,7 @@ impl Default for PageManifest {
 // Compilation (issue: agent-authored dashboard pages, plan §2)
 // ---------------------------------------------------------------------------
 
-/// The bare import specifiers a `Page.tsx` may reference.
+/// The bare import specifiers a `page.tsx` may reference.
 ///
 /// Anything else fails [`compile_page`] before any transform runs — this is a
 /// compile-time allow-list on the parsed `ImportDecl`s, not a sandbox
@@ -165,10 +165,10 @@ pub const ALLOWED_IMPORTS: &[&str] = &[
     "@opencompany/site",
 ];
 
-/// The result of compiling one `Page.tsx`.
+/// The result of compiling one `page.tsx`.
 #[derive(Debug)]
 pub struct CompiledPage {
-    /// The rendered ES module, ready to serve as `Page.compiled.mjs`.
+    /// The rendered ES module, ready to serve as `page.compiled.mjs`.
     pub code: String,
 }
 
@@ -355,13 +355,13 @@ fn reject_disallowed_imports(module: &swc_core::ecma::ast::Module) -> Result<(),
 // ---------------------------------------------------------------------------
 
 /// A [`WorkspaceStore`] pinned to one company and one agent, scoped to
-/// `Pages/` — the object every tool in this module holds.
+/// `pages/` — the object every tool in this module holds.
 ///
 /// `company` and `agent_id` are fixed at build time and never derived from a
 /// tool argument, the same tenancy argument [`crate::harness::workspace_tools`]
 /// makes for `CompanyWorkspace`: every lookup here starts from
 /// [`CompanyPages::slug_children`], which reads this company's own tree, so a
-/// slug an agent invents can only ever resolve inside this company's `Pages/`
+/// slug an agent invents can only ever resolve inside this company's `pages/`
 /// subtree.
 #[derive(Clone)]
 pub struct CompanyPages {
@@ -399,9 +399,17 @@ impl CompanyPages {
     /// resolved from a single company-scoped tree read.
     async fn all_pages(&self) -> crate::Result<Vec<(String, PageBundle)>> {
         let nodes = self.store.tree(&self.company).await?;
-        let pages_root = nodes
-            .iter()
-            .find(|n| n.parent_id.is_none() && n.kind == NodeKind::Folder && n.name == PAGES_ROOT);
+        // Case-insensitive on all four names, and for one reason: the root and
+        // the two source files were `pages/`, `page.tsx` and `page.compiled.mjs`
+        // before the workspace's lowercase-dashed rule
+        // ([`crate::company::workspace_names`]). A company created then still
+        // carries them, and an exact match would report every one of its pages
+        // as missing while they sit in the tree.
+        let pages_root = nodes.iter().find(|n| {
+            n.parent_id.is_none()
+                && n.kind == NodeKind::Folder
+                && n.name.eq_ignore_ascii_case(PAGES_ROOT)
+        });
         let Some(pages_root) = pages_root else {
             return Ok(Vec::new());
         };
@@ -422,11 +430,13 @@ impl CompanyPages {
                 .iter()
                 .filter(|n| n.parent_id.as_deref() == Some(folder.id.as_str()))
             {
-                match child.name.as_str() {
-                    MANIFEST_NAME => bundle.manifest = Some(child.clone()),
-                    SOURCE_NAME => bundle.source = Some(child.clone()),
-                    COMPILED_NAME => bundle.compiled = Some(child.clone()),
-                    _ => {}
+                let name = child.name.as_str();
+                if name.eq_ignore_ascii_case(MANIFEST_NAME) {
+                    bundle.manifest = Some(child.clone());
+                } else if name.eq_ignore_ascii_case(SOURCE_NAME) {
+                    bundle.source = Some(child.clone());
+                } else if name.eq_ignore_ascii_case(COMPILED_NAME) {
+                    bundle.compiled = Some(child.clone());
                 }
             }
             out.push((folder.name.clone(), bundle));
@@ -445,17 +455,30 @@ impl CompanyPages {
             .map(|(_, bundle)| bundle))
     }
 
-    /// Claims `Pages/<slug>/`, creating `Pages/` first if this is the first
+    /// Claims `pages/<slug>/`, creating `pages/` first if this is the first
     /// page — mirrors [`crate::company::workspace_scaffold::ensure_agent_folder`]'s
-    /// on-demand-root pattern for `Agents/`.
+    /// on-demand-root pattern for `agents/`.
     async fn ensure_slug_folder(&self, slug: &str) -> crate::Result<String> {
-        let pages_root = self
-            .store
-            .adopt_or_create_folder(&self.company, None, PAGES_ROOT, self.origin())
-            .await?;
+        // A legacy `Pages/` root is adopted rather than joined by a lowercase
+        // twin — the same call the scaffold makes for `agents/`, and made
+        // through the scaffold's own resolver so the two cannot drift.
+        let nodes = self.store.tree(&self.company).await?;
+        let pages_root = match crate::company::workspace_scaffold::find(&nodes, None, PAGES_ROOT) {
+            crate::company::workspace_scaffold::Found::Folder(id) => id,
+            crate::company::workspace_scaffold::Found::Collision(why) => {
+                return Err(crate::error::OpenCompanyError::Conflict(why));
+            }
+            crate::company::workspace_scaffold::Found::Free => {
+                self.store
+                    .adopt_or_create_folder(&self.company, None, PAGES_ROOT, self.origin())
+                    .await?
+                    .into_node()
+                    .id
+            }
+        };
         let claim: FolderClaim = self
             .store
-            .adopt_or_create_folder(&self.company, Some(pages_root.id()), slug, self.origin())
+            .adopt_or_create_folder(&self.company, Some(&pages_root), slug, self.origin())
             .await?;
         Ok(claim.id().to_string())
     }
@@ -573,7 +596,7 @@ impl Tool for PagesListTool {
 // pages_read
 // ---------------------------------------------------------------------------
 
-/// Reads one page's manifest and `Page.tsx` source. Read-only.
+/// Reads one page's manifest and `page.tsx` source. Read-only.
 pub struct PagesReadTool {
     pages: CompanyPages,
 }
@@ -592,7 +615,7 @@ impl Tool for PagesReadTool {
 
     fn description(&self) -> &str {
         "Read one dashboard page's manifest (title, description, icon, nav visibility) and its \
-         `Page.tsx` source, by `slug`. USE FOR reviewing or revising a page you or a teammate \
+         `page.tsx` source, by `slug`. USE FOR reviewing or revising a page you or a teammate \
          already built."
     }
 
@@ -672,16 +695,16 @@ impl Tool for PagesReadTool {
                     out.push_str(&format!(
                         "Source rev={rev}. To revise it, call `{PAGES_WRITE_TOOL}` with \
                          expected_updated_at={rev} and the complete new source.\n--- BEGIN \
-                         Page.tsx ---\n",
+                         page.tsx ---\n",
                         rev = node.updated_at_millis
                     ));
                     out.push_str(&body);
-                    out.push_str("\n--- END Page.tsx ---\n");
+                    out.push_str("\n--- END page.tsx ---\n");
                 }
-                _ => out.push_str("Its `Page.tsx` could not be read.\n"),
+                _ => out.push_str("Its `page.tsx` could not be read.\n"),
             },
             None => {
-                out.push_str("This page has no `Page.tsx` yet — write one with `pages_write`.\n")
+                out.push_str("This page has no `page.tsx` yet — write one with `pages_write`.\n")
             }
         }
 
@@ -693,8 +716,8 @@ impl Tool for PagesReadTool {
 // pages_write
 // ---------------------------------------------------------------------------
 
-/// Creates or updates one page's manifest and/or `Page.tsx` source. A source
-/// write compiles it via [`compile_page`] and writes `Page.compiled.mjs`
+/// Creates or updates one page's manifest and/or `page.tsx` source. A source
+/// write compiles it via [`compile_page`] and writes `page.compiled.mjs`
 /// alongside it; a compile failure writes nothing.
 pub struct PagesWriteTool {
     pages: CompanyPages,
@@ -714,7 +737,7 @@ impl Tool for PagesWriteTool {
 
     fn description(&self) -> &str {
         "Create or update one internal dashboard page, by `slug`. Pass `source` (the complete new \
-         `Page.tsx` body) to (re)compile the page — a page importing anything other than \"react\", \
+         `page.tsx` body) to (re)compile the page — a page importing anything other than \"react\", \
          \"react-dom/client\", \"react/jsx-runtime\" or \"@opencompany/site\" is refused, and a \
          compile error is returned verbatim so you can fix it. Pass `title` (required on first \
          write) and optionally `description`, `icon`, `nav_visible` to set the manifest. When \
@@ -748,11 +771,11 @@ impl Tool for PagesWriteTool {
                 },
                 "source": {
                     "type": "string",
-                    "description": "The complete new Page.tsx body. Omit to change only the manifest."
+                    "description": "The complete new page.tsx body. Omit to change only the manifest."
                 },
                 "expected_updated_at": {
                     "type": "integer",
-                    "description": "Required when `source` is given and the page already has a Page.tsx — the `rev` from pages_read."
+                    "description": "Required when `source` is given and the page already has a page.tsx — the `rev` from pages_read."
                 }
             },
             "required": ["slug"],
@@ -801,7 +824,7 @@ impl Tool for PagesWriteTool {
         // CAS guard, mirroring `workspace_write`: required whenever a source
         // that already exists is being replaced, so a page edited since the
         // agent last read it is refused rather than clobbered. A brand-new
-        // page (no existing `Page.tsx`) has no revision to guard against.
+        // page (no existing `page.tsx`) has no revision to guard against.
         if source.is_some()
             && let Some(existing_source) = existing.as_ref().and_then(|b| b.source.as_ref())
         {
@@ -842,13 +865,13 @@ impl Tool for PagesWriteTool {
                     Ok(Ok(compiled)) => Some(compiled),
                     Ok(Err(diagnostic)) => {
                         return Ok(ToolResult::error(format!(
-                            "Could not compile `{slug}`'s Page.tsx — nothing was written:\n\n\
+                            "Could not compile `{slug}`'s page.tsx — nothing was written:\n\n\
                              {diagnostic}"
                         )));
                     }
                     Err(e) => {
                         return Ok(ToolResult::error(format!(
-                            "Could not compile `{slug}`'s Page.tsx — the compiler task failed: \
+                            "Could not compile `{slug}`'s page.tsx — the compiler task failed: \
                              {e}"
                         )));
                     }
@@ -958,7 +981,7 @@ impl Tool for PagesWriteTool {
                 .await
             {
                 return Ok(ToolResult::error(format!(
-                    "Could not save `{slug}`'s Page.tsx: {reason}.",
+                    "Could not save `{slug}`'s page.tsx: {reason}.",
                     reason = store_reason(&e),
                 )));
             }
@@ -974,7 +997,7 @@ impl Tool for PagesWriteTool {
                 .await
             {
                 return Ok(ToolResult::error(format!(
-                    "Saved `{slug}`'s Page.tsx but could not save the compiled bundle: \
+                    "Saved `{slug}`'s page.tsx but could not save the compiled bundle: \
                      {reason}. The page will not serve correctly until this is retried.",
                     reason = store_reason(&e),
                 )));

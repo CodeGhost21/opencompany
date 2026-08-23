@@ -1298,8 +1298,29 @@ impl RuntimeBuilder {
             seed_workspace(ops.workspace.as_ref(), &id, seed_dir).await?;
         }
 
-        // Issue #551: lay down the workspace's system roots — `Agents/` and
-        // `Desks/` — beside the template-seeded top-level folders, so anything
+        // The company's own axes, seeded the same way and for the same reason
+        // the workspace is: a vertical that ships a roster, a workflow graph and
+        // three skills but no matter list, deal pipeline or experiment log is
+        // one whose defining record exists only if some turn thinks to invent
+        // it — and two runs of one template then disagree about what the
+        // company even tracks.
+        //
+        // NOT gated on `seed_dir`, deliberately: a platform-provisioned tenant
+        // carries no bundle, and the *global* ledgers are part of what a company
+        // is, exactly like the `agents/`/`desks/` roots below.
+        //
+        // Gated on the store holding no declaration at all rather than on each
+        // slug's absence, so retiring a seeded ledger sticks. The honest limit:
+        // a person who retires *every* declared ledger and restarts gets the
+        // defaults back. That is visible and reversible, and it is a better
+        // failure than a baseline that silently re-asserts one ledger somebody
+        // deliberately dropped.
+        if handover.is_none() {
+            seed_ledgers(&ops, &id, self.seed_dir.as_deref()).await?;
+        }
+
+        // Issue #551: lay down the workspace's system roots — `agents/` and
+        // `desks/` — beside the template-seeded top-level folders, so anything
         // an agent or a desk produces has a named home both the operator and
         // the other agents can navigate to. The roots only; the folder for a
         // given agent or desk is minted the first time that agent or desk
@@ -1911,6 +1932,21 @@ impl RuntimeBuilder {
             .as_ref()
             .map(|r| r.overlay_agents.clone())
             .unwrap_or_default();
+        // The roster edits and removals an operator has made from the console.
+        // Carried across the rebuild for the reason the overlay model exists at
+        // all: neither is written back to `company.toml`, so the seed manifest
+        // this rebuild starts from still declares the teammate under its
+        // original name and still declares the one that was removed. Left out,
+        // the `store.save` at the end of this function overwrites both with an
+        // empty list — and that save runs on every boot and every
+        // `rebuild_company` (an inference-settings change, a harness pool swap,
+        // a restart), so a console rename would revert and a removed teammate
+        // would walk back onto the roster. The same reasoning as
+        // `overlay_budgets` below, and the same failure mode.
+        let overlay_retired_agents = existing
+            .as_ref()
+            .map(|r| r.overlay_retired_agents.clone())
+            .unwrap_or_default();
         let overlay_desk_members = existing
             .as_ref()
             .map(|r| r.overlay_desk_members.clone())
@@ -1935,6 +1971,8 @@ impl RuntimeBuilder {
         // removed there would linger as one. The overlay halves are already
         // lifted out of `existing` above, so this loses nothing.
         let desk_record = CompanyRecord {
+            overlay_retired_agents: Vec::new(),
+            overlay_agent_edits: Vec::new(),
             id: id.clone(),
             manifest: self.manifest.clone(),
             ledger: Vec::new(),
@@ -1994,6 +2032,15 @@ impl RuntimeBuilder {
         let overlay_budgets = existing
             .as_ref()
             .map(|r| r.overlay_budgets.clone())
+            .unwrap_or_default();
+        // Issue #1530: the operator-set per-agent persona overrides. Carried
+        // across the rebuild for the same reason as the budget caps above — the
+        // manifest is a read-only boot snapshot on a hosted tenant, so dropping
+        // these would silently revert every console-edited persona to the text
+        // baked into the image on the next restart.
+        let overlay_agent_edits = existing
+            .as_ref()
+            .map(|r| r.overlay_agent_edits.clone())
             .unwrap_or_default();
         // Issue #562: the operator's `[policy]` override, carried across the
         // rebuild — but ONLY while the seed's `[policy]` has not itself changed.
@@ -2378,6 +2425,28 @@ impl RuntimeBuilder {
                             } else {
                                 None
                             };
+                            // The company's own search provider, resolved from
+                            // the same store for the same reason: a BYO search
+                            // key is billed to the company that pasted it, so
+                            // there is no environment fallback. Absent, the
+                            // agents search through the managed surface below.
+                            let tenant_search_config = if crate::company::grants_search_explicit(
+                                &self.manifest.tools.allow,
+                            ) {
+                                crate::harness::search_byo::TenantSearch::resolve(&secrets, &id)
+                                    .await
+                                    .unwrap_or_else(|err| {
+                                        tracing::warn!(
+                                            company = %id,
+                                            "[search] could not read the company's search \
+                                             provider at boot; falling back to managed search this \
+                                             turn: {err}"
+                                        );
+                                        None
+                                    })
+                            } else {
+                                None
+                            };
                             let composio_config = if crate::company::grants_composio_explicit(
                                 &self.manifest.tools.allow,
                             ) {
@@ -2581,6 +2650,7 @@ impl RuntimeBuilder {
                                 #[cfg(feature = "paypal")]
                                 paypal: paypal_config,
                                 hosting: hosting_config,
+                                tenant_search: tenant_search_config,
                                 steer,
                                 run_supervisor: supervisor,
                                 // Issue #170: the ports an `output` node's
@@ -2656,7 +2726,7 @@ impl RuntimeBuilder {
                                 // Issue #237: the SAME workspace handle the
                                 // console's REST/GraphQL surface writes through
                                 // (`ops.workspace`, seeded just above), so an
-                                // operator's edit to `Standards/` is what the
+                                // operator's edit to `standards/` is what the
                                 // next agent turn reads. The tools cache
                                 // nothing, so no rebuild is needed for an edit
                                 // to take effect.
@@ -2676,6 +2746,15 @@ impl RuntimeBuilder {
                             };
                             workflow_harness_deps = Some(deps.clone());
                             let record = CompanyRecord {
+                                // Seeded from the store like every other
+                                // operator overlay below. The brain resolves
+                                // its roster through `effective_agents`, so a
+                                // record built with these empty hands it a
+                                // roster where a removed teammate is back and
+                                // a renamed one still answers to the name the
+                                // blueprint gave it.
+                                overlay_retired_agents: overlay_retired_agents.clone(),
+                                overlay_agent_edits: overlay_agent_edits.clone(),
                                 id: id.clone(),
                                 manifest: self.manifest.clone(),
                                 ledger: Vec::new(),
@@ -2907,6 +2986,8 @@ impl RuntimeBuilder {
         // revoking it in version control.
         store
             .save(&CompanyRecord {
+                overlay_retired_agents,
+                overlay_agent_edits,
                 id: id.clone(),
                 manifest: self.manifest.clone(),
                 ledger,
@@ -3190,6 +3271,68 @@ async fn seed_workspace(
         };
         workspace.create(id, &node, seed.content.as_deref()).await?;
         path_to_id.insert(seed.rel_path.clone(), node.id);
+    }
+    Ok(())
+}
+
+/// Seeds a company's declared ledgers: the global baseline
+/// ([`crate::globals::ledgers`]) plus whatever its own bundle declares under
+/// `companies/<name>/ledgers/*.toml`.
+///
+/// Runs only on a company that has declared nothing yet — see the call site.
+/// The built-ins (`tasks`, `goals`, `decisions`) are never stored: they ship
+/// with the runtime, and persisting a copy would let a company's version drift
+/// from the code every prompt and route is written against.
+///
+/// A company's own declaration **wins**: it is put last, so a bundle that
+/// declares the same slug as a global replaces it rather than being refused by
+/// the cap behind it. That is the same precedence every other global surface
+/// resolves an id collision by.
+///
+/// Each spec is admitted through [`crate::ledger::Registry`] before it is
+/// stored, which is what enforces the cap and the collision rules against
+/// whatever is already there. A refused declaration is a warning and not a boot
+/// failure: a company must reach the rest of itself when one axis is bad,
+/// exactly as it does for a malformed global.
+async fn seed_ledgers(
+    ops: &OpsStores,
+    id: &CompanyId,
+    seed_dir: Option<&std::path::Path>,
+) -> Result<()> {
+    use crate::ledger::Registry;
+
+    if !ops.ledgers.list_specs(id).await?.is_empty() {
+        return Ok(());
+    }
+
+    let mut specs: Vec<crate::ledger::LedgerSpec> = crate::globals::ledgers().to_vec();
+    if let Some(dir) = seed_dir {
+        match crate::company::load_dir_ledgers(dir) {
+            Ok(bundled) => {
+                for spec in bundled {
+                    specs.retain(|global| global.slug != spec.slug);
+                    specs.push(spec);
+                }
+            }
+            // A bundle whose ledgers do not parse must not stop the company
+            // booting. `content_test` fails CI on a shipped template that has
+            // one, so this arm is for a hand-edited bundle, where reaching the
+            // console to fix it beats refusing to start.
+            Err(err) => {
+                tracing::warn!(company = %id, "company ledgers not seeded ({err})");
+            }
+        }
+    }
+
+    let mut seeded: Vec<crate::ledger::LedgerSpec> = Vec::new();
+    for spec in specs {
+        let registry = Registry::build(seeded.clone());
+        if let Err(err) = registry.admits(&spec) {
+            tracing::warn!(company = %id, ledger = %spec.slug, "ledger not seeded ({err})");
+            continue;
+        }
+        ops.ledgers.put_spec(id, &spec).await?;
+        seeded.push(spec);
     }
     Ok(())
 }
@@ -4805,9 +4948,9 @@ mod test {
         let home = home_dir.path().to_path_buf();
         // A company definition dir with a workspace subtree.
         let seed_dir = home.join("def");
-        std::fs::create_dir_all(seed_dir.join("workspace/Brand")).unwrap();
-        std::fs::write(seed_dir.join("workspace/README.md"), "# Root").unwrap();
-        std::fs::write(seed_dir.join("workspace/Brand/voice.md"), "# Voice").unwrap();
+        std::fs::create_dir_all(seed_dir.join("workspace/brand")).unwrap();
+        std::fs::write(seed_dir.join("workspace/readme.md"), "# Root").unwrap();
+        std::fs::write(seed_dir.join("workspace/brand/voice.md"), "# Voice").unwrap();
 
         let manifest = parse("[company]\nname=\"Acme\"\n[policy]\nmode=\"full\"\n");
         let id = CompanyId::new("acme");
@@ -4817,22 +4960,29 @@ mod test {
             .build()
             .await
             .unwrap();
-        // Seeded: README.md, Brand/, Brand/voice.md — plus runtime scaffold
-        // (`Agents/` and `secrets/README.md`) which is not what the re-seed
-        // gate is about.
+        // Seeded: readme.md, brand/, brand/voice.md — plus runtime scaffold
+        // (the system roots and the explanatory note under each root that
+        // carries one), which is not what the re-seed gate is about. The
+        // explanatory notes are excluded by their *parent*, not by name: they
+        // are all called `readme.md`, and so is the seeded one this asserts on.
         let seeded = |tree: &[crate::ports::WorkspaceNode]| {
-            let secrets = tree
+            let scaffold_roots: Vec<&str> = tree
                 .iter()
-                .find(|node| {
+                .filter(|node| {
                     node.parent_id.is_none()
-                        && node.name == crate::company::workspace_scaffold::SECRETS_ROOT
+                        && crate::company::workspace_scaffold::SYSTEM_ROOTS
+                            .contains(&node.name.as_str())
                 })
-                .map(|node| node.id.as_str());
+                .map(|node| node.id.as_str())
+                .collect();
             let mut names: Vec<String> = tree
                 .iter()
                 .filter(|node| {
                     !crate::company::workspace_scaffold::SYSTEM_ROOTS.contains(&node.name.as_str())
-                        && node.parent_id.as_deref() != secrets
+                        && !node
+                            .parent_id
+                            .as_deref()
+                            .is_some_and(|parent| scaffold_roots.contains(&parent))
                 })
                 .map(|node| node.name.clone())
                 .collect();
@@ -4840,7 +4990,7 @@ mod test {
             names
         };
         let tree = runtime.workspace().tree(&id).await.unwrap();
-        assert_eq!(seeded(&tree), vec!["Brand", "README.md", "voice.md"]);
+        assert_eq!(seeded(&tree), vec!["brand", "readme.md", "voice.md"]);
 
         // Operator deletes a node.
         let voice = tree.iter().find(|n| n.name == "voice.md").unwrap();
@@ -4857,14 +5007,213 @@ mod test {
         let tree = runtime.workspace().tree(&id).await.unwrap();
         assert_eq!(
             seeded(&tree),
-            vec!["Brand", "README.md"],
+            vec!["brand", "readme.md"],
             "workspace re-seeded despite operator deletion"
         );
         // Sanity: the record store still loads.
         assert!(runtime.store().load(&id).await.unwrap().is_some());
     }
 
-    /// Boot lays down `Agents/` and operator-only `secrets/README.md`. `Desks/`
+    /// A declaration file every template author would write, used by the
+    /// seeding tests below.
+    #[cfg(test)]
+    const PIPELINE_LEDGER: &str = r#"
+title = "Deal pipeline"
+purpose = "Every deal in flight and why a lost one was lost."
+
+[[field]]
+name = "deal"
+role = "id"
+required = true
+
+[[field]]
+name = "stage"
+role = "status"
+required = true
+
+[[status]]
+name = "qualifying"
+
+[[status]]
+name = "won"
+closed = true
+needs_reason = true
+"#;
+
+    /// The baseline's ledgers reach a company with no bundle at all — the
+    /// platform-provisioned tenant shape, which is most of them.
+    #[tokio::test]
+    async fn the_baseline_ledgers_are_seeded_without_a_bundle() {
+        let home_dir = tmp_home("oc-ledger-seed-");
+        let manifest = parse("[company]\nname=\"Acme\"\n");
+        let id = CompanyId::new("acme");
+        let runtime = RuntimeBuilder::new(home_dir.path().to_path_buf(), manifest)
+            .with_id(id.clone())
+            .build()
+            .await
+            .unwrap();
+
+        let stored: Vec<String> = runtime
+            .ledgers()
+            .list_specs(&id)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|spec| spec.slug)
+            .collect();
+        for global in crate::globals::ledgers() {
+            assert!(
+                stored.contains(&global.slug),
+                "`{}` was not seeded: {stored:?}",
+                global.slug
+            );
+        }
+        // The built-ins stay in the runtime. Persisting a copy is what lets a
+        // company's stored version drift from the code every prompt is written
+        // against.
+        assert!(!stored.contains(&"tasks".to_string()));
+    }
+
+    /// A bundle's own ledgers are seeded beside the baseline's, and a bundle
+    /// declaration of the same slug replaces the global rather than colliding
+    /// with it.
+    #[tokio::test]
+    async fn a_bundle_ledger_is_seeded_and_supersedes_a_global_of_the_same_slug() {
+        let home_dir = tmp_home("oc-ledger-bundle-");
+        let seed_dir = home_dir.path().join("def");
+        std::fs::create_dir_all(seed_dir.join("ledgers")).unwrap();
+        std::fs::write(seed_dir.join("ledgers/pipeline.toml"), PIPELINE_LEDGER).unwrap();
+        let shadowing_slug = crate::globals::ledgers()[0].slug.clone();
+        std::fs::write(
+            seed_dir.join(format!("ledgers/{shadowing_slug}.toml")),
+            PIPELINE_LEDGER.replace("Deal pipeline", "Ours, not the baseline's"),
+        )
+        .unwrap();
+
+        let manifest = parse("[company]\nname=\"Acme\"\n");
+        let id = CompanyId::new("acme");
+        let runtime = RuntimeBuilder::new(home_dir.path().to_path_buf(), manifest)
+            .with_id(id.clone())
+            .with_seed_dir(seed_dir)
+            .build()
+            .await
+            .unwrap();
+
+        let specs = runtime.ledgers().list_specs(&id).await.unwrap();
+        let slugs: Vec<&str> = specs.iter().map(|spec| spec.slug.as_str()).collect();
+        assert!(slugs.contains(&"pipeline"), "{slugs:?}");
+        assert_eq!(
+            specs
+                .iter()
+                .filter(|spec| spec.slug == shadowing_slug)
+                .count(),
+            1,
+            "the company's own declaration replaces the global, it does not sit beside it"
+        );
+        assert_eq!(
+            specs
+                .iter()
+                .find(|spec| spec.slug == shadowing_slug)
+                .unwrap()
+                .title,
+            "Ours, not the baseline's"
+        );
+    }
+
+    /// Seeded once. Retiring a ledger has to stick across a restart, or
+    /// "only a person retires one" is a rule the next boot takes back.
+    #[tokio::test]
+    async fn ledgers_seed_once_and_a_retirement_sticks() {
+        let home_dir = tmp_home("oc-ledger-once-");
+        let home = home_dir.path().to_path_buf();
+        let manifest = parse("[company]\nname=\"Acme\"\n");
+        let id = CompanyId::new("acme");
+
+        let runtime = RuntimeBuilder::new(home.clone(), manifest.clone())
+            .with_id(id.clone())
+            .build()
+            .await
+            .unwrap();
+        let retired = crate::globals::ledgers()[0].slug.clone();
+        runtime.ledgers().delete_spec(&id, &retired).await.unwrap();
+        drop(runtime);
+
+        let runtime = RuntimeBuilder::new(home, manifest)
+            .with_id(id.clone())
+            .build()
+            .await
+            .unwrap();
+        let slugs: Vec<String> = runtime
+            .ledgers()
+            .list_specs(&id)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|spec| spec.slug)
+            .collect();
+        assert!(
+            !slugs.contains(&retired),
+            "`{retired}` came back after a person retired it: {slugs:?}"
+        );
+    }
+
+    /// A **shipped** bundle seeds its own ledgers, and their derived files
+    /// appear in the workspace.
+    ///
+    /// The other seeding tests build their bundle in a tempdir, so they prove
+    /// the mechanism and not the content. This one boots
+    /// `companies/agentic_law_firm` exactly as an operator would and asserts
+    /// that the axes that vertical is *about* — its matter list, its deadlines —
+    /// are actually there, which is the whole point of the feature and the one
+    /// thing a tempdir fixture cannot check.
+    #[tokio::test]
+    async fn a_shipped_bundle_seeds_its_own_ledgers_and_renders_them() {
+        let home_dir = tmp_home("oc-ledger-shipped-");
+        let bundle = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("companies")
+            .join("agentic_law_firm");
+        let manifest = CompanyManifest::from_path(&bundle).expect("the shipped bundle parses");
+        let id = CompanyId::new("firm");
+        let runtime = RuntimeBuilder::new(home_dir.path().to_path_buf(), manifest)
+            .with_id(id.clone())
+            .with_seed_dir(bundle)
+            .build()
+            .await
+            .unwrap();
+
+        let slugs: Vec<String> = runtime
+            .ledgers()
+            .list_specs(&id)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|spec| spec.slug)
+            .collect();
+        for expected in ["matters", "deadlines", "positions"] {
+            assert!(
+                slugs.contains(&expected.to_string()),
+                "`{expected}` was not seeded from the bundle: {slugs:?}"
+            );
+        }
+
+        // And the derived files are published, so the axes are legible to
+        // everything that already reads the workspace rather than only through
+        // the ledger tools.
+        let ctx = crate::company::ledgers::Ledgers::new(id.clone(), runtime.ledgers().clone())
+            .with_workspace_opt(Some(runtime.workspace().clone()));
+        crate::company::ledgers::republish_all(&ctx)
+            .await
+            .expect("republished");
+        let tree = runtime.workspace().tree(&id).await.unwrap();
+        for name in ["matters.md", "deadlines.md", "positions.md"] {
+            assert!(
+                tree.iter().any(|node| node.name == name),
+                "`{name}` was not rendered"
+            );
+        }
+    }
+
+    /// Boot lays down `agents/` and operator-only `secrets/readme.md`. `desks/`
     /// has no producer, so it is minted on first use instead of standing empty.
     ///
     /// The per-agent folder is deliberately absent: it is minted the first time
@@ -4877,7 +5226,7 @@ mod test {
     /// an existing company picks the root up.
     #[tokio::test]
     async fn boot_provisions_the_system_roots_and_nothing_inside_them() {
-        use crate::company::workspace_scaffold::{AGENTS_ROOT, SECRETS_ROOT};
+        use crate::company::workspace_scaffold::{AGENTS_ROOT, ARTIFACTS_ROOT, SECRETS_ROOT};
         use crate::ports::workspace::{NodeKind, WorkspaceOrigin};
 
         let home_dir = tmp_home("oc-agents-");
@@ -4902,8 +5251,14 @@ mod test {
         names.sort_unstable();
         assert_eq!(
             names,
-            vec![AGENTS_ROOT, "README.md", SECRETS_ROOT],
-            "boot provisions the managed roots with no seed dir — no `Desks/`, and no \
+            vec![
+                AGENTS_ROOT,
+                ARTIFACTS_ROOT,
+                "readme.md",
+                "readme.md",
+                SECRETS_ROOT
+            ],
+            "boot provisions the managed roots with no seed dir — no `desks/`, and no \
              folder for a teammate that has produced nothing"
         );
         for node in &tree {
@@ -4913,7 +5268,7 @@ mod test {
             tree.iter()
                 .filter(|node| node.parent_id.is_none() && node.kind == NodeKind::Folder)
                 .count(),
-            2
+            crate::company::workspace_scaffold::SYSTEM_ROOTS.len(),
         );
 
         // An existing, non-empty workspace: an `is_empty` gate would have
@@ -4923,7 +5278,7 @@ mod test {
         // With one managed root, deleting it would leave the tree empty and
         // stop pinning that. A lazily-minted desk folder stands in for the
         // content a real company would have — and doubles as the #645 check
-        // that boot neither re-manages, duplicates nor disturbs a `Desks/` that
+        // that boot neither re-manages, duplicates nor disturbs a `desks/` that
         // already exists.
         crate::company::workspace_scaffold::ensure_desk_folder(
             runtime.workspace().as_ref(),
@@ -4958,12 +5313,14 @@ mod test {
             names,
             vec![
                 AGENTS_ROOT,
-                "Desks",
-                "README.md",
-                "creative_studio",
+                ARTIFACTS_ROOT,
+                "creative-studio",
+                "desks",
+                "readme.md",
+                "readme.md",
                 SECRETS_ROOT,
             ],
-            "the deleted root was re-provisioned, and the unmanaged `Desks/` left as it stood"
+            "the deleted root was re-provisioned, and the unmanaged `desks/` left as it stood"
         );
     }
 
@@ -4971,7 +5328,7 @@ mod test {
     /// roster: a company with no agents at all still gets it.
     #[tokio::test]
     async fn boot_provisions_the_roots_for_a_company_with_no_agents() {
-        use crate::company::workspace_scaffold::{AGENTS_ROOT, SECRETS_ROOT};
+        use crate::company::workspace_scaffold::{AGENTS_ROOT, ARTIFACTS_ROOT, SECRETS_ROOT};
 
         let home_dir = tmp_home("oc-noagents-");
         let id = CompanyId::new("acme");
@@ -4987,7 +5344,16 @@ mod test {
         let tree = runtime.workspace().tree(&id).await.unwrap();
         let mut names: Vec<&str> = tree.iter().map(|n| n.name.as_str()).collect();
         names.sort_unstable();
-        assert_eq!(names, vec![AGENTS_ROOT, "README.md", SECRETS_ROOT]);
+        assert_eq!(
+            names,
+            vec![
+                AGENTS_ROOT,
+                ARTIFACTS_ROOT,
+                "readme.md",
+                "readme.md",
+                SECRETS_ROOT
+            ]
+        );
     }
 
     /// Issue #85: the launch path's template provenance is stamped onto the
@@ -5711,6 +6077,8 @@ mod test {
         let id = CompanyId::new("acme");
         FsCompanyStore::new(dir.path())
             .save(&CompanyRecord {
+                overlay_retired_agents: Vec::new(),
+                overlay_agent_edits: Vec::new(),
                 id: id.clone(),
                 manifest: manifest.clone(),
                 ledger: Vec::new(),
@@ -5883,6 +6251,8 @@ mod test {
         let id = CompanyId::new("acme");
         FsCompanyStore::new(dir.path())
             .save(&CompanyRecord {
+                overlay_retired_agents: Vec::new(),
+                overlay_agent_edits: Vec::new(),
                 id: id.clone(),
                 manifest: persisted,
                 ledger: Vec::new(),
@@ -6104,6 +6474,103 @@ mod test {
         );
     }
 
+    /// The same defect one field over, and the one that would have made this
+    /// PR's whole promise false: a console rename and a console removal must
+    /// survive a rebuild.
+    ///
+    /// Neither is written back to `company.toml` — that is the point of the
+    /// overlay model — so the seed manifest a rebuild starts from still names
+    /// the teammate as it launched and still declares the one that was removed.
+    /// `build()` ends in an unconditional `store.save`, and while that save
+    /// wrote `Vec::new()` for these two fields every restart, every harness
+    /// pool swap and every inference-settings change quietly reverted the
+    /// rename and walked the removed teammate back onto the roster. An operator
+    /// on a hosted tenant has no file to edit and no redeploy to make, so
+    /// "it comes back on the next restart" is the whole feature failing.
+    ///
+    /// Asserted through `effective_agents` rather than the raw overlay vectors,
+    /// because that is the roster everything downstream actually reads.
+    #[tokio::test]
+    async fn a_rebuild_keeps_a_console_rename_and_a_console_removal() {
+        use crate::ports::types::AgentOverride;
+        use crate::store::FsCompanyStore;
+
+        let home_dir = tmp_home("oc-roster-rebuild-");
+        let home = home_dir.path().to_path_buf();
+        let id = CompanyId::new("roster-co");
+        let manifest = parse(
+            r#"
+            [company]
+            name = "Roster Co"
+
+            [[agent]]
+            id = "ceo"
+            role = "Chief Executive"
+
+            [[agent]]
+            id = "cto"
+            role = "Chief Technologist"
+            "#,
+        );
+
+        // First build materializes the record.
+        RuntimeBuilder::new(home.clone(), manifest.clone())
+            .with_id(id.clone())
+            .build()
+            .await
+            .unwrap();
+
+        // The console writes: rename one blueprint teammate, remove another.
+        let store = FsCompanyStore::new(home.clone());
+        let mut record = store.load(&id).await.unwrap().unwrap();
+        record.overlay_agent_edits.push(AgentOverride {
+            agent_id: "ceo".to_string(),
+            name: None,
+            role: Some("Managing Director".to_string()),
+            description: None,
+            tools: None,
+            instructions: None,
+        });
+        record.retire_agent("cto");
+        store.save(&record).await.unwrap();
+
+        // Rebuild, exactly as a restart does.
+        RuntimeBuilder::new(home.clone(), manifest)
+            .with_id(id.clone())
+            .build()
+            .await
+            .unwrap();
+
+        let rebuilt = store.load(&id).await.unwrap().unwrap();
+        let roster = rebuilt.effective_agents();
+        let ceo = roster
+            .iter()
+            .find(|agent| agent.id == "ceo")
+            .expect("the renamed teammate is still on the roster");
+        assert_eq!(
+            ceo.role, "Managing Director",
+            "the rebuild reverted a console rename — `overlay_agent_edits` was not carried \
+             forward; roster: {roster:?}"
+        );
+        assert!(
+            !roster.iter().any(|agent| agent.id == "cto"),
+            "the rebuild resurrected a removed teammate — `overlay_retired_agents` was not \
+             carried forward; roster: {roster:?}"
+        );
+
+        // And the blueprint really does still declare both, which is exactly why
+        // carrying the overlay is the only thing that can have produced the two
+        // assertions above.
+        assert!(
+            rebuilt
+                .manifest
+                .agents
+                .iter()
+                .any(|agent| agent.id == "cto"),
+            "the manifest no longer declares the removed teammate, so this test proves nothing"
+        );
+    }
+
     /// Spawns an in-process OpenAI-compatible stub that answers every
     /// chat-completion with `marker`, so a harness turn can run without a real
     /// inference backend. Mirrors the provider-test helper of the same name.
@@ -6182,6 +6649,8 @@ mod test {
         let store = FsCompanyStore::new(home.clone());
         store
             .save(&CompanyRecord {
+                overlay_retired_agents: Vec::new(),
+                overlay_agent_edits: Vec::new(),
                 id: id.clone(),
                 manifest: manifest.clone(),
                 ledger: Vec::new(),
@@ -6300,6 +6769,8 @@ mod test {
         let store = FsCompanyStore::new(home.clone());
         store
             .save(&CompanyRecord {
+                overlay_retired_agents: Vec::new(),
+                overlay_agent_edits: Vec::new(),
                 id: id.clone(),
                 manifest: manifest.clone(),
                 ledger: Vec::new(),
@@ -6436,6 +6907,8 @@ mod test {
         let store = FsCompanyStore::new(home.clone());
         store
             .save(&CompanyRecord {
+                overlay_retired_agents: Vec::new(),
+                overlay_agent_edits: Vec::new(),
                 id: id.clone(),
                 manifest: manifest.clone(),
                 ledger: Vec::new(),

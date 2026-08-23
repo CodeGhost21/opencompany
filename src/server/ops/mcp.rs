@@ -83,6 +83,10 @@ pub(super) struct McpServerDto {
     pub(super) enabled: bool,
     pub(super) allowed_tools: Vec<String>,
     pub(super) disallowed_tools: Vec<String>,
+    /// Remote tool names the operator declared read-only on this server (issue
+    /// #1124). The console renders this beside the two lists above, with the same
+    /// source badge, so an operator sees which layer declared it.
+    pub(super) read_only_tools: Vec<String>,
     pub(super) timeout_secs: u64,
     /// Whether an outbound credential is stored — never the credential itself.
     ///
@@ -198,6 +202,9 @@ struct AddServer {
     allowed_tools: Vec<String>,
     #[serde(default)]
     disallowed_tools: Vec<String>,
+    /// Remote tool names to declare read-only on this server (issue #1124).
+    #[serde(default)]
+    read_only_tools: Vec<String>,
     #[serde(default)]
     timeout_secs: Option<u64>,
     /// The outbound credential value, stored write-only. Omit to leave auth
@@ -230,6 +237,10 @@ struct UpdateServer {
     allowed_tools: Option<Vec<String>>,
     #[serde(default)]
     disallowed_tools: Option<Vec<String>>,
+    /// Replace the read-only declaration (issue #1124). Omit to leave it
+    /// unchanged; send `[]` to clear it.
+    #[serde(default)]
+    read_only_tools: Option<Vec<String>>,
     #[serde(default)]
     timeout_secs: Option<u64>,
     /// Rotate the outbound credential (write-only). Omit to leave it unchanged.
@@ -315,6 +326,7 @@ fn dto_from_decl(
         enabled: decl.enabled,
         allowed_tools: decl.allowed_tools.clone(),
         disallowed_tools: decl.disallowed_tools.clone(),
+        read_only_tools: decl.read_only_tools.clone(),
         timeout_secs: decl.timeout_secs,
         auth_configured: decl.auth.is_configured(),
         // A List A decl knows nothing about a directory install; the merge pass
@@ -350,7 +362,7 @@ fn dto_from_decl(
 /// id, matching `bucket_usage`.
 pub(super) fn roster_grants(record: &CompanyRecord) -> Vec<(RosterAgentDto, Vec<String>)> {
     let allow = &record.manifest.tools.allow;
-    let names = roster_display_names(&record.manifest.agents, &record.overlay_agents);
+    let names = roster_display_names(&record.effective_agents(), &record.overlay_agents);
     let roster_agent = |id: &str| RosterAgentDto {
         id: id.to_string(),
         name: names.get(id).cloned().unwrap_or_else(|| id.to_string()),
@@ -493,6 +505,7 @@ async fn add_server(
         command: None,
         allowed_tools: body.allowed_tools.clone(),
         disallowed_tools: body.disallowed_tools.clone(),
+        read_only_tools: body.read_only_tools.clone(),
         timeout_secs: body.timeout_secs.unwrap_or(30),
         enabled: true,
         auth_secret: None,
@@ -590,6 +603,9 @@ async fn update_server(
     }
     if let Some(disallowed) = patch.disallowed_tools.clone() {
         server.disallowed_tools = disallowed;
+    }
+    if let Some(read_only) = patch.read_only_tools.clone() {
+        server.read_only_tools = read_only;
     }
     if let Some(timeout) = patch.timeout_secs {
         server.timeout_secs = timeout;
@@ -1017,6 +1033,8 @@ role = "Chief Executive"
         )
         .expect("manifest parses");
         CompanyRecord {
+            overlay_retired_agents: Vec::new(),
+            overlay_agent_edits: Vec::new(),
             id: CompanyId::new("acme"),
             manifest,
             ledger: Vec::new(),

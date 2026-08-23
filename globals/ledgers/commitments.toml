@@ -1,0 +1,122 @@
+# The global baseline's promise register: what this company told somebody
+# outside it that it would do.
+#
+# The axis every other one loses. A task is internal and can be re-planned; a
+# goal is the company's own ambition and can be dropped; a commitment was said
+# out loud to a client, a user, a partner or a regulator, and dropping one costs
+# something the company cannot decide for itself. When a promise lives only in
+# the thread it was made in, the agent that made it is the only thing that
+# remembers — and it does not, next week.
+
+title = "Commitments"
+purpose = """
+What this company has promised someone outside it, to whom, by when, and \
+whether it was kept. Read it before promising anything and before telling a \
+client where things stand; record against a commitment rather than opening a \
+second row for the same promise.\
+"""
+written_by = "`record_entry` to make or update a promise, `close_entry` when it is kept, missed or released"
+checks = ["required-field", "known-status", "closed-needs-reason"]
+
+[[field]]
+name = "id"
+role = "id"
+required = true
+
+[[field]]
+name = "commitment"
+role = "title"
+required = true
+description = "What was promised, in the words the other side would recognise."
+
+[[field]]
+name = "status"
+role = "status"
+required = true
+
+[[field]]
+name = "to"
+role = "prose"
+required = true
+description = "Who it was promised to — the client, user, partner or authority."
+
+[[field]]
+name = "owner"
+role = "owner"
+description = "The teammate or desk accountable for delivering it."
+
+[[field]]
+name = "due"
+role = "date"
+description = "When it was promised for. A commitment with no date is a hope."
+
+[[field]]
+name = "made_on"
+role = "date"
+description = "When it was made, which is what settles disagreements about what was said."
+
+[[field]]
+name = "evidence"
+role = "prose"
+description = "Where the promise is recorded — the message, the contract clause, the call."
+
+[[field]]
+name = "progress"
+role = "prose"
+description = "Where it stands now, in a line, in terms the other side would understand."
+
+[[field]]
+name = "reason"
+role = "prose"
+description = "Why it closed — delivered, missed, or released by the other side. Required when it closes."
+
+[[field]]
+name = "refs"
+role = "refs"
+description = "Tasks, documents or artifacts that carry the work."
+
+[[status]]
+name = "promised"
+
+[[status]]
+name = "in_progress"
+label = "Being delivered"
+aliases = ["at_risk"]
+
+[[status]]
+name = "kept"
+closed = true
+needs_reason = true
+
+[[status]]
+name = "missed"
+closed = true
+needs_reason = true
+
+[[status]]
+name = "released"
+closed = true
+needs_reason = true
+
+order = "recent"
+
+[[section]]
+heading = "Outstanding"
+blurb = """
+Promised and not yet delivered. Soonest attention first — record against a row \
+to raise it. If one is not going to land as stated, say so on the row and say \
+what the other side has been told; there is no status that means it, because a \
+status that says how a promise is *going* is one nothing ever moves back out of.\
+"""
+statuses = ["promised", "in_progress"]
+order = "recent"
+
+[[section]]
+heading = "Settled"
+blurb = """
+Kept, missed, or released — each with the reason. A missed promise is kept here \
+deliberately: it is the company's only honest record of what it costs to say \
+yes, and the thing to read before saying yes the same way again.\
+"""
+statuses = ["kept", "missed", "released"]
+cap = 20

@@ -132,6 +132,25 @@ afterAll(() => {
 });
 
 describe("the create form derives the id from the name (#1053)", () => {
+  it("starts with the human name, then explains the editable permanent machine id", async () => {
+    await open();
+
+    const name = field("name");
+    const id = field("id");
+    expect(name.compareDocumentPosition(id) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
+    expect(document.body.textContent).toContain("Generated from the name");
+    expect(document.body.textContent).toContain("permanent machine ID");
+
+    for (const label of ["Node ID", "Kind", "Step name", "Summary"]) {
+      expect(document.body.textContent).toContain(label);
+    }
+    expect(
+      Array.from(document.body.querySelectorAll("button")).some(
+        (button) => button.textContent?.trim() === "Connect in order",
+      ),
+    ).toBe(true);
+  });
+
   it("fills the id in as the name is typed, so a bare name is not rejected", async () => {
     await open();
 

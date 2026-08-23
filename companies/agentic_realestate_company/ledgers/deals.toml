@@ -1,0 +1,113 @@
+# Properties under consideration and under contract.
+#
+# A real estate deal has a clock made of other people's deadlines — inspection
+# periods, financing contingencies, closing dates — and missing one costs the
+# deposit rather than the schedule. A board cannot express that, and a
+# spreadsheet cannot say why the last four deals were passed on.
+
+title = "Deals"
+purpose = """
+Every property this company is looking at or buying: the numbers, the \
+contingency dates, and why the passed ones were passed. Read it before \
+underwriting anything — the reasons on the closed rows are this company's buy \
+box, made concrete.\
+"""
+written_by = "`record_entry` to open or advance a deal, `close_entry` when it closes or is passed on"
+checks = ["required-field", "known-status", "closed-needs-reason"]
+
+[[field]]
+name = "id"
+role = "id"
+required = true
+
+[[field]]
+name = "deal"
+role = "title"
+required = true
+description = "The property — address and type."
+
+[[field]]
+name = "status"
+role = "status"
+required = true
+
+[[field]]
+name = "price"
+role = "number"
+description = "Asking, then contract price."
+
+[[field]]
+name = "underwriting"
+role = "prose"
+description = "The return, and the two or three assumptions it actually depends on."
+
+[[field]]
+name = "next_deadline"
+role = "date"
+description = "The nearest contingency date. Missing one of these costs the deposit, not the schedule."
+
+[[field]]
+name = "condition"
+role = "prose"
+description = "What is known about the physical state, and what has only been assumed."
+
+[[field]]
+name = "owner"
+role = "owner"
+
+[[field]]
+name = "reason"
+role = "prose"
+description = "Why it closed — bought, passed and on what, or lost to another bidder. Required when it closes."
+
+[[field]]
+name = "refs"
+role = "refs"
+
+[[status]]
+name = "underwriting"
+aliases = ["sourced"]
+
+[[status]]
+name = "offer_out"
+label = "Offer out"
+
+[[status]]
+name = "under_contract"
+label = "Under contract"
+
+[[status]]
+name = "closed_won"
+label = "Closed"
+closed = true
+needs_reason = true
+
+[[status]]
+name = "not_bought"
+label = "Not bought"
+closed = true
+needs_reason = true
+aliases = ["passed", "lost"]
+
+[[section]]
+heading = "Under contract"
+blurb = "On somebody else's clock. Check `next_deadline` before anything else today."
+statuses = ["under_contract", "offer_out"]
+order = "recent"
+
+[[section]]
+heading = "In the funnel"
+blurb = "Sourced or being underwritten."
+statuses = ["underwriting"]
+order = "recent"
+
+[[section]]
+heading = "Closed"
+blurb = """
+Bought, or not — each with the reason, which is where passed-on and lost-to-a-\
+higher-bidder are told apart. The passed rows are the buy box made concrete and \
+the lost ones say what this company will actually pay versus what it says it \
+will, so the reason has to carry which of the two it was.\
+"""
+statuses = ["closed_won", "not_bought"]
+cap = 20

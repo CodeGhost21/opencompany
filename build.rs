@@ -116,7 +116,7 @@ fn embed_globals(root: &Path) {
     let skills = root.join("skills");
     println!("cargo:rerun-if-changed={}", globals.display());
     println!("cargo:rerun-if-changed={}", skills.display());
-    for sub in ["agents", "workflows"] {
+    for sub in ["agents", "workflows", "ledgers"] {
         println!("cargo:rerun-if-changed={}", globals.join(sub).display());
     }
 
@@ -137,6 +137,14 @@ fn embed_globals(root: &Path) {
         &mut workflows,
     );
     workflows.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let mut ledgers = Vec::new();
+    collect(
+        &globals.join("ledgers"),
+        &globals.join("ledgers"),
+        &mut ledgers,
+    );
+    ledgers.sort_by(|a, b| a.0.cmp(&b.0));
 
     // Every shared skill, keyed by slug: which of them the baseline *installs*
     // is `[skills].always`, read at runtime rather than here, so this script
@@ -172,6 +180,12 @@ fn embed_globals(root: &Path) {
         "EMBEDDED_GLOBAL_WORKFLOWS",
         "Every file under `globals/workflows/`, keyed by path relative to it, sorted.",
         &workflows,
+    );
+    write_pairs(
+        &mut out,
+        "EMBEDDED_GLOBAL_LEDGERS",
+        "Every file under `globals/ledgers/`, keyed by path relative to it, sorted.",
+        &ledgers,
     );
     write_pairs(
         &mut out,

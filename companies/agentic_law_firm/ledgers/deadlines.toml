@@ -1,0 +1,107 @@
+# Statutory and contractual dates that cannot move.
+#
+# Separated from both the board and the matter list on purpose. A card can be
+# re-planned and a matter has one "next" date, but a firm's real exposure is the
+# whole set of dates across every matter, sorted by nearest — which is a
+# question neither of the other two can answer. Missing one of these is not a
+# late deliverable; it is a lost right.
+
+title = "Deadlines"
+purpose = """
+Every date this firm cannot miss — filing dates, limitation periods, notice \
+periods, response windows — across all matters, with what has to be done and \
+who is doing it. Read it at the start of every working session.\
+"""
+written_by = "`record_entry` to add or move a deadline, `close_entry` when it is met, waived or has passed"
+checks = ["required-field", "known-status", "closed-needs-reason"]
+
+[[field]]
+name = "id"
+role = "id"
+required = true
+
+[[field]]
+name = "deadline"
+role = "title"
+required = true
+description = "What must happen, and under what rule or clause."
+
+[[field]]
+name = "status"
+role = "status"
+required = true
+
+[[field]]
+name = "due"
+role = "date"
+required = true
+description = "The actual date. Not the internal target — the date the rule imposes."
+
+[[field]]
+name = "matter"
+role = "refs"
+required = true
+description = "The matter id this belongs to."
+
+[[field]]
+name = "owner"
+role = "owner"
+
+[[field]]
+name = "source"
+role = "prose"
+description = "The statute, rule or clause that creates it. A deadline with no source is a guess with a date on it."
+
+[[field]]
+name = "consequence"
+role = "prose"
+description = "What is lost if it passes. This is what decides whether it outranks everything else today."
+
+[[field]]
+name = "reason"
+role = "prose"
+description = "How it resolved — met, extended, waived, or missed. Required when it closes."
+
+[[status]]
+name = "upcoming"
+
+[[status]]
+name = "imminent"
+label = "Imminent"
+
+[[status]]
+name = "met"
+closed = true
+needs_reason = true
+
+[[status]]
+name = "extended"
+closed = true
+needs_reason = true
+
+[[status]]
+name = "missed"
+closed = true
+needs_reason = true
+
+[[section]]
+heading = "Imminent"
+blurb = "Nothing this firm is doing outranks a row here."
+statuses = ["imminent"]
+order = "recent"
+
+[[section]]
+heading = "Upcoming"
+blurb = "Every date ahead, with the consequence of missing it."
+statuses = ["upcoming"]
+order = "recent"
+
+[[section]]
+heading = "Resolved"
+blurb = """
+Met, extended, or missed — each with the reason. A missed deadline is kept \
+because it is the firm's own record of exposure, and deleting it does not \
+un-miss it.\
+"""
+statuses = ["met", "extended", "missed"]
+cap = 20

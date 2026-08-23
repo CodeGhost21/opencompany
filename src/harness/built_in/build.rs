@@ -42,7 +42,7 @@
 //!   **explicit** `workspace` / `workspace.write` grant — a bare `*` does not
 //!   confer them. `workspace_write` and `workspace_delete` are each guarded by
 //!   a required compare-and-swap revision token, and the lifecycle pair reaches
-//!   only `Agents/<agent id>/`. Unlike the file tools these are scoped by the
+//!   only `agents/<agent id>/`. Unlike the file tools these are scoped by the
 //!   store, not the filesystem: every call resolves through one company-scoped
 //!   `tree()` read, so no host path is ever built from agent input.
 //! * **Delegation authority is orchestrator-only; delegation itself is
@@ -215,8 +215,12 @@ pub fn model_for_tier(tier: Option<&str>) -> String {
 /// harness's existing callers and tests keep one name for "the persona", and so
 /// the composition rules (including the operator's inline `prompt`) are exercised
 /// by the default-build test suite rather than only where this module links.
-pub fn persona_prompt(company_name: &str, agent: &ManifestAgent) -> String {
-    crate::company::prompt::persona_prompt(company_name, agent)
+pub fn persona_prompt(
+    company_name: &str,
+    agent: &ManifestAgent,
+    instructions: Option<&str>,
+) -> String {
+    crate::company::prompt::persona_prompt(company_name, agent, instructions)
 }
 
 /// Build one openhuman [`Agent`] for `manifest_agent` within `company`.
@@ -231,6 +235,14 @@ pub fn persona_prompt(company_name: &str, agent: &ManifestAgent) -> String {
 /// store by the async caller. Passed in rather than fetched here for the same
 /// reason `skill_deltas` is: this function is synchronous and runs on every
 /// roster rebuild, while the `WorkspaceStore` is async.
+///
+/// `instructions` are this agent's **effective** persona text (issue #1530),
+/// resolved by the caller through
+/// [`CompanyRecord::effective_instructions`](crate::ports::types::CompanyRecord::effective_instructions)
+/// — an operator override when one is set, else the manifest `prompt`, else
+/// `None`. Passed in rather than read off `manifest_agent.prompt` so an overlay
+/// teammate (which has no manifest `prompt`) and a console-edited manifest agent
+/// are framed through the one injection point.
 ///
 /// `is_orchestrator` marks the company's orchestrator agent (issue #53): it
 /// additionally receives the delegating-orchestrator persona brief and the
@@ -249,6 +261,7 @@ pub fn build_agent(
     grants: &[String],
     skill_deltas: &[SkillState],
     routed_context: &[(String, String)],
+    instructions: Option<&str>,
     is_orchestrator: bool,
 ) -> crate::Result<Agent> {
     let memory: Arc<dyn Memory> = Arc::new(OcMemory::new(
@@ -580,9 +593,30 @@ pub fn build_agent(
     // always-compiled `openhuman_core` integrations client, and CI's gated lane
     // builds `--features openhuman,tinycortex`. Hiding a real-money tool behind
     // a feature no CI job compiles is how #288 / #281 / #297 each happened.
+    //
+    // A company that configured its **own** provider in the console
+    // (`deps.tenant_search`) gets that provider's family from OpenHuman's search
+    // domain INSTEAD of the managed tool — never as well as. The two would
+    // otherwise sit on one belt under one name, and the model would pick
+    // whichever the prompt happened to mention, which for a company that pasted
+    // a key means quietly spending the platform's money instead of its own. A
+    // BYO belt carries no daily cap and no usage sample either: the calls are
+    // billed by Brave or Exa to the company's own account, and metering a bill
+    // this host does not pay would be a number nobody can reconcile.
     if crate::company::grants_search_explicit(grants) {
-        match &deps.search {
-            Some(backend) => tools.extend(crate::harness::search::search_tools(
+        match (&deps.tenant_search, &deps.search) {
+            (Some(tenant), _) => {
+                let byo = crate::harness::search_byo::byo_search_tools(tenant);
+                tracing::debug!(
+                    company = %company,
+                    agent = %manifest_agent.id,
+                    provider = %tenant.provider(),
+                    tools = byo.len(),
+                    "[build] wiring the company's own search provider in place of managed search"
+                );
+                tools.extend(byo);
+            }
+            (None, Some(backend)) => tools.extend(crate::harness::search::search_tools(
                 backend,
                 crate::harness::search::SearchMetering {
                     company: company.clone(),
@@ -590,10 +624,10 @@ pub fn build_agent(
                     meter: deps.meter.clone(),
                 },
             )),
-            None => tracing::warn!(
+            (None, None) => tracing::warn!(
                 company = %company,
                 agent = %manifest_agent.id,
-                "[build] agent explicitly grants `search` but no managed search backend is configured; web_search NOT wired (fail-closed)"
+                "[build] agent explicitly grants `search` but neither a company search provider nor a managed search backend is configured; web_search NOT wired (fail-closed)"
             ),
         }
     }
@@ -740,7 +774,7 @@ pub fn build_agent(
 
     // Company workspace (issues #237, #551) — live read (and optionally
     // create/write) tools over the shared note tree, so an agent can ground an
-    // answer in the company's own `Standards/` / `Playbooks/` instead of
+    // answer in the company's own `standards/` / `playbooks/` instead of
     // guessing, and can put what it produces somewhere the operator and its
     // teammates will actually find it. Two independent gates, deliberately
     // asymmetric:
@@ -773,7 +807,7 @@ pub fn build_agent(
     // (`policy::consequence`); and authorship, since every node records who
     // created it and who last wrote it (#326).
     //
-    // Rename and delete additionally reach only `Agents/<agent id>/`. Read that
+    // Rename and delete additionally reach only `agents/<agent id>/`. Read that
     // as a division of labour, not as a security boundary: the same grant
     // already confers unconfined overwrite, which is the broader power. See the
     // `workspace_tools::lifecycle` module docs.
@@ -805,7 +839,7 @@ pub fn build_agent(
         tools.extend(workspace_tools);
     }
 
-    // Agent-authored internal dashboard pages (`Pages/<slug>/` in the same
+    // Agent-authored internal dashboard pages (`pages/<slug>/` in the same
     // workspace store). Unlike workspace reads vs. writes above, there is no
     // two-tier gate here: per the design, `pages` rides the default `"*"`
     // grant whole, so a single `grants_cover` check on `pages` is enough —
@@ -842,8 +876,10 @@ pub fn build_agent(
 
     // Persona over openhuman's own identity: `omit_identity = true` drops the
     // "you are OpenHuman" preamble so the agent speaks as its company role.
-    // Includes the operator's inline `prompt`, appended to the generated framing.
-    let mut persona = persona_prompt(company_name, manifest_agent);
+    // Includes the effective persona instructions (issue #1530) — an operator
+    // override when one is set, else the manifest `prompt` — resolved by the
+    // caller and appended to the generated framing.
+    let mut persona = persona_prompt(company_name, manifest_agent, instructions);
 
     // The agent's checked-in briefing documents, placed here — before every
     // tool brief and before the routed workspace documents — because they are
@@ -890,10 +926,12 @@ pub fn build_agent(
         || !skill_deltas.is_empty()
         || !crate::globals::skills().is_empty()
     {
+        // Named through the same helper as the sandbox beside it, so the two
+        // siblings cannot end up under different spellings of one agent.
         let skill_ws = deps
             .workspace_root
-            .join(company.as_ref())
-            .join(&manifest_agent.id)
+            .join(sandbox_segment(company.as_ref()))
+            .join(sandbox_segment(&manifest_agent.id))
             .join("skill-catalog");
         // Best-effort, not fatal. This ran only for a company with a skills
         // source or an operator delta until the global baseline made it run for
@@ -1210,7 +1248,27 @@ pub(crate) fn grants_cover(grants: &[String], namespace: &str) -> bool {
 /// Naming only — this never touches the disk. Anything that needs the directory
 /// to *exist* goes through [`ensure_agent_workspace`].
 pub fn agent_workspace(root: &Path, company: &CompanyId, agent_id: &str) -> PathBuf {
-    root.join(company.as_ref()).join(agent_id).join("workspace")
+    root.join(sandbox_segment(company.as_ref()))
+        .join(sandbox_segment(agent_id))
+        .join("workspace")
+}
+
+/// One directory name in the sandbox tree, under the workspace naming rule.
+///
+/// The sandbox is the other half of "the agent's workspace", and it carried the
+/// company id and the roster id verbatim — so a company browsing its own data
+/// directory found `agentic_law_firm/page_builder/` next to a note tree whose
+/// every name is lowercase and dashed. One rule for both
+/// ([`crate::company::workspace_names`]) is the point.
+///
+/// Two ids cannot collide into one sandbox by being normalized. Roster ids are
+/// snake_case (`company::manifest::is_snake_case`), so `-` never occurs in one
+/// and the mapping is injective over that alphabet. A company id is not
+/// validated that tightly, but it already shares a slug with its bundle
+/// directory (`store::paths`), so two ids that normalize alike were sharing
+/// their company data long before they shared a sandbox.
+fn sandbox_segment(raw: &str) -> String {
+    crate::company::workspace_names::kebab_name_or(raw, raw)
 }
 
 /// One agent's shell audit sink directory, resolved from the instance data root:
@@ -1272,8 +1330,56 @@ pub fn ensure_agent_workspace(
     agent_id: &str,
 ) -> std::io::Result<PathBuf> {
     let workspace = agent_workspace(root, company, agent_id);
+    adopt_legacy_sandbox(root, company, agent_id, &workspace);
     std::fs::create_dir_all(&workspace)?;
     Ok(workspace)
+}
+
+/// Move a pre-lowercase-dashed sandbox onto its canonical path, once.
+///
+/// The tree used to be named by the company and roster ids verbatim
+/// (`agentic_law_firm/page_builder/`), and an agent upgraded into the new
+/// naming would otherwise start in an empty directory with its half-finished
+/// work still on disk under the old name — present, unreachable, and reported
+/// by nothing.
+///
+/// This is a *rename*, unlike the workspace tree, where the equivalent
+/// migration is refused and offered as an operator action instead. The two are
+/// different things: this directory is the agent's private scratch, addressed
+/// only by [`agent_workspace`] within this process, with no ids, no links and
+/// no console pointing into it. Nothing outside can notice the move.
+///
+/// Best-effort and silent-on-conflict by construction: it acts only when the
+/// canonical path does not exist and the legacy one is a directory, so it
+/// cannot overwrite a live sandbox, and a failed rename simply leaves the
+/// agent with a fresh empty one rather than failing the turn.
+fn adopt_legacy_sandbox(root: &Path, company: &CompanyId, agent_id: &str, canonical: &Path) {
+    let legacy = root.join(company.as_ref()).join(agent_id).join("workspace");
+    if legacy == canonical || canonical.exists() || !legacy.is_dir() {
+        return;
+    }
+    let Some(parent) = canonical.parent() else {
+        return;
+    };
+    if std::fs::create_dir_all(parent).is_err() {
+        return;
+    }
+    match std::fs::rename(&legacy, canonical) {
+        Ok(()) => tracing::info!(
+            company = %company,
+            agent = %agent_id,
+            from = %legacy.display(),
+            to = %canonical.display(),
+            "[harness] moved the agent sandbox onto its lowercase-dashed path"
+        ),
+        Err(error) => tracing::warn!(
+            company = %company,
+            agent = %agent_id,
+            %error,
+            from = %legacy.display(),
+            "[harness] could not move the legacy agent sandbox; starting from an empty one"
+        ),
+    }
 }
 
 /// A [`SecurityPolicy`] that sandboxes an agent's file tools to `workspace` and
@@ -1395,6 +1501,84 @@ mod tests {
         let again = ensure_agent_workspace(root.path(), &company, "ceo").expect("second ensure");
         assert_eq!(again, made);
         assert!(again.is_dir());
+    }
+
+    /// The sandbox is named under the workspace naming rule, so a snake_case
+    /// roster id and an underscored company id land on dashed directories —
+    /// the same convention the note tree beside them is kept in.
+    #[test]
+    fn the_sandbox_path_is_lowercase_and_dashed() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let named = agent_workspace(
+            root.path(),
+            &CompanyId::new("Agentic_Law Firm"),
+            "page_builder",
+        );
+
+        assert_eq!(
+            named,
+            root.path()
+                .join("agentic-law-firm")
+                .join("page-builder")
+                .join("workspace")
+        );
+    }
+
+    /// An agent upgraded into the new naming keeps the work it had in flight.
+    ///
+    /// The sandbox is private scratch that nothing outside this process
+    /// addresses, so moving it is invisible — while leaving it behind would
+    /// strand a half-finished file on disk, present and unreachable, with
+    /// nothing reporting it.
+    #[test]
+    fn a_pre_rule_sandbox_is_moved_onto_the_canonical_path() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let company = CompanyId::new("acme");
+
+        let legacy = root
+            .path()
+            .join("acme")
+            .join("page_builder")
+            .join("workspace");
+        std::fs::create_dir_all(&legacy).expect("legacy sandbox");
+        std::fs::write(legacy.join("draft.md"), "half-finished").expect("in-flight work");
+
+        let made = ensure_agent_workspace(root.path(), &company, "page_builder").expect("ensure");
+
+        assert_eq!(made, agent_workspace(root.path(), &company, "page_builder"));
+        assert_eq!(
+            std::fs::read_to_string(made.join("draft.md")).expect("the work came with it"),
+            "half-finished"
+        );
+        assert!(!legacy.exists(), "the legacy path is not left as a twin");
+    }
+
+    /// A sandbox that already exists at the canonical path is never overwritten
+    /// by a stale legacy one — the move is a one-time adoption, not a sync.
+    #[test]
+    fn a_live_sandbox_is_never_replaced_by_a_legacy_one() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let company = CompanyId::new("acme");
+
+        let canonical =
+            ensure_agent_workspace(root.path(), &company, "page_builder").expect("ensure");
+        std::fs::write(canonical.join("current.md"), "live").expect("live work");
+        let legacy = root
+            .path()
+            .join("acme")
+            .join("page_builder")
+            .join("workspace");
+        std::fs::create_dir_all(&legacy).expect("legacy sandbox");
+        std::fs::write(legacy.join("stale.md"), "stale").expect("stale work");
+
+        let again = ensure_agent_workspace(root.path(), &company, "page_builder").expect("ensure");
+
+        assert_eq!(again, canonical);
+        assert_eq!(
+            std::fs::read_to_string(canonical.join("current.md")).expect("still there"),
+            "live"
+        );
+        assert!(!canonical.join("stale.md").exists());
     }
 
     /// The bug, pinned. With the workspace absent, `validate_parent_path` walks
@@ -1585,7 +1769,7 @@ mod tests {
     #[test]
     fn persona_frames_role_company_and_description() {
         let agent = manifest_agent("Chief Executive", Some("Sets direction."));
-        let persona = persona_prompt("Acme", &agent);
+        let persona = persona_prompt("Acme", &agent, None);
         assert!(persona.contains("Chief Executive"), "{persona}");
         assert!(persona.contains("Acme"), "{persona}");
         assert!(persona.contains("first person"), "{persona}");
@@ -1594,7 +1778,7 @@ mod tests {
 
     #[test]
     fn persona_omits_absent_or_blank_description() {
-        let persona = persona_prompt("Acme", &manifest_agent("Engineer", Some("   ")));
+        let persona = persona_prompt("Acme", &manifest_agent("Engineer", Some("   ")), None);
         assert!(persona.contains("Engineer"));
         assert!(!persona.contains("   Engineer"));
         // No trailing description clause.
@@ -1658,6 +1842,14 @@ mod tests {
             &self,
             _: &CompanyId,
             _: &crate::ports::types::ChunkAddr,
+        ) -> crate::Result<bool> {
+            Ok(false)
+        }
+        async fn delete_label(
+            &self,
+            _: &CompanyId,
+            _: &crate::ports::types::ChunkAddr,
+            _: &str,
         ) -> crate::Result<bool> {
             Ok(false)
         }
@@ -1742,6 +1934,7 @@ mod tests {
             // #238 tool is never built and the pinned belt below is the
             // pre-#238 belt exactly.
             search: None,
+            tenant_search: None,
             // Fail-closed default: with no workspace store wired, the #237
             // tools are never built and the pinned belt below is the
             // pre-#237 belt exactly.
@@ -1798,6 +1991,7 @@ mod tests {
             &grants,
             &[],
             &[],
+            None,
             is_orchestrator,
         )
         .expect("agent builds");
@@ -1848,12 +2042,121 @@ mod tests {
             &grants,
             &[],
             &[],
+            None,
             false,
         )
         .expect("agent builds");
         let mut names: Vec<String> = agent.tools().iter().map(|t| t.name().to_string()).collect();
         names.sort();
         names
+    }
+
+    /// Build one agent under `grants` with BOTH a managed search backend and a
+    /// company's own `provider` connection wired, and return its live tool
+    /// names. The two together is the interesting case: it is what a company
+    /// that pasted a key into the console actually has, and what decides which
+    /// of the two surfaces the model is offered.
+    fn built_tool_names_with_byo_search(grants: &[&str], provider: &str) -> Vec<String> {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut deps = pin_deps(dir.path().to_path_buf());
+        deps.search = Some(crate::harness::search::SearchBackend::new(
+            "https://api.example.test".to_string(),
+            crate::company::credentials::Credential::from_value("managed-platform-token"),
+            crate::company::DEFAULT_SEARCH_DAILY_CALLS,
+        ));
+        deps.tenant_search = Some(crate::harness::search_byo::TenantSearch::for_test(
+            provider,
+            Some("tenant-key"),
+            Some("https://searx.example"),
+        ));
+        let manifest_agent = ManifestAgent {
+            global: false,
+            id: "desk".to_string(),
+            role: "Desk Lead".to_string(),
+            name: None,
+            description: None,
+            tier: None,
+            harness: None,
+            tools: Vec::new(),
+            delegates_to: Vec::new(),
+            context: None,
+            budget_usd_daily: None,
+            prompt: None,
+            prompt_files: Vec::new(),
+            prompt_files_resolved: Vec::new(),
+            classes: Vec::new(),
+            ledgers: None,
+            can_declare_ledgers: true,
+        };
+        let policy = ApprovalPolicy::new(&Policy::default(), None);
+        let grants: Vec<String> = grants.iter().map(|g| g.to_string()).collect();
+        let agent = build_agent(
+            &CompanyId::new("acme"),
+            "Acme",
+            &manifest_agent,
+            policy,
+            &deps,
+            &grants,
+            &[],
+            &[],
+            None,
+            false,
+        )
+        .expect("agent builds");
+        let mut names: Vec<String> = agent.tools().iter().map(|t| t.name().to_string()).collect();
+        names.sort();
+        names
+    }
+
+    /// A company's own provider REPLACES the managed surface rather than
+    /// joining it, and still answers to the one name the skills know.
+    ///
+    /// Both halves matter. Two "search the web" tools on one belt would let the
+    /// model spend the platform's metered budget for a company that pasted its
+    /// own key — the exact bill-swap the BYO surface exists to prevent. And a
+    /// belt where the canonical name changed with the provider would break the
+    /// shipped research skills, which name `web_search` in their instructions.
+    #[test]
+    fn a_company_provider_replaces_the_managed_search_tool_under_the_same_name() {
+        let byo = built_tool_names_with_byo_search(&["search"], "brave");
+
+        assert!(
+            byo.contains(&"web_search".to_string()),
+            "the canonical name must survive the provider switch: {byo:?}"
+        );
+        assert!(
+            byo.contains(&"brave_news_search".to_string()),
+            "the provider's own extras must be wired too: {byo:?}"
+        );
+        // Exactly one tool answers to the canonical name.
+        assert_eq!(
+            byo.iter().filter(|name| *name == "web_search").count(),
+            1,
+            "two search tools under one name: {byo:?}"
+        );
+        // And the managed family's siblings are absent — nothing on this belt
+        // reaches the platform's metered backend.
+        assert!(
+            !byo.contains(&"exa_search".to_string()),
+            "a Brave company must not carry Exa tools: {byo:?}"
+        );
+    }
+
+    /// The BYO surface rides the SAME explicit grant as the metered one. A
+    /// company key does not turn `search` into a wildcard-conferred namespace:
+    /// the queries still leave the building, and which index reads them is a
+    /// decision the manifest makes by name.
+    #[test]
+    fn a_wildcard_grant_confers_no_search_tools_even_with_a_company_provider() {
+        let wildcard = built_tool_names_with_byo_search(&["*"], "exa");
+        assert!(
+            !wildcard.contains(&"web_search".to_string()),
+            "{wildcard:?}"
+        );
+        assert!(
+            !wildcard.contains(&"exa_get_contents".to_string()),
+            "{wildcard:?}"
+        );
     }
 
     // --- Company-workspace wiring gates (issue #237) -----------------------
@@ -1894,6 +2197,7 @@ mod tests {
             &grants,
             &[],
             &[],
+            None,
             false,
         )
         .expect("agent builds");
@@ -1938,6 +2242,7 @@ mod tests {
             &grants,
             &[],
             &[],
+            None,
             false,
         )
         .expect("agent builds");
@@ -2190,6 +2495,7 @@ mod tests {
             &grants,
             &[],
             &[],
+            None,
             false,
         )
         .expect("agent builds");
@@ -2638,6 +2944,7 @@ mod tests {
             &[],
             &[],
             &[],
+            None,
             false,
         )
         .expect("agent builds");
@@ -2905,6 +3212,7 @@ mod tests {
             &grants,
             &[],
             &[],
+            None,
             false,
         )
         .expect("agent builds");

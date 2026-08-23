@@ -664,6 +664,79 @@ export interface FeedbackSummary {
 }
 
 /**
+ * The shared feedback board (`GET .../feedback/board`).
+ *
+ * The board is not this host's: it lives on the TinyHumans hub, where every
+ * product's operators file into the same list, and the host proxies it so the
+ * console never holds a hub credential. An instance with no credential has no
+ * board and every board route 404s with `tinyhumans_no_board` — the console
+ * hides the surface rather than rendering an empty one.
+ */
+export type BoardKind = "feature" | "bug";
+
+/** Where an item sits in the hub's triage. */
+export type BoardStatus = "open" | "planned" | "completed" | "closed";
+
+/** The orderings the board exposes. */
+export type BoardSort = "hot" | "top" | "new";
+
+/** `1` up, `-1` down, `0` no vote (or a retracted one). */
+export type BoardVote = 1 | -1 | 0;
+
+/** One row on the board. */
+export interface BoardItem {
+  id: string;
+  kind: BoardKind;
+  title: string;
+  body: string;
+  status: BoardStatus;
+  author: string | null;
+  upvotes: number;
+  downvotes: number;
+  score: number;
+  comment_count: number;
+  /**
+   * This *instance's* vote, not this operator's: every console on a host votes
+   * through the one hub account the host is provisioned with.
+   */
+  my_vote: BoardVote;
+  issue_url: string | null;
+  /** ISO-8601, as the hub reports it. */
+  created_at: string;
+}
+
+/** One comment on a board item. */
+export interface BoardComment {
+  id: string;
+  author: string | null;
+  body: string;
+  created_at: string;
+}
+
+/** One page of board rows, plus the total the query matches. */
+export interface BoardPage {
+  items: BoardItem[];
+  total: number;
+  page: number;
+  limit: number;
+}
+
+/** One board item with its comments. */
+export interface BoardDetail {
+  item: BoardItem;
+  comments: BoardComment[];
+}
+
+/** The query one board page is fetched with. */
+export interface BoardQuery {
+  sort?: BoardSort;
+  kind?: BoardKind;
+  status?: BoardStatus;
+  page?: number;
+  limit?: number;
+}
+
+/**
  * `GET /spec` — the host's runtime specification. Unauthenticated, so the
  * console can read it before (and regardless of) a session.
  */
@@ -855,10 +928,31 @@ export interface AgentDetailDto {
    */
   description?: string;
   /**
-   * Which half of the roster this teammate comes from, and therefore what may
-   * be done to it. `manifest` teammates are declared in the version-controlled
-   * `company.toml`; `overlay` teammates were added at runtime and live on the
-   * company record this host writes.
+   * The persona instructions **in force** for this teammate (issue #1530): the
+   * per-agent override when one is set, otherwise the blueprint seed. This is
+   * the text the agent actually runs with, and the draft an edit starts from.
+   */
+  instructions?: string | null;
+  /**
+   * The blueprint's own instructions — the manifest seed a manifest teammate
+   * was declared with, kept beside the effective value so the console can show
+   * what "Reset to blueprint" restores. Absent for a bare overlay teammate,
+   * which has no blueprint.
+   */
+  blueprintInstructions?: string;
+  /**
+   * Whether an override is currently masking the blueprint. The console shows
+   * the Reset-to-blueprint control exactly when this is true — an agent running
+   * on its blueprint has nothing to reset.
+   */
+  instructionsOverridden?: boolean;
+  /**
+   * Which half of the roster this teammate comes from. `manifest` teammates are
+   * declared in the version-controlled `company.toml`; `overlay` teammates were
+   * added at runtime. Both are editable and both are removable — a manifest
+   * teammate's edits are stored as an override on the company record and its
+   * removal as a tombstone, so `company.toml` is never rewritten either way. The
+   * only refusal is the company's last teammate.
    */
   source: "manifest" | "overlay";
   /**
@@ -924,6 +1018,15 @@ export interface EditAgentInput {
   name?: string;
   role?: string;
   description?: string | null;
+  /**
+   * The persona instructions, three-state exactly like `description` (issue
+   * #1530): `undefined` leaves the override untouched, `null` clears it —
+   * resetting the teammate to its blueprint — and a string sets it. The three
+   * are different on the wire (`JSON.stringify` keeps `null`, drops `undefined`)
+   * and must never be collapsed, or a partial save would silently reset a
+   * persona the operator did not touch.
+   */
+  instructions?: string | null;
 }
 
 /**
@@ -945,7 +1048,7 @@ export interface SetBudgetInput {
  */
 /**
  * One agent-authored dashboard page's manifest, from `GET {scope}/pages`.
- * Mirrors the `page.toml` a page's `Pages/<slug>/` bundle carries
+ * Mirrors the `page.toml` a page's `pages/<slug>/` bundle carries
  * (`docs/spec/runtime/pages.md`) — the page's own compiled bundle is served
  * separately, at `GET {scope}/pages/{slug}` (the iframe host document) and
  * `GET {scope}/pages/{slug}/bundle.mjs` (the compiled JS).
@@ -1124,6 +1227,16 @@ export interface McpServer {
   enabled: boolean;
   allowedTools: string[];
   disallowedTools: string[];
+  /**
+   * Remote tool names the operator has declared **read-only** on this server
+   * (issue #1124). A bridge call to one is priced as an outward read rather than
+   * parked for approval, so it can run unattended under `auto`; every other call
+   * through the server still parks. Independent of {@link McpServer.allowedTools}
+   * / {@link McpServer.disallowedTools} — it says nothing about whether a tool is
+   * exposed, only how a call to it is gated. Carries this row's provenance badge
+   * exactly as the two lists above do.
+   */
+  readOnlyTools: string[];
   timeoutSecs: number;
   /** Whether an outbound credential is stored — never the credential itself. */
   authConfigured: boolean;
@@ -1311,6 +1424,17 @@ export interface CapabilityStatusDto {
   searchCredentialConfigured?: boolean;
   /** The company's daily `web_search` call ceiling. */
   searchDailyCallCap?: number;
+  /**
+   * Which provider the company's searches actually reach: `managed` (the
+   * platform's own account, metered and daily-capped) or the slug it configured
+   * in Settings → Search.
+   *
+   * Read beside `searchCredentialConfigured` rather than instead of it: the two
+   * disagree in both directions. A host with no platform credential still
+   * searches for a company that brought its own key, and a company that picked a
+   * provider without finishing it is still on `managed`.
+   */
+  searchProvider?: string;
   /**
    * Bound repositories (issue #245, agent half): whether the company
    * **explicitly** grants the `repo` namespace (a `*` wildcard does not count).
