@@ -6,8 +6,16 @@ import { relayToastClick } from "@/lib/toast-click-through";
 
 afterEach(() => {
   document.body.replaceChildren();
+  delete (document as Partial<Document>).elementFromPoint;
   vi.restoreAllMocks();
 });
+
+function mockElementFromPoint(element: HTMLElement): void {
+  Object.defineProperty(document, "elementFromPoint", {
+    configurable: true,
+    value: vi.fn(() => element),
+  });
+}
 
 function toast(): HTMLElement {
   const toaster = document.createElement("section");
@@ -25,7 +33,7 @@ describe("toast click-through", () => {
     const clicked = vi.fn();
     below.addEventListener("click", clicked);
     document.body.append(below);
-    vi.spyOn(document, "elementFromPoint").mockReturnValue(below);
+    mockElementFromPoint(below);
 
     const text = document.createElement("span");
     toast().append(text);
@@ -40,7 +48,7 @@ describe("toast click-through", () => {
     const belowClicked = vi.fn();
     below.addEventListener("click", belowClicked);
     document.body.append(below);
-    vi.spyOn(document, "elementFromPoint").mockReturnValue(below);
+    mockElementFromPoint(below);
 
     const action = document.createElement("button");
     const actionClicked = vi.fn();
