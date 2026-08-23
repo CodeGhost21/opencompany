@@ -25,7 +25,7 @@ type APIRequestContext = import("@playwright/test").APIRequestContext;
 const MEMBER_EMAIL = "member-403@example.test";
 
 async function openConnections(page: Page) {
-  await page.goto("/#/settings/connections");
+  await page.goto("/#/settings/oauth");
   const skip = page.getByRole("button", { name: "Skip for now" });
   await skip
     .waitFor({ state: "visible", timeout: 10_000 })
