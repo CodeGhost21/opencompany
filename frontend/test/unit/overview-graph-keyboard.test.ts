@@ -1,11 +1,12 @@
 // @vitest-environment jsdom
 
-import { act, createElement, type ReactNode } from "react";
+import { act, createElement, Fragment, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("@/views/overview/kg/KnowledgeGraphFullscreen", () => ({
-  KnowledgeGraphFullscreen: ({ children }: { children: ReactNode }) => children,
+  KnowledgeGraphFullscreen: ({ children, extraDetail }: { children: ReactNode; extraDetail?: ReactNode }) =>
+    createElement(Fragment, null, children, extraDetail),
 }));
 
 import { KnowledgeGraph } from "@/views/overview/kg/KnowledgeGraph";
@@ -138,5 +139,53 @@ describe("the overview graph keyboard control", () => {
     });
     expect(nodes[2].tabIndex).toBe(0);
     expect(document.activeElement).toBe(nodes[2]);
+  });
+
+  it("opens a memory note's detail card when Enter is pressed on it", () => {
+    act(() => {
+      root.render(
+        createElement(KnowledgeGraph, {
+          graph: {
+            nodes: [
+              { id: "self", kind: "self", label: "Acme", ring: 0 },
+              { id: "team:desk:eng", kind: "team", label: "Engineering", ring: 1 },
+            ],
+            edges: [{ source: "self", target: "team:desk:eng", kind: "pillar" }],
+          },
+          memory: {
+            nodes: [
+              {
+                id: "note:onboarding", type: "page", label: "Onboarding", folder: "ops",
+                excerpt: "Welcome aboard", wordCount: 12, chunks: 2, vx: 0.2, vy: -0.2, cluster: 0, links: 1,
+              },
+            ],
+            edges: [],
+          },
+        }),
+      );
+    });
+
+    // Open the vault from the keyboard, exposing the note as a button.
+    let nodes = [...host.querySelectorAll<SVGGElement>('g[role="button"]')];
+    act(() => {
+      nodes[0].focus();
+      nodes[0].dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    });
+
+    nodes = [...host.querySelectorAll<SVGGElement>('g[role="button"]')];
+    expect(nodes).toHaveLength(3);
+    expect(nodes[1].getAttribute("aria-label")).toBe(
+      "Memory note: Onboarding. Press Enter or Space to open.",
+    );
+
+    // The aria label promises opening — the detail card is not up yet.
+    expect(host.textContent).not.toContain("Welcome aboard");
+
+    // Enter on the note opens its detail card (the excerpt is card-only text).
+    act(() => {
+      nodes[1].focus();
+      nodes[1].dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    });
+    expect(host.textContent).toContain("Welcome aboard");
   });
 });
