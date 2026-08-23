@@ -23,6 +23,20 @@ human_role = "Everything, until the team is built"
 # real one, so the failure surfaces as "no dev_code came back".
 admins = ["harness-e2e@tinyhumans.ai"]
 
+[tools]
+# Stated rather than inherited, because the inherited belt now grants `search`.
+#
+# This is a deterministic fixture: a priced network call inside it would make
+# the setup lane non-hermetic and flaky, and it would spend real money on every
+# CI run. So the belt is the default one with `search` left off — `allow`
+# REPLACES the default rather than extending it, which is exactly why the rest
+# has to be written out here.
+#
+# `[[agent]]` is deliberately absent from this bundle, so nothing reads this
+# until the setup wizard mints a roster; it is here so that the moment one
+# exists, it is searchless.
+allow = ["*", "workspace.*", "media", "composio", "mcp:*"]
+
 [policy]
 # The default anyway; stated so the spec's expectations do not silently depend
 # on a default changing elsewhere.
