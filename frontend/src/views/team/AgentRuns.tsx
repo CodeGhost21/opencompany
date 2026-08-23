@@ -366,9 +366,8 @@ export function AgentRuns({
           <Note>
             {wanted
               ? "No attempt in this history matches that filter."
-              : `${agentName} hasn't run yet. An attempt is recorded the first time a
-                 card is dispatched to this teammate, or the first time it answers a
-                 message.`}
+              : `${agentName} hasn't run yet. An attempt is recorded the first time a card is ` +
+                `dispatched to this teammate, or the first time it answers a message.`}
           </Note>
         )}
 
