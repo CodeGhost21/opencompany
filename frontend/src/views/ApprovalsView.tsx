@@ -528,7 +528,8 @@ function useStandingGrants(
       // "you" outranks the roster name: an operator reading their own audit
       // trail should not have to recognise their own user id or email.
       if (me) names.set(me.id, "you");
-      setGranterNames(names);
+      if (holdingRef.current) pendingNames.current = names;
+      else setGranterNames(names);
     })();
 
     // Slow on purpose. Mint and revoke from another browser are only
