@@ -150,46 +150,46 @@ export function PagesView({ client, company }: Props) {
   }, [loadPages]);
 
   // The bridge: forwards a page's GraphQL request to the console's own
-  // authenticated endpoint and posts the answer back. Scoped to the active
-  // iframe element and torn down on unmount or whenever the selected page
-  // changes, so a stale iframe (the previous page, already unmounted) can
-  // never be mistaken for the source of a later request.
+  // authenticated endpoint and posts the answer back over the same port.
+  // The handler is stored in a ref because the port it listens on is minted
+  // later, in `handleLoad`, when the iframe's document finishes loading.
+  const bridgeHandlerRef = useRef<(event: MessageEvent) => void>(() => {});
   useEffect(() => {
-    function onMessage(event: MessageEvent) {
+    bridgeHandlerRef.current = (event: MessageEvent) => {
       // The actual authentication of "did this really come from my own
       // embedded page":
-      //   * `source` identity — only this console's own iframe element.
-      //   * `event.origin === "null"` — only an opaque-origin sandboxed iframe
-      //     reports the literal `"null"` origin; any other frame or tab has a
-      //     real origin.
-      //   * the per-document `capability` — granted only to the initial load.
-      //     Navigation revokes it, closing the window that `event.source`
-      //     alone (which survives navigation) would leave open.
-      if (event.source !== iframeRef.current?.contentWindow) return;
-      if (event.origin !== "null") return;
+      //   * the port — only the entangled half the console transferred to
+      //     exactly one iframe document can send a message here, and a
+      //     document the page navigated itself to never received that half.
+      //     This replaces the `event.source` / `event.origin` checks a window
+      //     listener would need (both survive navigation; the port does not).
+      //   * the per-document `capability` — granted only to the initial load,
+      //     a redundant second layer on top of the port binding.
       if (!isGraphQLBridgeMessage(event.data)) return;
       if (!capabilityRef.current || event.data.capability !== capabilityRef.current) return;
       const { id, query, variables } = event.data;
-      const replyTo = event.source as Window;
+      const reply = { type: "oc:graphql:result" as const, id };
       void client
         .graphqlRequest(query, variables)
         .then((result) => {
-          replyTo.postMessage({ type: "oc:graphql:result", id, data: result.data, errors: result.errors }, "*");
+          portRef.current?.postMessage({ ...reply, data: result.data, errors: result.errors });
         })
         .catch((cause: unknown) => {
-          replyTo.postMessage(
-            {
-              type: "oc:graphql:result",
-              id,
-              errors: [{ message: cause instanceof Error ? cause.message : "request failed" }],
-            },
-            "*",
-          );
+          portRef.current?.postMessage({
+            ...reply,
+            errors: [{ message: cause instanceof Error ? cause.message : "request failed" }],
+          });
         });
-    }
-
-    window.addEventListener("message", onMessage);
-    return () => window.removeEventListener("message", onMessage);
+    };
+    return () => {
+      // The selected page changed or the view unmounted: the iframe document
+      // this port was minted for is gone, so the port can never legitimately
+      // be used again. Close it rather than leaving a live channel into a
+      // document that no longer exists.
+      portRef.current?.close();
+      portRef.current = null;
+      capabilityRef.current = "";
+    };
   }, [client, active?.slug]);
 
   if (load === "loading") {
