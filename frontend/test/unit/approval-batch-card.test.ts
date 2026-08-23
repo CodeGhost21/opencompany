@@ -71,6 +71,23 @@ function payment(id: string, to: string, amountUsd: number): ApprovalSummary {
 const VENDOR = payment("p1", "vendor@example.test", 42.5);
 const SUPPLIER = payment("p2", "supplier@example.test", 12);
 
+function request(id: string, url: string, method: string): ApprovalSummary {
+  return {
+    id,
+    kind: "http_request",
+    amount_usd: null,
+    at_millis: T0,
+    agent: "seo",
+    thread: "desk-marketing",
+    batch: "turn-1",
+    broadly_grantable: true,
+    payload: { url, method },
+  };
+}
+
+const GET_ITEMS = request("h1", "https://example.com/items", "GET");
+const DELETE_ITEMS = request("h2", "https://example.com/items", "DELETE");
+
 interface Decision {
   id: string;
   verdict: Verdict;
