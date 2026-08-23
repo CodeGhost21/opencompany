@@ -16,7 +16,6 @@ use serde::Serialize;
 use crate::AppState;
 use crate::company::credentials::{CredentialSource, TinyhumansTokenSource};
 use crate::company::runtime::CompanyRuntime;
-use crate::company::smithery::DirectoryKeySource;
 use crate::metering::capability::{CapabilityPlan, tokens_in};
 use crate::ports::now_millis;
 use crate::server::error::ApiError;
@@ -120,23 +119,6 @@ struct CapabilityStatusDto {
     /// transient store hiccup is the same class of lie #886 is about.
     #[serde(skip_serializing_if = "Option::is_none")]
     composio_credential_source: Option<CredentialSource>,
-    /// Which Smithery credential this company's MCP **directory** browsing
-    /// presents (issue #1287) — `company` (its own key), `environment` (one key
-    /// set for the whole host and shared by every company on it), or `none`
-    /// (Smithery is not queried, so the directory shows only the open registry's
-    /// hosted entries, which is very little).
-    ///
-    /// A tier and not a boolean, deliberately. `configured: true` would be true
-    /// of both working tiers while hiding that one of them is a shared account,
-    /// and a `configured` that meant "its own" would read `false` for a company
-    /// whose directory works — the two halves of the #886 lie at once. Anything
-    /// boolean the console needs is derivable from this; a second field would
-    /// only be a copy that can drift.
-    ///
-    /// Omitted when there is no company record to resolve for, or when the
-    /// secret store could not be read — an unknown answer is not `none`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    mcp_directory_credential: Option<DirectoryKeySource>,
     /// Metered web search (issue #238): whether this company **explicitly**
     /// grants the `search` namespace (a `*` wildcard does NOT count).
     search_granted: bool,
@@ -266,11 +248,6 @@ struct OptInFlags {
     /// lies to every company that has one — the failure the issue #567 test
     /// below exists to catch.
     composio_credential_source: Option<CredentialSource>,
-    /// The resolved Smithery directory tier (issue #1287), or `None` when it
-    /// could not be determined. On the flags for the same reason the Composio
-    /// tier is: the DTO is built in two places and a field wired into one of
-    /// them lies to every company that has a plan.
-    mcp_directory_credential: Option<DirectoryKeySource>,
     search_granted: bool,
     search_daily_call_cap: u32,
     search_provider: String,
@@ -461,19 +438,6 @@ async fn effective_status(runtime: &CompanyRuntime) -> Result<CapabilityStatusDt
                 .map(std::sync::Arc::new),
         )
         .await,
-        // Issue #1287: which Smithery key the MCP directory browses with. Read
-        // through the resolver rather than a second copy of its precedence, so
-        // this panel cannot name a tier different from the one a search sent.
-        // A store error yields `None` (undetermined) rather than failing the
-        // whole /capabilities response, matching the Composio probe above.
-        mcp_directory_credential: crate::company::smithery::resolve(
-            runtime.id(),
-            runtime.secrets().as_ref(),
-            &crate::app::config::ProcessEnv,
-        )
-        .await
-        .ok()
-        .map(|key| key.source()),
         // Issue #238: search is opt-in per tool grant like media/composio, and
         // its daily cap lives on `[tools]` rather than `[plan]` — a call
         // ceiling, not a token budget — so both travel with the plan-independent
