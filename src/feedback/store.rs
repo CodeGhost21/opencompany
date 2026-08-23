@@ -112,7 +112,7 @@ impl FeedbackStore {
     /// Applies `edit` to the stored item with `id` and rewrites the log
     /// atomically, serialising on the path key's write lock so an append cannot
     /// be erased by the read-modify-write (issue #388).
-    async fn update<F>(&self, id: &str, edit: F) -> Result<()>
+    async fn update<F>(&self, id: &str, mut edit: F) -> Result<()>
     where
         F: FnMut(&mut FeedbackItem),
     {
