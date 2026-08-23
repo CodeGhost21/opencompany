@@ -416,6 +416,7 @@ function CompactApprovalRow({
   approvals,
   now,
   askerNames,
+  thread,
   actions,
   busy,
   status,
@@ -428,6 +429,8 @@ function CompactApprovalRow({
   approvals: ApprovalSummary[];
   now: number;
   askerNames: Map<string, string>;
+  /** The channel this inline row is already rendered inside (#1419). */
+  thread?: ApprovalThreadLink | null;
   actions: React.ReactNode;
   busy: boolean;
   status?: React.ReactNode;
