@@ -559,13 +559,16 @@ fn apply_pages_headers(headers: &mut axum::http::HeaderMap) {
     );
 }
 
-/// Allows the opaque-origin page iframe to load an authenticated module.
+/// Allows the opaque-origin page iframe to load a module response.
 ///
 /// The shell deliberately omits `allow-same-origin`, which makes module
-/// imports send `Origin: null`. Module graphs are fetched with CORS, and the
-/// `crossorigin="use-credentials"` attribute on the shell's module script
-/// ensures the browser includes the same-origin session cookie. This precise
-/// response pair is therefore required for `bundle.mjs`; the general CORS
+/// imports send `Origin: null` — every module in the graph is a CORS request
+/// from that null origin. Module scripts always fetch with CORS, so the
+/// response must admit the origin explicitly. `Access-Control-Allow-Origin:
+/// null` matches the opaque origin exactly; `Access-Control-Allow-Credentials:
+/// true` is harmless (the frame sends no credentials) and keeps the pair
+/// consistent across every module the shell references. This precise response
+/// pair is therefore required for the pages module graph; the general CORS
 /// middleware cannot provide it because same-origin console deployments leave
 /// that middleware disabled.
 pub(crate) fn apply_page_module_cors_headers(headers: &mut axum::http::HeaderMap) {
