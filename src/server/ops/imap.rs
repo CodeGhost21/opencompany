@@ -122,7 +122,9 @@ impl AsyncImapReceiver {
                 .dangerous()
                 .with_custom_certificate_verifier(std::sync::Arc::new(TestOnlyCertificateVerifier))
                 .with_no_client_auth();
-            return Ok(tokio_rustls::TlsConnector::from(std::sync::Arc::new(config)));
+            return Ok(tokio_rustls::TlsConnector::from(std::sync::Arc::new(
+                config,
+            )));
         }
         let root_store: tokio_rustls::rustls::RootCertStore =
             webpki_roots::TLS_SERVER_ROOTS.iter().cloned().collect();
@@ -307,8 +309,10 @@ impl tokio_rustls::rustls::client::danger::ServerCertVerifier for TestOnlyCertif
         _message: &[u8],
         _cert: &tokio_rustls::rustls::pki_types::CertificateDer<'_>,
         _dss: &tokio_rustls::rustls::DigitallySignedStruct,
-    ) -> Result<tokio_rustls::rustls::client::danger::HandshakeSignatureValid, tokio_rustls::rustls::Error>
-    {
+    ) -> Result<
+        tokio_rustls::rustls::client::danger::HandshakeSignatureValid,
+        tokio_rustls::rustls::Error,
+    > {
         Ok(tokio_rustls::rustls::client::danger::HandshakeSignatureValid::assertion())
     }
 
@@ -317,8 +321,10 @@ impl tokio_rustls::rustls::client::danger::ServerCertVerifier for TestOnlyCertif
         _message: &[u8],
         _cert: &tokio_rustls::rustls::pki_types::CertificateDer<'_>,
         _dss: &tokio_rustls::rustls::DigitallySignedStruct,
-    ) -> Result<tokio_rustls::rustls::client::danger::HandshakeSignatureValid, tokio_rustls::rustls::Error>
-    {
+    ) -> Result<
+        tokio_rustls::rustls::client::danger::HandshakeSignatureValid,
+        tokio_rustls::rustls::Error,
+    > {
         Ok(tokio_rustls::rustls::client::danger::HandshakeSignatureValid::assertion())
     }
 
