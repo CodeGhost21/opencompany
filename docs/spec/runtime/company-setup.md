@@ -391,6 +391,11 @@ Two related problems surfaced in the same run, both fixed:
   straight over an empty console — the first impression this document exists to
   replace. The hold is a render-time gate, not a state one: the tour's own effect
   consumes a one-shot resume marker and must not be made to re-run.
+- Skipping is not a one-way door: the empty-team prompt remains in place, and
+  anyone can reopen setup from **Settings → Product tour → Set up company** or
+  by visiting `#/setup`. The manual route deliberately forces the dialog open
+  even for a staffed company, because an explicit request is not the automatic
+  first-run offer.
 
 ## Open questions
 

@@ -22,8 +22,10 @@ export const REWRITE_RETIRED = (
   // detail sub-page (issue #264), it is what the org chart's rows and the chat
   // pane's chips link to, and it is deliberately a page so it can be linked.
   if (head === "team" && !sub) return ["company", null];
-  // Keep the head as the sub-page so the explanation can identify what failed
-  // without accepting it as a real view.
-  if (!VIEWS.includes(head as View)) return ["not-found", head || null];
+  // An empty hash is the normal console entry point and uses the router's
+  // Overview fallback. Keep the head as the sub-page for every non-empty
+  // unknown address so the explanation can identify what failed without
+  // accepting it as a real view.
+  if (head && !VIEWS.includes(head as View)) return ["not-found", head];
   return null;
 };
