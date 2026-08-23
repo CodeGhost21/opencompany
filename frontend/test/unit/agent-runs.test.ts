@@ -298,6 +298,64 @@ describe("a teammate's run history", () => {
     ).not.toBeNull();
   });
 
+  it("refreshes a held run's summary from its detail response", async () => {
+    vi.useFakeTimers();
+    // The open run sits older than the newest page, so the unfiltered poll
+    // omits it and the section holds the previously-known summary. The detail
+    // read keeps returning a fresh one — the attempt settled while the panel
+    // was open — and the panel must follow the attempt, not the moment it was
+    // opened, or a settled run would stay "Running" and poll forever.
+    const older = run({
+      id: "old-live-1",
+      status: "running",
+      phase: "active",
+      createdAtMillis: 1_500_000_000_000,
+    });
+    const settled = {
+      ...older,
+      status: "succeeded" as const,
+      phase: "terminal" as const,
+      finishedAtMillis: 1_700_000_000_000,
+    };
+    const get = vi.fn(async (path: string) => {
+      if (path.startsWith("/runs/")) return { run: settled, steps: [] };
+      if (path.includes("status=")) return [older];
+      if (path.startsWith("/runs")) return [run()];
+      if (path.startsWith("/tasks")) return [];
+      if (path.startsWith("/workflows")) return [];
+      throw new Error(`no route for ${path}`);
+    });
+    const client = {
+      get,
+      scopeFor: () => "",
+    } as unknown as OpenCompanyClient & { get: typeof get };
+
+    await mount(client);
+
+    const live = container.querySelector<HTMLButtonElement>(
+      '[data-testid="agent-runs-filter-live"]',
+    );
+    expect(live).not.toBeNull();
+    await act(async () => live!.click());
+    await act(async () => {});
+
+    const row = container.querySelector<HTMLButtonElement>(
+      '[data-testid="agent-run-old-live-1"]',
+    );
+    expect(row).not.toBeNull();
+    await act(async () => row!.click());
+    await act(async () => {});
+
+    // The detail read resolved with the settled summary; the held copy must
+    // give way so the panel reads the attempt's current state. The old status
+    // must be gone too — a panel that still claimed "Running" would be the
+    // bug this regression exists to catch.
+    const panel = container.querySelector('[data-testid="agent-run-detail"]');
+    expect(panel).not.toBeNull();
+    expect(panel?.textContent).toContain("Succeeded");
+    expect(panel?.textContent).not.toContain("Running");
+  });
+
   it("discards a stale list response after the operator switches teammates", async () => {
     // The engineer's list read is slow; the operator moves to Dana before it
     // resolves. The late answer was filtered against the old agentId and must
