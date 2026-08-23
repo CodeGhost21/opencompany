@@ -250,7 +250,13 @@ describe("what the always-ask field suggests", () => {
   it("withholds the unwired warning when the host cannot serve the tool set", async () => {
     const client = makeClient({
       slugs: "unavailable",
-      status: { ...STATUS, alwaysApprove: ["shell"] },
+      status: {
+        ...STATUS,
+        alwaysApprove: ["shell"],
+        // No complete registry either: neither source can prove what is wired,
+        // so the note stays silent rather than guessing.
+        knownTools: undefined,
+      },
     });
     await mount(client);
     await act(async () => {
@@ -260,6 +266,7 @@ describe("what the always-ask field suggests", () => {
     // An older host never answers discovery, so an entry cannot be proven
     // unwired — it may still be a hosted effect kind.
     expect(container.textContent).not.toContain("is not a tool");
+    expect(container.textContent).not.toContain("match any");
   });
 
   it("says what an entry is, including the prefix rule the matcher implements", async () => {
