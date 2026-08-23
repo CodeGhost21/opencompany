@@ -165,7 +165,10 @@ function useAvatarSrc(ref: string): string | null {
   const [src, setSrc] = useState<string | null>(immediate);
 
   useEffect(() => {
-    const resolved = resolveAvatarSrc(client, company, ref);
+    // No client means no authenticated fetch is possible — outside the console
+    // shell, or before one is chosen. A mascot still resolves; an uploaded face
+    // draws as the tone tile, which is the same thing a deleted one does.
+    const resolved = client ? resolveAvatarSrc(client, company, ref) : immediate;
     if (typeof resolved === "string") {
       setSrc(resolved);
       return;
@@ -181,7 +184,7 @@ function useAvatarSrc(ref: string): string | null {
     return () => {
       live = false;
     };
-  }, [client, company, ref]);
+  }, [client, company, ref, immediate]);
 
   return src;
 }
