@@ -545,6 +545,10 @@ impl Bundle {
     }
 
     /// Path to a single secret file by key.
+    ///
+    /// Canonical filenames always start with `%` (see [`secret_filename`]), so
+    /// they are disjoint from every legacy slugged filename in the same
+    /// directory.
     pub fn secret(&self, key: &str) -> PathBuf {
         self.secrets_dir().join(secret_filename(key))
     }
@@ -553,6 +557,8 @@ impl Bundle {
     ///
     /// [`FsSecretStore`](crate::store::FsSecretStore) reads this path only as a
     /// migration fallback and removes it after a successful write to [`secret`].
+    /// It is never written by the new layout, and its `[A-Za-z0-9._-]` filename
+    /// can never coincide with a canonical `%`-prefixed one.
     pub(crate) fn legacy_secret(&self, key: &str) -> PathBuf {
         self.secrets_dir().join(slug(&CompanyId::new(key)))
     }
