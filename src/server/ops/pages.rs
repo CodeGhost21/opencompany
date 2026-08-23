@@ -65,7 +65,7 @@ use crate::server::ops::{ScopedCompany, scoped};
 /// request this origin makes. `frame-ancestors 'self'` keeps the shell from
 /// being embedded anywhere but this console.
 const PAGES_CSP: &str = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; \
-     connect-src 'none'; frame-ancestors 'self'";
+     font-src 'self' data:; connect-src 'none'; frame-ancestors 'self'";
 
 /// Builds the pages route fragment.
 pub fn router() -> Router<AppState> {
