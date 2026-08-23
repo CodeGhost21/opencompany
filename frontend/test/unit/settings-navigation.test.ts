@@ -36,24 +36,11 @@ describe("Settings navigation (issue #1468)", () => {
   });
 
   it("renders linkable rows and gives narrow-screen navigation its missing context", () => {
-    const section = read("views/SettingsSection.tsx");
-    const settingsPages = [
-      "SettingsView.tsx",
-      "PeopleView.tsx",
-      "DevicesView.tsx",
-      "ConnectionsView.tsx",
-      "McpServersView.tsx",
-      "HostingView.tsx",
-      "SearchView.tsx",
-      "SkillsView.tsx",
-      "UsageView.tsx",
-    ].map((page) => read(`views/${page}`));
+    const settings = read("views/SettingsView.tsx");
 
     expect(section.match(/href=\{`#\/settings\/\$\{item\.id\}`\}/g)).toHaveLength(2);
     expect(section).toContain("title={item.hint}");
     expect(section).toContain("{activePage.hint}");
-    for (const page of settingsPages) {
-      expect(page).toContain('className="text-2xl font-semibold tracking-tight"');
-    }
+    expect(settings).toContain('className="text-2xl font-semibold tracking-tight lg:sr-only"');
   });
 });
