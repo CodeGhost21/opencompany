@@ -94,6 +94,31 @@ export function widensAutonomy(
 }
 
 /**
+ * Whether `list` still gates `target`, mirroring the host matcher
+ * (`src/policy/always_approve.rs::matches`): exact or a leading dotted segment,
+ * ASCII-case-insensitive, on a segment boundary.
+ *
+ * A reset drops the whole override, always-ask list included, so an effective
+ * entry the manifest's list does not gate is a fence a reset would silently
+ * take down. This is the "would the reset let something through that used to
+ * ask" test, and it must agree with the gate itself or the confirmation would
+ * contradict the behaviour it describes.
+ */
+export function gatedBy(list: string[], target: string): boolean {
+  const t = target.trim();
+  return list.some((entry) => {
+    const e = entry.trim();
+    if (e === "") return false;
+    if (t.toLowerCase() === e.toLowerCase()) return true;
+    return (
+      t.length > e.length &&
+      t[e.length] === "." &&
+      t.slice(0, e.length).toLowerCase() === e.toLowerCase()
+    );
+  });
+}
+
+/**
  * The autonomy tier and the always-ask list (issue #562).
  *
  * An operator drowning in approval cards previously had no way to stop it: the
