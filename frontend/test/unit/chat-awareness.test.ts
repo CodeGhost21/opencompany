@@ -15,6 +15,7 @@ import {
   typingLabel,
   TYPING_RECEIVE_TTL_MS,
   type Peer,
+  type PresenceStatus,
   type Typer,
 } from "@/lib/awareness";
 
