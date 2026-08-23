@@ -181,13 +181,10 @@ async fn run_publishing(dir: &std::path::Path) -> crate::ports::WorkflowRun {
     .expect("the run settles — a refused publish is not a failed run")
 }
 
-/// A two-lane scripted endpoint that holds both runs after they have each
-/// received a refused-publish result, before either can complete and drain.
-///
-/// The lane comes from the run request, which stays in every provider request.
-/// Both agents share one deps handle and therefore one publish queue, while
-/// using distinct roster entries so one agent's serialized turn lock cannot
-/// prevent the other run from reaching the barrier.
+/// A scripted endpoint whose per-lane responses let two runs overlap while
+/// they share one publish queue. Each run receives a refused publish before it
+/// completes, so the concurrent join still exercises cross-run isolation
+/// without requiring the provider calls to rendezvous.
 async fn spawn_interleaved_publish_script() -> String {
     let steps = Arc::new(Mutex::new(BTreeMap::<String, usize>::new()));
     let barrier = Arc::new(tokio::sync::Barrier::new(2));
