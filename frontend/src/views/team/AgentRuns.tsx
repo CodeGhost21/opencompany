@@ -390,7 +390,10 @@ export function AgentRuns({
             runs={shown}
             index={index}
             now={now}
-            onOpen={(id) => setOpenId(id)}
+            onOpen={(id) => {
+              openIdRef.current = id;
+              setOpenId(id);
+            }}
           />
         )}
       </CardContent>
