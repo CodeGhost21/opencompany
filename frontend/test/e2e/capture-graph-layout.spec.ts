@@ -39,6 +39,29 @@ test("capture settled graph layout + API data", async ({ page }) => {
   await page.addInitScript(() => {
     window.localStorage.setItem("theme", "dark");
   });
+  // Capture the graph's node-count trajectory from the very first DOM appearance
+  // (before "visible"), so an empty→full growth at mount is caught even if the
+  // empty state flashes for a single frame.
+  await page.addInitScript(() => {
+    const t0 = performance.now();
+    const counts: Array<{ t: number; n: number }> = [];
+    const record = () => {
+      const svg = document.querySelector('svg[aria-label="Operating knowledge graph"]');
+      counts.push({ t: Math.round(performance.now() - t0), n: svg ? (svg.innerHTML.match(/<g transform=/g) || []).length : 0 });
+    };
+    const obs = new MutationObserver(() => record());
+    const boot = () => {
+      const svg = document.querySelector('svg[aria-label="Operating knowledge graph"]');
+      if (svg) {
+        record();
+        obs.observe(svg, { childList: true, subtree: true });
+      } else {
+        requestAnimationFrame(boot);
+      }
+    };
+    requestAnimationFrame(boot);
+    (window as unknown as { __kgCounts: Array<{ t: number; n: number }> }).__kgCounts = counts;
+  });
   await page.goto("/#/overview");
   await page.locator(CONTENT_SURFACE).waitFor({ state: "visible", timeout: 30_000 });
   await page.evaluate(() => document.fonts.ready);
