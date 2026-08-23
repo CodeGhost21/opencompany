@@ -510,6 +510,25 @@ impl StandingGrant {
 #[derive(Clone, Default)]
 pub struct GrantSet {
     inner: Arc<Mutex<GrantState>>,
+    /// Serialises the mint-side opposite-polarity reconcile (issue #1458).
+    ///
+    /// A standing mint's `snapshot → journal revocations → insert` spans
+    /// awaited journal appends, so two concurrent resolutions of the same
+    /// (subject, tool, scope) with opposite verdicts — an approve and a deny
+    /// landing within a few milliseconds from separate console surfaces — can
+    /// both snapshot an empty opposite set and then both insert. The two
+    /// opposite policies then sit live together, and because denials match
+    /// first, the approve stays listed but never admits a call whatever the
+    /// operator's true order. Held as a `tokio` guard across the whole sequence
+    /// so the second mint sees the first's policy and supersedes it, exactly as
+    /// "newest standing decision wins" promises.
+    ///
+    /// A `tokio::sync::Mutex` rather than the `std` one that guards the state:
+    /// the guard has to survive the journal awaits inside the reconcile, which
+    /// a `std::sync::MutexGuard` (not `Send`) cannot. Cloning shares the lock
+    /// like it shares the state, so every holder of a cloned `GrantSet` agrees
+    /// on the ordering.
+    reconcile_lock: Arc<TokioMutex<()>>,
 }
 
 #[derive(Default)]
