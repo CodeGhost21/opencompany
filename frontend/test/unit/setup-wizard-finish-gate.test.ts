@@ -311,6 +311,7 @@ describe("finishing setup with no companies on the host", () => {
       }),
     );
 
+    await fill("setup-field-key", "rejected-key");
     await act(async () => {
       (
         container.querySelector('[data-testid="setup-test-connection"]') as HTMLElement
@@ -340,6 +341,7 @@ describe("finishing setup with no companies on the host", () => {
       }),
     );
 
+    await fill("setup-field-key", "working-key");
     await act(async () => {
       (
         container.querySelector('[data-testid="setup-test-connection"]') as HTMLElement
@@ -354,6 +356,44 @@ describe("finishing setup with no companies on the host", () => {
     ).toContain("https://example.test/v1");
     await next();
     expect(container.querySelector('[data-testid="setup-field-industry"]')).toBeTruthy();
+  });
+
+  it("requires the selected provider's credential before testing", async () => {
+    let requests = 0;
+    await show(
+      clientWith(status(), {
+        post: async () => {
+          requests += 1;
+          return { ok: true, baseUrl: "https://example.test/v1" };
+        },
+      }),
+    );
+
+    expect(button("Test connection").disabled).toBe(true);
+    await act(async () => {
+      button("Test connection").click();
+    });
+    expect(requests).toBe(0);
+
+    await fill("setup-field-key", "working-key");
+    expect(button("Test connection").disabled).toBe(false);
+    await act(async () => {
+      button("Test connection").click();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(requests).toBe(1);
+  });
+
+  it("requires an endpoint before testing Ollama", async () => {
+    await show(clientWith(status()));
+
+    await act(async () => {
+      (container.querySelector('[data-testid="setup-provider-ollama"]') as HTMLElement).click();
+    });
+    expect(button("Test connection").disabled).toBe(true);
+
+    await fill("setup-field-base-url", "http://127.0.0.1:11434/v1");
+    expect(button("Test connection").disabled).toBe(false);
   });
 
 
@@ -385,6 +425,7 @@ describe("finishing setup with no companies on the host", () => {
     ).toBeTruthy();
     // No empty input pretending to be the question.
     expect(container.querySelector('[data-testid="setup-field-key"]')).toBeNull();
+    expect(button("Test connection").disabled).toBe(false);
 
     // Someone who wants their own key can still get the field.
     await act(async () => {
