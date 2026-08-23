@@ -192,7 +192,13 @@ export function Login({ client, company, notice, onSignedIn }: Props) {
 
   useEffect(() => {
     let cancelled = false;
-    fetchHubProviders(client, company)
+    // A dead setup hand-off link keeps its marker in the hash while it falls
+    // back to this form, so an ecosystem button asked for from here must land on
+    // the same destination the link promised — the host carries it on the
+    // sign-in's return URI (`from=setup`), which survives the OAuth round trip
+    // the way a fragment cannot. Absent for any other sign-in, which lands
+    // wherever it always did.
+    fetchHubProviders(client, company, arrivedViaSetupHandoff() ? "setup" : undefined)
       .then((providers) => {
         if (!cancelled) setHubProviders(providers);
       })
