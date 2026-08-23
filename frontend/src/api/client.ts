@@ -671,35 +671,45 @@ export class OpenCompanyClient {
   /**
    * Clear this console's dot on the way out.
    *
-   * A `keepalive` fetch rather than the ordinary request path, because a
-   * request issued from `pagehide` is otherwise cancelled along with the
-   * document. `sendBeacon` would be the usual tool but cannot issue a
-   * `DELETE`, and inventing a POST alias for one route is a worse trade than
-   * `keepalive`, which every browser this console supports honours.
+   * Goes through `this.transport`, the same seam every other call on this
+   * class uses — **not** a direct `fetch`, which this used to be. A desktop
+   * console's webview cannot satisfy this route on its own even with the
+   * right headers: it is cross-origin with the host (so a direct request
+   * needs CORS the host does not grant it) and the device credential lives
+   * only in the Rust core's keychain, never in JS. `ProxyTransport` is what
+   * gets both right, and only routing through `this.transport` reaches it.
    *
-   * Carries the same session and bearer headers `request` would attach.
-   * `credentials: "include"` alone only carries a same-origin cookie; a
-   * console authenticated cross-origin (or through a desktop transport) holds
-   * its session in `x-opencompany-session`/`authorization` instead, and
-   * without them this call 401s on every tab close, leaving the lease visible
-   * until its TTL expires regardless of the beacon firing.
+   * The one thing this needs beyond an ordinary request — surviving the
+   * document going away, since this fires from `pagehide` — is
+   * `keepalive: true`, threaded through `TransportRequest` for exactly this
+   * call. `BrowserTransport` forwards it to `fetch`'s own `keepalive` option;
+   * `ProxyTransport` ignores it, because a Tauri `invoke` is core-process IPC
+   * with no equivalent teardown-survival problem. `sendBeacon` would be the
+   * usual browser-only tool here but cannot issue a `DELETE` or run through
+   * the desktop bridge at all.
+   *
+   * Carries the same session and bearer headers `request` would attach —
+   * `credentials: "include"` alone (still set unconditionally inside
+   * `BrowserTransport`) only carries a same-origin cookie, and a console
+   * authenticated cross-origin holds its session in
+   * `x-opencompany-session`/`authorization` instead.
    *
    * Best-effort by design, and allowed to fail silently: if it does not land,
    * the host's lease expires the dot within a few minutes anyway. That is the
    * whole reason presence is a lease — no disconnect path has to be correct.
    */
   disconnectPresenceBeacon(company?: string | null, consoleId?: string): void {
-    try {
-      const query = consoleId ? `?consoleId=${encodeURIComponent(consoleId)}` : "";
-      void fetch(`${this.baseUrl}${this.scope(company)}/presence${query}`, {
+    const query = consoleId ? `?consoleId=${encodeURIComponent(consoleId)}` : "";
+    void this.transport
+      .request({
         method: "DELETE",
-        credentials: "include",
-        keepalive: true,
+        url: `${this.baseUrl}${this.scope(company)}/presence${query}`,
         headers: this.authHeaders(),
-      }).catch(() => {});
-    } catch {
-      // The document is unloading. Nothing to do, and nobody to report it to.
-    }
+        keepalive: true,
+      })
+      .catch(() => {
+        // Best-effort by design; see this method's doc comment.
+      });
   }
 
   /**
