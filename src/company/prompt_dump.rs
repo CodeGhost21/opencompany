@@ -313,6 +313,30 @@ fn harness_sections(
         body: crate::harness::ledger_tools::ledger_brief(&registry),
     });
 
+    // Mirrors `build_agent`'s ordering — the sandbox is described before the
+    // deliverable brief that presumes it. Each of the three namespaces is read
+    // off the same predicates the builder gates its tool vectors on, so a dump
+    // cannot claim a clause the real prompt withholds. `shell` here is the
+    // GRANT, where the builder additionally requires the audit logger to have
+    // initialized; a manifest cannot know that, so the origin line says so
+    // rather than letting the dump imply a guarantee it does not have.
+    let sandbox_files = crate::company::grants_files_or_docs(grants);
+    let sandbox_shell = grants_cover(grants, "shell");
+    let sandbox_code = grants_cover(grants, "code");
+    let sandbox = crate::harness::toolbelt::sandbox_brief(sandbox_files, sandbox_shell, sandbox_code);
+    if sandbox.is_empty() {
+        deferred.push(Deferred {
+            title: "Your sandbox".to_string(),
+            reason: "this agent's grants cover none of `files`/`docs`, `shell` or `code`, so it is offered no tool that reaches its working directory".to_string(),
+        });
+    } else {
+        sections.push(Section {
+            title: "Your sandbox".to_string(),
+            origin: "`harness::toolbelt::sandbox_brief` — one clause per granted namespace; the `shell` clause additionally needs the per-agent audit logger to initialize at build time".to_string(),
+            body: sandbox,
+        });
+    }
+
     if crate::company::grants_files_or_docs(grants) {
         sections.push(Section {
             title: "Deliverables".to_string(),
