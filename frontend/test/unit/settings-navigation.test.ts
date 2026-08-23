@@ -56,7 +56,7 @@ describe("Settings navigation (issue #1468)", () => {
     expect(section).toContain("title={item.hint}");
     expect(section).toContain("{activePage.hint}");
     for (const page of settingsPages) {
-      expect(page).toContain('className="text-2xl font-semibold tracking-tight"');
+      expect(page).toContain("text-2xl font-semibold tracking-tight");
     }
     // The General page draws no visible title of its own — the rail already
     // says "Settings" (issue #1221) — so its heading is screen-reader-only.
