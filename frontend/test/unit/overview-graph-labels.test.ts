@@ -124,7 +124,7 @@ describe("planLabels", () => {
   it("accounts for the 10px floor when deciding which dense labels survive", () => {
     const pair = [
       cand({ id: "priority", x: 0, priority: LABEL_PRIORITY.hovered }),
-      cand({ id: "neighbour", x: 30, priority: LABEL_PRIORITY.worker }),
+      cand({ id: "neighbour", x: 29, priority: LABEL_PRIORITY.worker }),
     ];
     // The former 9px label boxes fit at this gap. At the design system floor,
     // the planner drops the quieter one instead of letting the rendered names
