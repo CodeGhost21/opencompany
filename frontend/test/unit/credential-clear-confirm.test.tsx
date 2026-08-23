@@ -100,8 +100,9 @@ describe("credential clearing confirmation (issue #1471)", () => {
       status: { configured: false, source: "none", notice: "Not configured." },
       note: "Smithery key cleared.",
     });
+    const fakeClient = client();
     await act(async () => {
-      root.render(createElement(McpDirectoryCredentialCard, { client: client(), company: "acme" }));
+      root.render(createElement(McpDirectoryCredentialCard, { client: fakeClient, company: "acme" }));
       await Promise.resolve();
     });
 
@@ -110,7 +111,7 @@ describe("credential clearing confirmation (issue #1471)", () => {
     expect(document.body.textContent).toContain("cannot be shown or recovered");
 
     await act(async () => button("Clear key").click());
-    expect(api.setMcpDirectoryCredential).toHaveBeenCalledWith(client(), "acme", "");
+    expect(api.setMcpDirectoryCredential).toHaveBeenCalledWith(fakeClient, "acme", "");
   });
 
   it("does not disconnect hosting until confirmation", async () => {
