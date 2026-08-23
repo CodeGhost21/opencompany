@@ -195,6 +195,7 @@ impl FeedbackItem {
             at_millis: now_millis(),
             filed_issue_url: None,
             issue_status: None,
+            scrubbed_body: None,
             consent_mode,
         }
     }
