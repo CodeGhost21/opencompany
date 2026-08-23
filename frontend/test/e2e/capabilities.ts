@@ -146,7 +146,7 @@ export const LIVE_LLM_BIND = process.env.PW_LIVE_LLM_BIND || "127.0.0.1:8096";
 
 /** The reason string a `LIVE_LLM` skip carries, so no skip is ever bare. */
 export const LIVE_LLM_REASON =
-  "needs a --features openhuman,tinycortex,mcp host pointed at a real model; " +
+  "needs a --features openhuman,mcp host pointed at a real model; " +
   "run `npm run e2e:live-llm` (which sets PW_LIVE_LLM=1 and starts " +
   "test/e2e/live-brain-proxy.mjs in front of the configured router).";
 
