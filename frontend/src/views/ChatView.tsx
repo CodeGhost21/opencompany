@@ -268,7 +268,10 @@ export function ChatView({
       writeChannelRailCollapsed(scope, next);
       // Expanding from the compact rail unmounts the button that carried focus;
       // hand it to the header toggle, which is mounted on both density states.
-      if (next) channelsToggleRef.current?.focus();
+      // `next` is the rail's new collapsed state, so expanding is `!next` —
+      // collapsing from the header's own toggle leaves that button mounted,
+      // and the focus it already holds is the right place to stay.
+      if (!next) channelsToggleRef.current?.focus();
       return next;
     });
   }
