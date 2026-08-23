@@ -6,7 +6,7 @@ What a company remembers, where it lives, and the Operator's rights over it.
 
 | Kind | Written by | Retention |
 | --- | --- | --- |
-| Compressed cycle traces | every cycle | newest 32 retained and inspectable; **not** summarized or read back into a cycle (issue #1175) |
+| Compressed cycle traces | every cycle | newest 32 retained and inspectable; backends that archive rather than destroy bound the archive tier to the newest 32 evicted traces too; **not** summarized or read back into a cycle (issue #1175) |
 | Task results (delegated work products) | cycles | durable |
 | Context chunks (documents, research, transcripts the brain filed) | cycles, imports | durable, content-addressed |
 | Customers, engagements, decisions, outcomes | cycles (as structured task results / context) | durable |
