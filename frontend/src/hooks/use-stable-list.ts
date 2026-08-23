@@ -143,6 +143,7 @@ export function useStableList<T>(live: T[]): StableList<T> {
 
   return {
     items: frozen ?? live,
+    holding: frozen !== null,
     containerProps: {
       onPointerEnter,
       onPointerLeave,
