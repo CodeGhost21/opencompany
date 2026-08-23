@@ -346,10 +346,7 @@ mod test {
         let items = list.as_array().expect("an array");
         assert_eq!(items.len(), 2);
         assert_eq!(
-            items
-                .iter()
-                .filter(|i| i["issue_status"] == "open")
-                .count(),
+            items.iter().filter(|i| i["issue_status"] == "open").count(),
             1,
             "exactly one filed report"
         );
