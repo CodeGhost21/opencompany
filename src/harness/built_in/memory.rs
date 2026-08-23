@@ -8,8 +8,8 @@
 //! `{company}/{agent}/{namespace}` so multiple agents in one company never
 //! collide.
 //!
-//! The backend is chosen by `OPENCOMPANY_STORAGE` (fs / sqlite / mongodb /
-//! tinycortex), not by openhuman — that is the "memory pluggable and
+//! The backend is chosen by `OPENCOMPANY_STORAGE` (fs / sqlite / mongodb),
+//! not by openhuman — that is the "memory pluggable and
 //! configurable" requirement. On the fs backend
 //! [`Memory::recall_relevant_by_vector`] has no vectors, so it degrades to the
 //! store's substring/FTS `search` and, per the trait contract, **never
