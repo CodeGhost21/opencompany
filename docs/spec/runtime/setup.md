@@ -219,13 +219,14 @@ the wizard for a sign-in form would restore the dead end this flow removes.
 
 ## What it does not configure
 
-ACP is a **cargo feature** (`acp`), not a setting, and no `/acp` handler is
-mounted in this tree — only the session and permission model plus the reserved
-path (`src/server/routes.rs`). The flow therefore reports `acp_in_build` and
-`acp_transport_mounted` separately and offers no switch, which is the difference
-between telling an operator "not available" and sending a client at an endpoint
-that 404s. The same reporting-not-writing rule covers `mcp`, `openhuman` and
-`oauth`.
+ACP is a **cargo feature** (`acp`), not a setting. With the feature on, the
+host mounts the authenticated HTTP JSON-RPC transport at `/acp`
+(`src/server/acp/`); without it only the session and permission model plus the
+reserved path compile (`src/server/routes.rs`). The flow therefore reports
+`acp_in_build` and `acp_transport_mounted` separately and offers no switch,
+which is the difference between telling an operator "not available" and sending
+a client at an endpoint that 404s. The same reporting-not-writing rule covers
+`mcp`, `openhuman` and `oauth`.
 
 `data_dir` is excluded too: a running host has already opened and locked its
 data root, so writing a new one into the file that lives *inside* that root

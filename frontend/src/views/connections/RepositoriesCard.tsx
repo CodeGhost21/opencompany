@@ -6,6 +6,16 @@ import type { OpenCompanyClient } from "@/api/client";
 import { bindRepo, listRepos, revokeRepo, type Repo } from "@/api/repos";
 import { ApiError, type RosterAgent } from "@/api/types";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -66,6 +76,7 @@ export function RepositoriesCard({ client, company, canManage }: Props) {
   const [token, setToken] = useState("");
   const [branches, setBranches] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
+  const [revokeTarget, setRevokeTarget] = useState<Repo | null>(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -251,7 +262,7 @@ export function RepositoriesCard({ client, company, canManage }: Props) {
                       variant="ghost"
                       size="sm"
                       disabled={busy !== null}
-                      onClick={() => void revoke(repo.key)}
+                      onClick={() => setRevokeTarget(repo)}
                       aria-label={`Unbind ${repo.owner}/${repo.repo}`}
                     >
                       {busy === repo.key ? (
@@ -343,6 +354,28 @@ export function RepositoriesCard({ client, company, canManage }: Props) {
         </CardContent>
       </Card>
       )}
+      <AlertDialog open={revokeTarget !== null} onOpenChange={(open) => !open && setRevokeTarget(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Unbind {revokeTarget?.owner}/{revokeTarget?.repo}?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This permanently removes the host&apos;s mirror and stored credential. Teammates lose access
+              to this repository; bind it again with a new token to restore it.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Keep repository</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => {
+                if (revokeTarget) void revoke(revokeTarget.key);
+                setRevokeTarget(null);
+              }}
+            >
+              Unbind repository
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </section>
   );
 }
