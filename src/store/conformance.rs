@@ -2562,6 +2562,29 @@ pub async fn assert_secret_store(secrets: Arc<dyn crate::ports::secrets::SecretS
         "a distinct key with an underscore was overwritten by its space variant"
     );
 
+    // A key that is itself shaped like a legacy filename must not alias another
+    // key. On the filesystem backend the canonical namespace and the legacy
+    // slug fallback have to stay disjoint, so `key-foo` must not read the value
+    // written for `foo`, and writing `key-foo` must not touch `foo`.
+    secrets
+        .set(&alpha, "foo", SecretValue("value-for-foo".to_string()))
+        .await
+        .unwrap();
+    assert_eq!(
+        read(&alpha, "key-foo").await,
+        None,
+        "reading a key-shaped legacy slug reached another key's value"
+    );
+    secrets
+        .set(&alpha, "key-foo", SecretValue("value-for-key-foo".to_string()))
+        .await
+        .unwrap();
+    assert_eq!(
+        read(&alpha, "foo").await.as_deref(),
+        Some("value-for-foo"),
+        "writing a key-shaped legacy slug deleted another key"
+    );
+
     // 5. Overwrite replaces. A backend that appended, or that served a cached or
     //    stale row, would hand a rotated credential's *predecessor* to the next
     //    outbound call — which fails as an authentication error days later, far
