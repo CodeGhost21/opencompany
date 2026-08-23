@@ -245,6 +245,14 @@ describe("policy tier changes", () => {
     });
     expect(options()).toEqual(WIRED);
 
+    const input = field()!;
+    await act(async () => {
+      input.value = "shel, invoice.send";
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    expect(container.textContent).toContain("shel, invoice.send are not tools this deployment wires.");
+    expect(container.textContent).toContain("They may still be hosted effect kinds.");
+
     const auto = Array.from(container.querySelectorAll<HTMLButtonElement>('[role="radio"]')).find(
       (button) => button.textContent?.includes("Auto"),
     );
@@ -255,13 +263,5 @@ describe("policy tier changes", () => {
       "/api/v1/acme/policy",
       { mode: "auto" },
     );
-
-    const input = field()!;
-    await act(async () => {
-      input.value = "shel, invoice.send";
-      input.dispatchEvent(new Event("input", { bubbles: true }));
-    });
-    expect(container.textContent).toContain("shel, invoice.send are not tools this deployment wires.");
-    expect(container.textContent).toContain("They may still be hosted effect kinds.");
   });
 });
