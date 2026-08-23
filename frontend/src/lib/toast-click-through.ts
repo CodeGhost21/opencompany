@@ -65,6 +65,43 @@ function beneathAt(x: number, y: number): (HTMLElement | SVGElement) | null {
 }
 
 /**
+ * Hand a gesture over a page frame to the frame's own document.
+ *
+ * For a point over an embedded document, `elementFromPoint` answers with the
+ * frame host, and a `click()` or `dispatchEvent` on it stays in this document
+ * — it can neither reach the frame's content nor, for the console's sandboxed
+ * Pages view, be legal (the two documents are not same-origin). The one
+ * channel that does cross the boundary is `postMessage`: this posts the
+ * gesture's coordinates, frame-relative, and the page SDK's own listener
+ * (`pages-sdk/client.ts`) turns them into a real pointer gesture on whatever
+ * element is beneath the point *inside* the frame. Coordinates are shifted by
+ * the frame's viewport offset so the embedded document sees the same point
+ * the parent hit-test would have.
+ */
+function relayToFrame(
+  frame: HTMLIFrameElement,
+  gesture: PointerEvent | MouseEvent,
+  type: "oc:relay-click" | "oc:relay-pointerdown",
+): void {
+  const rect = frame.getBoundingClientRect();
+  const payload: Record<string, unknown> = {
+    type,
+    x: gesture.clientX - rect.left,
+    y: gesture.clientY - rect.top,
+  };
+  if (type === "oc:relay-pointerdown") {
+    const pointer = gesture as PointerEvent;
+    payload.pointerId = pointer.pointerId;
+    payload.pointerType = pointer.pointerType;
+    payload.isPrimary = pointer.isPrimary;
+    payload.button = pointer.button;
+    payload.buttons = pointer.buttons;
+    payload.detail = pointer.detail;
+  }
+  frame.contentWindow?.postMessage(payload, "*");
+}
+
+/**
  * Relay the pointerdown of a press on a toast's read-only surface to the page
  * beneath it.
  *
