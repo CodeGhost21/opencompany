@@ -1185,7 +1185,7 @@ async fn memory_is_isolated_between_companies() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(list_b.as_array().unwrap().len(), 0);
+    assert_eq!(list_b["items"].as_array().unwrap().len(), 0);
 
     // A's own memory holds exactly the one fact.
     let (status, list_a) = send_auth(
