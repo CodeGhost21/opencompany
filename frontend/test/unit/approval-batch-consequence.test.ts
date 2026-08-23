@@ -43,7 +43,11 @@ function approval(id: string, group: ApprovalSummary["group"], kind = "web_fetch
 let container: HTMLDivElement;
 let root: Root;
 
-async function render(approvals: ApprovalSummary[], decided: Record<string, Verdict> = {}) {
+async function render(
+  approvals: ApprovalSummary[],
+  decided: Record<string, Verdict> = {},
+  failed: Record<string, string> = {},
+) {
   await act(async () => {
     root.render(
       createElement(ApprovalRow, {
@@ -52,7 +56,7 @@ async function render(approvals: ApprovalSummary[], decided: Record<string, Verd
         askerNames: new Map([["seo", "SEO Specialist"]]),
         deciding: new Map(),
         decided,
-        failed: {},
+        failed,
         onDecide: (_a: ApprovalSummary, _v: Verdict, _s: GrantScope) => {},
       }),
     );
@@ -142,5 +146,37 @@ describe("the consequence on a batched approval card", () => {
     const lines = [...container.querySelectorAll<HTMLElement>("[data-approval-item]")];
     expect(lines[0].textContent).not.toContain("Spends money");
     expect(lines[1].textContent).toContain("Leaves the company");
+  });
+
+  // The headline describes what the next Approve authorises, and `decideAll`
+  // acts only on the still-pending subset. An item settled on the Approvals
+  // page while this card sat open is no longer part of that decision.
+  it("stops claiming a consequence settled elsewhere while the card sat open", async () => {
+    await render([approval("a1", "spend"), approval("a2", "other")], { a1: "approve" });
+
+    expect(badges()).toEqual([]);
+    expect(iconTile().className).not.toContain("bg-tone-");
+  });
+
+  it("narrows a mixed headline to what is still pending", async () => {
+    await render([approval("a1", "spend"), approval("a2", "send"), approval("a3", "send")], {
+      a1: "approve",
+    });
+
+    // Only the sends are still up for decision, so the batch now agrees with
+    // itself and wears that one consequence.
+    expect(container.textContent).not.toContain("Spends money");
+    expect(iconTile().className).toContain("bg-tone-2/15");
+  });
+
+  // A failed item is still pending and still retryable, so its warning is
+  // attached to a decision the operator has yet to make.
+  it("keeps the warning on an item whose decision did not record", async () => {
+    await render([approval("a1", "spend"), approval("a2", "send")], {}, { a1: "host unreachable" });
+
+    const failedLine = container.querySelector<HTMLElement>('[data-approval-failed="true"]');
+    expect(failedLine).not.toBeNull();
+    expect(failedLine?.textContent).toContain("Not recorded");
+    expect(failedLine?.textContent).toContain("Spends money");
   });
 });
