@@ -254,7 +254,18 @@ export function Login({ client, company, notice, onSignedIn }: Props) {
     setBusy(true);
     setError(null);
     try {
-      const result = await requestCode(client, company, email);
+      const result = await requestCode(
+        client,
+        company,
+        email,
+        // A dead setup hand-off link keeps the address while it falls back to
+        // this form (`#/company?from=setup` survives in the hash), so a link
+        // asked for from here must carry the same destination the original did
+        // — otherwise following the replacement lands on Overview and can show
+        // the tour welcome instead of the roster setup just built. Absent for
+        // any other sign-in, which lands wherever it always did.
+        arrivedViaSetupHandoff() ? SETUP_HANDOFF_FRAGMENT : undefined,
+      );
       // Always the same acknowledgement, whoever they are.
       setSent(true);
       setDevCode(result.dev_code ?? null);
