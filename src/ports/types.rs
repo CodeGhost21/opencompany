@@ -2682,6 +2682,23 @@ pub struct AgentOverride {
     /// The operator's replacement persona prompt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instructions: Option<String>,
+    /// The face this teammate wears, when somebody has chosen one — a
+    /// `tiny:<flavour>` mascot or a `blob:<nodeId>` upload, validated by
+    /// [`crate::company::avatar`] before it is stored.
+    ///
+    /// `None` means **nobody has chosen**, which is not the same as "no face":
+    /// the console hashes the teammate's stable id into one of the shipped
+    /// mascots, so an untouched roster still reads as a set of individuals.
+    /// Keeping the two apart is what makes "reset to the default face"
+    /// expressible — it is [`CompanyRecord::clear_agent_avatar`], not a second
+    /// stored value.
+    ///
+    /// Carried here rather than on [`OverlayAgent`] so **one** field answers for
+    /// both kinds of teammate: an override row may name a manifest agent or an
+    /// overlay one (`effective_instructions` already works this way), and a
+    /// choice of face is the same act whichever kind was clicked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avatar: Option<String>,
 }
 
 /// An operator-added desk membership that the version-controlled manifest does
@@ -3803,6 +3820,9 @@ impl CompanyRecord {
             if entry.instructions.is_some() {
                 held.instructions = entry.instructions;
             }
+            if entry.avatar.is_some() {
+                held.avatar = entry.avatar;
+            }
             return;
         }
         self.overlay_agent_edits.push(entry);
@@ -3991,12 +4011,54 @@ impl CompanyRecord {
         {
             entry.instructions = None;
         }
+        self.retain_nonempty_agent_edits();
+    }
+
+    /// The face in force for `agent_id`: the chosen one, or `None` for "nobody
+    /// has chosen" — which the console renders as the mascot it hashes from the
+    /// teammate's id (`docs/spec/runtime/avatars.md`).
+    ///
+    /// Reads through the override for **either** kind of teammate, which is why
+    /// there is no manifest arm here as there is in
+    /// [`Self::effective_instructions`]: `company.toml` declares no face, so an
+    /// unset avatar has nothing to fall back to but the default, and inventing a
+    /// stored value for it would make "reset" unexpressible.
+    pub fn effective_avatar(&self, agent_id: &str) -> Option<String> {
+        self.agent_override(agent_id).and_then(|o| o.avatar.clone())
+    }
+
+    /// Drops `agent_id`'s chosen face so the hashed default applies again.
+    ///
+    /// Clears the one field rather than the row, for the reason
+    /// [`Self::upsert_agent_override`] merges field-wise: an operator resetting a
+    /// face has said nothing about the persona, the name or the tool scope, and
+    /// dropping their row would silently reset those too. A no-op when nothing
+    /// is stored — the caller's intent is already satisfied.
+    pub fn clear_agent_avatar(&mut self, agent_id: &str) {
+        if let Some(entry) = self
+            .overlay_agent_edits
+            .iter_mut()
+            .find(|entry| entry.agent_id == agent_id)
+        {
+            entry.avatar = None;
+        }
+        self.retain_nonempty_agent_edits();
+    }
+
+    /// Drops any override row left carrying no edits at all.
+    ///
+    /// Shared by the two clear paths so neither can forget a field: a row that
+    /// held only the thing just cleared is not "an empty override", it is a row
+    /// whose continued existence would move the harness's overlay fingerprint
+    /// for no change.
+    fn retain_nonempty_agent_edits(&mut self) {
         self.overlay_agent_edits.retain(|entry| {
             entry.name.is_some()
                 || entry.role.is_some()
                 || entry.description.is_some()
                 || entry.tools.is_some()
                 || entry.instructions.is_some()
+                || entry.avatar.is_some()
         });
     }
 
