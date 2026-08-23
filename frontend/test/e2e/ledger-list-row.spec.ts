@@ -55,7 +55,7 @@ test("a list row leads with its title and shows one readable status", async ({
     expect(recorded.ok()).toBeTruthy();
 
     await page.goto(`/#/ledgers/${slug}`);
-    // A declared ledger opens as readable rows already — `defaultLedgerMode`
+    // Declared ledgers open in list mode (issue #1351) — `defaultLedgerMode`
     // keeps the board for the native Tasks ledger only — so there is no "List"
     // button to click (the toggle reads "Board" while we are on the list).
 
