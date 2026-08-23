@@ -786,6 +786,7 @@ to = "run"
                 policy,
                 run_id: "run-1".to_string(),
                 grants: crate::runtime::grants::GrantSet::default(),
+                registry: Arc::new(ChildGateRegistry::default()),
             }),
         )
     }
