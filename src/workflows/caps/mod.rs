@@ -726,6 +726,7 @@ impl HarnessAgentRunner {
         blocks: RunBlocks,
         approvals: RunApprovals,
         board_claim: Arc<crate::harness::orchestrator::DelegationClaim>,
+        publish_refusal_claim: Arc<crate::harness::publish::PublishRefusalClaim>,
     ) -> Self {
         Self {
             turn,
@@ -740,6 +741,7 @@ impl HarnessAgentRunner {
             blocks,
             approvals,
             board_claim,
+            publish_refusal_claim,
         }
     }
 
@@ -1812,6 +1814,8 @@ mod tests {
         let queue = deps.approval_requests.clone();
         let notices = RunNotices::default();
         let board_claim = Arc::new(deps.delegations.claim_board("run-1"));
+        let publish_refusal_claim =
+            Arc::new(deps.pending_publishes.claim_refusals_for_run("run-1"));
         let runner = HarnessAgentRunner::new(
             single_turn(&deps),
             deps,
@@ -1825,6 +1829,7 @@ mod tests {
             RunBlocks::default(),
             RunApprovals::default(),
             board_claim,
+            publish_refusal_claim,
         );
 
         // Pushed inside the run's own scope, exactly as its turn would.

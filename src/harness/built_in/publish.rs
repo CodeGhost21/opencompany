@@ -443,7 +443,10 @@ impl PendingPublishQueue {
     }
 
     fn clear_refusals_in(&self, scope: &PublishRefusalScope) {
-        self.refusals.lock().expect("publish refusals").remove(scope);
+        self.refusals
+            .lock()
+            .expect("publish refusals")
+            .remove(scope);
     }
 }
 
