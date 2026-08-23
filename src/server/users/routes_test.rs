@@ -1780,9 +1780,11 @@ async fn inviting_someone_mails_them_a_credential_free_invitation() {
         "the mail must carry no login code: {}",
         mail.body
     );
-    // The inviter is named by local part, never by full address.
+    // The inviter is named from the local part, never by full address — and
+    // through `UserRecord::display_label`, so the name in this mail is the one
+    // the invitee will meet in the console a minute later.
     assert!(
-        mail.body.contains("ada"),
+        mail.body.contains("Ada"),
         "the mail must name who invited them: {}",
         mail.body
     );
