@@ -46,6 +46,7 @@ export function ChatHeader({
   onOpenRail,
   channelsCollapsed,
   onToggleChannels,
+  channelsToggleRef,
 }: Props) {
   const [copied, setCopied] = useState(false);
   const title = channelTitle(channel);
