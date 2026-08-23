@@ -1256,11 +1256,7 @@ async fn run_memory_cmd(cmd: MemoryCmd) -> Result<()> {
     // (`store::memory::migrate::resolve_migrate_configs`), where the feature
     // lanes execute the guards' tests; the bin drives the loop and reports.
     let (from_config, to_config) = opencompany::store::memory::migrate::resolve_migrate_configs(
-        &settings,
-        &to,
-        to_url,
-        to_api_key,
-        to_data_dir,
+        &settings, &to, to_url, to_api_key,
     )?;
 
     // Hosted providers have no local memory store to lock. The pause-first
