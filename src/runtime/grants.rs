@@ -1556,9 +1556,32 @@ mod test {
         assert_eq!(drained.len(), 1);
     }
 
-    /// Same-polarity policies are never reconciled — two approvals of one scope
-    /// are the same opinion, and the matcher already picks the later-expiring
-    /// one deterministically.
+    /// The mirror of the wildcard-old case: a **new** wildcard policy (an
+    /// unresolvable scope, recorded `None`) shadows every scoped opposite policy
+    /// for the same tool, so the reconcile takes the older scoped one too.
+    /// Otherwise it would sit listed-but-inert while the wildcard refused every
+    /// call, and silently resurrect when the wildcard expired — the newest
+    /// standing decision should be the whole of the contract.
+    #[test]
+    fn a_new_wildcard_policy_supersedes_an_older_scoped_opposite() {
+        let set = GrantSet::default();
+        set.grant_standing(scoped("approve-1", "ops", "web_fetch", "https://docs.rs", 10_000));
+
+        let drained = set.opposite_polarity(
+            &GrantSubject::agent("ops"),
+            "web_fetch",
+            None, // a scope the tool could not resolve
+            crate::ports::types::Verdict::Deny,
+            2_000,
+        );
+        assert_eq!(
+            drained.len(),
+            1,
+            "the new wildcard refusal supersedes the older scoped approval"
+        );
+        assert_eq!(drained[0].id, GrantId::new("approve-1"));
+        assert!(set.standing().is_empty(), "nothing opposite remains listed");
+    }
     #[test]
     fn same_polarity_policies_are_never_reconciled() {
         let set = GrantSet::default();
