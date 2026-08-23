@@ -67,6 +67,14 @@ function isRelayMessage(value: unknown): value is RelayMessage {
 // Only the console frame that hosts this page may relay gestures into it. The
 // source check is what makes that true: a frame the page embeds itself would
 // surface with `event.source` set to its own window, not `window.parent`.
+//
+// The event dispatched below is programmatic, so it is untrusted: like the
+// console's own synthetic clicks, it carries no transient user activation,
+// and a browser will not transfer activation across the sandbox boundary
+// (that is the clickjacking defense). A control that requires activation — a
+// file input, `showPicker()`, `window.open()` — is therefore not reachable
+// through an overlay; the relay targets ordinary click- and pointer-driven
+// controls, which is what a toast-over-page gesture is for.
 window.addEventListener("message", function onRelay(event: MessageEvent) {
   if (event.source !== window.parent) return;
   if (!isRelayMessage(event.data)) return;
