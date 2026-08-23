@@ -5,6 +5,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import type { ApprovalSummary, GrantScope, Verdict } from "@/api/types";
+import type { ApprovalThreadLink } from "@/components/approval-card";
 import { money } from "@/lib/language";
 import { ApprovalRow } from "@/views/chat/ApprovalRow";
 
