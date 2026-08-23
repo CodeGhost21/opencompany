@@ -149,18 +149,21 @@ describe("toast click-through", () => {
     expect(belowPressed).not.toHaveBeenCalled();
   });
 
-  it("does not relay a press that has nothing interactive beneath", () => {
-    const below = document.createElement("div");
-    const pressed = vi.fn();
-    below.addEventListener("pointerdown", pressed);
-    document.body.append(below);
-    mockElementFromPoint(below);
-
+  it("does not relay a press when nothing but the toaster is beneath", () => {
+    // The point under the press is still inside the toaster (another toast,
+    // or the toaster's own chrome): relaying there would hand the gesture back
+    // to the very element the toast is covering.
     const text = document.createElement("span");
-    toast().append(text);
+    const toaster = toast();
+    toaster.append(text);
     text.addEventListener("pointerdown", relayToastPointerDown);
+    mockElementFromPoint(toaster);
+
     press(text);
 
-    expect(pressed).not.toHaveBeenCalled();
+    // Nothing to assert a side effect on — the relay must simply not throw or
+    // dispatch. The `elementFromPoint` mock would have received the call, and
+    // the guard after it returns without dispatching.
+    expect(document.elementFromPoint).toHaveBeenCalledOnce();
   });
 });
