@@ -1194,8 +1194,10 @@ to = "fetch"
             "supervised",
             crate::runtime::grants::GrantSet::default(),
         );
-        resolver.resolve("child").await.expect("child resolves");
-
+        let registry = Arc::new(ChildGateRegistry::default());
+        let child = crate::workflows::translate::translate(
+            &crate::company::parse_workflow(&child_with_shell("child")).expect("child parses"),
+        );
         let gated = child
             .nodes
             .iter()
