@@ -1197,9 +1197,9 @@ approval.]"
         // Computed here rather than inline in the literal below, which would
         // borrow `tool` after the field above has moved it.
         let scope = crate::policy::consequence::standing_scope_of(&tool, &args);
-        let (agent, workflow) = match subject {
-            GrantSubject::Agent(agent) => (agent, None),
-            GrantSubject::Workflow(workflow) => (String::new(), Some(workflow)),
+        let (agent, workflow) = match &subject {
+            GrantSubject::Agent(agent) => (agent.clone(), None),
+            GrantSubject::Workflow(workflow) => (String::new(), Some(workflow.clone())),
         };
         let grant = StandingGrant {
             id: GrantId::generate(),

@@ -1430,7 +1430,13 @@ mod test {
     #[test]
     fn a_denial_mint_supersedes_a_live_approval_of_the_same_scope() {
         let set = GrantSet::default();
-        set.grant_standing(scoped("grant-1", "ops", "web_fetch", "https://docs.rs", 10_000));
+        set.grant_standing(scoped(
+            "grant-1",
+            "ops",
+            "web_fetch",
+            "https://docs.rs",
+            10_000,
+        ));
 
         let drained = set.drain_opposite_polarity(
             &GrantSubject::agent("ops"),
@@ -1450,8 +1456,20 @@ mod test {
     #[test]
     fn a_denial_for_one_host_does_not_take_back_a_grant_for_another() {
         let set = GrantSet::default();
-        set.grant_standing(scoped("grant-1", "ops", "web_fetch", "https://docs.rs", 10_000));
-        let mut deny = scoped("deny-1", "ops", "web_fetch", "https://other.example", 10_000);
+        set.grant_standing(scoped(
+            "grant-1",
+            "ops",
+            "web_fetch",
+            "https://docs.rs",
+            10_000,
+        ));
+        let mut deny = scoped(
+            "deny-1",
+            "ops",
+            "web_fetch",
+            "https://other.example",
+            10_000,
+        );
         deny.verdict = crate::ports::types::Verdict::Deny;
         set.grant_standing(deny);
 
