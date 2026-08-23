@@ -1027,6 +1027,17 @@ export interface EditAgentInput {
    * persona the operator did not touch.
    */
   instructions?: string | null;
+  /**
+   * The teammate's own tool-grant globs, admin-only on the host (a member gets
+   * a 403). Omitted leaves them alone; a list replaces them verbatim, exactly
+   * as a manifest `[[agent]].tools` line would be read.
+   *
+   * `[]` is the sharp one and is deliberately expressible: an empty list means
+   * **the company's standard grant**, not "no tools", so sending it is a
+   * potential *widening* rather than a revocation. That is why the host gates
+   * this key on admin and why the console asks before sending it.
+   */
+  tools?: string[];
 }
 
 /**
