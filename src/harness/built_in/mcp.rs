@@ -791,28 +791,6 @@ mod tests {
         g.iter().map(|s| s.to_string()).collect()
     }
 
-    fn agent(grants: &[&str]) -> ManifestAgent {
-        ManifestAgent {
-            global: false,
-            id: "ceo".into(),
-            role: "Chief".into(),
-            name: None,
-            description: None,
-            tier: None,
-            harness: None,
-            tools: grants.iter().map(|g| g.to_string()).collect(),
-            delegates_to: vec![],
-            context: None,
-            budget_usd_daily: None,
-            prompt: None,
-            prompt_files: Vec::new(),
-            prompt_files_resolved: Vec::new(),
-            classes: Vec::new(),
-            ledgers: None,
-            can_declare_ledgers: true,
-        }
-    }
-
     #[test]
     fn empty_decls_yield_no_registry() {
         assert!(registry_for_agent(&[], &grants(&["mcp:*"])).is_none());
