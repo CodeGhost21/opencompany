@@ -2837,27 +2837,6 @@ mod test {
         );
     }
 
-    fn card_record(id: &str) -> TaskRecord {
-        TaskRecord {
-            id: id.to_string(),
-            title: "t".to_string(),
-            note: None,
-            column: crate::ports::tasks::COLUMN_IN_PROGRESS.to_string(),
-            priority: "medium".to_string(),
-            assignee: "ceo".to_string(),
-            updated_at_millis: 1,
-            origin_chat_id: None,
-            parent_task_id: None,
-            output: None,
-            plan: None,
-            planning_attempts: Vec::new(),
-            deliverable: crate::ports::tasks::TaskDeliverable::Once,
-            workflow_proposal: None,
-            origin_run_id: None,
-            origin_workflow_id: None,
-        }
-    }
-
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
