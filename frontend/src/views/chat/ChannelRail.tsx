@@ -173,13 +173,16 @@ function Section({
   activeId,
   unread,
   onSelect,
+  open,
+  onToggle,
 }: {
   section: ChannelSection;
   activeId: string | null;
   unread: Record<string, number>;
   onSelect: (id: string) => void;
+  open: boolean;
+  onToggle: () => void;
 }) {
-  const [open, setOpen] = useState(true);
   const hiddenUnread = !open
     ? section.channels.reduce((n, c) => n + (unread[c.id] ?? 0), 0)
     : 0;
@@ -188,7 +191,7 @@ function Section({
     <section className="group/section select-none px-2 pt-2">
       <button
         type="button"
-        onClick={() => setOpen((o) => !o)}
+        onClick={onToggle}
         aria-expanded={open}
         className="flex w-full items-center gap-1 rounded-md px-1.5 py-1 text-left text-xs font-medium text-muted-foreground transition-colors hover:text-foreground"
       >
