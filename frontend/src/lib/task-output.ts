@@ -247,8 +247,3 @@ export function tabForFocus(focus?: TaskFocus): TaskTab {
   if (focus?.runId) return "attempts";
   return "timeline";
 }
-
-/** Whether a focus asks for anything at all. */
-export function hasFocus(focus: TaskFocus): boolean {
-  return Boolean(focus.tab || focus.artifactId || focus.runId);
-}
