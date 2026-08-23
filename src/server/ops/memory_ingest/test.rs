@@ -108,7 +108,7 @@ async fn brain_rows(state: &AppState) -> Vec<Value> {
     let response = router(state.clone()).oneshot(request).await.unwrap();
     let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     serde_json::from_slice::<Value>(&bytes)
-        .unwrap()
+        .unwrap()["items"]
         .as_array()
         .cloned()
         .unwrap_or_default()
