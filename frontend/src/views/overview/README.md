@@ -1,8 +1,8 @@
 # Overview — the knowledge graph
 
-`#/overview` is the graph and nothing else: no page header, no strip, and the
-console's own top bar is hidden for this view (see `app-shell.tsx`). It fills
-the viewport beside the sidebar.
+`#/overview` is the graph and nothing else: no page header or strip. No view
+has a top bar; its remaining controls live in the sidebar. The graph fills the
+shell's content surface beside the sidebar.
 
 ## What it draws
 
@@ -26,6 +26,11 @@ Click the core to bloom the memory constellation, with type-to-find over it.
 Drag the background to pan. `←` / `→` turn the pillar wheel; `Escape` steps
 back out.
 
+The graph is one tab stop. After Tab enters it, `←` / `↑` and `→` / `↓` move
+between visible nodes; `Enter` or `Space` selects the focused node just as a
+click would. The graph announces those instructions and each node's kind and
+name to assistive technology.
+
 Panning is an offset on top of whatever the camera is framing, not a separate
 mode: the shot still tracks its subject, just off-centre by the amount you
 dragged, and re-framing (selecting a node, opening the core) resets it.
@@ -46,12 +51,13 @@ except the node under the pointer. Every node keeps a `<title>`, so a native
 tooltip is the floor wherever a drawn label is suppressed. Tasks, workflow stages and tools are the numerous tiers, which is
 why they are bare until you point at one.
 
-Whatever that leaves is then decluttered: candidates are placed highest
-priority first and any label whose box overlaps one already placed is dropped
-rather than nudged. The pass measures in **screen px**, not graph units —
-labels hold one on-screen size at every camera depth (`fixedLabel` counter
-scales through `--kg-cam-k`), so zooming changes how far apart nodes are and
-never how wide a name is. `kg/label-plan.ts` holds both steps, pure.
+Whatever that leaves is then decluttered: candidates retain their full titles,
+are placed highest priority first, and any label whose box overlaps one already
+placed is dropped rather than nudged. The pass measures in **screen px**, not
+graph units — labels hold one on-screen size at every camera depth
+(`fixedLabel` counter-scales through `--kg-cam-k`), so zooming changes how far
+apart nodes are and never how wide a name is. `kg/label-plan.ts` holds both
+steps, pure.
 
 ## What is derived — read this before trusting the org chart
 
@@ -61,7 +67,8 @@ workflow hangs on the wheel**: the host scopes a flow to the *company*, and
 nothing links a flow to a desk, so a flow is drawn on the desk of the first
 teammate it runs through. That is a real relationship read as a placement it was
 never declared to be. `DERIVED_NOTICE` in `kg/adapter.ts` is the standing
-caveat, and the legend chip reads "flow placement".
+caveat; the legend visibly labels its placement as inferred, and its native
+disclosure opens the full explanation for pointer, keyboard, and touch users.
 
 Three rings used to be invented, and were deleted as the host grew the reads
 they were standing in for:
@@ -175,3 +182,9 @@ touch device. The chips wrap rather than scroll or clip; each carries the
 colour its pillar's node and label already carry. The docked directory index
 and the entity/function/action lenses were removed — with nothing else on the
 page competing for attention, they covered more of the graph than they earned.
+
+The legend is bounded by the graph canvas and wraps its kind chips rather than
+running beyond the clipped edge. Below 900px the paddles become 80px by 40px
+and inset 12px; below 640px they become 56px by 32px and inset 8px. Keyboard
+`←` / `→` remains available at every width, so the smaller touch targets do not
+remove a way to turn the pillar wheel.

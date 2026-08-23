@@ -60,9 +60,10 @@ acp            | partial      | acp,runner,tinymemory | server::acp harness::acp
 runner         | partial      | acp,runner,tinymemory | runner
 mcp            | partial      | openhuman,mcp,telegram,media    | harness::built_in::build::tests app::types
 media          | partial      | openhuman,mcp,telegram,media    | harness::built_in::build::tests harness::built_in::toolbelt
-composio       | partial      | openhuman,chargebee,paypal,composio | harness::built_in::composio::isolation_tests harness::built_in::composio::ops_helper_tests harness::built_in::composio::live::live_tests server::ops::composio::tests::gated_tests
+composio       | partial      | openhuman,chargebee,paypal,composio | composio
 export         | partial      | export                          | store::export
-imap           | partial      | imap,smtp                       | server::ops::imap
+imap           | partial      | imap,smtp                       | server::ops::imap send_then_receive_roundtrip
+smtp           | partial      | imap,smtp                       | send_then_receive_roundtrip
 chargebee      | partial      | openhuman,chargebee,paypal,composio | chargebee server::ops::finance
 paypal         | partial      | openhuman,chargebee,paypal,composio | paypal server::ops::finance
 sidecar        | partial      | sidecar                         | brain::sidecar
@@ -106,7 +107,6 @@ dns            | compile-only | - | Only `HickoryDnsResolver` is gated. The `Dns
 
 # --- Compile-only, no gated test exists yet ---------------------------------
 
-smtp           | compile-only | - | Only `LettreMailSender` is gated and it carries no gated test; the `MailSender` trait and `RecordingMailSender` test at default features. The mail lane compiles smtp beside imap so a gated test added later has a home — RECLASSIFY THIS ROW to `partial` when one is added, which this script will force.
 telegram       | compile-only | - | Only `HttpTelegramApi` is gated and carries no gated test; the trait, inbound parsing, token scrubbing and `RecordingTelegramApi` test at default features. The feature IS enabled on the belt lane, for the belt contract rather than for tests of its own.
 tiny           | compile-only | - | A dependency switch: it brings the vendored `tinyagents` crate into scope for `openhuman`. No code is gated on `tiny` itself, so there is nothing for a lane to run.
 tinyagents     | compile-only | - | The implicit feature of the optional `tinyagents` dependency, enabled only via `tiny`. Nothing is gated on it directly.
