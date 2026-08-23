@@ -8604,6 +8604,26 @@ mode = "full"
             .await
             .unwrap();
         assert_ne!(response.status(), StatusCode::BAD_REQUEST);
+
+        // A deny riding the tool scope is no longer a contradiction: it mints a
+        // standing refusal (issue #1458). Same edge validation as an approve —
+        // duration mandatory, bounded, and the missing approval resolves as a
+        // no-op — so it is accepted exactly where a matching approve would be.
+        let response = router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/company/approvals/appr-missing")
+                    .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(
+                        r#"{{"verdict":"deny","scope":"tool","expires_in_millis":{day}}}"#
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_ne!(response.status(), StatusCode::BAD_REQUEST);
     }
 
     /// The default body — no `scope` key at all — is accepted exactly as before.
