@@ -325,14 +325,14 @@ five minutes and is not coming back.
 no model still answers — that is D3 — but the operator has by then spent three
 answers believing they were shaping something, so the dialog states the
 consequence beside question one. Three things keep that honest. It asks the
-**company** (`GET {scope}/inference`), whose cognition path is what decides
-whether a roster builder exists; `/api/v1/setup` reads the *host's* managed
-credential and refuses multi-company hosts, so a BYOK company reads as
-unavailable there while its design pass runs fine. The wait is **bounded**:
-nothing dismisses this dialog and the questions are withheld while the check is
-outstanding, so a host that stalls rather than rejecting would lock the operator
-out. And leaving to wire a model is **not a skip** — that is the operator
-starting this flow, so it closes the dialog and records nothing.
+**company** (`GET {scope}/inference`), whose cognition path decides whether a
+roster builder exists; `/api/v1/setup` reads the *host's* credential and refuses
+multi-company hosts, so a BYOK company reads as unavailable there while its
+design pass runs fine. The wait is **bounded**, because nothing dismisses this
+dialog and the questions are withheld while the check runs. And leaving to wire
+a model is **not a skip but a debt**: it records a resume and reopens setup on
+the return — the controller outlives the navigation and bars a second unprompted
+open, so merely not persisting the skip would still strand them.
 
 **Decision D3b: the fallback says which fallback, because the next action
 differs.** `no_model` means nothing was reachable — wire a credential.

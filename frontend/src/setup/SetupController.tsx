@@ -5,7 +5,22 @@ import type { TeamMemberDto } from "@/api/types";
 import { useLocalScope } from "@/connections/ConnectionContext";
 import { shouldOfferSetup, teamIsUnstaffed } from "@/lib/company-setup";
 import { SetupDialog } from "./SetupDialog";
-import { clearSetupSkipped, markSetupSkipped, setupSkipped } from "./state";
+import {
+  clearSetupResuming,
+  clearSetupSkipped,
+  markSetupResuming,
+  markSetupSkipped,
+  setupResuming,
+  setupSkipped,
+} from "./state";
+
+/** Where "Set up a model" sends the operator. */
+const MODEL_SETTINGS = "#/settings/connections";
+
+/** Whether the operator is still on the page they left setup for. */
+function onModelSettings(): boolean {
+  return window.location.hash.startsWith(MODEL_SETTINGS);
+}
 
 /**
  * Decides whether first-run setup opens, and gets out of the way once it has
@@ -136,12 +151,25 @@ export function SetupController({
       if (cancelled) return;
       const first = !evaluatedOnce.current;
       evaluatedOnce.current = true;
-      setUnstaffed(teamIsUnstaffed(roster));
+      const empty = teamIsUnstaffed(roster);
+      setUnstaffed(empty);
+      // A console reloaded after wiring a provider — a restart is a thing that
+      // page asks for — lands here rather than on a `hashchange`, so the debt is
+      // honoured on this path too. Not while still *on* that page: the operator
+      // has not come back yet, and the listener below is what notices when they
+      // do.
+      const returned = setupResuming(scope) && !onModelSettings();
+      // Dropped on return whatever we do with it, so a debt cannot outlive the
+      // trip that created it and resurface over some later unrelated
+      // navigation. `empty` decides only whether it is worth acting on.
+      if (returned) clearSetupResuming(scope);
+      const resume = returned && empty;
       // Only the first evaluation may open the dialog by itself; see
       // `evaluatedOnce`. Later switches still report `unstaffed`, so the tour
       // keeps holding and the Team page keeps prompting.
       setOpen(
-        first && !deepLinked && shouldOfferSetup({ roster, skipped: setupSkipped(scope) }),
+        resume ||
+          (first && !deepLinked && shouldOfferSetup({ roster, skipped: setupSkipped(scope) })),
       );
       setChecked(true);
     })();
@@ -150,6 +178,24 @@ export function SetupController({
       cancelled = true;
     };
   }, [client, company, scope, deepLinked]);
+
+  // Bring the operator back when they return from wiring a model.
+  //
+  // The navigation away is a hash change and so is the navigation back, and this
+  // controller sees neither through its own props — hence a listener rather than
+  // an effect keyed on the route. Guarded on `unstaffed` so a company staffed in
+  // the meantime (a second tab, a colleague) does not get a setup dialog over a
+  // team that already exists, and the debt is dropped either way so it cannot
+  // resurface on some later unrelated navigation.
+  useEffect(() => {
+    const arrive = () => {
+      if (onModelSettings() || !setupResuming(scope)) return;
+      clearSetupResuming(scope);
+      if (unstaffed) setOpen(true);
+    };
+    window.addEventListener("hashchange", arrive);
+    return () => window.removeEventListener("hashchange", arrive);
+  }, [scope, unstaffed]);
 
   // The Team page's prompt reopens setup after a skip.
   useEffect(() => {
@@ -169,13 +215,21 @@ export function SetupController({
    * Following "Set up a model" is the operator starting this flow, not
    * declining it. Routing that through `skip` persisted an "I'll do this later"
    * they never expressed, so on return the company was still unstaffed and the
-   * dialog no longer offered itself — the flow they had just gone to enable was
-   * the flow they could no longer reach, short of finding the Team page's
-   * separate prompt.
+   * dialog no longer offered itself.
+   *
+   * Not recording the skip is only half of it, though, and the other half is
+   * why this records something of its own. This controller stays mounted across
+   * hash changes, its gate re-evaluates only on `(client, company, scope,
+   * deepLinked)`, and `evaluatedOnce` bars a second unprompted open — so on the
+   * operator's return nothing would reopen the dialog either way, and the flow
+   * they had just gone to enable would still be reachable only through the Team
+   * page's separate prompt. `markSetupResuming` is the debt; the effect below
+   * pays it.
    */
   const leave = useCallback(() => {
+    markSetupResuming(scope);
     setOpen(false);
-  }, []);
+  }, [scope]);
 
   const done = useCallback(() => {
     // Clear the skip so it cannot outlive what it was suppressing: an operator

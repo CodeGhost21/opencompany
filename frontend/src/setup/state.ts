@@ -27,6 +27,20 @@ const KEY = (scope: LocalScope): string => scopedKey("oc-setup", scope);
 
 interface SetupState {
   skipped?: boolean;
+  /**
+   * The operator left this flow to wire a model and has not been brought back.
+   *
+   * The exact opposite of [`skipped`] despite sharing a record: skipping hides
+   * the offer, this one owes the operator a re-offer. It is here rather than in
+   * a ref because wiring a provider can ask for a restart, and a console
+   * reloaded on the Connections page would otherwise lose the debt — which is
+   * the whole failure this flag exists to prevent.
+   *
+   * Losing it anyway (private mode, cleared storage) costs nothing worse than
+   * the operator reaching setup through the Team page's prompt, exactly as they
+   * did before. It can only ever *offer* something.
+   */
+  resuming?: boolean;
   at?: number;
 }
 
@@ -44,12 +58,49 @@ export function setupSkipped(scope: LocalScope): boolean {
   return Boolean(read(scope).skipped);
 }
 
-/** Record "I'll do this later", so the dialog stops opening by itself. */
+/**
+ * Record "I'll do this later", so the dialog stops opening by itself.
+ *
+ * Writes the record whole, which drops any pending resume: an operator who went
+ * to wire a model and then said "later" has said "later", and honouring the
+ * older debt would reopen the dialog they just dismissed.
+ */
 export function markSetupSkipped(scope: LocalScope): void {
   try {
     localStorage.setItem(KEY(scope), JSON.stringify({ skipped: true, at: Date.now() }));
   } catch {
     /* private mode / quota — setup simply re-offers on the next load */
+  }
+}
+
+/** Is setup owed a re-offer because the operator left to wire a model? */
+export function setupResuming(scope: LocalScope): boolean {
+  return Boolean(read(scope).resuming);
+}
+
+/**
+ * Record that the operator left for model settings mid-setup.
+ *
+ * Merged onto whatever is stored rather than written whole: a company that had
+ * been skipped before can be forced open again from the Team page, and clearing
+ * the skip here would silently re-enable the unprompted offer.
+ */
+export function markSetupResuming(scope: LocalScope): void {
+  try {
+    const next: SetupState = { ...read(scope), resuming: true, at: Date.now() };
+    localStorage.setItem(KEY(scope), JSON.stringify(next));
+  } catch {
+    /* private mode / quota — the Team page's prompt is still the way back */
+  }
+}
+
+/** Forget the debt, once it has been paid by reopening the dialog. */
+export function clearSetupResuming(scope: LocalScope): void {
+  try {
+    const { resuming: _dropped, ...rest } = read(scope);
+    localStorage.setItem(KEY(scope), JSON.stringify(rest));
+  } catch {
+    /* nothing to clear */
   }
 }
 
