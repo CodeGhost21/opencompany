@@ -32,6 +32,10 @@ describe("the console's route table", () => {
     expect(VIEWS).toContain("pages");
   });
 
+  it("keeps #/memory routable after Brain moves under Settings (#1416)", () => {
+    expect(VIEWS).toContain("memory");
+  });
+
   it("has no duplicate entries", () => {
     expect(new Set(VIEWS).size).toBe(VIEWS.length);
   });

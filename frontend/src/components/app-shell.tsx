@@ -1,7 +1,6 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   // AppWindow,  // re-add with the Pages nav entry below
-  Brain,
   FolderClosed,
   LayoutDashboard,
   type LucideIcon,
@@ -97,7 +96,6 @@ import { ApprovalsView } from "@/views/ApprovalsView";
 import { LedgersView, MANAGE_SEGMENT } from "@/views/LedgersView";
 import { TaskDetailRoute } from "@/views/TaskDetailRoute";
 import { InboxView } from "@/views/InboxView";
-import { MemoryView } from "@/views/MemoryView";
 import { FeedbackView } from "@/views/FeedbackView";
 import { SettingsSection } from "@/views/SettingsSection";
 import { useLocalScope } from "@/connections/ConnectionContext";
@@ -158,11 +156,6 @@ const NAV: NavItem[] = [
   // through the switcher on `LedgersView`'s own title. See the comment above
   // `NAV` for why this is one row rather than one per list or a tab strip.
   { view: "ledgers", label: "Work", icon: BookText },
-  // What the company remembers, and — now that an operator can select a
-  // memory engine — WHERE it remembers: the engine panel shows which driver
-  // is bound, what it negotiated, and whether the boot probe reached it.
-  // Re-listed (issue #302 parked it; the memory-engine work un-parks it).
-  { view: "memory", label: "Brain", icon: Brain },
   { view: "workspace", label: "Workspace", icon: FolderClosed },
   { view: "approvals", label: "Approvals", icon: ShieldCheck },
   // Re-listed. Issue #302 parked the flat Finances page — a single ledger
@@ -2060,7 +2053,6 @@ export function AppShell({
               onNavigateToDesk={(deskId) => navigate("company", deskId)}
             />
           )}
-          {view === "memory" && <MemoryView client={client} company={company} />}
           {view === "workspace" && (
             <Suspense
               fallback={

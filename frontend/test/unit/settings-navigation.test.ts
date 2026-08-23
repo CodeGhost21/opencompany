@@ -25,6 +25,14 @@ describe("Settings navigation (issue #1468)", () => {
     expect(SETTINGS_PAGES.find((page) => page.id === "general")?.hint).toContain("Approvals");
   });
 
+  it("puts the memory browser in the capability section", () => {
+    expect(SETTINGS_PAGES.find((page) => page.id === "brain")).toMatchObject({
+      label: "Brain",
+      hint: "What your company remembers",
+      group: "capability",
+    });
+  });
+
   it("renders linkable rows and gives narrow-screen navigation its missing context", () => {
     const section = read("views/SettingsSection.tsx");
     const settings = read("views/SettingsView.tsx");
@@ -32,6 +40,7 @@ describe("Settings navigation (issue #1468)", () => {
     expect(section.match(/href=\{`#\/settings\/\$\{item\.id\}`\}/g)).toHaveLength(2);
     expect(section).toContain("title={item.hint}");
     expect(section).toContain("{activePage.hint}");
+    expect(section).toContain('{page === "brain" && <MemoryView client={client} company={company} />}');
     expect(settings).toContain('className="text-2xl font-semibold tracking-tight lg:sr-only"');
   });
 });
