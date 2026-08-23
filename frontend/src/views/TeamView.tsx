@@ -537,32 +537,7 @@ function MemberCard({
   return (
     <Card
       data-testid="team-card"
-      // Issue #1206: the whole card is the way in, not just the name. Both the
-      // Inbox switch (#1190) and the menu's "View teammate"/budget items are
-      // gone now, so there is nothing left inside the card that a whole-card
-      // click would swallow — the earlier "deliberately this block rather than
-      // the card" tradeoff no longer applies. Cursor and hover say so before
-      // the click does; `role`/`tabIndex`/`onKeyDown` keep it reachable and
-      // activatable from the keyboard, the same pattern `TaskItem` already uses
-      // for a whole-card click target.
-      onClick={onOpen}
-      role={onOpen ? "button" : undefined}
-      tabIndex={onOpen ? 0 : undefined}
-      onKeyDown={
-        onOpen
-          ? (e) => {
-              if (e.target !== e.currentTarget) return;
-              if (e.key === "Enter" || e.key === " ") {
-                e.preventDefault();
-                onOpen();
-              }
-            }
-          : undefined
-      }
-      className={cn(
-        onOpen &&
-          "cursor-pointer transition-colors hover:border-primary/40 hover:shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
-      )}
+      className="transition-colors"
     >
       <CardContent className="flex h-full flex-col gap-3 py-4">
         <div className="flex items-start gap-3">
@@ -576,28 +551,27 @@ function MemberCard({
             smudge and the bare tone tile is the honest fallback.
           */}
           <TeammateAvatar name={member.name} tone={member.tone} avatar={member.avatar} className="size-11 rounded-xl text-sm" />
-          {/*
-            Plain text, not its own button (issue #1206): the whole card above
-            is now the single click/keyboard target, so a second nested
-            interactive element here would just be a second tab stop for the
-            same action. `data-testid` stays for the e2e specs that click this
-            block by name — a click here still reaches the host, it just
-            bubbles to the card's own handler rather than firing one of its own.
-          */}
-          <div className="min-w-0 flex-1" data-testid="team-card-open">
-            <p className="truncate font-medium">{member.name}</p>
-            {subtitle && (
-              <p className="truncate text-xs text-muted-foreground">{subtitle}</p>
-            )}
-          </div>
-          {/*
-            Stops every click inside — the trigger and, since Base UI portals
-            the menu content elsewhere in the DOM but React still bubbles
-            synthetic events along the *component* tree, every item inside it
-            too — from reaching the card's own onClick above. Without this,
-            opening the menu (or clicking Remove) would also navigate.
-          */}
-          <div onClick={(e) => e.stopPropagation()}>
+          {onOpen ? (
+            <button
+              type="button"
+              onClick={onOpen}
+              className="-m-1 min-w-0 flex-1 rounded-sm p-1 text-left hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              data-testid="team-card-open"
+            >
+              <span className="block truncate font-medium">{member.name}</span>
+              {subtitle && (
+                <span className="block truncate text-xs text-muted-foreground">{subtitle}</span>
+              )}
+            </button>
+          ) : (
+            <div className="min-w-0 flex-1" data-testid="team-card-open">
+              <p className="truncate font-medium">{member.name}</p>
+              {subtitle && (
+                <p className="truncate text-xs text-muted-foreground">{subtitle}</p>
+              )}
+            </div>
+          )}
+          <div>
             <DropdownMenu>
               <DropdownMenuTrigger
                 render={<Button variant="ghost" size="icon" className="-mr-1 -mt-1 size-7" aria-label="Teammate actions" />}
@@ -621,8 +595,8 @@ function MemberCard({
 
                   That leaves exactly one item. It stays a menu rather than a
                   bare button: Remove is destructive, and a deliberate extra
-                  click before it is worth keeping now that the rest of the
-                  card is one big click target. Unlike "View teammate" it does
+                  click before it is worth keeping beside the title action.
+                  Unlike "View teammate" it does
                   not duplicate the card's own action, and unlike Budget it is
                   not per-teammate configuration that reads better on a
                   detail page — it is the one roster-level action an operator
@@ -666,10 +640,7 @@ function MemberCard({
                 data-testid={`team-card-desk-${desk.id}`}
                 onClick={
                   onNavigateToDesk
-                    ? (e) => {
-                        e.stopPropagation();
-                        onNavigateToDesk(desk.id);
-                      }
+                    ? () => onNavigateToDesk(desk.id)
                     : undefined
                 }
               >
