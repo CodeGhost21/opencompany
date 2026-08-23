@@ -231,11 +231,13 @@ written for company A is unreadable as company B, in both directions. The port
 has no `delete`; callers clear by writing an empty value, which is why the
 empty-value case stands in for a deletion case.
 
-One property it deliberately does **not** assert yet: that two distinct keys
-stay distinct. They do not on the filesystem backend, whose secret filename is a
-non-injective slug of the key, so two MCP servers whose names differ only by a
-folded character share one credential — issue #1510. The function's doc comment
-names that, so the hole is countable rather than silent.
+It also asserts that two distinct keys stay distinct — issue #1510. The
+filesystem backend encodes each key into an injective filename (percent-encoded
+with a `%` prefix the legacy slug layout can never produce, and truncated with a
+digest suffix for long keys), and the old slugged file is kept readable as a
+migration fallback until the next successful write. The suite covers both the
+space-vs-underscore keys the old slug conflated and a key shaped like a legacy
+filename (`key-foo`) reading or deleting a different key's value.
 
 **Fixtures in this suite are non-empty on purpose.** An empty vec, map or `None`
 survives every possible bug, including a backend that never persisted the field
