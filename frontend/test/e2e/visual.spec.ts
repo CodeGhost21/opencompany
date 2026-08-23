@@ -206,14 +206,13 @@ async function open(page: Page, theme: "dark" | "light", hash: string) {
  * necessarily rewritten the SVG hundreds of times before it holds still. If it
  * never moves, the graph did not settle — it never ran. Headless Chromium can
  * occasionally stall a page's frame clock entirely (`requestAnimationFrame`
- * stops firing; `data-visual-volatile` in `../visual.spec.ts`'s sibling
- * diagnostics saw it as a frozen graph on a fresh host), and a stall would
- * make the two-sample check pass on the first attempt: the graph is born on
- * its resting positions, two identical samples of a motionless graph record a
- * baseline of nothing. Failing loudly with a re-run hint beats committing a
- * screenshot of a physics sim that never ticked. The lane retries once
- * (`retries` in `playwright.config.ts`), which absorbs the stall when it is
- * the frame clock that stumbled rather than the graph.
+ * stops firing), and a stall would make the two-sample check pass on the first
+ * attempt: the graph is born on its resting positions, and two identical
+ * samples of a motionless graph record a baseline of nothing. Failing loudly
+ * with a re-run hint beats committing a screenshot of a physics sim that never
+ * ticked. The lane retries once (`retries` in `playwright.config.ts`), which
+ * absorbs the stall when it is the frame clock that stumbled rather than the
+ * graph.
  */
 async function settleKnowledgeGraph(page: Page) {
   const svg = page.getByRole("img", { name: "Operating knowledge graph" });
