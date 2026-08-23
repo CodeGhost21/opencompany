@@ -251,14 +251,15 @@ export function ApprovalRow({
         // is always safe and stays inline; Approve is replaced by a path to the
         // detailed view, where the complete host-bounded payload is on the card
         // (#1330 review).
-        <Button
-          variant={compact ? "ghost" : "default"}
-          size="sm"
-          className={compact ? COMPACT_ACTION_CLASS : undefined}
-          render={<a href="#/approvals" />}
+        <a
+          href="#/approvals"
+          className={cn(
+            buttonVariants({ variant: compact ? "ghost" : "default", size: "sm" }),
+            compact ? COMPACT_ACTION_CLASS : undefined,
+          )}
         >
           Review in Approvals
-        </Button>
+        </a>
       ) : (
         <Button
           variant={compact ? "ghost" : "default"}
