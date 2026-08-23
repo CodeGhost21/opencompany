@@ -79,14 +79,14 @@ async fn list_read_state(
     company: ScopedCompany,
 ) -> Result<Json<ReadStateDto>, crate::server::Rejection> {
     let Some(user) = actor_id(&company) else {
-        return Err(unauthorized());
+        return Err(unauthorized().into());
     };
     let markers = company
         .runtime
         .read_state()
         .list(company.id(), &user)
         .await
-        .map_err(|e| ApiError(e).into_response())?
+        .map_err(|e| ApiError(e).into_response().into())?
         .into_iter()
         .map(ReadMarkerDto::from)
         .collect();
@@ -98,7 +98,7 @@ async fn mark_read(
     Json(body): Json<MarkReadBody>,
 ) -> Result<Json<ReadMarkerDto>, crate::server::Rejection> {
     let Some(user) = actor_id(&company) else {
-        return Err(unauthorized());
+        return Err(unauthorized().into());
     };
     if body.channel_id.trim().is_empty() {
         return Err((
@@ -116,7 +116,7 @@ async fn mark_read(
         .read_state()
         .mark(company.id(), &user, &body.channel_id, body.last_read_at)
         .await
-        .map_err(|e| ApiError(e).into_response())?;
+        .map_err(|e| ApiError(e).into_response().into())?;
     Ok(Json(settled.into()))
 }
 

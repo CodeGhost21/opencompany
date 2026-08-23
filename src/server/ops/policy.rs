@@ -360,7 +360,7 @@ async fn load_record(company: &ScopedCompany) -> Result<CompanyRecord, crate::se
         .store()
         .load(company.id())
         .await
-        .map_err(|e| ApiError(e).into_response())?
+        .map_err(|e| ApiError(e).into_response().into())?
         .ok_or_else(|| {
             ApiError(OpenCompanyError::CompanyNotFound(company.id().to_string())).into_response()
         })
@@ -375,7 +375,7 @@ async fn save(
         .store()
         .save(record)
         .await
-        .map_err(|e| ApiError(e).into_response())
+        .map_err(|e| ApiError(e).into_response().into())
 }
 
 #[cfg(test)]

@@ -116,11 +116,11 @@ async fn run_verify(
 ) -> Result<Json<DomainStatus>, crate::server::Rejection> {
     use axum::response::IntoResponse;
     let Some(resolver) = state.connections().dns.clone() else {
-        return Err(super::not_wired("domain verification"));
+        return Err(super::not_wired("domain verification").into());
     };
     let stored = load_domain(&runtime)
         .await
-        .map_err(|e| ApiError(e).into_response())?;
+        .map_err(|e| ApiError(e).into_response().into())?;
     let Some(stored) = stored else {
         return Err(ApiError(crate::error::OpenCompanyError::InvalidRequest(
             "no domain configured".to_string(),
@@ -129,10 +129,10 @@ async fn run_verify(
     };
     let status = dns::verify(&stored.domain, resolver.as_ref())
         .await
-        .map_err(|e| ApiError(e).into_response())?;
+        .map_err(|e| ApiError(e).into_response().into())?;
     persist(&runtime, &status)
         .await
-        .map_err(IntoResponse::into_response)?;
+        .map_err(|error| IntoResponse::into_response(error).into())?;
     Ok(Json(status))
 }
 

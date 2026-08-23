@@ -124,12 +124,12 @@ async fn bind_repo(
 ) -> Result<Json<MutationResponse>, crate::server::Rejection> {
     use axum::response::IntoResponse;
     let Some(repos) = manager(&company.runtime) else {
-        return Err(no_repo_surface());
+        return Err(no_repo_surface().into());
     };
     let binding = repos
         .bind(body)
         .await
-        .map_err(|e| ApiError(e).into_response())?;
+        .map_err(|e| ApiError(e).into_response().into())?;
     tracing::info!(
         company = %company.id(),
         key = %binding.key,
@@ -156,12 +156,12 @@ async fn bind_repo(
 async fn list_repos(company: ScopedCompany) -> Result<Json<RepoList>, crate::server::Rejection> {
     use axum::response::IntoResponse;
     let Some(repos) = manager(&company.runtime) else {
-        return Err(no_repo_surface());
+        return Err(no_repo_surface().into());
     };
     let list = repos
         .list()
         .await
-        .map_err(|e| ApiError(e).into_response())?;
+        .map_err(|e| ApiError(e).into_response().into())?;
     Ok(Json(RepoList {
         repos: list,
         pull_requests_available: repos.has_host(),
@@ -214,12 +214,12 @@ async fn revoke_repo(
 ) -> Result<Json<MutationResponse>, crate::server::Rejection> {
     use axum::response::IntoResponse;
     let Some(repos) = manager(&company.runtime) else {
-        return Err(no_repo_surface());
+        return Err(no_repo_surface().into());
     };
     repos
         .revoke(&params.key)
         .await
-        .map_err(|e| ApiError(e).into_response())?;
+        .map_err(|e| ApiError(e).into_response().into())?;
     tracing::info!(company = %company.id(), key = %params.key, "revoked a repository binding");
     Ok(Json(MutationResponse {
         repo: None,

@@ -1514,14 +1514,14 @@ async fn run_workflow(
     // a hosted tenant (no source directory) runs the same as a committed one.
     let (overlays, globals_disable) = overlay_workflows_and_globals(&company)
         .await
-        .map_err(IntoResponse::into_response)?;
+        .map_err(|error| IntoResponse::into_response(error).into())?;
     let file = load_workflow_with_globals(
         company.runtime.source_dir(),
         &overlays,
         &globals_disable,
         &wid,
     )
-    .map_err(|e| ApiError(e).into_response())?
+    .map_err(|e| ApiError(e).into_response().into())?
     .ok_or_else(|| {
         ApiError(OpenCompanyError::NotFound(format!("workflow {wid}"))).into_response()
     })?;
@@ -1550,7 +1550,7 @@ async fn run_workflow(
         body.input,
         dry_run,
     )
-    .map_err(|e| ApiError(e).into_response())?;
+    .map_err(|e| ApiError(e).into_response().into())?;
 
     if detach {
         // Returned before the engine has walked a node. From here the client
@@ -2144,7 +2144,7 @@ async fn fix_from_run(
     // the copilot corrects and pins its identity to.
     let (overlays, globals_disable) = overlay_workflows_and_globals(&company)
         .await
-        .map_err(IntoResponse::into_response)?;
+        .map_err(|error| IntoResponse::into_response(error).into())?;
     // A source-defined workflow (seed-backed, or seed-shadowed) can never take
     // the correction: `PUT …/workflows/{wid}` refuses it with the same 409 this
     // mirrors (`locate_editable_overlay`). Catching it here — before the copilot
@@ -2164,7 +2164,7 @@ async fn fix_from_run(
         &globals_disable,
         &wid,
     )
-    .map_err(|e| ApiError(e).into_response())?
+    .map_err(|e| ApiError(e).into_response().into())?
     .ok_or_else(|| {
         ApiError(OpenCompanyError::NotFound(format!("workflow {wid}"))).into_response()
     })?;
@@ -2190,7 +2190,7 @@ async fn fix_from_run(
     // caller's hint. Neither → there is nothing to fix from.
     let journaled = journaled_run_failure(&company, &body.run_id)
         .await
-        .map_err(IntoResponse::into_response)?;
+        .map_err(|error| IntoResponse::into_response(error).into())?;
     let hint = body
         .error_hint
         .as_deref()

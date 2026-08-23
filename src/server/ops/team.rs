@@ -436,7 +436,7 @@ async fn add_member(
     let author = match body.budget_usd_daily {
         Some(cap) => {
             if let Some(refusal) = validate_cap(cap) {
-                return Err(refusal);
+                return Err(refusal.into());
             }
             Some(require_admin(&headers, &state, &company.runtime, peer).await?)
         }
@@ -511,7 +511,7 @@ async fn add_member(
         .store()
         .save(&record)
         .await
-        .map_err(|e| ApiError(e).into_response())?;
+        .map_err(|e| ApiError(e).into_response().into())?;
     // A brand-new overlay teammate has no `[[agent]]` row at all, so it declares
     // no tier, holds the company's standard grant, and sits on no desk until
     // somebody adds it to one. Resolved through the shared helpers rather than
@@ -633,7 +633,7 @@ async fn set_budget(
     // option is the cap-or-uncap the operator asked for.
     let cap = body.budget_usd_daily.flatten();
     if let Some(refusal) = cap.and_then(validate_cap) {
-        return Err(refusal);
+        return Err(refusal.into());
     }
 
     let write_lock = company_write_lock(company.id());
@@ -641,7 +641,7 @@ async fn set_budget(
 
     let mut record = load_record(&company).await?;
     if let Some(refusal) = require_roster_teammate(&record, &agent_id) {
-        return Err(refusal);
+        return Err(refusal.into());
     }
 
     let entry = BudgetOverride {
@@ -661,7 +661,7 @@ async fn set_budget(
         .store()
         .save(&record)
         .await
-        .map_err(|e| ApiError(e).into_response())?;
+        .map_err(|e| ApiError(e).into_response().into())?;
 
     updated_row(&company, &record, &agent_id).await
 }
@@ -688,7 +688,7 @@ async fn clear_budget(
 
     let mut record = load_record(&company).await?;
     if let Some(refusal) = require_roster_teammate(&record, &agent_id) {
-        return Err(refusal);
+        return Err(refusal.into());
     }
 
     record.overlay_budgets.retain(|b| b.agent_id != agent_id);
@@ -697,7 +697,7 @@ async fn clear_budget(
         .store()
         .save(&record)
         .await
-        .map_err(|e| ApiError(e).into_response())?;
+        .map_err(|e| ApiError(e).into_response().into())?;
 
     updated_row(&company, &record, &agent_id).await
 }
@@ -737,7 +737,7 @@ async fn load_record(company: &ScopedCompany) -> Result<CompanyRecord, crate::se
         .store()
         .load(company.id())
         .await
-        .map_err(|e| ApiError(e).into_response())?
+        .map_err(|e| ApiError(e).into_response().into())?
         .ok_or_else(|| {
             ApiError(OpenCompanyError::CompanyNotFound(company.id().to_string())).into_response()
         })
@@ -780,7 +780,7 @@ async fn updated_row(
         .inbox()
         .inboxes(company.id())
         .await
-        .map_err(|e| ApiError(e).into_response())?
+        .map_err(|e| ApiError(e).into_response().into())?
         .into_iter()
         .any(|meta| meta.key == agent_id && meta.enabled);
 

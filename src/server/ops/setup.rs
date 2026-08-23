@@ -196,7 +196,7 @@ async fn store_answers(
         .store()
         .save(&record)
         .await
-        .map_err(|e| ApiError(e).into_response())
+        .map_err(|e| ApiError(e).into_response().into())
 }
 
 /// The proposal itself: designed by the model when one is wired, the curated
@@ -240,7 +240,7 @@ async fn load_record(company: &ScopedCompany) -> Result<CompanyRecord, crate::se
         .store()
         .load(company.id())
         .await
-        .map_err(|e| ApiError(e).into_response())?
+        .map_err(|e| ApiError(e).into_response().into())?
         .ok_or_else(|| {
             ApiError(OpenCompanyError::CompanyNotFound(company.id().to_string())).into_response()
         })

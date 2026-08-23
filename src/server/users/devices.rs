@@ -166,7 +166,7 @@ async fn start_pairing(
 ) -> Result<Json<PairingCode>, crate::server::Rejection> {
     let runtime = company.runtime.clone();
     let Some(principal) = current_user(&headers, &state, runtime.id(), peer).await else {
-        return Err(no_session());
+        return Err(no_session().into());
     };
 
     // A device may not mint a pairing code. Otherwise one compromised desktop
@@ -194,7 +194,7 @@ async fn start_pairing(
         .login_codes()
         .create(runtime.id(), &record)
         .await
-        .map_err(|e| ApiError(e).into_response())?;
+        .map_err(|e| ApiError(e).into_response().into())?;
 
     Ok(Json(PairingCode {
         code,
@@ -221,9 +221,9 @@ async fn claim_device(
         .login_codes()
         .consume(id, &pair_code_hash(&body.code), now)
         .await
-        .map_err(|e| ApiError(e).into_response())?
+        .map_err(|e| ApiError(e).into_response().into())?
     else {
-        return Err(invalid_pairing_code());
+        return Err(invalid_pairing_code().into());
     };
 
     // Re-read the user at redemption. The code may have been minted minutes
@@ -233,7 +233,7 @@ async fn claim_device(
         .users()
         .find_user_by_email(id, &record.email)
         .await
-        .map_err(|e| ApiError(e).into_response())?
+        .map_err(|e| ApiError(e).into_response().into())?
         .filter(|u| u.status == crate::ports::UserStatus::Active)
         .ok_or_else(invalid_pairing_code)?;
 
@@ -244,7 +244,7 @@ async fn claim_device(
 
     let token = super::routes::create_session(&runtime, &user, SessionKind::Device, label, None)
         .await
-        .map_err(|e| ApiError(e).into_response())?;
+        .map_err(|e| ApiError(e).into_response().into())?;
 
     // Find the record just written, for its id and expiry. Looking it up by
     // hash rather than threading it back keeps `create_session` returning only
@@ -254,7 +254,7 @@ async fn claim_device(
         .sessions()
         .find_by_token_hash(id, &hash)
         .await
-        .map_err(|e| ApiError(e).into_response())?
+        .map_err(|e| ApiError(e).into_response().into())?
         .ok_or_else(|| {
             ApiError(OpenCompanyError::Store(
                 "the device session vanished immediately after it was written".to_string(),
@@ -279,13 +279,13 @@ async fn list_devices(
 ) -> Result<Json<Vec<DeviceSummary>>, crate::server::Rejection> {
     let runtime = company.runtime.clone();
     let Some(principal) = current_user(&headers, &state, runtime.id(), peer).await else {
-        return Err(no_session());
+        return Err(no_session().into());
     };
     let sessions = runtime
         .sessions()
         .list_for_user(runtime.id(), &principal.user_id)
         .await
-        .map_err(|e| ApiError(e).into_response())?;
+        .map_err(|e| ApiError(e).into_response().into())?;
 
     Ok(Json(
         sessions
@@ -320,7 +320,7 @@ async fn revoke_device(
 ) -> Result<Json<serde_json::Value>, crate::server::Rejection> {
     let runtime = company.runtime.clone();
     let Some(principal) = current_user(&headers, &state, runtime.id(), peer).await else {
-        return Err(no_session());
+        return Err(no_session().into());
     };
     let device_id = params.get("deviceId").cloned().unwrap_or_default();
 
@@ -328,7 +328,7 @@ async fn revoke_device(
         .sessions()
         .list_for_user(runtime.id(), &principal.user_id)
         .await
-        .map_err(|e| ApiError(e).into_response())?;
+        .map_err(|e| ApiError(e).into_response().into())?;
     let Some(target) = sessions
         .into_iter()
         .find(|s| s.id == device_id && s.kind.is_device())
@@ -343,7 +343,7 @@ async fn revoke_device(
         .sessions()
         .delete(runtime.id(), &target.id)
         .await
-        .map_err(|e| ApiError(e).into_response())?;
+        .map_err(|e| ApiError(e).into_response().into())?;
     Ok(Json(serde_json::json!({ "revoked": removed })))
 }
 

@@ -168,7 +168,7 @@ async fn list_users(
         .users()
         .list_users(runtime.id())
         .await
-        .map_err(|e| ApiError(e).into_response())?;
+        .map_err(|e| ApiError(e).into_response().into())?;
     Ok(Json(users.into_iter().map(UserSummary::from).collect()))
 }
 
@@ -186,7 +186,7 @@ async fn list_invites(
         .users()
         .list_invites(runtime.id())
         .await
-        .map_err(|e| ApiError(e).into_response())?;
+        .map_err(|e| ApiError(e).into_response().into())?;
     // Manifest admins are eligible without an invite record. Showing only the
     // stored ones would render a list that contradicts who can actually log in.
     let stored: Vec<String> = invites.iter().map(|i| i.email.clone()).collect();
@@ -194,10 +194,10 @@ async fn list_invites(
         .users()
         .list_users(runtime.id())
         .await
-        .map_err(|e| ApiError(e).into_response())?;
+        .map_err(|e| ApiError(e).into_response().into())?;
     let synthetic = manifest_admin_invites(state.config(), &runtime, now)
         .await
-        .map_err(|e| ApiError(e).into_response())?;
+        .map_err(|e| ApiError(e).into_response().into())?;
     for invite in synthetic {
         let already_a_user = users.iter().any(|u| u.email == invite.email);
         if !stored.contains(&invite.email) && !already_a_user {
@@ -407,18 +407,18 @@ async fn invite(
     // person to admit, and an invite would grant an account nobody could ever
     // reach. See `AuthMode::None`.
     if let Some(refusal) = wrong_mode_for_admin(&runtime) {
-        return Err(refusal);
+        return Err(refusal.into());
     }
     let admin = require_admin(&headers, &state, &runtime, peer).await?;
     let identity = body
         .identity(runtime.auth_mode())
-        .map_err(|e| ApiError(e).into_response())?;
+        .map_err(|e| ApiError(e).into_response().into())?;
     let now = now_millis();
     if runtime
         .users()
         .find_user_by_email(runtime.id(), &identity)
         .await
-        .map_err(|e| ApiError(e).into_response())?
+        .map_err(|e| ApiError(e).into_response().into())?
         .is_some()
     {
         return Err(ApiError(OpenCompanyError::Conflict(format!(
@@ -442,7 +442,7 @@ async fn invite(
         .users()
         .upsert_invite(runtime.id(), &record)
         .await
-        .map_err(|e| ApiError(e).into_response())?;
+        .map_err(|e| ApiError(e).into_response().into())?;
 
     // Strictly after the grant lands. Mailing first would tell someone they
     // were invited by a request that then 409'd on a duplicate or failed in the
@@ -493,7 +493,7 @@ async fn revoke_invite(
 ) -> Result<Json<serde_json::Value>, crate::server::Rejection> {
     let runtime = company.runtime.clone();
     if let Some(refusal) = wrong_mode_for_admin(&runtime) {
-        return Err(refusal);
+        return Err(refusal.into());
     }
     require_admin(&headers, &state, &runtime, peer).await?;
     let invite_id = params.get("invite_id").cloned().unwrap_or_default();
@@ -520,7 +520,7 @@ async fn revoke_invite(
         .users()
         .delete_invite(runtime.id(), &invite_id)
         .await
-        .map_err(|e| ApiError(e).into_response())?;
+        .map_err(|e| ApiError(e).into_response().into())?;
     Ok(Json(serde_json::json!({ "removed": removed })))
 }
 
@@ -545,7 +545,7 @@ async fn update_user(
 ) -> Result<Json<UserSummary>, crate::server::Rejection> {
     let runtime = company.runtime.clone();
     if let Some(refusal) = wrong_mode_for_admin(&runtime) {
-        return Err(refusal);
+        return Err(refusal.into());
     }
     require_admin(&headers, &state, &runtime, peer).await?;
     let user_id = params.get("user_id").cloned().unwrap_or_default();
@@ -570,7 +570,7 @@ async fn update_user(
         .users()
         .upsert_user(runtime.id(), &user)
         .await
-        .map_err(|e| ApiError(e).into_response())?;
+        .map_err(|e| ApiError(e).into_response().into())?;
 
     // Suspension must bite now, not at cookie expiry. resolve_principal also
     // re-checks status per request; this closes the window and frees the rows.
@@ -613,15 +613,16 @@ async fn reset_password(
     // credential no route accepts; in `none` mode there is nobody to issue it
     // to.
     if let Some(refusal) = crate::server::users::routes::wrong_mode_for_email(&runtime) {
-        return Err(refusal);
+        return Err(refusal.into());
     }
     require_admin(&headers, &state, &runtime, peer).await?;
     let user_id = params.get("user_id").cloned().unwrap_or_default();
     let mut user = load_user(&runtime, &user_id).await?;
 
-    password::validate(&body.password, &user.email).map_err(|e| ApiError(e).into_response())?;
+    password::validate(&body.password, &user.email)
+        .map_err(|e| ApiError(e).into_response().into())?;
     let hash = password::hash(&token::OsTokens, &body.password)
-        .map_err(|e| ApiError(e).into_response())?;
+        .map_err(|e| ApiError(e).into_response().into())?;
     user.password_hash = Some(hash);
     user.must_change_password = true;
     user.updated_at_millis = now_millis();
@@ -629,7 +630,7 @@ async fn reset_password(
         .users()
         .upsert_user(runtime.id(), &user)
         .await
-        .map_err(|e| ApiError(e).into_response())?;
+        .map_err(|e| ApiError(e).into_response().into())?;
 
     // Every session goes: a reset is what you do when you believe the account
     // is compromised, so leaving live sessions running would defeat it.
@@ -657,7 +658,7 @@ async fn revoke_sessions(
     // on every request, so there is no session whose deletion would sign anyone
     // out. Succeeding would report a lever that does not exist.
     if let Some(refusal) = wrong_mode_for_admin(&runtime) {
-        return Err(refusal);
+        return Err(refusal.into());
     }
     require_admin(&headers, &state, &runtime, peer).await?;
     let user_id = params.get("user_id").cloned().unwrap_or_default();
@@ -666,7 +667,7 @@ async fn revoke_sessions(
         .sessions()
         .delete_for_user(runtime.id(), &user.id)
         .await
-        .map_err(|e| ApiError(e).into_response())?;
+        .map_err(|e| ApiError(e).into_response().into())?;
     Ok(Json(serde_json::json!({ "revoked": revoked })))
 }
 
@@ -678,7 +679,7 @@ async fn load_user(
         .users()
         .get_user(runtime.id(), user_id)
         .await
-        .map_err(|e| ApiError(e).into_response())?
+        .map_err(|e| ApiError(e).into_response().into())?
         .ok_or_else(|| {
             ApiError(OpenCompanyError::InvalidRequest(format!(
                 "no user {user_id}"
@@ -699,7 +700,7 @@ async fn ensure_not_last_admin(
         .users()
         .list_users(runtime.id())
         .await
-        .map_err(|e| ApiError(e).into_response())?;
+        .map_err(|e| ApiError(e).into_response().into())?;
     let others = users
         .iter()
         .filter(|u| {

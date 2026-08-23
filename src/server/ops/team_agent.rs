@@ -489,7 +489,7 @@ async fn edit_agent(
         .store()
         .load(company.id())
         .await
-        .map_err(|e| ApiError(e).into_response())?
+        .map_err(|e| ApiError(e).into_response().into())?
         .ok_or_else(|| {
             ApiError(OpenCompanyError::CompanyNotFound(company.id().to_string())).into_response()
         })?;
@@ -625,7 +625,7 @@ async fn edit_agent(
         .store()
         .save(&record)
         .await
-        .map_err(|e| ApiError(e).into_response())?;
+        .map_err(|e| ApiError(e).into_response().into())?;
 
     // The caller either passed `require_admin` above or sent no `tools`, so
     // re-resolve rather than assume: an admin editing only a name must still

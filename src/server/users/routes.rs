@@ -532,7 +532,7 @@ async fn mint_session(
             .map(|v| v.chars().take(200).collect()),
     )
     .await
-    .map_err(|e| ApiError(e).into_response())?;
+    .map_err(|e| ApiError(e).into_response().into())?;
 
     // The header carrier hands the token to the client and sets **no** cookie.
     // Setting both would leave one session reachable two ways, and the cookie
@@ -593,14 +593,14 @@ async fn request_code(
 ) -> Result<Json<RequestCodeResult>, crate::server::Rejection> {
     let runtime = company.runtime.clone();
     if let Some(refusal) = wrong_mode_for_email(&runtime) {
-        return Err(refusal);
+        return Err(refusal.into());
     }
     let email = normalize_email(&body.email);
     let now = now_millis();
 
     let eligible = eligibility(state.config(), &runtime, &email, now)
         .await
-        .map_err(|e| ApiError(e).into_response())?;
+        .map_err(|e| ApiError(e).into_response().into())?;
     let Some(_role) = eligible else {
         // Unknown or uninvited: no code, no mail, same answer.
         return Ok(Json(RequestCodeResult {
@@ -625,7 +625,7 @@ async fn request_code(
             .login_codes()
             .latest_for_email(runtime.id(), &email)
             .await
-            .map_err(|e| ApiError(e).into_response())?
+            .map_err(|e| ApiError(e).into_response().into())?
         && now.saturating_sub(previous.created_at_millis) < RESEND_INTERVAL_MILLIS
     {
         tracing::debug!(company = %runtime.id(), "login link throttled");
@@ -650,12 +650,12 @@ async fn request_code(
         .login_codes()
         .delete_for_email(runtime.id(), &email)
         .await
-        .map_err(|e| ApiError(e).into_response())?;
+        .map_err(|e| ApiError(e).into_response().into())?;
     runtime
         .login_codes()
         .create(runtime.id(), &record)
         .await
-        .map_err(|e| ApiError(e).into_response())?;
+        .map_err(|e| ApiError(e).into_response().into())?;
 
     // Deliver. A send failure must not change the response — it would report
     // that the address exists.
@@ -767,7 +767,7 @@ async fn verify_code(
 ) -> Result<Response, crate::server::Rejection> {
     let runtime = company.runtime.clone();
     if let Some(refusal) = wrong_mode_for_email(&runtime) {
-        return Err(refusal);
+        return Err(refusal.into());
     }
     let now = now_millis();
     // Single use is the store's guarantee, not a check here: `consume` matches
@@ -776,23 +776,23 @@ async fn verify_code(
         .login_codes()
         .consume(runtime.id(), &token::sha256_hex(&body.code), now)
         .await
-        .map_err(|e| ApiError(e).into_response())?;
+        .map_err(|e| ApiError(e).into_response().into())?;
     let Some(code) = consumed else {
-        return Err(invalid_login());
+        return Err(invalid_login().into());
     };
 
     // The address comes from the *code*, never from the request: otherwise
     // anyone holding any valid link could name whoever they liked.
     let Some(role) = eligibility(state.config(), &runtime, &code.email, now)
         .await
-        .map_err(|e| ApiError(e).into_response())?
+        .map_err(|e| ApiError(e).into_response().into())?
     else {
         // Eligibility can lapse between mailing and clicking.
-        return Err(invalid_login());
+        return Err(invalid_login().into());
     };
     let user = upsert_from_eligibility(&runtime, &code.email, role, now)
         .await
-        .map_err(|e| ApiError(e).into_response())?;
+        .map_err(|e| ApiError(e).into_response().into())?;
     mint_session(&state, &runtime, &user, &headers).await
 }
 
@@ -913,7 +913,7 @@ async fn hub_sign_in(
 ) -> Result<Response, crate::server::Rejection> {
     let runtime = company.runtime.clone();
     if let Some(refusal) = wrong_mode_for_email(&runtime) {
-        return Err(refusal);
+        return Err(refusal.into());
     }
 
     // Refuse before going anywhere when this host has no hub to ask. Accepting
@@ -922,7 +922,8 @@ async fn hub_sign_in(
         return Err(hub_refused(
             "hub_unavailable",
             "this host is not part of a TinyHumans ecosystem",
-        ));
+        )
+        .into());
     };
 
     // The hub answering is what proves the token was real — this tenant cannot
@@ -935,33 +936,31 @@ async fn hub_sign_in(
         // error type otherwise maps to would tell the user the ecosystem is
         // down when all they need to do is sign in again.
         Err(OpenCompanyError::TinyHumans { code, .. }) if code.starts_with("http_4") => {
-            return Err(hub_refused(
-                "hub_rejected",
-                "that sign-in has expired — sign in again",
-            ));
+            return Err(
+                hub_refused("hub_rejected", "that sign-in has expired — sign in again").into(),
+            );
         }
         // Anything else really is the hub being unreachable or wrong, and keeps
         // its 502/503 so an operator can tell the two apart.
-        Err(err) => return Err(ApiError(err).into_response()),
+        Err(err) => return Err(ApiError(err).into_response().into()),
     };
 
     let email = normalize_email(&identity.email);
     let now = now_millis();
     let Some(role) = eligibility(state.config(), &runtime, &email, now)
         .await
-        .map_err(|e| ApiError(e).into_response())?
+        .map_err(|e| ApiError(e).into_response().into())?
     else {
         // Signed in to the ecosystem, but not a person this company knows. A
         // distinct code so the console can say "ask an admin to invite you"
         // instead of "that sign-in is dead".
-        return Err(hub_refused(
-            "not_a_member",
-            "that account has no access to this company",
-        ));
+        return Err(
+            hub_refused("not_a_member", "that account has no access to this company").into(),
+        );
     };
     let user = upsert_from_eligibility(&runtime, &email, role, now)
         .await
-        .map_err(|e| ApiError(e).into_response())?;
+        .map_err(|e| ApiError(e).into_response().into())?;
     mint_session(&state, &runtime, &user, &headers).await
 }
 
@@ -974,7 +973,7 @@ async fn login_password(
 ) -> Result<Response, crate::server::Rejection> {
     let runtime = company.runtime.clone();
     if let Some(refusal) = wrong_mode_for_email(&runtime) {
-        return Err(refusal);
+        return Err(refusal.into());
     }
     let email = normalize_email(&body.email);
     let now = now_millis();
@@ -983,25 +982,25 @@ async fn login_password(
         .users()
         .find_user_by_email(runtime.id(), &email)
         .await
-        .map_err(|e| ApiError(e).into_response())?;
+        .map_err(|e| ApiError(e).into_response().into())?;
 
     // Every path with no hash to check burns equivalent work first, so an
     // unknown address costs the same wall-clock as a wrong password.
     let Some(user) = user else {
         password::dummy_verify(&body.password);
-        return Err(invalid_login());
+        return Err(invalid_login().into());
     };
     if user.status != UserStatus::Active {
         password::dummy_verify(&body.password);
-        return Err(invalid_login());
+        return Err(invalid_login().into());
     }
     let Some(hash) = user.password_hash.as_deref() else {
         // Magic-link-only account.
         password::dummy_verify(&body.password);
-        return Err(invalid_login());
+        return Err(invalid_login().into());
     };
     if !password::verify(&body.password, hash) {
-        return Err(invalid_login());
+        return Err(invalid_login().into());
     }
 
     let mut user = user;
@@ -1024,11 +1023,11 @@ async fn logout(
     // meaning there and quietly succeeding would tell the console it had signed
     // someone out when the very next request is authenticated again.
     if let Some(refusal) = wrong_mode_for_login(&runtime) {
-        return Err(refusal);
+        return Err(refusal.into());
     }
     let insecure = !state.config().host_base_url().starts_with("https://");
     let Some(name) = cookie::session_cookie_name(runtime.id()) else {
-        return Err(no_session());
+        return Err(no_session().into());
     };
 
     // Revoke server-side when the cookie names a real session; clearing the
@@ -1059,13 +1058,13 @@ async fn me(
 ) -> Result<Json<MeResult>, crate::server::Rejection> {
     let runtime = company.runtime.clone();
     let Some(principal) = current_user(&headers, &state, runtime.id(), peer).await else {
-        return Err(no_session());
+        return Err(no_session().into());
     };
     let user = runtime
         .users()
         .get_user(runtime.id(), &principal.user_id)
         .await
-        .map_err(|e| ApiError(e).into_response())?
+        .map_err(|e| ApiError(e).into_response().into())?
         .ok_or_else(no_session)?;
     Ok(Json(me_result(runtime.id(), &user)))
 }
@@ -1087,21 +1086,22 @@ async fn set_password(
     // where the mailbox does. In wallet mode the key is the credential; in
     // `none` mode there is nobody to distinguish from anybody.
     if let Some(refusal) = wrong_mode_for_email(&runtime) {
-        return Err(refusal);
+        return Err(refusal.into());
     }
     let Some(principal) = current_user(&headers, &state, runtime.id(), peer).await else {
-        return Err(no_session());
+        return Err(no_session().into());
     };
     let mut user = runtime
         .users()
         .get_user(runtime.id(), &principal.user_id)
         .await
-        .map_err(|e| ApiError(e).into_response())?
+        .map_err(|e| ApiError(e).into_response().into())?
         .ok_or_else(no_session)?;
 
-    password::validate(&body.password, &user.email).map_err(|e| ApiError(e).into_response())?;
+    password::validate(&body.password, &user.email)
+        .map_err(|e| ApiError(e).into_response().into())?;
     let hash = password::hash(&token::OsTokens, &body.password)
-        .map_err(|e| ApiError(e).into_response())?;
+        .map_err(|e| ApiError(e).into_response().into())?;
     let now = now_millis();
     user.password_hash = Some(hash);
     // Whatever prompted the change is now satisfied.
@@ -1111,7 +1111,7 @@ async fn set_password(
         .users()
         .upsert_user(runtime.id(), &user)
         .await
-        .map_err(|e| ApiError(e).into_response())?;
+        .map_err(|e| ApiError(e).into_response().into())?;
 
     // Every *other* session is revoked: changing a password is what someone
     // does when they think a session is stolen, so leaving the others live
@@ -1154,7 +1154,7 @@ async fn wallet_challenge(
 ) -> Result<Json<wallet::ChallengeResult>, crate::server::Rejection> {
     let runtime = company.runtime.clone();
     if let Some(refusal) = wrong_mode_for_wallet(&runtime) {
-        return Err(refusal);
+        return Err(refusal.into());
     }
     let now = now_millis();
 
@@ -1173,7 +1173,7 @@ async fn wallet_challenge(
     let identity = LoginIdentity::Wallet(address.clone()).key();
     let eligible = eligibility(state.config(), &runtime, &identity, now)
         .await
-        .map_err(|e| ApiError(e).into_response())?;
+        .map_err(|e| ApiError(e).into_response().into())?;
     if eligible.is_none() {
         return Ok(Json(wallet::unpersisted_challenge(
             runtime.id(),
@@ -1186,7 +1186,7 @@ async fn wallet_challenge(
     wallet::issue_challenge(&runtime, &token::OsTokens, &address, now)
         .await
         .map(Json)
-        .map_err(|e| ApiError(e).into_response())
+        .map_err(|e| ApiError(e).into_response().into())
 }
 
 /// `POST …/auth/wallet/verify` — answer a challenge and receive a session.
@@ -1203,12 +1203,12 @@ async fn wallet_verify(
 ) -> Result<Response, crate::server::Rejection> {
     let runtime = company.runtime.clone();
     if let Some(refusal) = wrong_mode_for_wallet(&runtime) {
-        return Err(refusal);
+        return Err(refusal.into());
     }
     let now = now_millis();
 
     let Some(address) = wallet::verify_challenge(&runtime, &body, now).await else {
-        return Err(invalid_login());
+        return Err(invalid_login().into());
     };
 
     // The address comes from the challenge record, never from this request, so
@@ -1216,14 +1216,14 @@ async fn wallet_verify(
     let identity = LoginIdentity::Wallet(address).key();
     let Some(role) = eligibility(state.config(), &runtime, &identity, now)
         .await
-        .map_err(|e| ApiError(e).into_response())?
+        .map_err(|e| ApiError(e).into_response().into())?
     else {
         // Eligibility can lapse between the challenge and the answer.
-        return Err(invalid_login());
+        return Err(invalid_login().into());
     };
     let user = upsert_from_eligibility(&runtime, &identity, role, now)
         .await
-        .map_err(|e| ApiError(e).into_response())?;
+        .map_err(|e| ApiError(e).into_response().into())?;
     mint_session(&state, &runtime, &user, &headers).await
 }
 
