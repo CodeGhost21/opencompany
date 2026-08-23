@@ -398,7 +398,10 @@ test("#1190 the card carries no switch; the inbox lives on the teammate", async 
   // teammate, and the switch was one mis-click from a silent config change
   // while scanning thirteen of them.
   await expect(page.getByTestId("team-inbox-toggle")).toHaveCount(0);
-  await expect(page.getByRole("switch")).toHaveCount(0);
+  // Scoped to the cards, not the whole page: the roster's "Working" filter
+  // above the grid is also a switch, but it is a local view filter that writes
+  // nothing to the host — the thing #1190 removed from the cards.
+  await expect(page.getByTestId("team-card").getByRole("switch")).toHaveCount(0);
 
   // The capability is not gone — it moved to the page that already reported it.
   await card(page, "Maya").getByTestId("team-card-open").click();
