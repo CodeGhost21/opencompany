@@ -185,6 +185,13 @@ The `shell` clause tracks what was **wired**, not what was granted:
 `toolbelt::shell_tools` withholds the whole namespace when the per-agent audit
 logger cannot initialize, and the brief follows it rather than the grant.
 
+The `shell`/`code` clauses also track the per-turn capability tier
+(`capability_budget::resolve_filter`, live at `HarnessPool::ensure`): a fail-closed
+metering error or an exhausted budget makes `filter_by_capabilities` drop the
+matching tools from the vector `build_agent` hands to the builder, and
+`sandbox_brief_flags` withholds the matching clause for the same turn — so the
+brief never instructs an agent to call a tool the filter has already removed.
+
 Step 5 is resolved by the async caller before the (synchronous) agent build and
 fingerprinted over document **bodies**, so editing a routed note reaches the next
 turn rather than the next restart. See
