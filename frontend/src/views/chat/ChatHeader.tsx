@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, type Ref } from "react";
 import { Check, CircleDot, Copy, Hash, Lock, PanelLeft, PanelRight, Users } from "lucide-react";
 
 import { TeammateAvatar } from "@/components/teammate-avatar";
