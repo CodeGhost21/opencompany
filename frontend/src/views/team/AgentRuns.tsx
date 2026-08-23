@@ -196,6 +196,7 @@ export function AgentRuns({
   const [index, setIndex] = useState<RunSourceIndex>({});
   const [filter, setFilter] = useState("all");
   const [openId, setOpenId] = useState<string | null>(null);
+  const openIdRef = useRef<string | null>(null);
   // A 1s clock, so a live attempt's elapsed time ticks rather than jumping on
   // the 4s poll. Only mounted while something is actually open — a settled
   // history has nothing that changes second to second.
