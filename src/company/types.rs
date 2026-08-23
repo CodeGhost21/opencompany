@@ -111,7 +111,7 @@ pub const POLICY_MODES: &[&str] = &["readonly", "supervised", "auto", "full"];
 pub const PROVISIONED_POLICY_MODE: &str = "auto";
 
 /// Channels the runtime knows how to enable under `[channels.*]`.
-pub const KNOWN_CHANNELS: &[&str] = &["operator", "email", "slack", "sms", "web", "telegram"];
+pub const KNOWN_CHANNELS: &[&str] = &["operator", "email", "slack", "sms", "web"];
 
 /// Effect kinds gated for approval by default — **empty on purpose** (issue
 /// #684).
@@ -160,8 +160,8 @@ pub const CONNECTION_PRIORITIES: &[&str] = &["low", "medium", "high"];
 /// maps individual tools onto these namespaces. A `[plan].token_budgets` key
 /// outside this set is a manifest error. Lives here (not the feature-gated
 /// harness) so manifest validation can see it in the default build.
-pub const GATEABLE_NAMESPACES: [&str; 8] = [
-    "shell", "code", "web", "subagent", "media", "composio", "search", "repo",
+pub const GATEABLE_NAMESPACES: [&str; 7] = [
+    "shell", "code", "web", "subagent", "media", "composio", "search",
 ];
 
 /// Whether a tool-grant list **explicitly** grants the real-money `media`
@@ -252,27 +252,6 @@ pub fn grants_search_explicit(grants: &[String]) -> bool {
         .any(|grant| grant == "search" || grant.starts_with("search."))
 }
 
-/// Whether a tool-grant list **explicitly** grants the bound-repository `repo`
-/// namespace (issue #245, agent half).
-///
-/// Like [`grants_media_explicit`], [`grants_composio_explicit`] and
-/// [`grants_search_explicit`], the catch-all `*` does **not** confer it, and the
-/// reason is sharper here than for any of them: `repo_checkout` materializes a
-/// third party's source — and, through `repo_pr`, a third party's patch — inside
-/// an agent's sandbox, where the same agent may also hold `shell`. That is a
-/// company deciding to let its agents read real code under an operator-installed
-/// credential, and a decision of that size is made by name rather than inherited
-/// from a wildcard set for file and shell tools.
-///
-/// Matches the bare `repo` grant or any `repo.*` sub-grant. Lives here (always
-/// compiled) so both the feature-gated harness wiring (`build::build_agent`) and
-/// the always-compiled console capability route key off one source of truth.
-pub fn grants_repo_explicit(grants: &[String]) -> bool {
-    grants
-        .iter()
-        .any(|grant| grant == "repo" || grant.starts_with("repo."))
-}
-
 /// Whether a tool-grant list confers the **publishing** capability (issue #244)
 /// — the `files`/`docs` namespace on which both an agent's file tools and
 /// `publish_artifact` ride.
@@ -318,33 +297,6 @@ pub fn grants_files_or_docs(grants: &[String]) -> bool {
             || extends_on_boundary(grant, "files", NAMESPACE_SEPARATORS)
             || extends_on_boundary(grant, "docs", NAMESPACE_SEPARATORS)
     })
-}
-
-/// Whether a tool-grant list **explicitly** grants the repository *write* tier
-/// (issue #734) — the tier under which an agent's work can be pushed to a real
-/// remote and opened as a pull request.
-///
-/// This is the tightest predicate on this surface, and deliberately tighter than
-/// **both** of its neighbours. Do not "harmonise" it back toward either shape:
-///
-/// * Unlike [`grants_repo_explicit`], a **bare `repo` grant confers nothing
-///   here.** Every company adopting the read tier writes bare `repo`; if that
-///   silently carried push, a company that asked for agents *reading* code would
-///   get agents *pushing* it — exactly the outcome issue #247's write tier exists
-///   to prevent. Read and write are separate decisions, so they are separate
-///   grants. Widening this to the `repo` / `repo.*` shape reintroduces that
-///   footgun.
-/// * Unlike [`grants_workspace_write_explicit`], not even a *bare namespace*
-///   token confers it: only the **exact** string `repo.write` does. `repo`,
-///   `repo.read`, any other `repo.*` sub-grant, and the catch-all `*` all confer
-///   nothing. Matching a `repo.write` *prefix* (`starts_with`) would let a stray
-///   `repo.writer` slip through; the exact-string match is the point.
-///
-/// Lives here (always compiled) so the feature-gated harness wiring
-/// (`build::build_agent`) and always-compiled tooling share one source of truth,
-/// as with the read predicate above.
-pub fn grants_repo_write_explicit(grants: &[String]) -> bool {
-    grants.iter().any(|grant| grant == "repo.write")
 }
 
 /// Whether a tool-grant list **explicitly** grants writes to the company
@@ -1727,63 +1679,6 @@ mod test {
         assert!(!grants_composio_explicit(&["composiotools".into()]));
     }
 
-    /// Bound repositories (issue #245, agent half) are granted ONLY by an
-    /// explicit `repo` / `repo.*` grant — never by the catch-all `*`. A
-    /// `repo_checkout` puts a third party's source inside a sandbox an agent may
-    /// also hold `shell` over, so a wildcard set for file and shell tools must
-    /// not carry it in.
-    #[test]
-    fn repo_grant_requires_explicit_namespace_not_wildcard() {
-        assert!(grants_repo_explicit(&["repo".into()]));
-        assert!(grants_repo_explicit(&["repo.checkout".into()]));
-        assert!(grants_repo_explicit(&["web.*".into(), "repo".into()]));
-        // The catch-all `*` must NOT grant repo.
-        assert!(!grants_repo_explicit(&["*".into()]));
-        assert!(!grants_repo_explicit(&["web.*".into()]));
-        assert!(!grants_repo_explicit(&[]));
-        // A substring match must not count as the repo namespace.
-        assert!(!grants_repo_explicit(&["reporting".into()]));
-        assert!(!grants_repo_explicit(&["repository".into()]));
-    }
-
-    /// The repository *write* tier (issue #734) is conferred ONLY by the exact
-    /// string `repo.write` — never a bare `repo`, never a `repo.write` prefix,
-    /// never the catch-all `*`. Read and write are separate decisions.
-    #[test]
-    fn repo_write_is_conferred_only_by_the_exact_grant() {
-        assert!(grants_repo_write_explicit(&["repo.write".into()]));
-        assert!(grants_repo_write_explicit(&[
-            "web.*".into(),
-            "repo.write".into()
-        ]));
-        // The catch-all `*` must NOT grant write.
-        assert!(!grants_repo_write_explicit(&["*".into()]));
-        // A read grant is genuinely read-only.
-        assert!(!grants_repo_write_explicit(&["repo.read".into()]));
-        assert!(!grants_repo_write_explicit(&["repo.checkout".into()]));
-        assert!(!grants_repo_write_explicit(&[]));
-        // A prefix match must not count: `repo.writer` is not `repo.write`.
-        assert!(!grants_repo_write_explicit(&["repo.writer".into()]));
-    }
-
-    /// **The regression this predicate exists to prevent.** Every company
-    /// adopting the read tier writes bare `repo`; that must confer read tools
-    /// (`grants_repo_explicit`) and **not** push (`grants_repo_write_explicit`),
-    /// so a company reading code never silently gains agents pushing it. Named so
-    /// its purpose survives a refactor that "harmonises" the two predicates.
-    #[test]
-    fn bare_repo_confers_read_but_not_write() {
-        assert!(grants_repo_explicit(&["repo".into()]));
-        assert!(!grants_repo_write_explicit(&["repo".into()]));
-    }
-
-    /// `repo` is a budgetable namespace, so a `[plan].token_budgets` key of
-    /// that name is accepted rather than rejected as unknown.
-    #[test]
-    fn repo_is_a_gateable_namespace() {
-        assert!(GATEABLE_NAMESPACES.contains(&"repo"));
-    }
-
     /// The `[tools.composio]` sub-section parses its toolkit allowlist and an
     /// absent section defaults to open mode (empty list).
     #[test]
@@ -2047,20 +1942,14 @@ mod test {
     /// "consistency" edit. It would be a silent revocation: most shipped
     /// manifests grant `*` and nothing else, so publishing would switch off for
     /// them with no error anywhere — agents that can still write files and can
-    /// no longer deliver one. `repo` is asserted alongside it so the contrast is
-    /// in the same assertion block as the temptation.
+    /// no longer deliver one.
     #[test]
-    fn a_bare_wildcard_confers_publishing_unlike_repo() {
+    fn a_bare_wildcard_confers_publishing() {
         let wildcard = grants(&["*"]);
         assert!(
             grants_files_or_docs(&wildcard),
             "a bare `*` must confer publishing — it is what most shipped manifests grant"
         );
-        assert!(
-            !grants_repo_explicit(&wildcard),
-            "a bare `*` must NOT confer `repo`; the two rules are different on purpose"
-        );
-
         // The ordinary namespace forms confer it too.
         for grant in ["files", "docs", "files.write", "docs.read"] {
             assert!(

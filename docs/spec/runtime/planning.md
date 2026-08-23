@@ -146,7 +146,7 @@ The host stamps every verdict:
 
 | Kind | Checked against | `missing` reads as |
 |---|---|---|
-| `connection` | the `GET …/connections` projection | "GitHub is not connected — connect it from the Connections tab" |
+| `connection` | the `GET …/connections` projection | "Notion is not connected — connect it from the OAuth page" |
 | `composio` | the same projection's `via`, plus token presence | "no Composio account is connected for this" |
 | `mcp` | manifest ∪ runtime index — **both** halves; a disabled server is its own verdict | the named server is in neither |
 | `credential` | presence only — the mail handle, or a secret key that exists | "no outbound email is configured" |

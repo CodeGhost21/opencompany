@@ -110,8 +110,9 @@ sends one cross-site, and a webview is cross-site with every server. The only
 other header credential was the platform bearer, which maps to `actor: None` —
 every write anonymous in the journal.
 
-So a session has a second carrier and a way to get one. Both are documented in
-[`users.md`](users.md) → "Two carriers, one session" and "Device pairing".
+So a session has a second carrier, documented in [`users.md`](users.md) →
+"Two carriers, one session". Getting one is the client's own business: device
+pairing left the host with the rest of the device routes.
 
 The token lives in the OS keychain (`src-tauri/src/keychain.rs`), and the
 console never sees it. `oc_connect` takes no device material: the core resolves

@@ -1991,11 +1991,6 @@ mod tests {
             ("mcp_registry_tool_call", serde_json::json!({})),
             ("run_workflow", serde_json::json!({})),
             ("composio_authorize", serde_json::json!({})),
-            // Issue #245: a checkout writes a tree of third-party source into a
-            // sandbox this agent may also hold `shell` over, and both tools
-            // reach the forge under the company's credential.
-            ("repo_checkout", serde_json::json!({})),
-            ("repo_pr", serde_json::json!({})),
             (
                 "composio_execute",
                 serde_json::json!({ "tool": "GMAIL_SEND_EMAIL" }),
@@ -2568,61 +2563,6 @@ mod tests {
         ] {
             assert_eq!(
                 full.check(&request(tool, serde_json::json!({}))).await,
-                ToolPolicyDecision::Allow,
-                "{tool} under full mode"
-            );
-        }
-    }
-
-    /// The repository pair across all four tiers (issue #245), asserted as a
-    /// line rather than as four independent facts.
-    ///
-    /// `readonly` **denies** rather than parks, and that is the one verdict here
-    /// worth arguing: both names read like reads. `repo_checkout` writes
-    /// thousands of files into the agent's sandbox, which a tier whose whole
-    /// contract is "nothing changes" cannot admit; `repo_pr` reaches a third
-    /// party under the company's credential, which is the other half of the same
-    /// contract. Parking either under `readonly` would be worse than denying,
-    /// because openhuman resolves a `RequireApproval` inline and never
-    /// re-dispatches — the operator would approve a call that then does not run.
-    ///
-    /// The parked request's `kind` is checked too, because the console's plain
-    /// language table is keyed on exactly that string: a `kind` that is not the
-    /// tool name silently falls through to "Use one of its tools".
-    #[tokio::test]
-    async fn the_repository_pair_parks_under_supervision_and_is_denied_read_only() {
-        let args = serde_json::json!({ "repo": "acme/widgets" });
-        for mode in ["supervised", "auto"] {
-            let p = policy(mode, &[], None);
-            for tool in ["repo_checkout", "repo_pr"] {
-                let decision = p.check(&request(tool, args.clone())).await;
-                let ToolPolicyDecision::RequireApproval { .. } = decision else {
-                    panic!("{tool} must park under {mode}, got {decision:?}");
-                };
-                assert_eq!(
-                    p.effect_for(tool, &args).kind,
-                    tool,
-                    "the approval card's kind must be the tool name, or the console \
-                     cannot label it"
-                );
-            }
-        }
-
-        let readonly = policy("readonly", &[], None);
-        for tool in ["repo_checkout", "repo_pr"] {
-            assert!(
-                matches!(
-                    readonly.check(&request(tool, args.clone())).await,
-                    ToolPolicyDecision::Deny { .. }
-                ),
-                "{tool} must be denied under readonly, not parked"
-            );
-        }
-
-        let full = policy("full", &[], None);
-        for tool in ["repo_checkout", "repo_pr"] {
-            assert_eq!(
-                full.check(&request(tool, args.clone())).await,
                 ToolPolicyDecision::Allow,
                 "{tool} under full mode"
             );
@@ -4380,8 +4320,6 @@ mod tests {
             "mcp_call_tool",
             // Third-party source and diffs, fetched under the operator's
             // credential (issue #245).
-            "repo_checkout",
-            "repo_pr",
             // Named consequences, unchanged.
             "composio_authorize",
             "pay_invoice",

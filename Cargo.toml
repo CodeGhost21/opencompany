@@ -340,7 +340,7 @@ rand_core = { version = "0.6", default-features = false, features = ["getrandom"
 # (authorize-url + server-side token exchange) are a first-class console
 # surface, so a company can connect GitHub end-to-end without a custom feature
 # build. It only pulls in `reqwest`, which several already-shipped features
-# (`github`, `telegram`, `medulla`, …) also depend on, so the default build
+# (`medulla`, …) also depend on, so the default build
 # gains no new heavy native dependency. The read-only status route
 # (`ops::connections_read`) is un-gated and available regardless.
 #
@@ -497,11 +497,6 @@ smtp = ["dep:lettre"]
 # offline `RecordingMailReceiver` compile without this; only `AsyncImapReceiver`
 # and the RFC822 parser are gated here.
 imap = ["dep:async-imap", "dep:mail-parser", "dep:tokio-rustls", "dep:webpki-roots"]
-# Real HTTPS transport to api.telegram.org for the Telegram channel
-# (sendMessage / setWebhook). The `TelegramApi` trait, inbound parsing, token
-# scrubbing, and the offline `RecordingTelegramApi` compile without this; only
-# `HttpTelegramApi` is gated here (it needs the shared `reqwest` client).
-telegram = ["dep:reqwest"]
 # OAuth connection lifecycle (authorize-url + server-side token exchange). The
 # read-only connections catalog compiles without this; only the token-exchanging
 # write routes are gated here (they need the shared `reqwest` client).
