@@ -98,7 +98,7 @@ describe("the deadline on an approval card", () => {
       approval({
         kind: "workflow.approve",
         workflow_run_id: "run/1",
-        payload: { workflow_id: "invoice sync" },
+        workflow_id: "invoice sync",
       }),
       T0,
     );
@@ -107,6 +107,33 @@ describe("the deadline on an approval card", () => {
       'a[href="#/workflows/invoice%20sync?run=run%2F1"]',
     );
     expect(link?.textContent).toContain("Open the run");
+  });
+
+  /**
+   * Issue #1418: the run link must survive role redaction.
+   *
+   * A member reader's summary arrives with `payload` stripped (#618), but the
+   * workflow id is a top-level field that rides through with `workflow_run_id`
+   * — so the member holding up the stalled run still gets the address instead
+   * of "Origin unavailable".
+   */
+  it("keeps the run link when role redaction stripped the payload", async () => {
+    await render(
+      approval({
+        kind: "workflow.approve",
+        workflow_run_id: "run/1",
+        workflow_id: "invoice sync",
+        contents_hidden: true,
+        payload: undefined,
+      }),
+      T0,
+    );
+
+    const link = container.querySelector<HTMLAnchorElement>(
+      'a[href="#/workflows/invoice%20sync?run=run%2F1"]',
+    );
+    expect(link?.textContent).toContain("Open the run");
+    expect(container.textContent).not.toContain("Origin unavailable");
   });
 
   it("says when the host did not report an addressable origin", async () => {
