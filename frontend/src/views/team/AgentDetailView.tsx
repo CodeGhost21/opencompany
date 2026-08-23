@@ -1016,6 +1016,54 @@ function Budget({
 }
 
 /**
+ * Pick a teammate's icon.
+ *
+ * Picking **is** the save — there is no Save button — because a face is chosen
+ * by clicking it and a confirm step over a visual choice only adds a way to
+ * lose it. The dialog closes on the click, and the write reports itself with a
+ * toast like every other one-click write on this page.
+ */
+function AvatarDialog({
+  client,
+  company,
+  agent,
+  onOpenChange,
+  onPick,
+}: {
+  client: OpenCompanyClient;
+  company: string | null;
+  agent: AgentDetailDto | null;
+  onOpenChange: (open: boolean) => void;
+  onPick: (avatar: string | undefined) => void;
+}) {
+  const name = agent?.name?.trim() || agent?.role || "this teammate";
+  return (
+    <Dialog open={agent !== null} onOpenChange={onOpenChange}>
+      <DialogContent className="sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle>Icon</DialogTitle>
+          <DialogDescription>
+            The face {name} wears everywhere in this console — chat, the org chart, every list
+            they appear in.
+          </DialogDescription>
+        </DialogHeader>
+        {agent && (
+          <AvatarPicker
+            client={client}
+            company={company}
+            value={agent.avatar}
+            seed={agent.id || name}
+            name={name}
+            tone={toneFor(agent.id || name)}
+            onChange={onPick}
+          />
+        )}
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+/**
  * Enter a daily cap for one teammate.
  *
  * Empty input is **not** submittable: "no cap" is the explicit "Remove cap"
