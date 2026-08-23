@@ -1550,12 +1550,14 @@ impl SecretStore for FsSecretStore {
             .await
             .map_err(|e| io_err(&path, e))?;
 
-        let legacy_path = bundle.legacy_secret(key);
-        match tokio::fs::remove_file(&legacy_path).await {
-            Ok(()) => Ok(()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(io_err(&legacy_path, e)),
-        }
+        // Deliberately keep the legacy slugged file. One slug can name several
+        // distinct keys (the conflation issue #1510 fixes), so the file may
+        // still hold a colliding alias's value that an un-migrated alias reads
+        // through the legacy fallback; rotating one alias must not delete
+        // another's credential. `get` prefers the canonical file, so the kept
+        // legacy file is inert for this key and only serves un-migrated
+        // aliases.
+        Ok(())
     }
 }
 
