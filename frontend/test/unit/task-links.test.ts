@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import { extraOutputCount, primaryLink, readTaskFocus } from "@/lib/task-output";
+import {
+  extraOutputCount,
+  primaryLink,
+  readTaskFocus,
+  taskTabHref,
+} from "@/lib/task-output";
 import type { Task, TaskOutput } from "@/api/tasks";
 
 /**
@@ -157,8 +162,34 @@ describe("readTaskFocus", () => {
     expect(readTaskFocus("#/tasks/t-1?run=run-9")).toEqual({ runId: "run-9" });
   });
 
+  it("reads an explicitly addressed detail tab before a linked focus", () => {
+    expect(readTaskFocus("#/tasks/t-1?artifact=a-1&v=3&tab=discussion")).toEqual({
+      tab: "discussion",
+      artifactId: "a-1",
+      version: 3,
+    });
+  });
+
+  it("drops a tab that this screen cannot render", () => {
+    expect(readTaskFocus("#/tasks/t-1?tab=plan")).toEqual({});
+  });
+
   it("yields an empty focus for an address that asks for nothing", () => {
     expect(readTaskFocus("#/tasks/t-1")).toEqual({});
     expect(readTaskFocus("#/tasks/t-1?")).toEqual({});
+  });
+});
+
+describe("taskTabHref", () => {
+  it("replaces the tab while retaining the task focus and host scope", () => {
+    expect(taskTabHref("#/tasks/t-1?artifact=a-1&v=3&host=local", "discussion")).toBe(
+      "#/tasks/t-1?artifact=a-1&v=3&host=local&tab=discussion",
+    );
+  });
+
+  it("replaces an earlier tab rather than emitting it twice", () => {
+    expect(taskTabHref("#/tasks/t-1?tab=timeline", "attempts")).toBe(
+      "#/tasks/t-1?tab=attempts",
+    );
   });
 });

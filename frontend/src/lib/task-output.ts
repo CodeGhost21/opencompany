@@ -170,12 +170,24 @@ export function extraOutputCount(task: Task): number {
 
 /** What a `#/tasks/<id>?…` address asks the detail screen to open. */
 export interface TaskFocus {
+  /** An explicitly addressed always-visible task-detail tab. */
+  tab?: TaskTab;
   /** Open this artifact on the Artifacts tab… */
   artifactId?: string;
   /** …pinned at this revision, when the address named one. */
   version?: number;
   /** Or open this attempt's trace on the Attempts tab. */
   runId?: string;
+}
+
+/** The task-detail tabs that every card renders. */
+export const TASK_TABS = ["timeline", "attempts", "artifacts", "discussion"] as const;
+
+export type TaskTab = (typeof TASK_TABS)[number];
+
+/** Whether a query value names a task-detail tab that can always be opened. */
+export function isTaskTab(value: string): value is TaskTab {
+  return (TASK_TABS as readonly string[]).includes(value);
 }
 
 /**
@@ -195,6 +207,8 @@ export function readTaskFocus(hash: string): TaskFocus {
     return {};
   }
   const focus: TaskFocus = {};
+  const tab = params.get("tab");
+  if (tab && isTaskTab(tab)) focus.tab = tab;
   const artifactId = params.get("artifact");
   if (artifactId) {
     focus.artifactId = artifactId;
@@ -209,7 +223,18 @@ export function readTaskFocus(hash: string): TaskFocus {
   return focus;
 }
 
+/**
+ * Replaces the addressed task-detail tab without discarding another focus or
+ * the host scope carried in the same hash query.
+ */
+export function taskTabHref(hash: string, tab: TaskTab): string {
+  const [path, query = ""] = hash.split("?");
+  const params = new URLSearchParams(query);
+  params.set("tab", tab);
+  return `${path}?${params.toString()}`;
+}
+
 /** Whether a focus asks for anything at all. */
 export function hasFocus(focus: TaskFocus): boolean {
-  return Boolean(focus.artifactId || focus.runId);
+  return Boolean(focus.tab || focus.artifactId || focus.runId);
 }
