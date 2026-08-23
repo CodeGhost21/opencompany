@@ -302,10 +302,19 @@ pub fn build_agent(
     let mut tools: Vec<Box<dyn Tool>> = memory_tools(deps, company, &manifest_agent.id);
     #[cfg(feature = "mcp")]
     {
-        // These config-free tools read OpenHuman's live process registry, so
-        // installs and lifecycle changes are visible without rebuilding agents.
-        tools.push(Box::new(oh::mcp::registry::tools::McpRegistryListToolsTool));
-        tools.push(Box::new(oh::mcp::registry::tools::McpRegistryToolCallTool));
+        // These read the installed-server registry, so installs and lifecycle
+        // changes are visible without rebuilding agents. They take the config
+        // that selects the store now rather than reading a process global —
+        // hand them this company's own, the one REST writes through.
+        if let Some(mcp_home) = deps.mcp_home.clone() {
+            let config = std::sync::Arc::new(crate::harness::mcp::McpRuntime::config_for(mcp_home));
+            tools.push(Box::new(
+                oh::mcp::registry::tools::McpRegistryListToolsTool::new(config.clone()),
+            ));
+            tools.push(Box::new(
+                oh::mcp::registry::tools::McpRegistryToolCallTool::new(config),
+            ));
+        }
     }
 
     // Granted file tools, sandboxed to this agent's own workspace directory. An
