@@ -235,7 +235,6 @@ mod test {
     use super::{MaintenanceTicker, TRACE_RETENTION_LIMIT};
     use crate::company::CompanyManifest;
     use crate::policy::ManifestApprovalGate;
-    use crate::ports::MemoryStore;
     use crate::ports::now_millis;
     use crate::ports::types::{
         Actor, ActorKind, ApprovalId, CompanyEvent, CompanyId, CompressedTrace, Effect,
