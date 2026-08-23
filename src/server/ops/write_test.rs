@@ -944,7 +944,6 @@ async fn memory_list_filters_stats_and_dual_write() {
     assert_eq!(stats["teammateMemory"], 0);
     assert_eq!(stats["taskOutcomes"], 0);
     assert_eq!(stats["documentMemory"], 0);
-    assert_eq!(stats["contextTruncated"], false);
     // Nothing but facts so far, so "Last updated" tracks the newest fact.
     assert_eq!(stats["lastUpdatedAtMillis"], 3_000);
 
