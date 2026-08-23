@@ -313,7 +313,7 @@ export function MemoryView({ client, company }: Props) {
         )}
 
         <HealthStrip loading={loading} stats={stats} perType={perType} />
-        {stats && totalContextItems > listedContextItems && (
+        {stats?.contextTruncated && (
           <Alert>
             <AlertDescription>
               Showing the newest {listedContextItems} of {totalContextItems} context memory items.

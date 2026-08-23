@@ -356,6 +356,11 @@ struct MemoryStats {
     document_memory: usize,
     /// Stored task outcomes, excluding operator-fact mirrors.
     task_outcomes: usize,
+    /// Whether `GET /memory` capped its context rows (the non-mirror chunk
+    /// count past [`MAX_CONTEXT_ENTRIES`]). Computed from this same snapshot
+    /// so the console's "showing the newest N of M" notice never compares the
+    /// capped list against a count taken at a different moment.
+    context_truncated: bool,
 }
 
 /// `GET /memory` — everything the company remembers, so the console lists what
@@ -512,6 +517,11 @@ async fn memory_stats(company: ScopedCompany) -> Result<Json<MemoryStats>, ApiEr
         teammate_memory,
         document_memory,
         task_outcomes,
+        // The list route caps the same non-mirror context population at
+        // `MAX_CONTEXT_ENTRIES`; reporting the flag here keeps the console's
+        // truncation notice on ONE snapshot instead of comparing the list and
+        // stats responses that a write between them can disagree on.
+        context_truncated: teammate_memory + task_outcomes + document_memory > MAX_CONTEXT_ENTRIES,
     }))
 }
 
@@ -1297,6 +1307,32 @@ mod route_tests {
             stats["totalItems"], 4,
             "document chunks stay in the display partition, just not under teammate memory"
         );
+        assert_eq!(
+            stats["contextTruncated"], false,
+            "four context chunks are far under the list cap"
+        );
+    }
+
+    /// The truncation notice must be decided from ONE server snapshot: the
+    /// stats response reports `contextTruncated` directly, so the console never
+    /// compares the capped list against an independently-timed count.
+    #[tokio::test]
+    async fn brain_stats_report_context_truncation_from_the_same_snapshot() {
+        let home = tempfile::tempdir().unwrap();
+        let state = state_over(
+            home.path(),
+            ScriptedContext::with_chunks(MAX_CONTEXT_ENTRIES + 2),
+        )
+        .await;
+
+        let (status, stats) = get_stats(&state).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            stats["contextTruncated"], true,
+            "past the 500-row list cap, the stats snapshot must say the list truncates"
+        );
+        assert_eq!(stats["totalItems"], (MAX_CONTEXT_ENTRIES + 2) as u64);
     }
 
     /// #1488: with more chunks than the cap, the list must keep the NEWEST

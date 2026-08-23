@@ -75,6 +75,13 @@ export interface MemoryStats {
   documentMemory: number;
   /** Stored task outcomes, disjoint from teammate memory. */
   taskOutcomes: number;
+  /**
+   * Whether `GET /memory` capped its context rows (non-mirror chunk count past
+   * the 500-row list cap). Computed from this same stats snapshot, so the
+   * "showing the newest N of M" notice never compares the list against a
+   * count taken at a different moment.
+   */
+  contextTruncated: boolean;
 }
 
 /** The kinds in display order, for filters and the add form. */

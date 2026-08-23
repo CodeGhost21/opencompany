@@ -51,8 +51,12 @@ agent-recallable but are not counted as teammate memory, because the
 corresponding fact is already the operator-visible row. Dropped-document and
 link chunks (`document/…`) get their own bucket for the same reason: they are
 operator-supplied material, and counting them as teammate memory would read
-as something an agent learned. Unlike `GET /memory`, these counts are never
-capped; the list may show only the newest 500 non-mirror context rows.
+as something an agent learned. `contextTruncated` reports whether `GET /memory`
+capped its context rows (the non-mirror chunk count past the 500-row list cap),
+computed from this same snapshot so the console's "showing the newest N of M"
+notice never compares the list against a count taken at a different moment.
+Unlike `GET /memory`, these counts are never capped; the list may show only
+the newest 500 non-mirror context rows.
 
 Read that stamp as a max across chunks, not as one row per body: one address
 carries one row per *label* claiming it (issue #1300), a new label on an

@@ -944,6 +944,7 @@ async fn memory_list_filters_stats_and_dual_write() {
     assert_eq!(stats["teammateMemory"], 0);
     assert_eq!(stats["taskOutcomes"], 0);
     assert_eq!(stats["documentMemory"], 0);
+    assert_eq!(stats["contextTruncated"], false);
     // Nothing but facts so far, so "Last updated" tracks the newest fact.
     assert_eq!(stats["lastUpdatedAtMillis"], 3_000);
 
@@ -977,6 +978,7 @@ async fn memory_list_filters_stats_and_dual_write() {
     assert_eq!(stats["teammateMemory"], 0);
     assert_eq!(stats["taskOutcomes"], 0);
     assert_eq!(stats["documentMemory"], 0);
+    assert_eq!(stats["contextTruncated"], false);
 }
 
 /// The Brain's "Last updated" stat must move when *agents* write memory, not
@@ -1032,6 +1034,7 @@ async fn memory_stats_last_updated_covers_agent_written_context() {
     assert_eq!(stats["teammateMemory"], 1);
     assert_eq!(stats["taskOutcomes"], 1);
     assert_eq!(stats["documentMemory"], 0);
+    assert_eq!(stats["contextTruncated"], false);
     assert_eq!(
         stats["factsUpdatedAtMillis"], 0,
         "the facts-only figure is unchanged — it is simply not the whole story"
