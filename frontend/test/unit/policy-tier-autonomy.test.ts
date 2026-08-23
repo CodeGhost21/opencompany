@@ -110,6 +110,18 @@ async function mount(client: OpenCompanyClient) {
   });
 }
 
+/** Types into a field the way an operator does, so React's state updates. */
+async function type(box: HTMLInputElement, value: string) {
+  await act(async () => {
+    const setter = Object.getOwnPropertyDescriptor(
+      window.HTMLInputElement.prototype,
+      "value",
+    )?.set;
+    setter?.call(box, value);
+    box.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+}
+
 describe("the autonomy direction", () => {
   it("uses the host's ordered list to identify widening moves", () => {
     expect(widensAutonomy(TIERS, "supervised", "full")).toBe(true);
