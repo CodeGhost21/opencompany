@@ -310,6 +310,15 @@ describe("the page frame's toast-relay listener", () => {
       buttons: 0,
     });
     relayFrom(window.parent, {
+      type: "oc:relay-click",
+      x: 60,
+      y: 60,
+      pointerId: 7,
+    });
+    expect(pressClicked).toHaveBeenCalledOnce();
+    expect(releaseClicked).not.toHaveBeenCalled();
+
+    relayFrom(window.parent, {
       type: "oc:relay-pointerdown",
       x: 60,
       y: 60,
