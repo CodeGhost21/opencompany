@@ -4776,6 +4776,68 @@ mod test {
         drop_db(&s).await;
     }
 
+    /// KeepRecent eviction deletes strictly-older-than-the-n-th-newest traces,
+    /// so a trace saved after the eviction snapshot can never be evicted by the
+    /// sweep that means to keep it. The old `$nin` predicate deleted any doc
+    /// whose seq was not in the keep set, so a `save_trace` landing between
+    /// evict's find and delete was dropped the same pass it was written — the
+    /// race this delete-by-cutoff form removes.
+    #[tokio::test]
+    async fn evict_keep_recent_spares_a_trace_saved_after_its_snapshot() {
+        let Some(s) = store().await else { return };
+        let id = CompanyId::new("acme");
+        // 33 traces: `next_seq` hands out 0..=32 in save order.
+        for i in 0..=32 {
+            s.save_trace(
+                &id,
+                CompressedTrace::now(format!("c{i}"), format!("s{i}")),
+            )
+            .await
+            .unwrap();
+        }
+        // Keeps the newest 32 (seqs 1..=32), evicting exactly seq 0.
+        let removed = s
+            .evict(&id, EvictionPolicy::KeepRecent { n: 32 })
+            .await
+            .unwrap();
+        assert_eq!(removed, 1);
+        let kept = s.recent_traces(&id, usize::MAX).await.unwrap();
+        assert_eq!(kept.len(), 32);
+        assert_eq!(kept.first().unwrap().cycle_id, "c1");
+        assert_eq!(kept.last().unwrap().cycle_id, "c32");
+
+        // A trace written after the sweep's snapshot has seq 33, above the
+        // cutoff (1): it must survive the retention policy. This is the write
+        // the `$nin` predicate deleted when it landed between evict's find and
+        // delete.
+        s.save_trace(&id, CompressedTrace::now("c33", "s33"))
+            .await
+            .unwrap();
+        let after = s.recent_traces(&id, usize::MAX).await.unwrap();
+        assert_eq!(after.len(), 33);
+        assert_eq!(after.last().unwrap().cycle_id, "c33");
+
+        // KeepRecent{0} keeps nothing: every trace goes.
+        let removed = s
+            .evict(&id, EvictionPolicy::KeepRecent { n: 0 })
+            .await
+            .unwrap();
+        assert_eq!(removed, 33);
+        assert!(s.recent_traces(&id, usize::MAX).await.unwrap().is_empty());
+
+        // KeepRecent above the current count is a no-op.
+        s.save_trace(&id, CompressedTrace::now("c34", "s34"))
+            .await
+            .unwrap();
+        let removed = s
+            .evict(&id, EvictionPolicy::KeepRecent { n: 10 })
+            .await
+            .unwrap();
+        assert_eq!(removed, 0);
+
+        drop_db(&s).await;
+    }
+
     #[tokio::test]
     async fn conformance_inbox_store() {
         let Some(s) = store().await else { return };
