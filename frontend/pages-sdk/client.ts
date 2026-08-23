@@ -106,22 +106,8 @@ const DRAG_THRESHOLD_PX = 10;
 /** Where each relayed press started, keyed by pointer id, for the drag test. */
 const pressOrigins = new Map<number, { x: number; y: number }>();
 
-/** Every relayed press that has started so far, to tie a click to its own press. */
-let relayedPressCount = 0;
-
-/**
- * The point the most recent relayed press ended at, and whether it was a drag.
- *
- * The parent relays a compatibility click after a press's `pointerup`, but the
- * click message carries coordinates and no pointer id, so this document cannot
- * address the press it belongs to directly. A click always immediately follows
- * the `pointerup` of its own gesture, so the most recently ended press is the
- * one to correlate against — gated on no newer press having started. A click
- * that ends a drag must not land on whatever is under the release point: the
- * press's tail was routed to the element that took it (capture semantics), and
- * a drag produces no click.
- */
-let lastPressEnd: { x: number; y: number; dragged: boolean; press: number } | null = null;
+/** The most recently ended press for each pointer id, used to suppress drag clicks. */
+const lastPressEnds = new Map<number, { x: number; y: number; dragged: boolean }>();
 
 /** Close a relayed press out, recording whether it was a drag for the click test. */
 function endRelayedPress(pointerId: number, x: number, y: number, canceled: boolean): void {
@@ -130,7 +116,7 @@ function endRelayedPress(pointerId: number, x: number, y: number, canceled: bool
   const dragged =
     canceled ||
     (origin !== undefined && Math.hypot(x - origin.x, y - origin.y) > DRAG_THRESHOLD_PX);
-  lastPressEnd = { x, y, dragged, press: relayedPressCount };
+  lastPressEnds.set(pointerId, { x, y, dragged });
 }
 
 function dispatchRelayedPointer(message: RelayMessage, target: Element): void {
