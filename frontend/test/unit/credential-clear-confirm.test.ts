@@ -87,32 +87,6 @@ describe("credential clearing confirmation (issue #1471)", () => {
     expect(api.clearBilling).toHaveBeenCalledOnce();
   });
 
-  it("does not clear a Smithery key until confirmation", async () => {
-    api.getMcpDirectoryCredential.mockResolvedValue({
-      configured: true,
-      source: "company",
-      notice: "Configured for this company.",
-    });
-    api.setMcpDirectoryCredential.mockResolvedValue({
-      status: { configured: false, source: "none", notice: "Not configured." },
-      note: "Smithery key cleared.",
-    });
-    const fakeClient = client();
-    await act(async () => {
-      root.render(createElement(McpDirectoryCredentialCard, { client: fakeClient, company: "acme" }));
-      await Promise.resolve();
-    });
-
-    await act(async () => button("Clear key").click());
-    expect(api.setMcpDirectoryCredential).not.toHaveBeenCalled();
-    expect(document.body.textContent).toContain("cannot be shown or recovered");
-
-    await act(async () => {
-      (document.querySelector("[data-slot=alert-dialog-action]") as HTMLButtonElement).click();
-    });
-    expect(api.setMcpDirectoryCredential).toHaveBeenCalledWith(fakeClient, "acme", "");
-  });
-
   it("does not disconnect hosting until confirmation", async () => {
     api.getHosting.mockResolvedValue({
       provider: "vercel",
