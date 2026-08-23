@@ -330,4 +330,34 @@ describe("ApprovalCard decide ordering (#1406)", () => {
       ),
     ).not.toBeNull();
   });
+
+  it("names a workflow grant revocation after the workflow (#1411)", async () => {
+    // A workflow grant carries no agent (`agent` is empty, issue #1098) — its
+    // subject lives in `workflow`, and the revocation label must name that
+    // workflow, not the empty string the agent field would yield.
+    const workflowGrant: StandingGrant = {
+      ...GRANT,
+      id: "grant-deploy",
+      agent: "",
+      workflow: "deploy",
+    };
+
+    await act(async () => {
+      root.render(
+        createElement(StandingPermissions, {
+          grants: [workflowGrant],
+          now: T0,
+          askerNames: new Map([["ops", "Ops"]]),
+          granterNames: new Map([["operator", "you"]]),
+          onRevoke: async () => {},
+        }),
+      );
+    });
+
+    expect(
+      container.querySelector(
+        'button[aria-label="Revoke the deploy workflow\'s permission: Fetch a web page — https://docs.rs only"]',
+      ),
+    ).not.toBeNull();
+  });
 });
