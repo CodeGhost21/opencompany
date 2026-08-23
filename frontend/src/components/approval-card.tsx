@@ -64,6 +64,31 @@ const KIND_ICONS: Record<string, LucideIcon> = {
 };
 
 /**
+ * The host's consequence group in the operator's vocabulary (#1426).
+ *
+ * `group` is derived from the tool call and its arguments by the host, which
+ * is the only layer that can know the actual consequence. `other` is the
+ * internal catch-all, while an absent group means an older host: both stay
+ * deliberately unmarked so the badge and tint retain their signal.
+ */
+const APPROVAL_CONSEQUENCES = {
+  spend: { label: "Spends money", iconClass: "bg-status-failed-soft text-status-failed-text" },
+  send: { label: "Leaves the company", iconClass: "bg-status-blocked-soft text-status-blocked-text" },
+  sign: { label: "Makes a commitment", iconClass: "bg-status-failed-soft text-status-failed-text" },
+  publish: { label: "Goes public", iconClass: "bg-status-running-soft text-status-running-text" },
+  hire: { label: "Changes who can act", iconClass: "bg-status-done-soft text-status-done-text" },
+  identity: { label: "Changes who can act", iconClass: "bg-status-done-soft text-status-done-text" },
+} as const;
+
+type ApprovalConsequence = (typeof APPROVAL_CONSEQUENCES)[keyof typeof APPROVAL_CONSEQUENCES];
+
+/** The marked consequence, or nothing for internal and old-host approvals. */
+export function approvalConsequence(group: ApprovalSummary["group"]): ApprovalConsequence | null {
+  if (group == null || group === "other") return null;
+  return APPROVAL_CONSEQUENCES[group];
+}
+
+/**
  * How much of a payload is shown before it is clamped. Past either bound the
  * block collapses behind a "Show everything" toggle — a queue of approvals has
  * to stay scannable, and a forty-line argument object buries the next card.
@@ -88,13 +113,26 @@ export function ApprovalHeadline({
   actions?: React.ReactNode;
 }) {
   const Icon = approvalIcon(a.kind);
+  const consequence = approvalConsequence(a.group);
   return (
     <div className="flex items-start gap-4">
-      <div className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-muted text-foreground">
+      <div
+        className={cn(
+          "flex size-10 shrink-0 items-center justify-center rounded-lg",
+          consequence?.iconClass ?? "bg-muted text-foreground",
+        )}
+      >
         <Icon className="size-5" />
       </div>
       <div className="min-w-0 flex-1">
-        <p className="font-medium">{approvalAction(a)}</p>
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+          <p className="font-medium">{approvalAction(a)}</p>
+          {consequence && (
+            <span className="rounded-full bg-muted px-2 py-0.5 text-2xs font-medium text-foreground">
+              {consequence.label}
+            </span>
+          )}
+        </div>
         {a.amount_usd != null && (
           <p className="text-xs font-medium text-muted-foreground">{money(a.amount_usd)}</p>
         )}
