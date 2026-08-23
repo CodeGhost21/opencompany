@@ -22,6 +22,17 @@ interface Props {
   activeId: string | null;
   /** Channel id → unread count. Absent or 0 reads as caught up. */
   unread: Record<string, number>;
+  /**
+   * Channel id → how many unread mentions name **this person** there.
+   *
+   * Deliberately separate from {@link unread}, and not a subset of it: the two
+   * are computed from different places and answer different questions. Unread
+   * is derived in this browser from what this tab has seen; a mention is a
+   * durable, host-side fact about *you*, and survives a reload, a new device,
+   * and a week away. Merging them would take the honest one and give it the
+   * other's caveat.
+   */
+  mentions?: Record<string, number>;
   onSelect: (id: string) => void;
   className?: string;
 }
@@ -35,7 +46,14 @@ interface Props {
  * screen — the app's own nav is to its left — so it stays visually quieter
  * than that one: no group headers in caps, no badges except unread.
  */
-export function ChannelRail({ sections, activeId, unread, onSelect, className }: Props) {
+export function ChannelRail({
+  sections,
+  activeId,
+  unread,
+  mentions,
+  onSelect,
+  className,
+}: Props) {
   return (
     <aside
       className={cn(
@@ -63,6 +81,7 @@ export function ChannelRail({ sections, activeId, unread, onSelect, className }:
           section={section}
           activeId={activeId}
           unread={unread}
+          mentions={mentions}
           onSelect={onSelect}
         />
       ))}
@@ -74,11 +93,13 @@ function Section({
   section,
   activeId,
   unread,
+  mentions,
   onSelect,
 }: {
   section: ChannelSection;
   activeId: string | null;
   unread: Record<string, number>;
+  mentions?: Record<string, number>;
   onSelect: (id: string) => void;
 }) {
   const [open, setOpen] = useState(true);
@@ -117,6 +138,7 @@ function Section({
                 channel={channel}
                 active={channel.id === activeId}
                 unread={unread[channel.id] ?? 0}
+                mentions={mentions?.[channel.id] ?? 0}
                 onSelect={onSelect}
               />
             </li>
@@ -134,14 +156,21 @@ function ChannelRow({
   channel,
   active,
   unread,
+  mentions,
   onSelect,
 }: {
   channel: Channel;
   active: boolean;
   unread: number;
+  mentions: number;
   onSelect: (id: string) => void;
 }) {
   const hasUnread = unread > 0 && !active;
+  // A mention badge shows even on the open channel, unlike the unread count.
+  // Unread means "you have not looked"; a mention means "somebody asked you
+  // something", and having the channel open is not an answer to that. It
+  // clears when the mention is marked read, not when the channel is viewed.
+  const hasMentions = mentions > 0;
 
   return (
     <button
@@ -164,6 +193,22 @@ function ChannelRow({
     >
       <ChannelIcon channel={channel} />
       <span className="min-w-0 flex-1 truncate">{channel.name}</span>
+      {hasMentions && (
+        <span
+          data-testid="channel-mentions"
+          // Unlike unread, this is not a guess this browser made: the host
+          // recorded who was named. So it gets no "only in this tab" caveat —
+          // it means the same thing on every device.
+          title={
+            mentions === 1
+              ? "1 mention of you here"
+              : `${mentions} mentions of you here`
+          }
+          className="shrink-0 rounded-full bg-destructive px-1.5 text-3xs font-semibold leading-4 text-destructive-foreground"
+        >
+          @{mentions > 99 ? "99+" : mentions}
+        </span>
+      )}
       {hasUnread && (
         <span
           data-testid="channel-unread"

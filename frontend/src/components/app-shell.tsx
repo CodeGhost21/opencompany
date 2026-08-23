@@ -20,6 +20,7 @@ import {
   type ApprovalSummary,
   type CompanyStatus,
   type GrantScope,
+  type NotificationDto,
   type TurnStep,
   type Verdict,
 } from "@/api/types";
@@ -55,6 +56,7 @@ import { startVisiblePolling } from "@/lib/visible-poll";
 import { mergeOpenTurns, openTurnsFromRuns, PendingSyncPosts, type OpenTurn } from "@/lib/live-reply";
 import { type AgentReplyEvent, type CompanyStreamEvent, useEvents } from "@/hooks/use-events";
 import { useLedgerNav } from "@/hooks/use-ledger-nav";
+import { mentionCountsByChannel, mentionsToClear } from "@/lib/mention-badge";
 import type { WorkspaceEvent } from "@/views/WorkspaceView";
 import { useHashView } from "@/hooks/use-hash-view";
 import { BOARD_LEDGER } from "@/lib/board-columns";
@@ -1102,9 +1104,76 @@ export function AppShell({
    * again as the open channel's transcript grows so a line read as it lands
    * doesn't leave a badge behind.
    */
+  /**
+   * This person's unread mentions.
+   *
+   * Polled rather than streamed, deliberately: the company SSE feed has **no
+   * per-viewer projection**, which is the documented reason `ReactionToggled`
+   * is dropped from it entirely — a mention frame would have to carry either
+   * everyone's user ids or nobody's. So the feed is refetched on the same
+   * cadence the console already polls, on each reply, and on window focus.
+   *
+   * A host without the route leaves this empty, so no mention badges render and
+   * nothing else changes.
+   */
+  const [mentionFeed, setMentionFeed] = useState<NotificationDto[]>([]);
+  const refreshMentions = useCallback(() => {
+    void client
+      .notifications(company)
+      .then((feed) => setMentionFeed(feed.notifications))
+      .catch(() => setMentionFeed([]));
+  }, [client, company]);
+
+  useEffect(() => {
+    refreshMentions();
+    const onFocus = () => refreshMentions();
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, [refreshMentions]);
+
+  // Ride the existing company poll rather than adding a second timer.
+  useEffect(() => {
+    refreshMentions();
+  }, [feed.now, refreshMentions]);
+
+  const mentionCounts = useMemo(
+    () => mentionCountsByChannel(mentionFeed),
+    [mentionFeed],
+  );
+  /**
+   * The same feed, readable from a callback that must not be rebuilt when it
+   * changes.
+   *
+   * `onChannelViewed` is handed to `ChatView` and is deliberately stable — it
+   * is called on every channel view and on every transcript growth, and adding
+   * the feed to its dependencies would rebuild it on every poll. But it also
+   * has to clear *this* channel's mentions, which means reading the current
+   * feed. A ref is how both hold: the callback stays stable and still sees the
+   * latest value, instead of capturing the empty array it was created with.
+   */
+  const mentionFeedRef = useRef(mentionFeed);
+  mentionFeedRef.current = mentionFeed;
+
   const onChannelViewed = useCallback(
     (channelId: string) => {
       activeChatChannelRef.current = channelId;
+      // Clear only THIS channel's mentions. A bare "mark all read" here would
+      // silently clear a summons waiting in another channel — which is exactly
+      // the message somebody would then never answer.
+      const clearing = mentionsToClear(mentionFeedRef.current, channelId);
+      if (clearing.length > 0) {
+        // Optimistic, so the badge goes at once; the next poll reconciles.
+        setMentionFeed((current) =>
+          current.map((n) =>
+            clearing.includes(n.id) ? { ...n, readAt: Date.now() } : n,
+          ),
+        );
+        void client.markNotificationsRead(clearing, company).catch(() => {
+          // Older host, or offline. The next poll restores the true state
+          // rather than leaving a badge permanently wrong.
+          refreshMentions();
+        });
+      }
       const at = Date.now();
       setLastViewedChannel((v) => ({ ...v, [channelId]: at }));
       // The durable half (issue #755). Fire-and-forget on purpose: the local
@@ -1916,6 +1985,7 @@ export function AppShell({
               liveStepsByThread={liveStepsByThread}
               unread={unread}
               onChannelViewed={onChannelViewed}
+              mentions={mentionCounts}
               approvals={feed.approvals}
               chatChannelByThread={chatChannelByThread}
               now={feed.now}

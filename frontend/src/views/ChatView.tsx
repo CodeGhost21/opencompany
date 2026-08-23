@@ -140,6 +140,14 @@ interface Props {
   /** Channel id → unread count, for the rail's badges. Owned by the shell. */
   unread?: Record<string, number>;
   /**
+   * Channel id → unread mentions of this person there.
+   *
+   * A separate badge from `unread`, not a subset of it: unread is derived in
+   * this browser, a mention is a durable host-side fact about *you*. See
+   * `ChannelRail`'s prop docs for why merging them would be a loss.
+   */
+  mentions?: Record<string, number>;
+  /**
    * Reports the channel actually on screen — which the hash need not name,
    * since it may have been resolved by the first-channel fallback. The shell
    * clears that channel's unread count and remembers it as where an
@@ -208,6 +216,7 @@ export function ChatView({
   openTurns,
   liveStepsByThread,
   unread,
+  mentions,
   onChannelViewed,
   approvals,
   chatChannelByThread,
@@ -989,6 +998,7 @@ export function ChatView({
         sections={sections}
         activeId={channel.id}
         unread={unread ?? {}}
+        mentions={mentions}
         onSelect={selectChannel}
         className={cn("lg:flex", mobilePane === "rail" ? "flex" : "hidden")}
       />

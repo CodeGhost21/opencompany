@@ -20,6 +20,8 @@ import {
   type BoardQuery,
   type BoardVote,
   type ReadMarker,
+  type MarkNotificationsReadResponse,
+  type NotificationFeedResponse,
   type ReadStateResponse,
   type ApiErrorBody,
   type WorkflowProblem,
@@ -625,6 +627,43 @@ export class OpenCompanyClient {
    */
   readState(company?: string | null): Promise<ReadStateResponse> {
     return this.request<ReadStateResponse>("GET", `${this.scope(company)}/chat/read-state`);
+  }
+
+  /**
+   * This person's notification feed — today, their mentions.
+   *
+   * The durable half of a mention: the live feed only reaches an open browser,
+   * so a mention that landed overnight is here and nowhere else.
+   *
+   * A host that predates this route answers 404; callers treat that as an empty
+   * feed and simply show no mention badges, rather than throwing on load.
+   */
+  notifications(company?: string | null): Promise<NotificationFeedResponse> {
+    return this.request<NotificationFeedResponse>(
+      "GET",
+      `${this.scope(company)}/notifications`,
+    );
+  }
+
+  /**
+   * Mark notifications read for this person.
+   *
+   * Omitting `ids` marks everything they can see — what "clear the badge"
+   * means. An explicitly empty array marks nothing, which is a different
+   * instruction and is honoured as one.
+   *
+   * Answers with what is *actually* still unread rather than what the caller
+   * expects, because marking is a latch and two tabs race constantly.
+   */
+  markNotificationsRead(
+    ids?: string[],
+    company?: string | null,
+  ): Promise<MarkNotificationsReadResponse> {
+    return this.request<MarkNotificationsReadResponse>(
+      "PUT",
+      `${this.scope(company)}/notifications`,
+      ids ? { ids } : {},
+    );
   }
 
   /**
