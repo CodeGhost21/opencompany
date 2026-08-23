@@ -136,6 +136,25 @@ afterEach(() => {
 });
 
 describe("the consolidated approval card", () => {
+  it("lets actions wrap below a readable headline in single and batch cards (#1384)", async () => {
+    // The chat column is narrower than the viewport in both reported cases, so
+    // this has to be a width floor and wrapping contract on each headline — not
+    // a viewport breakpoint. A 12rem title plus the icon and action pair cannot
+    // fit in the narrow transcript, moving the pair to its own line instead of
+    // reducing the title to one word per line.
+    await render([ESPN]);
+    const singleActions = container.querySelector<HTMLElement>("[data-approval-actions]");
+    expect(singleActions).not.toBeNull();
+    expect(singleActions!.parentElement?.className).toContain("flex-wrap");
+    expect(singleActions!.previousElementSibling?.className).toContain("min-w-48");
+
+    await render([ESPN, BBC]);
+    const batchActions = container.querySelector<HTMLElement>("[data-approval-actions]");
+    expect(batchActions).not.toBeNull();
+    expect(batchActions!.parentElement?.className).toContain("flex-wrap");
+    expect(batchActions!.previousElementSibling?.className).toContain("min-w-48");
+  });
+
   it("asks once for a turn's three gated calls, naming each of them", async () => {
     await render([ESPN, BBC, GUARDIAN]);
 
