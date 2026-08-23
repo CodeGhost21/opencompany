@@ -494,6 +494,32 @@ mod tests {
         assert!(!body["tiers"].as_array().unwrap().is_empty());
     }
 
+    /// `GET` also answers the console's "is this a real tool?" note: the
+    /// complete gateable registry, not the workflow-authorable subset. A wired
+    /// agent tool that cannot be a workflow node (`publish_artifact`,
+    /// `hosting_launch_site`) is still a fence the gate matches, so it must be
+    /// present — otherwise the console would call a working entry a mistake.
+    #[tokio::test]
+    async fn get_serves_the_complete_gateable_tool_registry() {
+        let dir = home();
+        let state = state(dir.path()).await;
+        let (status, body) = call(&state, "GET", None).await;
+        assert_eq!(status, StatusCode::OK);
+        let known_tools: &Vec<Value> = body["knownTools"]
+            .as_array()
+            .expect("knownTools is an array");
+        assert!(
+            known_tools
+                .iter()
+                .any(|tool| tool == "publish_artifact"),
+            "a wired agent tool the workflow catalog does not carry must be known"
+        );
+        assert!(
+            known_tools.iter().any(|tool| tool == "shell"),
+            "the registry still carries the workflow tools"
+        );
+    }
+
     /// A tier `PUT` moves the tier and leaves the always-ask list on the
     /// manifest's value — the independence the console's two controls rely on.
     #[tokio::test]
