@@ -669,6 +669,12 @@ jobs:
       # Stalwart's first-run output (including the generated admin password)
       # goes to stderr, and the management API binds the published port, so the
       # provisioning commands below run from the runner against 127.0.0.1.
+      #
+      # The account's address domain must already exist — `account create
+      # --addresses` resolves it up front and fails with "<domain> not found"
+      # otherwise — so create `localhost.test` first. `domain create` is
+      # idempotent (exit 0 even when the domain already exists), which keeps
+      # this retry loop from wedging on a partial run.
       - name: Create the smoke-test mailbox
         run: |
           container="${{ job.services.stalwart.id }}"
@@ -678,6 +684,10 @@ jobs:
           test -n "${admin_secret}"
           for attempt in $(seq 1 20); do
             if docker exec "${container}" \
+              stalwart-cli --url http://127.0.0.1:8080 \
+              --credentials "admin:${admin_secret}" \
+              domain create localhost.test \
+              && docker exec "${container}" \
               stalwart-cli --url http://127.0.0.1:8080 \
               --credentials "admin:${admin_secret}" \
               account create smoke ci-mail-password \
