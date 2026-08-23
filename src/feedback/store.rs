@@ -6,7 +6,9 @@
 //! applied by rewriting the log atomically, so the closing-the-loop poller can
 //! record where a filed issue stands.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::{Arc, LazyLock, Mutex as StdMutex};
 
 use tokio::sync::Mutex as TokioMutex;
 
@@ -15,6 +17,37 @@ use crate::error::OpenCompanyError;
 use crate::feedback::types::FeedbackItem;
 use crate::ports::generate_id;
 use crate::store::paths::Bundle;
+
+/// Process-wide, per-item confirm locks.
+///
+/// Confirming one feedback item (Send after Preview) serialises on its id so
+/// two concurrent confirms of the same item cannot both observe
+/// `issue_status = None` and both file or forward: the loser blocks until the
+/// winner records its status, then re-reads the item and returns the recorded
+/// result. Keyed on the item id — not the store path — because the confirm
+/// surface holds the lock across the whole send; the path-keyed registry in
+/// `store::fs` (issue #388) is what the send's own status rewrite serialises
+/// on, and the two must not collide. The key being the item id also means two
+/// independently-constructed [`FeedbackStore`]s over one company meet here.
+struct ConfirmLocks {
+    inner: Arc<StdMutex<HashMap<String, Arc<TokioMutex<()>>>>>,
+}
+
+impl ConfirmLocks {
+    fn get(&self, id: &str) -> Arc<TokioMutex<()>> {
+        let mut map = self.inner.lock().expect("confirm-lock map poisoned");
+        map.entry(id.to_string()).or_default().clone()
+    }
+}
+
+static CONFIRM_LOCKS: LazyLock<ConfirmLocks> = LazyLock::new(|| ConfirmLocks {
+    inner: Arc::new(StdMutex::new(HashMap::new())),
+});
+
+/// The process-wide serialisation point for confirming feedback item `id`.
+pub(crate) fn confirm_lock(id: &str) -> Arc<TokioMutex<()>> {
+    CONFIRM_LOCKS.get(id)
+}
 
 /// A per-company append-only store of [`FeedbackItem`]s.
 ///
