@@ -188,6 +188,71 @@ describe("ApprovalCard decide ordering (#1406)", () => {
     );
   });
 
+  it("keeps truncated payload labels distinct with the card id (#1411)", async () => {
+    // Same url, method and headers — the only difference is the body, which
+    // sits past `MAX_LEAD_LINES` and is dropped from the label. The card id
+    // must ride along so the two buttons do not read identically.
+    const a: ApprovalSummary = {
+      ...APPROVAL,
+      id: "req-1",
+      kind: "http_request",
+      payload: {
+        url: "https://api.example.com/items",
+        method: "POST",
+        headers: "content-type: application/json",
+        body: "{\"q\": 1}",
+      },
+    };
+    const b: ApprovalSummary = {
+      ...APPROVAL,
+      id: "req-2",
+      kind: "http_request",
+      payload: {
+        url: "https://api.example.com/items",
+        method: "POST",
+        headers: "content-type: application/json",
+        body: "{\"q\": 2}",
+      },
+    };
+
+    await act(async () => {
+      root.render(
+        createElement(
+          "div",
+          null,
+          createElement(ApprovalCard, {
+            approval: a,
+            now: T0 + 60_000,
+            askerNames: new Map([["ops", "Ops"]]),
+            deciding: null,
+            batchIndex: 1,
+            batchTotal: 2,
+            onDecide: (_verdict: Verdict, _scope: GrantScope) => {},
+          }),
+          createElement(ApprovalCard, {
+            approval: b,
+            now: T0 + 60_000,
+            askerNames: new Map([["ops", "Ops"]]),
+            deciding: null,
+            batchIndex: 2,
+            batchTotal: 2,
+            onDecide: (_verdict: Verdict, _scope: GrantScope) => {},
+          }),
+        ),
+      );
+    });
+
+    const labelled = Array.from(container.querySelectorAll("button")).map((b) =>
+      b.getAttribute("aria-label"),
+    );
+    expect(labelled).toContain(
+      "Approve: Make a request to a web address — https://api.example.com/items — method: POST — headers: content-type: application/json — card req-1 — asked by Ops",
+    );
+    expect(labelled).toContain(
+      "Approve: Make a request to a web address — https://api.example.com/items — method: POST — headers: content-type: application/json — card req-2 — asked by Ops",
+    );
+  });
+
   it("distinguishes two same-payload payment cards by amount (#1411)", async () => {
     const small: ApprovalSummary = {
       ...APPROVAL,
