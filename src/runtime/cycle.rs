@@ -7740,6 +7740,44 @@ mod test {
         );
     }
 
+    /// Issue #1458, from the deny side: a standing denial minted against a
+    /// scoped tool remembers **which slice** the operator refused.
+    ///
+    /// The mint used to re-read the journal's payload-scrubbed copy of the
+    /// effect (issue #351), whose `Null` payload made `standing_scope_of`
+    /// answer `None` — and a stored `None` is a wildcard in `admits_scope`, so
+    /// refusing one web origin blocked every origin for that teammate until
+    /// expiry. The resolve now carries the parked effect whole, so the deny
+    /// records the same scope the card showed.
+    #[tokio::test]
+    async fn a_standing_deny_on_a_scoped_tool_keeps_the_scope_it_was_shown_for() {
+        let home_dir = tmp_home();
+        let (rt, id) = park_one_blocked_tool_call(
+            home_dir.path().to_path_buf(),
+            grantable_effect(
+                "ops",
+                crate::policy::consequence::WEB_FETCH,
+                serde_json::json!({ "url": "https://docs.rs/x" }),
+            ),
+        )
+        .await;
+
+        let (_, follow_up) = rt
+            .resolve_approval_spawned(&id, Verdict::Deny, operator(), tool_scope())
+            .await
+            .unwrap();
+        let _ = crate::company::runtime::join_follow_up(follow_up).await;
+
+        let listed = rt.standing_grants();
+        assert_eq!(listed.len(), 1, "one standing denial is minted");
+        assert_eq!(listed[0].verdict, Verdict::Deny);
+        assert_eq!(
+            listed[0].scope.as_deref(),
+            Some("https://docs.rs"),
+            "the deny records the origin the operator refused, not a wildcard"
+        );
+    }
+
     /// A scope the runtime must not honour changes **nothing**: the approval is
     /// still parked and no verdict was journaled.
     ///
