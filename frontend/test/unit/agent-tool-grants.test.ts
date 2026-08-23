@@ -94,9 +94,12 @@ describe("companyCovers", () => {
     expect(companyCovers(["repo.read"], "repo")).toBe(true);
     expect(companyCovers(["mcp:*"], "mcp:notion")).toBe(true);
     expect(companyCovers(["mcp:notion"], "mcp:notion")).toBe(true);
-    // …but a sibling grant does not confer the bare namespace.
+    // …but a *different* namespace does not confer it.
     expect(companyCovers(["media.generation"], "composio")).toBe(false);
-    expect(companyCovers(["search.web"], "search")).toBe(false);
+    // …while the opt-in predicate accepts any sub-grant of the namespace, so
+    // `search.web` does confer a bare `search` request — unlike the generic
+    // matcher, where `docs.read` would not confer `docs`.
+    expect(companyCovers(["search.web"], "search")).toBe(true);
   });
 
   it("covers a sub-grant from a starred namespace", () => {
