@@ -150,10 +150,11 @@ window.addEventListener("message", function onRelay(event: MessageEvent) {
     const pointerId = event.data.pointerId;
     const lastPressEnd = pointerId === undefined ? undefined : lastPressEnds.get(pointerId);
     if (
+      pointerId !== undefined &&
       lastPressEnd?.dragged &&
       Math.hypot(event.data.x - lastPressEnd.x, event.data.y - lastPressEnd.y) <= 4
     ) {
-      lastPressEnds.delete(pointerId!);
+      lastPressEnds.delete(pointerId);
       return;
     }
     const element = document.elementFromPoint(event.data.x, event.data.y);
