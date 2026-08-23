@@ -157,8 +157,11 @@ pub enum ResolveOutcome {
     /// The approval was parked but is past its TTL, so it resolves to a
     /// default-deny whatever the operator asked for. It IS removed.
     Expired,
-    /// The operator denied it. Removed; nothing to execute.
-    Denied,
+    /// The operator denied it. Removed, and here is the effect the card showed,
+    /// retained so a standing denial can be minted against the same scoped
+    /// arguments (issue #1458) rather than the payload-scrubbed copy the journal
+    /// keeps (issue #351), which would read as an unscoped wildcard.
+    Denied(Effect),
     /// The operator approved it in time. Removed, and here is the effect.
     Approved(Effect),
 }
