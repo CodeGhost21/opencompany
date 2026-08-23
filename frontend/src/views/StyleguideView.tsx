@@ -320,7 +320,7 @@ function ColorSection() {
               ink-muted — teammate counts, metadata. 4.5:1
             </p>
             <p className="text-sm text-primary">primary — links and emphasis. 4.7:1</p>
-            <p className="text-sm text-destructive">destructive — errors. 3.8:1 (marks)</p>
+            <p className="text-sm text-destructive">destructive — errors. 4.67:1</p>
           </CardContent>
         </Card>
         <p className="mt-2 text-2xs text-muted-foreground">
