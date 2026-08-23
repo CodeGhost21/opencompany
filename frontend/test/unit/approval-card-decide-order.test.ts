@@ -304,12 +304,14 @@ describe("ApprovalCard decide ordering (#1406)", () => {
     // Identical payload and asker — the amount is the only thing that tells
     // the $40 decision from the $4,000 one, so it has to ride in the name.
     // The amount is formatted via `money`, so the expectation uses it rather
-    // than a locale-hardcoded literal.
+    // than a locale-hardcoded literal. The recipient keeps its label because
+    // `payment.send` has no predictable first argument name — dropping it
+    // would let `{recipient: "acme"}` and `{payee: "acme"}` collide (#1411).
     expect(labelled).toContain(
-      `Approve: Send a payment — ${money(40)} — acme — asked by Ops`,
+      `Approve: Send a payment — ${money(40)} — recipient: acme — asked by Ops`,
     );
     expect(labelled).toContain(
-      `Approve: Send a payment — ${money(4000)} — acme — asked by Ops`,
+      `Approve: Send a payment — ${money(4000)} — recipient: acme — asked by Ops`,
     );
   });
 
