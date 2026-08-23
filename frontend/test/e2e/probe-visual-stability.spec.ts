@@ -44,33 +44,16 @@ async function open(page: Page) {
 
 test("overview holds still without the mask (probe)", async ({ page }) => {
   await open(page);
-  await page.waitForTimeout(2500);
-  const samples = [] as string[];
-  for (let i = 0; i < 5; i++) {
-    samples.push(
-      await page.evaluate(() => {
-        const svg = document.querySelector('.oc-kg svg');
-        const html = svg?.innerHTML ?? '';
-        let h = 0;
-        for (const el of svg?.querySelectorAll('[transform]') ?? []) {
-          for (const ch of el.getAttribute('transform') ?? '') h = (h * 31 + ch.charCodeAt(0)) | 0;
-        }
-        let h2 = 0;
-        for (const el of svg?.querySelectorAll('circle, path, ellipse') ?? []) {
-          const s = el.getAttribute('transform') ?? el.getAttribute('d') ?? '';
-          for (const ch of s.slice(0, 64)) h2 = (h2 * 31 + ch.charCodeAt(0)) | 0;
-        }
-        const circles = Array.from(svg?.querySelectorAll('circle') ?? []);
-        let cxs = 0, cys = 0;
-        for (const c of circles) {
-          cxs += (parseFloat(c.getAttribute('cx') ?? '0') * 1000) | 0;
-          cys += (parseFloat(c.getAttribute('cy') ?? '0') * 1000) | 0;
-        }
-        return JSON.stringify({ len: html.length, thash: h, dhash: h2, cxs, cys, n: circles.length });
-      }),
-    );
-    await page.waitForTimeout(800);
-  }
-  console.log("PROBE_SAMPLES=" + JSON.stringify(samples, null, 1));
-  expect(false).toBe(true);
+  // Let the d3 sim fully cool to sleep (~8s at alphaDecay 0.015) before testing.
+  await page.waitForTimeout(12_000);
+  const a = await page.screenshot({ fullPage: true, animations: "disabled", caret: "hide" });
+  await page.waitForTimeout(2000);
+  const b = await page.screenshot({ fullPage: true, animations: "disabled", caret: "hide" });
+  await import("node:fs/promises").then(async (fs) => {
+    await fs.writeFile("/tmp/probe-a.png", a);
+    await fs.writeFile("/tmp/probe-b.png", b);
+  });
+  const same = a.equals(b);
+  console.log(`PROBE overview stable without mask after cool-down: ${same} (${a.length} bytes)`);
+  expect(same).toBe(true);
 });
