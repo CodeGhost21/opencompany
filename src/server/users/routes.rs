@@ -763,6 +763,20 @@ fn redirect_fragment(redirect: &str) -> Option<String> {
     safe.then(|| redirect.to_string())
 }
 
+/// The safe subset of a hub sign-in destination hint.
+///
+/// `from` is carried in the hub's return URI as a query parameter — a fragment
+/// would swallow the hub's own `token=` on the way back, which is why this is
+/// not a [`redirect_fragment`]. It is round-tripped through an external service
+/// and back into the console's address bar, so it is validated to a slug
+/// subset (`setup`, today): a value that cannot be honoured is dropped rather
+/// than refused, exactly like [`redirect_fragment`].
+fn redirect_from(from: &str) -> Option<&str> {
+    let safe = from.len() <= 32
+        && from.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'));
+    safe.then_some(from)
+}
+
 /// Mails the magic link. Returns whether it was actually sent.
 ///
 /// `redirect`, when present, is appended to the link so the console lands on
