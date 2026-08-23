@@ -47,10 +47,9 @@ import {
   payloadAge,
   payloadLines,
 } from "@/lib/language";
-import type { TeamMember } from "@/lib/team";
+import { fromDto, type TeamMember } from "@/lib/team";
 import { cn } from "@/lib/utils";
 import { channelIdForThread, deskFromDto, dmChannelId } from "@/views/chat/model";
-import { fromDto } from "@/lib/team";
 
 const KIND_ICONS: Record<string, LucideIcon> = {
   "payment.send": CreditCard,

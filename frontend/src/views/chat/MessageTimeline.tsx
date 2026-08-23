@@ -12,7 +12,6 @@ import { WorkingIndicator } from "./WorkingIndicator";
 import {
   channelIntroSentence,
   channelTitle,
-  channelTitle,
   dmFace,
   type Channel,
   type TimelineItem,

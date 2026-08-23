@@ -611,6 +611,7 @@ export function ApprovalCard({
   approval: a,
   now,
   askerNames,
+  thread,
   deciding,
   batchIndex,
   batchTotal,
@@ -619,6 +620,7 @@ export function ApprovalCard({
   approval: ApprovalSummary;
   now: number;
   askerNames: Map<string, string>;
+  thread?: import("@/components/approval-card").ApprovalThreadLink | null;
   /** The verdict this card is waiting on, or `null` when it is idle (#373). */
   deciding: Verdict | null;
   /**
