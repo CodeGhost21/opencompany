@@ -579,6 +579,19 @@ struct GrantState {
     pending: HashMap<ApprovalId, String>,
 }
 
+/// Whether two recorded scopes overlap (issue #1458).
+///
+/// A wildcard — a scope the tool could not resolve at mint time, recorded
+/// `None` — overlaps every concrete scope, because a wildcard policy matches
+/// every call the tool can make. Two concrete scopes overlap only when they are
+/// identical. This is deliberately not [`StandingGrant::admits_scope`], whose
+/// third case refuses a scoped grant against an unresolvable live call: that is
+/// the right answer for matching (unknown is a send), but the reconcile is
+/// comparing two policies, not a policy and a call.
+fn scopes_overlap(a: Option<&str>, b: Option<&str>) -> bool {
+    a.is_none() || b.is_none() || a == b
+}
+
 impl GrantSet {
     /// Mints a grant.
     pub fn grant(&self, call: GrantedCall) {
