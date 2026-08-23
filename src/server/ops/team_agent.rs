@@ -1810,7 +1810,11 @@ prompt = "Lead decisively."
     /// named `name`, declaring `image/png`. The declared type is what the store
     /// keeps — the referent check must not trust it, and this helper exists to
     /// prove that.
-    async fn upload_workspace_binary(state: &AppState, name: &str, bytes: &[u8]) -> (StatusCode, Value) {
+    async fn upload_workspace_binary(
+        state: &AppState,
+        name: &str,
+        bytes: &[u8],
+    ) -> (StatusCode, Value) {
         const BOUNDARY: &str = "----ocworkspacetest";
         let mut body: Vec<u8> = Vec::new();
         body.extend_from_slice(
