@@ -21,6 +21,16 @@ interface Props {
   placeholder: string;
   disabled?: boolean;
   onSend: (text: string, intent?: MessageIntent) => void;
+  /**
+   * Called as the box is typed in, so the company can show a typing
+   * indicator.
+   *
+   * Fired on **every** change rather than on a timer: throttling is the
+   * caller's job, because it is per channel and this component does not know
+   * which channel it is in. Absent on the composers where a typing indicator
+   * would be noise.
+   */
+  onTyping?: () => void;
   /** Compact form, for the narrower thread panel. */
   compact?: boolean;
   /**
@@ -63,6 +73,7 @@ export function MessageComposer({
   onSend,
   compact,
   deliverableChoice,
+  onTyping,
 }: Props) {
   const [draft, setDraft] = useState("");
   // What the NEXT line is for, and only the next one. It starts and resets
@@ -159,7 +170,10 @@ export function MessageComposer({
         <textarea
           ref={input}
           value={draft}
-          onChange={(e) => setDraft(e.target.value)}
+          onChange={(e) => {
+            setDraft(e.target.value);
+            onTyping?.();
+          }}
           onKeyDown={onKeyDown}
           aria-label={placeholder}
           placeholder={placeholder}
