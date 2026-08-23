@@ -436,6 +436,19 @@ test("#1141 a card opens a teammate, breadcrumbed and editable", async ({ page }
   await expect(page.getByTestId("agent-status")).toHaveText("Working");
   await expect(page.getByTestId("agent-tasks")).toHaveText("2 open tasks");
 
+  // The desk is identity, not a final detail section. Its chip goes to the
+  // desk's shareable chart address, and the workload names each open card so
+  // the count is not a dead end (issue #1433).
+  const desk = page.getByTestId("agent-desk-research");
+  await expect(desk).toContainText("Research");
+  await expect(desk).toContainText("(lead)");
+  await expect(desk).toHaveAttribute("href", "#/company/research");
+  await expect(page.getByTestId("agent-open-task-t1")).toHaveText("Scan competitor pricing");
+  await expect(page.getByTestId("agent-open-task-t1")).toHaveAttribute("href", "#/tasks/t1");
+  await expect(page.getByTestId("agent-open-task-t2")).toHaveText("Draft the weekly brief");
+  await expect(page.getByTestId("agent-open-task-t2")).toHaveAttribute("href", "#/tasks/t2");
+  await expect(page.getByTestId("agent-open-task-t3")).toHaveCount(0);
+
   // Edit is on the header row, not buried in a card halfway down, and this
   // teammate is an overlay so it is live.
   const edit = page.getByTestId("agent-edit");
@@ -447,4 +460,50 @@ test("#1141 a card opens a teammate, breadcrumbed and editable", async ({ page }
   await page.getByTestId("agent-breadcrumb-company").click();
   await expect(card(page, "Maya")).toBeVisible({ timeout: 30_000 });
   await expect.poll(() => page.url()).toContain("#/company");
+});
+
+test("#1433 switching teammates drops the previous one's open tasks", async ({ page }) => {
+  await mockApi(page);
+
+  // The board read, under the test's control. `AgentDetailView` stays mounted
+  // across a hash change — `TeamView` renders it without a `key` — so the
+  // agent-detail request for the teammate being opened races the board request
+  // independently. Stalling the board on the second read is what makes that
+  // race deterministic: it is the "and indefinitely if that request hangs" half
+  // of the failure, and it is the half a real slow host produces.
+  //
+  // Registered after `mockApi`, so it wins: Playwright gives the most recently
+  // added handler priority.
+  let stall = false;
+  await page.route("**/tasks", async (route) => {
+    // Deliberately neither fulfilled nor aborted — the board read never lands.
+    if (stall) return;
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(TASKS),
+    });
+  });
+
+  await page.goto("/#/team/maya");
+  await expect(page.getByTestId("agent-open-task-t1")).toBeVisible({ timeout: 30_000 });
+
+  // Same-document navigation, which is what the operator's click does and what
+  // keeps the view mounted. A full `goto` would remount it and prove nothing.
+  stall = true;
+  await page.evaluate(() => {
+    window.location.hash = "#/team/ravi";
+  });
+
+  // Ravi's page is ready…
+  await expect(page.getByTestId("agent-name")).toHaveText("Ravi", { timeout: 30_000 });
+
+  // …and carries no reading of the board at all, rather than Maya's. Before the
+  // fix the previous teammate's task links and workload survived here, because
+  // the effect cleared them only when `company` went falsy — so Ravi rendered
+  // with links to cards that are not his, for as long as the board read took.
+  await expect(page.getByTestId("agent-open-tasks")).toHaveCount(0);
+  await expect(page.getByTestId("agent-open-task-t1")).toHaveCount(0);
+  await expect(page.getByTestId("agent-open-task-t2")).toHaveCount(0);
+  await expect(page.getByTestId("agent-tasks")).toHaveCount(0);
 });

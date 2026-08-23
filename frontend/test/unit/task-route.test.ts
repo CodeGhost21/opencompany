@@ -43,15 +43,20 @@ describe("taskIdFromSegment", () => {
  * The shell's own rewrite, verbatim (`app-shell.tsx`). Duplicated rather than
  * exported because exporting it would make the shell's route table part of its
  * public surface for one test's benefit; what matters here is the rule, and the
- * rule is two lines.
+ * rule is short.
  */
 const REWRITE = (
   head: string,
   sub: string | null,
-): [string, string | null] | null =>
-  head === "tasks" && taskIdFromSegment(sub) === null ? ["ledgers", "tasks"] : null;
+): [string, string | null] | null => {
+  if (head === "tasks" && taskIdFromSegment(sub) === null) return ["ledgers", "tasks"];
+  if (head === "connections") return ["settings", "connections"];
+  if (head === "mcp") return ["settings", "mcp"];
+  if (head === "people") return ["settings", "people"];
+  return null;
+};
 
-const VIEWS = ["overview", "ledgers", "tasks"] as const;
+const VIEWS = ["overview", "ledgers", "tasks", "settings"] as const;
 
 describe("the retired #/tasks address", () => {
   let container: HTMLDivElement;
@@ -120,5 +125,15 @@ describe("the retired #/tasks address", () => {
     await visit("#/ledgers/goals");
     expect(seen).toEqual(["ledgers", "goals"]);
     expect(window.location.hash).toBe("#/ledgers/goals");
+  });
+
+  it.each([
+    ["connections", "connections"],
+    ["mcp", "mcp"],
+    ["people", "people"],
+  ])("sends retired #/%s to its Settings page", async (retired, settingsPage) => {
+    await visit(`#/${retired}`);
+    expect(seen).toEqual(["settings", settingsPage]);
+    expect(window.location.hash).toBe(`#/settings/${settingsPage}`);
   });
 });
