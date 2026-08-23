@@ -1977,6 +1977,15 @@ export function KnowledgeGraph({
     }
   };
   const nodeAriaLabel = (n: KGNode) => `${CAT[n.kind].label}: ${n.label}. Press Enter or Space to select.`;
+  // The memory notes (memoized, rendered earlier) read these through their ref
+  // so the roving logic here can stay exactly where the sim nodes use it.
+  memoryKeyNavRef.current = {
+    move: moveActiveNode,
+    select: (id: string) => {
+      clearDetail();
+      setSelectedMemoryId((s) => (s === id ? null : s));
+    },
+  };
 
   // ── the graph itself (reused inline + fullscreen) ───────────────────────────
   const graphInner = (
