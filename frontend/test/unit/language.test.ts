@@ -176,6 +176,7 @@ describe("the decide buttons' label (#1411)", () => {
         },
       }),
       askers,
+      NOW,
     );
     const second = decisionLabel(
       approval({
@@ -188,6 +189,7 @@ describe("the decide buttons' label (#1411)", () => {
         },
       }),
       askers,
+      NOW,
     );
     expect(first).not.toBe(second);
     expect(first).toContain('body: {"q": 1}');
@@ -195,13 +197,53 @@ describe("the decide buttons' label (#1411)", () => {
     expect(first).not.toContain("card a1");
   });
 
+  it("keeps unmapped-tool cards apart when their first argument name differs", () => {
+    // Two same-kind approvals whose first argument NAME differs but whose
+    // value is the same must not read alike: `{path: "/tmp/a"}` and
+    // `{destination: "/tmp/a"}` are different requests, and a bounded label
+    // that dropped the name would hand both cards the same button text (#1411).
+    const withPath = decisionLabel(
+      approval({ kind: "some_tool_nobody_declared", payload: { path: "/tmp/a" } }),
+      askers,
+      NOW,
+    );
+    const withDestination = decisionLabel(
+      approval({ kind: "some_tool_nobody_declared", payload: { destination: "/tmp/a" } }),
+      askers,
+      NOW,
+    );
+    expect(withPath).not.toBe(withDestination);
+    expect(withPath).toContain("path: /tmp/a");
+    expect(withDestination).toContain("destination: /tmp/a");
+  });
+
   it("says why there is no lead when the host withheld the contents", () => {
     // A non-admin's withheld card has no payload to lead with, but it must not
     // read as an ordinary no-argument approval — the resolve route accepts any
     // member, and the phrase is the one `ApprovalRow` already uses.
     expect(
-      decisionLabel(approval({ kind: "payment.send", contents_hidden: true }), askers),
-    ).toBe("Send a payment — details hidden by your role — asked by Sam");
+      decisionLabel(approval({ kind: "payment.send", contents_hidden: true }), askers, NOW),
+    ).toBe("Send a payment — details hidden by your role — composed 1m ago — asked by Sam");
+  });
+
+  it("keeps two hidden cards' decide buttons apart by their composition time", () => {
+    // Withheld contents are redacted to the same phrase on every card, so two
+    // hidden approvals of the same kind from the same asker would read alike —
+    // the composition time (non-sensitive, already on the card body) is what
+    // tells their buttons apart (#1411).
+    const earlier = decisionLabel(
+      approval({ kind: "payment.send", contents_hidden: true }),
+      askers,
+      61_000,
+    );
+    const later = decisionLabel(
+      approval({ kind: "payment.send", contents_hidden: true }),
+      askers,
+      3_601_000,
+    );
+    expect(earlier).not.toBe(later);
+    expect(earlier).toContain("composed 1m ago");
+    expect(later).toContain("composed 1h ago");
   });
 
   it("bounds one long value instead of becoming a wall of text", () => {
@@ -211,6 +253,7 @@ describe("the decide buttons' label (#1411)", () => {
     const label = decisionLabel(
       approval({ kind: "shell", payload: { command: "x".repeat(2_000) } }),
       askers,
+      NOW,
     );
     expect(label.length).toBeLessThanOrEqual(160);
     expect(label.startsWith("Run a terminal command — ")).toBe(true);
