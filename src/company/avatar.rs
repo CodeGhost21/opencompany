@@ -43,6 +43,8 @@
 //! [`is_supported_image`] for the accepted types, and the upload route for the
 //! size ceiling.
 
+use futures::StreamExt;
+
 use crate::Result;
 use crate::error::OpenCompanyError;
 
