@@ -581,6 +581,9 @@ function ProviderTile({
           )}
         >
           {body}
+          <p className="mt-2 text-left text-xs text-muted-foreground">
+            Permission requested: {permissionHint(row.category)}.
+          </p>
         </button>
       ) : connectable ? (
         <button

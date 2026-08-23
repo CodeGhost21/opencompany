@@ -792,12 +792,18 @@ export function McpServersSection({ client, company, canManage, chrome = "inline
                         />
                         <span className="ml-auto flex items-center gap-2">
                           {controls.toggle && (
-                            <Switch
-                              checked={server.enabled}
-                              disabled={busy !== null || !canManage}
-                              onCheckedChange={(v) => void toggle(server, v)}
-                              aria-label={`Enable ${server.name}`}
-                            />
+                            <span className="flex items-center gap-1.5">
+                              <Label htmlFor={`mcp-enabled-${server.name}`} className="text-xs">
+                                {server.enabled ? "Enabled" : "Disabled"}
+                              </Label>
+                              <Switch
+                                id={`mcp-enabled-${server.name}`}
+                                checked={server.enabled}
+                                disabled={busy !== null || !canManage}
+                                onCheckedChange={(v) => void toggle(server, v)}
+                                aria-label={`${server.enabled ? "Disable" : "Enable"} ${server.name}`}
+                              />
+                            </span>
                           )}
                           {/* Issue #1260: `oauth_required` means the server asked for
                               OAuth; it does NOT mean this console can complete one. A
@@ -919,6 +925,18 @@ export function McpServersSection({ client, company, canManage, chrome = "inline
                         </span>
                       </div>
                       <p className="truncate text-xs text-muted-foreground">{server.endpoint}</p>
+                      {controls.toggle && (
+                        <p className="text-xs text-muted-foreground">
+                          {server.enabled
+                            ? "Turning this off stops teammates from receiving this server's tools on their next turn."
+                            : "Turning this on makes this server's tools available on teammates' next turn, subject to their tool grants."}
+                        </p>
+                      )}
+                      {dial === "disconnect" && (
+                        <p className="text-xs text-muted-foreground">
+                          Disconnect keeps this install and its stored credentials. Reconnect it to use its tools again.
+                        </p>
+                      )}
                       {/* Reachability (issue #568): who can actually call this server. An
                           enabled server no agent reaches is almost always a misconfiguration,
                           so that empty case is flagged loudly rather than shown as a blank list.
@@ -1009,6 +1027,9 @@ export function McpServersSection({ client, company, canManage, chrome = "inline
                       )}
                       {envFor === server.name && canManage && (
                         <div className="space-y-2 rounded-md bg-muted/40 p-2" data-testid="mcp-env-inline">
+                          <p className="text-xs text-muted-foreground">
+                            Saving merges these values with the stored credentials and reconnects this server.
+                          </p>
                           {envFields.kind === "loading" ? (
                             <p className="flex items-center gap-1 text-xs text-muted-foreground">
                               <Loader2 className="size-3 animate-spin" /> Reading this
@@ -1179,6 +1200,11 @@ export function McpServersSection({ client, company, canManage, chrome = "inline
                     Add
                   </Button>
                 </div>
+                <p className="text-xs text-muted-foreground">
+                  Adding saves the server now. {bridge === "absent"
+                    ? "It stays unavailable to teammates until this deployment is rebuilt with MCP support."
+                    : "Teammates pick up its tools on their next turn."}
+                </p>
               </div>
             )}
 

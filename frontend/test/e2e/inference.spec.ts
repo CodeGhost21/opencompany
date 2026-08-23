@@ -134,3 +134,19 @@ test("a key typed for a BYOK provider does reach the host on save", async ({ pag
   const cleared = await page.request.get("/api/v1/company/inference");
   expect((await cleared.json()).keyConfigured).toBe(false);
 });
+
+test("changing provider asks before replacing a typed endpoint or model", async ({ page }) => {
+  await openConnections(page);
+  await expect(page.locator("#inference-key")).toBeVisible({ timeout: 30_000 });
+
+  await pickProvider(page, "Custom (OpenAI-compatible)");
+  await page.locator("#inference-base-url").fill("https://models.example.test/v1");
+  await page.locator("#inference-model-chat-v1").fill("operator-draft");
+  await pickProvider(page, "OpenRouter");
+
+  await expect(page.getByRole("alertdialog")).toContainText("replaces the typed Base URL and model fields");
+  await page.getByRole("button", { name: "Keep draft" }).click();
+  await expect(page.locator("#inference-provider")).toContainText("Custom (OpenAI-compatible)");
+  await expect(page.locator("#inference-base-url")).toHaveValue("https://models.example.test/v1");
+  await expect(page.locator("#inference-model-chat-v1")).toHaveValue("operator-draft");
+});

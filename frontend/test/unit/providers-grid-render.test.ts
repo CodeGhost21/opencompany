@@ -157,6 +157,11 @@ describe("what a tile says about its accounts", () => {
     expect(text()).toContain("not connected");
     expect(text()).not.toContain("none connected");
   });
+
+  it("shows an unconnected provider's requested permission before sign-in", async () => {
+    await render([row("slack", "Slack", [])]);
+    expect(text()).toContain("Permission requested:");
+  });
 });
 
 describe("a connected tile that does not deliver drops the success styling", () => {
