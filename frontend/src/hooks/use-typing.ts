@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import type { OpenCompanyClient } from "@/api/client";
+import { ApiError } from "@/api/types";
 import {
   pruneTypers,
   shouldShowTyping,
@@ -101,10 +102,13 @@ export function useTyping(
       const sent = lastSent.current.get(key) ?? 0;
       if (now - sent < TYPING_SEND_THROTTLE_MS) return;
       lastSent.current.set(key, now);
-      void client.typing(chatId, parentId, company).catch(() => {
-        // A host without the route, or a transient failure. Either way this is
-        // fire-and-forget: an undelivered typing ping is not worth a retry.
-        supported.current = false;
+      void client.typing(chatId, parentId, company).catch((error) => {
+        // Only a 404 means this host predates the route — disable it, the
+        // same distinction `usePresence`'s heartbeat makes. Anything else
+        // (a network blip, a proxy hiccup, a 5xx) is fire-and-forget: this
+        // one ping is not worth retrying, but the *route* is not disabled,
+        // so the next keystroke's ping still goes out.
+        if (error instanceof ApiError && error.status === 404) supported.current = false;
       });
     },
     [client, company, connected],
