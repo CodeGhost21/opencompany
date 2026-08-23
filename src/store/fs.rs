@@ -3039,6 +3039,62 @@ mod test {
             Some(SecretValue("rotated-not-a-real-token".into()))
         );
     }
+
+    #[tokio::test]
+    async fn canonical_namespace_does_not_bleed_into_legacy_fallback() {
+        // Issue #1510's follow-up: `key-` was itself a valid legacy slug, so
+        // the old canonical file for `foo` (`key-foo`) was returned when
+        // reading `key-foo` through the legacy fallback, and writing `key-foo`
+        // deleted `foo`. The `%` canonical prefix makes the two namespaces
+        // disjoint.
+        let root_dir = tmp_root();
+        let root = root_dir.path().to_path_buf();
+        let secrets = FsSecretStore::new(&root);
+        let company = CompanyId::new("company-a");
+
+        secrets
+            .set(&company, "foo", SecretValue("value-for-foo".into()))
+            .await
+            .unwrap();
+        // `key-foo` was never set, and the legacy fallback must not reach the
+        // canonical file of `foo`.
+        assert_eq!(
+            secrets.get(&company, "key-foo").await.unwrap(),
+            None,
+            "legacy fallback reached a canonical file of a different key"
+        );
+
+        // Writing `key-foo` must not disturb `foo`'s value.
+        secrets
+            .set(&company, "key-foo", SecretValue("value-for-key-foo".into()))
+            .await
+            .unwrap();
+        assert_eq!(
+            secrets.get(&company, "foo").await.unwrap(),
+            Some(SecretValue("value-for-foo".into())),
+            "writing `key-foo` deleted `foo`"
+        );
+        assert_eq!(
+            secrets.get(&company, "key-foo").await.unwrap(),
+            Some(SecretValue("value-for-key-foo".into()))
+        );
+    }
+
+    #[tokio::test]
+    async fn secret_set_succeeds_for_encoding_heavy_keys() {
+        // A 20-emoji MCP server name used to exceed the filesystem component
+        // limit once percent-encoded; the filename must stay bounded so `set`
+        // does not fail with ENAMETOOLONG.
+        let root_dir = tmp_root();
+        let root = root_dir.path().to_path_buf();
+        let secrets = FsSecretStore::new(&root);
+        let company = CompanyId::new("company-a");
+        let key = format!("mcp/{}/auth", "🎯".repeat(20));
+        let value = SecretValue("not-a-real-token".into());
+
+        secrets.set(&company, &key, value.clone()).await.unwrap();
+        assert_eq!(secrets.get(&company, &key).await.unwrap(), Some(value));
+    }
     /// The put/delete race the index lock exists for: a same-address write
     /// and delete interleaving as write-blob / delete-both / append-index
     /// would leave an index row whose blob is gone — list answers, peek
