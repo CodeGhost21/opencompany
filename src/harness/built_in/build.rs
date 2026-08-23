@@ -1903,6 +1903,7 @@ mod tests {
             store: Arc::new(PinStore),
             meter: None,
             workspace_root,
+            mcp_home: None,
             workspace_git_enabled: false,
             audit_root,
             model_override: None,
