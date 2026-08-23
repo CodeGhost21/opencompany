@@ -440,10 +440,15 @@ pub fn shell_tools(
 /// under the flag that wired its tools, and an agent holding none of the three
 /// gets the empty string and no section at all.
 ///
-/// The confinement sentence is not decoration. [`exec_security`] sets
-/// `workspace_only`, so an absolute path or a `../` escape is refused by the
-/// policy rather than by the model's judgement; an agent that does not know
-/// this spends its turns discovering it one refusal at a time.
+/// The confinement sentence is not decoration, and it is scoped on purpose.
+/// [`exec_security`] sets `workspace_only`, so the **file** and `code` tools
+/// refuse an absolute path or a `../` escape by policy rather than by the
+/// model's judgement; an agent that does not know this spends its turns
+/// discovering it one refusal at a time. The **shell** is deliberately not
+/// described that way: `action_dir` only sets the command's current directory,
+/// and a same-uid command can read anywhere the server can
+/// (`docs/spec/security/agent-isolation.md`). The shell clause says the
+/// directory is where commands *start*, never that they cannot leave it.
 pub fn sandbox_brief(files: bool, shell: bool, code: bool) -> String {
     if !files && !shell && !code {
         return String::new();
@@ -453,23 +458,22 @@ pub fn sandbox_brief(files: bool, shell: bool, code: bool) -> String {
          You have a real working directory of your own — a private folder on disk, separate from \
          the company workspace (the shared note tree the `workspace_*` tools read). It is where \
          your own files live.\n\
-         Every path you give these tools is relative to that directory, and nothing outside it is \
-         reachable: an absolute path or a `../` escape is refused, so write `report.md` or \
-         `drafts/report.md`, never `/tmp/report.md` or `~/report.md`. Subdirectories are created \
-         for you on write.\n",
+         Every path you give these tools is relative to that directory, so write `report.md` or \
+         `drafts/report.md`, never `/tmp/report.md` or `~/report.md`.\n",
     );
     if files {
         brief.push_str(
             "Read and write it with `file_read`, `file_write`, `edit`, `list`, `glob` and \
-             `grep`.\n",
+             `grep`. Subdirectories are created for you on write, and an absolute path or a \
+             `../` escape is refused by these tools.\n",
         );
     }
     if shell {
         brief.push_str(
-            "Run commands with `shell`. It executes inside that same directory and cannot leave \
-             it, so a command is written against relative paths like any other tool call. \
-             `read_workspace_state` gives you a read-only overview of what is there. Every \
-             command is recorded to an audit log the operator can read.\n",
+            "Run commands with `shell`. It starts in that same directory, so write a command \
+             against relative paths like any other tool call. `read_workspace_state` gives you \
+             a read-only overview of what is there. Every command is recorded to an audit log \
+             the operator can read.\n",
         );
     }
     if code {
@@ -479,9 +483,19 @@ pub fn sandbox_brief(files: bool, shell: bool, code: bool) -> String {
              `exports/`.\n",
         );
     }
+    if shell {
+        brief.push_str(
+            "When you are asked to write, produce, build or run something, do it here — \
+             actually write the file or run the command.",
+        );
+    } else {
+        brief.push_str(
+            "When you are asked to write, produce or build something, do it here — actually \
+             write the file.",
+        );
+    }
     brief.push_str(
-        "When you are asked to write, produce, build or run something, do it here — actually \
-         write the file, actually run the command. Recording a task about the work, or pasting \
+        " Recording a task about the work, or pasting \
          the finished text into your reply, is not the same as producing it, and leaves nothing \
          on disk for anyone to open.\n\
          A command or write that touches something consequential may be held for operator \
