@@ -247,7 +247,11 @@ describe("policy tier changes", () => {
 
     const input = field()!;
     await act(async () => {
-      input.value = "shel, invoice.send";
+      const setValue = Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        "value",
+      )?.set;
+      setValue?.call(input, "shel, invoice.send");
       input.dispatchEvent(new Event("input", { bubbles: true }));
     });
     expect(container.textContent).toContain("shel, invoice.send are not tools this deployment wires.");
