@@ -1392,6 +1392,142 @@ mod test {
         );
     }
 
+    /// Issue #1458, the reconcile: newest standing decision wins. An approval
+    /// minted after a live denial of the same scope takes the denial back, or
+    /// `ApprovalPolicy`'s deny-above-grant ordering would leave the operator's
+    /// later "yes" listed but never admitting a call.
+    #[test]
+    fn an_approval_mint_supersedes_a_live_denial_of_the_same_scope() {
+        let set = GrantSet::default();
+        let mut deny = scoped("deny-1", "ops", "web_fetch", "https://docs.rs", 10_000);
+        deny.verdict = crate::ports::types::Verdict::Deny;
+        set.grant_standing(deny);
+
+        let drained = set.drain_opposite_polarity(
+            &GrantSubject::agent("ops"),
+            "web_fetch",
+            Some("https://docs.rs"),
+            crate::ports::types::Verdict::Approve,
+            2_000,
+        );
+        assert_eq!(drained.len(), 1, "the shadowing denial is taken back");
+        assert_eq!(drained[0].id, GrantId::new("deny-1"));
+        assert!(
+            set.match_standing(
+                &GrantSubject::agent("ops"),
+                "web_fetch",
+                Some("https://docs.rs"),
+                2_000
+            )
+            .is_none(),
+            "only the new approval is left for this scope"
+        );
+    }
+
+    /// The mirror direction: a denial minted after a live approval of the same
+    /// scope takes the grant back, so the operator's newer refusal is the whole
+    /// of the standing contract.
+    #[test]
+    fn a_denial_mint_supersedes_a_live_approval_of_the_same_scope() {
+        let set = GrantSet::default();
+        set.grant_standing(scoped("grant-1", "ops", "web_fetch", "https://docs.rs", 10_000));
+
+        let drained = set.drain_opposite_polarity(
+            &GrantSubject::agent("ops"),
+            "web_fetch",
+            Some("https://docs.rs"),
+            crate::ports::types::Verdict::Deny,
+            2_000,
+        );
+        assert_eq!(drained.len(), 1);
+        assert_eq!(drained[0].id, GrantId::new("grant-1"));
+        assert_eq!(set.standing().len(), 0);
+    }
+
+    /// Opposite polarities for *different* scopes coexist: a denial of one host
+    /// neither shadows nor takes back a grant for another, exactly as they would
+    /// if minted in isolation.
+    #[test]
+    fn a_denial_for_one_host_does_not_take_back_a_grant_for_another() {
+        let set = GrantSet::default();
+        set.grant_standing(scoped("grant-1", "ops", "web_fetch", "https://docs.rs", 10_000));
+        let mut deny = scoped("deny-1", "ops", "web_fetch", "https://other.example", 10_000);
+        deny.verdict = crate::ports::types::Verdict::Deny;
+        set.grant_standing(deny);
+
+        let drained = set.drain_opposite_polarity(
+            &GrantSubject::agent("ops"),
+            "web_fetch",
+            Some("https://docs.rs"),
+            crate::ports::types::Verdict::Approve,
+            2_000,
+        );
+        assert!(
+            drained.is_empty(),
+            "a denial for other.example does not shadow a docs.rs approval"
+        );
+        assert_eq!(set.standing().len(), 2);
+    }
+
+    /// A wildcard old policy (a scope the tool could not resolve, recorded
+    /// `None`) shadows *every* new policy for the same tool, so it is
+    /// superseded too — the newer decision is the whole of the contract.
+    #[test]
+    fn a_wildcard_denial_is_superseded_by_any_new_policy_for_the_same_tool() {
+        let set = GrantSet::default();
+        let mut deny = standing("deny-1", "ops", "web_fetch", 10_000); // scope None
+        deny.verdict = crate::ports::types::Verdict::Deny;
+        set.grant_standing(deny);
+
+        let drained = set.drain_opposite_polarity(
+            &GrantSubject::agent("ops"),
+            "web_fetch",
+            Some("https://docs.rs"),
+            crate::ports::types::Verdict::Approve,
+            2_000,
+        );
+        assert_eq!(drained.len(), 1);
+    }
+
+    /// Same-polarity policies are never reconciled — two approvals of one scope
+    /// are the same opinion, and the matcher already picks the later-expiring
+    /// one deterministically.
+    #[test]
+    fn same_polarity_policies_are_never_reconciled() {
+        let set = GrantSet::default();
+        set.grant_standing(scoped("g1", "ops", "web_fetch", "https://docs.rs", 10_000));
+
+        let drained = set.drain_opposite_polarity(
+            &GrantSubject::agent("ops"),
+            "web_fetch",
+            Some("https://docs.rs"),
+            crate::ports::types::Verdict::Approve,
+            2_000,
+        );
+        assert!(drained.is_empty());
+        assert_eq!(set.standing().len(), 1);
+    }
+
+    /// An expired opposite-polarity policy shadows nothing — the matcher
+    /// refuses it — so the reconcile leaves it for the sweep.
+    #[test]
+    fn an_expired_opposite_polarity_policy_is_left_for_the_sweep() {
+        let set = GrantSet::default();
+        let mut deny = scoped("deny-1", "ops", "web_fetch", "https://docs.rs", 5_000);
+        deny.verdict = crate::ports::types::Verdict::Deny;
+        set.grant_standing(deny);
+
+        let drained = set.drain_opposite_polarity(
+            &GrantSubject::agent("ops"),
+            "web_fetch",
+            Some("https://docs.rs"),
+            crate::ports::types::Verdict::Approve,
+            6_000,
+        );
+        assert!(drained.is_empty());
+        assert_eq!(set.standing().len(), 1);
+    }
+
     #[test]
     fn a_standing_grant_is_scoped_to_its_agent_and_its_tool() {
         let set = GrantSet::default();
