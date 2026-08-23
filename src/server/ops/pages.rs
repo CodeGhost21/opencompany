@@ -489,13 +489,18 @@ async fn page_shell(
 
 /// `GET {scope}/pages/{slug}/bundle.mjs` — the page's compiled JS, streamed.
 async fn bundle(
-    company: ScopedCompany,
+    ModuleScopedCompany { runtime }: ModuleScopedCompany,
+    Query(query): Query<ModuleCapQuery>,
     Path(SlugPath { slug }): Path<SlugPath>,
 ) -> Result<Response, ApiError> {
     if !valid_slug(&slug) {
         return Err(ApiError(OpenCompanyError::NotFound(format!("page {slug}"))));
     }
-    let pages = all_pages(company.runtime.workspace().as_ref(), company.id()).await?;
+    let company = runtime.id();
+    if !validate_module_cap(&query.oc_cap, company, &slug) {
+        return Err(ApiError(OpenCompanyError::NotFound(format!("page {slug}"))));
+    }
+    let pages = all_pages(runtime.workspace().as_ref(), company).await?;
     let Some((_, bundle)) = pages.into_iter().find(|(name, _)| name == &slug) else {
         return Err(ApiError(OpenCompanyError::NotFound(format!("page {slug}"))));
     };
@@ -505,10 +510,9 @@ async fn bundle(
         ))));
     };
 
-    let Some((node, stream)) = company
-        .runtime
+    let Some((node, stream)) = runtime
         .workspace()
-        .read_bytes(company.id(), &compiled.id)
+        .read_bytes(company, &compiled.id)
         .await?
     else {
         return Err(ApiError(OpenCompanyError::NotFound(format!(
