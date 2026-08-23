@@ -358,6 +358,22 @@ struct MemoryStats {
     task_outcomes: usize,
 }
 
+/// `GET /memory` — the rows together with the context-truncation metadata for
+/// the SAME read, so the console's "newest N of M" notice never compares the
+/// capped rows against a count taken at a different moment.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MemoryList {
+    items: Vec<MemoryEntry>,
+    /// The non-mirror context chunk population before the 500-row display
+    /// cap — the "M" in the console's "showing the newest N of M" notice.
+    /// Facts are never capped, so they are not counted here.
+    total_context: usize,
+    /// Whether the context rows dropped any to [`MAX_CONTEXT_ENTRIES`], from
+    /// this same read.
+    context_truncated: bool,
+}
+
 /// `GET /memory` — everything the company remembers, so the console lists what
 /// the Brain header counts. Two sources, in this order:
 ///
