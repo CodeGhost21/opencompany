@@ -214,13 +214,23 @@ pub(crate) fn allow_covers(allow: &[String], tool: &str) -> bool {
     // `*` as covering every literal, but these grants reach metered services,
     // tenant credentials, or third-party source. Keep narrowing consistent with
     // the wiring predicates so an agent cannot ask for one of them through a
-    // catch-all company grant.
-    match literal {
-        "media" => return crate::company::grants_media_explicit(allow),
-        "composio" => return crate::company::grants_composio_explicit(allow),
-        "search" => return crate::company::grants_search_explicit(allow),
-        "repo" => return crate::company::grants_repo_explicit(allow),
-        _ => {}
+    // catch-all company grant. The predicates accept the bare namespace or any
+    // dotted descendant (`search` and `search.*` both satisfy them), so the
+    // request check must too — `search.*` or `media.image` is as much an opt-in
+    // ask as the bare namespace, and letting it fall through to the generic
+    // match below would hand a wildcard-only company the whole namespace on a
+    // sub-grant request.
+    if literal == "media" || literal.starts_with("media.") {
+        return crate::company::grants_media_explicit(allow);
+    }
+    if literal == "composio" || literal.starts_with("composio.") {
+        return crate::company::grants_composio_explicit(allow);
+    }
+    if literal == "search" || literal.starts_with("search.") {
+        return crate::company::grants_search_explicit(allow);
+    }
+    if literal == "repo" || literal.starts_with("repo.") {
+        return crate::company::grants_repo_explicit(allow);
     }
 
     // MCP grants use a colon namespace, so `mcp:*` is the explicit opt-in for
