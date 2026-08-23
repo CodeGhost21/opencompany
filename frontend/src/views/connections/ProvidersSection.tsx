@@ -344,9 +344,9 @@ export function ProvidersSection({
 function SectionHeading({ count }: { count: number | null }) {
   return (
     <div className="space-y-1">
-      <h3 className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
+      <h2 className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
         Providers
-      </h3>
+      </h2>
       <p className="text-sm text-muted-foreground">
         Every account this company can act through, and which are wired.
         {count !== null && count > 0 && ` ${count} connected.`}
