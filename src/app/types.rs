@@ -444,6 +444,13 @@ pub struct AppState {
     /// the process. Lazy because it is a disk read that only `/spec` needs, and
     /// `AppState::new` is deliberately IO-free.
     instance_id: Arc<OnceLock<String>>,
+    /// Who is currently present, per company.
+    ///
+    /// Host-global and in-memory, like the live turn bus it publishes
+    /// alongside — presence is a lease, not a record, so it has no port and no
+    /// backend. See [`crate::server::presence`] for the TTL contract and for
+    /// why a second replica knowing nothing about this one is acceptable.
+    presence: Arc<crate::server::presence::PresenceRegistry>,
     /// Which storage backend is serving the durable ports. Reported by `/spec`
     /// as a kind only — never a path or a connection string.
     storage_kind: crate::store::StorageKind,
@@ -544,6 +551,7 @@ impl AppState {
             skills_root: None,
             skill_registry: Arc::new(OnceLock::new()),
             instance_id: Arc::new(OnceLock::new()),
+            presence: Arc::new(crate::server::presence::PresenceRegistry::new()),
             storage_kind: crate::store::StorageKind::default(),
             // Fails "not set up", so a host that never calls `with_setup_complete`
             // — every test fixture — presents the wizard rather than silently
@@ -959,6 +967,18 @@ impl AppState {
     /// The registry of running companies served by this host.
     pub fn registry(&self) -> &CompanyRegistry {
         &self.registry
+    }
+
+    /// Who is currently present, per company.
+    pub fn presence(&self) -> &crate::server::presence::PresenceRegistry {
+        &self.presence
+    }
+
+    /// A cloned handle to the same host-global registry [`Self::presence`]
+    /// borrows from, for a background task (the periodic sweep) that must
+    /// outlive any single request's borrow of `self`.
+    pub fn presence_handle(&self) -> std::sync::Arc<crate::server::presence::PresenceRegistry> {
+        self.presence.clone()
     }
 
     /// The prebuilt GraphQL read-plane schema.

@@ -20,6 +20,8 @@ import {
   type BoardQuery,
   type BoardVote,
   type ReadMarker,
+  type MentionablesResponse,
+  type PresenceListResponse,
   type ReadStateResponse,
   type ApiErrorBody,
   type WorkflowProblem,
@@ -625,6 +627,104 @@ export class OpenCompanyClient {
    */
   readState(company?: string | null): Promise<ReadStateResponse> {
     return this.request<ReadStateResponse>("GET", `${this.scope(company)}/chat/read-state`);
+  }
+
+  /**
+   * Everything an `@` can name. Presence uses only `people`, for the
+   * user-id → label map the live frames deliberately do not carry.
+   *
+   * A host that predates this route answers 404; callers treat that as an
+   * empty directory rather than throwing on load.
+   */
+  mentionables(company?: string | null): Promise<MentionablesResponse> {
+    return this.request<MentionablesResponse>(
+      "GET",
+      `${this.scope(company)}/chat/mentionables`,
+    );
+  }
+
+  /** Who is present on this replica right now. */
+  presence(company?: string | null): Promise<PresenceListResponse> {
+    return this.request<PresenceListResponse>("GET", `${this.scope(company)}/presence`);
+  }
+
+  /**
+   * A heartbeat, and what to appear as.
+   *
+   * The body deliberately carries **no user id**: the host takes the subject
+   * from the session, so no caller can move somebody else's dot. `consoleId`
+   * is not an identity either — it is this tab's opaque lease key, so closing
+   * one of several open tabs drops only that tab's lease rather than logging
+   * every tab for this person out (see `usePresence`'s `consoleId`).
+   */
+  announcePresence(
+    status: "online" | "away" | "offline",
+    company?: string | null,
+    consoleId?: string,
+  ): Promise<void> {
+    return this.request<void>("PUT", `${this.scope(company)}/presence`, {
+      status,
+      ...(consoleId ? { consoleId } : {}),
+    });
+  }
+
+  /**
+   * Clear this console's dot on the way out.
+   *
+   * Goes through `this.transport`, the same seam every other call on this
+   * class uses — **not** a direct `fetch`, which this used to be. A desktop
+   * console's webview cannot satisfy this route on its own even with the
+   * right headers: it is cross-origin with the host (so a direct request
+   * needs CORS the host does not grant it) and the device credential lives
+   * only in the Rust core's keychain, never in JS. `ProxyTransport` is what
+   * gets both right, and only routing through `this.transport` reaches it.
+   *
+   * The one thing this needs beyond an ordinary request — surviving the
+   * document going away, since this fires from `pagehide` — is
+   * `keepalive: true`, threaded through `TransportRequest` for exactly this
+   * call. `BrowserTransport` forwards it to `fetch`'s own `keepalive` option;
+   * `ProxyTransport` ignores it, because a Tauri `invoke` is core-process IPC
+   * with no equivalent teardown-survival problem. `sendBeacon` would be the
+   * usual browser-only tool here but cannot issue a `DELETE` or run through
+   * the desktop bridge at all.
+   *
+   * Carries the same session and bearer headers `request` would attach —
+   * `credentials: "include"` alone (still set unconditionally inside
+   * `BrowserTransport`) only carries a same-origin cookie, and a console
+   * authenticated cross-origin holds its session in
+   * `x-opencompany-session`/`authorization` instead.
+   *
+   * Best-effort by design, and allowed to fail silently: if it does not land,
+   * the host's lease expires the dot within a few minutes anyway. That is the
+   * whole reason presence is a lease — no disconnect path has to be correct.
+   */
+  disconnectPresenceBeacon(company?: string | null, consoleId?: string): void {
+    const query = consoleId ? `?consoleId=${encodeURIComponent(consoleId)}` : "";
+    void this.transport
+      .request({
+        method: "DELETE",
+        url: `${this.baseUrl}${this.scope(company)}/presence${query}`,
+        headers: this.authHeaders(),
+        keepalive: true,
+      })
+      .catch(() => {
+        // Best-effort by design; see this method's doc comment.
+      });
+  }
+
+  /**
+   * Say this console is typing. Fire-and-forget: an undelivered ping is not
+   * worth a retry, and the indicator expires on its own regardless.
+   */
+  typing(
+    chatId: string,
+    parentId?: string,
+    company?: string | null,
+  ): Promise<void> {
+    return this.request<void>("POST", `${this.scope(company)}/chat/typing`, {
+      chatId,
+      ...(parentId ? { parentId } : {}),
+    });
   }
 
   /**

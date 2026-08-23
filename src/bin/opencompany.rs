@@ -648,6 +648,16 @@ fn spawn_maintenance_ticker(
     MaintenanceTicker::new(state.registry().clone(), Arc::new(SystemClock)).spawn(shutdown.clone())
 }
 
+/// Starts the process-wide presence sweep (issue: "Bound client-supplied
+/// console leases"). See [`opencompany::server::presence::PresenceSweeper`]
+/// for why this is a separate task from the maintenance ticker above rather
+/// than folded into it: presence is host-global, not scoped to a registered
+/// company.
+fn spawn_presence_sweeper(state: &AppState, shutdown: &Arc<Notify>) -> tokio::task::JoinHandle<()> {
+    opencompany::server::presence::PresenceSweeper::new(state.presence_handle())
+        .spawn(shutdown.clone())
+}
+
 /// Starts a company's IMAP mailbox poller as a background task, if the
 /// platform injected mailbox credentials for this tenant.
 ///
@@ -2026,6 +2036,7 @@ async fn async_main() -> Result<()> {
             // and fire claims are retired, and it covers a company registered
             // after boot — which the per-company scheduler spawn above does not.
             scheduler_handles.push(spawn_maintenance_ticker(&state, &shutdown));
+            scheduler_handles.push(spawn_presence_sweeper(&state, &shutdown));
 
             // Stop the schedulers on a termination signal so background cycle
             // work halts with the process (lifecycle shutdown).
