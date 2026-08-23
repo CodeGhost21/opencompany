@@ -45,12 +45,12 @@ afterEach(() => {
 
 describe("the consequence on an approval card", () => {
   it.each([
-    ["spend", "Spends money", "bg-status-failed-soft"],
-    ["send", "Leaves the company", "bg-status-blocked-soft"],
-    ["sign", "Makes a commitment", "bg-status-failed-soft"],
-    ["publish", "Publishes work", "bg-status-running-soft"],
-    ["hire", "Changes who can act", "bg-status-done-soft"],
-    ["identity", "Changes who can act", "bg-status-done-soft"],
+    ["spend", "Spends money", "bg-tone-4\\/15"],
+    ["send", "Leaves the company", "bg-tone-2\\/15"],
+    ["sign", "Makes a commitment", "bg-tone-1\\/15"],
+    ["publish", "Publishes work", "bg-tone-3\\/15"],
+    ["hire", "Engages or drops a counterparty", "bg-tone-4\\/15"],
+    ["identity", "Changes its identity or keys", "bg-tone-5\\/15"],
   ] as const)("marks %s approvals as %s", async (group, label, iconClass) => {
     await render(approval({ group }));
 
