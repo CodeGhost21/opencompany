@@ -395,8 +395,10 @@ export function useApprovalThreadLinks(
   );
 
   useEffect(() => {
-    setTopology(null);
-    if (!threadKey) return;
+    if (!threadKey) {
+      setTopology(null);
+      return;
+    }
     let live = true;
     void Promise.all([
       // Same empty-response fallback as ChatView and AppShell: a company with
