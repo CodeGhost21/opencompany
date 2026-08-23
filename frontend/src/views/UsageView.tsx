@@ -596,7 +596,7 @@ export function publishStatus(caps: CapabilityStatusDto): {
 } {
   if (caps.publishInBuild === false) return { label: "Not in this build", variant: "outline" };
   if (caps.publishGranted === undefined) return { label: "Couldn't check", variant: "outline" };
-  if (!caps.publishGranted) return { label: "Not granted", variant: "secondary" };
+  if (caps.publishGranted === false) return { label: "Not granted", variant: "secondary" };
   return { label: "Active", variant: "default" };
 }
 
