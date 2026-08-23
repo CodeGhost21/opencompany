@@ -1238,6 +1238,18 @@ approval.]"
         // same single-policy state. Scoped to what would actually shadow
         // (`admits_scope`), so a denial of one host leaves a grant for another
         // alone.
+        //
+        // The reconcile is not itself atomic: the snapshot below, the journal
+        // appends, and the insert are separate steps, and the journal appends
+        // are awaited. Two concurrent resolutions of the same scope with
+        // opposite verdicts — an approve and a deny landing within a few
+        // milliseconds from separate console surfaces — could both snapshot an
+        // empty opposite set before either inserts, leaving the deny shadowing
+        // the approve whatever the operator's true order. Holding the grant
+        // set's reconcile lock for the whole sequence makes the second mint see
+        // the first's policy and supersede it, which is the same single-policy
+        // state the sequential path already reconstructs on replay.
+        let _reconcile = self.rt.grants.standing_reconcile().await;
         for old in self.rt.grants.opposite_polarity(
             &subject,
             &grant.tool,
