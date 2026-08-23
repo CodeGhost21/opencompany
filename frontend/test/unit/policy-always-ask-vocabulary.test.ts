@@ -333,8 +333,12 @@ describe("policy tier changes", () => {
       setValue?.call(input, "shel, invoice.send");
       input.dispatchEvent(new Event("input", { bubbles: true }));
     });
-    expect(container.textContent).toContain("shel, invoice.send are not tools this deployment wires.");
-    expect(container.textContent).toContain("They may still be hosted effect kinds.");
+    expect(container.textContent).toContain(
+      "shel, invoice.send don't match any of the workflow tools wired here.",
+    );
+    expect(container.textContent).toContain(
+      "They may still be wired agent tools or hosted effect kinds.",
+    );
 
     const auto = Array.from(container.querySelectorAll<HTMLButtonElement>('[role="radio"]')).find(
       (button) => button.textContent?.includes("Auto"),
