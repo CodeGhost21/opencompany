@@ -16,6 +16,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use crate::Result;
+use crate::app::config::{EnvSource, ProcessEnv, data_dir_from_source};
 use crate::error::OpenCompanyError;
 use crate::ports::artifacts::ArtifactStore;
 use crate::ports::context::ContextStore;
@@ -558,23 +559,25 @@ impl std::fmt::Debug for StorageSettings {
 /// Parses env var `key` into `T`. Absent → `Ok(None)` (the caller applies its
 /// default); a set-but-non-UTF-8 value is a hard [`OpenCompanyError::Config`]
 /// rather than a silent fallback to the default.
-fn parse_env<T>(key: &str) -> Result<Option<T>>
+fn parse_env<T>(env: &dyn EnvSource, key: &str) -> Result<Option<T>>
 where
     T: std::str::FromStr<Err = OpenCompanyError>,
 {
-    match std::env::var(key) {
-        Ok(raw) => Ok(Some(raw.parse()?)),
-        Err(std::env::VarError::NotPresent) => Ok(None),
-        Err(std::env::VarError::NotUnicode(_)) => Err(OpenCompanyError::Config(format!(
+    match env.get_os(key) {
+        Some(raw) => match raw.into_string() {
+            Ok(raw) => Ok(Some(raw.parse()?)),
+            Err(_) => Err(OpenCompanyError::Config(format!(
             "{key} is set but is not valid UTF-8"
-        ))),
+            ))),
+        },
+        None => Ok(None),
     }
 }
 
 /// Reads a boolean opt-in env flag. Truthy values (case-insensitive, trimmed):
 /// `1`, `true`, `yes`, `on`. Anything else — including unset — is `false`.
-fn env_flag(key: &str) -> bool {
-    std::env::var(key)
+fn env_flag(env: &dyn EnvSource, key: &str) -> bool {
+    env.get(key)
         .map(|value| {
             matches!(
                 value.trim().to_ascii_lowercase().as_str(),
@@ -590,17 +593,22 @@ impl StorageSettings {
     /// `OPENCOMPANY_TENANT_ID`, `OPENCOMPANY_MEMORY`, `OPENCOMPANY_DATA_DIR`,
     /// `OPENCOMPANY_MEMORY_ALLOW_EPHEMERAL`).
     pub fn from_env() -> Result<Self> {
-        let kind: StorageKind = parse_env("OPENCOMPANY_STORAGE")?.unwrap_or_default();
-        let memory_backend: MemoryBackend = parse_env("OPENCOMPANY_MEMORY")?.unwrap_or_default();
-        let non_empty = |key: &str| std::env::var(key).ok().filter(|value| !value.is_empty());
+        Self::from_env_source(&ProcessEnv)
+    }
+
+    /// Resolves storage settings from an injected environment source.
+    pub fn from_env_source(env: &dyn EnvSource) -> Result<Self> {
+        let kind: StorageKind = parse_env(env, "OPENCOMPANY_STORAGE")?.unwrap_or_default();
+        let memory_backend: MemoryBackend = parse_env(env, "OPENCOMPANY_MEMORY")?.unwrap_or_default();
+        let non_empty = |key: &str| env.get(key);
         Ok(Self {
             kind,
             mongodb_uri: non_empty("OPENCOMPANY_MONGODB_URI"),
             mongodb_db: non_empty("OPENCOMPANY_MONGODB_DB"),
             tenant_id: non_empty("OPENCOMPANY_TENANT_ID"),
             memory_backend,
-            data_dir: Some(crate::app::config::data_dir_from_env()),
-            allow_ephemeral_memory: env_flag("OPENCOMPANY_MEMORY_ALLOW_EPHEMERAL"),
+            data_dir: Some(data_dir_from_source(env)),
+            allow_ephemeral_memory: env_flag(env, "OPENCOMPANY_MEMORY_ALLOW_EPHEMERAL"),
             memory_driver: non_empty("OPENCOMPANY_MEMORY_DRIVER"),
             memory_url: non_empty("OPENCOMPANY_MEMORY_URL"),
             memory_api_key: non_empty("OPENCOMPANY_MEMORY_API_KEY"),
@@ -618,7 +626,13 @@ impl StorageSettings {
     /// Presence, not value: a control plane that injects `OPENCOMPANY_MEMORY`
     /// owns the choice whichever engine it names, including `store`.
     pub fn memory_is_env_owned() -> bool {
-        std::env::var("OPENCOMPANY_MEMORY").is_ok_and(|value| !value.trim().is_empty())
+        Self::memory_is_env_owned_by(&ProcessEnv)
+    }
+
+    /// Whether `env` explicitly owns the memory-engine choice.
+    pub fn memory_is_env_owned_by(env: &dyn EnvSource) -> bool {
+        env.get("OPENCOMPANY_MEMORY")
+            .is_some_and(|value| !value.trim().is_empty())
     }
 
     /// Layers a `config.toml` `[memory]` section under the environment.
@@ -1178,7 +1192,7 @@ impl OwnershipStore for crate::store::MongoStore {
 mod test {
     use super::*;
 
-    use crate::test_support::EnvVarGuard;
+    use crate::app::config::MapEnv;
 
     #[test]
     fn parses_storage_kinds() {
@@ -1615,16 +1629,8 @@ mod test {
             "OPENCOMPANY_MEMORY_URL",
             "OPENCOMPANY_MEMORY_API_KEY",
         ];
-        // Takes the crate-wide env lock for the whole body and restores every
-        // key on drop — including on panic, which the hand-rolled restore this
-        // replaced would have skipped, leaving a driver name set for whatever
-        // `from_env` test libtest scheduled next.
-        let env = EnvVarGuard::capture(&KEYS);
-
-        env.set(KEYS[0], "supermemory");
-        env.set(KEYS[1], "https://memory.example");
-        env.set(KEYS[2], "sk-test");
-        let settings = StorageSettings::from_env().unwrap();
+        let env = MapEnv::new([(KEYS[0], "supermemory"), (KEYS[1], "https://memory.example"), (KEYS[2], "sk-test")]);
+        let settings = StorageSettings::from_env_source(&env).unwrap();
         assert_eq!(settings.memory_driver.as_deref(), Some("supermemory"));
         assert_eq!(
             settings.memory_url.as_deref(),
@@ -1634,16 +1640,11 @@ mod test {
 
         // Empty is absent, not an empty credential: `require` would otherwise
         // accept a blank key and defer the failure to the first call.
-        env.set(KEYS[0], "");
-        env.set(KEYS[2], "");
-        let blank = StorageSettings::from_env().unwrap();
+        let blank = StorageSettings::from_env_source(&MapEnv::new([(KEYS[0], ""), (KEYS[2], "")])).unwrap();
         assert_eq!(blank.memory_driver, None);
         assert_eq!(blank.memory_api_key, None);
 
-        for key in KEYS {
-            env.remove(key);
-        }
-        let unset = StorageSettings::from_env().unwrap();
+        let unset = StorageSettings::from_env_source(&MapEnv::default()).unwrap();
         assert_eq!(unset.memory_driver, None);
         assert_eq!(unset.memory_url, None);
         assert_eq!(unset.memory_api_key, None);
@@ -1651,17 +1652,14 @@ mod test {
 
     #[test]
     fn from_env_reads_memory_backend() {
-        let env = EnvVarGuard::capture(&["OPENCOMPANY_MEMORY"]);
-
-        env.set("OPENCOMPANY_MEMORY", "tinycortex");
+        let env = MapEnv::new([("OPENCOMPANY_MEMORY", "tinycortex")]);
         assert_eq!(
-            StorageSettings::from_env().unwrap().memory_backend,
+            StorageSettings::from_env_source(&env).unwrap().memory_backend,
             MemoryBackend::Tinycortex
         );
 
-        env.remove("OPENCOMPANY_MEMORY");
         assert_eq!(
-            StorageSettings::from_env().unwrap().memory_backend,
+            StorageSettings::from_env_source(&MapEnv::default()).unwrap().memory_backend,
             MemoryBackend::Store
         );
     }
@@ -1803,31 +1801,24 @@ mod test {
 
     #[test]
     fn from_env_reads_tenant_id() {
-        let env = EnvVarGuard::capture(&["OPENCOMPANY_TENANT_ID"]);
-
-        env.set("OPENCOMPANY_TENANT_ID", "acme");
+        let env = MapEnv::new([("OPENCOMPANY_TENANT_ID", "acme")]);
         assert_eq!(
-            StorageSettings::from_env().unwrap().tenant_id.as_deref(),
+            StorageSettings::from_env_source(&env).unwrap().tenant_id.as_deref(),
             Some("acme")
         );
 
         // An empty value is filtered out, same as the mongodb vars.
-        env.set("OPENCOMPANY_TENANT_ID", "");
-        assert_eq!(StorageSettings::from_env().unwrap().tenant_id, None);
+        assert_eq!(StorageSettings::from_env_source(&MapEnv::new([("OPENCOMPANY_TENANT_ID", "")])).unwrap().tenant_id, None);
 
         // Unset leaves it `None` (the id-namespacing no-op).
-        env.remove("OPENCOMPANY_TENANT_ID");
-        assert_eq!(StorageSettings::from_env().unwrap().tenant_id, None);
+        assert_eq!(StorageSettings::from_env_source(&MapEnv::default()).unwrap().tenant_id, None);
     }
 
     #[test]
     fn from_env_reads_data_dir() {
-        let env = EnvVarGuard::capture(&["OPENCOMPANY_DATA_DIR"]);
-
-        // An explicit data dir is threaded straight through into settings.
-        env.set("OPENCOMPANY_DATA_DIR", "/srv/oc-data");
+        let env = MapEnv::new([("OPENCOMPANY_DATA_DIR", "/srv/oc-data")]);
         assert_eq!(
-            StorageSettings::from_env().unwrap().data_dir,
+            StorageSettings::from_env_source(&env).unwrap().data_dir,
             Some(PathBuf::from("/srv/oc-data")),
             "OPENCOMPANY_DATA_DIR must be read into StorageSettings::data_dir"
         );
@@ -1836,26 +1827,20 @@ mod test {
     #[test]
     fn from_env_reads_allow_ephemeral_memory() {
         const KEY: &str = "OPENCOMPANY_MEMORY_ALLOW_EPHEMERAL";
-        let env = EnvVarGuard::capture(&[KEY]);
-
-        // Unset → the safe default: refuse (flag false).
-        env.remove(KEY);
-        assert!(!StorageSettings::from_env().unwrap().allow_ephemeral_memory);
+        assert!(!StorageSettings::from_env_source(&MapEnv::default()).unwrap().allow_ephemeral_memory);
 
         // Truthy values set the durability assertion.
         for truthy in ["1", "true", "YES", "On"] {
-            env.set(KEY, truthy);
             assert!(
-                StorageSettings::from_env().unwrap().allow_ephemeral_memory,
+                StorageSettings::from_env_source(&MapEnv::new([(KEY, truthy)])).unwrap().allow_ephemeral_memory,
                 "{truthy:?} must read as durability asserted"
             );
         }
 
         // Any non-truthy value stays false (fails safe toward refusal).
         for falsy in ["0", "false", "no", ""] {
-            env.set(KEY, falsy);
             assert!(
-                !StorageSettings::from_env().unwrap().allow_ephemeral_memory,
+                !StorageSettings::from_env_source(&MapEnv::new([(KEY, falsy)])).unwrap().allow_ephemeral_memory,
                 "{falsy:?} must read as not asserted"
             );
         }

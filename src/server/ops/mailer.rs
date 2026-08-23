@@ -49,6 +49,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use crate::error::OpenCompanyError;
+use crate::app::config::{EnvSource, ProcessEnv};
 use crate::server::ops::imap::ImapCredentials;
 use crate::server::ops::smtp::{SmtpCredentials, SmtpSecurity};
 
@@ -289,7 +290,12 @@ impl MailConfig {
     /// discovering the typo when the first login link silently fails to arrive
     /// is worse than refusing here.
     pub fn from_env() -> Result<Option<Self>, OpenCompanyError> {
-        let var = |key: &str| std::env::var(key).ok().filter(|v| !v.trim().is_empty());
+        Self::from_env_source(&ProcessEnv)
+    }
+
+    /// Resolves host-level mail configuration from an injected source.
+    pub fn from_env_source(env: &dyn EnvSource) -> Result<Option<Self>, OpenCompanyError> {
+        let var = |key: &str| env.get(key).filter(|v| !v.trim().is_empty());
 
         let provider: MailProvider = match var("OPENCOMPANY_MAIL_PROVIDER") {
             Some(raw) => raw.parse()?,
@@ -375,7 +381,12 @@ impl TenantMailboxConfig {
     /// `Ok(None)` when unconfigured (no `OPENCOMPANY_MAIL_ADDRESS`); a *partial*
     /// injection is a hard error.
     pub fn from_env() -> Result<Option<Self>, OpenCompanyError> {
-        let var = |k: &str| std::env::var(k).ok().filter(|v| !v.trim().is_empty());
+        Self::from_env_source(&ProcessEnv)
+    }
+
+    /// Resolves a tenant mailbox from an injected source.
+    pub fn from_env_source(env: &dyn EnvSource) -> Result<Option<Self>, OpenCompanyError> {
+        let var = |k: &str| env.get(k).filter(|v| !v.trim().is_empty());
         let Some(address) = var("OPENCOMPANY_MAIL_ADDRESS") else {
             return Ok(None);
         };
@@ -610,17 +621,7 @@ mod test {
 
     #[test]
     fn tenant_mailbox_config_parses_injected_env() {
-        // Serialize env access; set the 7 injected vars.
-        let env = EnvVarGuard::capture(&[
-            "OPENCOMPANY_MAIL_ADDRESS",
-            "OPENCOMPANY_MAIL_SMTP_HOST",
-            "OPENCOMPANY_MAIL_SMTP_PORT",
-            "OPENCOMPANY_MAIL_IMAP_HOST",
-            "OPENCOMPANY_MAIL_IMAP_PORT",
-            "OPENCOMPANY_MAIL_USER",
-            "OPENCOMPANY_MAIL_PASSWORD",
-        ]);
-        for (k, v) in [
+        let env = crate::app::config::MapEnv::new([
             ("OPENCOMPANY_MAIL_ADDRESS", "acme@opencompany.work"),
             ("OPENCOMPANY_MAIL_SMTP_HOST", "mail.opencompany.work"),
             ("OPENCOMPANY_MAIL_SMTP_PORT", "465"),
@@ -629,10 +630,8 @@ mod test {
             ("OPENCOMPANY_MAIL_USER", "acme@opencompany.work"),
             ("OPENCOMPANY_MAIL_PASSWORD", "secret"),
         ] {
-            env.set(k, v);
-        }
-
-        let cfg = TenantMailboxConfig::from_env()
+        ]);
+        let cfg = TenantMailboxConfig::from_env_source(&env)
             .unwrap()
             .expect("configured");
         assert_eq!(cfg.address, "acme@opencompany.work");
@@ -640,23 +639,16 @@ mod test {
         assert_eq!(cfg.imap.port, 993);
         assert_eq!(cfg.smtp.from_email, "acme@opencompany.work");
 
-        // `env` (dropped here) puts every touched var back to whatever it was
-        // before this test ran, rather than unconditionally removing it, and
-        // releases the crate-wide lock only once that restore has finished.
     }
 
     #[test]
     fn tenant_mailbox_config_absent_is_none() {
-        let env = EnvVarGuard::capture(&["OPENCOMPANY_MAIL_ADDRESS"]);
-        env.remove("OPENCOMPANY_MAIL_ADDRESS");
-        assert!(TenantMailboxConfig::from_env().unwrap().is_none());
+        assert!(TenantMailboxConfig::from_env_source(&crate::app::config::MapEnv::default()).unwrap().is_none());
     }
 
     #[test]
     fn tenant_mailbox_config_partial_is_error() {
-        let env = EnvVarGuard::capture(&["OPENCOMPANY_MAIL_ADDRESS", "OPENCOMPANY_MAIL_PASSWORD"]);
-        env.set("OPENCOMPANY_MAIL_ADDRESS", "acme@opencompany.work");
-        env.remove("OPENCOMPANY_MAIL_PASSWORD");
-        assert!(TenantMailboxConfig::from_env().is_err());
+        let env = crate::app::config::MapEnv::new([("OPENCOMPANY_MAIL_ADDRESS", "acme@opencompany.work")]);
+        assert!(TenantMailboxConfig::from_env_source(&env).is_err());
     }
 }
