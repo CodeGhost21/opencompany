@@ -304,7 +304,7 @@ impl MongoStore {
         // address may have several login codes over time.
         let nonunique = |keys: Document| IndexModel::builder().keys(keys).build();
         // See `unique_partial`.
-        let plans: [(&str, IndexModel); 35] = [
+        let plans: [(&str, IndexModel); 36] = [
             ("companies", unique(doc! {"company_id": 1})),
             ("ledger", unique(doc! {"company_id": 1, "idx": 1})),
             ("events", unique(doc! {"company_id": 1, "seq": 1})),
@@ -378,6 +378,10 @@ impl MongoStore {
             ("runs", unique(doc! {"company_id": 1, "run_id": 1})),
             // A card has many attempts, and many attempts share a status.
             ("runs", nonunique(doc! {"company_id": 1, "task_id": 1})),
+            // Issue #1573: and many attempts share a desk — the console's
+            // per-teammate run history. See `backfill_run_agent_ids` for why
+            // the field is on every document by the time this index matters.
+            ("runs", nonunique(doc! {"company_id": 1, "agent_id": 1})),
             ("runs", nonunique(doc! {"company_id": 1, "status": 1})),
             (
                 "run_steps",
@@ -2344,6 +2348,7 @@ impl crate::ports::runs::RunStore for MongoStore {
                 doc! {"company_id": company.as_ref(), "run_id": &run.id},
                 doc! {"$set": {
                     "task_id": run.task_id.as_deref(),
+                    "agent_id": run.agent_id.as_str(),
                     "status": run.status.as_str(),
                     "attempt": run.attempt as i64,
                     "created_ms": run.created_at_millis as i64,
@@ -2364,6 +2369,9 @@ impl crate::ports::runs::RunStore for MongoStore {
         let mut query = doc! {"company_id": company.as_ref()};
         if let Some(task_id) = &filter.task_id {
             query.insert("task_id", task_id.as_str());
+        }
+        if let Some(agent_id) = &filter.agent_id {
+            query.insert("agent_id", agent_id.as_str());
         }
         if !filter.statuses.is_empty() {
             let statuses: Vec<&str> = filter.statuses.iter().map(|s| s.as_str()).collect();
