@@ -140,9 +140,14 @@ export function SetupController({
       // Only the first evaluation may open the dialog by itself; see
       // `evaluatedOnce`. Later switches still report `unstaffed`, so the tour
       // keeps holding and the Team page keeps prompting.
-      setOpen(
-        first && !deepLinked && shouldOfferSetup({ roster, skipped: setupSkipped(scope) }),
-      );
+      // The reset at the beginning of this effect closes the previous
+      // company's dialog. Once this roster read has started, only open here
+      // for the automatic first-run offer; do not close a dialog that an
+      // explicit recovery action (`#/setup` or Settings) opened while the read
+      // was in flight (issue #1417).
+      if (first && !deepLinked && shouldOfferSetup({ roster, skipped: setupSkipped(scope) })) {
+        setOpen(true);
+      }
       setChecked(true);
     })();
 
