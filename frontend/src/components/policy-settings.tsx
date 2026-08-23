@@ -365,6 +365,7 @@ export function PolicySettings({ client, company }: Props) {
   const requestReset = () => {
     if (!status || saving) return;
     if (isAutonomyEscalation(status.tiers, status.mode, status.manifestMode)) {
+      confirmSource.current = "reset";
       setResetAwaitingConfirmation(true);
       return;
     }
