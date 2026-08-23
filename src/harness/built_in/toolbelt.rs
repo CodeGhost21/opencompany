@@ -829,11 +829,17 @@ mod tests {
         let shell_only = sandbox_brief(false, true, false);
         assert!(!shell_only.contains("cannot leave"), "{shell_only}");
         assert!(!shell_only.contains("nothing outside"), "{shell_only}");
-        assert!(shell_only.contains("starts in that same directory"), "{shell_only}");
+        assert!(
+            shell_only.contains("starts in that same directory"),
+            "{shell_only}"
+        );
 
         // The refusal sentence stays with the file tools that enforce it.
         let files_only = sandbox_brief(true, false, false);
-        assert!(files_only.contains("`../` escape is refused"), "{files_only}");
+        assert!(
+            files_only.contains("`../` escape is refused"),
+            "{files_only}"
+        );
     }
 
     /// "Run the command" is a command-running instruction, and the only tool
