@@ -2131,8 +2131,6 @@ impl RuntimeBuilder {
         let setup = existing.as_ref().and_then(|r| r.setup.clone());
         let ledger = existing.map(|r| r.ledger).unwrap_or_default();
 
-        }
-
         let brain: Arc<dyn Brain> = match self.brain {
             Some(brain) => brain,
             None => {
