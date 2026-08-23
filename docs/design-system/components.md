@@ -298,9 +298,9 @@ permanently: no transition and no state change to notice.
 3. **Express every colour, size and radius as a token.** If a value has no
    token, add it to layer 2 of `index.css` — see
    [`README.md`](README.md#the-one-rule).
-4. **Add it to `#/styleguide`** with every variant and state, including
-   disabled and invalid. A state absent from the styleguide is a state nobody
-   will notice breaking.
+4. **Add it to `#/styleguide`** with its defined variants and states, including
+   disabled and invalid where it applies. A state absent from the styleguide is
+   a state nobody will notice breaking.
 5. **Write out class names in full.** Tailwind finds classes by scanning source
    text, so a template-assembled name like `` `bg-status-${key}` `` is never
    generated and fails silently at runtime.

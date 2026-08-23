@@ -83,9 +83,9 @@ The same build works against any host/company. Resolution order (first wins):
   primitive ramps → semantic names → Tailwind utilities. Components may only
   use the third. Light lives in `:root`, dark in `.dark`; theming is driven by
   `next-themes`.
-- **Living reference:** open **`#/styleguide`** — every token and component
-  state, rendered by this stylesheet. It reads the variables at runtime, so it
-  cannot drift, and it needs no host, company, or sign-in.
+- **Living reference:** open **`#/styleguide`** — every token and shipped UI
+  primitive, rendered by this stylesheet. It reads the variables at runtime,
+  so it cannot drift, and it needs no host, company, or sign-in.
 - **Primitives** are shadcn/ui on **Base UI** under
   [`src/components/ui/`](src/components/ui/) — owned in-tree, add more with
   `npx shadcn@latest add <component>`.
