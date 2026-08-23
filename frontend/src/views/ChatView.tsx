@@ -1204,6 +1204,7 @@ export function ChatView({
               replies={threadReplies}
               sending={sending}
               mentionables={mentionables}
+              channelMemberIds={inChannel?.map((m) => m.id)}
               onSend={(text, _intent, mentions) =>
                 void send(text, undefined, parent.id, mentions)
               }
