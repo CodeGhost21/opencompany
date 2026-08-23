@@ -98,10 +98,21 @@ describe("useStableList (#1414)", () => {
     expect(domOrder()).toEqual(["c", "b"]);
   });
 
-  it("flows live when nothing is interacting", async () => {
-    await renderItems(["a", "b", "c"]);
-    // No pointer, no focus: a poll updates the list immediately.
-    await renderItems(["c", "b"]);
-    expect(domOrder()).toEqual(["c", "b"]);
+  it("thaws after a focused control is disabled without a blur event", async () => {
+    await act(async () => {
+      root.render(createElement(FocusHarness, { items: ["a", "b"], disabled: false }));
+    });
+
+    const target = container.querySelector<HTMLButtonElement>("[data-testid=focus-target]")!;
+    await act(async () => target.focus());
+    expect(captured.holding).toBe(true);
+
+    // Chromium clears activeElement when a focused button becomes disabled but
+    // does not dispatch blur. The hook's post-commit check must still release
+    // the hold so a later poll can reconcile.
+    await act(async () => {
+      root.render(createElement(FocusHarness, { items: ["a", "b"], disabled: true }));
+    });
+    expect(captured.holding).toBe(false);
   });
 });
