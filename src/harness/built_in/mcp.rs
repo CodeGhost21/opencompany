@@ -763,16 +763,30 @@ impl McpRuntime {
     }
 
     /// Disconnects an installed server after verifying it belongs to this store.
+    ///
+    /// Goes through this runtime's own service rather than the
+    /// `oh::mcp::registry::connections` free function, which reads the
+    /// *process-global* one. `connect` above is per-config, so the free
+    /// function would look for the connection in a service that never holds it
+    /// — this runtime never calls `host::init` — and answer a truthful-looking
+    /// `false` for a server that is in fact connected.
     pub async fn disconnect(&self, server_id: &str) -> crate::Result<bool> {
         self.get(server_id)?;
-        Ok(oh::mcp::registry::connections::disconnect(server_id).await)
+        Ok(self
+            .host()?
+            .dynamic()
+            .connections()
+            .disconnect(server_id)
+            .await)
     }
 
     /// Disconnects and deletes an installed server and its environment values.
     pub async fn uninstall(&self, server_id: &str) -> crate::Result<bool> {
         self.get(server_id)?;
-        oh::mcp::registry::connections::disconnect(server_id).await;
-        self.host()?
+        // Same per-config service as `disconnect`, for the same reason.
+        let host = self.host()?;
+        host.dynamic().connections().disconnect(server_id).await;
+        host
             .dynamic()
             .store()
             .delete_server(server_id)
@@ -802,7 +816,10 @@ impl McpRuntime {
     /// Returns the cached tool list for a connected installed server.
     pub async fn tools(&self, server_id: &str) -> crate::Result<Vec<McpTool>> {
         self.get(server_id)?;
-        oh::mcp::registry::connections::tools_for(server_id)
+        self.host()?
+            .dynamic()
+            .connections()
+            .tools_for(server_id)
             .await
             .ok_or_else(|| {
                 OpenCompanyError::InvalidRequest(format!(
