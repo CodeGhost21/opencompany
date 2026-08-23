@@ -836,6 +836,7 @@ export function LedgersView({
                   <Search className="pointer-events-none absolute left-2 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
                   <Input
                     className="pl-8"
+                    aria-label="Search ledger entries"
                     placeholder="Search every field"
                     value={query}
                     onChange={(e) => setQuery(e.target.value)}
@@ -853,7 +854,7 @@ export function LedgersView({
                       this read `all` while the list under it read "Every
                       status", and a chosen board column read `in_progress`
                       beside columns headed "In progress". */}
-                  <SelectTrigger className="w-[12rem]">
+                  <SelectTrigger className="w-[12rem]" aria-label="Filter by status">
                     <SelectValue>
                       {statusFilterLabel(ledger, statusFilter)}
                     </SelectValue>
