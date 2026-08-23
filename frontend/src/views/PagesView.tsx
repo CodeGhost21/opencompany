@@ -63,6 +63,11 @@ export function PagesView({ client, company }: Props) {
   const iframeRef = useRef<HTMLIFrameElement>(null);
   // The per-document bridge capability, granted only to the initial document.
   const capabilityRef = useRef<string>("");
+  // The document-bound half of the channel minted for that same document. The
+  // bridge listens on this port — a navigated-to document never received the
+  // other half, so it has no way to send through the bridge, which is what
+  // makes the port the real credential and the capability string a backstop.
+  const portRef = useRef<MessagePort | null>(null);
   const loadsRef = useRef(0);
 
   // Only nav-visible pages appear in the sidebar (`nav_visible = false` in
