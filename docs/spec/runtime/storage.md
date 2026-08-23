@@ -242,7 +242,7 @@ trailing periods), so distinct keys map to distinct files on every supported
 filesystem. `set` keeps the legacy file for non-empty rotations, because one
 slug can name several distinct keys and it may still hold a colliding alias's
 value that an un-migrated alias reads through the fallback. Clears are
- different: writing an empty value is a revocation, so the shared legacy file is
+different: writing an empty value is a revocation, so the shared legacy file is
 removed rather than allowing an un-migrated alias to resurrect the revoked
 credential. `get` prefers the canonical file, so a rotated key is shadowed while
 a cleared ambiguous legacy value is unavailable to every alias. The suite covers
