@@ -567,4 +567,38 @@ describe("the consolidated approval card", () => {
       "Make a request to a web address — GET https://example.com/items, DELETE https://example.com/items",
     );
   });
+
+  it("shows what a write sends, not just where it goes, in the compact row", async () => {
+    // Two POSTs to the same address are only the same decision if the payload
+    // is the same: the body is what the one Approve authorizes. A row that
+    // showed only "POST https://example.com/items" would render a write that
+    // ships a document and a body-less read identically.
+    const WRITE = request("h3", "https://example.com/items", "POST", {
+      message: "ship it",
+    });
+    await render([WRITE], {}, {}, new Map(), true);
+
+    const row = container.querySelector<HTMLElement>('[data-approval-inline="compact"]');
+    expect(row?.textContent).toContain(
+      'Make a request to a web address — POST {"message":"ship it"} https://example.com/items',
+    );
+  });
+
+  it("previews a long request body rather than flooding the compact row", async () => {
+    // The row's job is to distinguish two requests, not to carry the file; a
+    // giant body is previewed with an ellipsis, and the detailed view still
+    // shows the full payload.
+    const body = { message: "x".repeat(120) };
+    const bodyJson = JSON.stringify(body);
+    expect(bodyJson.length).toBeGreaterThan(60);
+    const WRITE = request("h4", "https://example.com/items", "POST", body);
+    await render([WRITE], {}, {}, new Map(), true);
+
+    const row = container.querySelector<HTMLElement>('[data-approval-inline="compact"]');
+    expect(row?.textContent).toContain(
+      `Make a request to a web address — POST ${bodyJson.slice(0, 60)}… https://example.com/items`,
+    );
+    // And the preview is not the whole body.
+    expect(row?.textContent).not.toContain(bodyJson);
+  });
 });
