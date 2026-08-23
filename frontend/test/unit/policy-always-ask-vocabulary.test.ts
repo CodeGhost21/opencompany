@@ -472,6 +472,61 @@ describe("policy tier changes", () => {
     expect((client.put as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled();
   });
 
+  it("wraps ArrowUp from the first tier to the last", async () => {
+    const client = makeClient();
+    await mount(client);
+    const radios = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('[role="radio"]'),
+    );
+    const auto = radios.find((button) =>
+      button.textContent?.includes("Auto"),
+    )!;
+    const full = radios.find((button) =>
+      button.textContent?.includes("Full"),
+    )!;
+    // Auto is the first tier and selected. ArrowUp has no neighbour above it,
+    // so the group wraps to Full — an escalation, which parks in the
+    // confirmation dialog instead of persisting.
+    auto.focus();
+    await act(async () => {
+      auto.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "ArrowUp", bubbles: true }),
+      );
+    });
+    expect(document.activeElement).toBe(full);
+    expect(document.body.textContent).toContain(
+      "Give teammates more autonomy?",
+    );
+    expect((client.put as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled();
+  });
+
+  it("wraps ArrowDown from the last tier to the first", async () => {
+    const client = makeClient({ status: { ...STATUS, mode: "full" } });
+    await mount(client);
+    const radios = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('[role="radio"]'),
+    );
+    const auto = radios.find((button) =>
+      button.textContent?.includes("Auto"),
+    )!;
+    const full = radios.find((button) =>
+      button.textContent?.includes("Full"),
+    )!;
+    // Full is the last tier and selected. ArrowDown has no neighbour below it,
+    // so the group wraps to Auto — a downgrade, which lands immediately.
+    full.focus();
+    await act(async () => {
+      full.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }),
+      );
+    });
+    expect(document.activeElement).toBe(auto);
+    expect((client.put as ReturnType<typeof vi.fn>)).toHaveBeenCalledWith(
+      "/api/v1/acme/policy",
+      { mode: "auto" },
+    );
+  });
+
   it("keeps the escalation confirmation open when saving fails", async () => {
     const failingPut = vi.fn(async () => {
       throw new Error("host refused");
