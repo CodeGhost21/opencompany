@@ -109,7 +109,14 @@ pub(super) enum AgentSource {
 
 /// The fields a `PATCH` accepts for a teammate — manifest-declared or overlay
 /// alike. Sent to the console so it renders the same rule the host enforces.
-const EDITABLE_FIELDS: [&str; 5] = ["name", "role", "description", "tools", "instructions"];
+const EDITABLE_FIELDS: [&str; 6] = [
+    "name",
+    "role",
+    "description",
+    "tools",
+    "instructions",
+    "avatar",
+];
 
 /// The subset a **non-admin** member may `PATCH` (issue #619).
 ///
@@ -119,7 +126,8 @@ const EDITABLE_FIELDS: [&str; 5] = ["name", "role", "description", "tools", "ins
 /// gives: a console renders a field read-only exactly when the host says it is,
 /// so offering `tools` to a member who would meet a `403` on save is precisely
 /// the drift `editable` exists to remove.
-const EDITABLE_FIELDS_MEMBER: [&str; 4] = ["name", "role", "description", "instructions"];
+const EDITABLE_FIELDS_MEMBER: [&str; 5] =
+    ["name", "role", "description", "instructions", "avatar"];
 
 /// One agent, in full — everything #264 lists as unreachable.
 #[derive(Debug, Serialize)]
@@ -169,6 +177,12 @@ pub(super) struct AgentDetailDto {
     tools: AgentToolsDto,
     desks: Vec<AgentDeskDto>,
     inbox_enabled: bool,
+    /// The face this teammate wears, when somebody has chosen one — the same
+    /// field, resolved through the same record helper, as `GET …/team`
+    /// (`docs/spec/runtime/avatars.md`). Absent means nobody has chosen and the
+    /// console draws the mascot it hashes from the id.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    avatar: Option<String>,
     /// The cap in force, its spend, and its attribution — the same fields and
     /// the same absent-means-uncapped contract as `GET …/team`.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -405,6 +419,26 @@ pub(super) struct EditAgent {
     /// is normalized to a reset, so an override can never blank a persona.
     #[serde(default, deserialize_with = "double_option")]
     instructions: Option<Option<String>>,
+    /// The face this teammate wears (`docs/spec/runtime/avatars.md`). A
+    /// **double option**, the same three-state contract as `instructions`:
+    ///
+    /// | body | parses as | means |
+    /// |---|---|---|
+    /// | `{}` | `None` | leave the face alone |
+    /// | `{"avatar": null}` | `Some(None)` | reset to the mascot hashed from the id |
+    /// | `{"avatar": "tiny:teal"}` | `Some(Some(…))` | wear that face |
+    ///
+    /// Accepted for a **manifest** teammate as well, for the reason
+    /// `instructions` is: it writes to the per-agent override record rather than
+    /// to `company.toml`. Editable by any member rather than admin-only —
+    /// picking a colleague's face is not a privilege boundary the way widening a
+    /// tool grant is, and a company whose only admin is away should not be stuck
+    /// with eleven hashed blobs.
+    ///
+    /// Validated by [`crate::company::avatar::normalize`], so the only strings
+    /// that reach the record name something this host already holds.
+    #[serde(default, deserialize_with = "double_option")]
+    avatar: Option<Option<String>>,
 }
 
 /// `GET {scope}/team/{agent_id}` — one agent, read.
@@ -620,6 +654,31 @@ async fn edit_agent(
         }
     }
 
+    // The chosen face, written to the same override row for either kind of
+    // teammate. `null` — and a blank string, which is the same intent typed by a
+    // client that cleared an input — resets to the hashed default rather than
+    // storing an unrenderable empty reference. Anything else is validated
+    // *before* it is stored: the value ends up in an `src=` on every surface
+    // that draws a face, so the refusal has to happen here, once, and not at
+    // eleven render sites.
+    if let Some(avatar) = body.avatar {
+        match avatar
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+        {
+            Some(value) => {
+                let stored = crate::company::avatar::normalize(&value)
+                    .map_err(|e| ApiError(e).into_response())?;
+                record.upsert_agent_override(AgentOverride {
+                    agent_id: agent_id.clone(),
+                    avatar: Some(stored),
+                    ..Default::default()
+                });
+            }
+            None => record.clear_agent_avatar(&agent_id),
+        }
+    }
+
     company
         .runtime
         .store()
@@ -805,6 +864,7 @@ async fn detail(
         spent_today_usd: spent,
         budget_set_by: attribution.map(|entry| entry.set_by.id.clone()),
         budget_set_at_millis: attribution.map(|entry| entry.at_millis),
+        avatar: record.effective_avatar(agent_id),
     }))
 }
 
