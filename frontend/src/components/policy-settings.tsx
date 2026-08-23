@@ -159,11 +159,12 @@ export function PolicySettings({ client, company }: Props) {
   const [pendingTier, setPendingTier] = useState<PolicyStatus["tiers"][number] | null>(
     null,
   );
-  // A reset restores the manifest's tier, so the widening check must run on it
-  // too — otherwise "Use the manifest's policy" is a one-click way around the
-  // confirmation the tier buttons get. Remember which action the dialog is
-  // confirming so the confirm button performs the same one the operator asked
-  // for.
+  // A reset restores the manifest's tier AND always-ask list, so the widening
+  // check must run on it too — otherwise "Use the manifest's policy" is a
+  // one-click way around the confirmation the tier buttons get, and the same
+  // for always-ask gates the manifest does not carry. Remember which action
+  // the dialog is confirming so the confirm button performs the same one the
+  // operator asked for.
   const [pendingReset, setPendingReset] = useState(false);
   /**
    * The tool names this deployment can actually gate (issue #1226).
