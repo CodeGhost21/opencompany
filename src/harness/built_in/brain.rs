@@ -133,51 +133,6 @@ use crate::ports::types::{
 };
 use crate::ports::{Cognition, TaskRecord, UsageMetering, generate_id, now_millis};
 
-/// Deletes everything this turn's repository tools materialized, however the
-/// turn ends (issue #245).
-///
-/// The lifecycle a checkout needs is *exactly* a turn's, and a turn ends in five
-/// ways — a reply, an error, a steer cancel, redirect exhaustion, and a panic
-/// unwinding through the whole stack. A cleanup call written at the end of the
-/// happy path covers one of those. So the boundary is an RAII guard claimed at
-/// each entry point instead: `Drop` runs on all five, which is what makes "a
-/// checkout does not outlive the task that asked for it" a property of the
-/// control flow rather than a rule every future edit has to remember.
-///
-/// It purges on the way **in** as well, for the reason the publish claim clears
-/// on the way in: several turns share one `HarnessDeps` within a cycle, and a
-/// path that somehow left a checkout behind must not have it attributed — or
-/// silently reused — by the next one.
-///
-/// Best-effort by construction: a path that cannot be removed is logged and
-/// forgotten, and the boot sweep
-/// ([`repo::sweep_orphaned_checkouts`](crate::harness::repo::sweep_orphaned_checkouts))
-/// is the backstop. A janitor that could fail a turn would trade a disk problem
-/// for a lost answer.
-#[must_use = "the janitor deletes on drop; dropping it immediately removes this turn's checkouts"]
-pub struct CheckoutJanitor {
-    ledger: crate::harness::repo::CheckoutLedger,
-}
-
-impl CheckoutJanitor {
-    /// Claims the ledger for the span of one turn.
-    pub fn claim(ledger: &crate::harness::repo::CheckoutLedger) -> Self {
-        ledger.purge();
-        Self {
-            ledger: ledger.clone(),
-        }
-    }
-}
-
-impl Drop for CheckoutJanitor {
-    fn drop(&mut self) {
-        let removed = self.ledger.purge();
-        if removed > 0 {
-            tracing::debug!(removed, "[repo] removed this turn's checkouts");
-        }
-    }
-}
-
 /// A [`Brain`] that answers with a live openhuman agent turn.
 pub struct HarnessBrain {
     pool: Arc<HarnessPool>,
