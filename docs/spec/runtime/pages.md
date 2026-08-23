@@ -206,13 +206,15 @@ iframe embedding, the bridge, and the nav view that lists pages are frontend
 concerns and are not described further here.
 
 
-**Normative: pages require a same-origin console.** The page shell and its
-`bundle.mjs` are loaded by an iframe `src` navigation, which can only attach the
-credentials a browser attaches to a same-origin request — the operator's
-HttpOnly session cookie. It cannot attach the API client's `authorization` or
-`x-opencompany-session` header, so `pages` MUST only be served to a console that
-is same-origin with the host. A cross-origin console gets no pages: its shell
-request is unauthenticated.
+**Normative: pages require a same-origin console.** The page shell is loaded by
+an iframe `src` navigation, which can only attach the credentials a browser
+attaches to a same-origin request — the operator's HttpOnly session cookie. It
+cannot attach the API client's `authorization` or `x-opencompany-session`
+header, and the module graph that follows rides a capability only that
+authenticated shell request can mint. `pages` MUST therefore only be served to
+a console that is same-origin with the host. A cross-origin console gets no
+pages: its shell request is unauthenticated, so no capability is minted and no
+module can load.
 
 **Normative: the bridge's residual privilege.** A page that the console's parent
 frame loads through the bridge described above MUST be assumed able to perform
