@@ -146,6 +146,34 @@ impl FeedbackResponse {
             ..Self::local(item_id)
         }
     }
+
+    /// The recorded result of an already-finalized item. A re-confirmed item —
+    /// a retried or duplicated Send — returns this instead of filing or
+    /// forwarding a second time, so a confirm is idempotent.
+    fn recorded(item: &FeedbackItem) -> Self {
+        let forwarded = item.issue_status.as_deref() == Some("forwarded");
+        Self {
+            item_id: item.id.clone(),
+            destination: if forwarded {
+                FeedbackDestination::Tinyhumans
+            } else {
+                FeedbackDestination::Github
+            },
+            filed: true,
+            blocked: false,
+            reason: None,
+            preview_body: None,
+            prefilled_url: None,
+            // A forwarded item stores the hub's id here, which is not a URL;
+            // only surface it when it is one, as `FeedbackSummary` does.
+            issue_url: item
+                .filed_issue_url
+                .as_ref()
+                .filter(|url| url.starts_with("http"))
+                .cloned(),
+            deduped: item.issue_status.as_deref() == Some("duplicate"),
+        }
+    }
 }
 
 /// Runs the scrub-then-preview gate for `item` and either previews or sends it.
