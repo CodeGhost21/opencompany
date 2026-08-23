@@ -1147,7 +1147,26 @@ to = "fetch"
         // explicitly so the lookup test mirrors the engine's call order.
         let registry = Arc::new(ChildGateRegistry::default());
         let a = crate::workflows::translate::translate(
-            &crate::company::parse_workflow(&parent_of("a", "b")).expect("a parses"),
+            &crate::company::parse_workflow(
+                r#"
+id = "a"
+name = "a"
+[[node]]
+id = "start"
+kind = "trigger"
+name = "Start"
+[[node]]
+id = "nested"
+kind = "sub_workflow"
+name = "Nested"
+[node.config]
+workflow_id = "b"
+[[edge]]
+from = "start"
+to = "nested"
+"#,
+            )
+            .expect("a parses"),
         );
         let b = crate::workflows::translate::translate(
             &crate::company::parse_workflow(&child_with_shell("b")).expect("b parses"),
