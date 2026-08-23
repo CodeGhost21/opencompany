@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { useHashView } from "@/hooks/use-hash-view";
 import { VIEWS, type View } from "@/lib/console-routes";
+import { REWRITE_RETIRED } from "@/lib/console-route-rewrites";
 
 /**
  * Every surface the console renders has to answer at its own address.
@@ -42,12 +43,10 @@ describe("resolving an address", () => {
   let root: Root;
   let seen: [View, string | null];
 
-  // No `rewrite` argument: this asks what the allow-list alone resolves, which
-  // is the property #1311 broke. The shell's `REWRITE_RETIRED` — which sends
-  // bare `#/tasks` and `#/team` elsewhere before the allow-list is consulted —
-  // is `task-route.test.ts`'s subject, not this file's.
+  // The shell's rewrite policy gets first refusal for retired and unknown
+  // addresses; the allow-list resolves every other head.
   function Probe() {
-    const [view, sub] = useHashView<View>(VIEWS, "overview");
+    const [view, sub] = useHashView<View>(VIEWS, "overview", REWRITE_RETIRED);
     seen = [view, sub];
     return null;
   }

@@ -57,8 +57,8 @@ import { type AgentReplyEvent, type CompanyStreamEvent, useEvents } from "@/hook
 import { useLedgerNav } from "@/hooks/use-ledger-nav";
 import type { WorkspaceEvent } from "@/views/WorkspaceView";
 import { useHashView } from "@/hooks/use-hash-view";
-import { BOARD_LEDGER } from "@/lib/board-columns";
 import { VIEWS, type View } from "@/lib/console-routes";
+import { REWRITE_RETIRED } from "@/lib/console-route-rewrites";
 import { taskIdFromSegment } from "@/lib/task-route";
 import { toast } from "sonner";
 
@@ -214,39 +214,6 @@ const NAV: NavItem[] = [
  * outright, and this only governs the no-segment case.
  */
 const NAV_ALWAYS_PARENT = new Set<View>(["company"]);
-
-/**
- * `#/tasks` with no card named the board page, which is retired (issue #1140).
- *
- * It lands where the board actually lives now, so a bookmark, a habit, or a
- * link written before the move all still arrive at a board rather than at a
- * 404 — and so does `#/tasks/<malformed>`, which names no card either. A real
- * `#/tasks/<id>` returns `null` from here and resolves untouched.
- *
- * Module scope, because `useHashView` holds this in a `useCallback` dependency
- * list: an inline arrow would be a new identity on every render and would
- * re-resolve the route on each one.
- */
-const REWRITE_RETIRED = (
-  head: string,
-  sub: string | null,
-): [View, string | null] | null => {
-  if (head === "tasks" && taskIdFromSegment(sub) === null) return ["ledgers", BOARD_LEDGER];
-  // Bare `#/team` is the Company page now (issue #1141). It rendered the
-  // teammate card grid from a route with no nav entry, so nobody arrived at it;
-  // the grid is Company's Cards half, and leaving `#/team` answering as well
-  // would leave two live addresses drawing one grid with no relationship
-  // between them. A named teammate is untouched — `#/team/<agentId>` is the
-  // detail sub-page (issue #264), it is what the org chart's rows and the chat
-  // pane's chips link to, and it is deliberately a page so it can be linked.
-  if (head === "team" && !sub) return ["company", null];
-  // Retired routes above have a real replacement. Everything else is a typo or
-  // a stale address, and must say so rather than quietly masquerading as
-  // Overview (issue #1417). Keep the head as the sub-page so the explanation
-  // can identify what failed without accepting it as a real view.
-  if (!VIEWS.includes(head as View)) return ["not-found", head || null];
-  return null;
-};
 
 /** How many workflow run-progress frames (issue #371) the shell keeps for the
  * Workflows canvas. A run emits roughly one per node, so this holds many runs'
