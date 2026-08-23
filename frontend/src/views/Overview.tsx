@@ -68,10 +68,11 @@ const EMPTY: Sources = {
 /**
  * The command centre: the company's knowledge graph, and nothing else.
  *
- * The page is the graph — no header, no strip, no top bar (the shell hides its
- * own for this view). The company sits at the core, its desks are the pillars,
- * the jobs hang off each pillar, the teammate who does each job sits above it,
- * and their tools are the outer ring.
+ * The page is the graph — no header or strip. The shell does not render a top
+ * bar for any view; its remaining controls live in the sidebar. The company
+ * sits at the core, its desks are the pillars, the jobs hang off each pillar,
+ * the teammate who does each job sits above it, and their tools are the outer
+ * ring.
  *
  * Every ring is **declared** now: the pillars are the company's own desks
  * (issue #486), the outer ring is the grants the host resolved for each
@@ -284,7 +285,7 @@ export function Overview({ client, company, companyName }: Props) {
           disabled={loading}
           title="This page is a snapshot, not a live view. Re-read the company."
           aria-label="Refresh the graph"
-          className="inline-flex items-center gap-1 rounded px-1 py-0.5 hover:bg-muted disabled:opacity-50"
+          className="inline-flex min-h-6 items-center gap-1 rounded px-1 py-0.5 hover:bg-muted disabled:opacity-50 md:min-h-0"
         >
           <RefreshCw className={`size-3 ${loading ? "animate-spin" : ""}`} aria-hidden />
           Refresh

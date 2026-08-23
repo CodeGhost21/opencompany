@@ -163,8 +163,12 @@ impl CompanyManifest {
         Self::from_located(&discover(path.as_ref())?)
     }
 
-    /// Loads an already-[`discover`]ed manifest, reading the roster from
-    /// `agents/*.toml` when the bundle has one.
+    /// Loads an already-[`discover`]ed manifest, folding in what the bundle
+    /// around it declares: the roster from `agents/*.toml` when it has one, and
+    /// the MCP servers from `mcp.json`.
+    ///
+    /// This — not [`from_file`](Self::from_file) — is what every production
+    /// caller reaches through, which is why the bundle merge lives here.
     ///
     /// Split out from [`from_path`](Self::from_path) so callers that need the
     /// [`Located`] value for themselves — `opencompany check`, which prints the
@@ -179,45 +183,79 @@ impl CompanyManifest {
         // both, and deriving the root from the located manifest is what keeps
         // the two call forms from resolving `agents/` differently.
         match located.path.parent() {
-            Some(bundle) if super::agent_file::has_agent_files(bundle) => {
-                Self::from_file_with_agents(&located.path, bundle)
-            }
-            _ => Self::from_file(&located.path),
+            Some(bundle) => Self::from_file_in_bundle(&located.path, bundle),
+            None => Self::from_file(&located.path),
         }
+    }
+
+    /// [`from_file`](Self::from_file), with everything the bundle around the
+    /// manifest declares folded in: the roster from `agents/*.toml` and the MCP
+    /// servers from `mcp.json`.
+    ///
+    /// Both are merged **before** validation, so a bundle-declared server is
+    /// held to exactly the rules an inline `[[mcp_server]]` is — the HTTP-only
+    /// transport boundary, the credential-free endpoint, the unique name —
+    /// without a second copy of them living in the parser.
+    fn from_file_in_bundle(path: &Path, bundle: &Path) -> Result<Self> {
+        let mut manifest = Self::parse_file(path)?;
+
+        if super::agent_file::has_agent_files(bundle) {
+            if !manifest.agents.is_empty() {
+                return Err(OpenCompanyError::ManifestInvalid {
+                    path: path.to_path_buf(),
+                    problems: vec![format!(
+                        "this company defines its roster in `{dir}/*.toml`, but `{file}` also has `[[agent]]` entries — the two forms are exclusive, so remove the `[[agent]]` blocks or delete the `{dir}/` directory.",
+                        dir = super::agent_file::AGENTS_DIR,
+                        file = path
+                            .file_name()
+                            .and_then(|name| name.to_str())
+                            .unwrap_or(MANIFEST_FILE),
+                    )],
+                });
+            }
+            manifest.agents = super::agent_file::load_agents(bundle)?;
+        }
+
+        let problems = manifest.merge_bundle_mcp_servers(bundle, path);
+        manifest.into_validated_with(path, problems)
+    }
+
+    /// Folds `<bundle>/mcp.json` into `mcp_servers`, returning every problem the
+    /// file carried.
+    ///
+    /// A name declared in both `mcp.json` and an inline `[[mcp_server]]` is
+    /// refused rather than resolved by precedence — the rule the roster already
+    /// uses for the same situation, and for the same reason: either precedence
+    /// rule silently discards a declaration somebody wrote down, and a server
+    /// that quietly is not the one you configured is worse than one that
+    /// refuses to start.
+    fn merge_bundle_mcp_servers(&mut self, bundle: &Path, path: &Path) -> Vec<String> {
+        let (servers, mut problems) = super::mcp_file::load_dir_mcp_servers(bundle);
+        for server in servers {
+            if self
+                .mcp_servers
+                .iter()
+                .any(|existing| existing.name.trim() == server.name)
+            {
+                problems.push(format!(
+                    "mcp server `{}` is declared in both `{}` and `{}` — the two forms are \
+                     exclusive per server, so keep one.",
+                    server.name,
+                    super::mcp_file::MCP_FILE,
+                    path.file_name()
+                        .and_then(|name| name.to_str())
+                        .unwrap_or(MANIFEST_FILE),
+                ));
+                continue;
+            }
+            self.mcp_servers.push(server);
+        }
+        problems
     }
 
     /// Reads, parses, and validates a specific manifest file.
     pub fn from_file(path: &Path) -> Result<Self> {
         Self::parse_file(path)?.into_validated(path)
-    }
-
-    /// [`from_file`](Self::from_file), with the roster taken from
-    /// `<bundle>/agents/*.toml` rather than the manifest's `[[agent]]` entries.
-    ///
-    /// The bundle roster **replaces** the inline one; it does not merge with it.
-    /// Declaring both is refused rather than resolved by precedence, because
-    /// either precedence rule silently discards teammates an operator wrote
-    /// down — and the roster is the one part of a manifest where a silent
-    /// omission stays invisible until the missing teammate fails to answer.
-    fn from_file_with_agents(path: &Path, bundle: &Path) -> Result<Self> {
-        let mut manifest = Self::parse_file(path)?;
-
-        if !manifest.agents.is_empty() {
-            return Err(OpenCompanyError::ManifestInvalid {
-                path: path.to_path_buf(),
-                problems: vec![format!(
-                    "this company defines its roster in `{dir}/*.toml`, but `{file}` also has `[[agent]]` entries — the two forms are exclusive, so remove the `[[agent]]` blocks or delete the `{dir}/` directory.",
-                    dir = super::agent_file::AGENTS_DIR,
-                    file = path
-                        .file_name()
-                        .and_then(|name| name.to_str())
-                        .unwrap_or(MANIFEST_FILE),
-                )],
-            });
-        }
-
-        manifest.agents = super::agent_file::load_agents(bundle)?;
-        manifest.into_validated(path)
     }
 
     /// Reads and deserializes a manifest file, without validating it.
@@ -292,8 +330,19 @@ impl CompanyManifest {
     /// already parsed and checked by [`crate::globals`], and running it through
     /// this validator would let one malformed global fail every company on the
     /// host rather than only itself.
-    fn into_validated(mut self, path: &Path) -> Result<Self> {
-        let problems = self.validate();
+    fn into_validated(self, path: &Path) -> Result<Self> {
+        self.into_validated_with(path, Vec::new())
+    }
+
+    /// [`into_validated`](Self::into_validated), carrying problems the caller
+    /// already found.
+    ///
+    /// Bundle files that are not the manifest — `mcp.json` today — are parsed
+    /// before validation runs, and what they found has to reach the same
+    /// refusal. Reported first, because a file that would not parse is the
+    /// thing to fix before anything the manifest says about it.
+    fn into_validated_with(mut self, path: &Path, mut problems: Vec<String>) -> Result<Self> {
+        problems.extend(self.validate());
         if problems.is_empty() {
             self.apply_globals();
             Ok(self)
@@ -1816,6 +1865,71 @@ mod tests {
                 .iter()
                 .any(|p| p.contains("workflow id") && p.contains("Bad-Id")),
             "{problems:?}"
+        );
+    }
+
+    /// A bundle laying an `mcp.json` beside its `company.toml` gets those
+    /// servers, and they are held to the same validator an inline entry is.
+    #[test]
+    fn a_bundle_mcp_json_reaches_the_manifest() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join(MANIFEST_FILE), "[company]\nname = \"X\"\n")
+            .expect("write manifest");
+        std::fs::write(
+            dir.path().join("mcp.json"),
+            r#"{"mcpServers": {"deepwiki": {"url": "https://mcp.deepwiki.com/mcp"}}}"#,
+        )
+        .expect("write mcp.json");
+
+        let manifest = CompanyManifest::from_path(dir.path()).expect("loads");
+        let names: Vec<&str> = manifest
+            .mcp_servers
+            .iter()
+            .map(|s| s.name.as_str())
+            .collect();
+        assert_eq!(names, ["deepwiki"]);
+    }
+
+    /// A server declared in both forms is refused rather than resolved by
+    /// precedence — the roster's rule, for the roster's reason: either
+    /// precedence rule silently discards a declaration somebody wrote down.
+    #[test]
+    fn a_server_declared_in_both_forms_is_refused() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join(MANIFEST_FILE),
+            "[company]\nname = \"X\"\n[[mcp_server]]\nname = \"deepwiki\"\nendpoint = \"https://one.test/mcp\"\n",
+        )
+        .expect("write manifest");
+        std::fs::write(
+            dir.path().join("mcp.json"),
+            r#"{"mcpServers": {"deepwiki": {"url": "https://two.test/mcp"}}}"#,
+        )
+        .expect("write mcp.json");
+
+        let err = CompanyManifest::from_path(dir.path()).expect_err("must refuse");
+        let text = err.to_string();
+        assert!(text.contains("deepwiki"), "{text}");
+    }
+
+    /// A bad entry in `mcp.json` is reported against the manifest rather than
+    /// swallowed — the file is genuinely read, and its problems genuinely land.
+    #[test]
+    fn a_bad_bundle_server_is_reported_against_the_manifest() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join(MANIFEST_FILE), "[company]\nname = \"X\"\n")
+            .expect("write manifest");
+        std::fs::write(
+            dir.path().join("mcp.json"),
+            r#"{"mcpServers": {"local": {"command": "npx some-mcp"}}}"#,
+        )
+        .expect("write mcp.json");
+
+        let err = CompanyManifest::from_path(dir.path()).expect_err("must refuse");
+        let text = err.to_string();
+        assert!(
+            text.contains("stdio") && text.contains("mcp.json"),
+            "{text}"
         );
     }
 

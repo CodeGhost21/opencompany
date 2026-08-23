@@ -361,6 +361,7 @@ fn chat(text: &str) -> CycleRequest {
         cycle_id: "cycle-1".to_string(),
         company_id: company(),
         events: vec![CompanyEvent::OperatorMessage {
+            mentions: Vec::new(),
             text: text.to_string(),
             by: None,
             chat: None,
