@@ -432,6 +432,54 @@ mod tests {
         assert!(!dumped[1].orchestrator);
     }
 
+    /// The sandbox section is the one this surface most needs to get right: an
+    /// agent that is never told it holds `file_write` records a task about
+    /// writing instead of writing, and an operator reading a dump that omits
+    /// the section has no way to see why. A default belt (`[tools].allow`
+    /// defaults to `*`) must therefore produce it, naming all three clauses.
+    #[test]
+    fn a_default_belt_is_told_about_its_sandbox_and_its_shell() {
+        let manifest = manifest(
+            "[company]\nname = \"Acme\"\n\n[[agent]]\nid = \"pm\"\nrole = \"Product Manager\"\n",
+        );
+        let dumped = dump(&manifest);
+        let section = dumped[0]
+            .sections
+            .iter()
+            .find(|s| s.title == "Your sandbox")
+            .expect("a `*` belt covers files, shell and code");
+        for tool in ["file_write", "shell", "apply_patch"] {
+            assert!(section.body.contains(tool), "{}", section.body);
+        }
+    }
+
+    /// The inverse, and the reason the section is gated at all: a belt that
+    /// reaches none of the three namespaces must report the absence rather than
+    /// describe tools this agent cannot call.
+    #[test]
+    fn a_belt_with_no_sandbox_namespace_defers_the_section() {
+        let manifest = manifest(
+            "[company]\nname = \"Acme\"\n\n[tools]\nallow = [\"workspace\"]\n\n[[agent]]\nid = \"pm\"\nrole = \"Product Manager\"\ntools = [\"workspace\"]\n",
+        );
+        let dumped = dump(&manifest);
+        assert!(
+            !dumped[0]
+                .sections
+                .iter()
+                .any(|s| s.title == "Your sandbox"),
+            "{:?}",
+            dumped[0].sections.iter().map(|s| &s.title).collect::<Vec<_>>()
+        );
+        assert!(
+            dumped[0]
+                .deferred
+                .iter()
+                .any(|entry| entry.title == "Your sandbox"),
+            "{:?}",
+            dumped[0].deferred
+        );
+    }
+
     /// An agent with no `prompt_files` has no brief, and that is reported as a
     /// deferred line rather than silently producing a shorter prompt — the
     /// whole point of the surface is to explain what an agent is missing.
