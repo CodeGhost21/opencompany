@@ -426,10 +426,11 @@ function CompactApprovalRow({
  * "+ 2 more" would let a harmless first call conceal a consequential second.
  * When the batch mixes actions, that phrasing would hide a payment behind a
  * fetch, so the line names every distinct action and states the count plainly,
- * the way `BatchHeadline` does. Either way, every amount is returned separately
- * from the text so the row can keep it outside the truncating region: an
- * operator approving money must see its value whether the payment is first in
- * the batch or not.
+ * the way `BatchHeadline` does — and names every call's own detail too, so a
+ * URL or recipient is never hidden behind a count. Either way, every amount is
+ * returned separately from the text so the row can keep it outside the
+ * truncating region: an operator approving money must see its value whether
+ * the payment is first in the batch or not.
  */
 function compactLabel(approvals: ApprovalSummary[]): { text: string; amounts: string } {
   const lead = approvals[0];
