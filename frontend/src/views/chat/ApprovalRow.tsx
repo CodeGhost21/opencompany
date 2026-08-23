@@ -403,7 +403,8 @@ function BatchHeadline({
       <div className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-muted text-foreground">
         <Icon className="size-5" />
       </div>
-      <div className="min-w-48 flex-1">
+      {/* Same container-capped 12rem floor as `ApprovalHeadline` (#1617 review). */}
+      <div className="min-w-[min(12rem,100%)] flex-1">
         <p className="font-medium">{title}</p>
         <p className="text-xs text-muted-foreground">
           {asker ? `${asker} needs` : "This turn needs"} {approvals.length} sign-offs before it
