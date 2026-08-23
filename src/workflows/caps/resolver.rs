@@ -1097,4 +1097,78 @@ to = "fetch"
         assert_eq!(described.node_id, "run");
         assert_eq!(described.slug, "shell");
     }
+
+    /// Issue #617, the nested half. A gate two levels down is reported as
+    /// `sub::nested::work`; the parent graph resolves only the first hop, so
+    /// the parking path must descend the registry — resolving each intermediate
+    /// `sub_workflow` node's `workflow_id` to the child that actually ran it —
+    /// to reach the grandchild's own classification.
+    #[tokio::test]
+    async fn a_two_level_child_gate_resolves_through_the_registry() {
+        let (resolver, registry) = gated_resolver_with_grants(
+            vec![
+                // `a` runs `b` from a node named `nested`.
+                overlay("a", parent_of("a", "b")),
+                overlay("b", child_with_shell("b")),
+            ],
+            "supervised",
+            crate::runtime::grants::GrantSet::default(),
+        );
+        resolver.resolve("a").await.expect("a resolves");
+        resolver.resolve("b").await.expect("b resolves");
+
+        // The top-level parent runs `a` from a node named `sub`, so the gate
+        // the grandchild paused on reads `sub::nested::work`.
+        let file =
+            crate::company::parse_workflow(&parent_of("parent", "a")).expect("parent parses");
+        let parent = crate::workflows::translate::translate(&file);
+        let described = child_gate_call(&registry, &parent, "sub::nested::work", None)
+            .expect("a two-level namespaced child gate resolves through the registry");
+        assert_eq!(described.node_id, "work");
+        assert_eq!(described.slug, "shell");
+    }
+
+    /// Issue #617, the dynamic half. A `workflow_id = "=item.target"` child is
+    /// resolved by the engine at run time, so the registry is keyed by the
+    /// RESOLVED id (`child`), not the authored expression. The parking path
+    /// must resolve the same expression against the trigger input to find the
+    /// record and describe the gate.
+    #[tokio::test]
+    async fn an_expr_bound_child_gate_resolves_through_the_registry() {
+        let (resolver, registry) = gated_resolver_with_grants(
+            vec![overlay("child", child_with_shell("child"))],
+            "supervised",
+            crate::runtime::grants::GrantSet::default(),
+        );
+        resolver.resolve("child").await.expect("child resolves");
+
+        let parent = r#"
+id = "parent"
+name = "Parent"
+[[node]]
+id = "start"
+kind = "trigger"
+name = "Start"
+[[node]]
+id = "sub"
+kind = "sub_workflow"
+name = "Sub"
+[node.config]
+workflow_id = "=item.target"
+[[edge]]
+from = "start"
+to = "sub"
+"#;
+        let file = crate::company::parse_workflow(parent).expect("parent parses");
+        let parent = crate::workflows::translate::translate(&file);
+        let described = child_gate_call(
+            &registry,
+            &parent,
+            "sub::work",
+            Some(&serde_json::json!({ "target": "child" })),
+        )
+        .expect("an expression-bound child gate resolves through the registry");
+        assert_eq!(described.node_id, "work");
+        assert_eq!(described.slug, "shell");
+    }
 }
