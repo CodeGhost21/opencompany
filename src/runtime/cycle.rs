@@ -1062,10 +1062,14 @@ approval.]"
                 Some(GrantSubject::Workflow(_))
             )
         {
+            // Name the real call a gate is stopping, not the `workflow.approve`
+            // wrapper — the same inner call the card showed the operator.
+            let call = crate::runtime::workflow_resume::gate_inner_call(&effect)
+                .map(|(tool, _)| tool)
+                .unwrap_or(&effect.kind);
             return Err(OpenCompanyError::InvalidRequest(format!(
-                "'{}' is a workflow call, and the workflow path does not enforce a standing \
-                 refusal yet; deny it once instead",
-                effect.kind
+                "'{call}' is a workflow call, and the workflow path does not enforce a \
+                 standing refusal yet; deny it once instead",
             )));
         }
         Ok(())
