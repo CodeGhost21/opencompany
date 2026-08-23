@@ -2667,12 +2667,6 @@ impl RuntimeBuilder {
                                 // nothing, so no rebuild is needed for an edit
                                 // to take effect.
                                 workspace: Some(ops.workspace.clone()),
-                                // Issue #245, agent half: the SAME manager the
-                                // console's bind/revoke routes write through
-                                // (wired onto the runtime below), so an operator
-                                // binding a repository is what the next turn's
-                                // `repo_checkout` resolves against — and the
-                                // one thing in this process holding the token.
                             };
                             workflow_harness_deps = Some(deps.clone());
                             let record = CompanyRecord {
