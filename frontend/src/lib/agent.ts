@@ -7,6 +7,18 @@ import type { AgentDetailDto, AgentToolsDto, EditAgentInput } from "@/api/types"
 /** The fields that describe an agent, in the order both forms show them. */
 export type AgentFieldKey = "name" | "role" | "description" | "instructions";
 
+/**
+ * Everything the host may report as editable — the form fields above, plus
+ * `tools`.
+ *
+ * `tools` is deliberately not an [`AgentFieldKey`]: it is a list of globs
+ * rather than a line of prose, it is admin-only where the others are
+ * member-open, and it has its own card. Keeping it out of `AGENT_FIELDS` is
+ * what stops the shared draft form from rendering it as a text field and
+ * echoing it back on every unrelated save.
+ */
+export type AgentEditableKey = AgentFieldKey | "tools";
+
 export interface AgentFieldSpec {
   key: AgentFieldKey;
   label: string;
@@ -81,7 +93,7 @@ export function draftFrom(detail: AgentDetailDto): AgentDraft {
  * duplicating the rule here is how a console starts offering a field that saves
  * with a 409.
  */
-export function isEditable(detail: AgentDetailDto, key: AgentFieldKey): boolean {
+export function isEditable(detail: AgentDetailDto, key: AgentEditableKey): boolean {
   return detail.editable.includes(key);
 }
 
@@ -165,6 +177,35 @@ export interface ToolGrantSummary {
  * blank field is `[]` — which the caller must treat as "the company's standard
  * grant" rather than "no tools".
  */
+/**
+ * Whether a company's allow-list covers one requested grant glob — the
+ * console's mirror of the host's `allow_covers`.
+ *
+ * A trailing `*` on the request is stripped first (asking for `docs.*` is
+ * asking about `docs.`), then each allow entry matches if it is the catch-all,
+ * an exact hit, or a prefix that stops on a namespace separator. The
+ * separator rule is what keeps `documentation.read` from being covered by a
+ * `docs` grant.
+ *
+ * This is a *hint*, shown while an operator types. The host stays the
+ * authority: it re-derives `effective` on every read, so a disagreement here
+ * shows up as a grant that renders struck through rather than as a permission
+ * the console invented.
+ */
+export function companyCovers(allow: string[], glob: string): boolean {
+  const literal = glob.endsWith("*") ? glob.slice(0, -1) : glob;
+  return allow.some((grant) => {
+    if (grant === "*") return true;
+    const base = grant.endsWith("*") ? grant.slice(0, -1) : grant;
+    if (literal === base || literal.startsWith(base)) return true;
+    if (!base.startsWith(literal)) return false;
+    // `workspace` covers a request for `workspace.read`, and the other way
+    // round a request for `workspace` is covered by `workspace.*`.
+    const rest = base.slice(literal.length);
+    return rest.startsWith(".") || rest.startsWith(":");
+  });
+}
+
 export function parseToolGlobs(input: string): string[] {
   const seen = new Set<string>();
   for (const raw of input.split(/[\s,]+/)) {
