@@ -554,11 +554,24 @@ pub struct McpRuntime {
 impl McpRuntime {
     /// Creates a runtime whose MCP SQLite store lives beneath `workspace_dir`.
     pub fn new(workspace_dir: PathBuf) -> Self {
-        let config = oh::config::Config {
+        Self {
+            config: Self::config_for(workspace_dir),
+        }
+    }
+
+    /// The config that selects the MCP store beneath `workspace_dir`.
+    ///
+    /// Public because the agent toolbelt needs the *same* one: OpenHuman's
+    /// `mcp_registry_*` tools take a config now rather than reading a process
+    /// global, and a tool built over a different config would quietly read a
+    /// different SQLite store than REST does — the installs would be there in
+    /// the console and absent from the turn.
+    #[must_use]
+    pub fn config_for(workspace_dir: PathBuf) -> oh::config::Config {
+        oh::config::Config {
             workspace_dir,
             ..Default::default()
-        };
-        Self { config }
+        }
     }
 
     /// This runtime's config with the company's Smithery key applied, for the
