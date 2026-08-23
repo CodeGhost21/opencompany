@@ -104,3 +104,54 @@ describe("collapsed ChannelRail unread labels", () => {
     expect(channelButtons()[0].getAttribute("aria-label")).toBe("Front desk");
   });
 });
+
+describe("section folds survive a rail collapse/expand (P2 review)", () => {
+  const sectionToggle = () =>
+    container.querySelector<HTMLButtonElement>('section button[aria-expanded]');
+
+  it("does not reopen a folded section when the rail is collapsed and expanded again", () => {
+    act(() =>
+      root.render(
+        createElement(ChannelRail, {
+          sections: SECTIONS,
+          activeId: null,
+          unread: {},
+          onSelect: () => {},
+        }),
+      ),
+    );
+
+    expect(sectionToggle()?.getAttribute("aria-expanded")).toBe("true");
+    act(() => {
+      sectionToggle()?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    expect(sectionToggle()?.getAttribute("aria-expanded")).toBe("false");
+
+    // Collapsing unmounts every `Section`; expanding must recreate them still
+    // folded rather than resetting the operator's organization.
+    act(() =>
+      root.render(
+        createElement(ChannelRail, {
+          sections: SECTIONS,
+          activeId: null,
+          unread: {},
+          onSelect: () => {},
+          collapsed: true,
+        }),
+      ),
+    );
+    act(() =>
+      root.render(
+        createElement(ChannelRail, {
+          sections: SECTIONS,
+          activeId: null,
+          unread: {},
+          onSelect: () => {},
+          collapsed: false,
+        }),
+      ),
+    );
+
+    expect(sectionToggle()?.getAttribute("aria-expanded")).toBe("false");
+  });
+});
