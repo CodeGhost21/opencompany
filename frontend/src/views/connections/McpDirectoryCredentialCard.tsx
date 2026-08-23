@@ -218,7 +218,7 @@ export function McpDirectoryCredentialCard({ client, company, onChanged }: Props
               <AlertDialogFooter>
                 <AlertDialogCancel>Cancel</AlertDialogCancel>
                 <AlertDialogAction variant="destructive" onClick={() => void write("", "clear")}>
-                  Clear key
+                  Clear Smithery key
                 </AlertDialogAction>
               </AlertDialogFooter>
             </AlertDialogContent>

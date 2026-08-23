@@ -106,7 +106,7 @@ describe("credential clearing confirmation (issue #1471)", () => {
       await Promise.resolve();
     });
 
-    await act(async () => button("Clear key").click());
+    await act(async () => button("Clear Smithery key").click());
     expect(api.setMcpDirectoryCredential).not.toHaveBeenCalled();
     expect(document.body.textContent).toContain("cannot be shown or recovered");
 
