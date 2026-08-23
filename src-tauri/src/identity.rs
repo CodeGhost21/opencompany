@@ -231,10 +231,7 @@ fn encode_picture(path: &Path) -> Option<String> {
     // `File` the host will refuse. The four signatures are the same set
     // `src/company/avatar.rs` accepts.
     let mime = sniff(&bytes)?;
-    Some(format!(
-        "data:{mime};base64,{}",
-        base64_encode(&bytes)
-    ))
+    Some(format!("data:{mime};base64,{}", base64_encode(&bytes)))
 }
 
 /// The four image types the host accepts, by signature.
@@ -257,8 +254,7 @@ fn sniff(bytes: &[u8]) -> Option<&'static str> {
 /// Standard base64, hand-rolled to keep a dependency out of the desktop shell
 /// for one call site.
 fn base64_encode(bytes: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
     for chunk in bytes.chunks(3) {
         let b = [
