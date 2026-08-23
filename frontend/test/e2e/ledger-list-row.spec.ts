@@ -55,8 +55,10 @@ test("a list row leads with its title and shows one readable status", async ({
     expect(recorded.ok()).toBeTruthy();
 
     await page.goto(`/#/ledgers/${slug}`);
-    await page.getByRole("button", { name: "List", exact: true }).click();
-
+    // Declared ledgers default to the list view (`defaultLedgerMode`, added
+    // with the #1627 mode work): the toggle then reads "Board", so there is
+    // no "List" button to click into the view this test is about. The row
+    // under test is the list's own, so assert it directly.
     const row = page.getByTestId(`ledger-entry-${id}`);
     await expect(row).toBeVisible({ timeout: 15_000 });
     await expect(row.getByTestId("ledger-entry-title")).toHaveText(title);
