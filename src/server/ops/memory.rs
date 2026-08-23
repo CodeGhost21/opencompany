@@ -1375,6 +1375,31 @@ mod route_tests {
         assert_eq!(stats["totalItems"], total as u64);
     }
 
+    /// A `?query=` request returns search matches, not "the newest N", so the
+    /// truncation metadata is not applicable — it must not claim a search
+    /// result was omitted by the cap, however far past it the store is.
+    #[tokio::test]
+    async fn the_brain_list_omits_truncation_metadata_for_queried_requests() {
+        let home = tempfile::tempdir().unwrap();
+        let total = MAX_CONTEXT_ENTRIES + 2;
+        let state = state_over(home.path(), ScriptedContext::with_chunks(total)).await;
+
+        let (status, list) = get_json(&state, "/api/v1/company/memory?query=note").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            list["contextTruncated"], false,
+            "a query result is not 'the newest N', so nothing was 'truncated'"
+        );
+        assert_eq!(
+            list["totalContext"], 0,
+            "truncation metadata does not describe queried rows"
+        );
+        assert!(
+            list["items"].as_array().unwrap().len() <= MAX_CONTEXT_ENTRIES,
+            "the query still returns its (capped) matches"
+        );
+    }
+
     /// #1488: with more chunks than the cap, the list must keep the NEWEST
     /// `MAX_CONTEXT_ENTRIES`, newest first. Before the fix the route took the
     /// head of the backend's oldest-first list, so a company past the cap
