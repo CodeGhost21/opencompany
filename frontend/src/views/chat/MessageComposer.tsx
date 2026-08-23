@@ -235,7 +235,22 @@ export function MessageComposer({
     if (!text || disabled) return;
     // The trim can shift every span, so the list is re-anchored against exactly
     // what is being sent — never against the untrimmed draft.
-    const sending = reconcileMentions(text, mentions);
+    let sending = reconcileMentions(text, mentions);
+    // A mention completed by hand (`@ceo ` — the query closed on the finished
+    // name) never entered `mentions`. When anything was picked, the host uses
+    // the supplied list exclusively, so sending just the picks would silently
+    // skip the typed one and the person would never be notified. Resolve every
+    // span the directory can name and send the union, keeping the picker's
+    // explicit targets for names the host's extraction would refuse as
+    // ambiguous.
+    if (sending.length && mentionables) {
+      for (const m of resolvableMentions(text, mentionables)) {
+        if (!sending.some((s) => s.text === m.text && s.offset === m.offset)) {
+          sending = [...sending, m];
+        }
+      }
+      sending = reconcileMentions(text, sending);
+    }
     // On first send with outside-channel mentions, warn instead of sending.
     const outside = mentionsOutsideChannel(sending, channelMemberIds);
     if (outside.length > 0 && !outsideWarning) {
