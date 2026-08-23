@@ -499,12 +499,12 @@ function compactLabel(approvals: ApprovalSummary[]): { text: string; amounts: st
   };
 }
 
-/** The compact row's first line: text may ellipsize, amounts never do. */
+/** The compact row's first line: text wraps rather than ellipsizing; amounts never wrap. */
 function CompactLabel({ approvals }: { approvals: ApprovalSummary[] }) {
   const { text, amounts } = compactLabel(approvals);
   return (
     <p className="flex min-w-0 items-baseline text-sm font-medium">
-      <span className="min-w-0 truncate">{text}</span>
+      <span className="min-w-0">{text}</span>
       {amounts !== "" && <span className="shrink-0">{amounts}</span>}
     </p>
   );
