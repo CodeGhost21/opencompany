@@ -581,8 +581,13 @@ function ProviderTile({
           )}
         >
           {body}
+          {/* The hint is a broad category-derived guess — Composio decides the
+              real consent scopes and does not publish them here. Saying
+              "Permission requested" would present that guess as the actual
+              grant; "Typical access" labels it as the general shape instead
+              (issue #1474). */}
           <p className="mt-2 text-left text-xs text-muted-foreground">
-            Permission requested: {permissionHint(row.category)}.
+            Typical access: {permissionHint(row.category)}.
           </p>
         </button>
       ) : connectable ? (
