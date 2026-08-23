@@ -740,24 +740,6 @@ export interface BoardQuery {
  * `GET /spec` — the host's runtime specification. Unauthenticated, so the
  * console can read it before (and regardless of) a session.
  */
-/** The bound memory engine, as `/spec` reports it. No endpoint, no credential. */
-export interface MemorySpec {
-  /** `store` | `embedded` | `remote` | `null`. */
-  backend: string;
-  /** The bound engine's own name, absent when the base store serves memory. */
-  driver_id?: string;
-  /** Capability families negotiated at bind time; empty = not negotiated. */
-  capabilities: string[];
-  /**
-   * Whether the boot-time reachability probe found the engine usable — ready
-   * or degraded (reachable, possibly reduced); only a down engine is `false`.
-   * A boot-time snapshot, not a live gauge: the provider can recover or fail
-   * after boot without this moving. Absent = not probed (base store, direct
-   * engine, or an older host) — treat as unknown, not unhealthy.
-   */
-  healthy?: boolean;
-}
-
 export interface AppSpec {
   name: string;
   version: string;
@@ -768,13 +750,6 @@ export interface AppSpec {
    * "is this instance provisioned" signal. No secret bytes are surfaced.
    */
   cycles_available: boolean;
-  /**
-   * The bound memory engine: mode, driver id, and the capability families it
-   * negotiated at bind time. Optional — a host predating the field omits it.
-   * The console shows this so an operator can see what a hosted engine does
-   * NOT support before a cycle discovers it.
-   */
-  memory?: MemorySpec;
   /**
    * Whether the first-run setup flow has been completed on this instance.
    *
@@ -1070,7 +1045,7 @@ export interface InboxDto {
   name: string;
   /** The full address (`{key}@{domain}` when a domain is configured). */
   address: string;
-  /** Whether the inbox is enabled on the Team page. */
+  /** Whether the inbox is enabled on this teammate's detail page. */
   enabled: boolean;
   /** The number of unread received (inbound) messages. */
   unread: number;
