@@ -1205,6 +1205,21 @@ mod route_tests {
         (status, value)
     }
 
+    async fn post_json(state: &AppState, uri: &str, body: Value) -> (StatusCode, Value) {
+        let request = Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header("content-type", "application/json")
+            .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        let response = router(state.clone()).oneshot(request).await.unwrap();
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        (status, value)
+    }
+
     #[tokio::test]
     async fn brain_stats_exclude_operator_fact_mirrors_from_the_display_partition() {
         let home = tempfile::tempdir().unwrap();
@@ -1215,13 +1230,25 @@ mod route_tests {
         ]);
         let state = state_over(home.path(), context).await;
 
+        let (created, _) = post_json(
+            &state,
+            "/api/v1/company/memory",
+            serde_json::json!({
+                "kind": "fact",
+                "title": "Operator note",
+                "body": "A durable fact",
+            }),
+        )
+        .await;
+        assert_eq!(created, StatusCode::OK);
+
         let (status, stats) = get_stats(&state).await;
 
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(stats["facts"], 0);
+        assert_eq!(stats["facts"], 1);
         assert_eq!(stats["teammateMemory"], 1);
         assert_eq!(stats["taskOutcomes"], 1);
-        assert_eq!(stats["totalItems"], 2);
+        assert_eq!(stats["totalItems"], 3);
         assert!(
             stats.get("agentChunks").is_none(),
             "the ambiguous all-chunks count must not reach the display"
