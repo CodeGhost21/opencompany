@@ -106,7 +106,34 @@ const providedBaseURL = process.env.PW_BASE_URL;
 /** Whether this config is responsible for the host, as opposed to driving yours. */
 const managesHost = !providedBaseURL;
 
-const baseURL = providedBaseURL || "http://127.0.0.1:8080";
+/**
+ * The default port, derived from this checkout's own path.
+ *
+ * A fixed default collides across worktrees, and it collides SILENTLY:
+ * `reuseExistingServer` below is on outside CI, so a second run does not fail
+ * with "port in use" — it adopts the host the first run started and reports on
+ * that binary, that console bundle and that data directory. The suite goes
+ * green or red against code which is not the code under test, which is
+ * indistinguishable from a real result. With ~200 worktrees on this repository
+ * and agents running the suite in several at once, that is the normal case
+ * rather than a corner one.
+ *
+ * Hashing the checkout path gives every worktree its own port, stable across
+ * runs (so a host you left up is still reused by the next run in the SAME
+ * worktree, which is what `reuseExistingServer` is for) and distinct from every
+ * other worktree's. `test/e2e/host.sh` derives the identical default from the
+ * same path, so running it directly agrees with running it through Playwright.
+ *
+ * 8100-8899 avoids 8080 itself, and stays clear of the ephemeral range so the
+ * kernel does not hand a derived port to something else first.
+ */
+const repoRoot = resolve(here, "..");
+const derivedPort =
+  8100 +
+  (parseInt(createHash("sha256").update(repoRoot).digest("hex").slice(0, 4), 16) %
+    800);
+
+const baseURL = providedBaseURL || `http://127.0.0.1:${derivedPort}`;
 
 /**
  * Where the shared signed-in session lands. Defaulted only when we manage the
