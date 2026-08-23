@@ -455,6 +455,7 @@ mod tests {
 
         let home = home();
         let state = state(home.path()).await;
+        crate::server::test_support::seed_fixed_member(&state, "acme").await;
         let id = CompanyId::new("acme");
         let runtime = state.registry().get(&id).expect("registered");
         runtime
