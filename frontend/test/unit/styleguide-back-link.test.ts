@@ -40,7 +40,17 @@ function backHref(): string | null {
   return link!.getAttribute("href");
 }
 
-describe("the styleguide's back link", () => {
+/** The styleguide header's outer row. */
+function headerRow(): HTMLElement {
+  act(() => root.render(createElement(StyleguideView)));
+  const row = container.querySelector<HTMLElement>(
+    '[data-testid="styleguide-header"] > div',
+  );
+  expect(row).not.toBeNull();
+  return row!;
+}
+
+describe("the styleguide back link", () => {
   it("carries the host scope the styleguide was opened with", () => {
     window.history.replaceState(null, "", "#/styleguide?host=c-2");
     expect(backHref()).toBe("#/overview?host=c-2");
@@ -49,5 +59,25 @@ describe("the styleguide's back link", () => {
   it("names no host when the address names none", () => {
     window.history.replaceState(null, "", "#/styleguide");
     expect(backHref()).toBe("#/overview");
+  });
+});
+
+/**
+ * jsdom lays nothing out, so this pins the properties that decide the outcome
+ * rather than the geometry: the title block sets its min-content width from an
+ * unbreakable path (`docs/design-system/`) and the controls do not shrink, so a
+ * non-wrapping row pushes "Back to console" past the right edge of a 320px
+ * viewport instead of stacking it under the heading.
+ */
+describe("the styleguide header on a narrow viewport", () => {
+  it("wraps its controls instead of overflowing", () => {
+    const row = headerRow();
+    expect(row.className).toContain("flex-wrap");
+    expect(row.className).not.toContain("flex-nowrap");
+  });
+
+  it("lets the title block shrink below its min-content width", () => {
+    const title = headerRow().firstElementChild as HTMLElement;
+    expect(title.className).toContain("min-w-0");
   });
 });
