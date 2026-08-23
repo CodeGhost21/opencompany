@@ -177,12 +177,11 @@ window.addEventListener("message", function onRelay(event: MessageEvent) {
       event.data.type === "oc:relay-pointerup" ||
       event.data.type === "oc:relay-pointercancel"
     ) {
-      endRelayedPress(
-        pointerId,
-        event.data.x,
-        event.data.y,
-        event.data.type === "oc:relay-pointercancel",
-      );
+      if (event.data.type === "oc:relay-pointerup") {
+        rememberPressTarget(pointerId, pressed);
+      } else {
+        lastPressTargets.delete(pointerId);
+      }
       relayPressTargets.delete(pointerId);
     }
     return;
@@ -191,12 +190,7 @@ window.addEventListener("message", function onRelay(event: MessageEvent) {
     event.data.type === "oc:relay-pointerup" ||
     event.data.type === "oc:relay-pointercancel"
   ) {
-    endRelayedPress(
-      pointerId,
-      event.data.x,
-      event.data.y,
-      event.data.type === "oc:relay-pointercancel",
-    );
+    lastPressTargets.delete(pointerId);
     relayPressTargets.delete(pointerId);
   }
 
@@ -204,7 +198,6 @@ window.addEventListener("message", function onRelay(event: MessageEvent) {
   if (!(element instanceof HTMLElement || element instanceof SVGElement)) return;
 
   if (event.data.type === "oc:relay-pointerdown") {
-    pressOrigins.set(pointerId, { x: event.data.x, y: event.data.y });
     relayPressTargets.set(pointerId, element);
   }
   dispatchRelayedPointer(event.data, element);
