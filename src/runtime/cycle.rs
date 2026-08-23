@@ -7943,6 +7943,52 @@ mod test {
         assert_eq!(listed[0].verdict, Verdict::Deny);
     }
 
+    /// Issue #1458 under concurrency: two opposite-polarity resolutions of the
+    /// **same** scope settled while both are in flight — the approve and the
+    /// deny each half-finished before either mints — must still leave a single
+    /// policy, not the deny permanently shadowing the approve.
+    ///
+    /// Before the reconcile lock this could interleave: the journal appends
+    /// between the [`opposite_polarity`] snapshot and the `grant_standing`
+    /// insert are awaited, so a concurrent settle gets polled in that window,
+    /// snapshots the same empty opposite set, and then both insert. Because
+    /// `ApprovalPolicy` matches a standing denial above a standing grant, the
+    /// approve then sits listed but never admits a call whatever the operator's
+    /// true order. The lock serialises the two mints, so the second observes
+    /// the first's policy and supersedes it — the same single-policy state the
+    /// sequential tests above assert.
+    #[tokio::test]
+    async fn concurrent_opposite_polarity_resolutions_leave_one_policy() {
+        let home_dir = tmp_home();
+        let (rt, ids) = park_two_blocked_tool_calls(
+            home_dir.path().to_path_buf(),
+            grantable_effect(
+                "ops",
+                crate::policy::consequence::WEB_FETCH,
+                serde_json::json!({ "url": "https://docs.rs/x" }),
+            ),
+        )
+        .await;
+
+        let (a, b) = tokio::join!(
+            rt.resolve_approval_spawned(&ids[0], Verdict::Approve, operator(), tool_scope()),
+            rt.resolve_approval_spawned(&ids[1], Verdict::Deny, operator(), tool_scope()),
+        );
+        let (_, follow_up_a) = a.unwrap();
+        let (_, follow_up_b) = b.unwrap();
+        let _ = tokio::join!(
+            crate::company::runtime::join_follow_up(follow_up_a),
+            crate::company::runtime::join_follow_up(follow_up_b),
+        );
+
+        let listed = rt.standing_grants();
+        assert_eq!(
+            listed.len(),
+            1,
+            "the concurrent resolutions must not leave both polarities live"
+        );
+    }
+
     /// A scope the runtime must not honour changes **nothing**: the approval is
     /// still parked and no verdict was journaled.
     ///
