@@ -214,6 +214,26 @@ test("#1436 the roster can search names, show working teammates, and identify th
   await expect(card(page, "Priya")).toHaveCount(0);
 });
 
+test("#1436 a workload outage disables the Working filter instead of hiding the roster", async ({
+  page,
+}) => {
+  await mockApi(page);
+  // The two reads behind the workload status fail, so `workload` stays null
+  // and no card gets a fabricated status. The Working filter has no data to
+  // judge against — it must be disabled, so it cannot be switched on into a
+  // state that would hide the whole roster with nothing to uncheck.
+  await page.route("**/api/v1/companies/acme/tasks", (route) => route.abort());
+  await page.route("**/api/v1/companies/acme/ledgers", (route) => route.abort());
+  await page.goto("/#/company");
+
+  await expect(card(page, "Maya")).toBeVisible({ timeout: 30_000 });
+  // The roster is complete: no filter is silently swallowing rows, and no card
+  // claims a workload the host never reported.
+  await expect(card(page, "Ravi")).toBeVisible();
+  await expect(card(page, "Priya")).toBeVisible();
+  await expect(page.getByTestId("team-roster-working")).toBeDisabled();
+});
+
 test("the status line sits on one baseline across a row, whatever the description", async ({
   page,
 }) => {
