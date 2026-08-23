@@ -200,17 +200,40 @@ async function open(page: Page, theme: "dark" | "light", hash: string) {
  * page writes nothing once the sim is asleep — the camera loop is at rest and
  * emits no transforms in the home state — so byte-identical markup is the
  * honest "done".
+ *
+ * The signal also demands the markup *changed at least once* first. A cold
+ * sim repaints nodes for its whole ~8s cool-down, so a settled graph has
+ * necessarily rewritten the SVG hundreds of times before it holds still. If it
+ * never moves, the graph did not settle — it never ran. Headless Chromium can
+ * occasionally stall a page's frame clock entirely (`requestAnimationFrame`
+ * stops firing; `data-visual-volatile` in `../visual.spec.ts`'s sibling
+ * diagnostics saw it as a frozen graph on a fresh host), and a stall would
+ * make the two-sample check pass on the first attempt: the graph is born on
+ * its resting positions, two identical samples of a motionless graph record a
+ * baseline of nothing. Failing loudly with a re-run hint beats committing a
+ * screenshot of a physics sim that never ticked. The lane retries once
+ * (`retries` in `playwright.config.ts`), which absorbs the stall when it is
+ * the frame clock that stumbled rather than the graph.
  */
 async function settleKnowledgeGraph(page: Page) {
   const svg = page.getByRole("img", { name: "Operating knowledge graph" });
   await expect(svg).toBeVisible({ timeout: 30_000 });
   let previous = "";
+  let changes = 0;
   for (let attempt = 0; attempt < 24; attempt += 1) {
     const current = await svg.evaluate((el) => el.innerHTML);
-    if (current === previous) return;
-    previous = current;
+    if (current !== previous) {
+      changes += 1;
+      previous = current;
+    } else if (changes >= 2) {
+      return;
+    }
     await page.waitForTimeout(750);
   }
+  throw new Error(
+    "knowledge graph never animated: the d3 simulation did not tick, so there is no " +
+      "settled layout to record. This is the headless frame-clock stall; re-run the lane.",
+  );
 }
 
 for (const theme of ["light", "dark"] as const) {
