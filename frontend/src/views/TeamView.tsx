@@ -241,6 +241,20 @@ export function TeamView({
   }, [boot, loadViewer, loadWorkload, refreshKey]);
 
   /**
+   * A "Working" filter is only answerable while the workload is readable.
+   *
+   * If the workload read fails after the operator turned the filter on —
+   * a re-run setup that hits a dropped network, say — every member reads as
+   * not working, and the switch below is disabled while `workload` is null,
+   * so the filter would hide the whole roster with no way to turn it off.
+   * Reset it when the workload becomes unavailable so the roster always has a
+   * way back.
+   */
+  useEffect(() => {
+    if (workload === null) setWorkingOnly(false);
+  }, [workload]);
+
+  /**
    * Re-read the roster on the way back from the agent sub-page (issue #264).
    *
    * This view renders the detail as an early return, so opening an agent never
