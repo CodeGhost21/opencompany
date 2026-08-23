@@ -490,6 +490,11 @@ function useStandingGrants(
       pending.current = null;
       setGrants(next);
     }
+    if (pendingNames.current !== null) {
+      const next = pendingNames.current;
+      pendingNames.current = null;
+      setGranterNames(next);
+    }
   }, [holding]);
 
   useEffect(() => {
