@@ -358,6 +358,32 @@ describe("mentionablesFor", () => {
     expect(labels).toContain("Other Person");
   });
 
+  /**
+   * Two people can share a display name; the host mints each a distinct slug
+   * so one can be told from the other. Rows that would otherwise be
+   * indistinguishable have to say which one they will ping.
+   */
+  it("shows the slug when two people share a display name", () => {
+    const dirWithSams = {
+      agents: [],
+      people: [
+        { id: "u1", label: "Sam", slug: "sam-1" },
+        { id: "u2", label: "Sam", slug: "sam-2" },
+      ],
+      desks: [],
+      everyone: { label: "everyone", aliases: ["everyone"] },
+    };
+    const rows = mentionablesFor(dirWithSams, []);
+    const hints = rows.filter((r) => r.target.kind === "user").map((r) => r.hint);
+    expect(hints).toEqual(["Person — @sam-1", "Person — @sam-2"]);
+  });
+
+  it("keeps the plain hint for a name nobody shares", () => {
+    const rows = mentionablesFor(directory, []);
+    const jane = rows.find((r) => r.target.kind === "user");
+    expect(jane?.hint).toBe("Person");
+  });
+
   it("includes everyone when selfId is not provided", () => {
     const rows = mentionablesFor(directory, []);
     const labels = rows.map((r) => r.label);
