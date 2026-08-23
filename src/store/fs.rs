@@ -1526,10 +1526,18 @@ impl FsSecretStore {
 #[async_trait]
 impl SecretStore for FsSecretStore {
     async fn get(&self, company: &CompanyId, key: &str) -> Result<Option<SecretValue>> {
-        let path = self.bundle(company).secret(key);
+        let bundle = self.bundle(company);
+        let path = bundle.secret(key);
         match tokio::fs::read_to_string(&path).await {
             Ok(value) => Ok(Some(SecretValue(value))),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                let legacy_path = bundle.legacy_secret(key);
+                match tokio::fs::read_to_string(&legacy_path).await {
+                    Ok(value) => Ok(Some(SecretValue(value))),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                    Err(e) => Err(io_err(&legacy_path, e)),
+                }
+            }
             Err(e) => Err(io_err(&path, e)),
         }
     }
@@ -1540,7 +1548,14 @@ impl SecretStore for FsSecretStore {
         let path = bundle.secret(key);
         tokio::fs::write(&path, value.expose())
             .await
-            .map_err(|e| io_err(&path, e))
+            .map_err(|e| io_err(&path, e))?;
+
+        let legacy_path = bundle.legacy_secret(key);
+        match tokio::fs::remove_file(&legacy_path).await {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(io_err(&legacy_path, e)),
+        }
     }
 }
 
@@ -2988,6 +3003,37 @@ mod test {
         );
         // Company B cannot see company A's secret.
         assert_eq!(secrets.get(&b, "github_token").await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn secret_store_reads_legacy_file_and_removes_it_on_rotation() {
+        let root_dir = tmp_root();
+        let root = root_dir.path().to_path_buf();
+        let secrets = FsSecretStore::new(&root);
+        let company = CompanyId::new("company-a");
+        let key = "mcp/acme prod/auth";
+        let bundle = Bundle::new(root, &company);
+        bundle.ensure_dirs().await.unwrap();
+        let legacy_path = bundle.legacy_secret(key);
+        tokio::fs::write(&legacy_path, "old-not-a-real-token")
+            .await
+            .unwrap();
+
+        assert_eq!(
+            secrets.get(&company, key).await.unwrap(),
+            Some(SecretValue("old-not-a-real-token".into()))
+        );
+
+        secrets
+            .set(&company, key, SecretValue("rotated-not-a-real-token".into()))
+            .await
+            .unwrap();
+
+        assert!(tokio::fs::metadata(&legacy_path).await.is_err());
+        assert_eq!(
+            secrets.get(&company, key).await.unwrap(),
+            Some(SecretValue("rotated-not-a-real-token".into()))
+        );
     }
     /// The put/delete race the index lock exists for: a same-address write
     /// and delete interleaving as write-blob / delete-both / append-index

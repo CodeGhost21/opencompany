@@ -182,6 +182,24 @@ fn slug(id: &CompanyId) -> String {
     out
 }
 
+/// Encodes a secret key as an injective filesystem-safe filename.
+///
+/// The `key-` prefix keeps the empty key distinct from every non-empty key,
+/// while percent-encoding `%` itself keeps the encoding unambiguous.
+fn secret_filename(key: &str) -> String {
+    let mut out = String::with_capacity("key-".len() + key.len());
+    out.push_str("key-");
+    for byte in key.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-') {
+            out.push(char::from(byte));
+        } else {
+            use std::fmt::Write;
+            write!(out, "%{byte:02X}").expect("writing to a String cannot fail");
+        }
+    }
+    out
+}
+
 /// The on-disk directory layout for one company.
 #[derive(Clone, Debug)]
 pub struct Bundle {
@@ -479,6 +497,14 @@ impl Bundle {
 
     /// Path to a single secret file by key.
     pub fn secret(&self, key: &str) -> PathBuf {
+        self.secrets_dir().join(secret_filename(key))
+    }
+
+    /// Path used for secrets before secret filenames became injective.
+    ///
+    /// [`FsSecretStore`](crate::store::FsSecretStore) reads this path only as a
+    /// migration fallback and removes it after a successful write to [`secret`].
+    pub(crate) fn legacy_secret(&self, key: &str) -> PathBuf {
         self.secrets_dir().join(slug(&CompanyId::new(key)))
     }
 
@@ -575,6 +601,21 @@ mod test {
         assert_eq!(slug(&CompanyId::new("acme-co")), "acme-co");
         assert_eq!(slug(&CompanyId::new("a/b/../c")), "a_b_.._c");
         assert_eq!(slug(&CompanyId::new("")), "_");
+    }
+
+    #[test]
+    fn secret_filenames_are_injective() {
+        let bundle = Bundle::new("/root", &CompanyId::new("acme"));
+        let space = bundle.secret("mcp/acme prod/auth");
+        let underscore = bundle.secret("mcp/acme_prod/auth");
+
+        assert_ne!(space, underscore);
+        assert!(space.ends_with("key-mcp%2Facme%20prod%2Fauth"));
+        assert!(underscore.ends_with("key-mcp%2Facme%5Fprod%2Fauth"));
+        assert_eq!(
+            bundle.legacy_secret("mcp/acme prod/auth"),
+            bundle.legacy_secret("mcp/acme_prod/auth")
+        );
     }
 
     #[test]
