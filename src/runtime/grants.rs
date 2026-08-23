@@ -727,13 +727,12 @@ impl GrantSet {
     /// Holds the lock that serialises the standing-policy reconcile
     /// (issue #1458) for the caller's whole mint sequence.
     ///
-    /// [`mint_standing_policy`](crate::runtime::cycle::CycleRunner::mint_standing_policy)
-    /// takes it across `snapshot → journal → insert` so a concurrent
-    /// opposite-polarity resolution cannot interleave between the read of
-    /// [`opposite_polarity`](Self::opposite_polarity) and the write of
-    /// [`grant_standing`](Self::grant_standing). The returned guard is
-    /// `Send` (a `tokio` guard, not a `std` one), so holding it across the
-    /// journal awaits inside the mint keeps the future `Send`.
+    /// The standing mint takes it across `snapshot → journal → insert` — the
+    /// read of [`opposite_polarity`](Self::opposite_polarity) through the write
+    /// of [`grant_standing`](Self::grant_standing) — so a concurrent
+    /// opposite-polarity resolution cannot interleave between them. The
+    /// returned guard is `Send` (a `tokio` guard, not a `std` one), so holding
+    /// it across the journal awaits inside the mint keeps the future `Send`.
     pub async fn standing_reconcile(&self) -> tokio::sync::MutexGuard<'_, ()> {
         self.reconcile_lock.lock().await
     }
