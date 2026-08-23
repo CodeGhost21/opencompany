@@ -154,9 +154,9 @@ test("a chat POST killed in flight still shows the reply the host went on to wri
   await expect(reply(page, marker)).toBeVisible({ timeout: 30_000 });
   await expect(reply(page, marker)).toHaveCount(1);
 
-  // Releasing must not be a licence to double-render: nothing else is going to
-  // deliver this reply, so a second bubble could only come from the frame being
-  // both replayed and rendered live.
+  // Releasing must not be a licence to double-render: the reply is expected
+  // exactly once after the connection failure, and the settled DOM assertion
+  // below catches any later duplicate delivery.
   await page.waitForTimeout(5_000);
   await expect(reply(page, marker)).toHaveCount(1);
 });
