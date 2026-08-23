@@ -2446,7 +2446,7 @@ export function KnowledgeGraph({
 .kg-glow { opacity: 0; animation: kg-glow-in 0.9s ease forwards; }
 /* SVG groups have no useful browser focus outline, so keep the keyboard
    position visible on the node itself rather than around its whole subtree. */
-.kg-node:focus-visible > circle:first-of-type { stroke: var(--focus-ring); stroke-width: 3px; }
+.kg-node:focus-visible > circle:first-of-type { stroke: var(--ring); stroke-width: 3px; }
 
 /* detail cards glide in with the camera instead of popping */
 @keyframes kg-panel-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }

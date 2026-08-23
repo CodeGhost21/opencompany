@@ -26,6 +26,11 @@ Click the core to bloom the memory constellation, with type-to-find over it.
 Drag the background to pan. `←` / `→` turn the pillar wheel; `Escape` steps
 back out.
 
+The graph is one tab stop. After Tab enters it, `←` / `↑` and `→` / `↓` move
+between visible nodes; `Enter` or `Space` selects the focused node just as a
+click would. The graph announces those instructions and each node's kind and
+name to assistive technology.
+
 Panning is an offset on top of whatever the camera is framing, not a separate
 mode: the shot still tracks its subject, just off-centre by the amount you
 dragged, and re-framing (selecting a node, opening the core) resets it.
