@@ -242,6 +242,8 @@ export function ChatView({
   const [addOpen, setAddOpen] = useState(false);
   const [mobilePane, setMobilePane] = useState<"rail" | "chat">("chat");
   const [isAdmin, setIsAdmin] = useState(false);
+  /** Your own avatar reference, once `loadViewer` has resolved who you are. */
+  const [youAvatar, setYouAvatar] = useState<string | undefined>(undefined);
   // Who set which cap (issue #360, ported from the retired Team page). Only
   // an admin may read the user directory, so this stays empty for a member —
   // the attribution line degrades to "an admin" rather than disappearing.
@@ -282,9 +284,15 @@ export function ChatView({
   const loadViewer = useCallback(async () => {
     let admin = false;
     try {
-      admin = (await fetchMe(client, company)).role === "admin";
+      const who = await fetchMe(client, company);
+      admin = who.role === "admin";
+      // Your own face, so your lines in a busy channel are yours at a glance.
+      // Read from the same call that resolves your role — there is no second
+      // round trip for it, and no way for the two to disagree about who you are.
+      setYouAvatar(personAvatar(who));
     } catch {
-      // No user plane on this host, or not signed in — treat as non-admin.
+      // No user plane on this host, or not signed in — treat as non-admin, and
+      // leave the composer's own lines on the name-seeded fallback.
     }
     setIsAdmin(admin);
     if (!admin) {
@@ -503,8 +511,8 @@ export function ChatView({
     ? loadingTeam || !historyReady(hydration, channel.id)
     : false;
   const entries = useMemo(
-    () => (channel ? buildTimeline(messages, channel, members) : []),
-    [messages, channel, members],
+    () => (channel ? buildTimeline(messages, channel, members, youAvatar) : []),
+    [messages, channel, members, youAvatar],
   );
 
   /**
