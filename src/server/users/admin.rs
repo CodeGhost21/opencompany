@@ -129,6 +129,16 @@ struct UserSummary {
     email: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     display_name: Option<String>,
+    /// The face this person chose (`docs/spec/runtime/avatars.md`), absent when
+    /// they have not chosen one — which the console draws as the mascot it
+    /// hashes from their id.
+    ///
+    /// Readable here, but **not writable**: unlike `displayName`, which an admin
+    /// may set so a roster of raw addresses can be made legible, a person's own
+    /// face is theirs to pick. `PATCH …/auth/me` is where it is written, by the
+    /// person wearing it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    avatar: Option<String>,
     role: UserRole,
     status: UserStatus,
     /// Whether they have a password, never what it is.
@@ -145,6 +155,7 @@ impl From<UserRecord> for UserSummary {
             id: u.id,
             email: u.email,
             display_name: u.display_name,
+            avatar: u.avatar,
             role: u.role,
             status: u.status,
             has_password: u.password_hash.is_some(),
