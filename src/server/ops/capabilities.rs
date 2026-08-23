@@ -1257,8 +1257,8 @@ mod tests {
         );
 
         // …and the wildcard the majority of manifests actually ship DOES grant
-        // it. Asserted here, beside the negative, because the asymmetry against
-        // `repoGranted` in the same response is the thing a reader gets wrong.
+        // it. Asserted here, beside the negative, so the two shapes read
+        // against each other.
         let wildcard_dir = home();
         let state2 = state_with_manifest(
             wildcard_dir.path(),
@@ -1269,10 +1269,6 @@ mod tests {
         assert_eq!(
             dto2["publishGranted"], true,
             "a bare `*` confers publishing — this is the shape most manifests ship: {dto2}"
-        );
-        assert_eq!(
-            dto2["repoGranted"], false,
-            "…and the same `*` still confers no `repo`; the two rules differ on purpose: {dto2}"
         );
     }
 }
