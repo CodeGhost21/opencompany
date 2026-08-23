@@ -48,7 +48,7 @@ describe("the consequence on an approval card", () => {
     ["spend", "Spends money", "bg-status-failed-soft"],
     ["send", "Leaves the company", "bg-status-blocked-soft"],
     ["sign", "Makes a commitment", "bg-status-failed-soft"],
-    ["publish", "Goes public", "bg-status-running-soft"],
+    ["publish", "Publishes work", "bg-status-running-soft"],
     ["hire", "Changes who can act", "bg-status-done-soft"],
     ["identity", "Changes who can act", "bg-status-done-soft"],
   ] as const)("marks %s approvals as %s", async (group, label, iconClass) => {
