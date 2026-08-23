@@ -38,7 +38,16 @@ export function useHashView<T extends string>(
   valid: readonly T[],
   fallback: T,
   rewrite?: (head: string, sub: string | null) => [T, string | null] | null,
-): [T, string | null, (view: T, sub?: string) => void] {
+): [
+  T,
+  string | null,
+  (
+    view: T,
+    sub?: string,
+    /** Query state that belongs to the destination, beside its route. */
+    query?: Readonly<Record<string, string | null>>,
+  ) => void,
+] {
   const resolve = useCallback((): [T, string | null] => {
     const [head, sub] = readSegments();
     const rewritten = rewrite?.(head ?? "", sub ?? null);
@@ -94,10 +103,19 @@ export function useHashView<T extends string>(
   // The host scope rides along; every other query key is dropped, which is what
   // `useHashFlag`'s flags want — `?new` belongs to the screen it was opened
   // over, not to the one being navigated to.
-  const navigate = useCallback((next: T, nextSub?: string) => {
+  const navigate = useCallback((next: T, nextSub?: string, query?: Readonly<Record<string, string | null>>) => {
     const path = nextSub ? `${next}/${nextSub}` : next;
-    if (readSegments().join("/") !== path) {
-      window.location.hash = withHostParam(path).slice(1);
+    const target = withHostParam(path);
+    const [targetPath, targetQuery = ""] = target.split("?");
+    const params = new URLSearchParams(targetQuery);
+    for (const [key, value] of Object.entries(query ?? {})) {
+      if (value === null) params.delete(key);
+      else params.set(key, value);
+    }
+    const suffix = params.toString().replace(/=(?=&|$)/g, "");
+    const nextHash = `${targetPath}${suffix ? `?${suffix}` : ""}`;
+    if (window.location.hash !== nextHash) {
+      window.location.hash = nextHash;
     }
     setRoute([next, nextSub ?? null]);
   }, []);

@@ -45,6 +45,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useHashFlag } from "@/hooks/use-hash-flag";
+import { useLedgerViewMode, type LedgerViewMode } from "@/hooks/use-ledger-view-mode";
 import { DeclareListWizard } from "@/views/company/DeclareListWizard";
 import {
   AlertTriangle,
@@ -165,7 +166,7 @@ interface Props {
    * does it. Absent when this view is rendered with nowhere to link to, in which
    * case a card opens the ordinary amend form.
    */
-  onOpenCard?: (id: string) => void;
+  onOpenCard?: (id: string, mode: LedgerViewMode) => void;
   /**
    * A counter the shell bumps on every task event off the company SSE stream
    * (issue #464) — a card opened, moved, settled, dispatched or steered.
@@ -288,7 +289,7 @@ export function LedgersView({
    * reading a row's whole contents, which is what a ledger with long prose
    * fields is actually for; the board truncates by construction.
    */
-  const [mode, setMode] = useState<"board" | "list">("board");
+  const [mode, setMode] = useLedgerViewMode();
   /**
    * The board's own create dialog, for the native `tasks` ledger only.
    *
@@ -945,7 +946,7 @@ export function LedgersView({
                   }
                   onOpen={(entry) =>
                     ledger.source === "native" && onOpenCard
-                      ? onOpenCard(entry.id)
+                      ? onOpenCard(entry.id, mode)
                       : setComposing({
                           id: entry.id,
                           fields: { ...entry.fields },
@@ -975,7 +976,12 @@ export function LedgersView({
                       ledger={ledger}
                       onOpen={
                         ledger.source === "native" && onOpenCard
-                          ? () => onOpenCard(entry.id)
+                          ? () => onOpenCard(entry.id, mode)
+                          : undefined
+                      }
+                      detailHref={
+                        ledger.source === "native"
+                          ? `#/tasks/${encodeURIComponent(entry.id)}?view=list`
                           : undefined
                       }
                       onAmend={() =>
@@ -1256,6 +1262,7 @@ function EntryCard({
   entry,
   ledger,
   onOpen,
+  detailHref,
   onAmend,
   onClose,
   onDelete,
@@ -1264,13 +1271,20 @@ function EntryCard({
   ledger: LedgerSummary;
   /** Leaves for the row's own screen, when it has one. Only the board does. */
   onOpen?: () => void;
+  /** Native task-detail address, including the List return context. */
+  detailHref?: string;
   onAmend: () => void;
   onClose: () => void;
   onDelete: () => void;
 }) {
   const writable = isWritable(ledger);
   return (
-    <Card className={cn(entry.closed && "opacity-75")}>
+    <Card
+      className={cn(
+        onOpen && "cursor-pointer transition-colors hover:bg-accent/50",
+        entry.closed && "opacity-75",
+      )}
+    >
       <CardContent className="space-y-2 p-4">
         <div className="flex flex-wrap items-start gap-2">
           <code className="text-xs text-muted-foreground">{entry.id}</code>
@@ -1281,13 +1295,16 @@ function EntryCard({
             </Badge>
           )}
           {onOpen ? (
-            <button
-              type="button"
-              className="flex-1 text-left font-medium hover:underline"
-              onClick={onOpen}
+            <a
+              href={detailHref}
+              className="flex-1 font-medium hover:underline"
+              onClick={(event) => {
+                event.preventDefault();
+                onOpen();
+              }}
             >
               {entry.title}
-            </button>
+            </a>
           ) : (
             <span className="flex-1 font-medium">{entry.title}</span>
           )}
