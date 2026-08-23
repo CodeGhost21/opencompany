@@ -113,6 +113,8 @@ export function TeamView({
    */
   const [hostEmpty, setHostEmpty] = useState(false);
   const [members, setMembers] = useState<TeamMember[]>([]);
+  const [nameQuery, setNameQuery] = useState("");
+  const [workingOnly, setWorkingOnly] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
   const [isAdmin, setIsAdmin] = useState(false);
   // Who set which cap. Only an admin may read the user directory, so this stays
@@ -373,6 +375,13 @@ export function TeamView({
     );
   }
 
+  const normalizedNameQuery = nameQuery.trim().toLocaleLowerCase();
+  const visibleMembers = members.filter((member) => {
+    const matchesName = !normalizedNameQuery || member.name.toLocaleLowerCase().includes(normalizedNameQuery);
+    const isWorking = workload?.get(member.id)?.status === "working";
+    return matchesName && (!workingOnly || isWorking);
+  });
+
   return (
     <div className="flex-1 overflow-y-auto">
       <div className="mx-auto w-full max-w-5xl space-y-6 px-4 py-6">
@@ -442,8 +451,33 @@ export function TeamView({
             ))}
           </div>
         ) : (
-          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-            {members.map((m) => (
+          <>
+            <div className="flex flex-wrap items-center gap-3" data-testid="team-roster-filters">
+              <div className="min-w-52 flex-1">
+                <Label htmlFor="team-roster-search" className="sr-only">
+                  Search teammates by name
+                </Label>
+                <Input
+                  id="team-roster-search"
+                  value={nameQuery}
+                  onChange={(event) => setNameQuery(event.target.value)}
+                  placeholder="Search teammates by name…"
+                  data-testid="team-roster-search"
+                />
+              </div>
+              <Label className="flex items-center gap-2 text-sm font-medium">
+                <Switch
+                  checked={workingOnly}
+                  onCheckedChange={setWorkingOnly}
+                  disabled={workload === null}
+                  aria-label="Show working teammates only"
+                  data-testid="team-roster-working"
+                />
+                Working
+              </Label>
+            </div>
+            <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+              {visibleMembers.map((m) => (
               <MemberCard
                 key={m.id}
                 member={m}
@@ -465,6 +499,11 @@ export function TeamView({
                 onNavigateToDesk={onNavigateToDesk}
               />
             ))}
+              {visibleMembers.length === 0 && (
+                <p className="col-span-full text-sm text-muted-foreground" data-testid="team-roster-empty">
+                  No teammates match these filters.
+                </p>
+              )}
             <button
               onClick={() => setAddOpen(true)}
               className="flex min-h-32 flex-col items-center justify-center gap-2 rounded-xl border border-dashed text-sm text-muted-foreground transition-colors hover:border-primary/40 hover:bg-accent/40 hover:text-foreground"
@@ -472,7 +511,8 @@ export function TeamView({
               <Plus className="size-5" />
               Add teammate
             </button>
-          </div>
+            </div>
+          </>
         )}
       </div>
 
@@ -588,6 +628,11 @@ function MemberCard({
             <p className="truncate font-medium">{member.name}</p>
             {subtitle && (
               <p className="truncate text-xs text-muted-foreground">{subtitle}</p>
+            )}
+            {member.global && (
+              <Badge variant="secondary" className="mt-1 text-3xs" data-testid="team-card-global">
+                Global baseline
+              </Badge>
             )}
           </div>
           {/*

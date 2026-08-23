@@ -34,7 +34,13 @@ const ROSTER = [
     role: "Research Lead",
     description: "Tracks competitor moves and drafts the weekly brief.",
   },
-  { id: "ravi", name: "Ravi", role: "Analyst", description: "Digs through the numbers." },
+  {
+    id: "ravi",
+    name: "Ravi",
+    role: "Analyst",
+    description: "Digs through the numbers.",
+    global: true,
+  },
   { id: "priya", name: "Priya", role: "Writer", description: "Turns findings into words." },
 ];
 
@@ -183,6 +189,29 @@ test("#1141 a card carries the description, the status and the open count", asyn
   const priya = card(page, "Priya");
   await expect(priya.getByTestId("team-card-status")).toHaveText("Idle");
   await expect(priya.getByTestId("team-card-tasks")).toHaveText("0 open tasks");
+});
+
+test("#1436 the roster can search names, show working teammates, and identify the baseline", async ({
+  page,
+}) => {
+  await mockApi(page);
+  await page.goto("/#/company");
+  await expect(card(page, "Maya")).toBeVisible({ timeout: 30_000 });
+
+  // Ravi follows the company roster only because he belongs to the shared
+  // baseline. The badge explains the deliberate boundary in host ordering.
+  await expect(card(page, "Ravi").getByTestId("team-card-global")).toHaveText("Global baseline");
+
+  const search = page.getByTestId("team-roster-search");
+  await search.fill("priya");
+  await expect(card(page, "Priya")).toBeVisible();
+  await expect(card(page, "Maya")).toHaveCount(0);
+
+  await search.fill("");
+  await page.getByTestId("team-roster-working").click();
+  await expect(card(page, "Maya")).toBeVisible();
+  await expect(card(page, "Ravi")).toHaveCount(0);
+  await expect(card(page, "Priya")).toHaveCount(0);
 });
 
 test("the status line sits on one baseline across a row, whatever the description", async ({
