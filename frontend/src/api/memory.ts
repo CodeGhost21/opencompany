@@ -141,17 +141,20 @@ export const ORIGIN_STYLES: Record<Exclude<MemoryOrigin, "fact">, string> = {
   document: "border-tone-2/30 bg-tone-2/10 text-tone-2-text",
 };
 
-/** The company's durable facts, newest-first, optionally filtered server-side. */
+/**
+ * The company's memory, newest-first, optionally filtered server-side. The
+ * rows come back wrapped with the truncation metadata for the same read.
+ */
 export function listMemory(
   client: OpenCompanyClient,
   company: string | null,
   opts?: { query?: string; kind?: MemoryKind },
-): Promise<MemoryEntry[]> {
+): Promise<MemoryList> {
   const params = new URLSearchParams();
   if (opts?.query) params.set("query", opts.query);
   if (opts?.kind) params.set("kind", opts.kind);
   const qs = params.toString();
-  return client.get<MemoryEntry[]>(`${client.scopeFor(company)}/memory${qs ? `?${qs}` : ""}`);
+  return client.get<MemoryList>(`${client.scopeFor(company)}/memory${qs ? `?${qs}` : ""}`);
 }
 
 /** Add a durable fact (also mirrored into the agents' recallable context). */
