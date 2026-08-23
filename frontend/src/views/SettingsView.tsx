@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import {
   Compass,
   Flag,
@@ -12,7 +12,7 @@ import {
 import { toast } from "sonner";
 
 import type { LifecycleAction, OpenCompanyClient } from "@/api/client";
-import { ApiError, type MemorySpec } from "@/api/types";
+import { ApiError } from "@/api/types";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import {
   AlertDialog,
@@ -112,8 +112,6 @@ export function SettingsView({ client, company, feed, onFlag }: Props) {
             </InfoRow>
           </CardContent>
         </Card>
-
-        <MemoryEngineCard client={client} />
 
         {/* Lifecycle */}
         {scoped ? (
@@ -375,75 +373,6 @@ function ConfirmAction({
         </AlertDialogFooter>
       </AlertDialogContent>
     </AlertDialog>
-  );
-}
-
-/**
- * Read-only: which memory engine this instance is bound to, from `/spec`.
- *
- * Deliberately carries no setter. Engine selection is instance-wide and
- * belongs to the infra operator — the `OPENCOMPANY_MEMORY*` variables, read
- * once at boot — so a console admin can see the engine but never repoint a
- * deployment's storage from here. The switch runbook lives in
- * `docs/spec/runtime/memory-engine.md`. Renders nothing on the `store`
- * default and on a host predating the `/spec` memory field.
- */
-function MemoryEngineCard({ client }: { client: OpenCompanyClient }) {
-  const [engine, setEngine] = useState<MemorySpec | undefined>(undefined);
-  useEffect(() => {
-    let live = true;
-    setEngine(undefined);
-    client
-      .spec()
-      .then((spec) => {
-        if (live) setEngine(spec.memory);
-      })
-      .catch(() => {
-        /* best-effort: the settings page works without /spec */
-      });
-    return () => {
-      live = false;
-    };
-  }, [client]);
-
-  if (!engine || engine.backend === "store") return null;
-  const discarding = engine.backend === "null";
-  return (
-    <Card data-testid="settings-memory-engine">
-      <CardHeader>
-        <CardTitle className="text-base">Memory engine</CardTitle>
-        <CardDescription>
-          Set by the infra operator (<code className="text-xs">OPENCOMPANY_MEMORY*</code>, read
-          at boot). Instance-wide; read-only here by design.
-          {discarding &&
-            " This engine accepts and discards every write — nothing this company is told will be remembered."}
-        </CardDescription>
-      </CardHeader>
-      <CardContent className="space-y-0 divide-y">
-        <InfoRow label="Engine">
-          <span className="font-mono text-xs">{engine.driver_id ?? engine.backend}</span>
-        </InfoRow>
-        <InfoRow label="Mode">
-          <span className="font-mono text-xs">{engine.backend}</span>
-        </InfoRow>
-        <InfoRow label="Capabilities">
-          <span className="text-sm">
-            {engine.capabilities.length > 0
-              ? engine.capabilities.join(", ")
-              : "not negotiated"}
-          </span>
-        </InfoRow>
-        <InfoRow label="Boot probe">
-          <span className="text-sm">
-            {engine.healthy === true
-              ? "reachable"
-              : engine.healthy === false
-                ? "unreachable — check the endpoint and credential"
-                : "not probed"}
-          </span>
-        </InfoRow>
-      </CardContent>
-    </Card>
   );
 }
 

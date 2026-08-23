@@ -27,7 +27,8 @@ first spelling; the second keeps parsing indefinitely, because renaming it would
 break every deployment that already sets it — including hosted tenants whose
 environment the control plane injects — for a cosmetic gain. The same applies to
 `cortex`, and to `mongo` on `OPENCOMPANY_STORAGE`. Only one name is reported
-back out (`/spec` says `embedded`), so a client never has to know both.
+back out (the authenticated memory-engine endpoint says `embedded`), so a
+client never has to know both.
 
 ## Choosing a hosted engine (`remote`)
 
@@ -65,8 +66,8 @@ Neither appears in logs, `/healthz`, `/spec`, status output, or an export.
 rendering `<set>` rather than the value, because both types are reachable from
 boot logging where a bare `{:?}` is one keystroke away.
 
-`driver_id()` **is** safe to surface, and `/spec` reports it alongside the
-capability families the driver negotiated at bind time — a hosted engine
+`driver_id()` is surfaced only by the authenticated memory-engine endpoint,
+alongside the capability families the driver negotiated at bind time — a hosted engine
 typically has no summary tree, no graph and no taint tier, and an operator
 should be able to read that rather than discover it from a failed cycle.
 
@@ -457,9 +458,9 @@ comes first.
    refuses at boot naming the missing feature.
 3. **Restart.** Selection is read once at boot; a running process never
    re-reads it.
-4. **Verify on `GET /spec`**: `memory.backend` and `memory.driver_id` name
-   what you selected, `memory.capabilities` lists what it negotiated, and
-   `memory.healthy` reports the boot-time reachability probe — `false` means
+4. **Verify through the authenticated `GET /api/v1/company/memory/engine`**:
+   `active` names what is bound, `capabilities` lists what it negotiated, and
+   `healthy` is re-probed for the read. `false` means
    bound-but-unreachable (bad endpoint or credential); absent means "not
    probed" (the `store` default or the direct engine overlay).
 
