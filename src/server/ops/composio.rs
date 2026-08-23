@@ -1682,7 +1682,7 @@ mod tests {
         )
         .await;
 
-        let (status, _body, raw) = send(
+        let (status, body, raw) = send(
             &state,
             "POST",
             "/api/v1/company/composio/authorize",
