@@ -52,6 +52,25 @@ const ESPN = approval("a1", "https://espn.com/nba");
 const BBC = approval("a2", "https://bbc.com/sport");
 const GUARDIAN = approval("a3", "https://theguardian.com/uk");
 
+function payment(id: string, to: string, amountUsd: number): ApprovalSummary {
+  return {
+    id,
+    kind: "payment.send",
+    amount_usd: amountUsd,
+    at_millis: T0,
+    agent: "seo",
+    thread: "desk-marketing",
+    batch: "turn-1",
+    // A spend stays a per-call decision, so the full card offers no standing
+    // scope — and the compact row must render the same way.
+    broadly_grantable: false,
+    payload: { to, amount_usd: amountUsd },
+  };
+}
+
+const VENDOR = payment("p1", "vendor@example.test", 42.5);
+const SUPPLIER = payment("p2", "supplier@example.test", 12);
+
 interface Decision {
   id: string;
   verdict: Verdict;
