@@ -1199,6 +1199,14 @@ to = "nested"
             "descend={:?}",
             descend(&registry, &parent, "sub::nested::work", None).map(|(_, g)| g)
         );
+        eprintln!(
+            "gated={:?}",
+            registry.get("b").map(|r| r
+                .gated
+                .iter()
+                .map(|g| (&g.node_id, &g.slug))
+                .collect::<Vec<_>>())
+        );
         let described = child_gate_call(&registry, &parent, "sub::nested::work", None)
             .expect("a two-level namespaced child gate resolves through the registry");
         assert_eq!(described.node_id, "work");
