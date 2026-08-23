@@ -273,7 +273,7 @@ export function KnowledgeGraph({
     select: () => {},
   });
   // eslint-disable-next-line no-console
-  console.log('[kg-debug] render', { activeNodeId, coreExpanded, memoryOn, navigable: navigableNodesRef.current });
+  console.log('[kg-debug] render', { activeNodeId, coreExpanded, memoryOn });
   const dragRef = useRef<{ id: string; moved: boolean; startX: number; startY: number } | null>(null);
   const suppressClickRef = useRef(false);
   // Drag-to-pan. `panRef` is an offset in viewBox units added to whatever the
