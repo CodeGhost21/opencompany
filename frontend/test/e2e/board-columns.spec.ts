@@ -142,8 +142,9 @@ test("an empty board leaves its column affordances to explain the empty state", 
     await dismissTour(page);
     // Declared ledgers open as readable rows (issue #1351); this test is
     // about the board's empty-state affordances, so switch to the board
-    // view before asserting them.
-    await page.getByRole("button", { name: "Board" }).click();
+    // view before asserting them. `exact` keeps the ledger's own title in
+    // the list-switcher trigger — `E2E empty board …` — out of the match.
+    await page.getByRole("button", { name: "Board", exact: true }).click();
     await expect(page.getByTestId("ledger-board")).toBeVisible({ timeout: 15_000 });
 
     // Board columns already say what an empty board is for. A second status
