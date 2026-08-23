@@ -160,7 +160,7 @@ pub const CONNECTION_PRIORITIES: &[&str] = &["low", "medium", "high"];
 /// maps individual tools onto these namespaces. A `[plan].token_budgets` key
 /// outside this set is a manifest error. Lives here (not the feature-gated
 /// harness) so manifest validation can see it in the default build.
-pub const GATEABLE_NAMESPACES: [&str; 8] = [
+pub const GATEABLE_NAMESPACES: [&str; 7] = [
     "shell", "code", "web", "subagent", "media", "composio", "search",
 ];
 
