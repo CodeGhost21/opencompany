@@ -38,6 +38,7 @@ import {
   SidebarProvider,
   SidebarRail,
   SidebarTrigger,
+  useSidebar,
 } from "@/components/ui/sidebar";
 import { ContentSurface } from "@/components/content-surface";
 import { FeedbackDialog } from "@/components/feedback-dialog";
@@ -130,6 +131,62 @@ interface NavItem {
   view: View;
   label: string;
   icon: LucideIcon;
+}
+
+function SidebarNavigation({
+  view,
+  pending,
+  onNavigate,
+}: {
+  view: View;
+  pending: number;
+  onNavigate: (view: View) => void;
+}) {
+  const { isMobile, setOpenMobile } = useSidebar();
+
+  const navigate = useCallback(
+    (next: View) => {
+      onNavigate(next);
+      if (isMobile) setOpenMobile(false);
+    },
+    [isMobile, onNavigate, setOpenMobile],
+  );
+
+  return (
+    <SidebarGroup>
+      <SidebarMenu>
+        {NAV.map((item) => (
+          <SidebarMenuItem key={item.view} data-tour={`nav-${item.view}`}>
+            <SidebarMenuButton
+              isActive={view === item.view}
+              tooltip={item.label}
+              onClick={() => navigate(item.view)}
+              className={RESTING_ROW}
+            >
+              <item.icon />
+              <span>{item.label}</span>
+            </SidebarMenuButton>
+            {item.view === "approvals" && pending > 0 && (
+              <>
+                <SidebarMenuBadge>{pending}</SidebarMenuBadge>
+                {/* Issue #1018: the badge is the sidebar's only attention
+                    signal and `SidebarMenuBadge` hides itself on the
+                    collapsed rail, so a collapsed sidebar said nothing was
+                    waiting. The dot is the same `pending` value rendered
+                    so it survives 32px — not a second source, so it cannot
+                    disagree with the badge or fork the count contract
+                    #932 pins. Exactly one of the two is visible at a
+                    time. */}
+                <SidebarMenuDot
+                  label={`${pending} ${pending === 1 ? "approval needs" : "approvals need"} you`}
+                />
+              </>
+            )}
+          </SidebarMenuItem>
+        ))}
+      </SidebarMenu>
+    </SidebarGroup>
+  );
 }
 
 // One flat list. The nav was grouped under "Operate" and "Configure" when the
@@ -1801,39 +1858,7 @@ export function AppShell({
           </div>
         </SidebarHeader>
         <SidebarContent data-tour="sidebar">
-          <SidebarGroup>
-            <SidebarMenu>
-              {NAV.map((item) => (
-                <SidebarMenuItem key={item.view} data-tour={`nav-${item.view}`}>
-                  <SidebarMenuButton
-                    isActive={view === item.view}
-                    tooltip={item.label}
-                    onClick={() => setView(item.view)}
-                    className={RESTING_ROW}
-                  >
-                    <item.icon />
-                    <span>{item.label}</span>
-                  </SidebarMenuButton>
-                  {item.view === "approvals" && pending > 0 && (
-                    <>
-                      <SidebarMenuBadge>{pending}</SidebarMenuBadge>
-                      {/* Issue #1018: the badge is the sidebar's only attention
-                          signal and `SidebarMenuBadge` hides itself on the
-                          collapsed rail, so a collapsed sidebar said nothing was
-                          waiting. The dot is the same `pending` value rendered
-                          so it survives 32px — not a second source, so it cannot
-                          disagree with the badge or fork the count contract
-                          #932 pins. Exactly one of the two is visible at a
-                          time. */}
-                      <SidebarMenuDot
-                        label={`${pending} ${pending === 1 ? "approval needs" : "approvals need"} you`}
-                      />
-                    </>
-                  )}
-                </SidebarMenuItem>
-              ))}
-            </SidebarMenu>
-          </SidebarGroup>
+          <SidebarNavigation view={view} pending={pending} onNavigate={setView} />
         </SidebarContent>
         <SidebarFooter>
           <SidebarControls
