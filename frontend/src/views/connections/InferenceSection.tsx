@@ -210,9 +210,27 @@ export function InferenceSection({
     setTest({ kind: "idle" });
   }
 
+  /**
+   * Whether the operator has typed anything into the Base URL or model fields
+   * since the current provider's preset was applied.
+   *
+   * The destructive-draft dialog exists to protect values the operator typed —
+   * the copy promises "confirmation is only required for values the operator
+   * typed", and a provider's *preset* is not a typed draft. OpenRouter pre-fills
+   * model ids and Ollama a local base URL, so switching away from either without
+   * editing anything must not ask to discard a draft nobody wrote (issue #1474).
+   */
+  function hasTypedDraft(): boolean {
+    const preset = presetFor(provider);
+    return (
+      baseUrl !== preset.baseUrl ||
+      TIERS.some((tier) => (models[tier] ?? "") !== (preset.models[tier] ?? ""))
+    );
+  }
+
   function requestProvider(next: InferenceProvider) {
     if (next === provider) return;
-    if (baseUrl.trim() || Object.values(models).some((model) => model?.trim())) {
+    if (hasTypedDraft()) {
       setPendingProvider(next);
       return;
     }
