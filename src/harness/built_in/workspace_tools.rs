@@ -2250,8 +2250,7 @@ pub(crate) async fn mutation_is_owned_by_agent(
         // A creation has no existing node to inspect. Its only affirmative safe
         // shape is a direct child of the caller's home: the tool stamps both
         // origins with this agent and cannot overwrite another node.
-        return segments.len() == 3
-            && workspace.is_strictly_inside_own_home(&segments[..2]);
+        return segments.len() == 3 && workspace.is_strictly_inside_own_home(&segments[..2]);
     }
 
     let path = args.get("path").and_then(Value::as_str).map(str::trim);
