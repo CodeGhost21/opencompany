@@ -1092,7 +1092,7 @@ impl ApprovalPolicy {
         // effect's payload — one function, so the two answers cannot drift into
         // a grant that never matches its own tool.
         let scope = crate::policy::consequence::standing_scope_of(tool, args);
-        let Some(grant) = self.requests.grants().match_standing(
+        let Some(grant) = self.requests.grants().match_standing_with_verdict(
             &subject,
             tool,
             scope.as_deref(),
@@ -1120,7 +1120,7 @@ impl ApprovalPolicy {
         let scope = crate::policy::consequence::standing_scope_of(tool, args);
         self.requests
             .grants()
-            .match_standing(
+            .match_standing_with_verdict(
                 &subject,
                 tool,
                 scope.as_deref(),

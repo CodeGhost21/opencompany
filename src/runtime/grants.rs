@@ -736,6 +736,23 @@ impl GrantSet {
         subject: &GrantSubject,
         tool: &str,
         scope: Option<&str>,
+        now_millis: u64,
+    ) -> Option<StandingGrant> {
+        self.match_standing_with_verdict(
+            subject,
+            tool,
+            scope,
+            crate::ports::types::Verdict::Approve,
+            now_millis,
+        )
+    }
+
+    /// Matches a standing policy with the requested polarity.
+    pub fn match_standing_with_verdict(
+        &self,
+        subject: &GrantSubject,
+        tool: &str,
+        scope: Option<&str>,
         verdict: crate::ports::types::Verdict,
         now_millis: u64,
     ) -> Option<StandingGrant> {
