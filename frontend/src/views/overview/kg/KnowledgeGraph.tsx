@@ -752,14 +752,9 @@ export function KnowledgeGraph({
       .force('x', forceX<SimNode>(CX))
       .force('y', forceY<SimNode>(CY))
       .force('collide', forceCollide<SimNode>(10))
-      .on('tick', tickHandler);
+      .on('tick', renderTick);
     configure(sim);
     simRef.current = sim;
-    // TEMP-DIAGNOSTIC: log sim creation + alpha trajectory (visual-flake hunt).
-    const prevLog = (window as unknown as { __simLog?: Array<object> }).__simLog ?? [];
-    prevLog.push({ ev: "create", t: performance.now(), nodes: nodes.length, alpha: sim.alpha() });
-    (window as unknown as { __simLog?: Array<object> }).__simLog = prevLog;
-    (window as unknown as { __alphaLog?: Array<object> }).__alphaLog = alphaLog;
     return () => {
       sim.stop();
       simRef.current = null;
