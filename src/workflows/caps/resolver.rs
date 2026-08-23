@@ -353,33 +353,98 @@ impl WorkflowResolver for StoreWorkflowResolver {
     }
 }
 
-/// The policy classification behind a namespaced child gate (`sub::work`), if
-/// the resolver recorded it this run.
+/// The child workflow id a `sub_workflow` node resolves to — the key the
+/// registry records the gate pass under.
 ///
-/// The parent's parking path resolves `<node>::<gate>` by reading the parent
-/// node's static `workflow_id`, looking the child up in the registry, and
-/// finding the gate's own classification. This is the only route by which the
-/// child's policy gate (tool, reason, arguments) reaches the card — the parent
+/// A static `workflow_id` names it directly. A `=`-expression names it through
+/// the engine, which resolves it against the node's run scope at run time; for
+/// a `once` node — the only shape whose id this lookup can reconstruct — that
+/// scope's `item` is the whole trigger input, so the same resolution is
+/// repeated here. Best-effort: an expression touching a key a parked run no
+/// longer carries (`run`, `nodes`), or a `per_item` fan-out whose per-element
+/// scope needs the item index the paused id does not carry, yields `None` and
+/// the caller falls back rather than failing the pause.
+pub(crate) fn child_id_of(
+    graph: &WorkflowGraph,
+    node: &str,
+    trigger_input: Option<&Value>,
+) -> Option<String> {
+    let node = graph.nodes.iter().find(|n| n.id == node)?;
+    if !matches!(node.kind, NodeKind::SubWorkflow) {
+        return None;
+    }
+    let config = node.config.get("workflow_id")?;
+    let id = config.as_str()?;
+    if !id.starts_with('=') {
+        return Some(id.to_string());
+    }
+    // A `per_item` fan-out resolves `workflow_id` against each element's own
+    // scope, and the paused id carries no item index to say which element that
+    // was. Resolving against the whole-input scope could describe the wrong
+    // child, so fall back rather than guess.
+    if node.config.get("execution").and_then(Value::as_str) == Some("per_item") {
+        return None;
+    }
+    let input = trigger_input?;
+    tinyflows::expr::resolve(config, &serde_json::json!({ "item": input, "items": [input] }))
+        .as_str()
+        .map(str::to_string)
+}
+
+/// Walks a namespaced pending id (`sub::work`, `sub::nested::work`) down through
+/// the registry's per-child records, to the gate the deepest child paused on.
+///
+/// Each segment before the last names a `sub_workflow` node in the graph one
+/// level up; [`child_id_of`] resolves the child it runs, and the registry entry
+/// for that child carries the next graph down. The last segment names the gate
+/// *inside* the deepest child. Returns that deepest record and the gate id, so
+/// the caller can read the gate's own classification ([`ChildGateRecord::gated`])
+/// or walk its upstream calls.
+///
+/// A segment that names no `sub_workflow` node, a child id the registry did not
+/// record (its gate pass never ran — a child the policy let through), or an
+/// expression-bound id this side cannot reconstruct yields `None`, and the
+/// caller falls back to its own default rather than failing the pause.
+pub(crate) fn descend(
+    registry: &ChildGateRegistry,
+    parent: &WorkflowGraph,
+    node_id: &str,
+    trigger_input: Option<&Value>,
+) -> Option<(ChildGateRecord, String)> {
+    let mut segments = node_id.split(GATE_NAMESPACE);
+    let gate = segments.next_back()?;
+    let mut record: Option<ChildGateRecord> = None;
+    for node in segments {
+        let graph = match &record {
+            None => parent,
+            Some(record) => &record.graph,
+        };
+        let child_id = child_id_of(graph, node, trigger_input)?;
+        record = Some(registry.get(&child_id)?);
+    }
+    Some((record?, gate.to_string()))
+}
+
+/// The policy classification behind a namespaced child gate (`sub::work`,
+/// `sub::nested::work`), if the resolver recorded it this run.
+///
+/// The parent's parking path resolves a namespaced id by descending the
+/// registry's per-child records — resolving each intermediate `sub_workflow`
+/// node's `workflow_id` (static, or a `=expr` best-effort against
+/// `trigger_input`) to the child the engine actually ran — and reading the
+/// deepest child's own classification. This is the only route by which the
+/// child's policy gate (tool, reason, arguments) reaches the card: the parent
 /// graph does not contain the child's nodes, and the child's partial output
-/// does not travel up when it pauses (tinyflows drops it on `ChildOutcome::Paused`).
+/// does not travel up when it pauses (tinyflows drops it on
+/// `ChildOutcome::Paused`).
 pub(crate) fn child_gate_call(
     registry: &ChildGateRegistry,
     parent: &WorkflowGraph,
     node_id: &str,
+    trigger_input: Option<&Value>,
 ) -> Option<crate::workflows::gate::GatedCall> {
-    let (parent_node, child_gate) = node_id.split_once(GATE_NAMESPACE)?;
-    let child_id = parent
-        .nodes
-        .iter()
-        .find(|n| n.id == parent_node)
-        .and_then(|n| n.config.get("workflow_id"))
-        .and_then(Value::as_str)?;
-    let record = registry.get(child_id)?;
-    record
-        .gated
-        .iter()
-        .find(|g| g.node_id == child_gate)
-        .cloned()
+    let (record, gate) = descend(registry, parent, node_id, trigger_input)?;
+    record.gated.iter().find(|g| g.node_id == gate).cloned()
 }
 
 /// Whether `id` is a single safe on-disk filename stem — no path separators, no
