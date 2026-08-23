@@ -249,7 +249,7 @@ pub fn persona_prompt(
 /// `query_company` / `spawn_task` / `delegate_to_desk` tools.
 // Each parameter is a distinct, load-bearing dependency of agent construction;
 // bundling them into a struct would only relocate the surface. (Pre-existing —
-// surfaced only under the full `openhuman,mcp,telegram` clippy combo, which CI
+// surfaced only under the full `openhuman,mcp` clippy combo, which CI
 // does not build; see the OpenCompany full-feature CI-gap note.)
 #[allow(clippy::too_many_arguments)]
 pub fn build_agent(
@@ -2847,7 +2847,7 @@ mod tests {
     /// **Feature-aware (issue #297).** The belt genuinely differs by feature
     /// set: `#[cfg(feature = "mcp")]` pushes two `mcp_registry_*` tools
     /// unconditionally in `build_agent`, so a flat literal was *wrong* under
-    /// `--features openhuman,mcp,telegram` — the combination a full local build
+    /// `--features openhuman,mcp` — the combination a full local build
     /// and the shipped tenant image both use, and which no CI lane ran. The pin
     /// was therefore failing unseen on `main`. Extending the array
     /// unconditionally would only move the failure onto plain

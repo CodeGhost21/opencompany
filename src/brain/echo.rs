@@ -57,26 +57,7 @@ impl Brain for EchoBrain {
                 });
             }
             if let CompanyEvent::WebhookReceived { channel, body } = event {
-                let (text, reply_to) = if channel == "telegram" {
-                    let chat_id = body
-                        .get("message")
-                        .and_then(|m| m.get("chat"))
-                        .and_then(|c| c.get("id"))
-                        .and_then(|id| id.as_i64());
-                    let user_text = body
-                        .get("message")
-                        .and_then(|m| m.get("text"))
-                        .and_then(|t| t.as_str())
-                        .unwrap_or("");
-                    (
-                        format!("You said: {user_text}"),
-                        chat_id.map(|id| ReplyTo {
-                            chat_id: id.to_string(),
-                        }),
-                    )
-                } else {
-                    (format!("webhook on {channel}"), None)
-                };
+                let (text, reply_to) = (format!("webhook on {channel}"), None);
                 channel_responses.push(OutboundMessage {
                     message_id: None,
                     task_id: None,

@@ -111,7 +111,7 @@ pub const POLICY_MODES: &[&str] = &["readonly", "supervised", "auto", "full"];
 pub const PROVISIONED_POLICY_MODE: &str = "auto";
 
 /// Channels the runtime knows how to enable under `[channels.*]`.
-pub const KNOWN_CHANNELS: &[&str] = &["operator", "email", "slack", "sms", "web", "telegram"];
+pub const KNOWN_CHANNELS: &[&str] = &["operator", "email", "slack", "sms", "web"];
 
 /// Effect kinds gated for approval by default — **empty on purpose** (issue
 /// #684).
