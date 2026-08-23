@@ -1332,25 +1332,37 @@ mod route_tests {
     }
 
     /// The truncation notice must be decided from ONE server snapshot: the
-    /// stats response reports `contextTruncated` directly, so the console never
-    /// compares the capped list against an independently-timed count.
+    /// list response carries `totalContext`/`contextTruncated` for the same
+    /// read that produced the rows, so the console never compares the capped
+    /// rows against an independently-timed count.
     #[tokio::test]
-    async fn brain_stats_report_context_truncation_from_the_same_snapshot() {
+    async fn the_brain_list_reports_its_own_truncation() {
         let home = tempfile::tempdir().unwrap();
-        let state = state_over(
-            home.path(),
-            ScriptedContext::with_chunks(MAX_CONTEXT_ENTRIES + 2),
-        )
-        .await;
+        let total = MAX_CONTEXT_ENTRIES + 2;
+        let state = state_over(home.path(), ScriptedContext::with_chunks(total)).await;
 
-        let (status, stats) = get_stats(&state).await;
+        let (status, list) = get_memory(&state).await;
 
         assert_eq!(status, StatusCode::OK);
         assert_eq!(
-            stats["contextTruncated"], true,
-            "past the 500-row list cap, the stats snapshot must say the list truncates"
+            list["contextTruncated"], true,
+            "past the 500-row list cap, the list read must say it truncated"
         );
-        assert_eq!(stats["totalItems"], (MAX_CONTEXT_ENTRIES + 2) as u64);
+        assert_eq!(
+            list["totalContext"], total as u64,
+            "the uncapped context count is the 'M' in the notice, from the same read"
+        );
+        assert_eq!(
+            list["items"].as_array().unwrap().len(),
+            MAX_CONTEXT_ENTRIES,
+            "the rows are capped to the newest 500"
+        );
+
+        // The stats counts are never capped — the display partition still
+        // reports the full store when the list truncates.
+        let (status, stats) = get_stats(&state).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(stats["totalItems"], total as u64);
     }
 
     /// #1488: with more chunks than the cap, the list must keep the NEWEST
