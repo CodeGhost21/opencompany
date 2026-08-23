@@ -4,6 +4,7 @@ import { Toaster as Sonner, toast, useSonner, type ToasterProps } from "sonner"
 import { CircleCheckIcon, InfoIcon, TriangleAlertIcon, OctagonXIcon, Loader2Icon } from "lucide-react"
 
 import { reconcileTracked, sweepToasts, type TrackedToast } from "@/lib/toast-lifetime"
+import { relayToastClick } from "@/lib/toast-click-through"
 
 /** How often the dismissal guard re-checks the toasts that are up. */
 const SWEEP_INTERVAL_MS = 500
@@ -13,13 +14,6 @@ function toasterHovered(): boolean {
   return Array.from(document.querySelectorAll("[data-sonner-toaster]")).some((el) =>
     el.matches(":hover"),
   )
-}
-
-/** Can this part of a toast handle its own click rather than passing it through? */
-function isToastControl(target: Element): boolean {
-  return target.closest(
-    'a, button, input, select, textarea, [role="button"], [role="link"], [contenteditable="true"]',
-  ) !== null
 }
 
 /**
@@ -33,30 +27,8 @@ function isToastControl(target: Element): boolean {
  */
 function useToastClickThrough(): void {
   useEffect(() => {
-    function relayClick(event: MouseEvent): void {
-      if (event.button !== 0 || !(event.target instanceof Element)) return
-      if (!event.target.closest("[data-sonner-toast]") || isToastControl(event.target)) return
-
-      const toasterElements = Array.from(
-        document.querySelectorAll<HTMLElement>("[data-sonner-toaster], [data-sonner-toaster] *"),
-      )
-      const pointerEvents = toasterElements.map((element) => element.style.pointerEvents)
-      for (const element of toasterElements) element.style.pointerEvents = "none"
-      const beneath = document.elementFromPoint(event.clientX, event.clientY)
-      for (const [index, element] of toasterElements.entries()) {
-        element.style.pointerEvents = pointerEvents[index]
-      }
-
-      if (!(beneath instanceof HTMLElement) || beneath.closest("[data-sonner-toaster]")) return
-
-      event.preventDefault()
-      event.stopPropagation()
-      beneath.focus({ preventScroll: true })
-      beneath.click()
-    }
-
-    document.addEventListener("click", relayClick, true)
-    return () => document.removeEventListener("click", relayClick, true)
+    document.addEventListener("click", relayToastClick, true)
+    return () => document.removeEventListener("click", relayToastClick, true)
   }, [])
 }
 
