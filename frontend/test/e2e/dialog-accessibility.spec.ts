@@ -31,10 +31,13 @@ async function openTaskDialog(page: Page): Promise<Locator> {
   return dialog;
 }
 
-async function expectModal(dialog: Locator, page: Page) {
+async function expectModal(dialog: Locator, backgroundControl: Locator) {
   await expect(dialog).toHaveAttribute("role", "dialog");
   await expect(dialog).toHaveAttribute("aria-modal", "true");
-  await expect(page.locator("#root")).toHaveAttribute("aria-hidden", "true");
+  // Base UI applies `aria-hidden` to the smallest outside subtree that can
+  // hide the page without hiding the dialog's trigger. Assert the resulting
+  // accessibility tree, not its private marker attribute or a fixed DOM shape.
+  await expect(backgroundControl).toHaveCount(0);
 }
 
 test("the task dialog is modal and restores keyboard focus for every close path", async ({
@@ -46,19 +49,19 @@ test("the task dialog is modal and restores keyboard focus for every close path"
   const addTask = page.getByRole("button", { name: "Add task" });
 
   let dialog = await openTaskDialog(page);
-  await expectModal(dialog, page);
+  await expectModal(dialog, addTask);
   await page.keyboard.press("Escape");
   await expect(dialog).toHaveCount(0);
   await expect(addTask).toBeFocused();
 
   dialog = await openTaskDialog(page);
-  await expectModal(dialog, page);
+  await expectModal(dialog, addTask);
   await dialog.getByRole("button", { name: "Cancel" }).click();
   await expect(dialog).toHaveCount(0);
   await expect(addTask).toBeFocused();
 
   dialog = await openTaskDialog(page);
-  await expectModal(dialog, page);
+  await expectModal(dialog, addTask);
   await dialog.getByRole("button", { name: "Close" }).click();
   await expect(dialog).toHaveCount(0);
   await expect(addTask).toBeFocused();
@@ -71,9 +74,7 @@ test("the mobile sidebar sheet is modal", async ({ page }) => {
 
   await page.getByRole("button", { name: "Toggle sidebar" }).click();
 
-  const sheet = page.locator('[data-slot="sheet-content"]');
+  const sheet = page.getByRole("dialog", { name: "Sidebar" });
   await expect(sheet).toBeVisible();
-  await expect(sheet).toHaveAttribute("role", "dialog");
-  await expect(sheet).toHaveAttribute("aria-modal", "true");
-  await expect(page.locator("#root")).toHaveAttribute("aria-hidden", "true");
+  await expectModal(sheet, page.getByRole("button", { name: "Toggle sidebar" }));
 });
