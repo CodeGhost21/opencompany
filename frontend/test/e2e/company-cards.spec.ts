@@ -34,7 +34,13 @@ const ROSTER = [
     role: "Research Lead",
     description: "Tracks competitor moves and drafts the weekly brief.",
   },
-  { id: "ravi", name: "Ravi", role: "Analyst", description: "Digs through the numbers." },
+  {
+    id: "ravi",
+    name: "Ravi",
+    role: "Analyst",
+    description: "Digs through the numbers.",
+    global: true,
+  },
   { id: "priya", name: "Priya", role: "Writer", description: "Turns findings into words." },
 ];
 
@@ -183,6 +189,49 @@ test("#1141 a card carries the description, the status and the open count", asyn
   const priya = card(page, "Priya");
   await expect(priya.getByTestId("team-card-status")).toHaveText("Idle");
   await expect(priya.getByTestId("team-card-tasks")).toHaveText("0 open tasks");
+});
+
+test("#1436 the roster can search names, show working teammates, and identify the baseline", async ({
+  page,
+}) => {
+  await mockApi(page);
+  await page.goto("/#/company");
+  await expect(card(page, "Maya")).toBeVisible({ timeout: 30_000 });
+
+  // Ravi follows the company roster only because he belongs to the shared
+  // baseline. The badge explains the deliberate boundary in host ordering.
+  await expect(card(page, "Ravi").getByTestId("team-card-global")).toHaveText("Global baseline");
+
+  const search = page.getByTestId("team-roster-search");
+  await search.fill("priya");
+  await expect(card(page, "Priya")).toBeVisible();
+  await expect(card(page, "Maya")).toHaveCount(0);
+
+  await search.fill("");
+  await page.getByTestId("team-roster-working").click();
+  await expect(card(page, "Maya")).toBeVisible();
+  await expect(card(page, "Ravi")).toHaveCount(0);
+  await expect(card(page, "Priya")).toHaveCount(0);
+});
+
+test("#1436 a workload outage disables the Working filter instead of hiding the roster", async ({
+  page,
+}) => {
+  await mockApi(page);
+  // The two reads behind the workload status fail, so `workload` stays null
+  // and no card gets a fabricated status. The Working filter has no data to
+  // judge against — it must be disabled, so it cannot be switched on into a
+  // state that would hide the whole roster with nothing to uncheck.
+  await page.route("**/api/v1/companies/acme/tasks", (route) => route.abort());
+  await page.route("**/api/v1/companies/acme/ledgers", (route) => route.abort());
+  await page.goto("/#/company");
+
+  await expect(card(page, "Maya")).toBeVisible({ timeout: 30_000 });
+  // The roster is complete: no filter is silently swallowing rows, and no card
+  // claims a workload the host never reported.
+  await expect(card(page, "Ravi")).toBeVisible();
+  await expect(card(page, "Priya")).toBeVisible();
+  await expect(page.getByTestId("team-roster-working")).toBeDisabled();
 });
 
 test("the status line sits on one baseline across a row, whatever the description", async ({
@@ -369,7 +418,10 @@ test("#1190 the card carries no switch; the inbox lives on the teammate", async 
   // teammate, and the switch was one mis-click from a silent config change
   // while scanning thirteen of them.
   await expect(page.getByTestId("team-inbox-toggle")).toHaveCount(0);
-  await expect(page.getByRole("switch")).toHaveCount(0);
+  // Scoped to the cards, not the whole page: the roster's "Working" filter
+  // above the grid is also a switch, but it is a local view filter that writes
+  // nothing to the host — the thing #1190 removed from the cards.
+  await expect(page.getByTestId("team-card").getByRole("switch")).toHaveCount(0);
 
   // The capability is not gone — it moved to the page that already reported it.
   await card(page, "Maya").getByTestId("team-card-open").click();

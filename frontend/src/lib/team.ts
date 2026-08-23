@@ -24,6 +24,11 @@ export interface TeamMember {
    */
   inboxEnabled: boolean;
   /**
+   * Whether this teammate comes from the global baseline every company gets.
+   * Undefined means an older host did not report provenance.
+   */
+  global?: boolean;
+  /**
    * The teammate's daily spend cap in USD, as the host will enforce it — an
    * admin's console override when one is set, otherwise the company's own
    * default. Undefined means uncapped: the card shows no budget line at all
@@ -183,6 +188,7 @@ export function fromDto(dto: TeamMemberDto): TeamMember {
     tone: toneFor(dto.id || name),
     avatar: avatarFor(dto.id || name),
     inboxEnabled: dto.inboxEnabled ?? false,
+    global: dto.global,
     // Carried through as-is: `undefined` means uncapped and must stay
     // `undefined`, never coalesced to `0`.
     budgetUsdDaily: dto.budgetUsdDaily,

@@ -1,0 +1,17 @@
+{
+  "$comment": "Search briefs and scorecards live in a shared workspace; an open search is often tracked as work in the client's own tracker.",
+  "mcpServers": {
+    "notion": {
+      "url": "https://mcp.notion.com/mcp",
+      "description": "The workspace this company's documents already live in. Needs a token.",
+      "enabled": false,
+      "authSecret": "mcp/notion/auth"
+    },
+    "linear": {
+      "url": "https://mcp.linear.app/mcp",
+      "description": "Issues and cycles, when the work is tracked outside this board. Needs a token.",
+      "enabled": false,
+      "authSecret": "mcp/linear/auth"
+    }
+  }
+}
