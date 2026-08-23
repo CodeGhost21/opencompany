@@ -37,12 +37,15 @@ export function FeedbackForm({ client, company, onDone, showCancel = true }: Pro
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
-  async function submit(preview: boolean) {
+  async function submit(preview: boolean, itemId?: string) {
     if (!note.trim() || busy) return;
     setBusy(true);
     setError(null);
     try {
-      const res = await client.feedback({ category, note: note.trim(), preview }, company);
+      const res = await client.feedback(
+        { category, note: note.trim(), preview, item_id: itemId },
+        company,
+      );
       setResult(res);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "something went wrong");
@@ -59,7 +62,7 @@ export function FeedbackForm({ client, company, onDone, showCancel = true }: Pro
         busy={busy}
         onDone={onDone}
         onEdit={() => setResult(null)}
-        onSend={() => void submit(false)}
+        onSend={() => void submit(false, result.item_id)}
       />
     );
   }
