@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { Bar, BarChart, CartesianGrid, XAxis } from "recharts";
 import {
   AlertTriangle,
   Check,
@@ -7,10 +8,23 @@ import {
   Copy,
   Loader2,
   Play,
+  Plus,
   X,
 } from "lucide-react";
+import { toast } from "sonner";
 
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from "@/components/ui/alert-dialog";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -21,20 +35,67 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import { ChartContainer, type ChartConfig } from "@/components/ui/chart";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+} from "@/components/ui/dialog";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { ScrollArea } from "@/components/ui/scroll-area";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
+import {
+  Sheet,
+  SheetContent,
+  SheetDescription,
+  SheetHeader,
+  SheetTitle,
+  SheetTrigger,
+} from "@/components/ui/sheet";
+import {
+  Sidebar,
+  SidebarContent,
+  SidebarGroup,
+  SidebarGroupContent,
+  SidebarGroupLabel,
+  SidebarMenu,
+  SidebarMenuButton,
+  SidebarMenuItem,
+  SidebarProvider,
+} from "@/components/ui/sidebar";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Stepper } from "@/components/ui/stepper";
 import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
+import { STYLEGUIDE_COMPONENTS } from "@/views/styleguide-components";
 
 /**
  * The living styleguide — `#/styleguide`.
  *
- * Every token and every component state on one page, rendered by the same CSS
+ * Every token and every shipped UI primitive on one page, rendered by the same CSS
  * the console ships. That is the whole point: a styleguide written as a
  * separate document drifts the moment someone edits `index.css`, whereas this
  * one cannot — it reads the variables at runtime, so a token that changes
@@ -71,7 +132,7 @@ function Header() {
       </p>
       <h1 className="mt-2 text-2xl font-semibold tracking-tight">Styleguide</h1>
       <p className="mt-2 max-w-2xl text-sm text-muted-foreground">
-        Every token and component state the console ships, rendered by the
+        Every token and shipped primitive the console ships, rendered by the
         console's own stylesheet. Switch the theme to check both. Written
         reference lives in{" "}
         <code className="rounded-sm bg-muted px-1 py-0.5 font-mono text-2xs">
@@ -687,11 +748,23 @@ const BUTTON_VARIANTS = [
   "link",
 ] as const;
 
+const STYLEGUIDE_CHART_CONFIG = {
+  completed: { label: "Completed", color: "var(--chart-1)" },
+  running: { label: "Running", color: "var(--chart-2)" },
+  planned: { label: "Planned", color: "var(--chart-3)" },
+  blocked: { label: "Blocked", color: "var(--chart-4)" },
+  queued: { label: "Queued", color: "var(--chart-5)" },
+} satisfies ChartConfig;
+
+const STYLEGUIDE_CHART_DATA = [
+  { week: "This week", completed: 12, running: 8, planned: 6, blocked: 3, queued: 5 },
+];
+
 function ComponentSection() {
   return (
     <Section
       title="Components"
-      hint="Each primitive in every state it ships. If a state is missing here, it is unspecified — build it into the primitive rather than restyling at the call site."
+      hint="Every shipped UI primitive has a reference here. Add missing states to the primitive rather than restyling at the call site."
     >
       <Card>
         <CardHeader>
@@ -734,7 +807,7 @@ function ComponentSection() {
         </CardContent>
       </Card>
 
-      <div className="grid gap-4 lg:grid-cols-2">
+      <div className="grid gap-4 lg:grid-cols-2" data-primitives={STYLEGUIDE_COMPONENTS.length}>
         <Card>
           <CardHeader>
             <CardTitle className="text-sm">Badge</CardTitle>
@@ -837,6 +910,165 @@ function ComponentSection() {
           </Tabs>
         </CardContent>
       </Card>
+
+      <div className="grid gap-4 lg:grid-cols-2">
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-sm">Dialog & alert dialog</CardTitle>
+            <CardDescription className="text-2xs">
+              Open each state to inspect its overlay, focus, and actions.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="flex flex-wrap gap-2">
+            <Dialog>
+              <DialogTrigger render={<Button variant="outline" />}>Open dialog</DialogTrigger>
+              <DialogContent>
+                <DialogHeader>
+                  <DialogTitle>Rename workflow</DialogTitle>
+                  <DialogDescription>Give this workflow a clear name.</DialogDescription>
+                </DialogHeader>
+                <Input aria-label="Workflow name" defaultValue="Weekly brief" />
+                <DialogFooter showCloseButton>
+                  <Button>Save name</Button>
+                </DialogFooter>
+              </DialogContent>
+            </Dialog>
+            <AlertDialog>
+              <AlertDialogTrigger render={<Button variant="destructive" />}>Delete company</AlertDialogTrigger>
+              <AlertDialogContent>
+                <AlertDialogHeader>
+                  <AlertDialogTitle>Delete this company?</AlertDialogTitle>
+                  <AlertDialogDescription>This cannot be undone.</AlertDialogDescription>
+                </AlertDialogHeader>
+                <AlertDialogFooter>
+                  <AlertDialogCancel>Keep company</AlertDialogCancel>
+                  <AlertDialogAction variant="destructive">Delete company</AlertDialogAction>
+                </AlertDialogFooter>
+              </AlertDialogContent>
+            </AlertDialog>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-sm">Sheet & dropdown menu</CardTitle>
+          </CardHeader>
+          <CardContent className="flex flex-wrap gap-2">
+            <Sheet>
+              <SheetTrigger render={<Button variant="outline" />}>Open sheet</SheetTrigger>
+              <SheetContent>
+                <SheetHeader>
+                  <SheetTitle>Run details</SheetTitle>
+                  <SheetDescription>A sheet keeps its page context visible.</SheetDescription>
+                </SheetHeader>
+              </SheetContent>
+            </Sheet>
+            <DropdownMenu>
+              <DropdownMenuTrigger render={<Button variant="outline" />}>Open menu</DropdownMenuTrigger>
+              <DropdownMenuContent>
+                <DropdownMenuLabel>Workflow</DropdownMenuLabel>
+                <DropdownMenuItem>Duplicate</DropdownMenuItem>
+                <DropdownMenuItem>Pause</DropdownMenuItem>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem variant="destructive">Delete</DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-sm">Select & scroll area</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            <Select defaultValue="weekly">
+              <SelectTrigger aria-label="Cadence"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="daily">Daily</SelectItem>
+                <SelectItem value="weekly">Weekly</SelectItem>
+                <SelectItem value="monthly">Monthly</SelectItem>
+              </SelectContent>
+            </Select>
+            <ScrollArea className="h-24 rounded-md border p-2">
+              <div className="space-y-1 text-sm text-muted-foreground">
+                <p>Scroll areas are for positioned panel scrollbars.</p>
+                <p>Native scrolling is themed globally.</p>
+                <p>Use the primitive only when overlay behaviour is needed.</p>
+                <p>This final line makes the scroll treatment visible.</p>
+              </div>
+            </ScrollArea>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-sm">Sonner</CardTitle>
+            <CardDescription className="text-2xs">Each outcome has a distinct toast severity.</CardDescription>
+          </CardHeader>
+          <CardContent className="flex flex-wrap gap-2">
+            <Button size="sm" variant="outline" onClick={() => toast.success("Workflow saved")}>Success</Button>
+            <Button size="sm" variant="outline" onClick={() => toast.info("Sync started")}>Info</Button>
+            <Button size="sm" variant="outline" onClick={() => toast.warning("Approval is due")}>Warning</Button>
+            <Button size="sm" variant="outline" onClick={() => toast.error("Could not save workflow")}>Error</Button>
+            <Button size="sm" variant="outline" onClick={() => toast.loading("Running workflow")}>Loading</Button>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-sm">Chart</CardTitle>
+            <CardDescription className="text-2xs">All five ordered series treatments.</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <ChartContainer config={STYLEGUIDE_CHART_CONFIG} className="h-40 w-full">
+              <BarChart accessibilityLayer data={STYLEGUIDE_CHART_DATA}>
+                <CartesianGrid vertical={false} />
+                <XAxis dataKey="week" tickLine={false} axisLine={false} />
+                {Object.keys(STYLEGUIDE_CHART_CONFIG).map((series) => (
+                  <Bar key={series} dataKey={series} stackId="runs" fill={`var(--color-${series})`} />
+                ))}
+              </BarChart>
+            </ChartContainer>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-sm">Stepper</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <Stepper
+              current={1}
+              onSelect={() => undefined}
+              steps={[{ id: "company", label: "Company" }, { id: "team", label: "Team" }, { id: "review", label: "Review" }]}
+            />
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-sm">Sidebar</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <SidebarProvider className="min-h-32 overflow-hidden rounded-md border" defaultOpen>
+              <Sidebar collapsible="none" className="w-48">
+                <SidebarContent>
+                  <SidebarGroup>
+                    <SidebarGroupLabel>Workspace</SidebarGroupLabel>
+                    <SidebarGroupContent>
+                      <SidebarMenu>
+                        <SidebarMenuItem><SidebarMenuButton isActive>Overview</SidebarMenuButton></SidebarMenuItem>
+                        <SidebarMenuItem><SidebarMenuButton>Tasks</SidebarMenuButton></SidebarMenuItem>
+                      </SidebarMenu>
+                    </SidebarGroupContent>
+                  </SidebarGroup>
+                </SidebarContent>
+              </Sidebar>
+              <div className="flex flex-1 items-center justify-center text-2xs text-muted-foreground">Content surface</div>
+            </SidebarProvider>
+          </CardContent>
+        </Card>
+      </div>
     </Section>
   );
 }
