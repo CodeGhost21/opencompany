@@ -868,40 +868,6 @@ impl MemoryStore for ProviderMemoryStore {
         }
         Ok(evicted)
     }
-
-    /// Bounds the archive tier to the newest `n` archived traces.
-    ///
-    /// Eviction moves traces OUT of the live window rather than destroying
-    /// them; without a matching cap here the archive would retain every trace a
-    /// company ever evicted, so the documented retention policy would bound the
-    /// inspectable window but not storage. Keeping the newest `n` evicted
-    /// traces bounds the tier at `n` and total trace storage at `2n` — the live
-    /// window plus the eviction history nearest to it.
-    async fn prune_archive(&self, id: &CompanyId, n: usize) -> Result<()> {
-        if n == 0 {
-            let archived = self.archive.list::<CompressedTrace>(id).await?;
-            for trace in archived {
-                self.archive.forget(id, &trace.cycle_id).await?;
-            }
-            return Ok(());
-        }
-        let mut archived = self.archive.list::<CompressedTrace>(id).await?;
-        if archived.len() <= n {
-            return Ok(());
-        }
-        // Same total order as the live set, so "newest" is unambiguous even
-        // when two traces share a millisecond.
-        archived.sort_by(|a, b| {
-            a.at_millis
-                .cmp(&b.at_millis)
-                .then_with(|| a.cycle_id.cmp(&b.cycle_id))
-        });
-        let prune = archived.len() - n;
-        for trace in archived.into_iter().take(prune) {
-            self.archive.forget(id, &trace.cycle_id).await?;
-        }
-        Ok(())
-    }
 }
 
 #[cfg(test)]
