@@ -34,20 +34,20 @@ afterEach(() => {
   container.remove();
 });
 
-/** A host answering `/auth/config` and `/auth/hub`, recording every `post`. */
+/** A host answering `/auth/config` and `/auth/hub`, recording every `get`/`post`. */
 function hostReporting(
   config: Record<string, unknown>,
   post: ReturnType<typeof vi.fn>,
-): OpenCompanyClient {
-  return {
-    scopeFor: () => "/api/v1/company",
-    get: vi.fn().mockImplementation(async (path: string) => {
-      if (path.endsWith("/auth/config")) return config;
-      if (path.endsWith("/auth/hub")) return { providers: [] };
-      throw new Error(`unexpected GET ${path}`);
-    }),
-    post,
-  } as unknown as OpenCompanyClient;
+): OpenCompanyClient & { get: ReturnType<typeof vi.fn> } {
+  const get = vi.fn().mockImplementation(async (path: string) => {
+    const base = path.split("?")[0];
+    if (base.endsWith("/auth/config")) return config;
+    if (base.endsWith("/auth/hub")) return { providers: [] };
+    throw new Error(`unexpected GET ${path}`);
+  });
+  return { scopeFor: () => "/api/v1/company", get, post } as unknown as OpenCompanyClient & {
+    get: ReturnType<typeof vi.fn>;
+  };
 }
 
 async function render(client: OpenCompanyClient) {
