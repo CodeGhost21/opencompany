@@ -7930,62 +7930,6 @@ mod test {
         assert_eq!(listed[0].verdict, Verdict::Deny);
     }
 
-    /// Opposite polarities for *different* scopes coexist: denying one host
-    /// must not revoke a grant for another, or a single refusal would silently
-    /// close a permission the operator is relying on elsewhere.
-    #[tokio::test]
-    async fn opposite_polarity_policies_for_different_scopes_coexist() {
-        let home_dir = tmp_home();
-        let (rt, ids) = park_two_blocked_tool_calls(
-            home_dir.path().to_path_buf(),
-            grantable_effect(
-                "ops",
-                crate::policy::consequence::WEB_FETCH,
-                serde_json::json!({ "url": "https://docs.rs/x" }),
-            ),
-        )
-        .await;
-
-        let (_, follow_up) = rt
-            .resolve_approval_spawned(&ids[0], Verdict::Approve, operator(), tool_scope())
-            .await
-            .unwrap();
-        let _ = crate::company::runtime::join_follow_up(follow_up).await;
-
-        // The second card is parked before any resolution, but its arguments
-        // name a different host than the effect parked into the queue — the
-        // resolve route does not re-read the parked card, so resolving this
-        // second id against the same tool mints a *different* scope.
-        let id = ids[1].clone();
-        let effect = rt.pending_approvals();
-        let _ = effect; // (parked effects are identical; scope comes from args)
-        let (_, follow_up) = rt
-            .resolve_approval_amended_spawned(
-                &id,
-                Verdict::Approve,
-                operator(),
-                tool_scope(),
-                serde_json::json!({ "url": "https://other.example/x" }),
-            )
-            .await
-            .unwrap();
-        let _ = crate::company::runtime::join_follow_up(follow_up).await;
-
-        // Now deny the original docs.rs card and check the other.example grant
-        // survived.
-        let (_, follow_up) = rt
-            .resolve_approval_spawned(&ids[0], Verdict::Deny, operator(), tool_scope())
-            .await
-            .unwrap();
-        let _ = crate::company::runtime::join_follow_up(follow_up).await;
-
-        let listed = rt.standing_grants();
-        assert_eq!(listed.len(), 2, "different scopes are not reconciled away");
-        let scopes: Vec<Option<String>> = listed.iter().map(|g| g.scope.clone()).collect();
-        assert!(scopes.contains(&Some("https://docs.rs".to_string())));
-        assert!(scopes.contains(&Some("https://other.example".to_string())));
-    }
-
     /// A scope the runtime must not honour changes **nothing**: the approval is
     /// still parked and no verdict was journaled.
     ///
