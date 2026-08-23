@@ -229,6 +229,16 @@ export function PolicySettings({ client, company }: Props) {
     void load();
   }, [load]);
 
+  // The confirmation dialog holds a choice reviewed against ONE company's
+  // policy. If the scope changes while it is open, that pending action no
+  // longer describes what the operator looked at — confirming would loosen or
+  // reset the NEW company under a dialog about the old one. Drop it on scope
+  // change rather than bind it to the originating company.
+  useEffect(() => {
+    setPendingTier(null);
+    setPendingReset(false);
+  }, [client, company]);
+
   // Deliberately silent about its own failure, and deliberately not part of
   // `load`: these are suggestions under a free-text box. A host that cannot
   // serve them costs the operator a datalist, not the setting, and a second
