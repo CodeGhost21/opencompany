@@ -150,7 +150,7 @@ impl FeedbackResponse {
     /// The recorded result of an already-finalized item. A re-confirmed item —
     /// a retried or duplicated Send — returns this instead of filing or
     /// forwarding a second time, so a confirm is idempotent.
-    fn recorded(item: &FeedbackItem) -> Self {
+    pub(crate) fn recorded(item: &FeedbackItem) -> Self {
         let forwarded = item.issue_status.as_deref() == Some("forwarded");
         Self {
             item_id: item.id.clone(),
