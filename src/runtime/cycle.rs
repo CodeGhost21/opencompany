@@ -1209,7 +1209,7 @@ approval.]"
             // `args` field to copy them into — that is the type's whole point.
             tool,
             verdict,
-            granted_by: by,
+            granted_by: by.clone(),
             approval_id: id.clone(),
             at_millis: now_millis(),
             expires_at_millis,
