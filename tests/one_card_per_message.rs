@@ -91,7 +91,9 @@ enum Effect {
 
 /// What the endpoint can see about one request.
 struct Ctx {
-    /// The `role` line of the system prompt, e.g. "Chief Executive".
+    /// The persona line of the system prompt, e.g.
+    /// "You are the Chief Executive at Acme…". Located by its opening, not
+    /// by position — see `Ctx::of`.
     role: String,
     /// Text of every `tool` message already in the transcript.
     tool_results: Vec<String>,
@@ -103,13 +105,25 @@ impl Ctx {
     fn of(body: &Value) -> Self {
         let msgs = body["messages"].as_array().cloned().unwrap_or_default();
         let text = |m: &Value| m["content"].as_str().unwrap_or("").to_string();
-        let role = msgs
+        // The persona line, found by its opening rather than by position.
+        //
+        // It used to be line one, and this took `.lines().next()`. openhuman
+        // now prepends a `## Tool Policy Boundary` section ahead of it, so
+        // position-based extraction read that heading as the role and every
+        // `is(...)` rule stopped matching — the model fell through to its
+        // default, no desk was delegated to, and eight of these tests failed
+        // with "0 cards" and nothing pointing at the prompt.
+        //
+        // Searching for `You are the ` is what a model does: it reads the whole
+        // system prompt rather than assuming a layout.
+        let system = msgs
             .iter()
             .find(|m| m["role"] == "system")
             .map(text)
-            .unwrap_or_default()
+            .unwrap_or_default();
+        let role = system
             .lines()
-            .next()
+            .find(|line| line.starts_with("You are the "))
             .unwrap_or("")
             .to_string();
         Ctx {
