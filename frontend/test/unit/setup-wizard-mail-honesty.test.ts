@@ -205,8 +205,7 @@ describe("the hand-off after setup applies", () => {
     await finish();
 
     expect(find("setup-handoff-link")).toBeTruthy();
-    expect(find("setup-signin")).toHaveAttribute(
-      "data-handoff-url",
+    expect(find("setup-signin")?.getAttribute("data-handoff-url")).toBe(
       "/login?company=acme&code=abc123#/company",
     );
   });
