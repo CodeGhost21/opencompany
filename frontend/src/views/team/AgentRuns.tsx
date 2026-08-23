@@ -251,6 +251,20 @@ export function AgentRuns({
     setFailed(false);
   }, [client, company, agentId, wanted]);
 
+  // The detail read is fresher than the summary the list poll last knew: a run
+  // the operator reached through a filter can sit older than the newest page,
+  // so its summary is *held* from before — and a held copy would keep showing
+  // the status it had the moment the panel opened, settling attempts as live
+  // forever. Lift the fresh summary back into the list so the panel's liveness
+  // and timings follow the attempt (issue #1671).
+  const onRunDetail = useCallback((fresh: RunSummary) => {
+    setRuns((prev) =>
+      prev
+        ? prev.map((run) => (run.id === fresh.id ? fresh : run))
+        : prev,
+    );
+  }, []);
+
   useEffect(() => {
     const generation = ++generationRef.current;
     setRuns(null);
