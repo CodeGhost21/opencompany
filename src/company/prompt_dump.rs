@@ -323,7 +323,8 @@ fn harness_sections(
     let sandbox_files = crate::company::grants_files_or_docs(grants);
     let sandbox_shell = crate::harness::build::grants_cover(grants, "shell");
     let sandbox_code = crate::harness::build::grants_cover(grants, "code");
-    let sandbox = crate::harness::toolbelt::sandbox_brief(sandbox_files, sandbox_shell, sandbox_code);
+    let sandbox =
+        crate::harness::toolbelt::sandbox_brief(sandbox_files, sandbox_shell, sandbox_code);
     if sandbox.is_empty() {
         deferred.push(Deferred {
             title: "Your sandbox".to_string(),
@@ -463,12 +464,13 @@ mod tests {
         );
         let dumped = dump(&manifest);
         assert!(
-            !dumped[0]
+            !dumped[0].sections.iter().any(|s| s.title == "Your sandbox"),
+            "{:?}",
+            dumped[0]
                 .sections
                 .iter()
-                .any(|s| s.title == "Your sandbox"),
-            "{:?}",
-            dumped[0].sections.iter().map(|s| &s.title).collect::<Vec<_>>()
+                .map(|s| &s.title)
+                .collect::<Vec<_>>()
         );
         assert!(
             dumped[0]

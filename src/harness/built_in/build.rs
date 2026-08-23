@@ -922,7 +922,11 @@ pub fn build_agent(
     // the brief cannot describe a namespace this agent was not granted. `shell`
     // in particular was wired since Cell A and named in no brief anywhere: an
     // agent asked to run something recorded a task about running it.
-    persona.push_str(&toolbelt::sandbox_brief(wants_files, shell_wired, wants_code));
+    persona.push_str(&toolbelt::sandbox_brief(
+        wants_files,
+        shell_wired,
+        wants_code,
+    ));
 
     // Issue #244: what a deliverable is, and how to hand one over. Only when
     // the tool was actually wired above — describing a tool the agent does not

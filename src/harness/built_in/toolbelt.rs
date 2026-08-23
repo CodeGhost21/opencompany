@@ -774,7 +774,10 @@ mod tests {
     #[test]
     fn the_brief_states_the_confinement_and_the_write_it_instruction() {
         let brief = sandbox_brief(true, true, true);
-        assert!(brief.contains("../"), "the escape rule must be shown: {brief}");
+        assert!(
+            brief.contains("../"),
+            "the escape rule must be shown: {brief}"
+        );
         assert!(
             brief.contains("actually write the file"),
             "the instruction that motivates this brief is missing: {brief}"
