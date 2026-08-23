@@ -413,13 +413,19 @@ function payloadLead(a: ApprovalSummary): string | null {
   const parts = [first.value, ...rest.map((line) => `${line.label}: ${line.value}`)];
   // A payload with more lines than the label carries can still collide: two
   // `http_request`s sharing url, method and headers differ only in the body,
-  // which is exactly what the cap omits. The dropped line's own start is the
+  // which is exactly what the cap omits. The dropped lines' own starts are the
   // discriminator — the argument that usually *is* the difference, in the same
   // words the card body uses. (The internal approval id would also differ, but
   // runtime ids stay out of operator-facing names.)
+  //
+  // Every omitted entry rides along, not just the first: two cards can share
+  // the first dropped line and still differ in a later one (arbitrary tool
+  // arguments have no fixed length), and `clipMiddle` below keeps the composed
+  // lead's start and end, so the last omitted entry survives the bound too.
   if (dropped > 0) {
-    const lead = lines[1 + MAX_LEAD_LINES];
-    parts.push(`${lead.label}: ${lead.value}`);
+    parts.push(
+      ...lines.slice(1 + MAX_LEAD_LINES).map((line) => `${line.label}: ${line.value}`),
+    );
   }
   return clipMiddle(parts.join(" — "), MAX_LEAD_CHARS);
 }

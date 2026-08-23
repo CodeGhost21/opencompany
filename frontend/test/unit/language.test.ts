@@ -210,6 +210,41 @@ describe("the decide buttons' label (#1411)", () => {
     expect(lead.startsWith("x".repeat(59))).toBe(true);
     expect(lead.endsWith("…" + "x".repeat(59))).toBe(true);
   });
+
+  it("tells cards apart by a dropped entry past the first", () => {
+    // Five payload entries with the first four identical: the first dropped
+    // line (index 3) is the same, so a label carrying only it would leave both
+    // cards indistinguishable. The further dropped entry rides along too.
+    const first = decisionLabel(
+      approval({
+        kind: "http_request",
+        payload: {
+          url: "https://x.test",
+          method: "POST",
+          headers: "a: b",
+          body: '{"q": 1}',
+          extra1: "alpha",
+        },
+      }),
+      askers,
+    );
+    const second = decisionLabel(
+      approval({
+        kind: "http_request",
+        payload: {
+          url: "https://x.test",
+          method: "POST",
+          headers: "a: b",
+          body: '{"q": 1}',
+          extra1: "beta",
+        },
+      }),
+      askers,
+    );
+    expect(first).not.toBe(second);
+    expect(first).toContain("extra1: alpha");
+    expect(second).toContain("extra1: beta");
+  });
 });
 
 describe("a kind nobody has named", () => {
