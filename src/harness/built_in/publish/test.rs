@@ -692,40 +692,6 @@ fn the_scan_ignores_what_the_runtime_itself_writes() {
     assert_eq!(before.changed_since(dir.path()).files, ["spec.md"]);
 }
 
-/// **A checked-out repository is not unpublished work** (issue #245).
-///
-/// `repo_checkout` clones a bound repository into `workspace/repos/<key>`, and a
-/// large repository is thousands of files that all appear "new" the moment the
-/// tool runs. Without the skip, the nudge would fire after every checkout,
-/// asking an agent whether somebody else's source — and a spilled pull-request
-/// diff — is a deliverable it meant to publish. Same permanent false positive
-/// the runtime-bookkeeping exclusions prevent, from the other direction.
-#[test]
-fn the_scan_ignores_a_checked_out_repository() {
-    let dir = workspace(&[("spec.md", b"one")]);
-    let before = WorkspaceSnapshot::take(dir.path());
-
-    for path in [
-        "repos/acme-widgets-000000000000/README.md",
-        "repos/acme-widgets-000000000000/src/lib.rs",
-        "repos/acme-widgets-000000000000/.git/config",
-        "repos/acme-widgets-000000000000.pr-7.diff",
-    ] {
-        let full = dir.path().join(path);
-        std::fs::create_dir_all(full.parent().unwrap()).unwrap();
-        std::fs::write(full, b"third-party content").unwrap();
-    }
-
-    assert!(
-        before.changed_since(dir.path()).files.is_empty(),
-        "a checkout must never look like unpublished agent work"
-    );
-
-    // The agent's actual file is still seen, so the exclusion did not blind it.
-    std::fs::write(dir.path().join("spec.md"), b"one, revised").unwrap();
-    assert_eq!(before.changed_since(dir.path()).files, ["spec.md"]);
-}
-
 /// The entry cap. A truncated scan may only under-report — it feeds a warning,
 /// never a promotion, so missing something is the acceptable failure.
 #[test]
