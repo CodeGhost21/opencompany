@@ -405,11 +405,22 @@ export function PolicySettings({ client, company }: Props) {
                             ?.description
                         }{" "}
                         With {pendingTier.label}: {pendingTier.description}
+                        {pendingReset && (
+                          <>
+                            {" "}This also replaces the current always-ask list
+                            with the manifest's list: {" "}
+                            {status.manifestAlwaysApprove.length > 0
+                              ? status.manifestAlwaysApprove.join(", ")
+                              : "none"}.
+                          </>
+                        )}
                       </>
                     )}
                   </AlertDialogDescription>
                   <p className="text-sm text-muted-foreground">
-                    Your always-ask list still wins, even on Full.
+                    {pendingReset
+                      ? "Reset replaces the whole policy override, including the always-ask list."
+                      : "Your always-ask list still wins, even on Full."}
                   </p>
                 </AlertDialogHeader>
                 <AlertDialogFooter>
