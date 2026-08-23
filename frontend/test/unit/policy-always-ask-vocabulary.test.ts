@@ -6,7 +6,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { OpenCompanyClient } from "@/api/client";
 import type { PolicyStatus } from "@/api/policy";
-import { alwaysAskPlaceholder } from "@/components/policy-settings";
+import {
+  alwaysAskPlaceholder,
+  isAutonomyEscalation,
+} from "@/components/policy-settings";
 
 /**
  * Issue #1226: the always-ask field's worked example.
@@ -62,6 +65,7 @@ const WIRED = ["shell", "apply_patch", "git_operations", "web_fetch", "http_requ
 
 /** A client serving the policy and, optionally, the wired tool slugs. */
 function makeClient({ slugs }: { slugs?: string[] | "unavailable" } = {}) {
+  const put = vi.fn(async () => STATUS);
   return {
     scopeFor: (company: string | null) => `/api/v1/${company ?? "company"}`,
     get: async (path: string) => {
@@ -72,7 +76,7 @@ function makeClient({ slugs }: { slugs?: string[] | "unavailable" } = {}) {
       if (path.endsWith("/policy")) return STATUS;
       return null;
     },
-    put: async () => STATUS,
+    put,
     del: async () => STATUS,
   } as unknown as OpenCompanyClient;
 }
@@ -174,5 +178,84 @@ describe("what the always-ask field suggests", () => {
     // The prefix rule, illustrated with a kind that is not one of the retired
     // three — explaining the rule must not double as recommending them.
     expect(text).toContain("invoice.send");
+  });
+});
+
+describe("policy tier changes", () => {
+  it("identifies only a move to a higher host-ordered tier as an escalation", () => {
+    expect(isAutonomyEscalation(STATUS.tiers, "auto", "full")).toBe(true);
+    expect(isAutonomyEscalation(STATUS.tiers, "full", "auto")).toBe(false);
+    expect(isAutonomyEscalation(STATUS.tiers, "auto", "auto")).toBe(false);
+  });
+
+  it("uses a labelled radio group and explains the autonomy axis", async () => {
+    await mount(makeClient());
+    const group = container.querySelector('[role="radiogroup"]');
+    expect(group?.getAttribute("aria-labelledby")).toBe("approvals-heading");
+    expect(group?.textContent).toContain("More oversight");
+    expect(group?.textContent).toContain("More autonomy");
+
+    const radios = Array.from(group?.querySelectorAll('[role="radio"]') ?? []);
+    expect(radios).toHaveLength(2);
+    expect(radios.map((radio) => radio.getAttribute("aria-checked"))).toEqual([
+      "true",
+      "false",
+    ]);
+  });
+
+  it("confirms an autonomy escalation before persisting it", async () => {
+    const client = makeClient();
+    await mount(client);
+    const full = Array.from(container.querySelectorAll<HTMLButtonElement>('[role="radio"]')).find(
+      (button) => button.textContent?.includes("Full"),
+    );
+
+    await act(async () => {
+      full?.click();
+    });
+    expect((client.put as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled();
+    expect(document.body.textContent).toContain("Give teammates more autonomy?");
+    expect(document.body.textContent).toContain("Acts without asking.");
+
+    const confirm = Array.from(document.body.querySelectorAll<HTMLButtonElement>("button")).find(
+      (button) => button.textContent === "Give more autonomy",
+    );
+    await act(async () => {
+      confirm?.click();
+    });
+    expect((client.put as ReturnType<typeof vi.fn>)).toHaveBeenCalledWith(
+      "/api/v1/acme/policy",
+      { mode: "full" },
+    );
+  });
+
+  it("keeps tightening one click and softly flags unwired tool names", async () => {
+    const client = makeClient();
+    const fullStatus = { ...STATUS, mode: "full" };
+    (client.get as ReturnType<typeof vi.fn>) = vi.fn(async (path: string) => {
+      if (path.includes("/workflows/tool-slugs")) return { slugs: WIRED, unwired: [] };
+      if (path.endsWith("/policy")) return fullStatus;
+      return null;
+    });
+    await mount(client);
+
+    const auto = Array.from(container.querySelectorAll<HTMLButtonElement>('[role="radio"]')).find(
+      (button) => button.textContent?.includes("Auto"),
+    );
+    await act(async () => {
+      auto?.click();
+    });
+    expect((client.put as ReturnType<typeof vi.fn>)).toHaveBeenCalledWith(
+      "/api/v1/acme/policy",
+      { mode: "auto" },
+    );
+
+    const input = field()!;
+    await act(async () => {
+      input.value = "shel, invoice.send";
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    expect(container.textContent).toContain("shel, invoice.send are not tools this deployment wires.");
+    expect(container.textContent).toContain("They may still be hosted effect kinds.");
   });
 });

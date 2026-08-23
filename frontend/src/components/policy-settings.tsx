@@ -13,6 +13,16 @@ import { listWorkflowToolSlugs } from "@/api/workflows";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+import {
   Card,
   CardContent,
   CardDescription,
@@ -67,6 +77,16 @@ export function alwaysAskPlaceholder(wired: string[]): string {
     .join(", ");
 }
 
+/** Whether a tier change gives the company more freedom than it has now. */
+export function isAutonomyEscalation(
+  tiers: PolicyStatus["tiers"],
+  currentMode: string,
+  nextMode: string,
+): boolean {
+  return tiers.findIndex((tier) => tier.value === nextMode) >
+    tiers.findIndex((tier) => tier.value === currentMode);
+}
+
 interface Props {
   client: OpenCompanyClient;
   company: string | null;
@@ -107,6 +127,8 @@ export function PolicySettings({ client, company }: Props) {
   // half-typed effect kind never reaches the gate.
   const [draftAlways, setDraftAlways] = useState("");
   const [dirty, setDirty] = useState(false);
+  const [tierAwaitingConfirmation, setTierAwaitingConfirmation] =
+    useState<PolicyStatus["tiers"][number] | null>(null);
   /**
    * The tool names this deployment can actually gate (issue #1226).
    *
@@ -183,7 +205,7 @@ export function PolicySettings({ client, company }: Props) {
     toast.success(message, { description: next.takesEffect });
   };
 
-  const chooseTier = async (mode: string) => {
+  const saveTier = async (mode: string) => {
     if (!status || saving || mode === status.mode) return;
     setSaving(true);
     try {
@@ -204,6 +226,20 @@ export function PolicySettings({ client, company }: Props) {
       setSaving(false);
     }
   };
+
+  const chooseTier = (tier: PolicyStatus["tiers"][number]) => {
+    if (!status || saving || tier.value === status.mode) return;
+    if (isAutonomyEscalation(status.tiers, status.mode, tier.value)) {
+      setTierAwaitingConfirmation(tier);
+      return;
+    }
+    void saveTier(tier.value);
+  };
+
+  const unmatchedWiredTools = draftAlways
+    .split(",")
+    .map((kind) => kind.trim())
+    .filter((kind) => kind && !wiredTools.includes(kind));
 
   const saveAlways = async () => {
     if (!status || saving) return;
@@ -248,7 +284,7 @@ export function PolicySettings({ client, company }: Props) {
   return (
     <Card data-testid="policy-settings">
       <CardHeader>
-        <CardTitle className="flex items-center gap-2 text-base">
+        <CardTitle id="approvals-heading" className="flex items-center gap-2 text-base">
           <ShieldCheck className="h-4 w-4" />
           Approvals
         </CardTitle>
@@ -274,7 +310,15 @@ export function PolicySettings({ client, company }: Props) {
           </div>
         ) : (
           <>
-            <div className="space-y-2">
+            <div
+              className="space-y-2"
+              role="radiogroup"
+              aria-labelledby="approvals-heading"
+            >
+              <div className="flex justify-between px-1 text-xs text-muted-foreground">
+                <span>More oversight</span>
+                <span>More autonomy</span>
+              </div>
               {status.tiers.map((tier) => {
                 const active = tier.value === status.mode;
                 return (
@@ -282,8 +326,9 @@ export function PolicySettings({ client, company }: Props) {
                     key={tier.value}
                     type="button"
                     disabled={saving}
-                    onClick={() => void chooseTier(tier.value)}
-                    aria-pressed={active}
+                    onClick={() => chooseTier(tier)}
+                    role="radio"
+                    aria-checked={active}
                     className={cn(
                       "w-full rounded-md border p-3 text-left transition-colors",
                       "disabled:cursor-not-allowed disabled:opacity-60",
@@ -359,6 +404,13 @@ export function PolicySettings({ client, company }: Props) {
                   ))}
                 </datalist>
               )}
+              {unmatchedWiredTools.length > 0 && (
+                <p className="text-xs text-muted-foreground">
+                  {unmatchedWiredTools.join(", ")} {unmatchedWiredTools.length === 1 ? "is" : "are"} not
+                  {" "}tools this deployment wires. {unmatchedWiredTools.length === 1 ? "It may" : "They may"} still be
+                  {" "}hosted effect kinds.
+                </p>
+              )}
               {dirty && (
                 <Button
                   size="sm"
@@ -389,6 +441,39 @@ export function PolicySettings({ client, company }: Props) {
                 </Button>
               </div>
             )}
+            <AlertDialog
+              open={tierAwaitingConfirmation !== null}
+              onOpenChange={(open) => {
+                if (!open) setTierAwaitingConfirmation(null);
+              }}
+            >
+              <AlertDialogContent>
+                <AlertDialogHeader>
+                  <AlertDialogTitle>
+                    Give teammates more autonomy?
+                  </AlertDialogTitle>
+                  <AlertDialogDescription>
+                    {tierAwaitingConfirmation?.description} They will use the
+                    {" "}{tierAwaitingConfirmation?.label} setting on their next turn.
+                  </AlertDialogDescription>
+                </AlertDialogHeader>
+                <AlertDialogFooter>
+                  <AlertDialogCancel>Keep current setting</AlertDialogCancel>
+                  <AlertDialogAction
+                    disabled={saving}
+                    onClick={() => {
+                      if (tierAwaitingConfirmation) {
+                        void saveTier(tierAwaitingConfirmation.value).then(() =>
+                          setTierAwaitingConfirmation(null),
+                        );
+                      }
+                    }}
+                  >
+                    Give more autonomy
+                  </AlertDialogAction>
+                </AlertDialogFooter>
+              </AlertDialogContent>
+            </AlertDialog>
           </>
         )}
       </CardContent>
