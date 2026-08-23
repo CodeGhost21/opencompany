@@ -8,8 +8,8 @@
 //! `{company}/{agent}/{namespace}` so multiple agents in one company never
 //! collide.
 //!
-//! The backend is chosen by `OPENCOMPANY_STORAGE` (fs / sqlite / mongodb /
-//! tinycortex), not by openhuman — that is the "memory pluggable and
+//! The backend is chosen by `OPENCOMPANY_STORAGE` (fs / sqlite / mongodb),
+//! not by openhuman — that is the "memory pluggable and
 //! configurable" requirement. On the fs backend
 //! [`Memory::recall_relevant_by_vector`] has no vectors, so it degrades to the
 //! store's substring/FTS `search` and, per the trait contract, **never
@@ -27,8 +27,8 @@
 //!   them are ignored and recalled entries carry defaults.
 //! * [`Memory::store`] appends; repeated keys are not coalesced.
 //!
-//! A `tinycortex`-backed [`ContextStore`] removes these gaps; the adapter code
-//! is identical because it only speaks the port.
+//! A hosted-provider [`ContextStore`] with richer semantics removes these
+//! gaps; the adapter code is identical because it only speaks the port.
 
 use std::collections::HashMap;
 use std::sync::Arc;

@@ -55,7 +55,6 @@ The desktop links the host with an explicit feature set, declared on the
 ```toml
 opencompany = { path = "..", default-features = false, features = [
   "sqlite", "platform-jwt", "oauth", "mcp",
-  "tinycortex", "tinymemory", "tinymemory-embedded",
 ] }
 ```
 
@@ -65,19 +64,15 @@ a company, serves the console — and cannot think. The visible symptom was the
 setup wizard's inference test answering *"This build cannot reach a model — the
 agent harness is not compiled in."* for every provider, however good the key.
 
-The belt a desktop agent gets is deliberately compact. The host declares
+The belt a desktop agent gets is deliberately the minimal one. The host declares
 `openhuman_core` with `default-features = false, features = ["skills", "mcp",
 "hosting"]`, so what a company can use is **built-in tools, MCP servers and
-skills**. OpenCompany additionally compiles all three of its memory feature
-layers into the desktop: `tinycortex` for the embedded engine, `tinymemory` for
-hosted and null drivers, and `tinymemory-embedded` for the in-process namespace
-driver. The packaged app therefore never tells an operator to obtain a
-differently compiled build from its memory configuration screen.
-
-Features left off, each on purpose:
+skills** — no memory engine, no TokenJuice, no voice or inference stack out of
+the vendored runtime. Features left off, each on purpose:
 
 | Off | Why |
 | --- | --- |
+| `tinycortex`, `tinymemory*` | In-pod memory engines. They carry tinycortex, `tinyagents/sqlite` and a second bundled SQLite into the bundle for a surface the desktop does not offer; the runtime keeps its fs-backed memory stores. |
 | `media`, `composio`, and the other managed backends | Each needs a platform credential the desktop has no way to hold, and each fails closed without one. |
 | `acp` | `src-tauri/src/acp/` is an ACP *client* and compiles without it (see below). Turning it on additionally wires `RuntimeBuilder::with_acp_agents`, which is a separate decision from having a harness. |
 | `mongodb` | A per-tenant cluster is a hosting concern. |
@@ -366,13 +361,11 @@ holding the data root's lock (see [`data-root.md`](data-root.md)). It becomes an
 ordinary connection in the console, discovered through `oc_embedded` because
 only the core knows which port the OS chose.
 
-That root is the **platform application-data directory** — on macOS
-`~/Library/Application Support/ai.tinyhumans.opencompany` — resolved by
-`default_data_dir` in `src-tauri/src/lib.rs` and passed explicitly to
-`app::prepare_instance`, not `$HOME/.opencompany`. A default desktop install and
-a default `opencompany serve` are therefore two separate instances that share
-nothing; `OPENCOMPANY_DATA_DIR` points both at one root where that is wanted.
-See [the desktop root](data-root.md#the-desktop-root-is-not-the-cli-root).
+That root is the same canonical data directory as the CLI: `$HOME/.opencompany`
+(or `%USERPROFILE%\.opencompany` on Windows). `default_data_dir` in
+`src-tauri/src/lib.rs` delegates to the host resolver and passes the result
+explicitly to `app::prepare_instance`. `OPENCOMPANY_DATA_DIR` overrides it for
+both launchers. See [the desktop root](data-root.md#the-desktop-root-is-the-cli-root).
 
 Loopback and never `0.0.0.0`: an embedded instance is this machine's, and
 binding a routable address would publish someone's company to their network.
