@@ -336,13 +336,24 @@ export function mentionablesFor(
       hint: a.role,
       inChannel: inChannel.has(a.id),
     }));
+  // Two people can share a display name ("Sam"); the host mints each a distinct
+  // slug precisely so one can be told from the other. Rows that would otherwise
+  // be indistinguishable show the slug as their hint — a user picking "Sam" has
+  // to be able to tell which Sam the row will ping.
+  const labelCounts = new Map<string, number>();
+  for (const p of directory.people) {
+    labelCounts.set(p.label, (labelCounts.get(p.label) ?? 0) + 1);
+  }
   const people: Mentionable[] = directory.people
     .filter((p) => p.id !== selfId)
     .map((p) => ({
       target: { kind: "user", id: p.id },
       label: p.label,
       aliases: [...new Set([p.label.toLowerCase(), p.slug])],
-      hint: "Person",
+      hint:
+        (labelCounts.get(p.label) ?? 0) > 1
+          ? `Person — @${p.slug}`
+          : "Person",
     }));
   const desks: Mentionable[] = directory.desks.map((d) => ({
     target: { kind: "desk", id: d.id },
