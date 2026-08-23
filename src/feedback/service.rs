@@ -183,11 +183,15 @@ impl FeedbackResponse {
 ///   the item so a later confirm of the same item posts exactly those bytes.
 /// * A confirm (a non-preview call for an item that has a previewed body) → the
 ///   persisted preview body is re-gated as a verification and then sent
-///   verbatim, never re-derived under a possibly-changed secret store.
+///   verbatim, never re-derived under a possibly-changed secret store. The
+///   caller ([`CompanyRuntime::submit_feedback`]) refuses a confirm of an item
+///   with no previewed body, so this path is only reached for items the
+///   operator actually previewed.
 /// * A configured TinyHumans credential → forward to the hub, recorded as the
 ///   credential's owner; no issue is filed from here.
-/// * Otherwise → file through the [`FeedbackFiler`], updating the stored item's
-///   status on success.
+/// * Otherwise → a freshly-captured item sent directly (a direct send without
+///   a separate preview step), filing through the [`FeedbackFiler`] and
+///   updating the stored item's status on success.
 #[allow(clippy::too_many_arguments)]
 pub async fn finalize(
     store: &FeedbackStore,
