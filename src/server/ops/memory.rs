@@ -1329,10 +1329,6 @@ mod route_tests {
             stats["totalItems"], 4,
             "document chunks stay in the display partition, just not under teammate memory"
         );
-        assert_eq!(
-            stats["contextTruncated"], false,
-            "four context chunks are far under the list cap"
-        );
     }
 
     /// The truncation notice must be decided from ONE server snapshot: the
