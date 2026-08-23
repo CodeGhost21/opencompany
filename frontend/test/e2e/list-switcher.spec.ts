@@ -169,7 +169,7 @@ test("Back after choosing List returns to Board before leaving Work", async ({ p
 
   await page.goBack();
   await expect.poll(() => new URL(page.url()).hash).toBe("#/ledgers/tasks");
-  await expect(page.getByRole("button", { name: "List" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "List", exact: true })).toBeVisible();
 });
 
 test("Manage lists opens from the switcher, in Work — not Company", async ({ page }) => {
