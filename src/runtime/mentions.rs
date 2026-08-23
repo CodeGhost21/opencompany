@@ -1640,4 +1640,113 @@ members = ["engineer", "ceo"]
         assert_eq!(out.len(), 1);
         assert!(!out[0].quiet, "{out:?}");
     }
+
+    /// A live alias sitting somewhere `opens_mention`/`closes_mention` would
+    /// refuse — mid-word, here — must be demoted the same way a mismatched
+    /// span is, not trusted just because the text happens to spell a real
+    /// alias.
+    #[test]
+    fn a_supplied_mention_mid_word_is_dropped() {
+        let supplied = vec![Mention {
+            target: agent("engineer"),
+            text: "@engineer".to_string(),
+            offset: 4,
+            quiet: false,
+        }];
+        let out = resolve("jane@engineer", Some(supplied), None, &acme(), &people());
+        assert!(
+            out.is_empty(),
+            "a span with no whitespace/bracket before it is not a mention: {out:?}"
+        );
+    }
+
+    /// The same alias-shaped-but-not-a-mention rule applies inside a fenced or
+    /// inline code span — fallback extraction already masks these, and a
+    /// structured caller must not be able to route around that mask.
+    #[test]
+    fn a_supplied_mention_inside_a_code_span_is_dropped() {
+        let text = "see `@engineer` for the review";
+        let offset = text.find("@engineer").expect("span present");
+        let supplied = vec![Mention {
+            target: agent("engineer"),
+            text: "@engineer".to_string(),
+            offset,
+            quiet: false,
+        }];
+        let out = resolve(text, Some(supplied), None, &acme(), &people());
+        assert!(out.is_empty(), "{out:?}");
+    }
+
+    /// Two live targets can share an alias (two "Sam"s, say); a structured
+    /// caller submitting the identical span for both must not double-ping —
+    /// only the first-supplied target for that exact span survives.
+    #[test]
+    fn only_the_first_target_for_one_span_survives() {
+        let users = vec![
+            user("u1", "sam.one@acme.test", Some("Sam")),
+            user("u2", "sam.two@acme.test", Some("Sam")),
+        ];
+        let supplied = vec![
+            Mention {
+                target: MentionTarget::User {
+                    id: "u1".to_string(),
+                },
+                text: "@Sam".to_string(),
+                offset: 0,
+                quiet: false,
+            },
+            Mention {
+                target: MentionTarget::User {
+                    id: "u2".to_string(),
+                },
+                text: "@Sam".to_string(),
+                offset: 0,
+                quiet: false,
+            },
+        ];
+        let out = resolve("@Sam please review", Some(supplied), None, &acme(), &users);
+        assert_eq!(
+            out.len(),
+            1,
+            "one run of text cannot name two different people: {out:?}"
+        );
+        assert_eq!(
+            out[0].target,
+            MentionTarget::User {
+                id: "u1".to_string()
+            },
+            "the picker's own ordering decides which of the pair is honoured: {out:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Unicode
+    // -----------------------------------------------------------------------
+
+    /// A display name that starts with a non-ASCII letter is still a real
+    /// alias `directory` offers verbatim — extraction must open a mention on
+    /// it exactly as it does on an ASCII one.
+    #[test]
+    fn a_non_ascii_display_name_opens_a_mention() {
+        let users = vec![user("u1", "elodie@acme.test", Some("Élodie"))];
+        let found = resolve("hey @Élodie, can you look?", None, None, &acme(), &users);
+        assert_eq!(
+            targets(&found),
+            vec![&MentionTarget::User {
+                id: "u1".to_string()
+            }],
+            "{found:?}"
+        );
+    }
+
+    /// A multi-byte character landing where a short alias's span would end
+    /// must not panic — it simply does not match, the same as any other
+    /// non-matching text.
+    #[test]
+    fn a_multibyte_character_at_a_short_aliass_boundary_does_not_panic() {
+        let users = vec![user("u1", "j@acme.test", Some("J"))];
+        // "é" is two UTF-8 bytes; a one-character alias ("j") ends inside it.
+        let found = resolve("@é hello", None, None, &acme(), &users);
+        assert!(found.is_empty(), "{found:?}");
+    }
 }
