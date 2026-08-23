@@ -645,6 +645,34 @@ export function payloadLeadLabel(a: ApprovalSummary): string | null {
   return extraValues.length > 0 ? `${extraValues.join(" ")} ${first.value}` : first.value;
 }
 
+/**
+ * Whether {@link payloadLeadLabel} had to cut a promoted extra to fit the
+ * compact lead.
+ *
+ * The compact row's job is to distinguish two requests, not to carry the file,
+ * so a long body is previewed — but a preview is not something an operator may
+ * authorize. `true` means the lead shows **less than the complete value**, so a
+ * caller with a one-click Approve must not offer it on that label: the operator
+ * has to see the full payload (the detailed view) before deciding.
+ *
+ * Mirrors {@link preview}'s bound exactly — same code-unit measure, same
+ * `EXTRA_PREVIEW_MAX` — so "would this label be cut?" can never drift from "was
+ * this label cut?".
+ */
+export function payloadLeadTruncated(a: ApprovalSummary): boolean {
+  const lines = payloadLines(a);
+  const first = lines[0];
+  if (first == null) return false;
+  const extras = PAYLOAD_LEAD_EXTRA[a.kind] ?? [];
+  if (extras.length === 0) return false;
+  return lines.some(
+    (line) =>
+      line.label !== first.label &&
+      extras.includes(line.label) &&
+      line.value.length > EXTRA_PREVIEW_MAX,
+  );
+}
+
 function renderValue(value: unknown): string {
   if (typeof value === "string") return value;
   return JSON.stringify(value) ?? String(value);
