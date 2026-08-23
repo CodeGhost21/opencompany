@@ -94,6 +94,30 @@ export function widensAutonomy(
 }
 
 /**
+ * ASCII-only case-insensitive equality, mirroring `str::eq_ignore_ascii_case`.
+ *
+ * `String.prototype.toLowerCase()` is NOT the same comparison: it folds
+ * Unicode case, so `"Ä".toLowerCase() === "ä"` while the host treats the two
+ * as different effect kinds. The confirmation must agree with the gate itself,
+ * so only ASCII letters fold here and every other code unit must match exactly.
+ */
+function asciiEqualsIgnoreCase(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    const ca = a.charCodeAt(i);
+    const cb = b.charCodeAt(i);
+    if (ca === cb) continue;
+    // Folding an ASCII letter is OR-ing in bit 0x20. Anything that does not
+    // land in 'a'..'z' after the fold is not an ASCII letter, so it cannot be
+    // a case pair.
+    const lowerA = ca | 0x20;
+    const lowerB = cb | 0x20;
+    if (lowerA !== lowerB || lowerA < 0x61 || lowerA > 0x7a) return false;
+  }
+  return true;
+}
+
+/**
  * Whether `list` still gates `target`, mirroring the host matcher
  * (`src/policy/always_approve.rs::matches`): exact or a leading dotted segment,
  * ASCII-case-insensitive, on a segment boundary.
@@ -109,11 +133,11 @@ export function gatedBy(list: string[], target: string): boolean {
   return list.some((entry) => {
     const e = entry.trim();
     if (e === "") return false;
-    if (t.toLowerCase() === e.toLowerCase()) return true;
+    if (asciiEqualsIgnoreCase(t, e)) return true;
     return (
       t.length > e.length &&
       t[e.length] === "." &&
-      t.slice(0, e.length).toLowerCase() === e.toLowerCase()
+      asciiEqualsIgnoreCase(t.slice(0, e.length), e)
     );
   });
 }
