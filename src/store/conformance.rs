@@ -143,6 +143,8 @@ fn sample_policy_override() -> crate::ports::types::PolicyOverride {
     PolicyOverride {
         mode: Some("auto".to_string()),
         always_approve: Some(vec!["payment.send".to_string()]),
+        auto_approve_under_usd: Some(Some(25.0)),
+        approval_ttl_hours: Some(48),
         set_by: Actor {
             kind: ActorKind::User,
             id: "user-conformance".to_string(),

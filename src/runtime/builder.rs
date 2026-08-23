@@ -5541,6 +5541,8 @@ needs_reason = true
         PolicyOverride {
             mode: Some(mode.to_string()),
             always_approve: None,
+            auto_approve_under_usd: None,
+            approval_ttl_hours: None,
             set_by: Actor {
                 kind: ActorKind::User,
                 id: "admin-1".to_string(),

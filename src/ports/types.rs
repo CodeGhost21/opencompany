@@ -2984,6 +2984,17 @@ pub struct PolicyOverride {
     /// over every tier including `full`, so the two must stay distinguishable.
     #[serde(default)]
     pub always_approve: Option<Vec<String>>,
+    /// The spend threshold, including an explicit `None` for "no cap".
+    ///
+    /// The outer option says whether the operator set this field; the inner
+    /// option is the threshold itself. `Some(None)` is therefore a real,
+    /// stricter choice: every spend parks for approval.
+    #[serde(default)]
+    pub auto_approve_under_usd: Option<Option<f64>>,
+    /// The approval deadline in hours, or `None` to leave the manifest's value
+    /// in force.
+    #[serde(default)]
+    pub approval_ttl_hours: Option<u64>,
     /// Who set it. A tier that can be loosened anonymously is not much of a gate.
     pub set_by: Actor,
     /// When it was set (epoch millis).
@@ -2998,7 +3009,10 @@ impl PolicyOverride {
     /// persisting a row that says nothing but whose presence the console renders
     /// as "overridden".
     pub fn is_empty(&self) -> bool {
-        self.mode.is_none() && self.always_approve.is_none()
+        self.mode.is_none()
+            && self.always_approve.is_none()
+            && self.auto_approve_under_usd.is_none()
+            && self.approval_ttl_hours.is_none()
     }
 }
 
@@ -3927,16 +3941,12 @@ impl CompanyRecord {
                 .always_approve
                 .clone()
                 .unwrap_or_else(|| manifest.always_approve.clone()),
-            // Not overridable from the console today. Left reading the manifest
-            // rather than added to `PolicyOverride` speculatively: the issue asks
-            // for the tier and the always-ask list, and a spend threshold whose
-            // console control does not exist would be a field nothing can write.
-            auto_approve_under_usd: manifest.auto_approve_under_usd,
-            // Same reasoning for the approval deadline (issue #971): the knob is
-            // a manifest one, so the override carries the manifest's answer
-            // through unchanged rather than gaining a field no console control
-            // writes.
-            approval_ttl_hours: manifest.approval_ttl_hours,
+            auto_approve_under_usd: override_
+                .auto_approve_under_usd
+                .unwrap_or(manifest.auto_approve_under_usd),
+            approval_ttl_hours: override_
+                .approval_ttl_hours
+                .unwrap_or(manifest.approval_ttl_hours),
         }
     }
 
@@ -5894,6 +5904,8 @@ mod test {
         PolicyOverride {
             mode: mode.map(str::to_string),
             always_approve: always.map(|v| v.into_iter().map(str::to_string).collect()),
+            auto_approve_under_usd: None,
+            approval_ttl_hours: None,
             set_by: Actor {
                 kind: ActorKind::User,
                 id: "user-1".to_string(),
@@ -5997,16 +6009,24 @@ mod test {
         );
     }
 
-    /// `auto_approve_under_usd` is not overridable and keeps reading the
-    /// manifest, so the merge cannot silently drop a threshold it does not carry.
+    /// The spend threshold and deadline are overridden independently of the
+    /// tier and list, including an explicit no-cap choice.
     #[test]
-    fn the_spend_threshold_is_untouched_by_a_policy_override() {
+    fn spend_threshold_and_deadline_can_be_overridden_independently() {
         let manifest = "[company]\nname = \"Acme\"\n\
              [[agent]]\nid = \"analyst\"\nrole = \"Analyst\"\n\
              [policy]\nmode = \"supervised\"\nauto_approve_under_usd = 2.5\n";
         let mut record = desk_record(manifest, Vec::new());
         record.overlay_policy = Some(policy_entry(Some("full"), Some(vec![])));
         assert_eq!(record.effective_policy().auto_approve_under_usd, Some(2.5));
+        assert_eq!(record.effective_policy().approval_ttl_hours, None);
+
+        let override_ = record.overlay_policy.as_mut().unwrap();
+        override_.auto_approve_under_usd = Some(None);
+        override_.approval_ttl_hours = Some(72);
+        let effective = record.effective_policy();
+        assert_eq!(effective.auto_approve_under_usd, None);
+        assert_eq!(effective.approval_ttl_hours, Some(72));
     }
 
     /// The roster a company was launched with is still the roster it runs, until

@@ -62,10 +62,14 @@ pub struct PolicyGql {
     /// The always-ask list actually in force. The operator's real lever: it
     /// wins over every tier, `full` included.
     pub always_approve: Vec<String>,
+    pub auto_approve_under_usd: Option<f64>,
+    pub approval_ttl_hours: f64,
     /// The manifest's tier, so a client can see what a reset would restore.
     pub manifest_mode: String,
     /// The manifest's always-ask list, for the same reason.
     pub manifest_always_approve: Vec<String>,
+    pub manifest_auto_approve_under_usd: Option<f64>,
+    pub manifest_approval_ttl_hours: Option<f64>,
     /// Whether an operator override is in force.
     ///
     /// Distinct from comparing `mode` with `manifestMode`: an override that
@@ -87,8 +91,12 @@ impl From<PolicyDto> for PolicyGql {
         Self {
             mode: dto.mode,
             always_approve: dto.always_approve,
+            auto_approve_under_usd: dto.auto_approve_under_usd,
+            approval_ttl_hours: dto.approval_ttl_hours as f64,
             manifest_mode: dto.manifest_mode,
             manifest_always_approve: dto.manifest_always_approve,
+            manifest_auto_approve_under_usd: dto.manifest_auto_approve_under_usd,
+            manifest_approval_ttl_hours: dto.manifest_approval_ttl_hours.map(|hours| hours as f64),
             overridden: dto.overridden,
             set_by: dto.set_by,
             // GraphQL has no 64-bit integer scalar, and epoch millis exceed

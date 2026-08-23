@@ -57,6 +57,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::AppState;
 use crate::company::{POLICY_MODES, Policy};
+use crate::policy::DEFAULT_TTL_MILLIS;
 use crate::error::OpenCompanyError;
 use crate::ports::now_millis;
 use crate::ports::store::company_write_lock;
@@ -126,13 +127,13 @@ const TIER_TEXT: &[TierDto] = &[
     TierDto {
         value: "supervised",
         label: "Supervised",
-        description: "The agents ask before every change, including their own scratch files.",
+        description: "The agents ask before every change, except payments under the configured spend cap.",
     },
     TierDto {
         value: "auto",
         label: "Auto",
         description: "The agents work on their own and stop before anything that leaves the \
-                      company or spends money.",
+                      company or spends money, except payments under the configured spend cap.",
     },
     TierDto {
         value: "full",
@@ -183,11 +184,19 @@ pub(crate) struct PolicyDto {
     /// The always-ask list actually in force. The operator's real lever: it
     /// wins over every tier, `full` included.
     pub(crate) always_approve: Vec<String>,
+    /// The spend threshold actually in force. `None` means every spend parks.
+    pub(crate) auto_approve_under_usd: Option<f64>,
+    /// The deadline actually in force, including the runtime default.
+    pub(crate) approval_ttl_hours: u64,
     /// The manifest's tier, so the console can show what "reset" would restore
     /// rather than describing it abstractly.
     pub(crate) manifest_mode: String,
     /// The manifest's always-ask list, for the same reason.
     pub(crate) manifest_always_approve: Vec<String>,
+    /// The manifest's spend threshold, before any console override.
+    pub(crate) manifest_auto_approve_under_usd: Option<f64>,
+    /// The manifest's deadline, if it explicitly names one.
+    pub(crate) manifest_approval_ttl_hours: Option<u64>,
     /// Whether an operator override is in force. Distinct from comparing the
     /// values: an override that happens to match the manifest is still an
     /// override, and still what `DELETE` would remove.
@@ -212,8 +221,14 @@ impl PolicyDto {
         Self {
             mode: effective.mode,
             always_approve: effective.always_approve,
+            auto_approve_under_usd: effective.auto_approve_under_usd,
+            approval_ttl_hours: effective
+                .approval_ttl_hours
+                .unwrap_or(DEFAULT_TTL_MILLIS / (60 * 60 * 1000)),
             manifest_mode: manifest.mode.clone(),
             manifest_always_approve: manifest.always_approve.clone(),
+            manifest_auto_approve_under_usd: manifest.auto_approve_under_usd,
+            manifest_approval_ttl_hours: manifest.approval_ttl_hours,
             overridden: record.overlay_policy.is_some(),
             set_by: record.overlay_policy.as_ref().map(|o| o.set_by.id.clone()),
             set_at_millis: record.overlay_policy.as_ref().map(|o| o.at_millis),
@@ -247,6 +262,10 @@ struct SetPolicy {
     mode: Option<Option<String>>,
     #[serde(default, deserialize_with = "double_option")]
     always_approve: Option<Option<Vec<String>>>,
+    #[serde(default, deserialize_with = "double_option")]
+    auto_approve_under_usd: Option<Option<f64>>,
+    #[serde(default, deserialize_with = "double_option")]
+    approval_ttl_hours: Option<Option<u64>>,
 }
 
 /// `GET {scope}/policy` — the tier in force, what the manifest would restore,
@@ -267,9 +286,13 @@ async fn set_policy(
 ) -> Result<Json<PolicyDto>, Response> {
     let admin = require_admin(&headers, &state, &company.runtime, peer).await?;
 
-    if body.mode.is_none() && body.always_approve.is_none() {
+    if body.mode.is_none()
+        && body.always_approve.is_none()
+        && body.auto_approve_under_usd.is_none()
+        && body.approval_ttl_hours.is_none()
+    {
         return Err(refusal(
-            "Nothing to set. Send `mode`, `alwaysApprove`, or both — or `DELETE` \
+            "Nothing to set. Send a policy field — or `DELETE` \
              this endpoint to go back to the manifest's policy.",
         ));
     }
@@ -286,6 +309,11 @@ async fn set_policy(
             "`mode` must be one of {} — you sent `{mode}`.",
             POLICY_MODES.join(", ")
         )));
+    }
+    if let Some(Some(cap)) = body.auto_approve_under_usd
+        && (!cap.is_finite() || cap < 0.0)
+    {
+        return Err(refusal("`autoApproveUnderUsd` must be a non-negative number."));
     }
 
     let write_lock = company_write_lock(company.id());
@@ -306,10 +334,21 @@ async fn set_policy(
         Some(value) => value,
         None => held.as_ref().and_then(|o| o.always_approve.clone()),
     };
+    let auto_approve_under_usd = match body.auto_approve_under_usd {
+        Some(value) => Some(value),
+        None => held.as_ref().and_then(|o| o.auto_approve_under_usd),
+    };
+    let approval_ttl_hours = match body.approval_ttl_hours {
+        Some(Some(value)) => Some(value),
+        Some(None) => held.as_ref().and_then(|o| o.approval_ttl_hours),
+        None => held.as_ref().and_then(|o| o.approval_ttl_hours),
+    };
 
     let entry = PolicyOverride {
         mode,
         always_approve,
+        auto_approve_under_usd,
+        approval_ttl_hours,
         set_by: Actor {
             kind: ActorKind::User,
             id: admin.user_id,
@@ -395,7 +434,9 @@ mod tests {
     const MANIFEST: &str = "[company]\nname = \"Acme\"\n\
          [[agent]]\nid = \"ceo\"\nrole = \"Chief\"\n\
          [policy]\nmode = \"supervised\"\n\
-         always_approve = [\"payment.send\", \"filing.submit\"]\n";
+         always_approve = [\"payment.send\", \"filing.submit\"]\n\
+         auto_approve_under_usd = 5.0\n\
+         approval_ttl_hours = 24\n";
 
     fn home() -> tempfile::TempDir {
         tempfile::Builder::new()
@@ -468,6 +509,10 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["mode"], "supervised");
         assert_eq!(body["manifestMode"], "supervised");
+        assert_eq!(body["autoApproveUnderUsd"], 5.0);
+        assert_eq!(body["manifestAutoApproveUnderUsd"], 5.0);
+        assert_eq!(body["approvalTtlHours"], 24);
+        assert_eq!(body["manifestApprovalTtlHours"], 24);
         assert_eq!(body["overridden"], false);
         assert!(body["setBy"].is_null());
         assert!(!body["tiers"].as_array().unwrap().is_empty());
@@ -503,6 +548,54 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["alwaysApprove"], json!([]));
         assert_eq!(body["mode"], "supervised", "the tier must not have moved");
+    }
+
+    /// The spend cap and deadline use the same field-wise write behaviour as
+    /// the tier: changing either leaves every other policy setting alone.
+    #[tokio::test]
+    async fn putting_a_cap_or_deadline_overrides_only_that_field() {
+        let dir = home();
+        let state = state(dir.path()).await;
+
+        let (status, body) = call(
+            &state,
+            "PUT",
+            Some(json!({ "autoApproveUnderUsd": null, "approvalTtlHours": 72 })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body["autoApproveUnderUsd"].is_null());
+        assert_eq!(body["approvalTtlHours"], 72);
+        assert_eq!(body["mode"], "supervised");
+        assert_eq!(body["alwaysApprove"], json!(["payment.send", "filing.submit"]));
+
+        let (_, reread) = call(&state, "GET", None).await;
+        assert!(reread["autoApproveUnderUsd"].is_null());
+        assert_eq!(reread["approvalTtlHours"], 72);
+    }
+
+    /// A deadline `null` releases that one override while preserving the cap,
+    /// just as `mode: null` releases only the tier override.
+    #[tokio::test]
+    async fn null_deadline_stops_overriding_the_deadline() {
+        let dir = home();
+        let state = state(dir.path()).await;
+        call(
+            &state,
+            "PUT",
+            Some(json!({ "autoApproveUnderUsd": 10, "approvalTtlHours": 72 })),
+        )
+        .await;
+
+        let (status, body) = call(
+            &state,
+            "PUT",
+            Some(json!({ "approvalTtlHours": null })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["autoApproveUnderUsd"], 10.0);
+        assert_eq!(body["approvalTtlHours"], 24);
     }
 
     /// A body that sets nothing is refused rather than stored, and an unknown

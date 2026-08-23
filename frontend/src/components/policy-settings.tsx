@@ -107,6 +107,9 @@ export function PolicySettings({ client, company }: Props) {
   // half-typed effect kind never reaches the gate.
   const [draftAlways, setDraftAlways] = useState("");
   const [dirty, setDirty] = useState(false);
+  const [draftSpend, setDraftSpend] = useState("");
+  const [noSpendCap, setNoSpendCap] = useState(false);
+  const [draftDeadline, setDraftDeadline] = useState("");
   /**
    * The tool names this deployment can actually gate (issue #1226).
    *
@@ -131,6 +134,9 @@ export function PolicySettings({ client, company }: Props) {
       const next = await getPolicy(client, company);
       setStatus(next);
       setDraftAlways(next.alwaysApprove.join(", "));
+      setDraftSpend(next.autoApproveUnderUsd?.toString() ?? "");
+      setNoSpendCap(next.autoApproveUnderUsd === null);
+      setDraftDeadline(next.approvalTtlHours.toString());
       setDirty(false);
     } catch (error) {
       const message =
@@ -179,6 +185,9 @@ export function PolicySettings({ client, company }: Props) {
     if (resyncDraft) {
       setDraftAlways(next.alwaysApprove.join(", "));
       setDirty(false);
+      setDraftSpend(next.autoApproveUnderUsd?.toString() ?? "");
+      setNoSpendCap(next.autoApproveUnderUsd === null);
+      setDraftDeadline(next.approvalTtlHours.toString());
     }
     toast.success(message, { description: next.takesEffect });
   };
@@ -223,6 +232,48 @@ export function PolicySettings({ client, company }: Props) {
       toast.error(
         error instanceof Error ? error.message : "Could not save the list.",
       );
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const saveSpendCap = async () => {
+    if (!status || saving) return;
+    const cap = Number(draftSpend);
+    if (!noSpendCap && (!Number.isFinite(cap) || cap < 0)) {
+      toast.error("Enter a non-negative amount, or choose no cap.");
+      return;
+    }
+    setSaving(true);
+    try {
+      apply(
+        await setPolicy(client, company, {
+          autoApproveUnderUsd: noSpendCap ? null : cap,
+        }),
+        "Spend cap updated",
+      );
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Could not save the spend cap.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const saveDeadline = async () => {
+    if (!status || saving) return;
+    const hours = Number(draftDeadline);
+    if (!Number.isSafeInteger(hours) || hours < 1) {
+      toast.error("Enter a whole number of hours, at least 1.");
+      return;
+    }
+    setSaving(true);
+    try {
+      apply(
+        await setPolicy(client, company, { approvalTtlHours: hours }),
+        "Approval deadline updated",
+      );
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Could not save the deadline.");
     } finally {
       setSaving(false);
     }
@@ -309,6 +360,64 @@ export function PolicySettings({ client, company }: Props) {
               <p className="text-xs text-muted-foreground">
                 Takes effect {status.takesEffect}.
               </p>
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="spend-cap">Spend without asking, under</Label>
+              <p className="text-xs text-muted-foreground">
+                Payments below this never appear in Approvals.
+              </p>
+              <div className="flex flex-wrap items-center gap-2">
+                <Input
+                  id="spend-cap"
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  inputMode="decimal"
+                  value={draftSpend}
+                  disabled={saving || noSpendCap}
+                  placeholder="No cap"
+                  onChange={(event) => setDraftSpend(event.target.value)}
+                  className="max-w-40"
+                />
+                <span className="text-sm text-muted-foreground">USD</span>
+                <Button
+                  size="sm"
+                  type="button"
+                  variant={noSpendCap ? "secondary" : "outline"}
+                  disabled={saving}
+                  onClick={() => setNoSpendCap((current) => !current)}
+                >
+                  {noSpendCap ? "No cap" : "Set no cap"}
+                </Button>
+                <Button size="sm" disabled={saving} onClick={() => void saveSpendCap()}>
+                  Save cap
+                </Button>
+              </div>
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="approval-deadline">Decline anything undecided after</Label>
+              <p className="text-xs text-muted-foreground">
+                Each approval stays decidable for this long before it is declined.
+              </p>
+              <div className="flex items-center gap-2">
+                <Input
+                  id="approval-deadline"
+                  type="number"
+                  min="1"
+                  step="1"
+                  inputMode="numeric"
+                  value={draftDeadline}
+                  disabled={saving}
+                  className="max-w-32"
+                  onChange={(event) => setDraftDeadline(event.target.value)}
+                />
+                <span className="text-sm text-muted-foreground">hours</span>
+                <Button size="sm" disabled={saving} onClick={() => void saveDeadline()}>
+                  Save deadline
+                </Button>
+              </div>
             </div>
 
             <div className="space-y-2">
