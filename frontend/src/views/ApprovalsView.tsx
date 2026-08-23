@@ -463,6 +463,9 @@ function useStandingGrants(
   // The newest grants while the queue is held. `null` means nothing pending; an
   // empty list is a real answer and must not be mistaken for "nothing arrived".
   const pending = useRef<StandingGrant[] | null>(null);
+  // Names can change card height too (fallback id/email → display name), so they
+  // use the same hold-and-reconcile path rather than updating above the queue.
+  const pendingNames = useRef<Map<string, string> | null>(null);
   // Live is read inside `refreshGrants`, which is memoised and must not close
   // over a stale render — the same ref pattern `useStableList` uses for `live`.
   const holdingRef = useRef(holding);
