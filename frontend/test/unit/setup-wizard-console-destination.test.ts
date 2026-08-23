@@ -183,7 +183,9 @@ describe("the console button after setup applies without a hand-off link", () =>
     done = () => {
       calls += 1;
     };
-    await show(clientWith(status()));
+    // The connection console's `onDone` re-probes and boots a fresh `AppShell`,
+    // so this completion writes the marker for that shell to read.
+    await show(clientWith(status()), { expectsShellRemount: true });
     await finishNoSignIn();
 
     // Nobody to invite, so there is no link to hand over — only the console.
@@ -199,7 +201,9 @@ describe("the console button after setup applies without a hand-off link", () =>
   });
 
   it("carries the same destination out of the unmailable escape", async () => {
-    await show(clientWith(status({ mail: { wired: false, echoes_code: false } })));
+    await show(clientWith(status({ mail: { wired: false, echoes_code: false } })), {
+      expectsShellRemount: true,
+    });
     await finishUnmailable();
 
     expect(find("setup-handoff-unmailable")).toBeTruthy();
@@ -208,5 +212,25 @@ describe("the console button after setup applies without a hand-off link", () =>
     await click("setup-open-console");
 
     expect(window.location.hash).toBe(SETUP_HANDOFF_FRAGMENT);
+  });
+
+  it("leaves the URL alone when completion happens in place", async () => {
+    // The in-shell dialog's `onDone` closes in place — the running shell
+    // suppresses the welcome through `onCompleted`, so no mount follows to
+    // consume a marker. Writing one here would be read as a fresh hand-off on
+    // the next reload, so the button must leave the address untouched.
+    (window as unknown as { __TAURI__: unknown }).__TAURI__ = { core: {} };
+    let calls = 0;
+    done = () => {
+      calls += 1;
+    };
+    window.location.hash = "#/overview";
+    await show(clientWith(status()));
+    await finishNoSignIn();
+
+    await click("setup-open-console");
+
+    expect(window.location.hash).toBe("#/overview");
+    expect(calls).toBe(1);
   });
 });
