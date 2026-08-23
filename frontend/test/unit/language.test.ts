@@ -175,6 +175,7 @@ function grant(over: Partial<StandingGrant> & Pick<StandingGrant, "tool">): Stan
   return {
     id: "g1",
     agent: "ceo",
+    verdict: "approve",
     granted_by: { kind: "user", id: "u1" },
     at_millis: 1_000,
     expires_at_millis: 2_000,
