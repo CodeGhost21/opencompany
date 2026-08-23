@@ -78,6 +78,7 @@ const OUTCOME_LABEL_PREFIX: &str = "task-outcome";
 pub fn router() -> Router<AppState> {
     scoped("/memory", post(create_fact).get(list_facts))
         .merge(scoped("/memory/stats", get(memory_stats)))
+        .merge(scoped("/memory/archives", get(archived_traces)))
         .merge(scoped("/memory/{fact_id}", delete(delete_fact)))
 }
 
@@ -86,6 +87,21 @@ pub fn router() -> Router<AppState> {
 /// chunk-body reads on a single `GET /memory`. The stats endpoint only counts
 /// (no per-chunk read), so it stays unbounded; the list caps its reads here.
 const MAX_CONTEXT_ENTRIES: usize = 500;
+
+/// `GET /memory/archives` — traces preserved by a provider-backed engine when
+/// it evicts its active trace window. The base and embedded engines have no
+/// archive tier, so they answer a clear refusal instead of an empty list that
+/// would falsely imply there are no archived traces.
+async fn archived_traces(
+    company: ScopedCompany,
+) -> Result<Json<Vec<crate::ports::CompressedTrace>>, ApiError> {
+    let traces = company.runtime.archived_traces().await?.ok_or_else(|| {
+        OpenCompanyError::Config(
+            "the selected memory engine does not provide archived traces; use a provider-backed memory engine to retain evicted traces".into(),
+        )
+    })?;
+    Ok(Json(traces))
+}
 
 /// Max characters kept for a context entry's synthesised title (its first line).
 const CONTEXT_TITLE_MAX: usize = 120;

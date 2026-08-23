@@ -506,6 +506,49 @@ impl CompanyRuntime {
         self.source_dir = dir;
     }
 
+    /// Installs the provider-backed memory decorators selected at boot.
+    ///
+    /// These are optional because the base store and the legacy embedded engine
+    /// do not have the provider contract's isolated partitions or archive tier.
+    pub(crate) fn set_memory_decorators(
+        &mut self,
+        scratch_context: Option<Arc<dyn ContextStore>>,
+        memory_scopes: Option<Arc<dyn crate::store::MemoryScopes>>,
+    ) {
+        self.scratch_context = scratch_context;
+        self.memory_scopes = memory_scopes;
+    }
+
+    /// The isolated working-memory partition, when the selected engine serves
+    /// the provider-backed decorator contract.
+    pub(crate) fn scratch_context(&self) -> Option<Arc<dyn ContextStore>> {
+        self.scratch_context.clone()
+    }
+
+    /// One agent's private context partition, without exposing namespaces.
+    pub(crate) fn agent_context(&self, agent_id: &str) -> Option<Arc<dyn ContextStore>> {
+        self.memory_scopes
+            .as_ref()
+            .map(|scopes| scopes.agent_context(agent_id))
+    }
+
+    /// One desk's shared context partition, without exposing namespaces.
+    pub(crate) fn desk_context(&self, desk_id: &str) -> Option<Arc<dyn ContextStore>> {
+        self.memory_scopes
+            .as_ref()
+            .map(|scopes| scopes.desk_context(desk_id))
+    }
+
+    /// Traces preserved by the provider decorator's archive-on-evict policy.
+    pub(crate) async fn archived_traces(
+        &self,
+    ) -> Result<Option<Vec<crate::ports::CompressedTrace>>> {
+        match &self.memory_scopes {
+            Some(scopes) => scopes.archived_traces(&self.id).await.map(Some),
+            None => Ok(None),
+        }
+    }
+
     /// The company's on-disk source directory, when built on the serve path.
     /// `None` in platform-provisioned mode.
     pub fn source_dir(&self) -> Option<&Path> {

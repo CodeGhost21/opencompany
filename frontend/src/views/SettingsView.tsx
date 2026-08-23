@@ -52,6 +52,18 @@ interface Props {
   onFlag: () => void;
 }
 
+// These are the optional capability families closest to the mandatory core /
+// recall / portability path. Remote providers commonly omit them, so merely
+// listing what answered leaves an operator to infer a material limitation.
+const MANDATORY_ADJACENT_MEMORY_FAMILIES = [
+  "tree",
+  "entities",
+  "graph",
+  "diff",
+  "goals",
+  "tool_memory",
+];
+
 /** Connection details, lifecycle controls, and the feedback entry point. */
 export function SettingsView({ client, company, feed, onFlag }: Props) {
   // Which (connection, company) this subtree's browser-local state belongs to.
@@ -408,6 +420,9 @@ function MemoryEngineCard({ client }: { client: OpenCompanyClient }) {
 
   if (!engine || engine.backend === "store") return null;
   const discarding = engine.backend === "null";
+  const unservedFamilies = MANDATORY_ADJACENT_MEMORY_FAMILIES.filter(
+    (family) => !engine.capabilities.includes(family),
+  );
   return (
     <Card data-testid="settings-memory-engine">
       <CardHeader>
@@ -431,6 +446,11 @@ function MemoryEngineCard({ client }: { client: OpenCompanyClient }) {
             {engine.capabilities.length > 0
               ? engine.capabilities.join(", ")
               : "not negotiated"}
+          </span>
+        </InfoRow>
+        <InfoRow label="Not served">
+          <span className="text-sm">
+            {unservedFamilies.length > 0 ? unservedFamilies.join(", ") : "none in this set"}
           </span>
         </InfoRow>
         <InfoRow label="Boot probe">
