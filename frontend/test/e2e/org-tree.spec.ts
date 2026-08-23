@@ -473,7 +473,9 @@ test("#311 membership can be edited from the chart and survives a reload", async
 
   // Turing sits on no desk, so the chart accounts for him beside the tree
   // rather than dropping him.
-  const unplaced = page.getByRole("heading", { name: "Not on a desk" });
+  await expect(page.getByRole("heading", { name: "Desks", level: 1 })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "People outside desks", level: 2 })).toBeAttached();
+  const unplaced = page.getByRole("heading", { name: "Not on a desk", level: 3 });
   await expect(unplaced).toBeVisible();
   await expect(
     unplaced.locator("xpath=following-sibling::ul[1]"),
