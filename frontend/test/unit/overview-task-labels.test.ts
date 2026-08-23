@@ -46,18 +46,31 @@ afterEach(() => {
   host.remove();
 });
 
+/**
+ * The d3 layout starts after mounting and its tick handler is raf-throttled,
+ * so the first nodes need at least two animation frames to reach the DOM. A
+ * fixed delay races that, so poll until the node appears instead.
+ */
+async function waitForTaskTitle(timeoutMs = 2_000): Promise<SVGTitleElement> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const found = [...host.querySelectorAll("title")].find((el) => el.textContent === TASK_TITLE);
+    if (found) return found as unknown as SVGTitleElement;
+    if (Date.now() > deadline) {
+      throw new Error(`the task node was not rendered within ${timeoutMs}ms`);
+    }
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 16));
+    });
+  }
+}
+
 describe("task labels", () => {
   it("renders the complete title when the task is named", async () => {
-    // The graph starts its d3 layout after mounting, so wait for its first
-    // tick to populate the SVG nodes.
-    await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 25));
-    });
-    const title = [...host.querySelectorAll("title")].find((el) => el.textContent === TASK_TITLE);
-    expect(title, "the task node must be rendered").toBeDefined();
+    const title = await waitForTaskTitle();
 
     act(() => {
-      title!.parentElement!.dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
+      title.parentElement!.dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
     });
 
     const labels = [...host.querySelectorAll("text")].map((el) => el.textContent);
