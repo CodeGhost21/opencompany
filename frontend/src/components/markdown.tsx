@@ -74,12 +74,11 @@ function chipMentions(nodes: ReactNode, mentions: MentionSpan[]): ReactNode {
       });
     }
     if (Array.isArray(node)) return node.map((child, i) => split(child, `${key}-${i}`));
-    if (typeof node === "object" && node !== null && "props" in node) {
+    if (isValidElement(node)) {
       // A formatted mention arrives as an element (strong, em, a…). Descend so
       // `**@engineer**` chips too — the host notified the target, so the chip
       // belongs regardless of the markup around it.
-      const el = node as { props: { children?: ReactNode } };
-      return cloneElement(node as Parameters<typeof cloneElement>[0], undefined, split(el.props.children, key));
+      return cloneElement(node, undefined, split(node.props.children, key));
     }
     return node;
   };
