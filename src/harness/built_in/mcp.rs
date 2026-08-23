@@ -1004,8 +1004,24 @@ mod tests {
         assert!(result.output().contains("remote ran ok"));
     }
 
-    /// SECURITY CANARY: a server that **reflects the submitted credential** in a
-    /// non-401 error body must not leak it anywhere the `OcMcpCallTool` decorator
+    /// An empty raw request inherits the company belt at the builder seam. The
+    /// scrubber must receive those effective grants too, or an MCP credential
+    /// echoed by a server can reach the agent-visible failure even though the
+    /// registry correctly wires that server.
+    #[test]
+    fn granted_secrets_follows_effective_grants() {
+        let mut server = decl("fixture", "http://127.0.0.1:1/mcp");
+        server.auth = AuthMaterial::Bearer("inherited-canary".into());
+        let inherited = granted_secrets(
+            std::slice::from_ref(&server),
+            &grants(&["*", "mcp:*"]),
+        );
+        assert_eq!(inherited, vec!["inherited-canary"]);
+
+        let omitted = granted_secrets(std::slice::from_ref(&server), &grants(&["*"]));
+        assert!(omitted.is_empty());
+    }
+
     /// surfaces — not the agent-visible result, and not the drained failure. This
     /// is the regression guard for leak vector #1 (upstream `MCP HTTP {status} —
     /// {body}` echoing the body) driven through the REAL vendored transport.
