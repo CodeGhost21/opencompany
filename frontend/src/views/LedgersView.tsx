@@ -241,6 +241,15 @@ export const RESERVED_SEGMENTS: readonly string[] = [
  */
 const EMPTY_APPROVALS: readonly ApprovalSummary[] = [];
 
+/** The task ledger is operated as a board; declared ledgers are read as rows. */
+export function defaultLedgerMode(
+  ledger: LedgerSummary | null,
+): "board" | "list" {
+  return ledger?.source === "native" && ledger.slug === BOARD_LEDGER
+    ? "board"
+    : "list";
+}
+
 /** A row is either being opened fresh or amended; the form differs only in id. */
 interface Composing {
   /** The row this edits, or empty for a new one. */
@@ -280,15 +289,8 @@ export function LedgersView({
   const [saving, setSaving] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState<LedgerEntry | null>(null);
   const [rendered, setRendered] = useState<string | null>(null);
-  /**
-   * Columns or rows.
-   *
-   * Board by default for anything with a status, because that is what a
-   * ledger's statuses *are* — a lifecycle, read left to right. The list is for
-   * reading a row's whole contents, which is what a ledger with long prose
-   * fields is actually for; the board truncates by construction.
-   */
-  const [mode, setMode] = useState<"board" | "list">("board");
+  /** Columns for dispatched tasks; rows for every agent-written ledger. */
+  const [mode, setMode] = useState<"board" | "list">("list");
   /**
    * The board's own create dialog, for the native `tasks` ledger only.
    *
@@ -330,6 +332,13 @@ export function LedgersView({
 
   /** The task board, as opposed to a ledger a company declared. */
   const isBoard = ledger?.source === "native" && ledger.slug === BOARD_LEDGER;
+
+  // A view choice belongs to the ledger it describes. Returning to Tasks
+  // restores its dispatch board; opening Goals or Decisions makes the closing
+  // reason readable without first finding and changing this toggle.
+  useEffect(() => {
+    setMode(defaultLedgerMode(ledger));
+  }, [ledger?.slug, ledger?.source]);
 
   const taskById = useMemo(
     () => new Map(tasks.map((task) => [task.id, task])),
@@ -1233,6 +1242,11 @@ function BoardMode({
             >
               {ownerOf(entry, ledger) || entry.id}
             </span>
+            {entry.closed && entry.fields.reason?.trim() && (
+              <span className="mt-2 block line-clamp-3 text-xs leading-relaxed text-muted-foreground">
+                {entry.fields.reason}
+              </span>
+            )}
           </button>
         );
       }}
