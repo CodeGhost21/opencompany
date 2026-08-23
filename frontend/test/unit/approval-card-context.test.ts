@@ -5,7 +5,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import type { ApprovalSummary, GrantScope, Verdict } from "@/api/types";
-import { approvalThreadLink } from "@/components/approval-card";
+import { approvalThreadLink, type ApprovalThreadLink } from "@/components/approval-card";
 import type { Desk } from "@/lib/desks";
 import type { TeamMember } from "@/lib/team";
 import { ApprovalCard } from "@/views/ApprovalsView";
@@ -30,14 +30,14 @@ function nativeApproval(over: Partial<ApprovalSummary> = {}): ApprovalSummary {
 let container: HTMLDivElement;
 let root: Root;
 
-async function render(approval: ApprovalSummary) {
+async function render(approval: ApprovalSummary, thread?: ApprovalThreadLink | null) {
   await act(async () => {
     root.render(
       createElement(ApprovalCard, {
         approval,
         now: T0 + 60_000,
         askerNames: new Map(),
-        thread: approvalThreadLink(approval, ENGINEERING, NO_MEMBERS),
+        thread: thread === undefined ? approvalThreadLink(approval, ENGINEERING, NO_MEMBERS) : thread,
         deciding: null,
         batchIndex: 1,
         batchTotal: 1,
