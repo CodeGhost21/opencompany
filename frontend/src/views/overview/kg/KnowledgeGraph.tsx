@@ -253,6 +253,9 @@ export function KnowledgeGraph({
   const [coreExpanded, setCoreExpanded] = useState(false);
   const [selectedMemoryId, setSelectedMemoryId] = useState<string | null>(null);
   const [memHoverId, setMemHoverId] = useState<string | null>(null);
+  // The graph is one tab stop. Arrow keys move its roving focus between
+  // visible nodes, rather than making a large company a wall of tab stops.
+  const [activeNodeId, setActiveNodeId] = useState<string | null>(() => graph.nodes[0]?.id ?? null);
   // type-to-find over the open vault; hits highlight in the overlay layer
   const [memQuery, setMemQuery] = useState('');
   const memSearchRef = useRef<HTMLInputElement | null>(null);
@@ -265,6 +268,7 @@ export function KnowledgeGraph({
   const nodesRef = useRef<SimNode[]>([]);
   const linksRef = useRef<SimLink[]>([]);
   const svgRef = useRef<SVGSVGElement | null>(null);
+  const nodeRefs = useRef(new Map<string, SVGGElement>());
   const dragRef = useRef<{ id: string; moved: boolean; startX: number; startY: number } | null>(null);
   const suppressClickRef = useRef(false);
   // Drag-to-pan. `panRef` is an offset in viewBox units added to whatever the
