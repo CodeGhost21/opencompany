@@ -598,6 +598,25 @@ struct PathIndex {
     /// per node id rather than per rendered path (two folders may share a
     /// path; they never share an id).
     child_count: HashMap<String, usize>,
+    /// Every node the store returned, keyed by id — including the ones
+    /// excluded from `by_path` and `by_id` above.
+    ///
+    /// `by_id` deliberately omits unaddressable nodes so no tool can reach them
+    /// by id; this map exists for the one gate that must inspect them anyway: a
+    /// rename of a folder re-renders the path of *every* node under it, so the
+    /// ownership check has to read the authorship of descendants the path maps
+    /// cannot see, not merely count them (which `child_count` already does).
+    all_nodes: HashMap<String, WorkspaceNode>,
+    /// Parent id → child node ids, over **every** node the store returned —
+    /// including the ones excluded from `by_path` and `by_id` above.
+    ///
+    /// The sibling of [`child_count`](Self::child_count) with the ids kept:
+    /// counting told the delete gate whether a folder was empty, and a subtree
+    /// walk over parent ids tells the rename gate which nodes a folder rename
+    /// would actually move, addressable or not. Built from the same
+    /// unfiltered pass, so it sees a child whether or not that child has a
+    /// renderable path.
+    children: HashMap<String, Vec<String>>,
 }
 
 impl PathIndex {
