@@ -78,7 +78,9 @@ async fn run(
     body: FeedbackRequest,
 ) -> Result<Json<FeedbackResponse>, ApiError> {
     runtime.ensure_running().await?;
-    let response = runtime.submit_feedback(body.input, body.preview).await?;
+    let response = runtime
+        .submit_feedback(body.input, body.preview, body.item_id)
+        .await?;
     Ok(Json(response))
 }
 
