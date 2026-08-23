@@ -20,6 +20,20 @@ export interface Reaction {
   mine: boolean;
 }
 
+/** One mention on one line. Mirrors `ChatMentionDto` on the host. */
+export interface Mention {
+  /** The literal span the author typed, `@` included. */
+  text: string;
+  /** Byte offset of `text` in the message body. */
+  offset: number;
+  /** Who was named, as a display label — never a raw user id. */
+  label: string;
+  /** Whether the reader is the one named (or was named by `@everyone`). */
+  mine: boolean;
+  /** Whether this mention renders but pinged nobody. */
+  quiet?: boolean;
+}
+
 /** One line in the conversation with the company. */
 export interface ChatMessage {
   id: string;
@@ -62,6 +76,15 @@ export interface ChatMessage {
    * `#/tasks/<id>`.
    */
   taskId?: string;
+  /**
+   * Who this line names (`@engineer`, `@Jane Doe`, `@everyone`), as the host
+   * resolved them — spans plus a label, never a target id.
+   *
+   * Carried rather than re-parsed from `text`, so a chip is drawn only where
+   * somebody was actually notified. Absent when the line names nobody, and on
+   * a host that predates the field.
+   */
+  mentions?: Mention[];
 }
 
 /**
@@ -312,6 +335,9 @@ export function fromHistory(entries: ChatHistoryMessageDto[]): ChatMessage[] {
       // Reactions come through whoever the host said reacted; nothing is
       // inferred here, `mine` included.
       reactions: entry.reactions?.length ? entry.reactions : undefined,
+      // Same rule as reactions: the host says who was mentioned, and nothing
+      // here infers one from the text.
+      mentions: entry.mentions?.length ? entry.mentions : undefined,
       // A sent message never carries a channel; only attribute one when the
       // line came from someone/something else, mirroring `ChatPane.send`.
       channel: from === "company" ? entry.channel : undefined,

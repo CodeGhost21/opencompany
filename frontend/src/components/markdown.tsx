@@ -1,7 +1,69 @@
+import type { ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
 import { cn } from "@/lib/utils";
+import { mentionRegex } from "@/views/chat/mentions";
+
+/** One mention span this document should chip, as `chat/history` returns it. */
+export interface MentionSpan {
+  text: string;
+  label: string;
+  mine: boolean;
+  quiet?: boolean;
+}
+
+/**
+ * Wraps every delivered mention span in `nodes` in a chip.
+ *
+ * Splits only **string** children, so a mention inside `**bold**` or a link
+ * still chips while the surrounding markup is left to `react-markdown`.
+ *
+ * The pattern comes from {@link mentionRegex}, which matches nothing when the
+ * list is empty. That is the rule, not an optimisation: an `@word` is
+ * highlighted only when the host actually delivered a mention for it. A chip
+ * claims somebody was notified, and one drawn over unresolved text is a claim
+ * the reader has no way to check.
+ */
+function chipMentions(nodes: ReactNode, mentions: MentionSpan[]): ReactNode {
+  if (mentions.length === 0) return nodes;
+  const byText = new Map(mentions.map((m) => [m.text, m]));
+  const pattern = mentionRegex(mentions);
+
+  const split = (node: ReactNode, key: string): ReactNode => {
+    if (typeof node !== "string") return node;
+    const parts = node.split(pattern);
+    if (parts.length === 1) return node;
+    return parts.map((part, i) => {
+      const hit = byText.get(part);
+      if (!hit) return part;
+      return (
+        <span
+          key={`${key}-${i}`}
+          // `mine` is the reader's own mention — including `@everyone`, which is
+          // addressed to them too. It reads as an alert; somebody else's mention
+          // is only a reference, so it stays quiet.
+          className={cn(
+            "rounded px-1 py-0.5 font-medium",
+            hit.mine
+              ? "bg-primary/15 text-primary"
+              : "bg-muted text-foreground/80",
+          )}
+          // A quiet mention rendered but pinged nobody — a duplicate, one past
+          // the cap, or a target that has since left. Saying so is better than
+          // a chip that silently means something different from its neighbour.
+          title={hit.quiet ? `${hit.label} — mentioned, not notified` : hit.label}
+        >
+          {part}
+        </span>
+      );
+    });
+  };
+
+  return Array.isArray(nodes)
+    ? nodes.map((node, i) => split(node, String(i)))
+    : split(nodes, "0");
+}
 
 /**
  * Is `href` a link that leaves the console?
@@ -38,10 +100,18 @@ export function isExternalHref(href?: string): boolean {
 export function Markdown({
   children,
   className,
+  mentions,
 }: {
   children: string;
   className?: string;
+  /**
+   * Mention spans to chip, when this document is a chat message that carries
+   * any. Omitted everywhere else — memory, workspace, workflows — so those
+   * surfaces render exactly as they did.
+   */
+  mentions?: MentionSpan[];
 }) {
+  const spans = mentions ?? [];
   return (
     <div className={cn("prose prose-sm max-w-none dark:prose-invert", className)}>
       <ReactMarkdown
@@ -55,6 +125,15 @@ export function Markdown({
             >
               {content}
             </a>
+          ),
+          // Chips are injected at the leaf elements that hold prose rather than
+          // through a remark plugin, so the mention list stays a plain prop and
+          // no AST transform has to be kept in step with it.
+          p: ({ children: content, ...rest }) => (
+            <p {...rest}>{chipMentions(content, spans)}</p>
+          ),
+          li: ({ children: content, ...rest }) => (
+            <li {...rest}>{chipMentions(content, spans)}</li>
           ),
         }}
       >

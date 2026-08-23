@@ -20,6 +20,8 @@ import {
   type BoardQuery,
   type BoardVote,
   type ReadMarker,
+  type ChatMentionInput,
+  type MentionablesResponse,
   type ReadStateResponse,
   type ApiErrorBody,
   type WorkflowProblem,
@@ -477,6 +479,18 @@ export class OpenCompanyClient {
      * is exactly why this returns a union rather than the detached type.
      */
     detach?: boolean,
+    /**
+     * Who this message names, as the picker resolved them.
+     *
+     * Sent only when the picker actually resolved something, so an ordinary
+     * post keeps the exact body shape it had before mentions existed — the
+     * same omitted-field rule `deliverable` and `detach` follow.
+     *
+     * The host re-validates every entry against the live roster and demotes
+     * what no longer resolves, so this is a suggestion, not an instruction.
+     * Omitting it entirely asks the host to extract from the text instead.
+     */
+    mentions?: ChatMentionInput[],
   ): Promise<ChatPostResult> {
     const body: {
       text: string;
@@ -484,6 +498,7 @@ export class OpenCompanyClient {
       parent?: string;
       deliverable?: MessageIntent;
       detach?: boolean;
+      mentions?: ChatMentionInput[];
     } = {
       text,
     };
@@ -493,6 +508,7 @@ export class OpenCompanyClient {
     // Sent only when asked for, so an ordinary post keeps the exact body shape
     // it had before #983 — the same omitted-field rule `deliverable` follows.
     if (detach) body.detach = detach;
+    if (mentions?.length) body.mentions = mentions;
     return this.request<ChatPostResult>("POST", `${this.scope(company)}/chat`, body);
   }
 
@@ -625,6 +641,22 @@ export class OpenCompanyClient {
    */
   readState(company?: string | null): Promise<ReadStateResponse> {
     return this.request<ReadStateResponse>("GET", `${this.scope(company)}/chat/read-state`);
+  }
+
+  /**
+   * Everything an `@` can name: teammates, people, desks, and the broadcast
+   * token's spellings.
+   *
+   * A host that predates this route answers 404; the caller treats that as
+   * "no picker" and typing an `@` stays plain text, which the host still
+   * extracts what it can from. So an older host degrades to the previous
+   * behaviour rather than throwing on load.
+   */
+  mentionables(company?: string | null): Promise<MentionablesResponse> {
+    return this.request<MentionablesResponse>(
+      "GET",
+      `${this.scope(company)}/chat/mentionables`,
+    );
   }
 
   /**
