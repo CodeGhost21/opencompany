@@ -8,7 +8,6 @@ import {
   Copy,
   Loader2,
   Play,
-  Plus,
   X,
 } from "lucide-react";
 import { toast } from "sonner";
