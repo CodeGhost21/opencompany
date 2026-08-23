@@ -884,6 +884,9 @@ mod tests {
         // `/spec` is the unauthenticated manager handshake. Memory-provider
         // identity, capability and reachability details belong to the
         // operator-authenticated engine route instead.
-        assert!(body.get("memory").is_none(), "memory leaked through /spec: {body}");
+        assert!(
+            body.get("memory").is_none(),
+            "memory leaked through /spec: {body}"
+        );
     }
 }

@@ -295,7 +295,10 @@ async fn read_reprobes_the_live_memory_engine() {
     })
     .expect("null binds")
     .expect("null yields an overlay");
-    assert_eq!(overlay.descriptor.healthy, None, "the overlay starts unprobed");
+    assert_eq!(
+        overlay.descriptor.healthy, None,
+        "the overlay starts unprobed"
+    );
 
     let state = state_at(dir.path()).await.with_memory_overlay(overlay);
     let (status, body) = call(&state, "GET", "/api/v1/company/memory/engine", None).await;
