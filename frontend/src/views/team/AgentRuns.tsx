@@ -284,9 +284,11 @@ export function AgentRuns({
 
   const shown = useMemo(() => {
     if (!runs) return null;
-    const wanted = FILTERS.find((f) => f.key === filter)?.statuses;
+    // Belt and braces on top of the host-side filter: a host that ignored
+    // `?status=` (being older than it) answers unfiltered, and the empty-state
+    // claim must still be honest on that host.
     return wanted ? runs.filter((run) => wanted.includes(run.status)) : runs;
-  }, [runs, filter]);
+  }, [runs, wanted]);
 
   const open = useMemo(
     () => runs?.find((run) => run.id === openId) ?? null,
