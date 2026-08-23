@@ -2603,6 +2603,33 @@ pub async fn assert_secret_store(secrets: Arc<dyn crate::ports::secrets::SecretS
         "a distinct key that differs only in case was overwritten by its upper-case variant"
     );
 
+    // Windows strips trailing periods from a path component, so `foo` and
+    // `foo.` are one directory entry there — the filesystem backend has to
+    // encode the trailing dot, and every backend has to keep the two keys
+    // apart regardless.
+    secrets
+        .set(&alpha, "foo", SecretValue("token-for-plain".to_string()))
+        .await
+        .unwrap();
+    secrets
+        .set(
+            &alpha,
+            "foo.",
+            SecretValue("token-for-trailing-dot".to_string()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        read(&alpha, "foo").await.as_deref(),
+        Some("token-for-plain"),
+        "a distinct key ending in a period was overwritten by its plain variant"
+    );
+    assert_eq!(
+        read(&alpha, "foo.").await.as_deref(),
+        Some("token-for-trailing-dot"),
+        "a distinct key ending in a period lost its own value"
+    );
+
     // A key that is itself shaped like a legacy filename must not alias another
     // key. On the filesystem backend the canonical namespace and the legacy
     // slug fallback have to stay disjoint, so `key-foo` must not read the value
