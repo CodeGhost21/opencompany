@@ -366,13 +366,18 @@ export function approvalThreadLink(
  * Read the small amount of chat topology the Approvals page needs to link a
  * parked request back to its conversation. An unreadable or older route simply
  * leaves the existing card intact: an unresolved thread must not be guessed.
+ *
+ * The desks and roster are the slow-moving half of the join; the approvals
+ * themselves arrive on every poll. Keeping the two apart is what lets a
+ * freshly arrived card on an already-known thread get its "Asked in" link:
+ * an effect that rebuilt the map only when the *set of thread ids* changed
+ * would skip a new approval that shares its thread with one already pending.
  */
 export function useApprovalThreadLinks(
   client: OpenCompanyClient,
   company: string | null,
   approvals: ApprovalSummary[],
 ): Map<string, ApprovalThreadLink> {
-  const [links, setLinks] = useState<Map<string, ApprovalThreadLink>>(() => new Map());
   const threadKey = useMemo(
     () =>
       Array.from(new Set(approvals.map((approval) => approval.thread).filter(Boolean)))
@@ -380,34 +385,38 @@ export function useApprovalThreadLinks(
         .join(","),
     [approvals],
   );
+  const [topology, setTopology] = useState<{ desks: Desk[]; members: TeamMember[] } | null>(
+    null,
+  );
 
   useEffect(() => {
-    setLinks(new Map());
+    setTopology(null);
     if (!threadKey) return;
     let live = true;
     void Promise.all([
       client.listDesks(company).catch(() => []),
       client.listTeam(company).catch(() => []),
-    ])
-      .then(([deskDtos, roster]) => {
-        if (!live) return;
-        const desks = deskDtos.map(deskFromDto);
-        const members = roster.map(fromDto);
-        setLinks(
-          new Map(
-            approvals.flatMap((approval) => {
-              const link = approvalThreadLink(approval, desks, members);
-              return link ? [[approval.id, link] as const] : [];
-            }),
-          ),
-        );
-      })
+    ]).then(([deskDtos, roster]) => {
+      if (!live) return;
+      setTopology({
+        desks: deskDtos.map(deskFromDto),
+        members: roster.map(fromDto),
+      });
+    });
     return () => {
       live = false;
     };
   }, [client, company, threadKey]);
 
-  return links;
+  return useMemo(() => {
+    if (!topology) return new Map();
+    return new Map(
+      approvals.flatMap((approval) => {
+        const link = approvalThreadLink(approval, topology.desks, topology.members);
+        return link ? [[approval.id, link] as const] : [];
+      }),
+    );
+  }, [approvals, topology]);
 }
 
 /**
