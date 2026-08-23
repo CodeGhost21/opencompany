@@ -210,10 +210,25 @@ pub trait ContextStore: Send + Sync {
     async fn list(&self, id: &CompanyId, prefix: &str) -> Result<Vec<ChunkMeta>>;
     async fn peek(&self, id: &CompanyId, addr: &ChunkAddr, range: Option<Range<usize>>)
         -> Result<String>;
+    async fn peek_many(&self, id: &CompanyId, addrs: &[ChunkAddr])
+        -> Result<Vec<Option<String>>>; // defaulted: loops peek
     async fn search(&self, id: &CompanyId, query: &str, limit: usize)
         -> Result<Vec<ChunkHit>>;
+    async fn delete(&self, id: &CompanyId, addr: &ChunkAddr) -> Result<bool>;
+    async fn delete_label(&self, id: &CompanyId, addr: &ChunkAddr, label: &str)
+        -> Result<bool>;
 }
 ```
+
+Chunks are content-addressed: byte-identical bodies share one address, and
+every backend keeps one claim per `(addr, label)` (issue #1300 — a re-`put`
+of an identical body under a new label lands that label's claim; under an
+identical label it is a no-op). `delete` is address-level and takes every
+claim with the body — the operator's hard-delete. `delete_label` removes one
+claim and reaps the body only with the last one, decided atomically inside
+the backend, which is what lets `memory_forget` and the fact-mirror reap
+remove their own claim on a shared address without racing a concurrent
+identical-content write.
 
 ## SecretStore
 
@@ -226,6 +241,20 @@ pub trait SecretStore: Send + Sync {
     async fn set(&self, company: &CompanyId, key: &str, value: SecretValue) -> Result<()>;
 }
 ```
+
+There is no `delete`: callers clear a secret by writing an empty value
+(`src/company/mcp.rs::clear_auth`, `src/company/inference.rs::clear_key`), so an
+empty value and an unset key are **different states** and a backend must keep
+them apart — collapsing `""` into `None` would fall back to whatever the
+manifest or the environment supplies and silently undo the operator's
+revocation.
+
+`assert_secret_store` in `src/store/conformance.rs` is the contract every
+backend is checked against (issue #1505): read-back, absence, per-key
+independence, overwrite, the empty-value distinction above, and isolation in
+both directions. See
+[storage.md](storage.md#conformance-coverage) for what it deliberately does not
+assert yet.
 
 ## UserStore, SessionStore, LoginCodeStore
 

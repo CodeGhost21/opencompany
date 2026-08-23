@@ -6,6 +6,7 @@ import { cn } from "@/lib/utils";
 import { ConnectionsView } from "@/views/ConnectionsView";
 import { DevicesView } from "@/views/DevicesView";
 import { HostingView } from "@/views/HostingView";
+import { SearchView } from "@/views/SearchView";
 import { McpServersView } from "@/views/McpServersView";
 import { PeopleView } from "@/views/PeopleView";
 import { SkillsView } from "@/views/SkillsView";
@@ -111,6 +112,11 @@ export function SettingsSection({ client, company, feed, sub, onNavigate, onFlag
             company's typed-but-unsaved token out of another's Save. */}
         {page === "hosting" && (
           <HostingView key={company ?? "self"} client={client} company={company} />
+        )}
+        {/* Same remount rule, same reason: a search key typed for one company
+            must never ride into another company's Save. */}
+        {page === "search" && (
+          <SearchView key={company ?? "self"} client={client} company={company} />
         )}
         {page === "skills" && <SkillsView client={client} company={company} />}
         {page === "usage" && (
