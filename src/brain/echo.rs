@@ -12,7 +12,7 @@ use crate::Result;
 use crate::ports::brain::{Brain, Cognition, CycleHost, UsageMetering};
 use crate::ports::types::{
     CompanyEvent, CompressedTrace, CycleRequest, CycleResult, Effect, EffectGroup, OutboundMessage,
-    ReplyTo, TokenUsage,
+    TokenUsage,
 };
 
 /// The offline echo brain: turns operator messages into acknowledgements.
@@ -56,7 +56,7 @@ impl Brain for EchoBrain {
                     reply_to: None,
                 });
             }
-            if let CompanyEvent::WebhookReceived { channel, body } = event {
+            if let CompanyEvent::WebhookReceived { channel, .. } = event {
                 let (text, reply_to) = (format!("webhook on {channel}"), None);
                 channel_responses.push(OutboundMessage {
                     message_id: None,
