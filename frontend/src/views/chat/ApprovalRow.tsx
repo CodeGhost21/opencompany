@@ -398,7 +398,10 @@ function CompactApprovalRow({
   status?: React.ReactNode;
 }) {
   const lead = approvals[0];
-  const Icon = approvalIcon(lead.kind);
+  const sameKind = approvals.every((a) => a.kind === lead.kind);
+  // A mixed batch has no one glyph that is true of it, so it wears the neutral
+  // one rather than the first item's, just as `BatchHeadline` does.
+  const Icon = sameKind ? approvalIcon(lead.kind) : ShieldCheck;
 
   return (
     <div className="px-4 py-1.5">
