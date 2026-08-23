@@ -30,6 +30,11 @@ mime, size and sha256 computed by the store, same as any upload. Both ride
 the workspace's existing `[workspace] max_blob_mb` / `tree_quota_gb` quotas;
 no new limit exists for pages specifically.
 
+`page.compiled.mjs` may also be a plain text node — an operator creating the
+file through the console, or a test seeding the tree over the workspace API,
+stores text, not a payload. The bundle route serves whichever kind the node
+is; the bytes are the compiled module either way.
+
 `slug` is restricted to `^[a-z0-9][a-z0-9-]*$` — narrower than an ordinary
 workspace path segment, because a slug is also a URL path segment
 (`GET …/pages/{slug}`) and has to survive that role without escaping or
