@@ -91,7 +91,7 @@ export function FeedbackView({ client, company }: Props) {
     <div className="flex-1 overflow-y-auto">
       <div className="mx-auto w-full max-w-3xl space-y-6 px-4 py-6">
         <div className="space-y-1">
-          <h2 className="text-2xl font-semibold tracking-tight">Feedback</h2>
+          <h1 className="text-2xl font-semibold tracking-tight">Feedback</h1>
           <p className="text-sm text-muted-foreground">
             Flag a wrong result, a missing capability, or anything that felt off
             {hasBoard && " — then vote on what everyone else has asked for"}.
