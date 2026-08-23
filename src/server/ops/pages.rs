@@ -64,6 +64,7 @@ const PAGES_CSP: &str = "default-src 'self'; script-src 'self' 'unsafe-inline'; 
 pub fn router() -> Router<AppState> {
     scoped("/pages", get(list_pages))
         .merge(scoped("/pages/{slug}", get(page_shell)))
+        .merge(scoped("/pages/{slug}/bootstrap.mjs", get(page_bootstrap)))
         .merge(scoped("/pages/{slug}/bundle.mjs", get(bundle)))
 }
 
@@ -233,7 +234,7 @@ async fn list_pages(company: ScopedCompany) -> Result<Response, ApiError> {
 fn page_shell_html(slug: &str) -> String {
     format!(
         r#"<!doctype html>
-<html data-page-slug="{slug}">
+<html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -252,12 +253,45 @@ fn page_shell_html(slug: &str) -> String {
 </head>
 <body>
 <div id="root"></div>
-<script type="module" src="/pages-sdk/page-bootstrap.mjs" crossorigin="use-credentials"></script>
+<script type="module" src="./{slug}/bootstrap.mjs" crossorigin="use-credentials"></script>
 </body>
 </html>
 "#,
         slug = slug,
     )
+}
+
+/// The fixed external module that mounts one page bundle.
+///
+/// This must be a module response rather than an inline script: only an
+/// external module's `crossorigin="use-credentials"` setting propagates to
+/// its static import of the authenticated bundle.
+const PAGE_BOOTSTRAP: &str = r#"import * as React from "react";
+import * as ReactDOM from "react-dom/client";
+import Page from "./bundle.mjs";
+const root = ReactDOM.createRoot(document.getElementById("root"));
+root.render(React.createElement(Page));
+"#;
+
+async fn page_bootstrap(
+    company: ScopedCompany,
+    Path(SlugPath { slug }): Path<SlugPath>,
+) -> Result<Response, ApiError> {
+    if !valid_slug(&slug) {
+        return Err(ApiError(OpenCompanyError::NotFound(format!("page {slug}"))));
+    }
+    let pages = all_pages(company.runtime.workspace().as_ref(), company.id()).await?;
+    if !pages.iter().any(|(name, _)| name == &slug) {
+        return Err(ApiError(OpenCompanyError::NotFound(format!("page {slug}"))));
+    }
+    let mut response = Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, PAGE_COMPILED_MIME)
+        .body(Body::from(PAGE_BOOTSTRAP))
+        .map_err(|e| ApiError(OpenCompanyError::Store(format!("page bootstrap failed: {e}")))?;
+    apply_pages_headers(response.headers_mut());
+    apply_page_module_cors_headers(response.headers_mut());
+    Ok(response)
 }
 
 /// `GET {scope}/pages/{slug}` — a fixed HTML shell that mounts the page.
@@ -398,7 +432,7 @@ mod tests {
         // inline module does not set the module graph's credentials mode.
         assert!(
             html.contains(
-                "<script type=\"module\" src=\"/pages-sdk/page-bootstrap.mjs\" crossorigin=\"use-credentials\"></script>"
+                "<script type=\"module\" src=\"./revenue/bootstrap.mjs\" crossorigin=\"use-credentials\"></script>"
             )
         );
     }
@@ -412,8 +446,8 @@ mod tests {
         // fails `valid_slug` and 404s. `./{slug}/bundle.mjs` resolves to the
         // registered bundle route.
         assert!(
-            html.contains("data-page-slug=\"revenue\""),
-            "the fixed bootstrap module must receive the validated slug"
+            html.contains("src=\"./revenue/bootstrap.mjs\""),
+            "the bootstrap module must be relative to the shell URL"
         );
     }
 

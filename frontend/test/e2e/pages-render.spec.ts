@@ -26,6 +26,8 @@ test("an agent-authored page bundle loads and paints in its sandboxed iframe", a
   page,
   request,
 }) => {
+  page.on("console", (message) => console.log(`[page console] ${message.type()}: ${message.text()}`));
+  page.on("requestfailed", (failed) => console.log(`[page request failed] ${failed.url()} ${failed.failure()?.errorText}`));
   const slug = `page-e2e-${Date.now().toString(36)}`;
   const title = `E2E page ${slug}`;
   const painted = `Page ${slug} painted`;
