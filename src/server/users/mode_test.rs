@@ -1141,34 +1141,3 @@ async fn the_host_override_beats_the_manifest() {
         .unwrap();
     assert_eq!(runtime.auth_mode(), AuthMode::None);
 }
-
-/// **Accepted regression:** pairing a *remote* device to a `none`-mode host
-/// produces a credential that is inert from anywhere but the host's own
-/// machine.
-///
-/// Worth a test rather than a sentence in a doc, because the flow does not fail
-/// where an operator would notice. Every step succeeds: the person at the
-/// machine is the local owner, so they can mint a pairing code; `claim` looks
-/// the code's user up by identity and finds `local:owner`, so it redeems and
-/// hands back a device token that is a perfectly real `SessionRecord`. Only the
-/// *use* of it fails, and only from the one place it was minted to be used.
-///
-/// Two independent refusals stand in the way, and either alone is enough:
-///
-/// - `authenticate_session` returns `None` for any session on a company whose
-///   mode has no login. That rule exists so a session minted before a mode flip
-///   cannot outlive it — see
-///   `a_session_from_before_a_mode_flip_does_not_survive_it` — and a device
-///   session is the same kind of record.
-/// - `resolve_principal` asks `local_owner` first, and a remote device's peer
-///   is not loopback, so it answers `GatesRefused` and the request is refused
-///   outright rather than degrading to the session path at all.
-///
-/// This is a real capability the desktop loses by moving to `none`, and it is
-/// accepted rather than worked around: pairing a phone to a laptop's company is
-/// a *second person on a second machine*, which is the exact premise `none`
-/// gives up in exchange for having no accounts. A desktop that wants it should
-/// choose `email` in setup, which is why that choice is a preselection rather
-/// than a lock.
-#[tokio::test]
-a
