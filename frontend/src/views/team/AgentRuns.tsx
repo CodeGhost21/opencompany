@@ -252,11 +252,19 @@ export function AgentRuns({
   }, [client, company, agentId, wanted]);
 
   useEffect(() => {
+    const generation = ++generationRef.current;
     setRuns(null);
     openIdRef.current = null;
     setOpenId(null);
-    void read().catch(() => setFailed(true));
-    return startVisiblePolling(() => void read().catch(() => setFailed(true)), POLL_MS);
+    // A refresh superseded by a teammate switch must not mark the new
+    // teammate's section failed on the old one's behalf — that state belongs
+    // to the effect that owns the failure.
+    const refresh = () =>
+      void read().catch(() => {
+        if (generation === generationRef.current) setFailed(true);
+      });
+    refresh();
+    return startVisiblePolling(refresh, POLL_MS);
   }, [read]);
 
   // The source lists. Read once per teammate rather than per poll: a card
