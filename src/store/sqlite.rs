@@ -192,8 +192,8 @@ CREATE TABLE IF NOT EXISTS runs (
     PRIMARY KEY (company_id, id)
 );
 CREATE INDEX IF NOT EXISTS runs_by_task ON runs (company_id, task_id);
-CREATE INDEX IF NOT EXISTS runs_by_agent ON runs (company_id, agent_id);
 CREATE INDEX IF NOT EXISTS runs_by_status ON runs (company_id, status);
+-- `runs_by_agent` is deliberately NOT here; see `heal_runs_agent_id`.
 CREATE TABLE IF NOT EXISTS run_steps (
     company_id TEXT NOT NULL,
     run_id     TEXT NOT NULL,
@@ -380,6 +380,40 @@ fn add_column_if_missing(conn: &Connection, table: &str, column: &str, decl: &st
         .map_err(sql_err)
 }
 
+/// Gives `runs` its `agent_id` mirror column, backfills it, and indexes it
+/// (issue #1573).
+///
+/// Three steps that have to happen in this order and cannot be expressed in
+/// [`MIGRATIONS`]:
+///
+/// 1. **The column.** `CREATE TABLE IF NOT EXISTS` silently skips a table that
+///    already exists, so an additive column only reaches an existing database
+///    through an `ALTER` — [`add_column_if_missing`].
+/// 2. **The backfill.** Every run ever written already carries its desk inside
+///    `run_json`; this copies it into the column so a per-teammate read answers
+///    with the *whole* history rather than only the attempts written since the
+///    upgrade. Without it the new filter would silently under-report, which is
+///    worse than not offering it — an empty history reads as "this teammate has
+///    never run", not as "this database has not been migrated".
+/// 3. **The index.** It cannot sit in [`MIGRATIONS`], because that batch is
+///    executed *before* the `ALTER` above and would fail on a column the old
+///    table does not have yet.
+///
+/// Idempotent, and cheap on every open after the first: the `ALTER` is skipped
+/// once the column exists, the `UPDATE` matches nothing once no row is `NULL`
+/// (and the index makes that a lookup rather than a scan), and re-creating an
+/// existing index is a no-op.
+fn heal_runs_agent_id(conn: &Connection) -> Result<()> {
+    add_column_if_missing(conn, "runs", "agent_id", "TEXT")?;
+    conn.execute(
+        "UPDATE runs SET agent_id = json_extract(run_json, '$.agentId') WHERE agent_id IS NULL",
+        [],
+    )
+    .map_err(sql_err)?;
+    conn.execute_batch("CREATE INDEX IF NOT EXISTS runs_by_agent ON runs (company_id, agent_id)")
+        .map_err(sql_err)
+}
+
 /// Drops the `NOT NULL` constraint on `runs.task_id` (issue #983).
 ///
 /// A column constraint cannot be altered in place in SQLite, so this is the
@@ -550,6 +584,10 @@ impl SqliteStore {
         // insert on a constraint the record no longer has. Idempotent: it reads
         // the live schema and does nothing once the constraint is gone.
         relax_runs_task_id_nullability(&conn)?;
+        // Issue #1573: the `agent_id` mirror column, its backfill and its index.
+        // After the rebuild above, which owns the table's shape on the one path
+        // that replaces it wholesale.
+        heal_runs_agent_id(&conn)?;
         // Issue #1300: the context index moved into `context_chunk_labels`
         // (one row per (addr, label) claim). Runs after the `stored_ms`
         // column heal above, whose column it reads.
