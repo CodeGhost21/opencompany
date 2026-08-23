@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { approvalAction, grantHeadline, payloadLines, toolAction } from "@/lib/language";
+import { approvalAction, grantHeadline, payloadLeadTruncated, payloadLines, toolAction } from "@/lib/language";
 import type { ApprovalSummary, StandingGrant } from "@/api/types";
 
 /**
