@@ -1301,7 +1301,6 @@ export function groupTimeline(entries: TimelineEntry[]): TimelineItem[] {
         row: "wait",
         key: `wait-${g.entries[0].seq}`,
         millis: waited,
-        live: false,
       });
     }
     items.push({ row: "group", key: g.key, group: g });
