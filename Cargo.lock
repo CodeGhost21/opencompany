@@ -3317,6 +3317,7 @@ dependencies = [
  "tinyagents",
  "tinycortex",
  "tinyflows",
+ "tinymcp",
  "tinymemory",
  "tinymemory-api",
  "tinymemory-conformance",
