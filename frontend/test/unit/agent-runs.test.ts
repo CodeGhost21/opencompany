@@ -178,7 +178,20 @@ describe("a teammate's run history", () => {
   });
 
   it("says no attempt matches an empty filtered fetch, not that the teammate never ran", async () => {
-    const client = makeClient({ "/runs": [], "/tasks": [], "/workflows": [] });
+    // The desk has history, but none of it is failed. The host answers the
+    // filtered read with an empty page; the section must say the filter matched
+    // nothing — not that the teammate has never run — and keep the controls up
+    // so the filter can be turned off again.
+    const client = {
+      get: vi.fn(async (path: string) => {
+        if (path.includes("status=")) return [];
+        if (path.startsWith("/runs")) return [run()];
+        if (path.startsWith("/tasks")) return [];
+        if (path.startsWith("/workflows")) return [];
+        throw new Error(`no route for ${path}`);
+      }),
+      scopeFor: () => "",
+    } as unknown as OpenCompanyClient & { get: typeof get };
     await mount(client);
 
     const failed = container.querySelector<HTMLButtonElement>(
@@ -192,7 +205,6 @@ describe("a teammate's run history", () => {
       "No attempt in this history matches that filter.",
     );
     expect(container.textContent).not.toContain("Robin hasn't run yet");
-    // The filter controls stay up so the filter can be turned off again.
     expect(
       container.querySelector('[data-testid="agent-runs-filter-all"]'),
     ).not.toBeNull();
