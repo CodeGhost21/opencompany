@@ -670,7 +670,10 @@ async fn revoke_sessions(
     Ok(Json(serde_json::json!({ "revoked": revoked })))
 }
 
-async fn load_user(runtime: &CompanyRuntime, user_id: &str) -> Result<UserRecord, crate::server::Rejection> {
+async fn load_user(
+    runtime: &CompanyRuntime,
+    user_id: &str,
+) -> Result<UserRecord, crate::server::Rejection> {
     runtime
         .users()
         .get_user(runtime.id(), user_id)

@@ -366,7 +366,10 @@ async fn load_record(company: &ScopedCompany) -> Result<CompanyRecord, crate::se
         })
 }
 
-async fn save(company: &ScopedCompany, record: &CompanyRecord) -> Result<(), crate::server::Rejection> {
+async fn save(
+    company: &ScopedCompany,
+    record: &CompanyRecord,
+) -> Result<(), crate::server::Rejection> {
     company
         .runtime
         .store()

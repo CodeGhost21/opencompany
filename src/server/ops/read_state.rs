@@ -75,7 +75,9 @@ pub(crate) struct MarkReadBody {
     last_read_at: i64,
 }
 
-async fn list_read_state(company: ScopedCompany) -> Result<Json<ReadStateDto>, crate::server::Rejection> {
+async fn list_read_state(
+    company: ScopedCompany,
+) -> Result<Json<ReadStateDto>, crate::server::Rejection> {
     let Some(user) = actor_id(&company) else {
         return Err(unauthorized());
     };

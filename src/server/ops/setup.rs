@@ -182,7 +182,10 @@ async fn propose_roster(
 /// does: this is a read-modify-write of the whole record, and a concurrent
 /// `POST …/team` from the build-out step of a *previous* attempt would otherwise
 /// lose one of the two writes.
-async fn store_answers(company: &ScopedCompany, answers: &SetupAnswers) -> Result<(), crate::server::Rejection> {
+async fn store_answers(
+    company: &ScopedCompany,
+    answers: &SetupAnswers,
+) -> Result<(), crate::server::Rejection> {
     let write_lock = company_write_lock(company.id());
     let _lock = write_lock.lock().await;
 
