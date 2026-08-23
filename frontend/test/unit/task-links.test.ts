@@ -4,6 +4,7 @@ import {
   extraOutputCount,
   primaryLink,
   readTaskFocus,
+  tabForFocus,
   taskTabHref,
 } from "@/lib/task-output";
 import type { Task, TaskOutput } from "@/api/tasks";
@@ -191,5 +192,24 @@ describe("taskTabHref", () => {
     expect(taskTabHref("#/tasks/t-1?tab=timeline", "attempts")).toBe(
       "#/tasks/t-1?tab=attempts",
     );
+  });
+});
+
+describe("tabForFocus", () => {
+  it("opens the tab the address names, ahead of a linked focus", () => {
+    expect(tabForFocus({ tab: "discussion", artifactId: "a-1" })).toBe("discussion");
+  });
+
+  it("derives the tab from a link that names no tab of its own", () => {
+    expect(tabForFocus({ artifactId: "a-1" })).toBe("artifacts");
+    expect(tabForFocus({ runId: "run-9" })).toBe("attempts");
+  });
+
+  it("falls back to the default for an address that asks for nothing", () => {
+    // A lineage hop writes a plain `#/tasks/<id>`, which claims the default
+    // tab — so the screen must land there rather than keep the tab the
+    // operator had selected on the previous card.
+    expect(tabForFocus({})).toBe("timeline");
+    expect(tabForFocus(undefined)).toBe("timeline");
   });
 });
