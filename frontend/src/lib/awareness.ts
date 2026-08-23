@@ -120,38 +120,46 @@ export function typerKey(frame: { userId: string; chatId: string; parentId?: str
 /**
  * Whether a typing frame should be shown at all.
  *
- * Three rules, all of which exist because a typing indicator that lies is worse
- * than none. Every one of them was a visible flicker before it was a rule:
+ * Two rules, both of which exist because a typing indicator that lies is worse
+ * than none:
  *
- * 1. **A frame older than its own TTL is dead on arrival.** A delayed or
- *    replayed frame must not resurrect an indicator for somebody who stopped
- *    typing ten seconds ago.
- * 2. **A frame at or before that author's last message here is stale.** Their
+ * 1. **A frame at or before that author's last message here is stale.** Their
  *    message and their final typing ping race constantly, and the ping loses:
  *    somebody who has just spoken is not still typing.
- * 3. **A short window after their message, ignore them entirely.** Rule 2 only
+ * 2. **A short window after their message, ignore them entirely.** Rule 1 only
  *    catches frames stamped before the message; one stamped a few milliseconds
  *    after it is the same in-flight ping and reads the same way to a viewer.
+ *
+ * There used to be a third rule here — drop a frame already older than its own
+ * TTL — but it compared `frame.atMillis` (the *server's* clock) against `now`
+ * (the *browser's*), so any viewer whose workstation clock ran more than
+ * [`TYPING_RECEIVE_TTL_MS`] ahead of the host saw every typing frame arrive
+ * "already expired" and typing broke outright for them. `atMillis` is kept
+ * for the two rules above — both compare it only to `lastMessageAt`, another
+ * server timestamp, so they never cross clock domains — and freshness is
+ * [`typingExpiry`]'s job now, anchored to local receipt time instead.
  */
 export function shouldShowTyping(
   frame: { atMillis: number },
-  now: number,
   lastMessageAt: number | undefined,
 ): boolean {
-  if (now - frame.atMillis >= TYPING_RECEIVE_TTL_MS) return false;
   if (lastMessageAt === undefined) return true;
   if (frame.atMillis <= lastMessageAt) return false;
   return frame.atMillis - lastMessageAt > TYPING_POST_MESSAGE_SUPPRESS_MS;
 }
 
 /**
- * When a typing indicator should disappear.
+ * When a typing indicator should disappear: a TTL from the moment *this*
+ * console received it.
  *
- * The earlier of "a TTL from now" and "a TTL from the frame's own timestamp",
- * so a frame delayed in transit cannot extend the bubble past its own validity.
+ * Deliberately not derived from `frame.atMillis` (the server's clock) at all
+ * — see [`shouldShowTyping`]'s header. Anchoring to local receipt time instead
+ * means a skewed workstation clock can no longer make an indicator vanish
+ * instantly or, in the other direction, linger past its host-side lease; the
+ * only clock this reads is the one the caller is already using for `now`.
  */
-export function typingExpiry(frame: { atMillis: number }, now: number): number {
-  return Math.min(now + TYPING_RECEIVE_TTL_MS, frame.atMillis + TYPING_RECEIVE_TTL_MS);
+export function typingExpiry(now: number): number {
+  return now + TYPING_RECEIVE_TTL_MS;
 }
 
 /** Drops every typer whose indicator has expired. */

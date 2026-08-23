@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import type { OpenCompanyClient } from "@/api/client";
+import { ApiError } from "@/api/types";
 import {
   applyPresence,
   livePeers,
@@ -13,6 +14,7 @@ import {
 } from "@/lib/awareness";
 
 const PREFERENCE_KEY = "oc.presence.override";
+const CONSOLE_ID_KEY = "oc.presence.consoleId";
 
 /** The viewer's stored appear-as choice, defaulting to automatic. */
 function storedPreference(): PresencePreference {
@@ -22,6 +24,32 @@ function storedPreference(): PresencePreference {
   } catch {
     // A private window, or storage disabled. Not a reason to fail.
     return "auto";
+  }
+}
+
+/**
+ * This tab's lease key — never a second identity, just which of this
+ * person's open consoles is announcing (see the server's presence module
+ * header). `sessionStorage` rather than `localStorage`: it is already scoped
+ * per tab, so a reload keeps the same lease (no double-announce) while a
+ * second tab gets its own key (no shared lease to steal on close). A private
+ * window or storage disabled falls back to a key that lives only for this
+ * render — still correct, just unable to survive a reload without minting a
+ * new one.
+ */
+function consoleId(): string {
+  const mint = () =>
+    typeof crypto !== "undefined" && "randomUUID" in crypto
+      ? crypto.randomUUID()
+      : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  try {
+    const existing = sessionStorage.getItem(CONSOLE_ID_KEY);
+    if (existing) return existing;
+    const fresh = mint();
+    sessionStorage.setItem(CONSOLE_ID_KEY, fresh);
+    return fresh;
+  } catch {
+    return mint();
   }
 }
 
@@ -58,6 +86,19 @@ export function usePresence(
   const lastActivity = useRef(Date.now());
   const preferenceRef = useRef(preference);
   preferenceRef.current = preference;
+  // This tab's lease key, minted once per mount. See `consoleId`'s own doc.
+  const tabId = useRef(consoleId());
+
+  /**
+   * Whether a failed request means "this host predates the route" (permanent,
+   * disable) versus a network blip or a proxy hiccup (transient, try again on
+   * the next beat). Only a 404 is the former: everything else — a dropped
+   * connection, a 5xx, a timeout — says nothing about whether the route
+   * exists, and treating it as permanent would leave presence disabled for
+   * the rest of the tab's life over one bad request.
+   */
+  const isRouteMissing = (error: unknown): boolean =>
+    error instanceof ApiError && error.status === 404;
 
   /** Apply one live frame. */
   const onFrame = useCallback(
@@ -85,7 +126,18 @@ export function usePresence(
     };
   }, [enabled]);
 
-  // The heartbeat, plus the initial roster read.
+  // The heartbeat, plus a snapshot re-read on every beat.
+  //
+  // The re-read (not just the announce) is what keeps a *steady* peer's clock
+  // from lapsing. The host only publishes a live frame when somebody's status
+  // changes — a renewal that doesn't move anything is deliberately silent, see
+  // `PresenceRegistry::beat` — so a peer who stays `online` the whole time
+  // never gets a fresh frame, and this hook's `atMillis` for them would freeze
+  // at whatever the very first snapshot said. `livePeers`'s sweep then reads
+  // that frozen timestamp against a moving clock and prunes them once the
+  // lease looks stale, even though the host still has them live. Re-fetching
+  // the snapshot every heartbeat renews `atMillis` for everybody still
+  // present, so the local sweep never outruns the truth.
   useEffect(() => {
     if (!enabled || !supported) return;
     let live = true;
@@ -99,27 +151,35 @@ export function usePresence(
       // "offline" every minute — a lapsed lease says it more cheaply, and says
       // the same thing to every reader.
       if (status === "offline") return;
-      void client.announcePresence(status, company).catch(() => {
-        // A host without the route. Stop asking rather than retrying every
-        // minute for the life of the tab.
-        if (live) setSupported(false);
+      void client.announcePresence(status, company, tabId.current).catch((error) => {
+        if (live && isRouteMissing(error)) setSupported(false);
+        // Otherwise a transient failure: the next beat tries again rather
+        // than disabling presence for the rest of the tab's life.
       });
     };
 
-    void client
-      .presence(company)
-      .then((res) => {
-        if (!live) return;
-        setPeers(
-          new Map(res.people.map((p) => [p.userId, { status: p.status, atMillis: p.atMillis }])),
-        );
-      })
-      .catch(() => {
-        if (live) setSupported(false);
-      });
+    const refresh = () => {
+      void client
+        .presence(company)
+        .then((res) => {
+          if (!live) return;
+          setPeers(
+            new Map(
+              res.people.map((p) => [p.userId, { status: p.status, atMillis: p.atMillis }]),
+            ),
+          );
+        })
+        .catch((error) => {
+          if (live && isRouteMissing(error)) setSupported(false);
+        });
+    };
 
+    refresh();
     announce();
-    const beat = setInterval(announce, PRESENCE_HEARTBEAT_MS);
+    const beat = setInterval(() => {
+      announce();
+      refresh();
+    }, PRESENCE_HEARTBEAT_MS);
     return () => {
       live = false;
       clearInterval(beat);
@@ -143,7 +203,7 @@ export function usePresence(
   useEffect(() => {
     if (!enabled || !supported) return;
     const leave = () => {
-      client.disconnectPresenceBeacon(company);
+      client.disconnectPresenceBeacon(company, tabId.current);
     };
     window.addEventListener("pagehide", leave);
     return () => {
@@ -160,7 +220,7 @@ export function usePresence(
         // Storage refused; the choice still holds for this tab.
       }
       if (next === "offline") {
-        client.disconnectPresenceBeacon(company);
+        client.disconnectPresenceBeacon(company, tabId.current);
         setPeers((current) => current);
       }
     },

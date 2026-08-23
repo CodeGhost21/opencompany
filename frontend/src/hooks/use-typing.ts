@@ -35,6 +35,16 @@ export function useTyping(
   const lastSent = useRef(new Map<string, number>());
   // Each author's most recent message per channel, for the de-flicker rules.
   const lastMessage = useRef(new Map<string, number>());
+  // The newest `atMillis` already applied per typer, so a redelivered frame —
+  // an SSE reconnect replaying its last event is the real-world case — cannot
+  // renew an indicator that a genuine new ping did not actually buy. This is
+  // the de-flicker rule `typingExpiry` used to get by capping expiry at
+  // `frame.atMillis + TTL`; that comparison read the *server's* clock against
+  // nothing of the browser's, but broke for anyone whose workstation clock ran
+  // ahead of the host (see `awareness.ts`). Comparing a frame's stamp only to
+  // the previous frame's stamp — both server-issued — keeps the guard without
+  // ever touching the browser's own clock.
+  const lastFrameAt = useRef(new Map<string, number>());
   const supported = useRef(true);
 
   /** Apply one live typing frame. */
@@ -47,15 +57,18 @@ export function useTyping(
     }) => {
       const now = Date.now();
       const seen = lastMessage.current.get(`${frame.userId}:${frame.chatId}`);
-      if (!shouldShowTyping(frame, now, seen)) return;
+      if (!shouldShowTyping(frame, seen)) return;
+      const key = typerKey(frame);
+      const previousAt = lastFrameAt.current.get(key);
+      if (previousAt !== undefined && frame.atMillis <= previousAt) return;
+      lastFrameAt.current.set(key, frame.atMillis);
       setTypers((current) => {
-        const key = typerKey(frame);
         const existing = current.find((t) => typerKey(t) === key);
         const next: Typer = {
           userId: frame.userId,
           chatId: frame.chatId,
           parentId: frame.parentId,
-          expiresAt: typingExpiry(frame, now),
+          expiresAt: typingExpiry(now),
           // Preserved across renewals so the displayed order stays put.
           firstSeenAt: existing?.firstSeenAt ?? now,
         };
@@ -103,7 +116,15 @@ export function useTyping(
     const prune = setInterval(() => {
       setTypers((current) => {
         const next = pruneTypers(current, Date.now());
-        return next.length === current.length ? current : next;
+        if (next.length === current.length) return current;
+        // Forget the dedup memory for whoever just expired, so a genuinely
+        // new burst of typing from them later is never mistaken for a
+        // replay of the one that just timed out.
+        const stillTyping = new Set(next.map((t) => typerKey(t)));
+        for (const key of lastFrameAt.current.keys()) {
+          if (!stillTyping.has(key)) lastFrameAt.current.delete(key);
+        }
+        return next;
       });
     }, TYPING_PRUNE_INTERVAL_MS);
     return () => clearInterval(prune);

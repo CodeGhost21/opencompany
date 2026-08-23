@@ -652,13 +652,20 @@ export class OpenCompanyClient {
    * A heartbeat, and what to appear as.
    *
    * The body deliberately carries **no user id**: the host takes the subject
-   * from the session, so no caller can move somebody else's dot.
+   * from the session, so no caller can move somebody else's dot. `consoleId`
+   * is not an identity either — it is this tab's opaque lease key, so closing
+   * one of several open tabs drops only that tab's lease rather than logging
+   * every tab for this person out (see `usePresence`'s `consoleId`).
    */
   announcePresence(
     status: "online" | "away" | "offline",
     company?: string | null,
+    consoleId?: string,
   ): Promise<void> {
-    return this.request<void>("PUT", `${this.scope(company)}/presence`, { status });
+    return this.request<void>("PUT", `${this.scope(company)}/presence`, {
+      status,
+      ...(consoleId ? { consoleId } : {}),
+    });
   }
 
   /**
@@ -670,16 +677,25 @@ export class OpenCompanyClient {
    * `DELETE`, and inventing a POST alias for one route is a worse trade than
    * `keepalive`, which every browser this console supports honours.
    *
+   * Carries the same session and bearer headers `request` would attach.
+   * `credentials: "include"` alone only carries a same-origin cookie; a
+   * console authenticated cross-origin (or through a desktop transport) holds
+   * its session in `x-opencompany-session`/`authorization` instead, and
+   * without them this call 401s on every tab close, leaving the lease visible
+   * until its TTL expires regardless of the beacon firing.
+   *
    * Best-effort by design, and allowed to fail silently: if it does not land,
    * the host's lease expires the dot within a few minutes anyway. That is the
    * whole reason presence is a lease — no disconnect path has to be correct.
    */
-  disconnectPresenceBeacon(company?: string | null): void {
+  disconnectPresenceBeacon(company?: string | null, consoleId?: string): void {
     try {
-      void fetch(`${this.baseUrl}${this.scope(company)}/presence`, {
+      const query = consoleId ? `?consoleId=${encodeURIComponent(consoleId)}` : "";
+      void fetch(`${this.baseUrl}${this.scope(company)}/presence${query}`, {
         method: "DELETE",
         credentials: "include",
         keepalive: true,
+        headers: this.authHeaders(),
       }).catch(() => {});
     } catch {
       // The document is unloading. Nothing to do, and nobody to report it to.
