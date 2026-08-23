@@ -483,7 +483,7 @@ pub fn extract_at_names(text: &str) -> Vec<(usize, String)> {
     let mut out = Vec::new();
     let mut i = 0usize;
     while i < bytes.len() {
-        if opens_mention(bytes, i) {
+        if opens_mention(text, bytes, i) {
             let mut j = i + 1;
             while j < bytes.len()
                 && (bytes[j].is_ascii_alphanumeric() || matches!(bytes[j], b'_' | b'-' | b'.'))
@@ -560,7 +560,7 @@ pub fn extract_with_known(text: &str, dir: &[MentionAlias]) -> Vec<Mention> {
     let mut out: Vec<Mention> = Vec::new();
     let mut i = 0usize;
     while i < bytes.len() {
-        if !opens_mention(bytes, i) {
+        if !opens_mention(text, bytes, i) {
             i += 1;
             continue;
         }
