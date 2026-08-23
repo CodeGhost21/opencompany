@@ -30,8 +30,18 @@ type APIRequestContext = import("@playwright/test").APIRequestContext;
 
 const MEMBER_EMAIL = "member-403@example.test";
 
+// The first-run tour offers itself once per browser context and then records
+// `skipped` in that context's localStorage. These tests visit three settings
+// pages within one context, so waiting for the dismiss button on every visit
+// burns a full `waitFor` timeout (10s) on the pages after the first, where the
+// tour can no longer appear — three such waits already blow the 60s test
+// budget. Key the dismissal by page object (one page per context here) so only
+// the first visit in each context waits on it.
+const tourDismissed = new WeakMap<Page, boolean>();
+
 async function openSettingsPage(page: Page, sub: string) {
   await page.goto(`/#/settings/${sub}`);
+  if (tourDismissed.has(page)) return;
   const skip = page.getByRole("button", { name: "Skip for now" });
   await skip
     .waitFor({ state: "visible", timeout: 10_000 })
@@ -39,6 +49,7 @@ async function openSettingsPage(page: Page, sub: string) {
     .catch(() => {
       /* already seen in this context — nothing to dismiss */
     });
+  tourDismissed.set(page, true);
 }
 
 /**
