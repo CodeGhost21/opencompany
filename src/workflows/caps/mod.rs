@@ -342,6 +342,14 @@ pub async fn build_capabilities(
         // hard-abort path is when the engine future is dropped: staged-but-undrained
         // writes die with the run, exactly as `ApprovalClaim` treats gated calls.
         let board_claim = Arc::new(deps.delegations.claim_board(run_id.to_string()));
+        // The publish tool is captured by the fingerprint-cached roster agent,
+        // so a workflow run cannot replace its queue handle. Scope only refused
+        // publishes: staged publishes remain unavailable to runs because they
+        // still have no destination to claim.
+        let publish_refusal_claim = Arc::new(
+            deps.pending_publishes
+                .claim_refusals_for_run(run_id.to_string()),
+        );
 
         // `deps` moves in last — the borrows above (`deps.capabilities`,
         // `deps.search`, `deps.meter`, `deps.secrets`, `deps.workspace_root`,
@@ -359,6 +367,7 @@ pub async fn build_capabilities(
             blocks,
             approvals,
             board_claim,
+            publish_refusal_claim,
         ));
         (Arc::new(tools), Arc::new(http), state, Some(agent))
     };
@@ -530,6 +539,10 @@ pub struct HarnessAgentRunner {
     /// claim would let one node destroy a sibling's staged writes. See the
     /// acquisition site for the full reasoning.
     board_claim: Arc<crate::harness::orchestrator::DelegationClaim>,
+    /// The run's refusal bucket on the shared publish queue. The cached
+    /// `PublishArtifactTool` reads this task-local scope when it refuses a
+    /// publish, so sibling runs cannot drain each other's notices.
+    publish_refusal_claim: Arc<crate::harness::publish::PublishRefusalClaim>,
 }
 
 /// Where an agent node leaves a notice for the operator (issue #638).
@@ -1307,7 +1320,8 @@ impl AgentRunner for HarnessAgentRunner {
             self.drain_publish_refusals();
             (outcome, parked)
         });
-        let (outcome, parked) = self.board_claim.scoped(turn).await;
+        let turn = Box::pin(self.board_claim.scoped(turn));
+        let (outcome, parked) = self.publish_refusal_claim.scoped(turn).await;
         // Issue #849: a provider context-window refusal reaches the operator as
         // the run's error text, and the vendor's own wording ("Please start a
         // new chat") is unfollowable in a workflow — there is no chat and no
