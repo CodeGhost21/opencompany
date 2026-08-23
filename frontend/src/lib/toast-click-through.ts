@@ -172,6 +172,16 @@ export function relayToastClick(event: MouseEvent): void {
 
   event.preventDefault();
   event.stopPropagation();
+
+  // A page frame is another document: `click()` on the host element does
+  // nothing to what is rendered inside, and focusing it would steal keyboard
+  // focus into the frame. Hand the click to the frame over the bridge; its
+  // page SDK dispatches it on the element under the point.
+  if (beneath instanceof HTMLIFrameElement) {
+    relayToFrame(beneath, event, "oc:relay-click");
+    return;
+  }
+
   beneath.focus({ preventScroll: true });
   // `HTMLElement.click()` also runs the element's default action (link
   // navigation, form submission); `SVGElement` has no `click()` in the DOM, so
