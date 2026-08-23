@@ -435,7 +435,9 @@ fn opens_mention(text: &str, bytes: &[u8], idx: usize) -> bool {
     // true by construction instead of by charset assumption.
     let mut after_chars = text[idx + 1..].chars();
     let after_ok = match after_chars.next() {
-        Some('#') => after_chars.next().is_some_and(|c| c.is_alphanumeric() || c == '_'),
+        Some('#') => after_chars
+            .next()
+            .is_some_and(|c| c.is_alphanumeric() || c == '_'),
         Some(c) => c.is_alphanumeric() || c == '_',
         None => false,
     };
@@ -593,9 +595,7 @@ pub fn extract_with_known(text: &str, dir: &[MentionAlias]) -> Vec<Mention> {
             // character: two byte spans are equal or they are not, and
             // `lowered`/`bytes` share `text`'s length either way (the fold
             // above guarantees it), so the offsets still line up.
-            if &lowered.as_bytes()[after..end] != alias.as_bytes()
-                || !closes_mention(bytes, end)
-            {
+            if &lowered.as_bytes()[after..end] != alias.as_bytes() || !closes_mention(bytes, end) {
                 continue;
             }
             match matched {
