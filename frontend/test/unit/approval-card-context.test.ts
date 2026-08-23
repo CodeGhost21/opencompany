@@ -81,4 +81,16 @@ describe("an unlabelled approval without details (#1419)", () => {
     await render(nativeApproval({ thread: "someone-else" }));
     expect(container.textContent).not.toContain("Asked in");
   });
+
+  it("writes a DM channel id unescaped, so the hash router can resolve it", async () => {
+    // A DM's channel id is `dm:<agent-id>`. The hash router splits
+    // `#/chat/…` on "/" without decoding, so `encodeURIComponent` turning
+    // the ":" into `%3A` would produce a segment no channel matches.
+    await render(nativeApproval(), { channelId: "dm:ada-1f3k", label: "Ada" });
+
+    const thread = [...container.querySelectorAll("a")].find((link) =>
+      link.textContent?.includes("#dm:ada-1f3k"),
+    );
+    expect(thread?.getAttribute("href")).toBe("#/chat/dm:ada-1f3k");
+  });
 });
