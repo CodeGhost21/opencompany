@@ -254,10 +254,15 @@ export function PolicySettings({ client, company }: Props) {
     void saveTier(tier.value);
   };
 
-  const unmatchedWiredTools = draftAlways
-    .split(",")
-    .map((kind) => kind.trim())
-    .filter((kind) => kind && !wiredTools.includes(kind));
+  // Only a successfully loaded tool set may label an entry "not a tool": while
+  // the request is pending, and on hosts predating the route, the empty array
+  // is "unknown", not "none of these are wired".
+  const unmatchedWiredTools = wiredToolsLoaded
+    ? draftAlways
+        .split(",")
+        .map((kind) => kind.trim())
+        .filter((kind) => kind && !wiredTools.includes(kind))
+    : [];
 
   const saveAlways = async () => {
     if (!status || saving) return;
