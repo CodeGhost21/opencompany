@@ -31,12 +31,12 @@ describe("Alert announcement semantics", () => {
   it("does not announce a standing informational notice assertively", async () => {
     await render();
 
-    expect(container.querySelector("[data-slot=alert]")).not.toHaveAttribute("role");
+    expect(container.querySelector("[data-slot=alert]")?.getAttribute("role")).toBeNull();
   });
 
   it("keeps destructive alerts assertive", async () => {
     await render("destructive");
 
-    expect(container.querySelector("[data-slot=alert]")).toHaveAttribute("role", "alert");
+    expect(container.querySelector("[data-slot=alert]")?.getAttribute("role")).toBe("alert");
   });
 });
