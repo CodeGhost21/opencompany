@@ -741,18 +741,6 @@ export function KnowledgeGraph({
     // The sim may tick faster than the display; coalesce the React render to
     // one per animation frame (d3's physics keep ticking freely underneath).
     const renderTick = rafThrottle(() => setTick((t) => (t + 1) % 1_000_000));
-    // TEMP-DIAGNOSTIC: wrap renderTick so we can log the alpha trajectory
-    // without replacing the real render handler (d3's .on("tick") replaces).
-    const lastLog = { a: 1 };
-    const alphaLog: Array<{ t: number; a: number }> = [];
-    const tickHandler = () => {
-      renderTick();
-      const a = sim.alpha();
-      if (a !== lastLog.a) {
-        lastLog.a = a;
-        alphaLog.push({ t: performance.now(), a: Math.round(a * 1000) / 1000 });
-      }
-    };
     const sim = forceSimulation(nodes)
       // extra friction + a slow cool-down → nodes drift floatily into place
       // instead of snapping or overshooting
