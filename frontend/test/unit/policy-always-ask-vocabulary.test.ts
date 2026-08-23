@@ -215,7 +215,14 @@ describe("what the always-ask field suggests", () => {
           });
         }
         if (path.endsWith("/policy")) {
-          return { ...STATUS, alwaysApprove: ["shell"] };
+          // A host that does not serve the complete registry (`knownTools`):
+          // the note has only the workflow set to fall back on, and an empty
+          // set while discovery is pending proves nothing.
+          return {
+            ...STATUS,
+            alwaysApprove: ["shell"],
+            knownTools: undefined,
+          };
         }
         return null;
       },
@@ -227,6 +234,7 @@ describe("what the always-ask field suggests", () => {
     // The always-ask list is nonempty, but an empty `wiredTools` while the
     // request is pending proves nothing — no "not a tool" claim yet.
     expect(container.textContent).not.toContain("is not a tool");
+    expect(container.textContent).not.toContain("match any");
 
     await act(async () => {
       resolveSlugs({ slugs: [] });
