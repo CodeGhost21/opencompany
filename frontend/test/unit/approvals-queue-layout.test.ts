@@ -31,7 +31,7 @@ const GRANT: StandingGrant = {
 };
 
 const client = {
-  get: async () => null,
+  get: async <T,>(path: string): Promise<T> => (path.endsWith("/users") ? [] : null) as T,
   listGrants: async () => [GRANT],
   listTeam: async () => [],
   revokeGrant: async () => undefined,
