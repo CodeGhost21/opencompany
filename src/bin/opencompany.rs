@@ -236,7 +236,6 @@ impl std::fmt::Debug for MemoryCmd {
                 to,
                 to_url,
                 to_api_key,
-                to_data_dir,
                 page_size,
                 dry_run,
                 resume_cursor,
@@ -245,7 +244,6 @@ impl std::fmt::Debug for MemoryCmd {
                 .field("to", to)
                 .field("to_url", &to_url.as_ref().map(|_| "<set>"))
                 .field("to_api_key", &to_api_key.as_ref().map(|_| "<set>"))
-                .field("to_data_dir", to_data_dir)
                 .field("page_size", page_size)
                 .field("dry_run", dry_run)
                 .field("resume_cursor", &resume_cursor.is_some())
