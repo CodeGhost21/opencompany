@@ -837,19 +837,13 @@ mod test {
             &base_settings(),
             "supermemory",
             Some(" https://source.example/ "),
-            None,
         )
         .expect_err("same hosted engine at the same endpoint must refuse")
         .to_string();
         assert!(err.contains("same engine"), "{err}");
 
         // A different endpoint proceeds.
-        resolve(
-            &base_settings(),
-            "supermemory",
-            Some("https://new.example"),
-            None,
-        )
-        .expect("a genuinely different endpoint is a migration");
+        resolve(&base_settings(), "supermemory", Some("https://new.example"))
+            .expect("a genuinely different endpoint is a migration");
     }
 }
