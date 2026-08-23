@@ -577,16 +577,15 @@ jobs:
     services:
       stalwart:
         image: stalwartlabs/mail-server:v0.9.4
-        env:
-          ADMIN_SECRET: ci-mail-admin-secret
         ports:
           - 25:25
           - 993:993
           - 8080:8080
-        # Query the management API, rather than merely waiting for the process
-        # to start: the test creates an account immediately after this check.
+        # The image writes this file only after its first-run configuration has
+        # completed. The provisioning step below retries the management request
+        # until the server has also bound its HTTP listener.
         options: >-
-          --health-cmd "stalwart-cli --url http://localhost:8080 --credentials admin:ci-mail-admin-secret account list --limit 1"
+          --health-cmd "test -s /opt/stalwart-mail/etc/config.toml"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 20
@@ -610,11 +609,23 @@ jobs:
 
       - name: Create the smoke-test mailbox
         run: |
-          docker exec "${{ job.services.stalwart.id }}" \
-            stalwart-cli --url http://localhost:8080 \
-            --credentials admin:ci-mail-admin-secret \
-            account create smoke --password ci-mail-password \
-            --addresses smoke@localhost
+          container="${{ job.services.stalwart.id }}"
+          admin_secret="$(docker logs "${container}" \
+            | sed -n "s/.*password '\(.*\)'\./\1/p" \
+            | tail -n 1)"
+          test -n "${admin_secret}"
+          for attempt in $(seq 1 20); do
+            if docker exec "${container}" \
+              stalwart-cli --url http://localhost:8080 \
+              --credentials "admin:${admin_secret}" \
+              account create smoke --password ci-mail-password \
+              --addresses smoke@localhost; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "Stalwart did not accept the smoke-test account within 20 seconds" >&2
+          exit 1
 
       - name: Run the live SMTP to IMAP round trip
         env:
