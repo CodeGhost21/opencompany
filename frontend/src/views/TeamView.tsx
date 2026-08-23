@@ -478,39 +478,39 @@ export function TeamView({
             </div>
             <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
               {visibleMembers.map((m) => (
-              <MemberCard
-                key={m.id}
-                member={m}
-                onRemove={() => void removeMember(m)}
-                // Only a host-backed teammate can be opened: a starter-team
-                // card is a local placeholder with no record behind it, so its
-                // id would 404 and the detail view would report a teammate that
-                // was never removed.
-                onOpen={fromHost ? () => onOpenAgent(m.id) : undefined}
-                setByLabel={m.budgetSetBy ? whoSet(m.budgetSetBy) : undefined}
-                // Looked up by roster id, so a card the board assigned to a
-                // *desk* is never attributed to the people on it.
-                //
-                // The two ways of having no entry are different facts and are
-                // kept apart here: the board answered and this teammate is on
-                // nothing (idle, zero — worth saying), versus the board never
-                // answered (undefined — the card says nothing at all).
-                workload={workload ? (workload.get(m.id) ?? IDLE) : undefined}
-                onNavigateToDesk={onNavigateToDesk}
-              />
-            ))}
+                <MemberCard
+                  key={m.id}
+                  member={m}
+                  onRemove={() => void removeMember(m)}
+                  // Only a host-backed teammate can be opened: a starter-team
+                  // card is a local placeholder with no record behind it, so its
+                  // id would 404 and the detail view would report a teammate that
+                  // was never removed.
+                  onOpen={fromHost ? () => onOpenAgent(m.id) : undefined}
+                  setByLabel={m.budgetSetBy ? whoSet(m.budgetSetBy) : undefined}
+                  // Looked up by roster id, so a card the board assigned to a
+                  // *desk* is never attributed to the people on it.
+                  //
+                  // The two ways of having no entry are different facts and are
+                  // kept apart here: the board answered and this teammate is on
+                  // nothing (idle, zero — worth saying), versus the board never
+                  // answered (undefined — the card says nothing at all).
+                  workload={workload ? (workload.get(m.id) ?? IDLE) : undefined}
+                  onNavigateToDesk={onNavigateToDesk}
+                />
+              ))}
               {visibleMembers.length === 0 && (
                 <p className="col-span-full text-sm text-muted-foreground" data-testid="team-roster-empty">
                   No teammates match these filters.
                 </p>
               )}
-            <button
-              onClick={() => setAddOpen(true)}
-              className="flex min-h-32 flex-col items-center justify-center gap-2 rounded-xl border border-dashed text-sm text-muted-foreground transition-colors hover:border-primary/40 hover:bg-accent/40 hover:text-foreground"
-            >
-              <Plus className="size-5" />
-              Add teammate
-            </button>
+              <button
+                onClick={() => setAddOpen(true)}
+                className="flex min-h-32 flex-col items-center justify-center gap-2 rounded-xl border border-dashed text-sm text-muted-foreground transition-colors hover:border-primary/40 hover:bg-accent/40 hover:text-foreground"
+              >
+                <Plus className="size-5" />
+                Add teammate
+              </button>
             </div>
           </>
         )}
