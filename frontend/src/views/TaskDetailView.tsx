@@ -1906,7 +1906,7 @@ function RunDrawer({
                 ) : detail ? (
                   /* The same grouped-timeline renderer the task timeline uses —
                      `kind` simply widens to the three step words. */
-                  <TimelineList entries={detail.steps} now={now} />
+                  <TimelineList entries={detail.steps} />
                 ) : null}
               </div>
             </ScrollArea>
