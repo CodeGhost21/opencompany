@@ -1556,14 +1556,11 @@ function RunDrawer({
                   />
                 ) : detail ? (
                   /* The same grouped-timeline renderer the task timeline uses —
-                     `kind` simply widens to the three step words. */
-                  <TimelineList
-                  empty={
-                    <EmptyState
-                      title="Nothing has happened yet"
-                      body="Dispatch this task from the board to start its timeline."
-                    />
-                  } entries={detail.steps} now={now} />
+                     `kind` simply widens to the three step words. The zero-step
+                     case is handled by the guard above, so no `empty` copy is
+                     needed here — the task-card dispatch sentence would be
+                     wrong for a run's trace anyway. */
+                  <TimelineList entries={detail.steps} now={now} />
                 ) : null}
               </div>
             </ScrollArea>
