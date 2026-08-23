@@ -152,8 +152,14 @@ interface Props {
    * since it may have been resolved by the first-channel fallback. The shell
    * clears that channel's unread count and remembers it as where an
    * unaddressed line belongs after this view is gone (issue #368).
+   *
+   * The second argument is whether *this* channel's history is still on the
+   * wire. A mention is durable and there is no older-history pagination to
+   * recover one — so the shell must not clear a mention for a message it
+   * cannot yet prove is on screen, which is exactly the case where this is
+   * `true`.
    */
-  onChannelViewed?: (channelId: string) => void;
+  onChannelViewed?: (channelId: string, historyPending: boolean) => void;
   /**
    * Every approval currently awaiting the operator, straight off the shell's
    * feed, plus the host thread → channel map that places them (#379).
@@ -579,8 +585,8 @@ export function ChatView({
   // a reply that lands while you are reading the channel is read, and should
   // not leave a badge on the channel you are sitting in.
   useEffect(() => {
-    if (channel) onChannelViewed?.(channel.id);
-  }, [channel?.id, messages.length, onChannelViewed]);
+    if (channel) onChannelViewed?.(channel.id, historyPending);
+  }, [channel?.id, messages.length, historyPending, onChannelViewed]);
 
   // Three ways to have no channel on screen, which used to be one blank pane.
   // Which one it is, is the whole point: "still loading" and "this company has

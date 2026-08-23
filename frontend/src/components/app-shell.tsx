@@ -1155,12 +1155,18 @@ export function AppShell({
   mentionFeedRef.current = mentionFeed;
 
   const onChannelViewed = useCallback(
-    (channelId: string) => {
+    (channelId: string, historyPending: boolean) => {
       activeChatChannelRef.current = channelId;
-      // Clear only THIS channel's mentions. A bare "mark all read" here would
-      // silently clear a summons waiting in another channel — which is exactly
-      // the message somebody would then never answer.
-      const clearing = mentionsToClear(mentionFeedRef.current, channelId);
+      // Clear only THIS channel's mentions, and only once its history is
+      // actually on screen. A mention is durable and there is no
+      // older-history pagination to recover one, so clearing it before the
+      // named message has loaded — or while hydration is still failing —
+      // would lose the summons for good with nothing left to notice it by.
+      // The effect above re-fires once `historyPending` goes false, so this
+      // simply waits rather than dropping the clear.
+      const clearing = historyPending
+        ? []
+        : mentionsToClear(mentionFeedRef.current, channelId);
       if (clearing.length > 0) {
         // Optimistic, so the badge goes at once; the next poll reconciles.
         setMentionFeed((current) =>

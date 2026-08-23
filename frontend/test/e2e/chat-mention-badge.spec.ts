@@ -84,7 +84,11 @@ function seedFeed(): Note[] {
   ];
 }
 
-async function mockApi(page: Page, feed: Note[]) {
+async function mockApi(
+  page: Page,
+  feed: Note[],
+  options: { historyGates?: Record<string, Promise<void>> } = {},
+) {
   // The first-run tour renders a modal over the console and swallows clicks.
   await page.addInitScript(() => {
     const real = Storage.prototype.getItem;
@@ -123,7 +127,15 @@ async function mockApi(page: Page, feed: Note[]) {
     }
 
     if (path.endsWith("/chat/read-state")) return json({ markers: [] });
-    if (path.endsWith("/chat/history")) return json([]);
+    if (path.endsWith("/chat/history")) {
+      // A test proving the race holds one channel's response open until it
+      // says so — the console must not have marked that channel's mentions
+      // read while its own history is still on the wire.
+      const desk = url.searchParams.get("desk") ?? "";
+      const gate = options.historyGates?.[desk];
+      if (gate) await gate;
+      return json([]);
+    }
     if (path.endsWith("/events")) {
       return route.fulfill({ status: 200, contentType: "text/event-stream", body: "" });
     }
@@ -190,6 +202,42 @@ test("opening a channel clears only its own mentions", async ({ page }) => {
     expect(call.ids).not.toContain("design-1");
   }
   expect(clearing.flatMap((c) => c.ids ?? []).sort()).toContain("eng-1");
+});
+
+test("opening a channel does not clear its mentions before history has loaded", async ({
+  page,
+}) => {
+  // The Codex P1 finding: `ChatView` used to report a channel "viewed" on the
+  // same tick it switched to it, with no regard for whether that channel's
+  // own `chat/history` had come back yet. A mention is durable and there is
+  // no older-history pagination to recover one, so clearing it in that window
+  // could lose the summons for good — worse than the local-only unread
+  // estimate this shares a code path with.
+  //
+  // Reproducing the race needs the mention feed already loaded *before* the
+  // switch (it is a poll independent of the active channel, and was already
+  // sitting in memory by the time the bug fired in the field) and Engineering's
+  // own history held open at the moment of the switch — which is why this
+  // opens General first, ungated, and only gates Engineering's history.
+  let releaseHistory: () => void = () => {};
+  const historyGate = new Promise<void>((resolve) => {
+    releaseHistory = resolve;
+  });
+  await mockApi(page, seedFeed(), { historyGates: { engineering: historyGate } });
+
+  await openChannel(page, "general");
+  await expect(mentionBadge(page, "Engineering")).toHaveText("@2");
+
+  await page.getByRole("button", { name: /engineering/i }).click();
+  await expect(page.getByPlaceholder(/^Message /)).toBeVisible();
+  // Engineering's `chat/history` is still on the wire at this point.
+  await page.waitForTimeout(200);
+  expect(marked.some((m) => m.ids?.includes("eng-1"))).toBe(false);
+
+  releaseHistory();
+  await expect
+    .poll(() => marked.some((m) => m.ids?.includes("eng-1")))
+    .toBe(true);
 });
 
 test("a collapsed section aggregates its hidden mentions, same as unread", async ({ page }) => {
