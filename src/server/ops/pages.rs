@@ -126,7 +126,9 @@ fn mint_module_cap(company: &CompanyId, slug: &str) -> String {
     getrandom::fill(&mut bytes)
         .expect("the OS CSPRNG is unavailable; cannot mint a page-module capability");
     let cap = hex_encode(&bytes);
-    let mut caps = module_caps().lock().expect("page-module capability map lock");
+    let mut caps = module_caps()
+        .lock()
+        .expect("page-module capability map lock");
     // Lazy sweep: drop everything that has expired since the last access.
     caps.retain(|_, c| c.expires_at > Instant::now());
     caps.insert(
@@ -146,7 +148,9 @@ fn mint_module_cap(company: &CompanyId, slug: &str) -> String {
 /// cannot open another page's bundle, and a capability minted for one company
 /// cannot be replayed against another.
 fn validate_module_cap(cap: &str, company: &CompanyId, slug: &str) -> bool {
-    let mut caps = module_caps().lock().expect("page-module capability map lock");
+    let mut caps = module_caps()
+        .lock()
+        .expect("page-module capability map lock");
     caps.retain(|_, c| c.expires_at > Instant::now());
     caps.get(cap)
         .is_some_and(|c| c.company == *company && c.slug == slug && c.expires_at > Instant::now())
