@@ -274,6 +274,7 @@ export function PolicySettings({ client, company }: Props) {
   const chooseTier = (tier: PolicyStatus["tiers"][number]) => {
     if (!status || saving || tier.value === status.mode) return;
     if (isAutonomyEscalation(status.tiers, status.mode, tier.value)) {
+      confirmSource.current = "tier";
       setTierAwaitingConfirmation(tier);
       return;
     }
