@@ -36,9 +36,10 @@ async function pickProvider(page: Page, label: string) {
  * opens over the console and swallows clicks. Skip it when it shows up.
  */
 async function openConnections(page: Page) {
-  // Connections moved under Settings' sub-rail; the bare `#/connections` hash
-  // no longer names a view, so it would silently canonicalize to Overview.
-  await page.goto("/#/settings/connections");
+  // Inference has a page of its own since the Connections split — it was a
+  // section on the accounts page, which is the wrong neighbourhood for the
+  // question it settles.
+  await page.goto("/#/settings/inference");
   const skip = page.getByRole("button", { name: "Skip for now" });
   await skip
     .waitFor({ state: "visible", timeout: 10_000 })
