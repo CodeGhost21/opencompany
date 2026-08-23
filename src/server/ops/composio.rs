@@ -529,7 +529,11 @@ async fn set_token(
     journal(&company, change, None).await?;
     Ok(Json(MutationResponse {
         status: effective_status(runtime).await?,
-        note: SWITCH_NOTE.to_string(),
+        note: if body.token.trim().is_empty() {
+            CLEAR_NOTE.to_string()
+        } else {
+            SWITCH_NOTE.to_string()
+        },
     }))
 }
 
