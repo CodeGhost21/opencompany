@@ -97,8 +97,13 @@ mode = "full"
 allow = ["files"]
 
 [[agent]]
-id = "ceo"
-role = "Chief Executive"
+id = "ceo-a"
+role = "Chief Executive A"
+tier = "orchestrator"
+
+[[agent]]
+id = "ceo-b"
+role = "Chief Executive B"
 tier = "orchestrator"
 "#,
     )
