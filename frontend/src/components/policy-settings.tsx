@@ -439,19 +439,35 @@ export function PolicySettings({ client, company }: Props) {
                   <AlertDialogDescription>
                     {pendingTier && (
                       <>
-                        Instead of:{" "}
-                        {
-                          status.tiers.find((tier) => tier.value === status.mode)
-                            ?.description
-                        }{" "}
-                        With {pendingTier.label}: {pendingTier.description}
+                        {pendingTier.value !== status.mode && (
+                          <>
+                            Instead of:{" "}
+                            {
+                              status.tiers.find(
+                                (tier) => tier.value === status.mode,
+                              )?.description
+                            }{" "}
+                            With {pendingTier.label}: {pendingTier.description}
+                            {" "}
+                          </>
+                        )}
                         {pendingReset && (
                           <>
-                            {" "}This also replaces the current always-ask list
-                            with the manifest's list: {" "}
+                            {pendingTier.value !== status.mode
+                              ? "This also"
+                              : "This"}{" "}
+                            replaces the current always-ask list with the
+                            manifest's list:{" "}
                             {status.manifestAlwaysApprove.length > 0
                               ? status.manifestAlwaysApprove.join(", ")
-                              : "none"}.
+                              : "none"}
+                            {removedAlwaysAsk.length > 0 &&
+                              `; ${removedAlwaysAsk.join(", ")} ${
+                                removedAlwaysAsk.length === 1
+                                  ? "stops"
+                                  : "stop"
+                              } always asking for approval`}
+                            .
                           </>
                         )}
                       </>
