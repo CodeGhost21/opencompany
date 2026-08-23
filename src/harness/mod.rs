@@ -45,9 +45,9 @@ mod cap_publish_test;
 #[cfg(test)]
 mod cap_turn_test;
 /// Agent-authored internal dashboard pages: `pages_list` / `pages_read` /
-/// `pages_write` / `pages_delete` over `Pages/<slug>/` in the same
+/// `pages_write` / `pages_delete` over `pages/<slug>/` in the same
 /// [`crate::ports::workspace::WorkspaceStore`], with `pages_write` compiling
-/// `Page.tsx` to `Page.compiled.mjs` via `swc_core`. See
+/// `page.tsx` to `page.compiled.mjs` via `swc_core`. See
 /// `docs/spec/runtime/pages.md`.
 pub mod pages_tools;
 /// First-run company setup's pass: one tool-less model call that designs a

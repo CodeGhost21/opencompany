@@ -72,7 +72,10 @@ afterEach(async () => {
   container.remove();
 });
 
-async function render(providers: GridProvider[]) {
+async function render(
+  providers: GridProvider[],
+  overrides: { granted?: boolean | undefined; probeFailed?: boolean } = {},
+) {
   await act(async () => {
     root.render(
       createElement(ProvidersSection, {
@@ -81,6 +84,7 @@ async function render(providers: GridProvider[]) {
         busy: null,
         noCredential: false,
         granted: true,
+        probeFailed: false,
         openMode: false,
         degraded: null,
         loading: false,
@@ -88,6 +92,7 @@ async function render(providers: GridProvider[]) {
         onDisconnect: () => {},
         onOpen: () => {},
         onConnectSlug: () => {},
+        ...overrides,
       }),
     );
   });
@@ -151,5 +156,31 @@ describe("what a tile says about its accounts", () => {
     await render([row("slack", "Slack", [])]);
     expect(text()).toContain("not connected");
     expect(text()).not.toContain("none connected");
+  });
+});
+
+describe("a connected tile that does not deliver drops the success styling", () => {
+  // A provider can be genuinely connected and still reach nobody when the grant
+  // is withheld (issue #1407). The glyph and shell already demote; the account
+  // line and the tile hover must follow, or the tile green-checks a connection
+  // its own caption says delivers no tools.
+  it("neutral-tones the account line and the hover, not just the glyph", async () => {
+    await render([row("github", "GitHub", [acct("h1", true)])], { granted: false });
+
+    // The caption states the demotion in words...
+    expect(text()).toContain("tools not delivered");
+
+    // ...and the account line under it wears the muted tone, never the success
+    // colour the caption contradicts.
+    const line = Array.from(container.querySelectorAll("span")).find((s) =>
+      s.textContent?.includes("tools not delivered"),
+    );
+    expect(line?.className).toContain("text-muted-foreground");
+    expect(line?.className).not.toContain("text-status-done-text");
+
+    // The tile itself hovers neutral rather than flashing the success tint.
+    const tile = container.querySelector("[data-testid='open-provider-github']");
+    expect(tile?.className).toContain("hover:bg-muted/70");
+    expect(tile?.className).not.toContain("hover:bg-status-done/10");
   });
 });

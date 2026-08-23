@@ -422,6 +422,41 @@ impl std::fmt::Debug for StorageHandles {
     }
 }
 
+/// Which deployment of a hosted engine the credential belongs to.
+///
+/// Not cosmetic, and not inferable from the URL. Mem0 and Cognee each expose
+/// two products that speak *different protocols* under the same driver id:
+/// Mem0's platform authenticates with `Authorization: Token` and serves v3/v1
+/// paths while its open-source server uses `X-API-Key` and un-prefixed ones;
+/// Cognee Cloud uses `X-Api-Key` where an authenticated self-hosted instance
+/// takes a bearer token. Pointing the wrong one at a live service fails at the
+/// first request — a 404 on paths that do not exist there, or a 401 whose body
+/// says `Invalid header` — and neither error names the real cause.
+///
+/// Supermemory is the exception that made this easy to miss: it serves the
+/// same API with the same bearer credential either way, so the single
+/// constructor OpenCompany used worked against it and against nothing else.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RemoteDeployment {
+    /// The vendor's managed platform. The default, because that is what
+    /// `remote` mode is for; a self-hosted engine is the deliberate case.
+    #[default]
+    Managed,
+    /// An instance the operator runs themselves.
+    SelfHosted,
+}
+
+impl RemoteDeployment {
+    /// Parses the wire value, or `None` when it names neither deployment.
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().replace('_', "-").as_str() {
+            "managed" | "cloud" | "hosted" | "platform" => Some(Self::Managed),
+            "self-hosted" | "selfhosted" | "self" => Some(Self::SelfHosted),
+            _ => None,
+        }
+    }
+}
+
 /// Connection settings for [`open_storage`]. `fs` needs nothing beyond the
 /// runtime's home directory (handled by the builder's defaults), so it yields
 /// `None` handles.
@@ -460,11 +495,16 @@ pub struct StorageSettings {
     /// Which engine to bind for `OPENCOMPANY_MEMORY=remote`
     /// (`OPENCOMPANY_MEMORY_DRIVER`): `supermemory`, `mem0`, `cognee`.
     ///
-    /// Env is the only channel: memory selection is instance-level (one engine
-    /// per boot, like `OPENCOMPANY_STORAGE`), while manifests are per-company —
-    /// a company-scoped knob for an instance-wide choice would be incoherent.
+    /// Instance-level, never per-company: one engine per instance, like
+    /// `OPENCOMPANY_STORAGE`, while manifests are per-company — a
+    /// company-scoped knob for an instance-wide choice would be incoherent.
     /// This deliberately differs from `[inference].provider`, which *is*
     /// per-company and rightly lives in the manifest.
+    ///
+    /// Two channels, in the usual order: the environment, and — when the
+    /// deployment names no engine — the `[memory]` section of `config.toml`,
+    /// which is what lets an operator choose one from the console
+    /// ([`MemorySelection`], [`StorageSettings::with_memory_config`]).
     pub memory_driver: Option<String>,
     pub memory_url: Option<String>,
     /// The hosted engine's credential (`OPENCOMPANY_MEMORY_API_KEY`).
@@ -480,6 +520,14 @@ pub struct StorageSettings {
     /// The hosted manager injects environment rather than manifests, which is
     /// what makes env sufficient.
     pub memory_api_key: Option<String>,
+    /// Which deployment of the named remote engine the credential belongs to
+    /// (`OPENCOMPANY_MEMORY_DEPLOYMENT`: `managed` or `self-hosted`).
+    ///
+    /// Defaults to managed. Mem0 and Cognee serve different protocols to their
+    /// platform and their self-hosted server under one driver id, so this is
+    /// not inferable from the URL, and getting it wrong fails at the first
+    /// request with an error that names neither the cause nor this setting.
+    pub memory_deployment: RemoteDeployment,
 }
 
 impl std::fmt::Debug for StorageSettings {
@@ -556,7 +604,111 @@ impl StorageSettings {
             memory_driver: non_empty("OPENCOMPANY_MEMORY_DRIVER"),
             memory_url: non_empty("OPENCOMPANY_MEMORY_URL"),
             memory_api_key: non_empty("OPENCOMPANY_MEMORY_API_KEY"),
+            memory_deployment: non_empty("OPENCOMPANY_MEMORY_DEPLOYMENT")
+                .as_deref()
+                .and_then(RemoteDeployment::parse)
+                .unwrap_or_default(),
         })
+    }
+
+    /// Whether the *deployment* named the memory engine
+    /// (`OPENCOMPANY_MEMORY`), in which case the `[memory]` section of
+    /// `config.toml` is inert and the console renders the engine read-only.
+    ///
+    /// Presence, not value: a control plane that injects `OPENCOMPANY_MEMORY`
+    /// owns the choice whichever engine it names, including `store`.
+    pub fn memory_is_env_owned() -> bool {
+        std::env::var("OPENCOMPANY_MEMORY").is_ok_and(|value| !value.trim().is_empty())
+    }
+
+    /// Layers a `config.toml` `[memory]` section under the environment.
+    ///
+    /// A no-op when [`Self::memory_is_env_owned`] — see [`MemorySection`] for
+    /// why the env layer wins rather than the more recent write.
+    ///
+    /// [`MemorySection`]: crate::app::config::MemorySection
+    pub fn with_memory_config(
+        mut self,
+        section: &crate::app::config::MemorySection,
+    ) -> Result<Self> {
+        if Self::memory_is_env_owned() {
+            return Ok(self);
+        }
+        let selection = MemorySelection::from_section(section)?;
+        self.memory_backend = selection.backend;
+        self.memory_driver = selection.driver;
+        self.memory_url = selection.url;
+        self.memory_api_key = selection.api_key;
+        Ok(self)
+    }
+
+    /// Replaces the memory selection with `selection`, leaving the base
+    /// backend, data dir and durability assertion untouched.
+    ///
+    /// This is what a live engine swap rebinds through
+    /// ([`crate::server::ops::memory_engine`]): the rest of a running
+    /// instance's storage settings must survive a memory change unchanged.
+    pub fn with_memory_selection(mut self, selection: MemorySelection) -> Self {
+        self.memory_backend = selection.backend;
+        self.memory_driver = selection.driver;
+        self.memory_url = selection.url;
+        self.memory_api_key = selection.api_key;
+        self
+    }
+}
+
+/// One instance's memory-engine choice: everything `OPENCOMPANY_MEMORY*`
+/// names, parsed and validated, independent of where it came from (the
+/// environment, `config.toml`, or a console write that has not been persisted
+/// yet).
+#[derive(Clone, Default, PartialEq, Eq)]
+pub struct MemorySelection {
+    pub backend: MemoryBackend,
+    pub driver: Option<String>,
+    pub url: Option<String>,
+    pub api_key: Option<String>,
+}
+
+impl MemorySelection {
+    /// Parses a `config.toml` `[memory]` section.
+    ///
+    /// Blank strings are treated as absent — a TOML key written and then
+    /// emptied means "not set", the same rule `non_empty` applies to the
+    /// environment, and routing on bare presence would send `""` down a path
+    /// that binds nothing.
+    pub fn from_section(section: &crate::app::config::MemorySection) -> Result<Self> {
+        let trimmed = |value: &Option<String>| {
+            value
+                .as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+                .map(str::to_string)
+        };
+        let backend = match trimmed(&section.backend) {
+            Some(raw) => raw.parse()?,
+            None => MemoryBackend::default(),
+        };
+        Ok(Self {
+            backend,
+            driver: trimmed(&section.driver),
+            url: trimmed(&section.url),
+            api_key: trimmed(&section.api_key),
+        })
+    }
+}
+
+/// Renders the credential as `<set>`, never its bytes — the same hand-written
+/// `Debug` [`StorageSettings`] carries, and for the same reason: this type is
+/// reachable from boot logging and from a route's error path, where a bare
+/// `{:?}` is one keystroke away.
+impl std::fmt::Debug for MemorySelection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MemorySelection")
+            .field("backend", &self.backend.as_str())
+            .field("driver", &self.driver)
+            .field("url", &self.url)
+            .field("api_key", &self.api_key.as_ref().map(|_| "<set>"))
+            .finish()
     }
 }
 
@@ -701,6 +853,7 @@ fn open_provider(settings: &StorageSettings) -> Result<Option<MemoryOverlay>> {
         url: settings.memory_url.clone(),
         api_key: settings.memory_api_key.clone(),
         data_dir: settings.data_dir.clone(),
+        deployment: settings.memory_deployment,
     };
     let Some((provider, class)) = open_driver(&config)? else {
         // Only `embedded` can answer "no driver to bind", and the caller only

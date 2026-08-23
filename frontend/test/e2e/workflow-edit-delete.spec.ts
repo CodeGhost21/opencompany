@@ -397,14 +397,14 @@ test("an author can change a saved workflow's schedule, and the id is read-only"
     const dialog = await openEditDialog(page, name);
 
     // Hydrated from the saved graph, not blank — the whole point of edit mode.
-    await expect(dialog.getByLabel("Id", { exact: true })).toHaveValue(id);
+    await expect(dialog.getByLabel("Workflow ID", { exact: true })).toHaveValue(id);
     await expect(dialog.getByLabel("Name", { exact: true })).toHaveValue(name);
     await expect(dialog.getByRole("textbox", { name: "Node id" }).first()).toHaveValue("start");
 
     // The id may not change through a PUT — the host answers 400 — so the field
     // states that by being unwritable rather than by refusing after the click.
     await expect(
-      dialog.getByLabel("Id", { exact: true }),
+      dialog.getByLabel("Workflow ID", { exact: true }),
       "an id field that accepts a rename can only ever 400",
     ).toHaveJSProperty("readOnly", true);
 

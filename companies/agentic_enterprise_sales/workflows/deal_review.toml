@@ -1,0 +1,92 @@
+# Workflow graph: deal_review
+#
+# Referenced by `[workflows].enabled` in ../company.toml. A deal is tested
+# against what has actually been proved — buyer, sequence, risk — and either
+# advanced or honestly downgraded. Downgrading is the point: a forecast made of
+# deals nobody qualified is worse than no forecast, because somebody plans
+# against it.
+
+id = "deal_review"
+name = "Deal review"
+description = "A deal is tested against what has been proved and advanced or downgraded."
+
+[[node]]
+id = "trigger"
+kind = "trigger"
+name = "Review due"
+summary = "A forecast is being made, or a close date has moved once."
+
+[[node]]
+id = "buyer"
+kind = "agent"
+name = "Name the economic buyer"
+summary = "Not the champion. Nobody able to name them means the deal is in discovery whatever the row says."
+agent = "lead_gen"
+
+[[node]]
+id = "sequence"
+kind = "agent"
+name = "Test the close date"
+summary = "What has to happen, who does each thing, and does procurement fit inside it."
+agent = "follow_up_agent"
+
+[[node]]
+id = "qualified"
+kind = "condition"
+name = "Still forecastable?"
+summary = "Branch on whether the stage survives the test."
+[node.config]
+field = "=item.forecastable"
+
+[[node]]
+id = "advance"
+kind = "agent"
+name = "Advance it"
+summary = "Update the row with the buyer, the tested date, and what would kill it."
+agent = "proposal_writer"
+
+[[node]]
+id = "downgrade"
+kind = "agent"
+name = "Downgrade it"
+summary = "Move it back a stage with the reason, or close it as no decision. This is the point of the pass."
+agent = "crm_updater"
+
+[[node]]
+id = "report"
+kind = "output"
+name = "Report the forecast"
+summary = "Hand the desk a pipeline made only of deals that survived the test."
+[node.destination]
+kind = "channel"
+target = "deal_desk"
+
+[[edge]]
+from = "trigger"
+to = "buyer"
+
+[[edge]]
+from = "buyer"
+to = "sequence"
+
+[[edge]]
+from = "sequence"
+to = "qualified"
+
+[[edge]]
+from = "qualified"
+to = "advance"
+label = "yes"
+
+[[edge]]
+from = "qualified"
+to = "downgrade"
+label = "no"
+
+[[edge]]
+from = "advance"
+to = "report"
+
+[[edge]]
+from = "downgrade"
+to = "report"

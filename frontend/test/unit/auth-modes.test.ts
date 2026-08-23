@@ -27,8 +27,30 @@ const client = (impl: { get?: unknown; post?: unknown }) =>
 
 describe("fetchAuthConfig", () => {
   it("reports the mode the host names", async () => {
-    const c = client({ get: async () => ({ mode: "wallet", passwords: false }) });
-    expect(await fetchAuthConfig(c, null)).toEqual({ mode: "wallet", passwords: false });
+    const c = client({
+      get: async () => ({ mode: "wallet", passwords: false, magicLink: false }),
+    });
+    expect(await fetchAuthConfig(c, null)).toEqual({
+      mode: "wallet",
+      passwords: false,
+      magicLink: false,
+    });
+  });
+
+  it("carries the company's name, blank-normalised", async () => {
+    // The sign-in screen has no other source for it: every route that reports
+    // the name is behind the sign-in being drawn (issue #1334). A blank one is
+    // normalised away here, once, so no view has to decide whether `""` means
+    // "unnamed" or "not reported".
+    const named = client({
+      get: async () => ({ mode: "email", passwords: true, magicLink: true, name: " Acme " }),
+    });
+    expect((await fetchAuthConfig(named, null)).name).toBe("Acme");
+
+    const blank = client({
+      get: async () => ({ mode: "email", passwords: true, magicLink: true, name: "  " }),
+    });
+    expect((await fetchAuthConfig(blank, null)).name).toBeUndefined();
   });
 
   it("falls back to email when the host has no such route", async () => {
@@ -40,7 +62,39 @@ describe("fetchAuthConfig", () => {
         throw new Error("404");
       },
     });
-    expect(await fetchAuthConfig(c, null)).toEqual({ mode: "email", passwords: true });
+    expect(await fetchAuthConfig(c, null)).toEqual({
+      mode: "email",
+      passwords: true,
+      magicLink: true,
+    });
+  });
+
+  it("assumes a magic link works on a host that cannot answer", async () => {
+    // The fallback must not be the cautious one. Every host predating this
+    // field either mails links or echoes them, so defaulting to false would
+    // hide a working sign-in from every deployment that has not updated.
+    const c = client({
+      get: async () => {
+        throw new Error("network down");
+      },
+    });
+    expect((await fetchAuthConfig(c, null)).magicLink).toBe(true);
+  });
+
+  it("assumes a magic link works on a host that omits the field", async () => {
+    // The route answering without `magicLink` is the same rollout skew as it
+    // not answering at all, and must resolve the same way.
+    const c = client({ get: async () => ({ mode: "email", passwords: true }) });
+    expect((await fetchAuthConfig(c, null)).magicLink).toBe(true);
+  });
+
+  it("reports a dead-end magic link when the host says so", async () => {
+    // A routable host with no transport. The default must not survive an
+    // explicit false, or the console draws a form that goes nowhere.
+    const c = client({
+      get: async () => ({ mode: "email", passwords: true, magicLink: false }),
+    });
+    expect((await fetchAuthConfig(c, null)).magicLink).toBe(false);
   });
 });
 

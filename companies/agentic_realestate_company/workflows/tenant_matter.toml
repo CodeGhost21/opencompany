@@ -1,0 +1,91 @@
+# Workflow graph: tenant_matter
+#
+# Referenced by `[workflows].enabled` in ../company.toml. A tenant report is
+# recorded on the day it arrives, classified by urgency — safety and
+# habitability carry statutory clocks — actioned, and closed with what the
+# tenant was actually told.
+
+id = "tenant_matter"
+name = "Tenant matter"
+description = "A tenant report is recorded, classified by urgency, actioned, and closed with what the tenant was told."
+
+[[node]]
+id = "report"
+kind = "trigger"
+name = "Tenant reports something"
+summary = "A repair, a complaint, or a query about the tenancy."
+
+[[node]]
+id = "record"
+kind = "agent"
+name = "Record it"
+summary = "With the date reported. The clock on most obligations starts there, not when somebody noticed."
+agent = "tenant_manager"
+
+[[node]]
+id = "urgent"
+kind = "condition"
+name = "Safety or habitability?"
+summary = "Branch on whether a statutory response time applies."
+[node.config]
+field = "=item.urgent"
+
+[[node]]
+id = "immediate"
+kind = "agent"
+name = "Action immediately"
+summary = "Outranks everything else this company is doing, including a closing."
+agent = "contractor_coordinator"
+
+[[node]]
+id = "schedule"
+kind = "agent"
+name = "Scope and schedule"
+summary = "Priced from a scope, not a rule of thumb."
+agent = "contractor_coordinator"
+
+[[node]]
+id = "tell"
+kind = "agent"
+name = "Tell the tenant"
+summary = "What happens next and when. Silence is what turns a repair into a dispute."
+agent = "tenant_manager"
+
+[[node]]
+id = "close"
+kind = "output"
+name = "Close the record"
+summary = "What was done, when, and what the tenant was told — the record that answers a dispute later."
+[node.destination]
+kind = "channel"
+target = "investment_committee"
+
+[[edge]]
+from = "report"
+to = "record"
+
+[[edge]]
+from = "record"
+to = "urgent"
+
+[[edge]]
+from = "urgent"
+to = "immediate"
+label = "yes"
+
+[[edge]]
+from = "urgent"
+to = "schedule"
+label = "no"
+
+[[edge]]
+from = "immediate"
+to = "tell"
+
+[[edge]]
+from = "schedule"
+to = "tell"
+
+[[edge]]
+from = "tell"
+to = "close"

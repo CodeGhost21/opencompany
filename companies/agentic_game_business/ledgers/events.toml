@@ -1,0 +1,107 @@
+# The LiveOps calendar, as a ledger rather than a spreadsheet.
+#
+# A live game's revenue is a sequence of events, and the questions asked of that
+# sequence are ones a board cannot answer: what is running right now, what
+# overlaps with it, what did the same event do last time it ran. Two events
+# competing for the same player attention is the most expensive scheduling
+# mistake available here and the easiest to make.
+
+title = "Events"
+purpose = """
+Every LiveOps event: when it runs, what it offers, what it is meant to move, and \
+what it actually did. Read it before scheduling anything — an event that \
+overlaps another is two events each performing worse than either would alone.\
+"""
+written_by = "`record_entry` to plan or update an event, `close_entry` when it ends"
+checks = ["required-field", "known-status", "closed-needs-reason"]
+
+[[field]]
+name = "id"
+role = "id"
+required = true
+
+[[field]]
+name = "event"
+role = "title"
+required = true
+description = "What players see it as."
+
+[[field]]
+name = "status"
+role = "status"
+required = true
+
+[[field]]
+name = "runs"
+role = "prose"
+required = true
+description = "Start and end. The field that makes overlaps visible before they happen."
+
+[[field]]
+name = "targets"
+role = "prose"
+required = true
+description = "What it is meant to move — retention, conversion, ARPDAU, re-engagement. One of them, not all."
+
+[[field]]
+name = "offer"
+role = "prose"
+description = "What is actually being sold or given, and to which segment."
+
+[[field]]
+name = "owner"
+role = "owner"
+
+[[field]]
+name = "result"
+role = "prose"
+description = "What it did against the target, and what it did to the metrics it was not aiming at."
+
+[[field]]
+name = "reason"
+role = "prose"
+description = "Why it closed — ran, pulled, or cancelled. Required when it closes."
+
+[[field]]
+name = "refs"
+role = "refs"
+
+[[status]]
+name = "planned"
+
+[[status]]
+name = "scheduled"
+
+[[status]]
+name = "live"
+
+[[status]]
+name = "ended"
+closed = true
+needs_reason = true
+
+[[status]]
+name = "pulled"
+closed = true
+needs_reason = true
+
+[[section]]
+heading = "Live now"
+blurb = "Running. Anything scheduled against one of these is competing with it for the same players."
+statuses = ["live"]
+order = "recent"
+
+[[section]]
+heading = "Coming up"
+blurb = "Scheduled or planned. Check the dates against what is live before adding anything."
+statuses = ["scheduled", "planned"]
+order = "recent"
+
+[[section]]
+heading = "Finished"
+blurb = """
+Ended or pulled, each with what it actually did — including to the metrics it \
+was not aiming at, which is where a good event and an expensive one differ.\
+"""
+statuses = ["ended", "pulled"]
+cap = 20

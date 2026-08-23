@@ -12,6 +12,7 @@ import {
 } from "@/connections/profileStore";
 import type { ConnectionProfile } from "@/connections/profileStore";
 import { availableConnectors } from "@/connections/types";
+import { firstHostCopy } from "@/connections/first-host";
 import {
   CLOUD_WAKE_WINDOW_MS,
   WAKE_RETRY_CEILING_MS,
@@ -193,6 +194,32 @@ describe("which connectors a runtime can offer", () => {
     // `local` and `ssh` both need a process on this machine. A browser build
     // has no core to start one in, so a tab for either would do nothing.
     expect(availableConnectors(false)).toEqual(["cloud", "remote"]);
+  });
+});
+
+describe("somebody with no host at all", () => {
+  it("tells a desktop operator what went wrong, because something did", () => {
+    // The host inside the application did not start — usually another copy of
+    // it holding the data root, which is a thing they can go and fix.
+    const copy = firstHostCopy(true);
+    expect(copy.title).toBe("No host to show");
+    expect(copy.body).toContain("didn't start");
+  });
+
+  it("does not tell a hub that a host it never had failed to start", () => {
+    // A hub's own origin serves assets and nothing else, so a new one holds
+    // zero connections and always did. The desktop's words turn a first run
+    // into a fault report about a computer that was never going to run one.
+    const copy = firstHostCopy(false);
+    expect(copy.body).not.toContain("didn't start");
+    expect(copy.body).toContain("Choose where your company runs");
+  });
+
+  it("offers the choice in both, rather than naming a control elsewhere", () => {
+    // What this screen used to do was point at the switcher. A dead end that
+    // describes its own exit is still a dead end.
+    expect(firstHostCopy(true).action).toBe("Choose where to run");
+    expect(firstHostCopy(false).action).toBe("Choose where to run");
   });
 });
 

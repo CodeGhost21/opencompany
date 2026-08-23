@@ -20,18 +20,8 @@
 // every host, and `data-worst-status` says the same thing to a test. Without it
 // removing the rail would be a net loss for anyone running more than one host.
 
-import { Building2, Check, ChevronsUpDown, Loader2, Play, Plus, Square } from "lucide-react";
-import { useState } from "react";
+import { Building2, Check, ChevronsUpDown, Plus, Settings2 } from "lucide-react";
 
-import { Button } from "@/components/ui/button";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -42,25 +32,15 @@ import {
   DropdownMenuShortcut,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 import {
   SidebarMenu,
   SidebarMenuButton,
   SidebarMenuItem,
   useSidebar,
 } from "@/components/ui/sidebar";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { isDesktopRuntime } from "@/api/transport";
-import type { LocalInstance } from "@/api/transport/desktop";
 import { hostShortcutLabel, useHosts } from "@/connections/HostsContext";
-import type {
-  Connection,
-  ConnectionStatus,
-  ConnectorKind,
-  SshTarget,
-} from "@/connections/types";
-import { DEFAULT_REMOTE_PORT, availableConnectors } from "@/connections/types";
+import type { Connection, ConnectionStatus } from "@/connections/types";
 import { cn } from "@/lib/utils";
 
 /**
@@ -154,9 +134,42 @@ export function worstStatus(connections: Connection[]): ConnectionStatus | null 
  *
  * This is the predicate `connectionRailVisible` used to be — same rule, moved
  * with the control it governs.
+ *
+ * It answers **two** of the three questions the switcher asks, and no longer
+ * the third: whether the floating standalone switcher is drawn at all, and
+ * whether the status dot earns its place. Whether the trigger *opens a menu*
+ * is {@link hostSwitcherMenu}, which parted company with this rule once the
+ * menu started carrying host management.
  */
 export function hostSwitcherInteractive(count: number, hub = false): boolean {
   return count >= 2 || hub || isDesktopRuntime();
+}
+
+/**
+ * Whether the trigger opens a menu, or is only a nameplate.
+ *
+ * This used to be {@link hostSwitcherInteractive} exactly, on the argument
+ * that a chevron over a menu of one is furniture. That argument was sound
+ * while the menu held nothing but the roster and "Add a host": with one host
+ * there is nothing to switch to, and adding a second is the desktop's and the
+ * hub's business.
+ *
+ * "Manage hosts" retires it. The menu now carries the *only* way to rename,
+ * re-address or forget a host — and an ordinary browser console with exactly
+ * one connection is precisely the arrangement whose host is most likely to
+ * move, since that bootstrap row is a plain `remote` connector (see
+ * `DEFAULT_CONNECTOR`) and therefore fully manageable. Under the old rule that
+ * console got a nameplate with no menu, so its one host could not be reached
+ * at all: a menu of one is not furniture once one is a menu of something to
+ * *do*.
+ *
+ * So: any host at all opens a menu. The zero cases are unchanged and still
+ * belong to the desktop and the hub, which need "Add a host" to have anything
+ * at all. A single `local` host — the one connector this page cannot manage —
+ * only ever exists on the desktop, which is already true here.
+ */
+export function hostSwitcherMenu(count: number, hub = false): boolean {
+  return count >= 1 || hostSwitcherInteractive(count, hub);
 }
 
 interface Props {
@@ -185,6 +198,7 @@ export function HostSwitcher({ variant = "sidebar", companyName }: Props) {
   const { connections, selected, hub } = hosts;
 
   const interactive = hostSwitcherInteractive(connections.length, hub);
+  const menu = hostSwitcherMenu(connections.length, hub);
   const active = connections.find((c) => c.id === selected) ?? null;
   const worst = worstStatus(connections);
 
@@ -251,7 +265,7 @@ export function HostSwitcher({ variant = "sidebar", companyName }: Props) {
     "data-worst-status": worst ?? "none",
   };
 
-  if (!interactive) {
+  if (!menu) {
     return (
       <SidebarMenu>
         <SidebarMenuItem>
@@ -329,6 +343,19 @@ export function HostSwitcher({ variant = "sidebar", companyName }: Props) {
       >
         <Plus className="size-4" />
         Add a host
+      </DropdownMenuItem>
+      {/* The other half of adding one. Kept out of the rows themselves: a row
+          is a *filter* — clicking it puts that host on screen — and hanging an
+          edit and a delete off the same row makes a menu whose click targets
+          disagree about what a row is for. The page says what each host is,
+          which the menu deliberately does not. */}
+      <DropdownMenuItem
+        data-testid="host-switcher-manage"
+        onClick={() => hosts.setManagingHosts(true)}
+        className="gap-2"
+      >
+        <Settings2 className="size-4" />
+        Manage hosts
       </DropdownMenuItem>
     </DropdownMenuContent>
   );
@@ -425,429 +452,5 @@ function SidebarHeaderTrigger({
         </DropdownMenu>
       </SidebarMenuItem>
     </SidebarMenu>
-  );
-}
-
-/**
- * Where a host comes from: an address somewhere else, or this machine.
- *
- * Lifted out of the rail unchanged — it is the same dialog, reached from the
- * menu's last item instead of from a `+` at the bottom of a strip of icons.
- *
- * **Mounted beside the console, not inside the switcher.** Creating a host on
- * this computer selects it, which remounts the console — and the switcher with
- * it — so a dialog owned by the switcher would close itself the moment it
- * succeeded, taking the roster away while the operator was still working in it.
- * Its open flag lives in `HostsContext` for the same reason.
- */
-export function AddHostDialog() {
-  const hosts = useHosts();
-  const {
-    addingHost: open,
-    setAddingHost: onOpenChange,
-    localInstances,
-    onAddLocal,
-    onAddSsh,
-    onStartLocal,
-    onStopLocal,
-  } = hosts;
-  // The two connectors that need a process on this machine are offered only
-  // where one can be started. `onAddLocal` rather than `isDesktopRuntime()`:
-  // `App` withholds these handlers on a shell too old to honour them, and a tab
-  // whose button does nothing is worse than a tab that is not there.
-  const tabs = availableConnectors(Boolean(onAddLocal)).filter(
-    (kind) => kind !== "ssh" || onAddSsh,
-  );
-  const onAdd = (baseUrl: string, kind: ConnectorKind) => {
-    hosts.onAdd(baseUrl, kind === "cloud" ? { kind, tenant: tenantOf(baseUrl) } : { kind: "remote" });
-    onOpenChange(false);
-  };
-
-  return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent>
-        <DialogHeader>
-          <DialogTitle>Add a host</DialogTitle>
-          <DialogDescription>
-            A host is one OpenCompany server. Run one on this computer, use one hosted
-            for you, or point at one somewhere else — over ssh if it is not on the open
-            internet. Whichever you choose stays connected alongside the others, and it
-            decides where a <em>new</em> company lives rather than moving one you have.
-          </DialogDescription>
-        </DialogHeader>
-        {/*
-          The desktop leads with the local half, because starting a host is the
-          thing it can do that a browser cannot — and because a person who has
-          just installed the application has no URL to type. A browser leads
-          with the cloud, which is the only one of the four it can offer that
-          nobody has to run themselves.
-        */}
-        <Tabs defaultValue={tabs[0]}>
-          <TabsList className="w-full">
-            {tabs.map((kind) => (
-              <TabsTrigger key={kind} value={kind} data-testid={`add-host-${kind}`}>
-                {CONNECTOR_LABELS[kind]}
-              </TabsTrigger>
-            ))}
-          </TabsList>
-          {onAddLocal ? (
-            <TabsContent value="local">
-              <LocalInstances
-                instances={localInstances}
-                onAdd={onAddLocal}
-                onStart={onStartLocal}
-                onStop={onStopLocal}
-              />
-            </TabsContent>
-          ) : null}
-          <TabsContent value="cloud">
-            <CloudHost
-              onAdd={(baseUrl) => onAdd(baseUrl, "cloud")}
-              onCancel={() => onOpenChange(false)}
-            />
-          </TabsContent>
-          <TabsContent value="remote">
-            <RemoteHost
-              onAdd={(baseUrl) => onAdd(baseUrl, "remote")}
-              onCancel={() => onOpenChange(false)}
-              desktop={Boolean(onAddLocal)}
-            />
-          </TabsContent>
-          {onAddSsh ? (
-            <TabsContent value="ssh">
-              <SshHost onAdd={onAddSsh} onDone={() => onOpenChange(false)} />
-            </TabsContent>
-          ) : null}
-        </Tabs>
-      </DialogContent>
-    </Dialog>
-  );
-}
-
-/** What each connector is called where an operator has to choose between them. */
-const CONNECTOR_LABELS: Record<ConnectorKind, string> = {
-  local: "On this computer",
-  cloud: "TinyHumans Cloud",
-  remote: "Another gateway",
-  ssh: "Over SSH",
-};
-
-/**
- * Which tenant a cloud address names.
- *
- * The first label of the host name, which is the subdomain the control plane
- * gives a tenant. Only ever a *name* — it decides nothing about where requests
- * go, which is `baseUrl`'s job — so a url shaped some other way degrading to
- * the whole authority costs nothing but a longer word in a row.
- */
-function tenantOf(baseUrl: string): string {
-  try {
-    const { hostname } = new URL(baseUrl);
-    return hostname.split(".")[0] || hostname;
-  } catch {
-    return baseUrl;
-  }
-}
-
-/** A tenant of the hosted platform, at the address it was given. */
-function CloudHost({
-  onAdd,
-  onCancel,
-}: {
-  onAdd: (baseUrl: string) => void;
-  onCancel: () => void;
-}) {
-  const [url, setUrl] = useState("");
-  return (
-    <>
-      <div className="space-y-2">
-        <Label htmlFor="cloud-url">Company address</Label>
-        <Input
-          id="cloud-url"
-          placeholder="https://acme.opencompany.cloud"
-          value={url}
-          onChange={(e) => setUrl(e.target.value)}
-        />
-        {/*
-          Worth saying before the first probe rather than after it: a tenant
-          that has been idle is not running, and the platform starts it when a
-          request arrives. The row says "Waking…" for as long as that takes,
-          and an operator who has not been told that reads it as a hang.
-        */}
-        <p className="text-muted-foreground text-xs">
-          A company hosted for you. If it has been idle it is started on the next
-          request, so the first connection can take a few seconds.
-        </p>
-      </div>
-      <DialogFooter>
-        <Button variant="ghost" onClick={onCancel}>
-          Cancel
-        </Button>
-        <Button disabled={!url.trim()} onClick={() => onAdd(url.trim())}>
-          Add
-        </Button>
-      </DialogFooter>
-    </>
-  );
-}
-
-/** The address of a host running somewhere this application did not start it. */
-function RemoteHost({
-  onAdd,
-  onCancel,
-  desktop,
-}: {
-  onAdd: (baseUrl: string) => void;
-  onCancel: () => void;
-  desktop: boolean;
-}) {
-  const [url, setUrl] = useState("");
-  return (
-    <>
-      <div className="space-y-2">
-        <Label htmlFor="connection-url">Host URL</Label>
-        <Input
-          id="connection-url"
-          placeholder="https://acme.example.com"
-          value={url}
-          onChange={(e) => setUrl(e.target.value)}
-        />
-        {/*
-          The most likely support question this tab generates, answered where
-          it is cheapest to answer. A browser reaches a gateway from *this*
-          origin, so the gateway has to allow it — and there is no wildcard,
-          because the session is a credential. The desktop proxies from Rust,
-          where no origin is involved and none of this applies.
-        */}
-        {desktop ? null : (
-          <p className="text-muted-foreground text-xs">
-            A gateway you run yourself. It has to allow this console's address in{" "}
-            <code>OPENCOMPANY_CORS_ORIGINS</code>, or your browser will block every
-            reply.
-          </p>
-        )}
-      </div>
-      <DialogFooter>
-        <Button variant="ghost" onClick={onCancel}>
-          Cancel
-        </Button>
-        <Button disabled={!url.trim()} onClick={() => onAdd(url.trim())}>
-          Add
-        </Button>
-      </DialogFooter>
-    </>
-  );
-}
-
-/**
- * A host on another machine that is bound to loopback there, reached through a
- * tunnel this application opens.
- *
- * The destination leads and everything else has a default, because the shape
- * this is for is `acme-vps` — a `Host` alias out of `~/.ssh/config`. Anyone
- * with a bastion, a jump host or a non-default key has already written that
- * file, and a form that re-asks for its contents is one they will fill in
- * wrong.
- */
-function SshHost({
-  onAdd,
-  onDone,
-}: {
-  onAdd: (target: SshTarget) => Promise<void>;
-  onDone: () => void;
-}) {
-  const [destination, setDestination] = useState("");
-  const [remotePort, setRemotePort] = useState(String(DEFAULT_REMOTE_PORT));
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  async function add(): Promise<void> {
-    setBusy(true);
-    setError(null);
-    try {
-      await onAdd({
-        destination: destination.trim(),
-        remotePort: Number(remotePort) || DEFAULT_REMOTE_PORT,
-      });
-      onDone();
-    } catch (err) {
-      // `ssh`'s own words, kept: "Host key verification failed" and
-      // "Permission denied (publickey)" each name a specific thing to go and
-      // fix, and a summary of either would name none of them.
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  return (
-    <>
-      <div className="space-y-2">
-        <Label htmlFor="ssh-destination">Machine</Label>
-        <Input
-          id="ssh-destination"
-          placeholder="acme-vps, or deploy@10.0.0.4"
-          value={destination}
-          onChange={(e) => setDestination(e.target.value)}
-        />
-        <Label htmlFor="ssh-remote-port">Port it serves on there</Label>
-        <Input
-          id="ssh-remote-port"
-          inputMode="numeric"
-          placeholder={String(DEFAULT_REMOTE_PORT)}
-          value={remotePort}
-          onChange={(e) => setRemotePort(e.target.value)}
-        />
-        <p className="text-muted-foreground text-xs">
-          The host stays reachable only from that machine; this application
-          forwards it over your own ssh. Your key has to be one ssh can use
-          without asking — an agent key, or one with no passphrase.
-        </p>
-        {error ? <p className="text-destructive text-xs">{error}</p> : null}
-      </div>
-      <DialogFooter>
-        <Button variant="ghost" onClick={onDone}>
-          Cancel
-        </Button>
-        <Button disabled={busy || !destination.trim()} onClick={() => void add()}>
-          {busy ? <Loader2 className="size-4 animate-spin" /> : null}
-          Connect
-        </Button>
-      </DialogFooter>
-    </>
-  );
-}
-
-/**
- * The hosts this machine runs: what is listening, what is not, and a name field
- * for one more.
- *
- * Stopped instances are listed rather than hidden, and this is the only place
- * they appear. A stopped instance has no address, so it cannot be a row in the
- * switcher — the menu lists connections, and a connection with nothing
- * listening at it is a permanent probe failure. Here it is a row with a Start
- * button, which is what it actually is.
- */
-function LocalInstances({
-  instances,
-  onAdd,
-  onStart,
-  onStop,
-}: {
-  instances: LocalInstance[];
-  onAdd: (label: string) => Promise<void>;
-  onStart?: (id: string) => Promise<void>;
-  onStop?: (id: string) => Promise<void>;
-}) {
-  const [label, setLabel] = useState("");
-  /** Which instance has a command in flight, or `"new"` for the create. */
-  const [busy, setBusy] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-
-  /**
-   * Runs one command, keeping its failure on screen.
-   *
-   * Every one of these can fail for a reason the operator has to read — most
-   * often the data root being held by an `opencompany serve` in a terminal —
-   * and a rejected promise with no `catch` is a console that silently does
-   * nothing when the button is pressed.
-   */
-  async function run(key: string, action: () => Promise<void>): Promise<void> {
-    setBusy(key);
-    setError(null);
-    try {
-      await action();
-    } catch (failure) {
-      setError(failure instanceof Error ? failure.message : String(failure));
-    } finally {
-      setBusy(null);
-    }
-  }
-
-  return (
-    <div className="space-y-4" data-testid="local-instances">
-      <ul className="space-y-1">
-        {instances.map((instance) => (
-          <li
-            key={instance.id}
-            data-testid={`local-instance-${instance.id}`}
-            data-running={instance.running}
-            className="flex items-center justify-between gap-2 rounded-md border px-3 py-2"
-          >
-            <div className="min-w-0">
-              <div className="truncate text-sm">{instance.label}</div>
-              <div className="truncate text-xs text-muted-foreground">
-                {instance.running ? instance.baseUrl : (instance.error ?? "Stopped")}
-              </div>
-            </div>
-            {instance.running ? (
-              <Button
-                variant="ghost"
-                size="sm"
-                disabled={!onStop || busy !== null}
-                onClick={() => void run(instance.id, () => onStop!(instance.id))}
-              >
-                {busy === instance.id ? (
-                  <Loader2 className="size-4 animate-spin" />
-                ) : (
-                  <Square className="size-4" />
-                )}
-                Stop
-              </Button>
-            ) : (
-              <Button
-                variant="ghost"
-                size="sm"
-                disabled={!onStart || busy !== null}
-                onClick={() => void run(instance.id, () => onStart!(instance.id))}
-              >
-                {busy === instance.id ? (
-                  <Loader2 className="size-4 animate-spin" />
-                ) : (
-                  <Play className="size-4" />
-                )}
-                Start
-              </Button>
-            )}
-          </li>
-        ))}
-      </ul>
-
-      <div className="space-y-2">
-        <Label htmlFor="local-instance-label">Name</Label>
-        <Input
-          id="local-instance-label"
-          placeholder="Acme"
-          value={label}
-          onChange={(e) => setLabel(e.target.value)}
-        />
-        <p className="text-xs text-muted-foreground">
-          A new host on this computer, with its own data and its own companies. Nothing is shared
-          with the ones above.
-        </p>
-      </div>
-
-      {error ? (
-        <p data-testid="local-instance-error" className="text-xs text-destructive">
-          {error}
-        </p>
-      ) : null}
-
-      <DialogFooter>
-        <Button
-          data-testid="local-instance-add"
-          disabled={!label.trim() || busy !== null}
-          onClick={() =>
-            void run("new", async () => {
-              await onAdd(label.trim());
-              setLabel("");
-            })
-          }
-        >
-          {busy === "new" ? <Loader2 className="size-4 animate-spin" /> : null}
-          Run it here
-        </Button>
-      </DialogFooter>
-    </div>
   );
 }

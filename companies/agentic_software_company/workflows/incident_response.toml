@@ -1,0 +1,106 @@
+# Workflow graph: incident_response
+#
+# Referenced by `[workflows].enabled` in ../company.toml. A report of something
+# wrong in production becomes a triaged, owned, mitigated and written-up
+# incident — with the customer told at the point they should be told, which is
+# before the cause is known rather than after.
+
+id = "incident_response"
+name = "Incident response"
+description = "A production problem is triaged, mitigated, explained to customers, and closed with a prevention."
+
+[[node]]
+id = "report"
+kind = "trigger"
+name = "Something is wrong"
+summary = "An alert, a support thread, or an operator says production is broken."
+
+[[node]]
+id = "triage"
+kind = "agent"
+name = "Triage and open the row"
+summary = "Judge severity, take ownership, and open the incidents row before diagnosing anything."
+agent = "qa_engineer"
+
+[[node]]
+id = "severity"
+kind = "condition"
+name = "Customer-visible?"
+summary = "Branch on whether anyone outside this company can tell."
+[node.config]
+field = "=item.customer_visible"
+
+[[node]]
+id = "notify"
+kind = "agent"
+name = "Tell customers"
+summary = "Say what is broken and that it is being worked on. Before the cause is known, not after."
+agent = "customer_support"
+
+[[node]]
+id = "mitigate"
+kind = "agent"
+name = "Stop the bleeding"
+summary = "Roll back, disable, or shed load — whatever restores service fastest."
+agent = "backend_engineer"
+
+[[node]]
+id = "cause"
+kind = "agent"
+name = "Find the cause"
+summary = "Correlate against the releases ledger and establish what actually happened."
+agent = "backend_engineer"
+
+[[node]]
+id = "security_check"
+kind = "agent"
+name = "Was it a security event?"
+summary = "Decide whether this belongs on security-findings as well, and file it if so."
+agent = "security_engineer"
+
+[[node]]
+id = "writeup"
+kind = "output"
+name = "Close it out"
+summary = "Record cause and prevention on the incident row and report to the desk."
+
+# Engineering, not go-to-market: the audience for a closed incident is the
+# people whose next change is affected by the cause, and the prevention task
+# lands on this desk.
+[node.destination]
+kind = "channel"
+target = "engineering"
+
+[[edge]]
+from = "report"
+to = "triage"
+
+[[edge]]
+from = "triage"
+to = "severity"
+
+[[edge]]
+from = "severity"
+to = "notify"
+label = "yes"
+
+[[edge]]
+from = "severity"
+to = "mitigate"
+label = "no"
+
+[[edge]]
+from = "notify"
+to = "mitigate"
+
+[[edge]]
+from = "mitigate"
+to = "cause"
+
+[[edge]]
+from = "cause"
+to = "security_check"
+
+[[edge]]
+from = "security_check"
+to = "writeup"

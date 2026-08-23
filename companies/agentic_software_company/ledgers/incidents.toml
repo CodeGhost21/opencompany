@@ -1,0 +1,120 @@
+# Production incidents. The axis a software company cannot run without and the
+# board cannot carry: an incident is not a card, it is a *state the product is
+# in*, and the questions asked of it — what is broken right now, who is on it,
+# what did we tell customers, what stopped it happening again — are questions
+# about the incident and not about anybody's work queue.
+
+title = "Incidents"
+purpose = """
+Everything that has gone wrong in production: what broke, who is on it, what \
+customers were told, and what was changed so it does not happen again. Read it \
+before shipping near a system that has broken before; open a row the moment \
+something is wrong, not once it is understood.\
+"""
+written_by = "`record_entry` to open or update an incident, `close_entry` when it is resolved and the follow-up is filed"
+checks = ["required-field", "known-status", "closed-needs-reason"]
+
+[[field]]
+name = "id"
+role = "id"
+required = true
+
+[[field]]
+name = "incident"
+role = "title"
+required = true
+description = "What is broken, from the customer's side rather than the stack's."
+
+[[field]]
+name = "status"
+role = "status"
+required = true
+
+[[field]]
+name = "severity"
+role = "prose"
+required = true
+description = "sev1 (customers cannot work), sev2 (degraded), sev3 (contained). Guess high; downgrading is cheap."
+
+[[field]]
+name = "owner"
+role = "owner"
+description = "The one teammate driving it. Not a desk — an incident with two owners has none."
+
+[[field]]
+name = "started_at"
+role = "date"
+description = "When it began, as opposed to when it was noticed. The gap is itself a finding."
+
+[[field]]
+name = "impact"
+role = "prose"
+description = "Who was affected and how, in numbers if there are any."
+
+[[field]]
+name = "told_customers"
+role = "prose"
+description = "What was said publicly and when. Blank here after a sev1 is its own problem."
+
+[[field]]
+name = "cause"
+role = "prose"
+description = "What actually caused it, once known. `unknown` is an honest value; a plausible guess written as fact is not."
+
+[[field]]
+name = "prevention"
+role = "prose"
+description = "The change that stops a repeat, and the task id carrying it. A resolved incident with no prevention is a rehearsal."
+
+[[field]]
+name = "reason"
+role = "prose"
+description = "How it ended. Required when it closes."
+
+[[field]]
+name = "refs"
+role = "refs"
+description = "Tasks, commits, dashboards and the customer thread."
+
+[[status]]
+name = "open"
+label = "Open"
+
+[[status]]
+name = "mitigated"
+label = "Mitigated"
+
+[[status]]
+name = "resolved"
+closed = true
+needs_reason = true
+
+[[status]]
+name = "not_an_incident"
+label = "Not an incident"
+closed = true
+needs_reason = true
+
+[[section]]
+heading = "Open now"
+blurb = "Live. Nothing else this roster is doing outranks a row here."
+statuses = ["open"]
+order = "recent"
+
+[[section]]
+heading = "Mitigated, not resolved"
+blurb = """
+Customers are working again and the cause is still there. These are the ones \
+that come back — each should name the task that finishes it.\
+"""
+statuses = ["mitigated"]
+order = "recent"
+
+[[section]]
+heading = "Closed"
+blurb = """
+Resolved, with the cause and the prevention. Kept: the fastest way to diagnose \
+an outage is to find the last one that looked like it.\
+"""
+statuses = ["resolved", "not_an_incident"]
+cap = 20

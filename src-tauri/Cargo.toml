@@ -37,7 +37,41 @@ path = "src/main.rs"
 [dependencies]
 # The host, linked rather than spawned. `sqlite` is the desktop's backend;
 # `mongodb` is deliberately absent — a per-tenant cluster is a hosting concern.
-opencompany = { path = "..", default-features = false, features = ["sqlite", "platform-jwt", "oauth"] }
+#
+# `mcp` is what puts an agent harness in the app at all. Without it this build
+# has no `openhuman` feature, so `src/harness/` is not compiled, no company can
+# reach a model, and the console's inference test answers "This build cannot
+# reach a model — the agent harness is not compiled in." `mcp` implies
+# `openhuman`, and the host's `openhuman_core` dependency is declared
+# `default-features = false, features = ["skills", "mcp", "hosting"]` — so what
+# a desktop agent gets is exactly the minimal belt: built-in tools, MCP servers
+# and skills.
+#
+# The desktop includes every memory engine the console offers. A packaged app
+# has no alternate server binary an operator can switch to, so showing disabled
+# TinyCortex/TinyMemory tiles with "this build was compiled without ..." would
+# make the configuration surface a dead end. `tinycortex` provides the incumbent
+# embedded overlay, `tinymemory` provides the hosted/null driver seam, and
+# `tinymemory-embedded` provides its in-process namespace driver.
+#
+# Deliberately NOT here, and each for a reason rather than an oversight:
+#
+# * `media`, `composio`, `search` and the rest of the managed backends — they
+#   need a platform credential the desktop has no way to hold, and each fails
+#   closed anyway.
+# * `acp` — the local coding-harness lane. `src/acp/` here is an ACP *client*
+#   and compiles without it; turning it on would additionally wire
+#   `RuntimeBuilder::with_acp_agents`, which is a separate decision from having
+#   a harness at all.
+opencompany = { path = "..", default-features = false, features = [
+    "sqlite",
+    "platform-jwt",
+    "oauth",
+    "mcp",
+    "tinycortex",
+    "tinymemory",
+    "tinymemory-embedded",
+] }
 
 tauri = { version = "2", features = [] }
 # The OS credential store, so a device session token never has to live in the
@@ -56,9 +90,33 @@ serde_json = "1"
 thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+tempfile = "3"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
-[dev-dependencies]
-tempfile = "3"
+# The host's `[patch]` table, rebased one directory up.
+#
+# A `[patch]` section only takes effect in the workspace root that declares it,
+# and this crate is deliberately its own workspace (see the header). Until the
+# `mcp` feature above put `openhuman_core` in this graph none of these crates
+# were reachable from here, so the table could be omitted; now they are, and
+# without it Cargo resolves `tinycortex-api`, `tinyflows` and friends from
+# crates.io (where some do not exist at all) instead of the vendored checkouts
+# the host is built against — and any that did resolve would be a *second*
+# copy, whose trait identities would not match the ones `opencompany` compiled.
+#
+# Keep this byte-identical to the host's table modulo the `../` prefix. The
+# comments explaining each entry live there; this is the replica.
+[patch."https://github.com/tinyhumansai/tinymemory"]
+tinymemory-api = { path = "../vendor/openhuman/vendor/tinymemory/crates/tinymemory-api" }
+
+[patch.crates-io]
+tinyagents = { path = "../vendor/openhuman/vendor/tinyagents" }
+tinyflows = { path = "../vendor/openhuman/vendor/tinyflows" }
+tinycortex = { path = "../vendor/openhuman/vendor/tinycortex" }
+tinycortex-api = { path = "../vendor/openhuman/vendor/tinycortex/api" }
+tinychannels = { path = "../vendor/openhuman/vendor/tinychannels" }
+tinyplace = { path = "../vendor/openhuman/vendor/tinyplace/sdk/rust" }
+motosan-ai-oauth = { path = "../vendor/openhuman/vendor/motosan-ai-oauth" }
+whisper-rs-sys = { git = "https://github.com/tinyhumansai/whisper-rs-sys.git", branch = "main" }

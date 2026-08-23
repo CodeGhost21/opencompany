@@ -1,0 +1,113 @@
+# Brand deals: what was promised, what was paid, and what was delivered.
+#
+# The revenue side of a creator business, and the side where a missed obligation
+# is both a lost payment and a public credibility problem. A deal has deliverable
+# counts, usage rights, exclusivity windows and disclosure requirements — none of
+# which is a task, and all of which somebody will check.
+
+title = "Sponsorships"
+purpose = """
+Every brand deal: what was promised, what it pays, what the exclusivity and \
+usage terms are, and what has actually been delivered. Read it before agreeing \
+to anything — an exclusivity window from a deal three months ago is the \
+commonest way a new deal becomes a breach.\
+"""
+written_by = "`record_entry` to open or update a deal, `close_entry` when it is delivered or falls through"
+checks = ["required-field", "known-status", "closed-needs-reason"]
+
+[[field]]
+name = "id"
+role = "id"
+required = true
+
+[[field]]
+name = "deal"
+role = "title"
+required = true
+description = "The brand and what is being made for them."
+
+[[field]]
+name = "status"
+role = "status"
+required = true
+
+[[field]]
+name = "deliverables"
+role = "prose"
+required = true
+description = "Exactly what was promised — counts, formats, dates. Vagueness here is renegotiated later at the creator's expense."
+
+[[field]]
+name = "fee"
+role = "number"
+
+[[field]]
+name = "exclusivity"
+role = "prose"
+description = "What cannot be promoted, and until when. The clause that turns a new deal into a breach of an old one."
+
+[[field]]
+name = "usage"
+role = "prose"
+description = "Where the brand may reuse the content, and for how long. Frequently worth more than the fee."
+
+[[field]]
+name = "disclosure"
+role = "prose"
+description = "How it is disclosed. Not optional and not a matter of style."
+
+[[field]]
+name = "owner"
+role = "owner"
+
+[[field]]
+name = "reason"
+role = "prose"
+description = "How it ended — delivered, cancelled, or declined. Required when it closes."
+
+[[field]]
+name = "refs"
+role = "refs"
+
+[[status]]
+name = "in_talks"
+label = "In talks"
+
+[[status]]
+name = "agreed"
+
+[[status]]
+name = "delivering"
+
+[[status]]
+name = "delivered"
+closed = true
+needs_reason = true
+
+[[status]]
+name = "cancelled"
+closed = true
+needs_reason = true
+aliases = ["declined"]
+
+[[section]]
+heading = "Live obligations"
+blurb = "Agreed or delivering. Check exclusivity here before agreeing to anything new."
+statuses = ["agreed", "delivering"]
+order = "recent"
+
+[[section]]
+heading = "In talks"
+blurb = "Being negotiated. Nothing is promised until the operator has agreed it."
+statuses = ["in_talks"]
+order = "recent"
+
+[[section]]
+heading = "Closed"
+blurb = """
+Delivered, cancelled, or declined — each with the reason. A declined deal's \
+reason is worth keeping: the same brand comes back, and \"we said no because \
+of the exclusivity clause\" saves the whole negotiation.\
+"""
+statuses = ["delivered", "cancelled"]
+cap = 20
