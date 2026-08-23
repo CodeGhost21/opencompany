@@ -3098,7 +3098,32 @@ mod test {
     }
 
     #[tokio::test]
-    async fn canonical_namespace_does_not_bleed_into_legacy_fallback() {
+    async fn clearing_one_colliding_key_revokes_the_ambiguous_legacy_value() {
+        let root_dir = tmp_root();
+        let root = root_dir.path().to_path_buf();
+        let secrets = FsSecretStore::new(&root);
+        let company = CompanyId::new("company-a");
+        let bundle = Bundle::new(root, &company);
+        bundle.ensure_dirs().await.unwrap();
+
+        let key_a = "mcp/acme prod/auth";
+        let key_b = "mcp/acme_prod/auth";
+        let shared = bundle.legacy_secret(key_a);
+        assert_eq!(shared, bundle.legacy_secret(key_b));
+        tokio::fs::write(&shared, "legacy-token-must-not-return")
+            .await
+            .unwrap();
+
+        // Clearing A must not leave the old shared credential available to B.
+        secrets
+            .set(&company, key_a, SecretValue(String::new()))
+            .await
+            .unwrap();
+        assert!(!tokio::fs::try_exists(&shared).await.unwrap());
+        assert_eq!(secrets.get(&company, key_b).await.unwrap(), None);
+    }
+
+
         // Issue #1510's follow-up: `key-` was itself a valid legacy slug, so
         // the old canonical file for `foo` (`key-foo`) was returned when
         // reading `key-foo` through the legacy fallback, and writing `key-foo`
