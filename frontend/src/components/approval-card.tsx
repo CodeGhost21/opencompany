@@ -72,9 +72,9 @@ const KIND_ICONS: Record<string, LucideIcon> = {
  * deliberately unmarked so the badge and tint retain their signal.
  */
 const APPROVAL_CONSEQUENCES = {
-  spend: { label: "Spends money", iconClass: "bg-status-failed-soft text-status-failed-text" },
-  send: { label: "Leaves the company", iconClass: "bg-status-blocked-soft text-status-blocked-text" },
-  sign: { label: "Makes a commitment", iconClass: "bg-status-failed-soft text-status-failed-text" },
+  spend: { label: "Spends money", iconClass: "bg-tone-4/15 text-tone-4-text" },
+  send: { label: "Leaves the company", iconClass: "bg-tone-2/15 text-tone-2-text" },
+  sign: { label: "Makes a commitment", iconClass: "bg-tone-1/15 text-tone-1-text" },
   // Not "Goes public". The group spans genuinely external publishing —
   // `repo_publish`'s push to the real remote, `hosting_launch_site`,
   // `hosting_add_domain` — *and* `publish_artifact`, which writes only into the
@@ -83,9 +83,16 @@ const APPROVAL_CONSEQUENCES = {
   // `language.ts` already refuses to print for the same tool. "Publishes work"
   // is true under either reading: it is the step that makes finished work
   // visible past the agent's sandbox, whoever is on the other side of it.
-  publish: { label: "Publishes work", iconClass: "bg-status-running-soft text-status-running-text" },
-  hire: { label: "Changes who can act", iconClass: "bg-status-done-soft text-status-done-text" },
-  identity: { label: "Changes who can act", iconClass: "bg-status-done-soft text-status-done-text" },
+  publish: { label: "Publishes work", iconClass: "bg-tone-3/15 text-tone-3-text" },
+  // `hire` and `identity` are separate rows in the taxonomy
+  // (`docs/spec/company-brain/approvals.md`) and had been sharing one label,
+  // which hid exactly the distinction this change exists to draw. `hire` is an
+  // outbound engagement with another company or the firing of a vendor;
+  // `identity` is handle registration and renewal, key rotation, delegated
+  // signer mint/expand and `composio_authorize` — the company's own name and
+  // credentials, not who it does business with.
+  hire: { label: "Engages or drops a counterparty", iconClass: "bg-tone-4/15 text-tone-4-text" },
+  identity: { label: "Changes its identity or keys", iconClass: "bg-tone-5/15 text-tone-5-text" },
 } as const;
 
 type ApprovalConsequence = (typeof APPROVAL_CONSEQUENCES)[keyof typeof APPROVAL_CONSEQUENCES];
