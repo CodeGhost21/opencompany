@@ -27,6 +27,8 @@
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
+use sha2::{Digest, Sha256};
+
 use crate::Result;
 use crate::error::OpenCompanyError;
 use crate::ports::types::CompanyId;
