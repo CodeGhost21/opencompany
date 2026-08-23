@@ -30,8 +30,8 @@ import {
   staleDecisionLine,
 } from "@/lib/approval-wording";
 import {
-  approvalAction,
   approvalSummary,
+  decisionLabel,
   grantHeadline,
   timeAgo,
   toolAction,
