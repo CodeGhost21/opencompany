@@ -135,10 +135,15 @@ function failureLabel(failedCount: number, total: number): string {
  * action's own words when the host sent no payload (an old host) or withheld it
  * (#618), so a row never renders blank and never invents a value it does not
  * have.
+ *
+ * A small set of tools carry a second argument that changes what the first
+ * does — `http_request`'s method is the difference between a read and a delete
+ * on the same URL — and {@link payloadLeadLabel} puts those ahead of the lead,
+ * so a row never lets the leading argument speak for an effect it does not have.
  */
 function itemLabel(a: ApprovalSummary): string {
   if (a.contents_hidden) return `${approvalAction(a)} — details hidden by your role`;
-  return payloadLines(a)[0]?.value ?? approvalAction(a);
+  return payloadLeadLabel(a) ?? approvalAction(a);
 }
 
 export function ApprovalRow({
