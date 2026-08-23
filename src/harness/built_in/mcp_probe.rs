@@ -226,11 +226,20 @@ pub fn classify_mcp_error(
 fn classify_kind(err: &anyhow::Error, auth_configured: bool, in_call_context: bool) -> FailureKind {
     // 1. Typed 401 — the security-critical case. Read the typed
     //    `resource_metadata` (not the message) to decide OAuth vs static auth.
-    if let Some(unauthorized) = err
-        .chain()
-        .find_map(|cause| cause.downcast_ref::<oh::mcp::http_client::McpUnauthorizedError>())
-    {
-        return if unauthorized.resource_metadata.is_some() {
+    //
+    //    The standalone `McpUnauthorizedError` became `tinymcp::Error::Unauthorized`
+    //    when the client was extracted. `Error` is `#[non_exhaustive]`, so match
+    //    the one variant and fall through to the string rules for the rest —
+    //    which is what a new variant should do here anyway.
+    if let Some(resource_metadata) = err.chain().find_map(|cause| {
+        match cause.downcast_ref::<tinymcp::Error>() {
+            Some(tinymcp::Error::Unauthorized {
+                resource_metadata, ..
+            }) => Some(resource_metadata),
+            _ => None,
+        }
+    }) {
+        return if resource_metadata.is_some() {
             FailureKind::OauthRequired
         } else if auth_configured {
             FailureKind::TokenRejected
@@ -733,9 +742,9 @@ mod tests {
 
     #[test]
     fn classify_typed_401_dominates_string() {
-        // A typed McpUnauthorizedError with OAuth metadata → oauth_required,
+        // A typed `Error::Unauthorized` with OAuth metadata → oauth_required,
         // even though the message string would otherwise be generic.
-        let err = anyhow::Error::new(oh::mcp::http_client::McpUnauthorizedError {
+        let err = anyhow::Error::new(tinymcp::Error::Unauthorized {
             endpoint: "host".into(),
             resource_metadata: Some("https://host/.well-known/oauth".into()),
         });
@@ -844,7 +853,7 @@ mod tests {
 
     #[test]
     fn classify_typed_401_without_metadata_respects_credential_state() {
-        let err = anyhow::Error::new(oh::mcp::http_client::McpUnauthorizedError {
+        let err = anyhow::Error::new(tinymcp::Error::Unauthorized {
             endpoint: "host".into(),
             resource_metadata: None,
         });
