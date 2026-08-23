@@ -20,15 +20,21 @@ function toasterHovered(): boolean {
  * Let a click on a toast's read-only surface reach the page behind it (issue #1303).
  *
  * The toast still receives pointer movement, which keeps sonner's useful
- * hover-to-read pause intact. Only a click on its non-interactive content is
- * relayed. Its close button and any action button remain ordinary controls, so
- * a notification can still offer a one-click recovery without eating nearby
- * page controls.
+ * hover-to-read pause intact. Only a press or click on its non-interactive
+ * content is relayed — `pointerdown` so pointer-driven controls beneath (the
+ * workflow minimap pans on `pointerdown`) react to the gesture itself, and
+ * `click` for the event path that starts later. Its close button and any
+ * action button remain ordinary controls, so a notification can still offer a
+ * one-click recovery without eating nearby page controls.
  */
 function useToastClickThrough(): void {
   useEffect(() => {
     document.addEventListener("click", relayToastClick, true)
-    return () => document.removeEventListener("click", relayToastClick, true)
+    document.addEventListener("pointerdown", relayToastPointerDown, true)
+    return () => {
+      document.removeEventListener("click", relayToastClick, true)
+      document.removeEventListener("pointerdown", relayToastPointerDown, true)
+    }
   }, [])
 }
 
