@@ -115,6 +115,32 @@ describe("a run that answered a message", () => {
     expect(bare.label).toBe("front-desk");
     expect(bare.resolved).toBe(false);
   });
+
+  it("links a desk-channel run to the desk, not to a DM of the same name", () => {
+    // `agentId === chatId` here is a *desk* coincidence, not a DM: the desk's
+    // channel id is its thread id, so a turn in #engineering is addressed to
+    // the very desk whose id the thread carries. Stamp `dm:` on that and the
+    // link is `#/chat/dm:engineering`, which ChatView cannot resolve as the
+    // desk and drops as an unknown channel — the bug this PR fixed.
+    const source = runSource(
+      run({ chatId: "engineering", agentId: "engineering" }),
+      { chats: new Map([["engineering", "#engineering"]]) },
+    );
+    expect(source.href).toBe("#/chat/engineering");
+    expect(source.resolved).toBe(true);
+  });
+
+  it("links a DM run to the member's DM, which no desk claims", () => {
+    // A DM's thread id is the roster member's id, and no desk's id is also a
+    // member's id — so "not in the desk index" is the DM signal, and the link
+    // needs the `dm:` prefix ChatView resolves those channel ids by.
+    const source = runSource(
+      run({ chatId: "ada-1f3k", agentId: "ada-1f3k" }),
+      { chats: new Map([["engineering", "#engineering"]]) },
+    );
+    expect(source.href).toBe("#/chat/dm:ada-1f3k");
+    expect(source.resolved).toBe(false);
+  });
 });
 
 describe("a run with neither handle", () => {
