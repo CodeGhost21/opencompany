@@ -400,6 +400,12 @@ async fn run_workflow_inner(
     // run that ended badly must still be able to say it opened one.
     let blocks = super::caps::RunBlocks::default();
     let approvals = super::caps::RunApprovals::default();
+    // Issue #617: one per-run record of every child the resolver gates. The
+    // resolver (invoked by the engine mid-run) writes it; the parking path
+    // (after the engine returns) reads it to name a child pause. Created out
+    // here and owned past the engine call — the engine future and the
+    // capability bundle drop before parking runs.
+    let child_gates = Arc::new(super::caps::resolver::ChildGateRegistry::default());
     let capabilities = super::caps::build_capabilities(
         turn,
         deps,
@@ -413,6 +419,7 @@ async fn run_workflow_inner(
             board: board.clone(),
             blocks: blocks.clone(),
             approvals: approvals.clone(),
+            child_gates: child_gates.clone(),
         },
     )
     .await?;
