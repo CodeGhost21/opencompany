@@ -16,7 +16,8 @@ human_role = "Creative direction sign-off"
 # Every entry below is load-bearing. `allow` REPLACES the default
 # (`globals/globals.toml`'s `default_allow`); it never extends it. `*` covers
 # files/docs/shell/code/web/subagent but deliberately excludes the rest, so
-# `workspace.*` (a bare `*` confers workspace reads only), `media`, `composio`,
+# `workspace.*` and `workspace.write` (the latter is explicit because the host
+# recognizes only the exact write grant), `media`, `composio`,
 # `search` and `mcp:*` are each listed literally. This line is the default belt
 # restated verbatim; keeping it written out is what makes a narrowing here a
 # visible edit rather than an inherited surprise.
