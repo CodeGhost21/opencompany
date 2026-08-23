@@ -1514,8 +1514,7 @@ mod tests {
     fn sandbox_brief_flags_withhold_a_capability_denied_namespace() {
         use std::collections::HashSet;
 
-        let deny_shell =
-            toolbelt::CapabilityFilter::DenyNamespaces(HashSet::from(["shell"]));
+        let deny_shell = toolbelt::CapabilityFilter::DenyNamespaces(HashSet::from(["shell"]));
         assert_eq!(
             sandbox_brief_flags(true, true, true, &deny_shell),
             (true, false, true),
