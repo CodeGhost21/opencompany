@@ -180,9 +180,8 @@ fn catalog_matches_driver_registry() {
 ///
 /// Deliberately NOT quantified over the whole catalog: the in-pod engines
 /// (`embedded`, `namespace`) do cost a bundled SQLite build and stay opt-in.
-/// The desktop turns those on explicitly, and its own
-/// `the_desktop_build_includes_every_memory_engine` test is what holds it to
-/// the stronger claim.
+/// The desktop keeps those off too — it offers no in-pod memory surface — and
+/// enables the hosted drivers itself via `tinymemory` in `src-tauri/Cargo.toml`.
 #[test]
 fn the_hosted_memory_engines_ship_in_the_default_build() {
     let hosted = ["supermemory", "mem0", "cognee", "null"];
