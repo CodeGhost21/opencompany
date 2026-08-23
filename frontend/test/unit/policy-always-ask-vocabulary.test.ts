@@ -180,6 +180,56 @@ describe("what the always-ask field suggests", () => {
     expect(toasts.error).not.toHaveBeenCalled();
   });
 
+  it("does not call an entry unwired before tool discovery has answered", async () => {
+    let resolveSlugs!: (r: { slugs: string[] }) => void;
+    const client = {
+      scopeFor: (company: string | null) => `/api/v1/${company ?? "company"}`,
+      get: async (path: string) => {
+        if (path.includes("/workflows/tool-slugs")) {
+          // Held until the test resolves it, so the component renders with the
+          // wired set still pending — an empty array, but not a proven one.
+          return await new Promise((resolve) => {
+            resolveSlugs = resolve;
+          });
+        }
+        if (path.endsWith("/policy")) {
+          return { ...STATUS, alwaysApprove: ["shell"] };
+        }
+        return null;
+      },
+      put: vi.fn(async () => STATUS),
+      del: vi.fn(async () => STATUS),
+    } as unknown as OpenCompanyClient;
+
+    await mount(client);
+    // The always-ask list is nonempty, but an empty `wiredTools` while the
+    // request is pending proves nothing — no "not a tool" claim yet.
+    expect(container.textContent).not.toContain("is not a tool");
+
+    await act(async () => {
+      resolveSlugs({ slugs: [] });
+    });
+    // Discovery succeeded and "shell" is genuinely not wired: now it speaks.
+    expect(container.textContent).toContain(
+      "shell is not a tool this deployment wires.",
+    );
+  });
+
+  it("withholds the unwired warning when the host cannot serve the tool set", async () => {
+    const client = makeClient({
+      slugs: "unavailable",
+      status: { ...STATUS, alwaysApprove: ["shell"] },
+    });
+    await mount(client);
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    // An older host never answers discovery, so an entry cannot be proven
+    // unwired — it may still be a hosted effect kind.
+    expect(container.textContent).not.toContain("is not a tool");
+  });
+
   it("says what an entry is, including the prefix rule the matcher implements", async () => {
     await mount(makeClient());
     const text = container.textContent ?? "";
