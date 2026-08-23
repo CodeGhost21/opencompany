@@ -26,3 +26,18 @@ cargo run --bin opencompany -- serve --company companies/agentic_math_lab
 The end-to-end proof is `frontend/test/e2e/euler-live.spec.ts`, which states a
 problem in the main line against a real model and checks the integer the lab
 reaches against the published one.
+
+## Tool servers
+
+An answer here ships with the program that produced it, so the library documentation has to match the version that ran.
+
+Declared in [`mcp.json`](mcp.json) and merged with anything the install
+ships and anything an operator adds from the console. A server marked
+*needs a token* is declared but off: write its credential from
+Settings → Connections, then enable it there.
+
+| Server | What it is for | Ships |
+| --- | --- | --- |
+| `deepwiki` | Documentation and Q&A for any public GitHub repository. Public and no-auth. | on |
+| `context7` | Version-accurate API and library documentation, so answers match the release in use. | on |
+| `huggingface` | Models, datasets and papers on the Hugging Face Hub. Public and no-auth. | on |

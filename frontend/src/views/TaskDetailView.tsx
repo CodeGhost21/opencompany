@@ -82,7 +82,12 @@ import {
   type ApprovalSummary,
 } from "@/api/types";
 import type { OpenCompanyClient } from "@/api/client";
-import { hasFocus, type TaskFocus } from "@/lib/task-output";
+import {
+  isTaskTab,
+  tabForFocus,
+  type TaskFocus,
+  type TaskTab,
+} from "@/lib/task-output";
 import { pendingApprovalWait } from "@/lib/task-approvals";
 import { startVisiblePolling } from "@/lib/visible-poll";
 import {
@@ -249,19 +254,6 @@ function timeOf(at: number): string {
 }
 
 /**
- * Which tab a card's output link asks for (issue #339).
- *
- * `timeline` for everything else — including a focus that names nothing, which
- * is every navigation that existed before this — so the screen's default is
- * untouched by the feature.
- */
-function tabForFocus(focus?: TaskFocus): string {
-  if (focus?.artifactId) return "artifacts";
-  if (focus?.runId) return "attempts";
-  return "timeline";
-}
-
-/**
  * The count that rides the Plan tab's trigger, and the colour it wears (#337).
  *
  * Two different signals, never merged into one number. Red is *blocking*: only
@@ -290,6 +282,7 @@ export function TaskDetailView({
   taskId,
   attemptEventTick,
   focus,
+  onTabChange,
   parked = EMPTY_PARKED,
   onBack,
   onNavigate,
@@ -317,6 +310,8 @@ export function TaskDetailView({
    * lands on the default tab, exactly as before.
    */
   focus?: TaskFocus;
+  /** Writes an always-visible tab into the task detail's address. */
+  onTabChange?: (tab: TaskTab) => void;
   /** Return to the board. */
   onBack: () => void;
   /** Navigate the detail to a neighbouring (lineage) task. */
@@ -343,18 +338,24 @@ export function TaskDetailView({
   // whenever the address asked for nothing.
   const [tab, setTab] = useState<string>(() => tabForFocus(focus));
 
-  // Follow a focus that arrives (or changes) after mount: a card link clicked
-  // while this screen is already open, or a back/forward between two links on
-  // the same card. Keyed on the focus's own identity rather than the object,
-  // because the parent rebuilds it on every hash event and an object dependency
-  // would yank the operator back to the linked tab on every re-render.
-  const focusKey = `${focus?.artifactId ?? ""}|${focus?.version ?? ""}|${focus?.runId ?? ""}`;
+  // Follow the address after mount: a card link clicked while this screen is
+  // already open, a back/forward between two links on the same card, or a
+  // lineage hop to a neighbouring card. Keyed on the focus's own identity
+  // rather than the object, because the parent rebuilds it on every hash event
+  // and an object dependency would yank the operator back to the linked tab on
+  // every re-render.
+  //
+  // `taskId` is a dependency because a lineage hop writes a plain
+  // `#/tasks/<id>` — no tab addressed — while this component instance survives.
+  // Without the reset the screen would keep showing the previous card's tab
+  // while its address claimed the default, so copying or reloading that URL
+  // opened a different view than the one on screen.
+  const focusKey = `${focus?.tab ?? ""}|${focus?.artifactId ?? ""}|${focus?.version ?? ""}|${focus?.runId ?? ""}`;
   useEffect(() => {
-    if (!hasFocus(focus ?? {})) return;
     setTab(tabForFocus(focus));
     // `focus` is read through `focusKey`, which is what actually changed.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [focusKey]);
+  }, [focusKey, taskId]);
 
   // `isActive` is a per-effect-run token, not a shared ref: a superseded run
   // (e.g. taskId A→B) flips its own token to false so an in-flight `load()` from
@@ -579,7 +580,14 @@ export function TaskDetailView({
               />
             )}
 
-            <Tabs value={tab} onValueChange={(next) => setTab(String(next))}>
+            <Tabs
+              value={tab}
+              onValueChange={(next) => {
+                const selected = String(next);
+                setTab(selected);
+                if (isTaskTab(selected)) onTabChange?.(selected);
+              }}
+            >
               <TabsList>
                 <TabsTrigger value="timeline">Timeline</TabsTrigger>
                 <TabsTrigger value="attempts">
@@ -847,7 +855,7 @@ function DetailHeader({
           host older than #333 has no link and still falls back to the run
           window. Said plainly rather than left for a reader to discover. */}
       {showWaiting && (
-        <p className="mt-2 text-2xs text-muted-foreground/70">
+        <p className="mt-2 text-2xs text-muted-foreground">
           Waiting counts this task&rsquo;s own approvals; sign-offs parked before they carried a
           task id fall back to its run window.
         </p>
@@ -1505,7 +1513,7 @@ function StepBody({ entry }: { entry: TimelineEntry }) {
       {entry.detail && (
         <div>
           {entry.result && (
-            <div className="text-3xs font-medium uppercase tracking-wide text-muted-foreground/70">
+            <div className="text-3xs font-medium uppercase tracking-wide text-muted-foreground">
               Called with
             </div>
           )}
@@ -1517,7 +1525,7 @@ function StepBody({ entry }: { entry: TimelineEntry }) {
       {entry.result && (
         <div>
           {entry.detail && (
-            <div className="text-3xs font-medium uppercase tracking-wide text-muted-foreground/70">
+            <div className="text-3xs font-medium uppercase tracking-wide text-muted-foreground">
               Result
             </div>
           )}

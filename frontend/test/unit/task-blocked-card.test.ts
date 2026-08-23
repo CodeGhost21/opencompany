@@ -61,9 +61,11 @@ function parked(id: string, kind: string, at = T0): ApprovalSummary {
 let container: HTMLDivElement;
 let root: Root;
 let resumes: number;
+let opens: number;
 
 async function render(approvals: ApprovalSummary[], dragging = false) {
   resumes = 0;
+  opens = 0;
   await act(async () => {
     root.render(
       createElement(TaskItem, {
@@ -71,7 +73,9 @@ async function render(approvals: ApprovalSummary[], dragging = false) {
         dragging,
         block: taskApprovalBlock(approvals, "task-1"),
         now: NOW,
-        onOpen: () => {},
+        onOpen: () => {
+          opens += 1;
+        },
         onResume: () => {
           resumes += 1;
         },
@@ -102,6 +106,24 @@ afterEach(async () => {
 });
 
 describe("a paused card with approvals outstanding", () => {
+  it("uses its title button as the task action, leaving its controls independent", async () => {
+    await render([]);
+
+    const card = container.firstElementChild as HTMLDivElement;
+    const title = [...container.querySelectorAll("button")].find((button) =>
+      button.textContent?.includes("Triage the release blockers"),
+    );
+    if (!title) throw new Error(`no task title button in:\n${container.innerHTML}`);
+
+    expect(card.getAttribute("role")).toBeNull();
+    expect(card.hasAttribute("tabindex")).toBe(false);
+    expect(title.querySelectorAll("button, a")).toHaveLength(0);
+    await act(async () => {
+      title.click();
+    });
+    expect(opens).toBe(1);
+  });
+
   it("looks lifted while the board is carrying it", async () => {
     await render([], true);
 
