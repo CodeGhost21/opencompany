@@ -279,6 +279,7 @@ describe("the decide buttons' label (#1411)", () => {
         },
       }),
       askers,
+      NOW,
     );
     const second = decisionLabel(
       approval({
@@ -292,6 +293,7 @@ describe("the decide buttons' label (#1411)", () => {
         },
       }),
       askers,
+      NOW,
     );
     expect(first).not.toBe(second);
     expect(first).toContain("extra1: alpha");
