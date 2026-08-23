@@ -111,6 +111,20 @@ describe("every explorer icon says what it is (issue #1378)", () => {
   });
 });
 
+describe("the explorer tree at a touch viewport (issue #1396)", () => {
+  it("gives each row a 24px target below the desktop breakpoint", async () => {
+    await render();
+
+    const name = container.querySelector('[data-testid="workspace-tree-name"]');
+    const row = name?.closest("button");
+    expect(row, "a tree name must be inside its open/toggle button").not.toBeNull();
+    expect(row?.className).toContain("min-h-6");
+    // The denser 20px row is preserved on desktop; mobile is where a pointer
+    // is ordinarily a finger, and where adjacent rows need distinct targets.
+    expect(row?.className).toContain("md:min-h-0");
+  });
+});
+
 describe("the sweep's confirm wears the destroy weight (issue #1378)", () => {
   it("renders Remove with the solid destructive class, not the pale tint", async () => {
     await render();
