@@ -264,6 +264,36 @@ describe("what the always-ask field suggests", () => {
     });
     expect(container.textContent).not.toContain("is not a tool");
   });
+
+  it("does not call a real gateable agent tool a mistake", async () => {
+    // `publish_artifact` is a tool the approval gate covers (it parks), but it
+    // is not one of the workflow-authorable slugs served by
+    // `/workflows/tool-slugs` — the exact gap the note's wording exists for.
+    // It is still flagged, because the served set cannot prove it wired, but
+    // the note is scoped to that set ("doesn't match … workflow tools wired
+    // here") and hedges that it may still be a wired agent tool — not a
+    // blanket "not a tool this deployment wires" claim.
+    const client = makeClient();
+    await mount(client);
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    const input = field()!;
+    await act(async () => {
+      const setValue = Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        "value",
+      )?.set;
+      setValue?.call(input, "publish_artifact");
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    expect(container.textContent).not.toContain("is not a tool");
+    expect(container.textContent).toContain(
+      "publish_artifact doesn't match any of the workflow tools wired here.",
+    );
+  });
 });
 
 describe("policy tier changes", () => {
