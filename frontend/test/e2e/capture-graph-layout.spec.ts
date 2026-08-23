@@ -39,14 +39,20 @@ test("capture settled graph layout", async ({ page }) => {
   const dump = await page.evaluate(() => {
     const svg = document.querySelector('svg[aria-label="Operating knowledge graph"]');
     if (!svg) return { error: "no svg" };
-    // Every node is a <g> carrying transform="translate(x,y)".
-    const positions: number[][] = [];
+    // Every node is a <g> carrying transform="translate(x,y)" plus an id.
+    const positions: Record<string, number[]> = {};
     for (const el of svg.querySelectorAll("g[transform]")) {
       const m = el.getAttribute("transform")?.match(/translate\((-?[\d.]+)\s*[, ]\s*(-?[\d.]+)\)/);
-      if (m) positions.push([Math.round(+m[1] * 10) / 10, Math.round(+m[2] * 10) / 10]);
+      if (m) {
+        const id =
+          el.getAttribute("id") ||
+          el.getAttribute("data-id") ||
+          el.querySelector("[id]")?.getAttribute("id") ||
+          `anon-${el.querySelectorAll("*").length}-${m[1]},${m[2]}`;
+        positions[id] = [Math.round(+m[1] * 10) / 10, Math.round(+m[2] * 10) / 10];
+      }
     }
-    positions.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
-    return { count: positions.length, positions };
+    return { count: Object.keys(positions).length, positions };
   });
   console.log("GRAPH_LAYOUT_JSON=" + JSON.stringify(dump));
   const out =
