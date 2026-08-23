@@ -65,14 +65,16 @@ export function ProfileRow({
           onClick={() => setOpen(true)}
           data-testid="profile-row"
         >
-          {/* 16px, which is below the size a mascot can be read at — so this is
-              the one place the tone tile alone is the right answer. The name
-              beside it is what identifies you here; the tile is a colour. */}
+          {/* 20px, not the 16px a sidebar icon slot would take: 16 is below the
+              size a face can be read at (see `MessageRow`'s facepile note), and
+              this is the one row on screen whose whole job is to show you yours.
+              A row's icon slot sizes to its content, so the extra four pixels
+              cost the label nothing. */}
           <TeammateAvatar
             name={name}
             tone={toneFor(me.id || me.email)}
             avatar={personAvatar(me)}
-            className="size-4 rounded-[4px] text-3xs"
+            className="size-5 rounded-[4px] text-3xs"
           />
           <span className="truncate">{name}</span>
         </SidebarMenuButton>
