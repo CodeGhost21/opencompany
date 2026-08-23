@@ -1259,7 +1259,7 @@ to = "sub"
             Some(&serde_json::json!({ "target": "child" })),
         )
         .expect("an expression-bound child gate resolves through the registry");
-        assert_eq!(described.node_id, "work");
+        assert_eq!(described.node_id, "run");
         assert_eq!(described.slug, "shell");
     }
 }
