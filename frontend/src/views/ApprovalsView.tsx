@@ -33,6 +33,7 @@ import {
   approvalSummary,
   decisionLabel,
   grantHeadline,
+  grantSubject,
   timeAgo,
   toolAction,
   untilLabel,
