@@ -827,8 +827,8 @@ impl GrantSet {
     }
 
     /// Returns every **live** standing policy of the opposite polarity whose
-    /// recorded scope would shadow `grant_scope` — the same subject and tool,
-    /// and a scope the old policy admits (issue #1458).
+    /// recorded scope overlaps `grant_scope` — the same subject and tool, and a
+    /// scope that either policy would shadow (issue #1458).
     ///
     /// This is the read half of the mint-side newest-decision-wins reconcile.
     /// Callers persist the returned policies as revoked before removing them
@@ -841,12 +841,16 @@ impl GrantSet {
     /// revoked.
     ///
     /// Scoped deliberately to policies whose scope would actually shadow the
-    /// new one (`admits_scope`), so a denial of one web host does not revoke a
-    /// grant for another: two policies that each govern their own slice of a
-    /// tool coexist, exactly as they do when minted in isolation. A wildcard
-    /// old policy (an unresolvable scope, recorded `None`) does shadow any new
-    /// policy for the same tool, so the reconcile takes it — the operator's
-    /// new decision supersedes the older, broader one.
+    /// new one, so a denial of one web host does not revoke a grant for another:
+    /// two policies that each govern their own slice of a tool coexist, exactly
+    /// as they do when minted in isolation. Overlap is symmetric: a wildcard
+    /// policy (an unresolvable scope, recorded `None`) shadows every other
+    /// policy for the same tool in either direction. A wildcard old policy is
+    /// superseded by any new scoped one, and a wildcard **new** policy
+    /// supersedes any older scoped one — the operator's newest decision is the
+    /// whole standing contract for the tool, rather than leaving the older
+    /// scoped policy listed-but-inert until the wildcard expires and resurrects
+    /// it.
     pub fn opposite_polarity(
         &self,
         subject: &GrantSubject,
@@ -863,7 +867,7 @@ impl GrantSet {
                 g.verdict != verdict
                     && &g.subject() == subject
                     && g.tool == tool
-                    && g.admits_scope(grant_scope)
+                    && scopes_overlap(grant_scope, g.scope.as_deref())
                     && g.is_live_at(now_millis)
             })
             .cloned()
