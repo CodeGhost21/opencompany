@@ -1044,6 +1044,13 @@ jobs:
             unshare --net -- sh -c "ip link set lo up && exec '$binary' --test-threads=1 --nocapture"
         env:
           OPENCOMPANY_OFFLINE_LANE: "1"
+          # This step runs the test binary DIRECTLY (bypassing cargo), so the
+          # tracked floor in `.cargo/config.toml` (issue #895) never reaches it:
+          # cargo applies `[env]` only to processes it launches. Without this,
+          # the OpenHuman agent-turn chain runs on libtest's 2 MiB default and
+          # can SIGABRT the whole binary before the offline lane is exercised
+          # (issue #579).
+          RUST_MIN_STACK: "8388608"
 
       # Catches the combination traps no single feature set can: most often a
       # mandatory struct field constructed differently across feature arms.
