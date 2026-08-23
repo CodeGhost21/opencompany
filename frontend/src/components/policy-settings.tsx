@@ -521,7 +521,7 @@ export function PolicySettings({ client, company }: Props) {
                   size="sm"
                   variant="outline"
                   disabled={saving}
-                  onClick={() => void reset()}
+                  onClick={() => void requestReset()}
                 >
                   <RotateCcw className="mr-1 h-3 w-3" />
                   Use the manifest's policy
