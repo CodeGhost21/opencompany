@@ -24,7 +24,6 @@
 
 use std::sync::{Arc, Mutex};
 
-use openhuman_core::openhuman as oh;
 
 use crate::company::mcp::{McpHealth, McpServerDecl, McpStatus};
 use crate::harness::mcp::registry_from_decls;
