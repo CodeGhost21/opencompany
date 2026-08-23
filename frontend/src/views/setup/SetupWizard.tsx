@@ -1118,8 +1118,20 @@ function PowerStep({
   // The house already holds one, and this operator may have no way to get their
   // own. The key box is then optional rather than the point of the screen.
   const onTheHouse = status.inference.ready && provider === status.inference.provider;
+  // "Use my own" flips the gate: the host credential is only testable while
+  // that is the operator's actual choice. Once they opt to supply their own
+  // key, an empty box must not test anything — a test with no key probes the
+  // host credential and would report a pass for a key they never provided.
+  const canTest =
+    (!spec.needsKey || (onTheHouse && !override) || value.trim().length > 0) &&
+    (!spec.needsUrl || baseUrl.trim().length > 0);
 
   const run = async () => {
+    // This also protects the Enter shortcut on the inputs. A disabled button
+    // alone would still leave that route to a request the provider cannot
+    // answer usefully.
+    if (!canTest) return;
+
     onTested({ kind: "testing" });
     try {
       const result = await testInference(client, {
@@ -1287,7 +1299,7 @@ function PowerStep({
         <Button
           type="button"
           variant={tested.kind === "ok" ? "outline" : "default"}
-          disabled={tested.kind === "testing"}
+          disabled={tested.kind === "testing" || !canTest}
           onClick={() => void run()}
           data-testid="setup-test-connection"
         >
