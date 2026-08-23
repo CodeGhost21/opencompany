@@ -125,9 +125,26 @@ pub struct TemplateAgent {
 /// file's, verbatim, for exactly that reason — the strings are already exercised
 /// in every company rather than invented here.
 ///
-/// `search` is deliberately absent from every belt even though the globals
-/// researcher names it: it bills per call, and a team nobody has met yet should
-/// not arrive holding a spend authority. A company that wants it grants it.
+/// ## The belts are wide by default, and narrowed by the company (issue: the
+/// setup-minted roster arriving unable to search, reach an MCP server or write
+/// the workspace)
+///
+/// The belts here used to stop at the workspace, documents and files, so a
+/// teammate a first-run operator created could not search the web, could not
+/// call a granted MCP server, and — because `workspace.*` is a read grant, not
+/// a write one (see
+/// [`grants_workspace_write_explicit`](crate::company::grants_workspace_write_explicit))
+/// — could not write the workspace it was told it owned. Every one of those
+/// showed up as the teammate itself saying the capability "is not enabled", and
+/// as a Team screen listing the ask under "asked for but not granted".
+///
+/// So each shape now asks for the belt its work actually needs, spend
+/// namespaces included, and the **company** is the place that narrows: an
+/// agent's `tools` line is intersected with `[tools].allow`, so a company that
+/// does not want `search`, `media`, `composio`, `shell`/`code` or `repo` drops
+/// it from that one list and every teammate loses it at once. The narrowing is
+/// still real — no shape asks for everything, and a belt can only ever be a
+/// subset of what the company allows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AgentFocus {
@@ -204,30 +221,54 @@ impl AgentFocus {
 
     /// This focus's tool belt.
     ///
-    /// Six of the eight return the same list, and that is not an oversight:
-    /// they differ in mandate and in what the prompt routes to them, not in the
-    /// tools they need. Keeping them distinct is what lets the belts diverge
-    /// later without re-deciding which agents are which — and it is what let
-    /// the vocabulary be widened for instruction purposes without moving a
-    /// single teammate's reach.
+    /// Every shape starts from [`BASE_BELT`] — the workspace (read *and*
+    /// write), documents, files, the web, web search and whatever MCP servers
+    /// the company has granted — and adds only what its own work needs on top.
+    /// A shape that adds nothing still differs from its neighbours in mandate
+    /// and in what the prompt routes to it; keeping the arms distinct is what
+    /// lets a belt diverge later without re-deciding which agents are which.
     ///
-    /// `Build` sharing the writing belt is a decision, not an omission. The
-    /// obvious reading of "makes the product" is `repo` and `shell`, and no
-    /// focus reaches either: a teammate a stranger's three sentences invented
-    /// does not get a shell on the strength of a word the model chose. A
-    /// company that wants that grants it.
+    /// Note `workspace.write` rather than `workspace.*`: only the bare
+    /// `workspace` grant and the exact `workspace.write` sub-grant confer
+    /// writes (see
+    /// [`grants_workspace_write_explicit`](crate::company::grants_workspace_write_explicit)),
+    /// so the `workspace.*` these belts used to carry was a read grant wearing
+    /// a wildcard — a teammate told it owned the workspace and refused every
+    /// write to it.
+    ///
+    /// `Build` is the one shape that reaches `shell`, `code` and `repo`,
+    /// because "makes and maintains the product" is not doable without them.
+    /// That reach is real, and the control over it is the company's
+    /// `[tools].allow`: drop `repo.*` (or `*`, which covers shell and code)
+    /// from that list and no teammate this flow mints can reach them,
+    /// whatever the model called the shape.
     pub fn tools(self) -> Vec<String> {
-        let belt: &[&str] = match self {
-            Self::Research => &["workspace.read", "docs.*", "files.*", "web.*"],
-            Self::Writing
-            | Self::Design
-            | Self::Operations
-            | Self::Coordination
-            | Self::Build
-            | Self::Support => &["workspace.*", "docs.*", "files.*"],
-            Self::Analysis => &["workspace.*", "docs.*", "files.*", "web.*"],
+        let extra: &[&str] = match self {
+            // Reads what is there and reports; it has no business writing the
+            // company's own guidance tree.
+            Self::Research => &[],
+            Self::Writing => &["workspace.write"],
+            // Makes the visual work, so it reaches image/video generation.
+            Self::Design => &["workspace.write", "media"],
+            // Runs recurring process end to end: third-party accounts through
+            // Composio, and helpers for the long-running ones.
+            Self::Operations => &["workspace.write", "composio", "subagent"],
+            // Moves work between people; delegating is the job.
+            Self::Coordination => &["workspace.write", "subagent"],
+            // The only shape that reaches code, a shell and a bound repository.
+            Self::Build => &["workspace.write", "shell", "code", "repo.*"],
+            // Answers customers, which means reaching the mailbox/helpdesk
+            // account the company connected.
+            Self::Support => &["workspace.write", "composio"],
+            // Measures and reports: it runs the numbers rather than writing
+            // the product.
+            Self::Analysis => &["workspace.write", "code"],
         };
-        belt.iter().map(|t| (*t).to_string()).collect()
+        BASE_BELT
+            .iter()
+            .chain(extra)
+            .map(|t| (*t).to_string())
+            .collect()
     }
 
     /// How a teammate with this focus works — the standing instructions that
