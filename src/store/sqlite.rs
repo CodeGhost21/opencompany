@@ -179,6 +179,12 @@ CREATE TABLE IF NOT EXISTS runs (
     -- does, and `task_id = ?` never matches it — which is what a per-card
     -- filter wants.
     task_id    TEXT,
+    -- Issue #1573: the desk the attempt was dispatched to, mirrored out of
+    -- `run_json` so the console's per-teammate history is an indexed read
+    -- rather than a scan. Nullable only so the additive `ALTER` on an existing
+    -- database has something to write before the backfill runs; every row the
+    -- store itself writes carries one.
+    agent_id   TEXT,
     status     TEXT NOT NULL,
     attempt    INTEGER NOT NULL,
     created_ms INTEGER NOT NULL,
@@ -186,6 +192,7 @@ CREATE TABLE IF NOT EXISTS runs (
     PRIMARY KEY (company_id, id)
 );
 CREATE INDEX IF NOT EXISTS runs_by_task ON runs (company_id, task_id);
+CREATE INDEX IF NOT EXISTS runs_by_agent ON runs (company_id, agent_id);
 CREATE INDEX IF NOT EXISTS runs_by_status ON runs (company_id, status);
 CREATE TABLE IF NOT EXISTS run_steps (
     company_id TEXT NOT NULL,
@@ -411,17 +418,25 @@ fn relax_runs_task_id_nullability(conn: &Connection) -> Result<()> {
              company_id TEXT NOT NULL,
              id         TEXT NOT NULL,
              task_id    TEXT,
+             agent_id   TEXT,
              status     TEXT NOT NULL,
              attempt    INTEGER NOT NULL,
              created_ms INTEGER NOT NULL,
              run_json   TEXT NOT NULL,
              PRIMARY KEY (company_id, id)
          );
+         -- `agent_id` is read straight out of the blob rather than copied from
+         -- a column, because this rebuild also runs on a database that predates
+         -- the column entirely — selecting it there would fail on a name the
+         -- old table does not have.
          INSERT INTO runs_rebuilt
-             SELECT company_id, id, task_id, status, attempt, created_ms, run_json FROM runs;
+             SELECT company_id, id, task_id,
+                    json_extract(run_json, '$.agentId'),
+                    status, attempt, created_ms, run_json FROM runs;
          DROP TABLE runs;
          ALTER TABLE runs_rebuilt RENAME TO runs;
          CREATE INDEX IF NOT EXISTS runs_by_task ON runs (company_id, task_id);
+         CREATE INDEX IF NOT EXISTS runs_by_agent ON runs (company_id, agent_id);
          CREATE INDEX IF NOT EXISTS runs_by_status ON runs (company_id, status);
          COMMIT;",
     )
@@ -2409,12 +2424,14 @@ impl crate::ports::runs::RunStore for SqliteStore {
             step_count: 0,
         };
         tx.execute(
-            "INSERT INTO runs (company_id, id, task_id, status, attempt, created_ms, run_json) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            "INSERT INTO runs \
+             (company_id, id, task_id, agent_id, status, attempt, created_ms, run_json) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 company.as_ref(),
                 run.id,
                 run.task_id,
+                run.agent_id,
                 run.status.as_str(),
                 run.attempt as i64,
                 run.created_at_millis as i64,
@@ -2456,15 +2473,18 @@ impl crate::ports::runs::RunStore for SqliteStore {
         // `status` and `task_id` are mirrored out of the blob so the indexes
         // can answer a filtered list without deserializing every row.
         conn.execute(
-            "INSERT INTO runs (company_id, id, task_id, status, attempt, created_ms, run_json) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) \
+            "INSERT INTO runs \
+             (company_id, id, task_id, agent_id, status, attempt, created_ms, run_json) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) \
              ON CONFLICT(company_id, id) DO UPDATE SET task_id = excluded.task_id, \
+             agent_id = excluded.agent_id, \
              status = excluded.status, attempt = excluded.attempt, \
              created_ms = excluded.created_ms, run_json = excluded.run_json",
             params![
                 company.as_ref(),
                 run.id,
                 run.task_id,
+                run.agent_id,
                 run.status.as_str(),
                 run.attempt as i64,
                 run.created_at_millis as i64,
@@ -2480,7 +2500,7 @@ impl crate::ports::runs::RunStore for SqliteStore {
         company: &CompanyId,
         filter: &crate::ports::runs::RunFilter,
     ) -> Result<Vec<crate::ports::runs::RunRecord>> {
-        // Every predicate is pushed into SQL (both columns are indexed) so a
+        // Every predicate is pushed into SQL (all three columns are indexed) so a
         // long-lived company does not deserialize its whole run history to
         // answer one card's Attempts list.
         let mut sql = String::from("SELECT run_json FROM runs WHERE company_id = ?1");
@@ -2488,6 +2508,10 @@ impl crate::ports::runs::RunStore for SqliteStore {
         if let Some(task_id) = &filter.task_id {
             args.push(task_id.clone());
             sql.push_str(&format!(" AND task_id = ?{}", args.len()));
+        }
+        if let Some(agent_id) = &filter.agent_id {
+            args.push(agent_id.clone());
+            sql.push_str(&format!(" AND agent_id = ?{}", args.len()));
         }
         if !filter.statuses.is_empty() {
             let placeholders: Vec<String> = filter
