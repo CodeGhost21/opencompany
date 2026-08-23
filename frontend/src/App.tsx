@@ -13,6 +13,7 @@ import { signInWithHubToken, verifyCode } from "@/api/auth";
 import { isAddressableBaseUrl, isDesktopRuntime } from "@/api/transport";
 import {
   createLocalInstance,
+  deleteLocalInstance,
   embeddedHost,
   localInstances,
   openSshTunnel,
@@ -603,6 +604,25 @@ function Console() {
           await refreshLocal();
         }
       : undefined,
+    onDeleteLocal: isDesktopRuntime()
+      ? async (id) => {
+          const instance = embedded.instances.find((candidate) => candidate.id === id);
+          const connection = instance?.instanceId
+            ? listConnections().find(
+                (candidate) => candidate.identity?.instanceId === instance.instanceId,
+              )
+            : undefined;
+          await deleteLocalInstance(id);
+          await refreshLocal();
+
+          // A deleted local host is not somewhere Back can return to. The
+          // roster refresh prunes its connection; this keeps the selected host
+          // and address bar in step with that removal as one user action.
+          if (connection?.id === selected) {
+            resettleHost(listConnections()[0]?.id ?? null);
+          }
+        }
+      : undefined,
     hub: Boolean(config.hub),
   };
 
@@ -801,4 +821,3 @@ export function magicLinkNotice(err: unknown): string {
       return "That sign-in link didn't work. Request a new one below.";
   }
 }
-

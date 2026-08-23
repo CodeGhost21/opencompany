@@ -1425,6 +1425,17 @@ export interface CapabilityStatusDto {
   /** The company's daily `web_search` call ceiling. */
   searchDailyCallCap?: number;
   /**
+   * Which provider the company's searches actually reach: `managed` (the
+   * platform's own account, metered and daily-capped) or the slug it configured
+   * in Settings → Search.
+   *
+   * Read beside `searchCredentialConfigured` rather than instead of it: the two
+   * disagree in both directions. A host with no platform credential still
+   * searches for a company that brought its own key, and a company that picked a
+   * provider without finishing it is still on `managed`.
+   */
+  searchProvider?: string;
+  /**
    * Bound repositories (issue #245, agent half): whether the company
    * **explicitly** grants the `repo` namespace (a `*` wildcard does not count).
    *
