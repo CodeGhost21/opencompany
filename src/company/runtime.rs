@@ -2606,7 +2606,10 @@ impl CompanyRuntime {
     /// * **Idempotent** — an item that already left this machine (its
     ///   `issue_status` is recorded) returns the recorded result instead of
     ///   filing or forwarding again, so a retried or double-submitted Send does
-    ///   not file a second issue or add a duplicate comment.
+    ///   not file a second issue or add a duplicate comment. A per-item lock
+    ///   held across the whole confirm serialises concurrent confirms of the
+    ///   same item, so the loser re-reads the winner's recorded result instead
+    ///   of both sending.
     /// * **Preview-first** — an item captured by the feedback tool or the chat
     ///   intent was never previewed and its words are hidden from the reports
     ///   list, so confirming it by id would send a body nobody inspected.
@@ -2618,8 +2621,13 @@ impl CompanyRuntime {
         item_id: Option<String>,
     ) -> Result<FeedbackResponse> {
         let manifest = self.store.load(&self.id).await?.map(|r| r.manifest);
+        // Held until the end of the call for a confirm, so the check below and
+        // the finalize that records the status are one critical section.
+        let mut _confirm_guard = None;
         let item = match item_id {
             Some(id) => {
+                _confirm_guard =
+                    Some(crate::feedback::store::confirm_lock(&id).lock_owned().await);
                 let item = self
                     .feedback
                     .get(&id)
