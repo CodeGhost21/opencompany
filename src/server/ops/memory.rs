@@ -420,10 +420,16 @@ async fn list_facts(
         // the reads so a huge context store can't unbound this request.
         let mirror_prefix = format!("{OPERATOR_FACT_PREFIX}/");
         let metas = company.runtime.context.list(company.id(), "").await?;
-        total_context = metas
-            .iter()
-            .filter(|m| !m.label.starts_with(&mirror_prefix))
-            .count();
+        // The truncation metadata describes the unqueried browse list — the
+        // "newest N of M" notice. With `?query=` the rows are search matches,
+        // not "the newest N", so the metadata is not applicable and stays 0/
+        // false rather than implying a search result was omitted by the cap.
+        if query.is_none() {
+            total_context = metas
+                .iter()
+                .filter(|m| !m.label.starts_with(&mirror_prefix))
+                .count();
+        }
         let metas = capped_newest_first(metas, &mirror_prefix, MAX_CONTEXT_ENTRIES);
         // One batched read for every surviving body — how few round trips
         // that really is, is the backend's business (see `peek_many`); what
