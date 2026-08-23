@@ -31,6 +31,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { ThemeToggle } from "@/components/theme-toggle";
+import { withHostParam } from "@/hooks/use-host-route";
 import { cn } from "@/lib/utils";
 
 /**
@@ -66,6 +67,11 @@ export function StyleguideView() {
 }
 
 function Header() {
+  // The styleguide is reachable from a console scoped to one of several hosts
+  // (`#/styleguide?host=<id>`), and `App` remounts `Console` on the way back:
+  // a bare `#/overview` would drop the scope and land the operator on whichever
+  // host the bootstrap fallback picks. `withHostParam` carries it over.
+  const backHref = withHostParam("overview");
   return (
     <header
       className="sticky top-0 z-10 border-b bg-background/95 backdrop-blur"
@@ -91,7 +97,7 @@ function Header() {
           <ThemeToggle />
           <a
             className="inline-flex h-8 items-center gap-1.5 rounded-md px-3 text-sm font-medium transition-colors hover:bg-accent hover:text-accent-foreground focus-visible:ring-3 focus-visible:ring-ring/50 focus-visible:outline-none"
-            href="#/overview"
+            href={backHref}
           >
             <ArrowLeft className="size-4" />
             Back to console
