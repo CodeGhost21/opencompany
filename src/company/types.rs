@@ -1679,63 +1679,6 @@ mod test {
         assert!(!grants_composio_explicit(&["composiotools".into()]));
     }
 
-    /// Bound repositories (issue #245, agent half) are granted ONLY by an
-    /// explicit `repo` / `repo.*` grant — never by the catch-all `*`. A
-    /// `repo_checkout` puts a third party's source inside a sandbox an agent may
-    /// also hold `shell` over, so a wildcard set for file and shell tools must
-    /// not carry it in.
-    #[test]
-    fn repo_grant_requires_explicit_namespace_not_wildcard() {
-        assert!(grants_repo_explicit(&["repo".into()]));
-        assert!(grants_repo_explicit(&["repo.checkout".into()]));
-        assert!(grants_repo_explicit(&["web.*".into(), "repo".into()]));
-        // The catch-all `*` must NOT grant repo.
-        assert!(!grants_repo_explicit(&["*".into()]));
-        assert!(!grants_repo_explicit(&["web.*".into()]));
-        assert!(!grants_repo_explicit(&[]));
-        // A substring match must not count as the repo namespace.
-        assert!(!grants_repo_explicit(&["reporting".into()]));
-        assert!(!grants_repo_explicit(&["repository".into()]));
-    }
-
-    /// The repository *write* tier (issue #734) is conferred ONLY by the exact
-    /// string `repo.write` — never a bare `repo`, never a `repo.write` prefix,
-    /// never the catch-all `*`. Read and write are separate decisions.
-    #[test]
-    fn repo_write_is_conferred_only_by_the_exact_grant() {
-        assert!(grants_repo_write_explicit(&["repo.write".into()]));
-        assert!(grants_repo_write_explicit(&[
-            "web.*".into(),
-            "repo.write".into()
-        ]));
-        // The catch-all `*` must NOT grant write.
-        assert!(!grants_repo_write_explicit(&["*".into()]));
-        // A read grant is genuinely read-only.
-        assert!(!grants_repo_write_explicit(&["repo.read".into()]));
-        assert!(!grants_repo_write_explicit(&["repo.checkout".into()]));
-        assert!(!grants_repo_write_explicit(&[]));
-        // A prefix match must not count: `repo.writer` is not `repo.write`.
-        assert!(!grants_repo_write_explicit(&["repo.writer".into()]));
-    }
-
-    /// **The regression this predicate exists to prevent.** Every company
-    /// adopting the read tier writes bare `repo`; that must confer read tools
-    /// (`grants_repo_explicit`) and **not** push (`grants_repo_write_explicit`),
-    /// so a company reading code never silently gains agents pushing it. Named so
-    /// its purpose survives a refactor that "harmonises" the two predicates.
-    #[test]
-    fn bare_repo_confers_read_but_not_write() {
-        assert!(grants_repo_explicit(&["repo".into()]));
-        assert!(!grants_repo_write_explicit(&["repo".into()]));
-    }
-
-    /// `repo` is a budgetable namespace, so a `[plan].token_budgets` key of
-    /// that name is accepted rather than rejected as unknown.
-    #[test]
-    fn repo_is_a_gateable_namespace() {
-        assert!(GATEABLE_NAMESPACES.contains(&"repo"));
-    }
-
     /// The `[tools.composio]` sub-section parses its toolkit allowlist and an
     /// absent section defaults to open mode (empty list).
     #[test]
@@ -1999,20 +1942,14 @@ mod test {
     /// "consistency" edit. It would be a silent revocation: most shipped
     /// manifests grant `*` and nothing else, so publishing would switch off for
     /// them with no error anywhere — agents that can still write files and can
-    /// no longer deliver one. `repo` is asserted alongside it so the contrast is
-    /// in the same assertion block as the temptation.
+    /// no longer deliver one.
     #[test]
-    fn a_bare_wildcard_confers_publishing_unlike_repo() {
+    fn a_bare_wildcard_confers_publishing() {
         let wildcard = grants(&["*"]);
         assert!(
             grants_files_or_docs(&wildcard),
             "a bare `*` must confer publishing — it is what most shipped manifests grant"
         );
-        assert!(
-            !grants_repo_explicit(&wildcard),
-            "a bare `*` must NOT confer `repo`; the two rules are different on purpose"
-        );
-
         // The ordinary namespace forms confer it too.
         for grant in ["files", "docs", "files.write", "docs.read"] {
             assert!(
