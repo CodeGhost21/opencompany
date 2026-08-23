@@ -2576,7 +2576,11 @@ pub async fn assert_secret_store(secrets: Arc<dyn crate::ports::secrets::SecretS
         "reading a key-shaped legacy slug reached another key's value"
     );
     secrets
-        .set(&alpha, "key-foo", SecretValue("value-for-key-foo".to_string()))
+        .set(
+            &alpha,
+            "key-foo",
+            SecretValue("value-for-key-foo".to_string()),
+        )
         .await
         .unwrap();
     assert_eq!(

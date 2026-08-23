@@ -689,7 +689,13 @@ mod test {
 
         // No legacy slug can start with `%`, so the canonical namespace can
         // never be entered through the legacy fallback.
-        for key in ["foo", "key-foo", "key_foo", "a/b/../c", "mcp/acme prod/auth"] {
+        for key in [
+            "foo",
+            "key-foo",
+            "key_foo",
+            "a/b/../c",
+            "mcp/acme prod/auth",
+        ] {
             let legacy = bundle.legacy_secret(key);
             let file_name = legacy.file_name().unwrap().to_string_lossy();
             assert!(
@@ -714,12 +720,19 @@ mod test {
             "emoji key produced a {} byte filename",
             emoji_file.len()
         );
-        assert!(emoji_file.starts_with("%l-"), "expected truncated form, got {emoji_file}");
+        assert!(
+            emoji_file.starts_with("%l-"),
+            "expected truncated form, got {emoji_file}"
+        );
 
         // Long ASCII keys (no percent-encoding) stay bounded too.
         let ascii = bundle.secret(&"a".repeat(400));
         let ascii_file = ascii.file_name().unwrap().to_str().unwrap();
-        assert!(ascii_file.len() < 255, "long ASCII key produced a {} byte filename", ascii_file.len());
+        assert!(
+            ascii_file.len() < 255,
+            "long ASCII key produced a {} byte filename",
+            ascii_file.len()
+        );
 
         // Distinct long keys sharing a prefix still get distinct filenames.
         let a = bundle.secret(&format!("{}{}", "a".repeat(300), "X"));
