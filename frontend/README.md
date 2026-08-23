@@ -356,6 +356,48 @@ It uses the same real-model proxy and the same environment variables as the lane
 above, on a company and a data root of its own, and **CI does not run it** for
 the same reasons plus one more: it takes tens of minutes.
 
+### The lane that compares pixels
+
+```sh
+cargo build --locked --bin opencompany   # the ordinary default-feature host
+npm run e2e:visual                       # compare against the committed baselines
+npm run e2e:visual:update                # re-record them
+```
+
+`visual.spec.ts` renders each top-level surface — Overview, Tasks, Workflows,
+Company, Memory, Inbox, Approvals, Settings — full-page in both themes and
+compares it against a PNG in
+[`test/e2e/visual.spec.ts-snapshots/`](test/e2e/visual.spec.ts-snapshots/).
+
+It is the only spec here that judges a page by how it looks, and that is the
+point of keeping it apart. Every other spec asserts a named quantity, and
+[`shell-two-layer.spec.ts`](test/e2e/shell-two-layer.spec.ts) says why at
+length: an inset of one pixel over a flat tint is structurally a two-layer
+shell and visually nothing, and only "eight pixels on all four sides, a fill
+measurably different from the chrome" fails that. None of those assertions
+should become "it looks like it did last week".
+
+What a baseline catches is the complement — the regression nobody had a
+quantity for, because nobody knew to write one. A token that shifted lightness
+across every surface. A web font that stopped loading and fell back. Padding
+lost on one view out of eight. A reviewer spots all three in a screenshot in a
+second and in a diff not at all.
+
+**CI does not run it.** Baselines are per-platform — Playwright suffixes each
+file with the platform name, and the ones committed here were recorded on
+`linux`. A required check that is red for everyone not on the recording
+platform teaches people to reach for `--update-snapshots` without looking,
+which is how a baseline suite stops meaning anything. Run it either side of a
+styling change and read the diff Playwright writes into `playwright-report/`.
+
+The false-positive rate is what makes this worth having, so the spec pins the
+clock, disables animations, waits on `document.fonts.ready`, hides the fading
+overlay scrollbar, and masks regions whose *value* legitimately changes between
+runs. To exempt something new, put `data-visual-volatile` on it at the call
+site rather than adding a CSS path to the mask list — a path stops masking
+anything the day it changes, and a mask that matches nothing looks exactly like
+a mask that was not needed.
+
 Some specs skip **the other way**, in the live lane only, and say so where they
 sit: three in `chat-live-events.spec.ts`, which find the reply to their own turn
 by the offline brain's `You said: <text>` (precisely how they prove an SSE frame

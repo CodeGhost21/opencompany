@@ -1902,13 +1902,20 @@ export function KnowledgeGraph({
   // ── the graph itself (reused inline + fullscreen) ───────────────────────────
   const graphInner = (
     <>
-      <div className="kg-grid pointer-events-none absolute inset-0" aria-hidden />
+      {/* `data-visual-volatile` on both halves of the canvas: the graph is a
+          d3-force simulation re-rendered every animation frame under a
+          cinematic camera, so it is never twice in the same place and
+          `visual.spec.ts` cannot compare it. Masking it keeps Overview's
+          surrounding chrome under a baseline instead of dropping the whole
+          view. */}
+      <div className="kg-grid pointer-events-none absolute inset-0" aria-hidden data-visual-volatile />
       <svg
         ref={svgRef}
         viewBox={`0 0 ${W} ${H}`}
         className="h-full w-full cursor-grab touch-none active:cursor-grabbing"
         role="img"
         aria-label="Operating knowledge graph"
+        data-visual-volatile
         onPointerDown={onCanvasPointerDown}
         onPointerMove={onCanvasPointerMove}
         onPointerUp={onCanvasPointerUp}

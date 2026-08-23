@@ -15,6 +15,7 @@ import {
   LIVE_LLM_BIND,
   MCP_FIXTURE_BIND,
   MOCK_BRAIN_BIND,
+  VISUAL,
 } from "./test/e2e/capabilities";
 
 // `package.json` is `"type": "module"`, so this file is ESM and `__dirname`
@@ -100,6 +101,15 @@ const LIVE_LLM_SPEC = /orchestration-live\.spec\.ts$/;
  * (`companies/agentic_math_lab`). See `EULER` in `test/e2e/capabilities.ts`.
  */
 const EULER_SPEC = /euler-live\.spec\.ts$/;
+
+/**
+ * The one spec that compares **pixels** rather than named quantities, and which
+ * therefore runs on its own so a page still settling cannot be attributed to it
+ * — and so it never sits in the way of a merge. Same default-feature host as an
+ * ordinary run; the separation is about the kind of verdict, not the kind of
+ * host. See `VISUAL` in `test/e2e/capabilities.ts`.
+ */
+const VISUAL_SPEC = /visual\.spec\.ts$/;
 
 const providedBaseURL = process.env.PW_BASE_URL;
 
@@ -330,13 +340,20 @@ export default defineConfig({
   // Four disjoint selections now: the Project Euler lane is a live-LLM run
   // against a different company, so it is checked *before* `LIVE_LLM` — both
   // flags are set for it, and the more specific lane wins.
+  //
+  // Five now: the visual lane is the fifth, and it is selected the same way for
+  // a different reason — its host is an ordinary one, but a run that mixed
+  // pixel comparison in with the rest would attribute a page still settling to
+  // whichever spec happened to be next.
   ...(FIRST_RUN
     ? { testMatch: FIRST_RUN_SPEC }
     : EULER
       ? { testMatch: EULER_SPEC }
       : LIVE_LLM
         ? { testMatch: LIVE_LLM_SPEC }
-        : { testIgnore: [FIRST_RUN_SPEC, LIVE_LLM_SPEC, EULER_SPEC] }),
+        : VISUAL
+          ? { testMatch: VISUAL_SPEC }
+          : { testIgnore: [FIRST_RUN_SPEC, LIVE_LLM_SPEC, EULER_SPEC, VISUAL_SPEC] }),
   globalSetup: storageState ? "./test/e2e/global-setup.ts" : undefined,
   fullyParallel: false,
   workers: 1,
@@ -347,6 +364,20 @@ export default defineConfig({
     storageState,
     trace: "on-first-retry",
     screenshot: "only-on-failure",
+    // The visual lane's baselines are only meaningful at the size and density
+    // they were recorded at, so both are pinned here rather than inherited.
+    // Playwright's own defaults are the same two values today; naming them
+    // means a future change to them is a decision about this lane instead of a
+    // silent invalidation of every committed PNG.
+    // `reducedMotion` is not belt-and-braces on top of `animations: "disabled"`
+    // — that option freezes CSS animations at their end state, and Overview's
+    // knowledge graph is a d3 simulation driven from `requestAnimationFrame`,
+    // which no CSS switch reaches. The graph reads the media query itself
+    // (`KnowledgeGraph.tsx` has a `prefers-reduced-motion` block) so this is the
+    // lever it was built to respond to.
+    ...(VISUAL
+      ? { viewport: { width: 1280, height: 720 }, deviceScaleFactor: 1, reducedMotion: "reduce" as const }
+      : {}),
   },
   webServer: managesHost
     ? [
