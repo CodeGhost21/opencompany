@@ -1246,6 +1246,24 @@ mod tests {
         hundred_entries().into_iter().map(|e| e.slug).collect()
     }
 
+    /// Serialises this test against `an_admin_is_unaffected`'s env mutation.
+    ///
+    /// In composio builds that test repoints `COMPOSIO_BACKEND_URL_ENV` at a
+    /// loopback backend for its whole body. The cache-seeding tests below derive
+    /// a cache key that embeds that URL, seed the cache under it, then re-derive
+    /// the key on the request path — a process-wide override landing between the
+    /// two reads would change the key and strand the seeded entry, failing the
+    /// `catalogSource == "backend"` assertion. `EnvVarGuard` serialises guard
+    /// users against each other, so taking it here closes the race the way the
+    /// crate documents (unguarded `std::env::var` readers are otherwise fair
+    /// game). Gated to composio builds, where the mutation exists.
+    #[cfg(feature = "composio")]
+    fn composio_backend_env_guard() -> crate::test_support::EnvVarGuard {
+        crate::test_support::EnvVarGuard::capture(&[
+            crate::company::composio::COMPOSIO_BACKEND_URL_ENV,
+        ])
+    }
+
     /// The heart of the reopened issue: in open mode the console is offered the
     /// **backend's** catalog, not a list maintained by hand in this repo.
     ///
@@ -1257,6 +1275,8 @@ mod tests {
     /// in favour of the constant.
     #[tokio::test]
     async fn open_mode_serves_the_fetched_catalog_rather_than_a_hardcoded_list() {
+        #[cfg(feature = "composio")]
+        let _env = composio_backend_env_guard();
         let home_dir = home();
         let state = state_with_manifest_id(
             home_dir.path(),
@@ -1306,6 +1326,8 @@ mod tests {
     /// ninety-nine providers it decided against.
     #[tokio::test]
     async fn an_explicit_allowlist_is_never_widened_by_the_catalog() {
+        #[cfg(feature = "composio")]
+        let _env = composio_backend_env_guard();
         let home_dir = home();
         let state = state_with_manifest_id(
             home_dir.path(),
@@ -1337,6 +1359,8 @@ mod tests {
     /// catalog is the failure this pins shut.
     #[tokio::test]
     async fn an_unfetchable_catalog_is_marked_degraded_not_passed_off_as_real() {
+        #[cfg(feature = "composio")]
+        let _env = composio_backend_env_guard();
         let home_dir = home();
         let state = state_with_manifest_id(
             home_dir.path(),
@@ -1387,6 +1411,8 @@ mod tests {
     /// different test.
     #[tokio::test]
     async fn a_credential_change_evicts_the_cached_catalog() {
+        #[cfg(feature = "composio")]
+        let _env = composio_backend_env_guard();
         let home_dir = home();
         let state = state_with_manifest_id(
             home_dir.path(),
