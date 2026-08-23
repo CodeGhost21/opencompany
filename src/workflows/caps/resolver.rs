@@ -84,6 +84,58 @@ pub struct ChildPolicyGates {
     pub run_id: String,
     /// The company's live standing permissions.
     pub grants: crate::runtime::grants::GrantSet,
+    /// Per-run record of the gates the resolver marked, keyed by child id.
+    ///
+    /// The parent's parking path reads this when a child pauses, so the card
+    /// can name the child's tool and reason the way a top-level gate's card
+    /// does (issue #617).
+    pub registry: Arc<ChildGateRegistry>,
+}
+
+/// The namespace that separates a child gate's id from the `sub_workflow` node
+/// that ran it, as tinyflows builds it (`namespaced_gate` in
+/// `vendor/openhuman/vendor/tinyflows/src/nodes/integration/sub_workflow.rs`).
+///
+/// A parent gate `approve` and a child's gate `approve` are different gates in
+/// different id spaces, so tinyflows reports the child's as `<node>::<gate>`.
+/// Both consumers of that shape live on this side of the seam: the resolver's
+/// [`child_gate_call`] and the runner's unreplayable-call report.
+pub(crate) const GATE_NAMESPACE: &str = "::";
+
+/// What the resolver recorded about one resolved child: the gated graph as
+/// tinyflows runs it, and the calls the policy raised on it.
+#[derive(Clone)]
+pub(crate) struct ChildGateRecord {
+    /// The child graph the engine is running, post-gate-pass.
+    pub graph: WorkflowGraph,
+    /// The calls the policy stopped on it (the ones marked `requires_approval`).
+    pub gated: Vec<crate::workflows::gate::GatedCall>,
+}
+
+/// A per-run record of every child graph the resolver gated, keyed by child id.
+///
+/// The resolver is invoked by the engine mid-run; the parent's parking path
+/// runs after the engine returns. This registry is the one channel between the
+/// two, so a child that pauses can be described from what the gate pass
+/// actually classified instead of being re-read from the store (which may have
+/// moved on, and the graph the engine ran is what the card must describe).
+#[derive(Default)]
+pub(crate) struct ChildGateRegistry {
+    inner: std::sync::Mutex<HashMap<String, ChildGateRecord>>,
+}
+
+impl ChildGateRegistry {
+    /// Records the gate pass for one resolved child.
+    pub(crate) fn record(&self, child_id: &str, record: ChildGateRecord) {
+        self.inner.lock().unwrap().insert(child_id.to_string(), record);
+    }
+
+    /// The record for `child_id`, cloned out so the caller need not hold the
+    /// lock (the graphs are small and lookups happen at pause time, not per
+    /// node).
+    pub(crate) fn get(&self, child_id: &str) -> Option<ChildGateRecord> {
+        self.inner.lock().unwrap().get(child_id).cloned()
+    }
 }
 
 impl StoreWorkflowResolver {
