@@ -291,7 +291,6 @@ async fn page_shell(
         .body(Body::from(html))
         .map_err(|e| ApiError(OpenCompanyError::Store(format!("page shell failed: {e}"))))?;
     apply_pages_headers(response.headers_mut());
-    apply_page_module_cors_headers(response.headers_mut());
     Ok(response)
 }
 
@@ -341,6 +340,7 @@ async fn bundle(
         )))
     })?;
     apply_pages_headers(response.headers_mut());
+    apply_page_module_cors_headers(response.headers_mut());
     Ok(response)
 }
 

@@ -163,8 +163,9 @@ fn router_with_console(state: AppState, console_dir: Option<PathBuf>) -> Router 
                     if is_reserved_path(request.uri().path()) {
                         return StatusCode::NOT_FOUND.into_response();
                     }
+                    let path = request.uri().path().to_owned();
                     match serve.oneshot(request).await {
-                        Ok(response) => cache_console_response(request.uri().path(), response.into_response()),
+                        Ok(response) => cache_console_response(&path, response.into_response()),
                         Err(err) => match err {},
                     }
                 }
