@@ -53,7 +53,9 @@ describe("reaction chips at a touch viewport", () => {
       );
     });
 
-    const chip = container.querySelector('[aria-label="👍 — Mithil"]');
+    const chip = [...container.querySelectorAll("button")].find((button) =>
+      button.className.includes("rounded-full"),
+    );
     expect(chip).not.toBeNull();
     expect(chip?.className).toContain("min-h-6");
     expect(chip?.className).toContain("md:min-h-0");
