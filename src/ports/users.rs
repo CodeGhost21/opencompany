@@ -141,6 +141,82 @@ impl UserRecord {
     pub fn mailbox(&self) -> Option<String> {
         self.identity().mailbox().map(str::to_string)
     }
+
+    /// What to call this person on screen: the name they chose, else one
+    /// derived from their login identity, else `None`.
+    ///
+    /// The fallback is [`derive_display_name`] — see there for why a derived
+    /// name is not written into [`Self::display_name`].
+    pub fn display_label(&self) -> Option<String> {
+        self.display_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(str::to_string)
+            .or_else(|| derive_display_name(&self.email))
+    }
+}
+
+/// A readable name guessed from a login identity — `steven.enamakel@acme.com`
+/// reads as "Steven Enamakel".
+///
+/// # Why this is derived and never stored
+///
+/// A person who has not named themselves still has to be called something on
+/// every surface that shows them, and the honest options are the raw address,
+/// nothing, or a guess. The raw address is refused elsewhere on this page's own
+/// rule — being in a company should not hand everyone your mailbox — and
+/// nothing leaves a chat message attributed to a blank.
+///
+/// So: a guess, made at render time. Writing it into
+/// [`UserRecord::display_name`] instead would be the tempting version and is
+/// wrong in a way that does not show up until later — the field would no longer
+/// mean "what this person chose", so nothing could tell a guess from a decision,
+/// and a person who never touched their profile would look like one who had. It
+/// would also freeze whatever the guess was on the day they first signed in.
+///
+/// # What it will and will not guess
+///
+/// Only the **local part**, split on the separators people actually use, with
+/// each word capitalised. The domain is dropped: it is the half that identifies
+/// the mailbox rather than the person.
+///
+/// `None` for an identity with no name in it to find — a wallet key, the local
+/// owner of a company with no sign-in, or a local part with no letters. `None`
+/// means "cannot say", and a caller should render something honest (an initial,
+/// a role noun) rather than a guess this function refused to make.
+pub fn derive_display_name(identity_key: &str) -> Option<String> {
+    let LoginIdentity::Email(address) = LoginIdentity::parse(identity_key) else {
+        // A base58 public key and `local:owner` are identities, not names.
+        // Capitalising either would produce something that looks like a name and
+        // is not one, which is worse than admitting there is nothing here.
+        return None;
+    };
+    let local = address.split('@').next().unwrap_or_default();
+    // `steven+acme@…` is one mailbox with a routing tag; the tag is plumbing.
+    let local = local.split('+').next().unwrap_or(local);
+    let words: Vec<String> = local
+        .split(['.', '_', '-'])
+        .filter(|word| !word.is_empty())
+        .map(capitalise)
+        .collect();
+    if words.is_empty() || !words.iter().any(|w| w.chars().any(char::is_alphabetic)) {
+        return None;
+    }
+    Some(words.join(" "))
+}
+
+/// Upper-cases the first character and leaves the rest alone.
+///
+/// The rest is left alone deliberately: lower-casing it would turn `McDonald`
+/// into `Mcdonald` and `JPMorgan` into `Jpmorgan`, and a local part that already
+/// carries capitals is one somebody chose to write that way.
+fn capitalise(word: &str) -> String {
+    let mut chars = word.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => String::new(),
+    }
 }
 
 /// An admin's standing permission for one email address to join the company.
