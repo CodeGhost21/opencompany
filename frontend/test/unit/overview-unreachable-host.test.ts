@@ -129,6 +129,15 @@ function clickRefresh() {
 }
 
 describe("a host that cannot be reached at all", () => {
+  it("keeps Refresh at a 24px touch target below the desktop breakpoint", async () => {
+    await render(fakeClient().client);
+
+    const refresh = container.querySelector('[aria-label="Refresh the graph"]');
+    expect(refresh).not.toBeNull();
+    expect(refresh?.className).toContain("min-h-6");
+    expect(refresh?.className).toContain("md:min-h-0");
+  });
+
   it("says so, and does not draw an empty company", async () => {
     const unreachable = fakeClient();
     goUnreachable(unreachable);

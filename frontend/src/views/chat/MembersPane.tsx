@@ -12,8 +12,10 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Skeleton } from "@/components/ui/skeleton";
+import type { PresenceStatus } from "@/lib/awareness";
 import { roleSubtitle, type TeamMember } from "@/lib/team";
 import { cn } from "@/lib/utils";
+import { PresenceDot } from "@/views/chat/PresenceDot";
 
 interface Props {
   /**
@@ -37,6 +39,24 @@ interface Props {
    * happens to be first.
    */
   leadId?: string;
+  /**
+   * The company's people.
+   *
+   * A section of their own, and **not** part of `channelMembers` or `others`:
+   * desk membership is a teammate concept, so a person is never "in" or
+   * "outside" a channel — every signed-in human can see every desk. Folding
+   * them into either list would state a membership that does not exist.
+   *
+   * Absent on a host without the mentionables route, which simply renders no
+   * People section.
+   */
+  people?: Array<{ id: string; label: string }>;
+  /**
+   * Who is present, keyed by user id. A person missing from this map has **no
+   * live signal** — which is not the same as offline, because presence is
+   * replica-local. {@link PresenceDot} renders that distinction.
+   */
+  presence?: ReadonlyMap<string, { status: PresenceStatus }>;
   loading: boolean;
   /** True when the roster came from the host rather than the starter set. */
   fromHost: boolean;
@@ -95,6 +115,8 @@ export function MembersPane({
   channelMembers,
   others,
   leadId,
+  people,
+  presence,
   loading,
   fromHost,
   onToggleInbox,
@@ -201,6 +223,22 @@ export function MembersPane({
                   <div className="mt-2 border-t pt-2">
                     <SectionLabel className="text-muted-foreground">Everyone else</SectionLabel>
                     {rows(others)}
+                  </div>
+                )}
+
+                {people && people.length > 0 && (
+                  <div className="mt-2 border-t pt-2">
+                    <SectionLabel className="text-muted-foreground">People</SectionLabel>
+                    {people.map((person) => (
+                      <div
+                        key={person.id}
+                        data-testid="person-row"
+                        className="flex items-center gap-2 rounded-lg px-2 py-1.5 text-sm"
+                      >
+                        <PresenceDot status={presence?.get(person.id)?.status} />
+                        <span className="min-w-0 flex-1 truncate">{person.label}</span>
+                      </div>
+                    ))}
                   </div>
                 )}
               </>

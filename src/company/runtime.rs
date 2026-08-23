@@ -2738,26 +2738,47 @@ impl CompanyRuntime {
         supplied: Option<Vec<Mention>>,
         sender: Option<&Actor>,
     ) -> Vec<Mention> {
-        let record = match self.store.load(&self.id).await {
+        // Issue: on the operator-message path this runs BEFORE the journal
+        // append (`mention_responder` reads the resolved mentions off the
+        // journaled event, so the append cannot go first), which puts these
+        // two store reads in front of every chat POST's accept latency. Run
+        // together rather than sequentially — they read different stores and
+        // neither depends on the other's result — to keep that addition close
+        // to the cost of the slower read alone rather than the sum of both.
+        let (record, user_list) =
+            tokio::join!(self.store.load(&self.id), self.users().list_users(&self.id));
+        let record = match record {
             Ok(Some(record)) => record,
             Ok(None) => return Vec::new(),
             Err(err) => {
                 tracing::warn!(
                     company = %self.id,
                     error = %err,
-                    "[mentions] the company record could not be read; this message                      is journaled with no mentions"
+                    "[mentions] the company record could not be read; this message is \
+                     journaled with no mentions"
                 );
                 return Vec::new();
             }
         };
-        let users = self.users().list_users(&self.id).await.unwrap_or_else(|err| {
+        let mut users = user_list.unwrap_or_else(|err| {
             tracing::warn!(
                 company = %self.id,
                 error = %err,
-                "[mentions] the user directory could not be read; only teammates and                  desks are resolvable on this message"
+                "[mentions] the user directory could not be read; only teammates and \
+                 desks are resolvable on this message"
             );
             Vec::new()
         });
+        // Suspended users are retained only for attribution and are refused on
+        // every request — they must not be a live mention target here either.
+        users.retain(|u| u.status == crate::ports::users::UserStatus::Active);
+        // Sorted by the same stable key `GET .../chat/mentionables` uses before
+        // it mints slugs (`user_slugs`), so a collision between two same-named
+        // users gets the same `-2`/`-3` suffix here that the picker advertised —
+        // an unsorted `UserStore` order (most-recently-created first) could
+        // otherwise resolve `@sam-2` to a different person than the one the
+        // picker showed under that label.
+        users.sort_by(|a, b| a.id.cmp(&b.id));
         crate::runtime::mentions::resolve(text, supplied, sender, &record, &users)
     }
 

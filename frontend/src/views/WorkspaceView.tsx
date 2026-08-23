@@ -2251,7 +2251,7 @@ function TreeRow({ node, ...props }: TreeProps & { node: FsNode }) {
       <div
         ref={rowRef}
         className={cn(
-          "group flex items-center gap-1 rounded-md px-1.5 py-1 text-sm",
+          "group flex items-center gap-1 rounded-md px-1.5 py-0 text-sm md:py-1",
           active ? "bg-accent font-medium" : "hover:bg-accent/50",
           // Muted whether or not it is the open note: neither what writes the
           // file (#1377) nor who can read it (#1465) changes when you select
@@ -2262,7 +2262,7 @@ function TreeRow({ node, ...props }: TreeProps & { node: FsNode }) {
       >
         <button
           onClick={() => (isFolder ? onToggle(node.id) : onOpen(node.id))}
-          className="flex min-w-0 flex-1 items-center gap-1.5 text-left"
+          className="flex min-h-6 min-w-0 flex-1 items-center gap-1.5 text-left md:min-h-0"
         >
           {isFolder ? (
             <>
