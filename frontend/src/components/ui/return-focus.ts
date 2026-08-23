@@ -49,14 +49,23 @@ function useReturnFocus(
     }
   }
 
+  // Controlled: the `open` prop is the only authority. A consumer is free to
+  // refuse a requested dismissal — `SetupDialog` hands Base UI a no-op handler,
+  // `DeskCreateDialog` swallows it while submitting — so believing the callback
+  // here would record a close that never happened and make the next render look
+  // like a fresh opening, capturing an element *inside* the still-open popup.
   if (open !== undefined) {
     if (open && !wasOpen.current) capture()
     wasOpen.current = open
   }
 
   const handleOpenChange: OpenChange = (nextOpen, ...rest) => {
-    if (nextOpen && !wasOpen.current) capture()
-    wasOpen.current = nextOpen
+    // Uncontrolled: Base UI owns the state and the callback is the only report
+    // of it, so it is authoritative here for exactly the same reason.
+    if (open === undefined) {
+      if (nextOpen && !wasOpen.current) capture()
+      wasOpen.current = nextOpen
+    }
     onOpenChange?.(nextOpen, ...rest)
   }
 
