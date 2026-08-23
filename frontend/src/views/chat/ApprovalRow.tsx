@@ -262,7 +262,12 @@ export function ApprovalRow({
   if (compact) {
     return (
       <CompactApprovalRow
-        approvals={approvals}
+        // The row speaks for what its buttons still decide, not for the whole
+        // original batch: an item settled on the Approvals page or in another
+        // tab is no longer something this Approve/Decline will touch, and a
+        // summary that still named it would leave the operator guessing which
+        // action the remaining buttons authorize (#842 review).
+        approvals={pending}
         now={now}
         askerNames={askerNames}
         actions={actions}
