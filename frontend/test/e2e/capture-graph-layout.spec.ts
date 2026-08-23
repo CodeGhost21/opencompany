@@ -43,38 +43,41 @@ test("capture settled graph layout + API data", async ({ page }) => {
   await page.evaluate(() => document.fonts.ready);
   const trajectory = await settleKnowledgeGraph(page);
 
-  const dump = await page.evaluate(async () => {
-    const svg = document.querySelector('svg[aria-label="Operating knowledge graph"]');
-    if (!svg) return { error: "no svg" };
-    const groups = svg.querySelectorAll("g[transform]");
-    const positions: Record<string, number[]> = {};
-    for (const el of groups) {
-      const m = el.getAttribute("transform")?.match(/translate\((-?[\d.]+)\s*[, ]\s*(-?[\d.]+)\)/);
-      if (!m) continue;
-      const title = el.querySelector("title");
-      const label = title ? title.textContent : "";
-      const key = label || `noid@${Math.round(+m[1])},${Math.round(+m[2])}`;
-      positions[key] = [Math.round(+m[1] * 10) / 10, Math.round(+m[2] * 10) / 10];
-    }
-    // Raw API data feeding the graph — same reads Overview makes.
-    const paths = [
-      "/api/v1/company/tasks",
-      "/api/v1/company/team",
-      "/api/v1/company/desks",
-      "/api/v1/company/memory",
-      "/api/v1/company/workflows",
-    ];
-    const data: Record<string, unknown> = {};
-    for (const p of paths) {
-      try {
-        const r = await fetch(p);
-        data[p] = r.ok ? await r.json() : { http: r.status };
-      } catch (e) {
-        data[p] = { fetchError: String(e) };
+  const dump = await page.evaluate(
+    async (trajectory: Array<{ t: number; n: number }>) => {
+      const svg = document.querySelector('svg[aria-label="Operating knowledge graph"]');
+      if (!svg) return { error: "no svg" };
+      const groups = svg.querySelectorAll("g[transform]");
+      const positions: Record<string, number[]> = {};
+      for (const el of groups) {
+        const m = el.getAttribute("transform")?.match(/translate\((-?[\d.]+)\s*[, ]\s*(-?[\d.]+)\)/);
+        if (!m) continue;
+        const title = el.querySelector("title");
+        const label = title ? title.textContent : "";
+        const key = label || `noid@${Math.round(+m[1])},${Math.round(+m[2])}`;
+        positions[key] = [Math.round(+m[1] * 10) / 10, Math.round(+m[2] * 10) / 10];
       }
-    }
-    return { count: groups.length, positions, data, trajectory };
-  });
+      // Raw API data feeding the graph — same reads Overview makes.
+      const paths = [
+        "/api/v1/company/tasks",
+        "/api/v1/company/team",
+        "/api/v1/company/desks",
+        "/api/v1/company/memory",
+        "/api/v1/company/workflows",
+      ];
+      const data: Record<string, unknown> = {};
+      for (const p of paths) {
+        try {
+          const r = await fetch(p);
+          data[p] = r.ok ? await r.json() : { http: r.status };
+        } catch (e) {
+          data[p] = { fetchError: String(e) };
+        }
+      }
+      return { count: groups.length, positions, data, trajectory };
+    },
+    trajectory,
+  );
   const out =
     process.env.CAPTURE_OUT ||
     "/tmp/graph-layout-" + (process.env.CAPTURE_TAG || "default") + ".json";
