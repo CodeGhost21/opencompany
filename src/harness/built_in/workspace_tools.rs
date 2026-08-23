@@ -2368,13 +2368,10 @@ pub(crate) async fn mutation_is_owned_by_agent(
     // name (delete refuses a folder that still holds anything), so those keep
     // the target-only check.
     if tool.eq_ignore_ascii_case(WORKSPACE_RENAME_TOOL) && entry.node.kind == NodeKind::Folder {
-        return index
-            .subtree_ids(&entry.node.id)
-            .iter()
-            .all(|id| {
-                let node = &index.all_nodes[*id];
-                node.created_by == own_origin && node.updated_by == own_origin
-            });
+        return index.subtree_ids(&entry.node.id).iter().all(|id| {
+            let node = &index.all_nodes[*id];
+            node.created_by == own_origin && node.updated_by == own_origin
+        });
     }
     true
 }
