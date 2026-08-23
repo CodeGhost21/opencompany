@@ -5,7 +5,7 @@ import type { OpenCompanyClient } from "@/api/client";
 import { proposeRoster, type ProposedAgent } from "@/api/company-setup";
 import { getSetup } from "@/api/setup";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
-import { Button } from "@/components/ui/button";
+import { Button, buttonVariants } from "@/components/ui/button";
 import {
   Dialog,
   DialogContent,
@@ -440,11 +440,14 @@ function BuildOut({
       {finished && (
         <DialogFooter>
           {fallback && (
-            <Button variant="outline" asChild>
-              <a href="#/settings/connections" onClick={onDone} data-testid="setup-add-model">
-                Add a model in Settings
-              </a>
-            </Button>
+            <a
+              href="#/settings/connections"
+              onClick={onDone}
+              data-testid="setup-add-model"
+              className={buttonVariants({ variant: "outline" })}
+            >
+              Add a model in Settings
+            </a>
           )}
           <Button onClick={onDone} data-testid="setup-finish">
             <Sparkles className="size-4" />

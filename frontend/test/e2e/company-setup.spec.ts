@@ -175,6 +175,14 @@ test("first-run setup builds a real team from three answers", async ({ page, req
   const dialog = page.getByTestId("setup-dialog");
   await expect(dialog).toBeVisible({ timeout: 20_000 });
   await expect(page.getByTestId("setup-question")).toContainText("What kind of company");
+  // This host has no model. Say what that changes before collecting answers,
+  // rather than after presenting a plausible but standard roster.
+  const modelNotice = page.getByTestId("setup-inference-notice");
+  await expect(modelNotice).toContainText("can't reach a model right now");
+  await expect(modelNotice.getByRole("link", { name: "Set up a model" })).toHaveAttribute(
+    "href",
+    "#/settings/connections",
+  );
 
   // The tour must be holding: a walkthrough of an unstaffed company is the
   // first impression this feature exists to replace.
@@ -194,9 +202,13 @@ test("first-run setup builds a real team from three answers", async ({ page, req
   await expect(created.first()).toBeVisible({ timeout: 30_000 });
 
   // 4. It finishes, and says so as a starting point rather than a fait accompli.
-  await expect(page.getByTestId("setup-buildout-title")).toContainText("ready", {
+  await expect(page.getByTestId("setup-buildout-title")).toContainText("standard team", {
     timeout: 60_000,
   });
+  await expect(page.getByTestId("setup-add-model")).toHaveAttribute(
+    "href",
+    "#/settings/connections",
+  );
   const names = await created.allInnerTexts();
   expect(names.length, `build-out listed ${names.length} agents`).toBeGreaterThanOrEqual(4);
 
