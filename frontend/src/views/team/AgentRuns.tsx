@@ -364,9 +364,11 @@ export function AgentRuns({
 
         {runs?.length === 0 && !failed && (
           <Note>
-            {agentName} hasn't run yet. An attempt is recorded the first time a
-            card is dispatched to this teammate, or the first time it answers a
-            message.
+            {wanted
+              ? "No attempt in this history matches that filter."
+              : `${agentName} hasn't run yet. An attempt is recorded the first time a
+                 card is dispatched to this teammate, or the first time it answers a
+                 message.`}
           </Note>
         )}
 
