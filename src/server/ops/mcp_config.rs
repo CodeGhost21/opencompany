@@ -203,7 +203,7 @@ async fn read_config(company: ScopedCompany) -> Result<Json<ConfigDoc>, ApiError
         out.insert(
             decl.name.clone(),
             serde_json::to_value(entry).map_err(|err| {
-                ApiError(OpenCompanyError::Internal(format!(
+                ApiError(OpenCompanyError::Config(format!(
                     "serializing mcp.json entry `{}`: {err}",
                     decl.name
                 )))

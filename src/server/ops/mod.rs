@@ -38,6 +38,7 @@ pub mod ledgers;
 pub mod mail;
 pub mod mailer;
 pub mod mcp;
+pub mod mcp_config;
 pub mod mcp_registry;
 pub mod memory;
 pub mod memory_engine;
@@ -218,6 +219,7 @@ pub fn router() -> Router<AppState> {
         .merge(pages::router())
         .merge(skills::router())
         .merge(mcp::router())
+        .merge(mcp_config::router())
         .merge(mcp_registry::router())
         .merge(read_state::router())
         .merge(repos::router())
