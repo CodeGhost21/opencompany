@@ -1271,6 +1271,45 @@ mod test {
     }
 
     #[test]
+    fn a_standing_deny_matches_only_its_subject_tool_and_deadline() {
+        let set = GrantSet::default();
+        let mut deny = standing("deny-1", "ops", "shell", 10_000);
+        deny.verdict = crate::ports::types::Verdict::Deny;
+        set.grant_standing(deny);
+
+        assert!(
+            set.match_standing_with_verdict(
+                &GrantSubject::agent("ops"),
+                "shell",
+                None,
+                crate::ports::types::Verdict::Deny,
+                2_000,
+            )
+            .is_some()
+        );
+        assert!(
+            set.match_standing_with_verdict(
+                &GrantSubject::agent("ops"),
+                "shell",
+                None,
+                crate::ports::types::Verdict::Deny,
+                10_000,
+            )
+            .is_none()
+        );
+        assert!(
+            set.match_standing_with_verdict(
+                &GrantSubject::agent("ops"),
+                "shell",
+                None,
+                crate::ports::types::Verdict::Approve,
+                2_000,
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
     fn a_standing_grant_is_scoped_to_its_agent_and_its_tool() {
         let set = GrantSet::default();
         set.grant_standing(standing("g1", "ops", "shell", 10_000));

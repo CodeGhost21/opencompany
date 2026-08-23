@@ -530,7 +530,7 @@ function StandingPermissions({
     <section className="mt-8">
       <h2 className="mb-1 text-sm font-medium text-muted-foreground">Standing permissions</h2>
       <p className="mb-3 text-xs text-muted-foreground">
-        Tools you've let a teammate use without asking each time. Each one expires on its own;
+        Tools you've allowed or blocked without asking each time. Each one expires on its own;
         you can end it sooner.
       </p>
       <div className="flex flex-col gap-2">
@@ -546,7 +546,7 @@ function StandingPermissions({
                   <p className="text-xs text-muted-foreground">
                     {askerNames.get(g.agent) ?? g.agent} ·{" "}
                     {expired ? "expired" : `expires ${untilLabel(g.expires_at_millis, now)}`} ·
-                    granted {timeAgo(g.at_millis, now)} by {granterLabel(g, granterNames)}
+                    {g.verdict === "deny" ? "declined" : "granted"} {timeAgo(g.at_millis, now)} by {granterLabel(g, granterNames)}
                   </p>
                 </div>
                 <Button
@@ -561,7 +561,7 @@ function StandingPermissions({
                   }}
                 >
                   {busy ? <Loader2 className="size-4 animate-spin" /> : <X className="size-4" />}{" "}
-                  Revoke
+                  Remove
                 </Button>
               </CardContent>
             </Card>
