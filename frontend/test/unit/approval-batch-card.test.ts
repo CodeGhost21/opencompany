@@ -351,7 +351,7 @@ describe("the consolidated approval card", () => {
 
     const row = container.querySelector<HTMLElement>('[data-approval-inline="compact"]');
     expect(row).not.toBeNull();
-    expect(row?.textContent).toContain("Fetch web page — https://espn.com/nba");
+    expect(row?.textContent).toContain("Fetch a web page — https://espn.com/nba");
     expect(row?.textContent).toContain("Asked by SEO Specialist");
     expect(row?.querySelector('a[href="#/approvals"]')?.textContent).toBe("View details");
     // Payload and grant scope are detailed decisions, so they stay on the
