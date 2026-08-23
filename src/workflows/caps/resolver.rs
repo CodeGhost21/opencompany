@@ -1195,6 +1195,34 @@ to = "nested"
         let parent = crate::workflows::translate::translate(
             &crate::company::parse_workflow(&parent_of("parent", "a")).expect("parent parses"),
         );
+        eprintln!(
+            "PARENT: {:?}",
+            parent
+                .nodes
+                .iter()
+                .map(|n| (&n.id, &n.config))
+                .collect::<Vec<_>>()
+        );
+        eprintln!(
+            "A: {:?}",
+            registry.get("a").map(|r| r
+                .graph
+                .nodes
+                .iter()
+                .map(|n| (&n.id, &n.config))
+                .collect::<Vec<_>>())
+        );
+        eprintln!(
+            "B: {:?}",
+            registry.get("b").map(|r| (
+                r.graph
+                    .nodes
+                    .iter()
+                    .map(|n| (&n.id, &n.config))
+                    .collect::<Vec<_>>(),
+                r.gated.iter().map(|g| &g.node_id).collect::<Vec<_>>()
+            ))
+        );
         let described = child_gate_call(&registry, &parent, "sub::nested::work", None)
             .expect("a two-level namespaced child gate resolves through the registry");
         assert_eq!(described.node_id, "work");
