@@ -359,8 +359,8 @@ export type BadgeVariant = "default" | "secondary" | "destructive" | "outline";
 /**
  * The media-generation capability (issue #109) is opt-in per tool grant and
  * gated on a managed platform credential, so it gets its own status row rather
- * than a token-budget bar. Four states: not compiled into this build, not
- * granted, granted-but-awaiting-credential, and active. A `media` token budget,
+ * than a token-budget bar. Five states: not compiled into this build, unknown,
+ * not granted, granted-but-awaiting-credential, and active. A `media` token budget,
  * if set, still surfaces as its own bar above via the tiers loop.
  */
 function MediaStatusRow({ caps }: { caps: CapabilityStatusDto }) {
@@ -583,11 +583,9 @@ function PublishStatusRow({ caps }: { caps: CapabilityStatusDto }) {
 /**
  * The publishing row's four states, in order (issue #1192).
  *
- * The `undefined` rung takes {@link composioStatus}'s stricter shape and NOT
- * {@link mediaStatus}'s: media collapses "absent" into `!granted` and paints an
- * older host — or one that did not answer — as a definite "Not granted", which
- * is the #886 lie in miniature. An unanswered host is unknown, and unknown is
- * shown as unknown.
+ * The `undefined` rung takes the same stricter shape as {@link composioStatus}
+ * and {@link mediaStatus}: an unanswered host is unknown, and unknown is shown
+ * as unknown rather than as a definite "Not granted".
  *
  * There is no credential rung below these. Publishing has no credential and no
  * store toggle, so `granted && inBuild` is the whole of the verdict.
