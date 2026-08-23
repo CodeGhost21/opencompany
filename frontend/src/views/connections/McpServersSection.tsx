@@ -690,8 +690,8 @@ export function McpServersSection({ client, company, canManage, chrome = "inline
     <section className="space-y-3">
       {/* `h2` in both chromes, and it lands one level under the page's `h1`
           either way (issue #1392). Inline on Connections it is a peer of
-          Inference, the company key, Composio, Channels, repositories and
-          providers, which all head their sections at the same level —
+          the company key, Composio and providers, which all head their
+          sections at the same level —
           `test/unit/connections-section-heading-level.test.ts` holds them
           together, because promoting this one alone would read to a screen
           reader as though every section after it were a subsection of MCP
