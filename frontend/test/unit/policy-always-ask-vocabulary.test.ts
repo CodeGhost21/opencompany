@@ -445,10 +445,10 @@ describe("policy tier changes", () => {
       input.dispatchEvent(new Event("input", { bubbles: true }));
     });
     expect(container.textContent).toContain(
-      "shel, invoice.send don't match any of the workflow tools wired here.",
+      "shel, invoice.send don't match any tool the approval gate recognizes.",
     );
     expect(container.textContent).toContain(
-      "They may still be wired agent tools or hosted effect kinds.",
+      "They may still be hosted effect kinds.",
     );
 
     const auto = Array.from(container.querySelectorAll<HTMLButtonElement>('[role="radio"]')).find(
