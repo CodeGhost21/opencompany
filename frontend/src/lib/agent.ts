@@ -155,6 +155,35 @@ export interface ToolGrantSummary {
   standardGrant: boolean;
 }
 
+/**
+ * Reads an operator-typed tool-grant list into the array the host stores.
+ *
+ * Split on commas **and** whitespace, because both spellings are what people
+ * actually type after reading a `company.toml` — `"docs.*, files.*"` and
+ * `"docs.* files.*"` mean the same thing and neither should produce a grant
+ * named `"docs.*,"`. Duplicates collapse, order is first-seen, and an entirely
+ * blank field is `[]` — which the caller must treat as "the company's standard
+ * grant" rather than "no tools".
+ */
+export function parseToolGlobs(input: string): string[] {
+  const seen = new Set<string>();
+  for (const raw of input.split(/[\s,]+/)) {
+    const glob = raw.trim();
+    if (glob !== "") seen.add(glob);
+  }
+  return [...seen];
+}
+
+/**
+ * Whether two grant lists differ as *sets*, so re-ordering or re-spacing a
+ * field the operator did not really change does not produce a write.
+ */
+export function toolGlobsDiffer(before: string[], after: string[]): boolean {
+  if (before.length !== after.length) return true;
+  const set = new Set(before);
+  return after.some((glob) => !set.has(glob));
+}
+
 export function summarizeGrants(tools: AgentToolsDto): ToolGrantSummary {
   return {
     effective: tools.effective,
