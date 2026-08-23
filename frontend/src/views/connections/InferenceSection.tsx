@@ -361,7 +361,7 @@ export function InferenceSection({
     <section className="space-y-3">
       <div className="flex items-center gap-2">
         <BrainCircuit className="size-4 text-muted-foreground" />
-        <h2 className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
+        <h3 className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
           Inference (BYOK)
         </h2>
         {/* Mirrors the Company credential card's own subtitle. Two cards in
