@@ -63,7 +63,7 @@ id = "work"
 kind = "agent"
 name = "Work"
 summary = "Draft the launch spec."
-agent = "ceo"
+agent = "ceo-a"
 [[node]]
 id = "done"
 kind = "output"
