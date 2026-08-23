@@ -1,6 +1,6 @@
 /**
- * Temporary diagnostics spec — captures the full settled SVG structure (node
- * titles, node positions, edge paths) so two fresh-host runs can be diffed.
+ * Temporary diagnostics spec — captures the settled graph layout AND the raw
+ * API data that feeds it, so two fresh-host runs can be diffed end to end.
  * NOT part of the suite; deleted after use.
  */
 import { writeFileSync } from "node:fs";
@@ -21,7 +21,7 @@ async function settleKnowledgeGraph(page: Page) {
   }
 }
 
-test("capture settled graph layout", async ({ page }) => {
+test("capture settled graph layout + API data", async ({ page }) => {
   await page.addInitScript(() => {
     const real = Storage.prototype.getItem;
     Storage.prototype.getItem = function getItem(key: string) {
@@ -36,7 +36,7 @@ test("capture settled graph layout", async ({ page }) => {
   await page.evaluate(() => document.fonts.ready);
   await settleKnowledgeGraph(page);
 
-  const dump = await page.evaluate(() => {
+  const dump = await page.evaluate(async () => {
     const svg = document.querySelector('svg[aria-label="Operating knowledge graph"]');
     if (!svg) return { error: "no svg" };
     const groups = svg.querySelectorAll("g[transform]");
@@ -49,12 +49,24 @@ test("capture settled graph layout", async ({ page }) => {
       const key = label || `noid@${Math.round(+m[1])},${Math.round(+m[2])}`;
       positions[key] = [Math.round(+m[1] * 10) / 10, Math.round(+m[2] * 10) / 10];
     }
-    // Edge paths: capture the d attribute of every <path> — this encodes the
-    // full link topology (which nodes connect, via their coordinates).
-    const edgePaths = Array.from(svg.querySelectorAll("path[d]")).map((p) => p.getAttribute("d"));
-    // The full innerHTML hash for reference.
-    const htmlLen = svg.innerHTML.length;
-    return { count: groups.length, positions, edgePathCount: edgePaths.length, edgePaths, htmlLen };
+    // Raw API data feeding the graph — same reads Overview makes.
+    const paths = [
+      "/api/v1/company/tasks",
+      "/api/v1/company/team",
+      "/api/v1/company/desks",
+      "/api/v1/company/memory",
+      "/api/v1/company/workflows",
+    ];
+    const data: Record<string, unknown> = {};
+    for (const p of paths) {
+      try {
+        const r = await fetch(p);
+        data[p] = r.ok ? await r.json() : { http: r.status };
+      } catch (e) {
+        data[p] = { fetchError: String(e) };
+      }
+    }
+    return { count: groups.length, positions, data };
   });
   const out =
     process.env.CAPTURE_OUT ||
