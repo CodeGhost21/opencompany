@@ -46,6 +46,15 @@ export function ChannelRail({
   onExpand,
   className,
 }: Props) {
+  // Section disclosure lives here rather than inside `Section`, because the
+  // collapsed branch below unmounts every `Section`. Held inside them, folding
+  // a section and then collapsing the rail would reopen it on expand — the
+  // density toggle must not discard the operator's organization. Absent means
+  // "open": the default is a fully expanded list.
+  const [openSections, setOpenSections] = useState<Record<string, boolean>>({});
+  const toggleSection = (id: string) =>
+    setOpenSections((prev) => ({ ...prev, [id]: !(prev[id] ?? true) }));
+
   if (collapsed) {
     return (
       <aside
