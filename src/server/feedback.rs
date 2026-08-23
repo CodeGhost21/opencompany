@@ -365,6 +365,128 @@ mod test {
         assert_eq!(github.comments().len(), 1);
     }
 
+    // A confirm-by-id of an item that was captured (the built-in feedback tool
+    // or the chat intent) but never previewed must be refused: its words are
+    // hidden from the reports list, so sending it would file a body nobody
+    // inspected.
+    #[tokio::test]
+    async fn confirm_of_unpreviewed_capture_is_blocked() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let github = Arc::new(MockGitHubClient::new());
+        let state = state_with_company(&home, github.clone()).await;
+        let app = router(state);
+
+        // Capture the item the way the built-in feedback tool / chat intent
+        // does — persisted locally, never previewed, words never surfaced.
+        let runtime = lookup(&state, "acme").expect("acme runtime");
+        let captured = runtime
+            .capture_feedback(crate::feedback::FeedbackInput {
+                category: crate::feedback::FeedbackCategory::Bug,
+                note: "the run crashed".into(),
+                work_ref: None,
+                template_name: None,
+                template_version: None,
+            })
+            .await
+            .expect("captured");
+
+        let confirm_body = serde_json::json!({
+            "category": "bug",
+            "note": "the run crashed",
+            "item_id": captured.id,
+        })
+        .to_string();
+        let (status, value) = post_json(&app, "/api/v1/company/feedback", &confirm_body).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(value["blocked"], true);
+        assert_eq!(value["destination"], "local");
+        assert!(
+            github.created().is_empty(),
+            "an unpreviewed item must not be filed"
+        );
+        assert!(github.comments().is_empty());
+    }
+
+    // Re-confirming an already-filed item is idempotent: it returns the
+    // recorded result instead of filing or commenting a second time.
+    #[tokio::test]
+    async fn re_confirm_of_filed_item_returns_recorded_result() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let github = Arc::new(MockGitHubClient::new());
+        let state = state_with_company(&home, github.clone()).await;
+        let app = router(state);
+
+        // Preview, then confirm — one issue is filed.
+        let (_, preview) = post_json(
+            &app,
+            "/api/v1/company/feedback",
+            r#"{"category":"bug","note":"the run crashed","preview":true}"#,
+        )
+        .await;
+        let item_id = preview["item_id"].as_str().expect("item id").to_string();
+        let confirm_body = serde_json::json!({
+            "category": "bug",
+            "note": "the run crashed",
+            "item_id": item_id,
+        })
+        .to_string();
+
+        let (status, first) = post_json(&app, "/api/v1/company/feedback", &confirm_body).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(first["filed"], true);
+        assert_eq!(github.created().len(), 1);
+
+        // Confirm the same item again: the recorded result returns and nothing
+        // new is filed or commented.
+        let (status, again) = post_json(&app, "/api/v1/company/feedback", &confirm_body).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(again["filed"], true);
+        assert_eq!(again["item_id"], item_id);
+        assert_eq!(again["issue_url"], first["issue_url"]);
+        assert_eq!(again["deduped"], false);
+        assert_eq!(github.created().len(), 1, "no second issue");
+        assert_eq!(github.comments().len(), 0, "no duplicate comment");
+    }
+
+    // Re-confirming an already-forwarded item returns the recorded result
+    // instead of ingesting the report into the hub a second time.
+    #[tokio::test]
+    async fn re_confirm_of_forwarded_item_does_not_ingest_twice() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let github = Arc::new(MockGitHubClient::new());
+        let hub = Arc::new(MockTinyHumansClient::new());
+        let state = state_with_clients(&home, github, Some(hub.clone())).await;
+        let app = router(state);
+
+        let (_, preview) = post_json(
+            &app,
+            "/api/v1/company/feedback",
+            r#"{"category":"bug","note":"the run crashed","preview":true}"#,
+        )
+        .await;
+        let item_id = preview["item_id"].as_str().expect("item id").to_string();
+        let confirm_body = serde_json::json!({
+            "category": "bug",
+            "note": "the run crashed",
+            "item_id": item_id,
+        })
+        .to_string();
+
+        let (_, first) = post_json(&app, "/api/v1/company/feedback", &confirm_body).await;
+        assert_eq!(first["filed"], true);
+        assert_eq!(first["destination"], "tinyhumans");
+        assert_eq!(hub.forwarded().len(), 1);
+
+        let (_, again) = post_json(&app, "/api/v1/company/feedback", &confirm_body).await;
+        assert_eq!(again["filed"], true);
+        assert_eq!(again["destination"], "tinyhumans");
+        assert_eq!(again["item_id"], item_id);
+        assert_eq!(hub.forwarded().len(), 1, "no second ingest");
+    }
+
     // A provisioned instance forwards to the hub instead of filing, and what
     // crosses the boundary is the scrubbed body — not the operator's raw words.
     #[tokio::test]
