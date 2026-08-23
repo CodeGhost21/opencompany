@@ -1,12 +1,33 @@
 // @vitest-environment jsdom
 
-import { act, createElement, Fragment, type ReactNode } from "react";
+import { act, createElement, Fragment, useEffect, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("@/views/overview/kg/KnowledgeGraphFullscreen", () => ({
-  KnowledgeGraphFullscreen: ({ children, extraDetail }: { children: ReactNode; extraDetail?: ReactNode }) =>
-    createElement(Fragment, null, children, extraDetail),
+  KnowledgeGraphFullscreen: ({
+    children,
+    extraDetail,
+    coreOpen,
+    onCollapseCore,
+  }: {
+    children: ReactNode;
+    extraDetail?: ReactNode;
+    coreOpen?: boolean;
+    onCollapseCore?: () => void;
+  }) => {
+    // The real fullscreen chrome owns Escape while the vault is open: it
+    // collapses the core instead of exiting. The mock must keep that single
+    // contract so tests can drive the collapse the way a user does.
+    useEffect(() => {
+      const onKey = (e: KeyboardEvent) => {
+        if (e.key === "Escape") onCollapseCore?.();
+      };
+      window.addEventListener("keydown", onKey);
+      return () => window.removeEventListener("keydown", onKey);
+    }, [coreOpen, onCollapseCore]);
+    return createElement(Fragment, null, children, extraDetail);
+  },
 }));
 
 import { KnowledgeGraph } from "@/views/overview/kg/KnowledgeGraph";
@@ -102,11 +123,14 @@ describe("the overview graph keyboard control", () => {
       nodes[0].dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
     });
 
-    nodes = [...host.querySelectorAll<SVGGElement>('g[role="button"]')];
+    // With the vault open the core sheds its button role (its notes are the
+    // interactive targets now), so the roving set spans buttons + the group.
+    nodes = [...host.querySelectorAll<SVGGElement>('g[role="button"], g[role="group"]')];
     expect(nodes).toHaveLength(4);
+    expect(nodes[0].getAttribute("role")).toBe("group");
     expect(nodes.filter((node) => node.tabIndex === 0)).toHaveLength(1);
     expect(nodes.map((node) => node.getAttribute("aria-label"))).toEqual([
-      "Notes: Acme. Press Enter or Space to select.",
+      "Notes: Acme. 2 notes.",
       "Memory note: Onboarding. Press Enter or Space to open.",
       "Memory note: Vault. Press Enter or Space to open.",
       "Pillars: Engineering. Press Enter or Space to select.",
@@ -166,13 +190,13 @@ describe("the overview graph keyboard control", () => {
     });
 
     // Open the vault from the keyboard, exposing the note as a button.
-    let nodes = [...host.querySelectorAll<SVGGElement>('g[role="button"]')];
+    let nodes = [...host.querySelectorAll<SVGGElement>('g[role="button"], g[role="group"]')];
     act(() => {
       nodes[0].focus();
       nodes[0].dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
     });
 
-    nodes = [...host.querySelectorAll<SVGGElement>('g[role="button"]')];
+    nodes = [...host.querySelectorAll<SVGGElement>('g[role="button"], g[role="group"]')];
     expect(nodes).toHaveLength(3);
     expect(nodes[1].getAttribute("aria-label")).toBe(
       "Memory note: Onboarding. Press Enter or Space to open.",
@@ -187,5 +211,56 @@ describe("the overview graph keyboard control", () => {
       nodes[1].dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
     });
     expect(host.textContent).toContain("Welcome aboard");
+  });
+
+  it("moves focus to the core when Escape collapses the vault under a focused note", async () => {
+    act(() => {
+      root.render(
+        createElement(KnowledgeGraph, {
+          graph: {
+            nodes: [
+              { id: "self", kind: "self", label: "Acme", ring: 0 },
+              { id: "team:desk:eng", kind: "team", label: "Engineering", ring: 1 },
+            ],
+            edges: [{ source: "self", target: "team:desk:eng", kind: "pillar" }],
+          },
+          memory: {
+            nodes: [
+              {
+                id: "note:onboarding", type: "page", label: "Onboarding", folder: "ops",
+                excerpt: "", wordCount: 12, chunks: 2, vx: 0.2, vy: -0.2, cluster: 0, links: 1,
+              },
+            ],
+            edges: [],
+          },
+        }),
+      );
+    });
+
+    let nodes = [...host.querySelectorAll<SVGGElement>('g[role="button"], g[role="group"]')];
+    act(() => {
+      nodes[0].focus();
+      nodes[0].dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    });
+
+    // Park the roving focus on the note, then Escape collapses the vault and
+    // unmounts it — focus must land back on the core, not <body>.
+    nodes = [...host.querySelectorAll<SVGGElement>('g[role="button"], g[role="group"]')];
+    act(() => {
+      nodes[1].focus();
+    });
+    expect(document.activeElement).toBe(nodes[1]);
+
+    // Escape in the fullscreen chrome collapses the vault (the mock keeps the
+    // real contract), stranding focus on the just-removed note.
+    await act(async () => {
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+    });
+
+    nodes = [...host.querySelectorAll<SVGGElement>('g[role="button"], g[role="group"]')];
+    expect(nodes).toHaveLength(2);
+    expect(nodes[0].getAttribute("role")).toBe("button");
+    expect(nodes[0].tabIndex).toBe(0);
+    expect(document.activeElement).toBe(nodes[0]);
   });
 });

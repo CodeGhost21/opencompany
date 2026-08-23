@@ -1956,7 +1956,20 @@ export function KnowledgeGraph({
   ];
   useEffect(() => {
     if (navigableNodes.some((n) => n.id === activeNodeId)) return;
-    setActiveNodeId(navigableNodes[0]?.id ?? null);
+    const next = navigableNodes[0]?.id ?? null;
+    setActiveNodeId(next);
+    // The roving focus parked on a node that just left the set (Escape
+    // collapsed the vault and unmounted its note, or a tree closed under
+    // it): the browser strands focus on <body> the moment a focused element
+    // unmounts, so hand it to the fallback node or arrow keys stop reaching
+    // the graph's handler.
+    if (activeNodeId) {
+      const prev = nodeRefs.current.get(activeNodeId) ?? null;
+      const stranded =
+        document.activeElement === document.body ||
+        (prev !== null && prev.contains(document.activeElement));
+      if (stranded) nodeRefs.current.get(next ?? '')?.focus();
+    }
   }, [activeNodeId, navigableNodes]);
   const moveActiveNode = (direction: number) => {
     if (navigableNodes.length === 0) return;
@@ -2220,8 +2233,16 @@ export function KnowledgeGraph({
                   if (el) nodeRefs.current.set(n.id, el);
                   else nodeRefs.current.delete(n.id);
                 }}
-                role="button"
-                aria-label={nodeAriaLabel(n)}
+                // The open vault's notes are buttons that sit inside this <g>;
+                // a `button` role would make them presentational, so once the
+                // constellation is expanded the core becomes a labelled group
+                // and the notes carry the interactive roles.
+                role={coreExpanded ? 'group' : 'button'}
+                aria-label={
+                  coreExpanded
+                    ? `Notes: ${n.label}. ${memory?.nodes.length ?? 0} notes.`
+                    : nodeAriaLabel(n)
+                }
                 tabIndex={activeNodeId === n.id ? 0 : -1}
                 className="kg-node"
                 transform={`translate(${n.x},${n.y})`}
