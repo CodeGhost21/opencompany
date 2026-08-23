@@ -845,4 +845,182 @@ to = "run"
             .expect("the child's node survives");
         assert!(run.config.get("requires_approval").is_none());
     }
+
+    // ---- Issue #617: routing the child's gate pass back to the parent -------
+
+    /// A child graph whose one working node is a `web_fetch` — the grantable
+    /// call the standing-permission tests below exercise (`shell` is
+    /// `Standing::PerCall`, so no grant can ever admit it).
+    fn child_with_web_fetch(id: &str) -> String {
+        format!(
+            r#"
+id = "{id}"
+name = "{id}"
+[[node]]
+id = "start"
+kind = "trigger"
+name = "Start"
+[[node]]
+id = "fetch"
+kind = "tool_call"
+name = "Fetch"
+[node.config]
+slug = "web_fetch"
+[node.config.args]
+url = "https://docs.rs/jaq"
+[[edge]]
+from = "start"
+to = "fetch"
+"#
+        )
+    }
+
+    /// A live standing permission for `web_fetch` held by one workflow.
+    fn web_fetch_grant(workflow: &str) -> crate::runtime::grants::GrantSet {
+        let grants = crate::runtime::grants::GrantSet::default();
+        grants.grant_standing(crate::runtime::grants::StandingGrant {
+            id: crate::runtime::grants::GrantId::new("g-web"),
+            agent: String::new(),
+            workflow: Some(workflow.to_string()),
+            tool: "web_fetch".to_string(),
+            granted_by: crate::ports::types::Actor {
+                kind: crate::ports::types::ActorKind::User,
+                id: "user-1".to_string(),
+            },
+            approval_id: crate::ports::types::ApprovalId::new("approval-1"),
+            at_millis: 1_000,
+            expires_at_millis: crate::ports::now_millis() + 60 * 60 * 1000,
+            origin_thread: None,
+            origin_parent: None,
+            origin_task: None,
+            scope: Some("https://docs.rs".to_string()),
+        });
+        grants
+    }
+
+    /// Like [`gated_resolver`], but hands back the registry too so a test can
+    /// assert what the resolver recorded, and accepts the live grant set.
+    fn gated_resolver_with_grants(
+        overlays: Vec<OverlayWorkflow>,
+        mode: &str,
+        grants: crate::runtime::grants::GrantSet,
+    ) -> (StoreWorkflowResolver, Arc<ChildGateRegistry>) {
+        let policy: crate::company::Policy =
+            toml::from_str(&format!("mode = \"{mode}\"\nalways_approve = []\n"))
+                .expect("valid [policy]");
+        let registry = Arc::new(ChildGateRegistry::default());
+        let resolver = StoreWorkflowResolver::new(
+            None,
+            store_with(overlays),
+            CompanyId::new("acme"),
+            "root".to_string(),
+            Some(ChildPolicyGates {
+                policy,
+                run_id: "run-1".to_string(),
+                grants,
+                registry: registry.clone(),
+            }),
+        );
+        (resolver, registry)
+    }
+
+    /// Issue #617. The child's policy check is bound to the run's **root**
+    /// workflow id — the id the parked card is minted under — so a permission
+    /// the operator granted the top-level workflow is honoured inside the
+    /// child. Bound to the child's own id instead, the grant would not match
+    /// and the child call would park again under a permission that should have
+    /// admitted it.
+    #[tokio::test]
+    async fn a_standing_grant_for_the_root_workflow_admits_a_child_call() {
+        let (resolver, _) = gated_resolver_with_grants(
+            vec![overlay("child", child_with_web_fetch("child"))],
+            "supervised",
+            web_fetch_grant("root"),
+        );
+
+        let graph = resolver.resolve("child").await.expect("child resolves");
+        let fetch = graph
+            .nodes
+            .iter()
+            .find(|n| n.id == "fetch")
+            .expect("the child's node survives");
+        assert!(
+            fetch.config.get("requires_approval").is_none(),
+            "a grant for the root workflow must admit the child's call: {:?}",
+            fetch.config
+        );
+    }
+
+    /// The other direction of the subject decision: a grant bound to the
+    /// child's own id does **not** admit it, because the child's checks run
+    /// under the root workflow. No card path mints a child-bound grant — cards
+    /// are minted with the root — so this pins the decision rather than a
+    /// reachable state, and keeps the two ids from being confused again.
+    #[tokio::test]
+    async fn a_grant_bound_to_the_child_id_does_not_admit_the_child_call() {
+        let (resolver, _) = gated_resolver_with_grants(
+            vec![overlay("child", child_with_web_fetch("child"))],
+            "supervised",
+            web_fetch_grant("child"),
+        );
+
+        let graph = resolver.resolve("child").await.expect("child resolves");
+        let fetch = graph
+            .nodes
+            .iter()
+            .find(|n| n.id == "fetch")
+            .expect("the child's node survives");
+        assert!(
+            fetch.config["requires_approval"].as_bool().unwrap_or(false),
+            "a grant bound to the child's own id must not admit it: {:?}",
+            fetch.config
+        );
+    }
+
+    /// Issue #617. The resolver records each gated child — the graph the engine
+    /// is actually running and the calls the policy raised on it — so the
+    /// parent's parking path can name a child pause after the run settles.
+    /// A namespaced pending id (`sub::work`) resolves through the parent graph
+    /// and the registry back to the child's own classification.
+    #[tokio::test]
+    async fn a_policy_gated_child_is_recorded_for_the_parents_parking_path() {
+        let (resolver, registry) = gated_resolver_with_grants(
+            vec![overlay("child", child_with_shell("child"))],
+            "supervised",
+            crate::runtime::grants::GrantSet::default(),
+        );
+        resolver.resolve("child").await.expect("child resolves");
+
+        let record = registry
+            .get("child")
+            .expect("the resolver recorded the gated child");
+        // The recorded graph is the one the engine runs — post-gate-pass.
+        assert!(
+            record.graph.nodes.iter().any(|n| n.id == "run"),
+            "the recorded graph is the gated child graph"
+        );
+        // The gated list names the child's OWN node ids (un-namespaced), so the
+        // parent can match them against the stripped namespace.
+        let gate = record
+            .gated
+            .iter()
+            .find(|g| g.node_id == "run")
+            .expect("the shell call was gated");
+        assert_eq!(gate.slug, "shell");
+        assert!(
+            gate.reason.contains("shell"),
+            "the reason names the call: {}",
+            gate.reason
+        );
+
+        // A namespaced pending id resolves through a parent graph to that same
+        // classification — the lookup the parking path performs.
+        let file =
+            crate::company::parse_workflow(&parent_of("parent", "child")).expect("parent parses");
+        let parent = crate::workflows::translate::translate(&file);
+        let described = child_gate_call(&registry, &parent, "sub::work")
+            .expect("a namespaced child gate resolves through the registry");
+        assert_eq!(described.node_id, "run");
+        assert_eq!(described.slug, "shell");
+    }
 }
