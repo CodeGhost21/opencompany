@@ -1362,7 +1362,7 @@ export function KnowledgeGraph({
       </g>
     );
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [memoryOn, memory, memLayout, memById, coreExpanded, coreScale]);
+  }, [memoryOn, memory, memLayout, memById, coreExpanded, coreScale, activeNodeId]);
 
   // Static backdrop chrome — depends only on constants, so memoize it once and
   // let React skip reconciling it on every (now frame-throttled) sim tick.
