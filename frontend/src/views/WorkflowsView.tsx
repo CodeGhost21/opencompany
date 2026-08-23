@@ -2705,7 +2705,7 @@ export function WorkflowsView({
             <AlertDescription className="flex flex-wrap items-center justify-between gap-2">
               <span>
                 {runRefusal.code === "inference_required"
-                  ? "This company has no inference provider configured, so workflows can't run. Set a provider under Settings → Connections → Inference, then run again."
+                  ? "This company has no inference provider configured, so workflows can't run. Set a provider under Settings → Inference, then run again."
                   : runRefusal.message}
               </span>
               {runRefusal.code === "inference_required" && (
