@@ -193,7 +193,9 @@ export function AgentRuns({
     // would still be a lie. Filtering here costs nothing and makes the section
     // under-report on that host instead of misattributing — which is the right
     // way round.
-    setRuns(rows.filter((run) => run.agentId === agentId));
+    setRuns(
+      Array.isArray(rows) ? rows.filter((run) => run.agentId === agentId) : [],
+    );
     setFailed(false);
   }, [client, company, agentId]);
 
@@ -216,11 +218,17 @@ export function AgentRuns({
         listWorkflows(client, company).catch(() => null),
       ]);
       if (!live) return;
+      // `Array.isArray` rather than a null check: these reads are best-effort
+      // and a *shape* that is not a list — an older host answering an object,
+      // a proxy returning an error body with a 200 — must degrade to "no
+      // sources" exactly as a rejection does. A throw here would escape into
+      // an unhandled rejection and take nothing useful with it, because the
+      // section renders every run perfectly well without either list.
       setIndex({
-        tasks: tasks
+        tasks: Array.isArray(tasks)
           ? new Map<string, Task>(tasks.map((task) => [task.id, task]))
           : undefined,
-        workflows: workflows
+        workflows: Array.isArray(workflows)
           ? new Map(workflows.map((flow) => [flow.id, flow.name]))
           : undefined,
       });
