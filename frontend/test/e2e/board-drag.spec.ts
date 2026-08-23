@@ -250,6 +250,14 @@ test("a card drags from Working to Done, and the board scrolls to get there", as
   // below turns on that measurement — which columns collapse, and by how much
   // the board overflows — so wait for it rather than for a timeout.
   await expect.poll(pane).toBeLessThan(wide);
+  // The pane shrinking is only the resize itself, though. Whether a column is
+  // allowed to collapse is derived from the `viewport` state that observer
+  // feeds, so that render lands a frame later — and `expandAll` returns the
+  // moment it sees no collapsed column, so calling it in the gap would pin
+  // nothing and let Done fold right after, which is the intermittent failure
+  // this wait exists for. Wait for the rail the narrowing actually creates
+  // before expanding, so there is something to expand when we get there.
+  await expect(board(page).locator('[data-collapsed="true"]')).not.toHaveCount(0);
 
   // And expand *again*, because narrowing the window is what created the rails.
   // `openBoard` ran `expandAll` at 1280px, where three phases fit and the board
