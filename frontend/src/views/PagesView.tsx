@@ -92,14 +92,26 @@ export function PagesView({ client, company }: Props) {
     const frame = iframeRef.current;
     if (++loadsRef.current > 1) {
       capabilityRef.current = "";
+      portRef.current?.close();
+      portRef.current = null;
       return;
     }
     const cap =
       typeof globalThis.crypto?.randomUUID === "function"
         ? globalThis.crypto.randomUUID()
         : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    // A fresh channel per document. port2 is transferred to the frame below,
+    // and the bridge listens on port1 — only port2 can reach it. When the
+    // document is destroyed (navigation), port2 dies with it, so a replacement
+    // document's scripts have no port to post through even before this `load`
+    // handler revokes the capability string.
+    const channel = new MessageChannel();
     capabilityRef.current = cap;
-    frame?.contentWindow?.postMessage({ type: "oc:init", capability: cap }, "*");
+    portRef.current = channel.port1;
+    channel.port1.onmessage = (event) => bridgeHandlerRef.current(event);
+    frame?.contentWindow?.postMessage({ type: "oc:init", capability: cap }, "*", [
+      channel.port2,
+    ]);
   }, []);
 
   // Changing the selected page creates a new iframe document. Its first load
@@ -107,7 +119,6 @@ export function PagesView({ client, company }: Props) {
   // a navigation and remains revoked.
   useEffect(() => {
     loadsRef.current = 0;
-    capabilityRef.current = "";
   }, [active?.slug]);
 
   const loadRun = useRef(0);
