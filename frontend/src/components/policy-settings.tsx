@@ -19,6 +19,16 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { cn } from "@/lib/utils";
@@ -72,6 +82,18 @@ interface Props {
   company: string | null;
 }
 
+/** Whether moving through the host-provided tier order gives agents more autonomy. */
+export function widensAutonomy(
+  tiers: PolicyStatus["tiers"],
+  from: string,
+  to: string,
+): boolean {
+  return (
+    tiers.findIndex((tier) => tier.value === to) >
+    tiers.findIndex((tier) => tier.value === from)
+  );
+}
+
 /**
  * The autonomy tier and the always-ask list (issue #562).
  *
@@ -107,6 +129,12 @@ export function PolicySettings({ client, company }: Props) {
   // half-typed effect kind never reaches the gate.
   const [draftAlways, setDraftAlways] = useState("");
   const [dirty, setDirty] = useState(false);
+  // A looser tier changes what teammates can do without stopping for approval.
+  // Keep the target, rather than a boolean, so the dialog can compare the
+  // host-provided consequences that actually apply to this deployment.
+  const [pendingTier, setPendingTier] = useState<PolicyStatus["tiers"][number] | null>(
+    null,
+  );
   /**
    * The tool names this deployment can actually gate (issue #1226).
    *
@@ -205,6 +233,15 @@ export function PolicySettings({ client, company }: Props) {
     }
   };
 
+  const requestTier = (tier: PolicyStatus["tiers"][number]) => {
+    if (!status || saving || tier.value === status.mode) return;
+    if (widensAutonomy(status.tiers, status.mode, tier.value)) {
+      setPendingTier(tier);
+      return;
+    }
+    void chooseTier(tier.value);
+  };
+
   const saveAlways = async () => {
     if (!status || saving) return;
     setSaving(true);
@@ -275,20 +312,28 @@ export function PolicySettings({ client, company }: Props) {
         ) : (
           <>
             <div className="space-y-2">
+              <p className="text-xs font-medium text-muted-foreground">
+                More freedom to act ↓
+              </p>
               {status.tiers.map((tier) => {
                 const active = tier.value === status.mode;
+                const looser = tier.value === "auto" || tier.value === "full";
                 return (
                   <button
                     key={tier.value}
                     type="button"
                     disabled={saving}
-                    onClick={() => void chooseTier(tier.value)}
+                    onClick={() => requestTier(tier)}
                     aria-pressed={active}
+                    data-testid={`policy-tier-${tier.value}`}
                     className={cn(
                       "w-full rounded-md border p-3 text-left transition-colors",
                       "disabled:cursor-not-allowed disabled:opacity-60",
+                      looser && "border-status-blocked/40 bg-status-blocked-soft hover:bg-status-blocked-soft",
                       active
-                        ? "border-primary bg-primary/5"
+                        ? looser
+                          ? "ring-1 ring-status-blocked/30"
+                          : "border-primary bg-primary/5"
                         : "hover:bg-muted/50",
                     )}
                   >
@@ -310,6 +355,41 @@ export function PolicySettings({ client, company }: Props) {
                 Takes effect {status.takesEffect}.
               </p>
             </div>
+
+            <AlertDialog
+              open={pendingTier !== null}
+              onOpenChange={(open) => {
+                if (!open) setPendingTier(null);
+              }}
+            >
+              <AlertDialogContent>
+                <AlertDialogHeader>
+                  <AlertDialogTitle>
+                    Let teammates do more on their own?
+                  </AlertDialogTitle>
+                  <AlertDialogDescription>
+                    {pendingTier && (
+                      <>
+                        Instead of: {status.tiers.find((tier) => tier.value === status.mode)?.description}{" "}
+                        With {pendingTier.label}: {pendingTier.description}
+                      </>
+                    )}
+                  </AlertDialogDescription>
+                  <p className="text-sm text-muted-foreground">
+                    Your always-ask list still wins, even on Full.
+                  </p>
+                </AlertDialogHeader>
+                <AlertDialogFooter>
+                  <AlertDialogCancel>Keep current setting</AlertDialogCancel>
+                  <AlertDialogAction
+                    onClick={() => pendingTier && void chooseTier(pendingTier.value)}
+                    data-testid="policy-tier-confirm"
+                  >
+                    Use {pendingTier?.label}
+                  </AlertDialogAction>
+                </AlertDialogFooter>
+              </AlertDialogContent>
+            </AlertDialog>
 
             <div className="space-y-2">
               <Label htmlFor="always-approve">Always ask first</Label>
