@@ -10,8 +10,6 @@ const api = vi.hoisted(() => ({
   clearBilling: vi.fn(),
   clearHosting: vi.fn(),
   getHosting: vi.fn(),
-  getMcpDirectoryCredential: vi.fn(),
-  setMcpDirectoryCredential: vi.fn(),
 }));
 
 vi.mock("@/api/billing", () => ({
@@ -25,20 +23,12 @@ vi.mock("@/api/hosting", () => ({
   saveHosting: vi.fn(),
 }));
 
-vi.mock("@/api/mcp-registry", () => ({
-  getMcpDirectoryCredential: api.getMcpDirectoryCredential,
-  setMcpDirectoryCredential: api.setMcpDirectoryCredential,
-}));
-
 vi.mock("sonner", () => ({
   toast: { error: vi.fn(), info: vi.fn(), success: vi.fn() },
 }));
 
 const { ChargebeeForm } = await import("@/views/finance/ChargebeeForm");
 const { HostingView } = await import("@/views/HostingView");
-const { McpDirectoryCredentialCard } = await import(
-  "@/views/connections/McpDirectoryCredentialCard"
-);
 
 let container: HTMLDivElement;
 let root: Root;
