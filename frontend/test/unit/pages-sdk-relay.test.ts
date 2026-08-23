@@ -201,6 +201,8 @@ describe("the page frame's toast-relay listener", () => {
     // (capture semantics). A press that moved is a drag; its release must not
     // activate whatever happens to be under the release point.
     const pressTarget = document.createElement("button");
+    const pressClicked = vi.fn();
+    pressTarget.addEventListener("click", pressClicked);
     document.body.append(pressTarget);
     mockElementFromPoint(pressTarget);
 
