@@ -121,6 +121,20 @@ describe("planLabels", () => {
     expect(ids(planLabels([long, neighbour], { x: 0, y: 0, w: W }, W))).toEqual(["named"]);
   });
 
+  it("accounts for the 10px floor when deciding which dense labels survive", () => {
+    const pair = [
+      cand({ id: "priority", x: 0, priority: LABEL_PRIORITY.hovered }),
+      cand({ id: "neighbour", x: 30, priority: LABEL_PRIORITY.worker }),
+    ];
+    // The former 9px label boxes fit at this gap. At the design system floor,
+    // the planner drops the quieter one instead of letting the rendered names
+    // overlap.
+    expect(idSet(planLabels(pair.map((c) => ({ ...c, fontPx: 9 })), { x: 0, y: 0, w: W }, W))).toEqual(
+      new Set(["priority", "neighbour"]),
+    );
+    expect(ids(planLabels(pair, { x: 0, y: 0, w: W }, W))).toEqual(["priority"]);
+  });
+
   it("separates labels that share an x but sit on different rows", () => {
     const stacked = [
       cand({ id: "row-0", x: 0, dy: 20, priority: LABEL_PRIORITY.hovered }),

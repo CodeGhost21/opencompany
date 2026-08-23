@@ -90,10 +90,9 @@ const EDGE_COLOR: Record<string, string> = {
 const shortLabel = (n: KGNode) =>
   n.kind === 'task' && n.label.length > 20 ? `${n.label.slice(0, 18).trimEnd()}…` : n.label;
 
-// On-screen label size per tier, in px. Quoted at rest and held there at every
-// camera depth by `fixedLabel`, which is why the declutter can measure in px.
-const labelFontPx = (kind: KGNodeKind): number =>
-  kind === 'self' || kind === 'team' ? 10 : kind === 'task' ? 8.5 : 9;
+// Labels hold at the design system's 10px floor at every camera depth through
+// `fixedLabel`, which is why the declutter can measure their boxes in px.
+const LABEL_FONT_PX = 10;
 
 // 'about how long ago' for the harness card's last-run line
 const agoLabel = (iso: string): string => {
@@ -1888,7 +1887,7 @@ export function KnowledgeGraph({
       x: n.x,
       y: n.y,
       dy: v.r + 11 + (labelDy.get(n.id) ?? 0),
-      fontPx: labelFontPx(n.kind),
+      fontPx: LABEL_FONT_PX,
       priority: priority + Math.min(degree, 50) / 100,
     });
   }
@@ -2217,7 +2216,7 @@ export function KnowledgeGraph({
                               fontFamily="var(--font-mono)"
                               fontWeight={500}
                               fill="var(--text-2)"
-                              style={fixedLabel(9, coreScale)}
+                              style={fixedLabel(LABEL_FONT_PX, coreScale)}
                             >
                               {m.label.length > 22 ? `${m.label.slice(0, 20).trimEnd()}…` : m.label}
                             </text>
@@ -2259,7 +2258,7 @@ export function KnowledgeGraph({
                               fontFamily="var(--font-mono)"
                               fontWeight={500}
                               fill="var(--text-2)"
-                              style={fixedLabel(9.5, coreScale)}
+                              style={fixedLabel(LABEL_FONT_PX, coreScale)}
                             >
                               {m.label.length > 24 ? `${m.label.slice(0, 22).trimEnd()}…` : m.label}
                             </text>
@@ -2316,7 +2315,7 @@ export function KnowledgeGraph({
                   fontFamily="var(--font-mono)"
                   fontWeight={n.kind === 'self' || n.kind === 'team' || hoverId === n.id ? 600 : 400}
                   fill={hoverId === n.id ? 'var(--text)' : n.kind === 'team' ? color : 'var(--text-2)'}
-                  style={fixedLabel(labelFontPx(n.kind))}
+                  style={fixedLabel(LABEL_FONT_PX)}
                 >
                   {shortLabel(n)}
                 </text>
