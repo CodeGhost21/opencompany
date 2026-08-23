@@ -207,10 +207,11 @@ function extendsOnBoundary(name: string, prefix: string): boolean {
  * `workspace.*` does **not** cover a bare `workspace` request (which is why
  * manifests list both); a grant with no trailing `*` matches only itself; and
  * `media`, `composio`, `search`, `repo` and the whole `mcp:` namespace are
- * explicit opt-ins that a catch-all `*` never confers — the host's
- * `allow_covers` rejects them under a bare `*`, so this hint must too, or the
- * editor would suppress its "will not apply" warning and save a request the
- * returned detail immediately renders as ineffective.
+ * explicit opt-ins that a catch-all `*` never confers — bare namespace or
+ * dotted descendant alike — the host's `allow_covers` rejects them under a
+ * bare `*`, so this hint must too, or the editor would suppress its "will not
+ * apply" warning and save a request the returned detail immediately renders
+ * as ineffective.
  *
  * This is a *hint*, shown while an operator types. The host stays the
  * authority: it re-derives `effective` on every read, so a disagreement here
