@@ -2600,6 +2600,17 @@ impl CompanyRuntime {
     /// path: the same item is finalized — never a second capture — so the report
     /// appears once in the feedback family and the posted body is the exact
     /// previewed bytes (see [`crate::feedback::service::finalize`]).
+    ///
+    /// A confirm closes two gaps a bare `finalize` call would leave open:
+    ///
+    /// * **Idempotent** — an item that already left this machine (its
+    ///   `issue_status` is recorded) returns the recorded result instead of
+    ///   filing or forwarding again, so a retried or double-submitted Send does
+    ///   not file a second issue or add a duplicate comment.
+    /// * **Preview-first** — an item captured by the feedback tool or the chat
+    ///   intent was never previewed and its words are hidden from the reports
+    ///   list, so confirming it by id would send a body nobody inspected.
+    ///   Confirms of such items are refused; the operator must preview first.
     pub async fn submit_feedback(
         &self,
         input: FeedbackInput,
@@ -2608,11 +2619,25 @@ impl CompanyRuntime {
     ) -> Result<FeedbackResponse> {
         let manifest = self.store.load(&self.id).await?.map(|r| r.manifest);
         let item = match item_id {
-            Some(id) => self
-                .feedback
-                .get(&id)
-                .await?
-                .ok_or_else(|| OpenCompanyError::NotFound(format!("feedback item {id}")))?,
+            Some(id) => {
+                let item = self
+                    .feedback
+                    .get(&id)
+                    .await?
+                    .ok_or_else(|| OpenCompanyError::NotFound(format!("feedback item {id}")))?;
+                if !preview {
+                    if item.issue_status.is_some() {
+                        return Ok(FeedbackResponse::recorded(&item));
+                    }
+                    if item.scrubbed_body.is_none() {
+                        return Ok(FeedbackResponse::blocked(
+                            &id,
+                            "this report was not previewed; preview it before sending".to_string(),
+                        ));
+                    }
+                }
+                item
+            }
             None => self.capture_feedback(input).await?,
         };
         crate::feedback::service::finalize(
