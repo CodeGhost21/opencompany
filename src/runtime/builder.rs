@@ -3607,8 +3607,28 @@ fn build_networked_brain(
 mod test {
     use super::*;
     use crate::openhuman::MockOpenHumanRpc;
-    use crate::ports::types::ToolCall;
+    use crate::ports::types::{CompanyId, CompressedTrace, ToolCall};
     use crate::runtime::journal::ExecutedEffect;
+
+    #[derive(Clone)]
+    struct TestMemoryScopes {
+        context: Arc<dyn ContextStore>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::store::MemoryScopes for TestMemoryScopes {
+        fn agent_context(&self, _agent_id: &str) -> Arc<dyn ContextStore> {
+            self.context.clone()
+        }
+
+        fn desk_context(&self, _desk_id: &str) -> Arc<dyn ContextStore> {
+            self.context.clone()
+        }
+
+        async fn archived_traces(&self, _company: &CompanyId) -> Result<Vec<CompressedTrace>> {
+            Ok(Vec::new())
+        }
+    }
 
     fn tmp_home(prefix: &str) -> tempfile::TempDir {
         tempfile::Builder::new()
@@ -3640,6 +3660,46 @@ mod test {
                 .workspace_git_enabled,
             "the switch must also be able to turn checkpoints back off"
         );
+    }
+
+    /// The provider decorator only has value if the runtime keeps all of its
+    /// safe handles. This pins the overlay path specifically: direct builder
+    /// injection could otherwise pass while `with_memory_overlay` still drops
+    /// scratch, scoped facades, or the archive reader.
+    #[tokio::test]
+    async fn memory_overlay_carries_scratch_scopes_and_archive_access_to_runtime() {
+        use crate::store::{FsContextStore, FsMemoryStore, MemoryOverlay};
+
+        let home = tmp_home("opencompany-memory-overlay-");
+        let memory = tempfile::tempdir().unwrap();
+        let context = tempfile::tempdir().unwrap();
+        let scratch = tempfile::tempdir().unwrap();
+        let scoped = tempfile::tempdir().unwrap();
+        let plain: Arc<dyn ContextStore> = Arc::new(FsContextStore::new(context.path().into()));
+        let scratch: Arc<dyn ContextStore> = Arc::new(FsContextStore::new(scratch.path().into()));
+        let scopes: Arc<dyn crate::store::MemoryScopes> = Arc::new(TestMemoryScopes {
+            context: Arc::new(FsContextStore::new(scoped.path().into())),
+        });
+        let mut overlay = MemoryOverlay::test_with_ports(
+            Arc::new(FsMemoryStore::new(memory.path().into())),
+            plain,
+            None,
+        );
+        overlay.scratch = Some(scratch);
+        overlay.scopes = Some(scopes);
+
+        let manifest: CompanyManifest =
+            toml::from_str("[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n").unwrap();
+        let runtime = RuntimeBuilder::new(home.path().to_path_buf(), manifest)
+            .with_memory_overlay(&overlay)
+            .build()
+            .await
+            .unwrap();
+
+        assert!(runtime.scratch_context().is_some());
+        assert!(runtime.agent_context("cto").is_some());
+        assert!(runtime.desk_context("engineering").is_some());
+        assert_eq!(runtime.archived_traces().await.unwrap(), Some(Vec::new()));
     }
 
     mod scoped_grants {
