@@ -615,7 +615,10 @@ mod tests {
                 .unwrap(),
             "true"
         );
-        assert_eq!(response.headers().get(axum::http::header::VARY).unwrap(), "Origin");
+        assert_eq!(
+            response.headers().get(axum::http::header::VARY).unwrap(),
+            "Origin"
+        );
     }
 
     /// The failure that made issue #979 a blank page rather than a 404: a

@@ -456,9 +456,7 @@ mod tests {
     #[test]
     fn shell_loads_its_module_graph_with_credentials() {
         let html = page_shell_html("revenue");
-        assert!(
-            html.contains("<script type=\"module\" crossorigin=\"use-credentials\">")
-        );
+        assert!(html.contains("<script type=\"module\" crossorigin=\"use-credentials\">"));
     }
 
     #[test]
