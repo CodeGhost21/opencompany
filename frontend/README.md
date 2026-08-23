@@ -380,6 +380,38 @@ you care about with it.
 The `dist/` can be served as static files by any web server (or mounted by the
 OpenCompany host); use `window.OPENCOMPANY_CONFIG` to point it at the API.
 
+## Driving the console from an agent
+
+[`.mcp.json`](../.mcp.json) at the repository root registers two browser MCP
+servers, so an agent working in this checkout can open the console and look at
+it rather than reasoning about the markup:
+
+| Server | Good for |
+|--------|----------|
+| `chrome-devtools` | CDP: computed styles, console, network, performance traces, Lighthouse |
+| `playwright` | accessibility-tree snapshots, clicking through a flow, screenshots |
+
+Both are headless and use a throwaway profile. They need the same browser the
+suite does:
+
+```sh
+npm install
+npx playwright install chromium                          # for the suite and chrome-devtools
+npx @playwright/mcp@0.0.79 install-browser chrome-for-testing   # for the playwright server
+```
+
+The two are separate downloads because the MCP server pins its own Playwright,
+whose browser revision is usually a step ahead of the one in `package.json`.
+
+`chrome-devtools` is launched through
+[`test/tools/chrome-devtools-mcp.sh`](test/tools/chrome-devtools-mcp.sh) rather
+than directly. The wrapper resolves the browser from `@playwright/test` at
+launch — the revision directory is versioned, so a literal path in `.mcp.json`
+would break at the next pin bump with a `Target closed` error that says nothing
+about paths — and, on a host where AppArmor denies unprivileged user namespaces
+(Ubuntu 24.04+), drops the Chromium sandbox, which the downloaded build cannot
+start without a distribution profile.
+
 > This is a Vite/TypeScript app, not a Cargo package — it lives outside the Rust
 > crate, so `cargo build` ignores it. Business definitions live one level up in
 > [`../companies/`](../companies/); this one console serves them all.
