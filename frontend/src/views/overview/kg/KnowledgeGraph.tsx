@@ -1879,7 +1879,7 @@ export function KnowledgeGraph({
     const degree = (adjacency.get(n.id)?.size ?? 1) - 1;
     labelCandidates.push({
       id: n.id,
-      text: n.label,
+      text: n.kind === 'task' && n.label.length > 20 ? `${n.label.slice(0, 18).trimEnd()}…` : n.label,
       x: n.x,
       y: n.y,
       dy: v.r + 11 + (labelDy.get(n.id) ?? 0),
@@ -2313,7 +2313,7 @@ export function KnowledgeGraph({
                   fill={hoverId === n.id ? 'var(--text)' : n.kind === 'team' ? color : 'var(--text-2)'}
                   style={fixedLabel(labelFontPx(n.kind))}
                 >
-                  {n.label}
+                  {n.kind === 'task' && n.label.length > 20 ? `${n.label.slice(0, 18).trimEnd()}…` : n.label}
                 </text>
               )}
             </g>
