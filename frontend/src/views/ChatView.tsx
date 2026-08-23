@@ -242,6 +242,12 @@ export function ChatView({
   const [addOpen, setAddOpen] = useState(false);
   const [mobilePane, setMobilePane] = useState<"rail" | "chat">("chat");
   const [channelsCollapsed, setChannelsCollapsed] = useState(() => readChannelRailCollapsed(scope));
+  // The header's density toggle stays mounted across a collapse/expand, but the
+  // compact rail's expand button does not — expanding unmounts it while a
+  // keyboard user is still focused on it, dropping them at the document. The
+  // ref lets the expand action hand focus to the header toggle instead (the
+  // fix for the rail's issue #1340 focus review).
+  const channelsToggleRef = useRef<HTMLButtonElement>(null);
   const [isAdmin, setIsAdmin] = useState(false);
   // Who set which cap (issue #360, ported from the retired Team page). Only
   // an admin may read the user directory, so this stays empty for a member —
