@@ -160,6 +160,16 @@ struct TeamMemberDto {
     /// When that cap was set (epoch millis). Paired with `budgetSetBy`.
     #[serde(skip_serializing_if = "Option::is_none")]
     budget_set_at_millis: Option<u64>,
+    /// The face this teammate wears, when somebody has chosen one — a
+    /// `tiny:<flavour>` mascot or a `blob:<nodeId>` upload
+    /// (`docs/spec/runtime/avatars.md`). Absent means **nobody has chosen**, and
+    /// the console draws the mascot it hashes from the id.
+    ///
+    /// Skipped rather than defaulted for the reason `tier` is: absent is a real
+    /// answer here, and a client that could not tell it from a choice would have
+    /// no way to offer "reset to the default face".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    avatar: Option<String>,
     /// Whether this teammate came from the **global baseline**
     /// (`docs/spec/runtime/globals.md`) rather than from this company — the
     /// same `Agent::global` marker the merge itself sets (issue #1404).
@@ -365,6 +375,11 @@ fn member_row(
         spent_today_usd: cap.and_then(|_| spent(agent_id)),
         budget_set_by: attribution.map(|entry| entry.set_by.id.clone()),
         budget_set_at_millis: attribution.map(|entry| entry.at_millis),
+        // Resolved through the record, like every other overlay-backed field:
+        // one override row answers for a manifest teammate and an overlay one
+        // alike, so both arms of the list above get the chosen face with no
+        // second lookup to keep in step.
+        avatar: record.effective_avatar(agent_id),
         // Through the same helper as the four above, for the same reason: the
         // roster read is what the first-run gate is decided on, so a second
         // copy of the provenance rule here is a second thing to forget.
