@@ -3,10 +3,21 @@ import { Dialog as SheetPrimitive } from "@base-ui/react/dialog"
 
 import { cn } from "@/lib/utils"
 import { Button } from "@/components/ui/button"
+import { ReturnFocusContext, useReturnFocus } from "@/components/ui/return-focus"
 import { XIcon } from "lucide-react"
 
-function Sheet({ ...props }: SheetPrimitive.Root.Props) {
-  return <SheetPrimitive.Root data-slot="sheet" {...props} />
+function Sheet({ open, onOpenChange, ...props }: SheetPrimitive.Root.Props) {
+  const { target, handleOpenChange } = useReturnFocus(open, onOpenChange)
+  return (
+    <ReturnFocusContext.Provider value={target}>
+      <SheetPrimitive.Root
+        data-slot="sheet"
+        open={open}
+        onOpenChange={handleOpenChange}
+        {...props}
+      />
+    </ReturnFocusContext.Provider>
+  )
 }
 
 function SheetTrigger({ ...props }: SheetPrimitive.Trigger.Props) {
@@ -46,16 +57,9 @@ function SheetContent({
   showCloseButton?: boolean
 }) {
   // Sheets are controlled by the same sidebar state as dialogs are by their
-  // views. Keep the opener so closing a trigger-less sheet restores focus.
-  const defaultFinalFocus = React.useRef<HTMLElement | null>(null)
-  if (
-    defaultFinalFocus.current === null &&
-    typeof document !== "undefined" &&
-    document.activeElement instanceof HTMLElement &&
-    document.activeElement !== document.body
-  ) {
-    defaultFinalFocus.current = document.activeElement
-  }
+  // views. `Sheet` captures the opener at the moment the sheet opens, so
+  // closing a trigger-less sheet restores focus to it.
+  const defaultFinalFocus = React.useContext(ReturnFocusContext)
 
   return (
     <SheetPortal>
@@ -64,7 +68,7 @@ function SheetContent({
         data-slot="sheet-content"
         data-side={side}
         aria-modal="true"
-        finalFocus={finalFocus ?? defaultFinalFocus}
+        finalFocus={finalFocus ?? defaultFinalFocus ?? undefined}
         className={cn(
           "fixed z-50 flex flex-col gap-4 bg-popover bg-clip-padding text-sm text-popover-foreground shadow-lg transition duration-200 ease-in-out data-ending-style:opacity-0 data-starting-style:opacity-0 data-[side=bottom]:inset-x-0 data-[side=bottom]:bottom-0 data-[side=bottom]:h-auto data-[side=bottom]:border-t data-[side=bottom]:data-ending-style:translate-y-[2.5rem] data-[side=bottom]:data-starting-style:translate-y-[2.5rem] data-[side=left]:inset-y-0 data-[side=left]:left-0 data-[side=left]:h-full data-[side=left]:w-3/4 data-[side=left]:border-r data-[side=left]:data-ending-style:translate-x-[-2.5rem] data-[side=left]:data-starting-style:translate-x-[-2.5rem] data-[side=right]:inset-y-0 data-[side=right]:right-0 data-[side=right]:h-full data-[side=right]:w-3/4 data-[side=right]:border-l data-[side=right]:data-ending-style:translate-x-[2.5rem] data-[side=right]:data-starting-style:translate-x-[2.5rem] data-[side=top]:inset-x-0 data-[side=top]:top-0 data-[side=top]:h-auto data-[side=top]:border-b data-[side=top]:data-ending-style:translate-y-[-2.5rem] data-[side=top]:data-starting-style:translate-y-[-2.5rem] data-[side=left]:sm:max-w-sm data-[side=right]:sm:max-w-sm",
           className

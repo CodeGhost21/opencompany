@@ -78,3 +78,24 @@ test("the mobile sidebar sheet is modal", async ({ page }) => {
   await expect(sheet).toBeVisible();
   await expectModal(sheet, page.getByRole("main"));
 });
+
+test("the mobile sidebar sheet returns focus to its toggle, not to an earlier control", async ({
+  page,
+}) => {
+  // The sidebar's `Sheet` stays mounted while closed, so a return target
+  // captured on first render would be whatever happened to be focused during
+  // an earlier rerender — the tour's dismiss button, which by then no longer
+  // exists — rather than the toggle the operator actually pressed.
+  await page.setViewportSize({ width: 700, height: 800 });
+  await page.goto("/#/overview");
+  await dismissTour(page);
+
+  const toggle = page.getByRole("button", { name: "Toggle sidebar" });
+  await toggle.click();
+
+  const sheet = page.getByRole("dialog", { name: "Sidebar" });
+  await expect(sheet).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(sheet).toHaveCount(0);
+  await expect(toggle).toBeFocused();
+});
