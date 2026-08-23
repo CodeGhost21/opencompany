@@ -9,7 +9,8 @@ import { ApiError, type FinancesDto } from "@/api/types";
 import { FinancesView } from "@/views/FinancesView";
 
 /**
- * The finance overview must tell an empty ledger apart from an absent route.
+ * The finance overview must tell an empty ledger apart from an absent route,
+ * and an absent budget apart from a zero-dollar cap.
  *
  * A zero-filled response is a real accounting result; a 404 means this host
  * cannot make that claim. These checks also keep zero from inheriting either a
@@ -18,7 +19,7 @@ import { FinancesView } from "@/views/FinancesView";
 
 const EMPTY_LEDGER: FinancesDto = {
   balanceUsd: -0,
-  budgetUsd: 0,
+  budgetUsd: null,
   spentUsd: 0,
   revenueUsd: 0,
   netUsd: -0,
