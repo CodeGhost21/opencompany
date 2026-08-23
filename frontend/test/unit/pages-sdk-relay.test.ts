@@ -350,7 +350,7 @@ describe("the page frame's toast-relay listener", () => {
 
     expect(pressClicked).toHaveBeenCalledOnce();
     expect(releaseClicked).toHaveBeenCalledOnce();
-  });
+  it("falls back to the point when a relayed press's element is gone", () => {
     // The page re-rendered mid-gesture and the pressed element left the
     // document; the continuation routes by point, like a fresh press would.
     const below = document.createElement("button");
