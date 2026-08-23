@@ -1021,11 +1021,13 @@ to = "fetch"
         );
 
         // A namespaced pending id resolves through a parent graph to that same
-        // classification — the lookup the parking path performs.
+        // classification — the lookup the parking path performs. The child's
+        // gated node id is `run`, so tinyflows' `<parent node>::<child node>`
+        // shape reads `sub::run`.
         let file =
             crate::company::parse_workflow(&parent_of("parent", "child")).expect("parent parses");
         let parent = crate::workflows::translate::translate(&file);
-        let described = child_gate_call(&registry, &parent, "sub::work")
+        let described = child_gate_call(&registry, &parent, "sub::run")
             .expect("a namespaced child gate resolves through the registry");
         assert_eq!(described.node_id, "run");
         assert_eq!(described.slug, "shell");
