@@ -229,6 +229,22 @@ describe("reconcileMentions", () => {
     expect(out.map((m) => m.offset)).toEqual([0, 10]);
   });
 
+  /**
+   * Two identical literals can name two different targets. Deleting the first
+   * leaves the second's text — but at the first's old offset. A greedy forward
+   * scan sees "the first span still there", keeps it, and drops the survivor;
+   * the server then notifies the wrong person. The survivor has to keep its
+   * identity.
+   */
+  it("keeps the survivor when two identical spans collapse onto one", () => {
+    const a: Mention = { target: { kind: "user", id: "a" }, text: "@Sam", offset: 0 };
+    const b: Mention = { target: { kind: "user", id: "b" }, text: "@Sam", offset: 6 };
+    const out = reconcileMentions("@Sam", [a, b]);
+    expect(out).toHaveLength(1);
+    expect(out[0].target).toEqual(b.target);
+    expect(out[0].offset).toBe(0);
+  });
+
   it("returns them in reading order", () => {
     const out = reconcileMentions("@engineer and @engineer", [
       { ...mention, offset: 14 },
