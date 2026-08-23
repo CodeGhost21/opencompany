@@ -193,14 +193,17 @@ the operator's session on a credentialed request of its own. Live data
 reaches the page through a postMessage bridge to the parent console tab
 instead of a credential handed into the frame; the parent is the only party
 that holds the operator's authenticated session, and it executes the page's
-requests on the page's behalf after verifying the message's `source` is that
-exact iframe's `contentWindow`. That bridge forwards full GraphQL — queries
-**and** mutations — so a page can read and write company data with the same
-authority the operator's own session has; the sandbox stops the page from
-touching cookies, the parent DOM, or making its own credentialed requests,
-but it does not limit what an authorized request can *do* once it crosses
-the bridge. The iframe embedding, the bridge, and the nav view that lists
-pages are frontend concerns and are not described further here.
+requests on the page's behalf. The bridge runs over a `MessageChannel` port
+the console transfers to exactly the loaded document: a document the page
+navigates itself to never receives the port, so it cannot send through the
+bridge — or observe a reply — even if it captures something the page that was
+there before it knew. That bridge forwards full GraphQL — queries **and**
+mutations — so a page can read and write company data with the same authority
+the operator's own session has; the sandbox stops the page from touching
+cookies, the parent DOM, or making its own credentialed requests, but it does
+not limit what an authorized request can *do* once it crosses the bridge. The
+iframe embedding, the bridge, and the nav view that lists pages are frontend
+concerns and are not described further here.
 
 
 **Normative: pages require a same-origin console.** The page shell and its
