@@ -144,7 +144,7 @@ impl BoundMemory {
         })
     }
 
-    /// The bound engine's own name (`tinycortex`, `supermemory`, `null`, …).
+    /// The bound provider's own name (`supermemory`, `mem0`, `cognee`, `null`, …).
     ///
     /// Safe to surface to an operator — unlike the endpoint and the credential,
     /// which are not.

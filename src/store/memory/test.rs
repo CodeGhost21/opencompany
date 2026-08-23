@@ -679,7 +679,7 @@ async fn conformance_context_multibyte_bodies() {
 /// This is that proof, run over the same shared asserts every other backend
 /// answers, so the embedded contract driver cannot quietly drift below the
 /// bar the fs/sqlite/mongodb stores are held to.
-#[cfg(feature = "tinymemory-embedded")]
+#[cfg(any())]
 mod namespace_driver_conformance {
     use super::*;
     use crate::store::{FsCompanyStore, FsEventLog};

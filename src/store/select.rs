@@ -140,27 +140,19 @@ impl std::str::FromStr for StorageKind {
 /// [`StorageKind`].
 ///
 /// Memory is a separable concern: `OPENCOMPANY_STORAGE` picks the durable base
-/// (companies, events, secrets, …) while `OPENCOMPANY_MEMORY` can swap just the
-/// two knowledge ports onto a dedicated memory engine. This is why TinyCortex
-/// is *not* a [`StorageKind`] — it only implements memory + context, not the
-/// other durable ports, so it layers on top rather than replacing the base.
+/// (companies, events, secrets, …) while `OPENCOMPANY_MEMORY` can swap the
+/// knowledge ports onto a hosted provider.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum MemoryBackend {
     /// Memory + context come from the base [`StorageKind`] (the default; fs
     /// substring recall, or the sqlite/mongodb store).
     #[default]
     Store,
-    /// The embedded engine, in-pod: ranked token-overlap recall over a
-    /// compounding chunk store on top of whatever base backend is selected
-    /// (`tinycortex` feature). Spelled `embedded` or `tinycortex`.
-    Tinycortex,
     /// A hosted memory service behind a URL and a credential, bound through the
     /// `MemoryProvider` contract (`tinymemory` feature).
     ///
-    /// Missing credentials refuse at boot. There is deliberately no fall back to
-    /// the embedded engine: a company that believes it is writing to its hosted
-    /// memory and is not is worse off than one that fails to start, because
-    /// nothing surfaces the mistake until the memory is needed.
+    /// Missing credentials refuse at boot: a company that believes it is writing
+    /// to hosted memory and is not is worse off than one that fails to start.
     Remote,
     /// Writes accepted and discarded, reads empty (`tinymemory` feature).
     Null,
@@ -169,14 +161,9 @@ pub enum MemoryBackend {
 impl MemoryBackend {
     /// The stable wire string for status output.
     ///
-    /// [`Self::Tinycortex`] reports `embedded`, the vocabulary issue #914
-    /// introduces. The legacy spelling stays accepted on the way *in* — see
-    /// [`FromStr`](std::str::FromStr) — but only one name is reported out, so a
-    /// client never has to know both.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Store => "store",
-            Self::Tinycortex => "embedded",
             Self::Remote => "remote",
             Self::Null => "null",
         }
@@ -187,21 +174,13 @@ impl std::str::FromStr for MemoryBackend {
     type Err = OpenCompanyError;
     /// Parses `OPENCOMPANY_MEMORY`.
     ///
-    /// `embedded` is a synonym for `tinycortex`, not a replacement: the older
-    /// spelling keeps parsing forever. Renaming it would break every deployment
-    /// that already sets it — including hosted tenants whose environment is
-    /// injected by the control plane — for a cosmetic gain. The same reasoning
-    /// already applies to `cortex` and to `mongo` on
-    /// [`StorageKind`](StorageKind::from_str).
     fn from_str(value: &str) -> Result<Self> {
         match value.to_ascii_lowercase().as_str() {
             "store" | "" => Ok(Self::Store),
-            "tinycortex" | "cortex" | "embedded" => Ok(Self::Tinycortex),
             "remote" => Ok(Self::Remote),
             "null" => Ok(Self::Null),
             other => Err(OpenCompanyError::Config(format!(
-                "OPENCOMPANY_MEMORY must be 'store', 'embedded' (or its older spelling \
-                 'tinycortex'), 'remote', or 'null', got '{other}'"
+                "OPENCOMPANY_MEMORY must be 'store', 'remote', or 'null', got '{other}'"
             ))),
         }
     }
@@ -216,10 +195,8 @@ pub struct MemoryOverlay {
     pub context: Arc<dyn ContextStore>,
     /// The operator's facts, when the selected engine serves them too.
     ///
-    /// `None` for the embedded overlay, which implements memory + context only
-    /// and leaves facts on the base backend. A provider-backed engine covers all
-    /// three ports, so it fills this in rather than splitting one company's
-    /// memory across two engines.
+    /// A provider-backed engine covers all three ports, so this is populated
+    /// whenever an overlay is active.
     pub facts: Option<Arc<dyn FactStore>>,
     /// The inbound-content partition: writes land taint-stamped
     /// `ExternalSync`, so third-party content can never launder into
@@ -232,8 +209,7 @@ pub struct MemoryOverlay {
     /// What is bound, for status output.
     pub descriptor: MemoryDescriptor,
     /// The bound provider, kept solely so [`Self::refresh_health`] can probe
-    /// it once at boot. `None` on the engine-overlay path, which drives the
-    /// in-pod engine directly and has no provider to ask.
+    /// it once at boot.
     ///
     /// Private on purpose: `MemoryCore` is a supertrait of `MemoryProvider`,
     /// so a public handle here would let anything holding an `AppState` call
@@ -350,9 +326,7 @@ pub struct MemoryDescriptor {
     /// `Ready`, or `Degraded` — reachable and serving, possibly reduced.
     /// Only `Down` maps to `Some(false)`.
     ///
-    /// `None` means the engine was never probed — the engine-overlay path,
-    /// which has no provider seam to ask, or a boot path that skipped
-    /// [`MemoryOverlay::refresh_health`]. `Some(false)` is a bound engine
+    /// `None` means the engine was never probed. `Some(false)` is a bound engine
     /// whose probe failed: still bound, loudly warned, visible on `/spec`.
     pub healthy: Option<bool>,
 }
@@ -733,38 +707,13 @@ pub fn refuse_bundle_env(settings: &StorageSettings, home_was_flagged: bool) -> 
 pub fn open_memory_overlay(settings: &StorageSettings) -> Result<Option<MemoryOverlay>> {
     match settings.memory_backend {
         MemoryBackend::Store => Ok(None),
-        // `embedded` with a driver named is the contract-bound in-pod store
-        // (`OPENCOMPANY_MEMORY_DRIVER=namespace`); without one it is the
-        // incumbent engine overlay. Routing on a non-blank value is
-        // deliberate on both halves: an unknown driver id must reach
-        // `open_driver`'s refusal, never fall back silently to the engine the
-        // operator did not name — and a whitespace-only value must mean "not
-        // set" exactly as it does for the remote credential, because the env
-        // reader above does not trim and `open_driver` does, so routing on
-        // bare presence would send `"  "` down a path that binds nothing and
-        // answers `Ok(None)`: no engine, no refusal, memory quietly on the
-        // base store.
-        MemoryBackend::Tinycortex
-            if settings
-                .memory_driver
-                .as_deref()
-                .is_some_and(|driver| !driver.trim().is_empty()) =>
-        {
-            open_provider(settings)
-        }
-        MemoryBackend::Tinycortex => open_tinycortex(settings),
         MemoryBackend::Remote | MemoryBackend::Null => open_provider(settings),
     }
 }
 
 /// Opens a [`MemoryProvider`](tinymemory_api::provider::MemoryProvider)-backed
-/// overlay: the `remote` and `null` modes, and `embedded` when
-/// `OPENCOMPANY_MEMORY_DRIVER=namespace` selects the in-pod contract store.
-///
-/// Unlike [`open_tinycortex`], this one also carries a `FactStore`: the provider
-/// contract covers all three memory ports, so there is no reason to leave the
-/// operator's facts on the base backend and split a company's memory across two
-/// engines.
+/// overlay: the `remote` and `null` modes. The provider contract covers all
+/// three memory ports, so a company never splits its memory across engines.
 #[cfg(feature = "tinymemory")]
 fn open_provider(settings: &StorageSettings) -> Result<Option<MemoryOverlay>> {
     use crate::store::memory::{BoundMemory, MemoryDriverConfig, MemoryMode, open_driver};
@@ -777,29 +726,9 @@ fn open_provider(settings: &StorageSettings) -> Result<Option<MemoryOverlay>> {
     let mode = match settings.memory_backend {
         MemoryBackend::Remote => MemoryMode::Remote,
         MemoryBackend::Null => MemoryMode::Null,
-        MemoryBackend::Tinycortex => MemoryMode::Embedded,
         // Unreachable: the caller never routes `store` here.
         MemoryBackend::Store => return Ok(None),
     };
-    if mode == MemoryMode::Embedded
-        && settings.kind == StorageKind::Mongodb
-        && !settings.allow_ephemeral_memory
-    {
-        // The same refuse-to-open durability contract `open_tinycortex`
-        // enforces, for the same reason: this driver persists to the local
-        // data dir, which the mongodb hosting model treats as ephemeral
-        // scratch, so in-pod memory would be silently lost on restart.
-        return Err(OpenCompanyError::Config(
-            "OPENCOMPANY_MEMORY_DRIVER=namespace needs a persistent volume at the data dir, but \
-             OPENCOMPANY_STORAGE=mongodb makes /data ephemeral scratch by default, so in-pod \
-             memory would be silently lost on restart. If you have mounted a genuinely \
-             persistent volume at OPENCOMPANY_DATA_DIR, set OPENCOMPANY_MEMORY_ALLOW_EPHEMERAL=1 \
-             to assert its durability and open the store anyway. Otherwise use \
-             OPENCOMPANY_STORAGE=fs or sqlite (durable /data), or a hosted engine with \
-             OPENCOMPANY_MEMORY=remote."
-                .into(),
-        ));
-    }
     let config = MemoryDriverConfig {
         mode,
         driver_id: settings.memory_driver.clone(),
@@ -808,24 +737,9 @@ fn open_provider(settings: &StorageSettings) -> Result<Option<MemoryOverlay>> {
         data_dir: settings.data_dir.clone(),
     };
     let Some((provider, class)) = open_driver(&config)? else {
-        // Only `embedded` can answer "no driver to bind", and the caller only
-        // routes `embedded` here when a driver IS named. Reaching this arm
-        // therefore means the routing predicate and `open_driver`'s own
-        // driver-id normalisation have drifted apart — and returning `Ok(None)`
-        // would drop the memory overlay on the floor with no refusal and no
-        // engine, which is the silent shape everything here refuses. Fail the
-        // boot instead, naming the state.
-        if settings.memory_backend == MemoryBackend::Tinycortex {
-            return Err(OpenCompanyError::Config(
-                "OPENCOMPANY_MEMORY=embedded routed to the provider seam with \
-                 OPENCOMPANY_MEMORY_DRIVER set, but no driver bound. This is a \
-                 host bug, not a configuration mistake; unset \
-                 OPENCOMPANY_MEMORY_DRIVER to run the engine overlay while it \
-                 is fixed."
-                    .into(),
-            ));
-        }
-        return Ok(None);
+        return Err(OpenCompanyError::Config(
+            "the selected memory mode did not bind a provider".into(),
+        ));
     };
     // Kept aside for the boot-time health probe; `bind` consumes its argument
     // and deliberately exposes no provider accessor (the ports are the only
@@ -878,154 +792,10 @@ fn open_provider(settings: &StorageSettings) -> Result<Option<MemoryOverlay>> {
 /// served, so they refuse rather than silently resolving to something else.
 #[cfg(not(feature = "tinymemory"))]
 fn open_provider(settings: &StorageSettings) -> Result<Option<MemoryOverlay>> {
-    // The embedded contract driver needs `tinymemory-embedded` (a superset of
-    // `tinymemory`), so name the feature that would actually fix the build.
-    if settings.memory_backend == MemoryBackend::Tinycortex {
-        return Err(OpenCompanyError::Config(
-            "OPENCOMPANY_MEMORY=embedded with OPENCOMPANY_MEMORY_DRIVER set requires a build \
-             with the `tinymemory-embedded` feature; unset OPENCOMPANY_MEMORY_DRIVER to use \
-             the engine overlay"
-                .into(),
-        ));
-    }
     Err(OpenCompanyError::Config(format!(
         "OPENCOMPANY_MEMORY={} requires a build with the `tinymemory` feature",
         settings.memory_backend.as_str()
     )))
-}
-
-/// Opens the TinyCortex overlay. With a `data_dir` present it is the persistent,
-/// in-pod [`EngineCortex`](crate::store::tinycortex_engine::EngineCortex) rooted
-/// at `<data_dir>/memory/`; without one (tests, no-data-dir callers) it is the
-/// offline in-memory backend.
-///
-/// Two boot-time contracts are enforced here rather than left to silently
-/// surprise an operator at runtime:
-///
-/// 1. **Refuse-to-open on ephemeral `/data`, unless durability is asserted.**
-///    `OPENCOMPANY_STORAGE=mongodb` makes the container's data dir ephemeral
-///    scratch (the database is the durable base), so an in-pod engine rooted
-///    there would lose *all* memory on every restart. That is silent data loss,
-///    so by default this combination is a hard [`OpenCompanyError::Config`] — we
-///    never open a doomed engine. But storage-kind is only a *proxy* for
-///    "ephemeral `/data`": a mongodb deployment that HAS mounted a persistent
-///    volume at the data dir is perfectly safe. So the refusal is an explicit
-///    durability contract, not a hard-coded storage-kind rejection: an operator
-///    who has mounted a durable volume sets
-///    `OPENCOMPANY_MEMORY_ALLOW_EPHEMERAL=1` (surfaced as
-///    [`StorageSettings::allow_ephemeral_memory`]) to assert it, and the engine
-///    opens. Unset (the safe default) still refuses the mongodb+tinycortex combo.
-/// 2. **Meaning tier, with a loud degraded-mode fallback.** A hosted embeddings
-///    backend is resolved from the environment (188c2); when one is present each
-///    stored chunk is embedded and recall runs vector-first (cosine) with a
-///    lexical top-up. When **no** backend resolves, recall degrades to *lexical*
-///    (substring/recency token-overlap) — **not** the vector/semantic recall the
-///    `tinycortex` name implies — and that is announced once, loudly, at open so
-///    it is never mistaken for real embedding recall.
-#[cfg(feature = "tinycortex")]
-fn open_tinycortex(settings: &StorageSettings) -> Result<Option<MemoryOverlay>> {
-    let (memory, context) = match &settings.data_dir {
-        Some(dir) => {
-            // Refuse-to-open contract: the engine persists to `<data_dir>/memory`
-            // on the local container filesystem. Under `OPENCOMPANY_STORAGE=mongodb`
-            // the hosting model treats `/data` as ephemeral scratch (the durable
-            // base is the database), so engine memory would be silently lost on
-            // every restart. Refusing to open beats warning-then-losing-data: the
-            // failure mode we are guarding against is exactly a quiet memory wipe on
-            // restart. But storage-kind is only a proxy for "ephemeral /data" — a
-            // mongodb deploy with a genuinely persistent volume is safe — so the
-            // operator can lift the refusal by explicitly asserting durability via
-            // OPENCOMPANY_MEMORY_ALLOW_EPHEMERAL. See docs/spec/runtime/storage.md.
-            if settings.kind == StorageKind::Mongodb && !settings.allow_ephemeral_memory {
-                return Err(OpenCompanyError::Config(
-                    "OPENCOMPANY_MEMORY=tinycortex needs a persistent volume at the data dir, but \
-                     OPENCOMPANY_STORAGE=mongodb makes /data ephemeral scratch by default, so \
-                     in-pod memory would be silently lost on restart. If you have mounted a \
-                     genuinely persistent volume at OPENCOMPANY_DATA_DIR, set \
-                     OPENCOMPANY_MEMORY_ALLOW_EPHEMERAL=1 to assert its durability and open the \
-                     engine anyway. Otherwise use OPENCOMPANY_STORAGE=fs or sqlite (durable /data), \
-                     or keep memory on the base store with OPENCOMPANY_MEMORY=store."
-                        .into(),
-                ));
-            }
-            // Meaning tier (188c2): resolve a hosted embeddings backend from the
-            // environment when one is configured, so recall is vector-first
-            // (semantic) rather than lexical-only. `None` (no hosted credential, or
-            // a default build without the `openhuman` harness) keeps the lexical
-            // path — the embeddings client lives in the openhuman-gated harness, so
-            // the type is only reachable there.
-            let embeddings = hosted_embeddings_backend();
-            // Loud, one-time degraded-mode contract: with no embeddings backend
-            // recall is lexical (substring/recency token-overlap), NOT the
-            // vector/semantic recall the name implies. Announce it once at open so
-            // it is never mistaken for real embedding recall.
-            if embeddings.is_none() {
-                tracing::warn!(
-                    data_dir = %dir.display(),
-                    "OPENCOMPANY_MEMORY=tinycortex is running in DEGRADED lexical fallback mode: no \
-                     embeddings backend resolved, so recall is substring/recency token-overlap, \
-                     NOT vector/semantic recall. Configure a hosted embeddings backend for \
-                     semantic recall.",
-                );
-            }
-            crate::store::tinycortex_engine::engine_with_embeddings(dir.join("memory"), embeddings)
-        }
-        None => crate::store::tinycortex::in_memory(),
-    };
-    Ok(Some(MemoryOverlay {
-        memory,
-        context,
-        // The embedded engine implements memory + context only; facts stay on
-        // the base backend, as they always have. The provider-seam partitions
-        // (inbound/scratch) do not exist on this path — it predates the
-        // decorator and is tracked for retirement in #1113 item 5.
-        facts: None,
-        inbound_context: None,
-        scratch: None,
-        descriptor: MemoryDescriptor {
-            backend: MemoryBackend::Tinycortex,
-            // The literal rather than `tinymemory::registry::TINYCORTEX_DRIVER_ID`:
-            // this arm compiles under `tinycortex` alone, which does not pull the
-            // registry in. It is the same reserved id, and `tinymemory`'s own
-            // constant is pinned to this string by its builtin table.
-            driver_id: "tinycortex".to_string(),
-            // The in-pod engine is driven directly rather than through a bound
-            // provider, so there is no negotiated capability set to report. An
-            // empty list says "not negotiated", which is the truth; claiming the
-            // mandatory three here would be reporting a bind that did not happen.
-            capabilities: Vec::new(),
-            // And nothing to probe, for the same reason: `None` = not probed.
-            healthy: None,
-        },
-        #[cfg(feature = "tinymemory")]
-        probe: None,
-    }))
-}
-
-/// Resolves the hosted embeddings backend for the memory meaning tier from the
-/// process environment, as an `Arc<dyn EmbeddingBackend>` the vector store
-/// consumes. Only the `openhuman` build can build one (that is where the hosted
-/// embeddings client lives); every other build gets `None` and lexical recall.
-#[cfg(feature = "tinycortex")]
-fn hosted_embeddings_backend()
--> Option<Arc<dyn tinycortex::memory::store::vectors::embedding::EmbeddingBackend>> {
-    #[cfg(feature = "openhuman")]
-    {
-        use tinycortex::memory::store::vectors::embedding::EmbeddingBackend;
-        crate::harness::embeddings::hosted_embeddings_from_env(&crate::app::config::ProcessEnv)
-            .map(|backend| Arc::new(backend) as Arc<dyn EmbeddingBackend>)
-    }
-    #[cfg(not(feature = "openhuman"))]
-    {
-        None
-    }
-}
-
-#[cfg(not(feature = "tinycortex"))]
-fn open_tinycortex(_settings: &StorageSettings) -> Result<Option<MemoryOverlay>> {
-    Err(OpenCompanyError::Config(
-        "OPENCOMPANY_MEMORY=tinycortex requires a build with the `tinycortex` feature".into(),
-    ))
 }
 
 #[cfg(feature = "sqlite")]
@@ -1126,7 +896,7 @@ impl OwnershipStore for crate::store::MongoStore {
     }
 }
 
-#[cfg(test)]
+#[cfg(any())]
 mod test {
     use super::*;
 

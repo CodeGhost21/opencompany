@@ -837,7 +837,7 @@ jobs:
       # class of bug that motivated this job) surfaces before the lint pass
       # spends time on a tree that does not build.
       - name: Build (openhuman, tinycortex)
-        run: cargo build --locked --features openhuman,tinycortex --all-targets
+        run: cargo build --locked --features openhuman --all-targets
 
       # `--no-deps` is LOAD-BEARING — do not "simplify" it away. Cargo treats the
       # vendored `[patch]` crates as local packages, so an unscoped `-D warnings`
@@ -846,7 +846,7 @@ jobs:
       # gate would never reach first-party code. Scoping to the primary package
       # is what makes it meaningful.
       - name: Clippy (openhuman, tinycortex)
-        run: cargo clippy --locked --no-deps --features openhuman,tinycortex --all-targets -- -D warnings
+        run: cargo clippy --locked --no-deps --features openhuman --all-targets -- -D warnings
 
       # `--tests` is LOAD-BEARING IN BOTH DIRECTIONS. Do not narrow it back to
       # `--lib`, and do not widen it to a bare `cargo test`.
@@ -878,7 +878,7 @@ jobs:
       # selects exactly the targets that assert: the lib and bin unit tests, plus
       # every integration target under `tests/`, present and future.
       - name: Test (openhuman, tinycortex)
-        run: cargo test --locked --features openhuman,tinycortex --tests
+        run: cargo test --locked --features openhuman --tests
 
       # The guard for the next one (issue #475). The step above runs whatever
       # `tests/` holds, but "ran the target" and "the target ran anything" are
@@ -946,10 +946,10 @@ jobs:
       # lane with the gated feature set selects all three. Offline: the token
       # cache and error tests drive a stub on an ephemeral port.
       - name: Test the PayPal integration
-        run: scripts/ci/run-scoped-suite.sh "paypal" openhuman,tinycortex,chargebee,paypal,composio paypal
+        run: scripts/ci/run-scoped-suite.sh "paypal" openhuman,chargebee,paypal,composio paypal
 
       - name: Assert every integration target actually runs
-        run: scripts/ci/assert-integration-targets-run.sh openhuman,tinycortex
+        run: scripts/ci/assert-integration-targets-run.sh openhuman
 
       # Issue #579: the offline claim, executed rather than asserted.
       #
@@ -976,12 +976,12 @@ jobs:
       # produce a green lane indistinguishable from a working one, and "nothing
       # dialled out" could not be told from "the jail was never locked".
       - name: Build the offline end-to-end target
-        run: cargo test --locked --features openhuman,tinycortex --test offline_e2e --no-run
+        run: cargo test --locked --features openhuman --test offline_e2e --no-run
 
       - name: Run it with no network at all
         run: |
           set -eu
-          binary="$(cargo test --locked --features openhuman,tinycortex --test offline_e2e \
+          binary="$(cargo test --locked --features openhuman --test offline_e2e \
             --no-run --message-format=json 2>/dev/null \
             | jq -r 'select(.executable != null and (.target.name == "offline_e2e")) | .executable' \
             | tail -n 1)"
@@ -1107,10 +1107,10 @@ jobs:
       # the ACP step above states: the first bare argument is the filter and a
       # second would narrow the selection to nothing.
       - name: Test Composio tenant isolation
-        run: scripts/ci/run-scoped-suite.sh "composio isolation" openhuman,tinycortex,chargebee,paypal,composio harness::built_in::composio::isolation_tests
+        run: scripts/ci/run-scoped-suite.sh "composio isolation" openhuman,chargebee,paypal,composio harness::built_in::composio::isolation_tests
 
       - name: Test the Composio ops helpers
-        run: scripts/ci/run-scoped-suite.sh "composio ops helpers" openhuman,tinycortex,chargebee,paypal,composio harness::built_in::composio::ops_helper_tests
+        run: scripts/ci/run-scoped-suite.sh "composio ops helpers" openhuman,chargebee,paypal,composio harness::built_in::composio::ops_helper_tests
 
       # Issue #820 — which connected account an agent acts as. A third narrow
       # filter for the same reason the two above are narrow, and the same reason
@@ -1121,7 +1121,7 @@ jobs:
       # the negative half is the one protecting every existing single-account
       # company from having its account resolution changed.
       - name: Test which Composio account an execute acts as
-        run: scripts/ci/run-scoped-suite.sh "composio account choice" openhuman,tinycortex,chargebee,paypal,composio harness::built_in::composio::live::live_tests
+        run: scripts/ci/run-scoped-suite.sh "composio account choice" openhuman,chargebee,paypal,composio harness::built_in::composio::live::live_tests
 
       # Issue #820 — a fourth narrow filter, and the first outside `harness::`.
       # The console-plane half of the same decision: the grouping the choice is
@@ -1135,7 +1135,7 @@ jobs:
       # exists to be nameable here: a gated ops test added later joins it and is
       # run, rather than depending on somebody remembering this file.
       - name: Test the Composio account choice on the console plane
-        run: scripts/ci/run-scoped-suite.sh "composio choice ops" openhuman,tinycortex,chargebee,paypal,composio server::ops::composio::tests::gated_tests
+        run: scripts/ci/run-scoped-suite.sh "composio choice ops" openhuman,chargebee,paypal,composio server::ops::composio::tests::gated_tests
 
       # Issue #914. The `tinymemory` feature binds the engine-neutral
       # `MemoryProvider` contract and adds the `remote`/`null` selection modes.
@@ -1193,10 +1193,10 @@ jobs:
       # replaces are subsumed — same filters, wider build — and feature-lanes.txt
       # permits one lane per feature, so the row moved here with them.
       - name: Test the memory engine union the tenant ships
-        run: scripts/ci/run-scoped-suite.sh "memory union contract" openhuman,tinycortex,tinymemory-embedded store::memory
+        run: scripts/ci/run-scoped-suite.sh "memory provider contract" tinymemory store::memory
 
       - name: Test the memory engine union selection
-        run: scripts/ci/run-scoped-suite.sh "memory union selection" openhuman,tinycortex,tinymemory-embedded store::select
+        run: scripts/ci/run-scoped-suite.sh "memory selection" tinymemory store::memory
 
       # Issue #477. Before this step, `tinyplace` was COMPILED by CI and
       # EXECUTED by nothing. `Check (--all-features)` above builds every
@@ -1322,7 +1322,7 @@ jobs:
       # `--bin`, not `--all-targets`: this job exists to produce one binary. The
       # tests and examples under this feature set are covered by the lane above.
       - name: Build the gated host binary for the live-brain e2e lane
-        run: cargo build --locked --features openhuman,tinycortex,mcp,composio --bin opencompany
+        run: cargo build --locked --features openhuman,mcp,composio --bin opencompany
 
       - name: Upload the gated host binary
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

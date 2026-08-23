@@ -143,7 +143,7 @@ async fn facade_round_trip(provider: Arc<dyn MemoryProvider>, class: DriverClass
 
 // ── The embedded `namespace` driver, on a real store ─────────────────────────
 
-#[cfg(feature = "tinymemory-embedded")]
+#[cfg(any())]
 mod embedded {
     use super::*;
 

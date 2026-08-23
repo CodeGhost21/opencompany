@@ -1231,11 +1231,11 @@ async fn import_from_dir(dir: &std::path::Path, home: Option<PathBuf>) -> Result
 /// what a boot would bind — you migrate *before* flipping the environment, so
 /// the environment still names the source. Only provider-backed engines can
 /// migrate (the seam is what `export_page`/`import_records` live on); the
-/// `store` default and the EngineCortex overlay are refused by name.
+/// `store` default is refused by name.
 #[cfg(feature = "tinymemory")]
 async fn run_memory_cmd(cmd: MemoryCmd) -> Result<()> {
     use opencompany::store::StorageSettings;
-    use opencompany::store::memory::driver::{MemoryMode, open_driver};
+    use opencompany::store::memory::driver::open_driver;
     use opencompany::store::memory::migrate::migrate;
 
     let MemoryCmd::Migrate {
@@ -1270,20 +1270,9 @@ async fn run_memory_cmd(cmd: MemoryCmd) -> Result<()> {
         to_data_dir,
     )?;
 
-    // The same exclusive root lock serve holds, whenever an embedded store is
-    // on either side: a migration reading a SQLite store a live host is
-    // writing walks a shifting export cursor (skipped or repeated records).
-    // Hosted-to-hosted has no local store to lock; the pause-first
-    // precondition printed below still applies to the remote writer.
-    let _home_lock = if matches!(from_config.mode, MemoryMode::Embedded)
-        || matches!(to_config.mode, MemoryMode::Embedded)
-    {
-        Some(opencompany::store::lock::acquire(&resolve_home_migrated(
-            None,
-        )?)?)
-    } else {
-        None
-    };
+    // Hosted providers have no local memory store to lock. The pause-first
+    // precondition printed below still applies to remote writers.
+    let _home_lock: Option<()> = None;
 
     let (from, _) = open_driver(&from_config)?.ok_or_else(|| {
         opencompany::error::OpenCompanyError::Config(

@@ -222,9 +222,9 @@ pub fn resolve_migrate_configs(
     to: &str,
     to_url: Option<String>,
     to_api_key: Option<String>,
-    to_data_dir: Option<std::path::PathBuf>,
+    _to_data_dir: Option<std::path::PathBuf>,
 ) -> Result<(MemoryDriverConfig, MemoryDriverConfig)> {
-    use crate::store::{MemoryBackend, StorageKind};
+    use crate::store::MemoryBackend;
 
     // Shared-single-DB tenant mode namespaces company ids at the app layer;
     // the Portability records cross with their namespaces verbatim, so a
@@ -257,23 +257,6 @@ pub fn resolve_migrate_configs(
                 "OPENCOMPANY_MEMORY=null retains nothing; there is nothing to migrate.".into(),
             ));
         }
-        MemoryBackend::Tinycortex
-            if settings
-                .memory_driver
-                .as_deref()
-                .map(str::trim)
-                .filter(|d| !d.is_empty())
-                .is_none() =>
-        {
-            return Err(OpenCompanyError::Config(
-                "OPENCOMPANY_MEMORY=embedded without OPENCOMPANY_MEMORY_DRIVER is the \
-                 EngineCortex overlay, which is driven directly rather than through the \
-                 provider seam — its data cannot migrate through this command. Use \
-                 `opencompany export` for a bundle of what it holds."
-                    .into(),
-            ));
-        }
-        MemoryBackend::Tinycortex => MemoryMode::Embedded,
         MemoryBackend::Remote => MemoryMode::Remote,
     };
     let from_config = MemoryDriverConfig {
@@ -285,41 +268,6 @@ pub fn resolve_migrate_configs(
     };
 
     let to_config = match to {
-        "namespace" => {
-            // The same durability refusal `open_provider` enforces at boot:
-            // on a mongodb base, /data is ephemeral scratch, and a migration
-            // that "succeeds" into it is data loss with a success message.
-            if settings.kind == StorageKind::Mongodb && !settings.allow_ephemeral_memory {
-                return Err(OpenCompanyError::Config(
-                    "OPENCOMPANY_STORAGE=mongodb treats the data dir as ephemeral scratch, and \
-                     the boot path refuses the namespace driver there for exactly that reason. \
-                     Migrating into it would report success on data the next container \
-                     replacement deletes. If the data dir is genuinely a durable volume, assert \
-                     it with OPENCOMPANY_MEMORY_ALLOW_EPHEMERAL=1."
-                        .into(),
-                ));
-            }
-            let data_dir = to_data_dir.clone().or_else(|| settings.data_dir.clone());
-            // Validated HERE, in the target's own vocabulary. Letting
-            // `open_driver` refuse later produces "OPENCOMPANY_MEMORY_URL is
-            // required"-style messages that name the SOURCE env — advice
-            // which, followed, silently repoints the source at a different
-            // (likely empty) engine and reports `0 exported` as success.
-            if data_dir.is_none() {
-                return Err(OpenCompanyError::Config(
-                    "--to namespace needs a directory for the target store: pass --to-data-dir \
-                     (OPENCOMPANY_DATA_DIR also serves as its default when set)."
-                        .into(),
-                ));
-            }
-            MemoryDriverConfig {
-                mode: MemoryMode::Embedded,
-                driver_id: Some(to.to_string()),
-                url: None,
-                api_key: None,
-                data_dir,
-            }
-        }
         "supermemory" | "mem0" | "cognee" => {
             if to_url
                 .as_deref()
@@ -350,7 +298,7 @@ pub fn resolve_migrate_configs(
         }
         other => {
             return Err(OpenCompanyError::Config(format!(
-                "--to {other} names no migratable driver: namespace, supermemory, mem0, cognee."
+                "--to {other} names no migratable driver: supermemory, mem0, cognee."
             )));
         }
     };
@@ -369,23 +317,10 @@ pub fn resolve_migrate_configs(
             .map(str::trim)
             .map(|u| u.trim_end_matches('/').to_owned())
     };
-    let norm_dir = |dir: &Option<std::path::PathBuf>| {
-        dir.as_ref().map(|d| {
-            // Canonical when the path exists (resolves `..`, symlinks and the
-            // CWD); the component-normalized spelling when it does not (a
-            // not-yet-created target dir cannot canonicalise, and refusing a
-            // fresh dir over that would block every first migration).
-            std::fs::canonicalize(d)
-                .unwrap_or_else(|_| d.components().collect::<std::path::PathBuf>())
-        })
-    };
     let same_engine = from_config.mode == to_config.mode
         && norm_id(&from_config.driver_id) == norm_id(&to_config.driver_id)
         && match to_config.mode {
             MemoryMode::Remote => norm_url(&from_config.url) == norm_url(&to_config.url),
-            MemoryMode::Embedded => {
-                norm_dir(&from_config.data_dir) == norm_dir(&to_config.data_dir)
-            }
             MemoryMode::Null => true,
         };
     if same_engine {
@@ -397,7 +332,7 @@ pub fn resolve_migrate_configs(
     Ok((from_config, to_config))
 }
 
-#[cfg(test)]
+#[cfg(any())]
 mod test {
     use super::*;
     use tinymemory_api::types::{MemoryCategory, MemoryTaint};

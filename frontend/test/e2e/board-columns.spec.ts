@@ -281,7 +281,7 @@ test("a card sent to Plan first is planned and settled, never left parked", asyn
 }) => {
   test.skip(
     !LIVE_BRAIN,
-    "needs a --features openhuman,tinycortex host with a planner attached; without " +
+    "needs a --features openhuman host with a planner attached; without " +
       "one Planning is inert and the test above is the applicable contract. Issue #501.",
   );
 

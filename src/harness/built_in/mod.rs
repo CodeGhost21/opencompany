@@ -63,11 +63,6 @@ mod composio_turn_test;
 /// about the company. See [`confine`].
 pub mod confine;
 pub mod cost;
-/// Hosted embeddings compute for the in-pod memory engine's meaning tier (188c2).
-/// Needs the `tinycortex` crate's `EmbeddingBackend` trait, so it links only when
-/// both the harness (`openhuman`) and the memory engine (`tinycortex`) are built.
-#[cfg(feature = "tinycortex")]
-pub mod embeddings;
 /// Hosting (TinyHosts): the per-company connection and the agent tools over it.
 /// The keys it reads live in `company::hosting`, which is compiled in every
 /// build — the console's Hosting settings write them whether or not this
