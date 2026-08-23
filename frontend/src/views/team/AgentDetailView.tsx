@@ -368,6 +368,40 @@ export function AgentDetailView({
   }
 
   /**
+   * Write this teammate's own tool-grant list (issue: the Tools card was a
+   * read-only report of a decision nobody could change from here).
+   *
+   * Its own write rather than a field on the shared draft, because `tools` is
+   * not shaped like the others: the host gates it on admin where name, role and
+   * instructions are member-open, so folding it into `save()` would make every
+   * ordinary edit by a member 403 the moment a stale tools value rode along.
+   * Sent alone, a member never sends the key at all.
+   */
+  async function saveTools(globs: string[]) {
+    if (!agent) return;
+    setSaving(true);
+    try {
+      const updated = await client.updateAgent(agentId, { tools: globs }, company);
+      if (displayedAgentIdRef.current !== agentId) return;
+      setAgent(updated);
+      toast.success("Tool grants updated.");
+    } catch (error) {
+      toast.error(
+        error instanceof ApiError
+          ? error.message
+          : error instanceof Error
+            ? error.message
+            : "Couldn't save these tool grants.",
+      );
+      // Rethrow so the card keeps its editor open on a refusal — closing it
+      // would read as "saved" for a write the host rejected.
+      throw error;
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  /**
    * Drop this teammate's instructions override so its blueprint persona applies
    * again (issue #1530). Sends `instructions: null` — the three-state reset,
    * distinct from saving an emptied field only in that it needs no edit form
