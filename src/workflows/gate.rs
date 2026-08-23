@@ -130,12 +130,12 @@
 //! * **An authored `requires_approval = false` does not win.** The policy adds
 //!   a gate the author did not ask for; an author cannot opt their node out of
 //!   the company's approval policy.
-//! * **`sub_workflow` children are not gated.** tinyflows cannot resume a child
-//!   across the boundary (`nodes/integration/sub_workflow.rs`), and a paused
-//!   child *halts the parent* with an unresumable error. Gating a child would
-//!   convert a working run into a dead one with no card to decide, so children
-//!   keep today's behaviour. Filed as its own issue (#617) rather than left in
-//!   a merged PR body; it needs engine work to close.
+//! * **`sub_workflow` children are gated by their resolver.** The child is
+//!   translated inside tinyflows after this pass has handled the top-level
+//!   graph, so [`StoreWorkflowResolver`](super::caps::resolver::StoreWorkflowResolver)
+//!   applies the same policy and grants before returning it. tinyflows surfaces
+//!   the pause to the parent with a namespaced node id and forwards approval on
+//!   the continuation (issue #617).
 //! * **Dry runs are not gated.** Every effect is stubbed
 //!   ([`dry_run`](super::caps)), so there is nothing to approve, and pausing
 //!   would stop a dry run from walking the rest of the graph — which is the one

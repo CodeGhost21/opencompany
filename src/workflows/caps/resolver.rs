@@ -292,9 +292,7 @@ mod tests {
 
     use crate::company::CompanyManifest;
     use crate::error::Result as OcResult;
-    use crate::ports::types::{
-        CompanyEvent, CompanyRecord, CompanySummary, EventSeq, LedgerEntry, StoredEvent,
-    };
+    use crate::ports::types::{CompanyRecord, CompanySummary, LedgerEntry};
 
     /// An in-memory `CompanyStore` holding one record, so the resolver's overlay
     /// half can be seeded without a real backend.
@@ -647,32 +645,7 @@ to = "sub"
         );
     }
 
-    // ---- Issue #617: disclosing a child's ungated calls -------------------
-
-    /// An [`EventLog`] that only remembers what it was handed.
-    struct RecordingEvents(std::sync::Mutex<Vec<CompanyEvent>>);
-
-    #[async_trait]
-    impl crate::ports::EventLog for RecordingEvents {
-        async fn append(&self, _id: &CompanyId, event: CompanyEvent) -> OcResult<EventSeq> {
-            self.0.lock().unwrap().push(event);
-            Ok(EventSeq::from(1))
-        }
-        async fn read_from(
-            &self,
-            _id: &CompanyId,
-            _seq: EventSeq,
-            _limit: usize,
-        ) -> OcResult<Vec<StoredEvent>> {
-            Ok(Vec::new())
-        }
-        fn subscribe(
-            &self,
-            _id: &CompanyId,
-        ) -> futures::stream::BoxStream<'static, crate::ports::events::EventStreamItem> {
-            Box::pin(futures::stream::empty())
-        }
-    }
+    // ---- Issue #617: gating child calls -----------------------------------
 
     /// A child graph whose one working node is a `tool_call` the policy parks.
     fn child_with_shell(id: &str) -> String {
@@ -693,7 +666,7 @@ slug = "shell"
 [node.config.args]
 # An ACTING command. Since issue #875 `shell` is classified by what it was
 # handed, so a read would be a call the policy does not park — and the
-# disclosure this fixture exists to exercise only happens for one that would.
+# gate this fixture exists to exercise only happens for one that would.
 command = "rm -rf ."
 [[edge]]
 from = "start"
@@ -702,10 +675,9 @@ to = "run"
         )
     }
 
-    fn audited_resolver(
+    fn gated_resolver(
         overlays: Vec<OverlayWorkflow>,
         mode: &str,
-        events: Arc<RecordingEvents>,
     ) -> StoreWorkflowResolver {
         let policy: crate::company::Policy =
             toml::from_str(&format!("mode = \"{mode}\"\nalways_approve = []\n"))
@@ -715,89 +687,69 @@ to = "run"
             store_with(overlays),
             CompanyId::new("acme"),
             "root".to_string(),
-            Some(ChildCallAudit {
+            Some(ChildPolicyGates {
                 policy,
                 run_id: "run-1".to_string(),
-                events: Some(events),
+                grants: crate::runtime::grants::GrantSet::default(),
             }),
         )
     }
 
-    /// Issue #617. The child's `shell` call is one the policy would park at the
-    /// top level. It cannot be parked here — the engine cannot resume a child
-    /// across the boundary — so the resolver must **say so on the record**
-    /// rather than let the call disappear from the approvals story.
+    /// Issue #617. The child's `shell` call is one the policy parks at the top
+    /// level, so the resolver must mark it before tinyflows runs the child.
     #[tokio::test]
-    async fn an_ungated_child_call_is_disclosed_to_the_journal() {
-        let events = Arc::new(RecordingEvents(std::sync::Mutex::new(Vec::new())));
-        let resolver = audited_resolver(
+    async fn a_policy_gated_child_call_is_marked_before_the_engine_runs_it() {
+        let resolver = gated_resolver(
             vec![overlay("child", child_with_shell("child"))],
             "supervised",
-            events.clone(),
         );
 
         let graph = resolver.resolve("child").await.expect("child resolves");
 
-        let seen = events.0.lock().unwrap();
-        let [
-            CompanyEvent::WorkflowChildCallNotOffered {
-                workflow_id,
-                child_workflow_id,
-                run_id,
-                node,
-                tool,
-                reason,
-            },
-        ] = seen.as_slice()
-        else {
-            panic!("expected exactly one disclosure: {seen:?}");
-        };
-        assert_eq!(workflow_id, "root", "the line names the run's own workflow");
-        assert_eq!(child_workflow_id, "child");
-        assert_eq!(run_id, "run-1");
-        assert_eq!(node, "run");
-        assert_eq!(tool, "shell");
-        assert!(reason.contains("shell"), "{reason}");
-
-        // And the child is NOT gated: marking it would pause a child the engine
-        // cannot resume, turning a working run into a dead one (issue #617).
         let run = graph
             .nodes
             .iter()
             .find(|n| n.id == "run")
             .expect("the child's node survives");
         assert!(
-            run.config.get("requires_approval").is_none(),
-            "disclosing must not gate the child: {:?}",
+            run.config["requires_approval"].as_bool().unwrap_or(false),
+            "the child call must be gated: {:?}",
             run.config
         );
     }
 
-    /// A company that would not park the call has nothing to disclose. Without
-    /// this, the test above is also satisfied by a resolver that logs on every
-    /// child regardless of policy.
+    /// A company whose policy does not park the call leaves the child runnable.
     #[tokio::test]
-    async fn a_child_the_policy_would_not_park_discloses_nothing() {
-        let events = Arc::new(RecordingEvents(std::sync::Mutex::new(Vec::new())));
-        let resolver = audited_resolver(
+    async fn a_child_the_policy_would_not_park_is_not_marked() {
+        let resolver = gated_resolver(
             vec![overlay("child", child_with_shell("child"))],
             "full",
-            events.clone(),
         );
 
-        resolver.resolve("child").await.expect("child resolves");
+        let graph = resolver.resolve("child").await.expect("child resolves");
+        let run = graph
+            .nodes
+            .iter()
+            .find(|n| n.id == "run")
+            .expect("the child's node survives");
 
         assert!(
-            events.0.lock().unwrap().is_empty(),
-            "an ungated-by-policy call is not a disclosure"
+            run.config.get("requires_approval").is_none(),
+            "an ungated child call remains runnable: {:?}",
+            run.config
         );
     }
 
-    /// A dry run executes nothing, so there is no omission to confess. The
-    /// audit is `None` there and the resolver behaves exactly as before.
+    /// A dry run executes nothing, so its resolver receives no gate context.
     #[tokio::test]
-    async fn a_resolver_without_an_audit_discloses_nothing() {
+    async fn a_resolver_without_policy_gates_leaves_the_child_unmarked() {
         let resolver = overlay_resolver(vec![overlay("child", child_with_shell("child"))], "root");
-        resolver.resolve("child").await.expect("child resolves");
+        let graph = resolver.resolve("child").await.expect("child resolves");
+        let run = graph
+            .nodes
+            .iter()
+            .find(|n| n.id == "run")
+            .expect("the child's node survives");
+        assert!(run.config.get("requires_approval").is_none());
     }
 }
