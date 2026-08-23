@@ -106,11 +106,13 @@ describe("credential clearing confirmation (issue #1471)", () => {
       await Promise.resolve();
     });
 
-    await act(async () => button("Clear Smithery key").click());
+    await act(async () => button("Clear key").click());
     expect(api.setMcpDirectoryCredential).not.toHaveBeenCalled();
     expect(document.body.textContent).toContain("cannot be shown or recovered");
 
-    await act(async () => button("Clear key").click());
+    await act(async () => {
+      (document.querySelector("[data-slot=alert-dialog-action]") as HTMLButtonElement).click();
+    });
     expect(api.setMcpDirectoryCredential).toHaveBeenCalledWith(fakeClient, "acme", "");
   });
 
