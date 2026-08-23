@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   AlertTriangle,
+  ArrowLeft,
   Check,
   ChevronRight,
   CircleDashed,
@@ -29,6 +30,7 @@ import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { ThemeToggle } from "@/components/theme-toggle";
 import { cn } from "@/lib/utils";
 
 /**
@@ -46,9 +48,9 @@ import { cn } from "@/lib/utils";
 export function StyleguideView() {
   return (
     <div className="min-h-0 flex-1 overflow-y-auto">
+      <Header />
       <div className="mx-auto w-full max-w-5xl px-6 py-10">
-        <Header />
-        <div className="mt-10 space-y-14 pb-24">
+        <div className="space-y-14 pb-24">
           <ColorSection />
           <StatusSection />
           <ToneSection />
@@ -65,20 +67,37 @@ export function StyleguideView() {
 
 function Header() {
   return (
-    <header>
-      <p className="text-2xs font-medium tracking-wide text-sidebar-accent-foreground uppercase">
-        OpenCompany design system
-      </p>
-      <h1 className="mt-2 text-2xl font-semibold tracking-tight">Styleguide</h1>
-      <p className="mt-2 max-w-2xl text-sm text-muted-foreground">
-        Every token and component state the console ships, rendered by the
-        console's own stylesheet. Switch the theme to check both. Written
-        reference lives in{" "}
-        <code className="rounded-sm bg-muted px-1 py-0.5 font-mono text-2xs">
-          docs/design-system/
-        </code>
-        .
-      </p>
+    <header
+      className="sticky top-0 z-10 border-b bg-background/95 backdrop-blur"
+      data-testid="styleguide-header"
+    >
+      <div className="mx-auto flex w-full max-w-5xl items-center justify-between gap-6 px-6 py-4">
+        <div>
+          <p className="text-2xs font-medium tracking-wide text-sidebar-accent-foreground uppercase">
+            OpenCompany design system
+          </p>
+          <h1 className="mt-1 text-2xl font-semibold tracking-tight">Styleguide</h1>
+          <p className="mt-2 max-w-2xl text-sm text-muted-foreground">
+            Every token and component state the console ships, rendered by the
+            console&apos;s own stylesheet. Switch the theme to check both. Written
+            reference lives in{" "}
+            <code className="rounded-sm bg-muted px-1 py-0.5 font-mono text-2xs">
+              docs/design-system/
+            </code>
+            .
+          </p>
+        </div>
+        <div className="flex shrink-0 items-center gap-1">
+          <ThemeToggle />
+          <a
+            className="inline-flex h-8 items-center gap-1.5 rounded-md px-3 text-sm font-medium transition-colors hover:bg-accent hover:text-accent-foreground focus-visible:ring-3 focus-visible:ring-ring/50 focus-visible:outline-none"
+            href="#/overview"
+          >
+            <ArrowLeft className="size-4" />
+            Back to console
+          </a>
+        </div>
+      </div>
     </header>
   );
 }
