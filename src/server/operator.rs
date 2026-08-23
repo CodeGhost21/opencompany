@@ -2819,6 +2819,16 @@ struct StandingGrantDto {
     /// the pre-#457 shape is byte-identical for every other tool.
     #[serde(skip_serializing_if = "Option::is_none")]
     scope: Option<String>,
+    /// The authored workflow allowed to redeem it (issue #1098), when the grant
+    /// is to a workflow rather than a teammate.
+    ///
+    /// On the wire for the same reason `scope` is: `agent` is empty on a
+    /// workflow permission, so without this the console would read the row as a
+    /// nameless teammate and could not tell two workflows holding the same
+    /// tool/scope apart. Absent — not `null` — on every teammate grant, so the
+    /// pre-#1098 wire shape is byte-identical for them.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    workflow: Option<String>,
 }
 
 impl From<crate::runtime::grants::StandingGrant> for StandingGrantDto {
