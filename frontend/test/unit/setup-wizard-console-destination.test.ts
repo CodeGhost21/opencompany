@@ -169,6 +169,9 @@ async function finishUnmailable() {
 
 describe("the console button after setup applies without a hand-off link", () => {
   it("carries the roster destination out of a no-sign-in setup", async () => {
+    // The desktop runtime is what makes the wizard preselect `none`; it must
+    // be in place before the wizard mounts (`isDesktopRuntime` is read once).
+    (window as unknown as { __TAURI__: unknown }).__TAURI__ = { core: {} };
     let calls = 0;
     done = () => {
       calls += 1;
