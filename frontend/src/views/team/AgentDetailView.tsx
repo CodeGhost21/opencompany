@@ -23,6 +23,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
+import { useHashFlag } from "@/hooks/use-hash-flag";
 import {
   agentEdits,
   draftFrom,
@@ -127,7 +128,22 @@ export function AgentDetailView({
   useEffect(() => {
     displayedAgentIdRef.current = agent?.id ?? null;
   }, [agent]);
-  const [editing, setEditing] = useState(false);
+  /**
+   * The edit form is an address, not a piece of local state (issue #1653).
+   *
+   * `#/team/<id>?edit` is what the profile panel's "Edit agent" button links
+   * to, so the form has to be openable by the hash rather than only by the
+   * button on this page. Deriving it from the flag rather than mirroring the
+   * flag into `useState` leaves one source of truth: the browser's Back button
+   * closes the editor, and a link into it lands with the form already open.
+   *
+   * Gated on the host's own `editable` list, so a hand-typed `?edit` on a
+   * teammate this host will not edit does not open a form whose Save can only
+   * fail.
+   */
+  const [editRequested, setEditRequested] = useHashFlag("edit");
+  const setEditing = setEditRequested;
+  const editing = editRequested && (agent?.editable.length ?? 0) > 0;
   const [draft, setDraft] = useState<AgentDraft>(emptyDraft());
   const [saving, setSaving] = useState(false);
   /**
