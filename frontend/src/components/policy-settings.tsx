@@ -510,7 +510,9 @@ export function PolicySettings({ client, company }: Props) {
                   <p className="text-sm text-muted-foreground">
                     {pendingReset
                       ? "Reset replaces the whole policy override, including the always-ask list."
-                      : "Your always-ask list still wins, even on Full."}
+                      : dirty
+                        ? "Your saved always-ask list still wins, even on Full — save the list to enforce new gates."
+                        : "Your always-ask list still wins, even on Full."}
                   </p>
                 </AlertDialogHeader>
                 <AlertDialogFooter>
