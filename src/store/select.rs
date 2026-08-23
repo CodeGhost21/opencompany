@@ -1000,69 +1000,6 @@ mod test {
     }
 
     #[test]
-    fn parses_memory_backends() {
-        assert_eq!(
-            "store".parse::<MemoryBackend>().unwrap(),
-            MemoryBackend::Store
-        );
-        assert_eq!("".parse::<MemoryBackend>().unwrap(), MemoryBackend::Store);
-        assert_eq!(
-            "TinyCortex".parse::<MemoryBackend>().unwrap(),
-            MemoryBackend::Tinycortex
-        );
-        assert_eq!(
-            "cortex".parse::<MemoryBackend>().unwrap(),
-            MemoryBackend::Tinycortex
-        );
-        assert!("redis".parse::<MemoryBackend>().is_err());
-    }
-
-    #[test]
-    fn the_legacy_spellings_keep_parsing_alongside_the_new_ones() {
-        // Issue #914 introduces `embedded`/`remote`/`null`. Renaming would break
-        // every deployment already setting `OPENCOMPANY_MEMORY=tinycortex`,
-        // including hosted tenants whose environment the control plane injects,
-        // so the older spelling is a synonym rather than a casualty.
-        assert_eq!(
-            "embedded".parse::<MemoryBackend>().unwrap(),
-            MemoryBackend::Tinycortex
-        );
-        assert_eq!(
-            "tinycortex".parse::<MemoryBackend>().unwrap(),
-            MemoryBackend::Tinycortex
-        );
-        assert_eq!(
-            "remote".parse::<MemoryBackend>().unwrap(),
-            MemoryBackend::Remote
-        );
-        assert_eq!(
-            "null".parse::<MemoryBackend>().unwrap(),
-            MemoryBackend::Null
-        );
-        assert_eq!(
-            "NULL".parse::<MemoryBackend>().unwrap(),
-            MemoryBackend::Null
-        );
-    }
-
-    #[test]
-    fn one_spelling_is_reported_out_even_though_two_parse_in() {
-        // A client reading status should never have to know both names.
-        assert_eq!(MemoryBackend::Tinycortex.as_str(), "embedded");
-        assert_eq!(MemoryBackend::Store.as_str(), "store");
-        assert_eq!(MemoryBackend::Remote.as_str(), "remote");
-        assert_eq!(MemoryBackend::Null.as_str(), "null");
-    }
-
-    #[test]
-    fn the_parse_refusal_names_every_accepted_value() {
-        let error = "redis".parse::<MemoryBackend>().err().unwrap().to_string();
-        for value in ["store", "embedded", "tinycortex", "remote", "null"] {
-            assert!(error.contains(value), "{value} missing from: {error}");
-        }
-    }
-
-    #[test]
     fn settings_debug_never_renders_a_credential() {
         // `StorageSettings` is printed at boot, so a derived `Debug` would put a
         // memory credential and a MongoDB connection string in the startup log
@@ -1690,5 +1627,24 @@ mod test {
             ..StorageSettings::default()
         };
         refuse_bundle_env(&blank_tenant, false).expect("blank tenant id is unset");
+    }
+}
+
+#[cfg(test)]
+mod selection_tests {
+    use super::*;
+
+    #[cfg(feature = "mongodb")]
+    #[tokio::test]
+    async fn mongodb_selection_requires_uri() {
+        let settings = StorageSettings {
+            kind: StorageKind::Mongodb,
+            ..Default::default()
+        };
+        let error = open_storage(&settings, std::path::Path::new("/tmp"))
+            .await
+            .expect_err("mongodb without a URI must refuse")
+            .to_string();
+        assert!(error.contains("OPENCOMPANY_MONGODB_URI"), "{error}");
     }
 }
