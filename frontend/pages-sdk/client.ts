@@ -200,7 +200,12 @@ window.addEventListener("message", function onRelay(event: MessageEvent) {
       event.data.type === "oc:relay-pointerup" ||
       event.data.type === "oc:relay-pointercancel"
     ) {
-      endRelayedPress(pointerId, event.data.x, event.data.y, event.data.type === "oc:relay-pointercancel");
+      endRelayedPress(
+        pointerId,
+        event.data.x,
+        event.data.y,
+        event.data.type === "oc:relay-pointercancel",
+      );
       relayPressTargets.delete(pointerId);
     }
     return;
@@ -209,7 +214,12 @@ window.addEventListener("message", function onRelay(event: MessageEvent) {
     event.data.type === "oc:relay-pointerup" ||
     event.data.type === "oc:relay-pointercancel"
   ) {
-    endRelayedPress(pointerId, event.data.x, event.data.y, event.data.type === "oc:relay-pointercancel");
+    endRelayedPress(
+      pointerId,
+      event.data.x,
+      event.data.y,
+      event.data.type === "oc:relay-pointercancel",
+    );
     relayPressTargets.delete(pointerId);
   }
 
