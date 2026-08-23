@@ -2757,7 +2757,11 @@ mod tests {
         let own = WorkspaceOrigin::Agent {
             id: "ceo".to_string(),
         };
-        let node = |id: &str, name: &str, kind: NodeKind, parent: Option<&str>, origin: WorkspaceOrigin| {
+        let node = |id: &str,
+                    name: &str,
+                    kind: NodeKind,
+                    parent: Option<&str>,
+                    origin: WorkspaceOrigin| {
             WorkspaceNode {
                 id: id.to_string(),
                 name: name.to_string(),
@@ -2772,7 +2776,11 @@ mod tests {
             }
         };
         store
-            .create(&company, &node("own", "own", NodeKind::Folder, None, own), None)
+            .create(
+                &company,
+                &node("own", "own", NodeKind::Folder, None, own),
+                None,
+            )
             .await
             .unwrap();
         store
@@ -2817,7 +2825,10 @@ mod tests {
             .with_workspace(store, company);
         assert_eq!(
             policy
-                .check(&request("workspace_rename", serde_json::json!({ "id": "own" })))
+                .check(&request(
+                    "workspace_rename",
+                    serde_json::json!({ "id": "own" })
+                ))
                 .await,
             ToolPolicyDecision::Allow
         );
