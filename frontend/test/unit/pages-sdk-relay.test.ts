@@ -305,6 +305,7 @@ describe("the page frame's toast-relay listener", () => {
       button: 0,
       buttons: 1,
     });
+    mockElementFromPoint(releaseTarget);
     relayFrom(window.parent, {
       type: "oc:relay-pointerup",
       x: 60,
