@@ -357,8 +357,10 @@ export function approvalAction(a: ApprovalSummary): string {
  * body, so a queue holding two shell commands would offer two "Approve: Run a
  * terminal command" buttons with no way to tell which request each one
  * decides. Appending the payload's lead argument — the command itself, the
- * URL, the pattern — and, when the card has one, the asker, makes each button
- * name *this* request.
+ * URL, the pattern — the follow-ups that tell two same-kind cards apart (two
+ * `http_request`s to one URL differ by `method`, two shell commands by `cwd`),
+ * and, when the card has one, the asker, makes each button name *this*
+ * request.
  *
  * Both halves degrade: a card with no payload (an approval with no arguments)
  * omits the lead, and one with no `agent` (a native effect, or an old host)
