@@ -193,11 +193,14 @@ fn decode_jpegphoto(output: &str) -> Option<String> {
 fn picture(username: Option<&str>) -> Option<String> {
     let _ = username;
     let public = std::env::var("PUBLIC").ok()?;
-    let dir = PathBuf::from(public).join("AccountPictures");
-    // The directory holds one folder per account SID with several sizes in it;
-    // the largest file is the best picture without resolving the SID.
+    // The directory holds one folder per account SID with several sizes in
+    // it. The current account's SID is resolved rather than every SID being
+    // scanned, because the largest file across the whole directory on a shared
+    // machine is another local user's picture — offered here as this person's.
+    let dir = PathBuf::from(public).join("AccountPictures").join(current_sid()?);
+    // Sizes sit directly in the SID folder, so one level of walk reaches them.
     let mut best: Option<(u64, PathBuf)> = None;
-    for entry in walk(&dir, 2) {
+    for entry in walk(&dir, 1) {
         let Ok(meta) = entry.metadata() else { continue };
         if !meta.is_file() || meta.len() > MAX_PICTURE_BYTES {
             continue;
@@ -207,6 +210,37 @@ fn picture(username: Option<&str>) -> Option<String> {
         }
     }
     best.and_then(|(_, path)| encode_picture(&path))
+}
+
+/// The current account's SID, for scoping the picture lookup to this person.
+///
+/// `whoami /user` answers it. The output is localized and its column layout
+/// varies, so the SID is found by shape rather than position — the one token
+/// shaped like `S-1-5-21-…`. A username can never match that shape, so the
+/// hunt cannot grab the wrong column. `None` means "no SID on this machine",
+/// and the caller offers no picture suggestion at all.
+#[cfg(target_os = "windows")]
+fn current_sid() -> Option<String> {
+    let out = std::process::Command::new("whoami").arg("/user").output().ok()?;
+    parse_whoami_user(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// Extracts the SID token from `whoami /user` output.
+///
+/// The shape check is deliberately stricter than a bare `S-` prefix: a real
+/// SID always has a second dash (`S-1-5-…`), so `S-123` or `S-admin` cannot
+/// match. Split into its own function so the parse is testable on any host.
+#[cfg(any(target_os = "windows", test))]
+fn parse_whoami_user(text: &str) -> Option<String> {
+    text.lines()
+        .flat_map(str::split_whitespace)
+        .find(|token| {
+            token.starts_with("S-")
+                && token.len() > 2
+                && token[2..].chars().all(|c| c.is_ascii_digit() || c == '-')
+                && token[2..].contains('-')
+        })
+        .map(str::to_string)
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
