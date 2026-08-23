@@ -50,13 +50,23 @@ test("overview holds still without the mask (probe)", async ({ page }) => {
     samples.push(
       await page.evaluate(() => {
         const svg = document.querySelector('.oc-kg svg');
-        const vb = svg?.getAttribute('viewBox') ?? 'none';
-        const tickEl = document.querySelector('.oc-kg [data-tick]');
-        const circles = Array.from(document.querySelectorAll('.oc-kg svg circle'))
-          .slice(0, 8)
-          .map((c) => c.getAttribute('cx') + ',' + c.getAttribute('cy'));
-        const stage = (window as any).__probeStage;
-        return JSON.stringify({ vb, tick: tickEl?.getAttribute('data-tick'), circles: circles.slice(0, 4), stage });
+        const html = svg?.innerHTML ?? '';
+        let h = 0;
+        for (const el of svg?.querySelectorAll('[transform]') ?? []) {
+          for (const ch of el.getAttribute('transform') ?? '') h = (h * 31 + ch.charCodeAt(0)) | 0;
+        }
+        let h2 = 0;
+        for (const el of svg?.querySelectorAll('circle, path, ellipse') ?? []) {
+          const s = el.getAttribute('transform') ?? el.getAttribute('d') ?? '';
+          for (const ch of s.slice(0, 64)) h2 = (h2 * 31 + ch.charCodeAt(0)) | 0;
+        }
+        const circles = Array.from(svg?.querySelectorAll('circle') ?? []);
+        let cxs = 0, cys = 0;
+        for (const c of circles) {
+          cxs += (parseFloat(c.getAttribute('cx') ?? '0') * 1000) | 0;
+          cys += (parseFloat(c.getAttribute('cy') ?? '0') * 1000) | 0;
+        }
+        return JSON.stringify({ len: html.length, thash: h, dhash: h2, cxs, cys, n: circles.length });
       }),
     );
     await page.waitForTimeout(800);
