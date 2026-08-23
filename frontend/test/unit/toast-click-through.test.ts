@@ -34,6 +34,33 @@ function press(element: Element, x = 40, y = 50, pointerId = 7): void {
   );
 }
 
+/** A primary-button click at a known position. */
+function clickAt(element: Element, x: number, y: number): void {
+  element.dispatchEvent(
+    new MouseEvent("click", {
+      bubbles: true,
+      cancelable: true,
+      clientX: x,
+      clientY: y,
+      button: 0,
+    }),
+  );
+}
+
+/** A page frame beneath the toast, relaying back to a stubbed `postMessage`. */
+function frameBeneath(): HTMLIFrameElement {
+  const frame = document.createElement("iframe");
+  Object.defineProperty(frame, "contentWindow", {
+    value: { postMessage: vi.fn() },
+  });
+  // jsdom has no layout; pin the frame's viewport offset so the relay's
+  // frame-relative coordinates are observable.
+  frame.getBoundingClientRect = () =>
+    ({ left: 10, top: 20, width: 100, height: 100 }) as DOMRect;
+  document.body.append(frame);
+  return frame;
+}
+
 function toast(): HTMLElement {
   const toaster = document.createElement("section");
   toaster.dataset.sonnerToaster = "";
