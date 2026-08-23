@@ -63,12 +63,15 @@ export function SettingsSection({ client, company, feed, sub, onFlag }: Props) {
         </div>
         {SETTINGS_PAGE_GROUPS.map((group) => (
           <section key={group.id} aria-labelledby={`settings-group-${group.id}`}>
-            <h3
+            {/* Named by `aria-labelledby`, which resolves against any element,
+                so the group keeps its accessible name without sitting in the
+                document outline ahead of the sub-page's `h1` (issue #1392). */}
+            <div
               id={`settings-group-${group.id}`}
               className="px-2 pb-1 pt-3 text-xs font-medium tracking-wide text-muted-foreground uppercase first:pt-1"
             >
               {group.label}
-            </h3>
+            </div>
             {SETTINGS_PAGES.filter((item) => item.group === group.id).map((item) => (
               <a
                 key={item.id}
