@@ -1586,7 +1586,11 @@ mod test {
             "the new wildcard refusal supersedes the older scoped approval"
         );
         assert_eq!(drained[0].id, GrantId::new("approve-1"));
-        assert!(set.standing().is_empty(), "nothing opposite remains listed");
+        assert_eq!(
+            set.standing().len(),
+            1,
+            "the reconcile is read-only; the caller persists the revocation before revoking"
+        );
     }
     #[test]
     fn same_polarity_policies_are_never_reconciled() {
