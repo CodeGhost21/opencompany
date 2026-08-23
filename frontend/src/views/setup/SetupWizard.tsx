@@ -636,14 +636,21 @@ export function SetupWizard({ client, onDone, onCancel, expectsShellRemount }: P
             <Button
               onClick={() => {
                 // The link branch above carries the landing fragment inside its
-                // URL. This branch hands off by remounting the shell in place
-                // (`onDone` re-probes and boots a fresh `AppShell`), so write
-                // the same fragment first: the fresh shell reads it, routes to
-                // the roster setup just built, suppresses the tour welcome, and
+                // URL. This branch hands off through `onDone`, and
+                // `expectsShellRemount` says that hands off to a fresh
+                // `AppShell` (the connection console's re-probe), so write the
+                // same fragment first: the fresh shell reads it, routes to the
+                // roster setup just built, suppresses the tour welcome, and
                 // clears the one-shot marker. Without it a no-sign-in host —
                 // and the "anyway" escapes for a mailed sign-in — lands on
                 // Overview with the tour free to open over that roster.
-                if (window.location.hash !== SETUP_HANDOFF_FRAGMENT) {
+                //
+                // The in-shell dialog must NOT write it: `onDone` there closes
+                // the dialog in place and the running shell already suppresses
+                // the welcome via `onCompleted`, so the marker would have no
+                // consuming mount and would be read as a fresh hand-off on the
+                // next reload.
+                if (expectsShellRemount && window.location.hash !== SETUP_HANDOFF_FRAGMENT) {
                   window.location.hash = SETUP_HANDOFF_FRAGMENT;
                 }
                 onDone();
