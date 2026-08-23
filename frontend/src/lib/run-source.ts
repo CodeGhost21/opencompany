@@ -132,7 +132,7 @@ export function runSource(run: RunSummary, index: RunSourceIndex = {}): RunSourc
     return {
       kind: "chat",
       label: name ?? run.chatId,
-      href: chatHref(run.chatId),
+      href: chatHref(run.chatId, run.agentId === run.chatId),
       resolved: name !== undefined,
     };
   }
