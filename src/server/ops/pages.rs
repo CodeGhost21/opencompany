@@ -80,6 +80,134 @@ struct SlugPath {
     slug: String,
 }
 
+/// The capability query parameter the shell embeds in its module URLs.
+///
+/// Only the two module routes parse it; everything else stays session-
+/// authenticated exactly as before.
+#[derive(Debug, serde::Deserialize)]
+struct ModuleCapQuery {
+    /// The short-lived capability minted by the shell ([`mint_module_cap`]).
+    oc_cap: String,
+}
+
+/// How long a minted page-module capability stays valid.
+///
+/// The shell mints one per load and the module graph (bootstrap + bundle) is
+/// fetched within the first moments of that load; a minute of slack covers a
+/// slow network without leaving a replayable token lying around.
+const MODULE_CAP_TTL: Duration = Duration::from_secs(60);
+
+/// One minted capability's scope: which page it authorizes and when it stops.
+struct ModuleCap {
+    company: CompanyId,
+    slug: String,
+    expires_at: Instant,
+}
+
+/// The live set of minted capabilities, keyed by the token itself.
+///
+/// The two module routes consume these instead of a session. They must: the
+/// opaque-origin page iframe cannot attach the operator's session cookie to
+/// its module imports (docs/spec/runtime/pages.md §5), so the shell — which
+/// *can* authenticate, because the iframe loads it by navigation — mints an
+/// unguessable token here and embeds it in the module URLs. The map is bounded
+/// by real page loads and lazily swept on every access, so it stays small;
+/// entries also die with the process, which is fine because each is minted
+/// fresh per shell load and lives at most [`MODULE_CAP_TTL`].
+static MODULE_CAPS: OnceLock<Mutex<HashMap<String, ModuleCap>>> = OnceLock::new();
+
+fn module_caps() -> &'static Mutex<HashMap<String, ModuleCap>> {
+    MODULE_CAPS.get_or_init(Default::default)
+}
+
+/// Mints an unguessable, short-lived capability for one page's module graph.
+fn mint_module_cap(company: &CompanyId, slug: &str) -> String {
+    let mut bytes = [0u8; 32];
+    getrandom::fill(&mut bytes)
+        .expect("the OS CSPRNG is unavailable; cannot mint a page-module capability");
+    let cap = hex_encode(&bytes);
+    let mut caps = module_caps().lock().expect("page-module capability map lock");
+    // Lazy sweep: drop everything that has expired since the last access.
+    caps.retain(|_, c| c.expires_at > Instant::now());
+    caps.insert(
+        cap.clone(),
+        ModuleCap {
+            company: company.clone(),
+            slug: slug.to_string(),
+            expires_at: Instant::now() + MODULE_CAP_TTL,
+        },
+    );
+    cap
+}
+
+/// Whether `cap` currently authorizes this company's `slug` module graph.
+///
+/// Bound to the company *and* the slug, so a capability minted for one page
+/// cannot open another page's bundle, and a capability minted for one company
+/// cannot be replayed against another.
+fn validate_module_cap(cap: &str, company: &CompanyId, slug: &str) -> bool {
+    let mut caps = module_caps().lock().expect("page-module capability map lock");
+    caps.retain(|_, c| c.expires_at > Instant::now());
+    caps.get(cap)
+        .is_some_and(|c| c.company == *company && c.slug == slug && c.expires_at > Instant::now())
+}
+
+/// Lowercase-hex encoding for a capability token: URL-safe and unguessable.
+fn hex_encode(bytes: &[u8]) -> String {
+    use std::fmt::Write;
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        // Infallible: writing to a String never fails.
+        let _ = write!(out, "{byte:02x}");
+    }
+    out
+}
+
+/// Resolves the addressed company exactly as [`ScopedCompany`] does, but
+/// admits the request without a session.
+///
+/// The two module routes are the sole consumers. An opaque-origin sandboxed
+/// iframe cannot attach the operator's session cookie to its module imports,
+/// so the shell — an authenticated navigation — mints a short-lived capability
+/// and embeds it in the module URLs; these routes validate that capability
+/// ([`validate_module_cap`]) in the handler, against the company *and* the
+/// slug, instead of a session. Nothing else is ever registered behind this
+/// extractor, so the capability's reach is exactly the module graph.
+struct ModuleScopedCompany {
+    runtime: Arc<CompanyRuntime>,
+}
+
+impl FromRequestParts<AppState> for ModuleScopedCompany {
+    type Rejection = Response;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        let id = RawPathParams::from_request_parts(parts, state)
+            .await
+            .ok()
+            .and_then(|params| {
+                params
+                    .iter()
+                    .find(|(key, _)| *key == "id")
+                    .map(|(_, value)| value.to_string())
+            });
+        let runtime = match &id {
+            Some(id) => state.registry().get(&CompanyId::new(id)).ok_or_else(|| {
+                ApiError(OpenCompanyError::CompanyNotFound(id.clone())).into_response()
+            })?,
+            None => state.registry().sole().ok_or_else(|| {
+                ApiError(OpenCompanyError::CompanyNotFound(
+                    "single-company".to_string(),
+                ))
+                .into_response()
+            })?,
+        };
+        Ok(ModuleScopedCompany { runtime })
+    }
+}
+
 /// One page's manifest, as the console nav consumes it.
 ///
 /// Field names match what `PagesView.tsx` (the frontend nav, built alongside
