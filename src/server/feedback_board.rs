@@ -131,9 +131,9 @@ fn addressed(
 ) -> Result<Arc<CompanyRuntime>, crate::server::Rejection> {
     let company = CompanyId::new(id);
     if let Some(resp) = authorize_address(state, auth, &company) {
-        return Err(resp);
+        return Err(resp.into());
     }
-    lookup(state, id).map_err(IntoResponse::into_response)
+    lookup(state, id).map_err(|error| IntoResponse::into_response(error).into())
 }
 
 /// The sole company, authorized the same way.
@@ -141,9 +141,9 @@ fn addressed_sole(
     state: &AppState,
     auth: &GqlAuth,
 ) -> Result<Arc<CompanyRuntime>, crate::server::Rejection> {
-    let runtime = sole(state).map_err(IntoResponse::into_response)?;
+    let runtime = sole(state).map_err(|error| IntoResponse::into_response(error).into())?;
     if let Some(resp) = authorize_address(state, auth, runtime.id()) {
-        return Err(resp);
+        return Err(resp.into());
     }
     Ok(runtime)
 }
@@ -155,7 +155,8 @@ fn checked_comment(body: &str) -> Result<&str, crate::server::Rejection> {
         return Err(ApiError(OpenCompanyError::InvalidRequest(
             "comment is empty".to_string(),
         ))
-        .into_response());
+        .into_response()
+        .into());
     }
     Ok(trimmed)
 }
@@ -168,7 +169,7 @@ async fn page(
         .feedback_board(params.to_query())
         .await
         .map(Json)
-        .map_err(|e| ApiError(e).into_response())
+        .map_err(|e| ApiError(e).into_response().into())
 }
 
 /// `GET /api/v1/companies/{id}/feedback/board`.
@@ -200,7 +201,7 @@ async fn detail(
         .feedback_board_item(&item)
         .await
         .map(Json)
-        .map_err(|e| ApiError(e).into_response())
+        .map_err(|e| ApiError(e).into_response().into())
 }
 
 /// `GET /api/v1/company/feedback/board/{item}` (single-company alias).
@@ -213,7 +214,7 @@ async fn detail_single(
         .feedback_board_item(&item)
         .await
         .map(Json)
-        .map_err(|e| ApiError(e).into_response())
+        .map_err(|e| ApiError(e).into_response().into())
 }
 
 /// `POST /api/v1/companies/{id}/feedback/board/{item}/vote`.
@@ -227,7 +228,7 @@ async fn vote(
         .vote_feedback_board(&item, body.value)
         .await
         .map(Json)
-        .map_err(|e| ApiError(e).into_response())
+        .map_err(|e| ApiError(e).into_response().into())
 }
 
 /// `POST /api/v1/company/feedback/board/{item}/vote` (single-company alias).
