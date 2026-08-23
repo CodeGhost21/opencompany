@@ -75,8 +75,8 @@ export interface RunSourceIndex {
 }
 
 /** `#/chat/<chatId>` — the thread a turn was raised in. */
-export function chatHref(chatId: string): string {
-  return `#/chat/${encodeURIComponent(chatId)}`;
+export function chatHref(chatId: string, directMessage = false): string {
+  return `#/chat/${directMessage ? "dm:" : ""}${encodeURIComponent(chatId)}`;
 }
 
 /**
