@@ -101,6 +101,13 @@ impl ChannelAdapter for DeskChannel {
                         .reply_to
                         .and_then(|reply| reply.chat_id.parse::<u64>().ok())
                         .map(EventSeq::new),
+                    // Workflow node output. This adapter holds no company
+                    // record, so it has nothing to resolve an `@name` against
+                    // — and a workflow bubble addresses the channel it posts
+                    // into, not a person in it. Left empty rather than
+                    // half-resolved.
+                    mentions: Vec::new(),
+                    mention_depth: 0,
                 },
             )
             .await?;
