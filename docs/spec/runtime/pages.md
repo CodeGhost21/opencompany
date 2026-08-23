@@ -111,7 +111,7 @@ internal dashboard page, not a public site):
 | Route | Serves |
 | --- | --- |
 | `GET {scope}/pages` | Every page's manifest as JSON — `[{ "slug", "title", "description", "icon", "navVisible" }]` — for the console nav. |
-| `GET {scope}/pages/{slug}` | A fixed HTML shell: an import map pointing `react` / `react-dom/client` / `react/jsx-runtime` at `/pages-sdk/react.mjs` and `@opencompany/site` at `/pages-sdk/index.mjs`, plus a `<script type="module">` that imports `./{slug}/bundle.mjs` — a path relative to the shell's own URL at `…/pages/{slug}` — and mounts it with `ReactDOM.createRoot`. |
+| `GET {scope}/pages/{slug}` | A fixed HTML shell: an import map pointing `react` / `react-dom/client` / `react/jsx-runtime` at `/pages-sdk/react.mjs` and `@opencompany/site` at `/pages-sdk/index.mjs`, plus a `<script type="module">` that imports the SDK first — `@opencompany/site` is loaded unconditionally, so the relay listener below is present even for a page that does not import it itself — then `./{slug}/bundle.mjs` (a path relative to the shell's own URL at `…/pages/{slug}`) and mounts it with `ReactDOM.createRoot`. |
 | `GET {scope}/pages/{slug}/bundle.mjs` | The page's `page.compiled.mjs`, streamed with `Content-Type: application/javascript` and `Content-Disposition: inline`. |
 
 All three set:
