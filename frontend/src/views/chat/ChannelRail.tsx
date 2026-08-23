@@ -124,12 +124,20 @@ function CompactChannelRow({
   unread: number;
   onSelect: (id: string) => void;
 }) {
+  const hasUnread = unread > 0 && !active;
+
   return (
     <button
       type="button"
       onClick={() => onSelect(channel.id)}
       aria-current={active ? "page" : undefined}
-      aria-label={channel.name}
+      // The compact row renders unread as a bare dot, so the count has to live
+      // in the accessible name — the expanded row says it in text, and
+      // collapsing the rail must not strip the same fact from the screen-reader
+      // tree. The dot itself stays a sighted-hover-only cue.
+      aria-label={
+        hasUnread ? `${channel.name}, ${unread > 99 ? "99+" : unread} unread` : channel.name
+      }
       title={channel.name}
       className={cn(
         "relative flex size-9 shrink-0 items-center justify-center rounded-md transition-colors",
@@ -139,7 +147,7 @@ function CompactChannelRow({
       )}
     >
       <ChannelIcon channel={channel} />
-      {unread > 0 && !active && (
+      {hasUnread && (
         <span
           title={UNREAD_IS_LOCAL}
           className="absolute -right-0.5 -top-0.5 size-2 rounded-full bg-primary"
