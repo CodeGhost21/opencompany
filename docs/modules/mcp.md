@@ -110,6 +110,8 @@ alias `…/company/…`). See [`server::ops::mcp`](../../src/server/ops/mcp.rs).
 | `PUT` | `…/mcp/servers/{name}` | Enable/disable, edit tool lists/endpoint, rotate token. A manifest server gets a runtime override entry. |
 | `DELETE` | `…/mcp/servers/{name}` | Remove a server, dispatching on where it lives. `409` for a manifest or default server (disable it instead). |
 | `GET` | `…/mcp/servers/{name}/tools` | Live tool discovery through the registry. |
+| `GET` | `…/mcp/config` | The declared servers as one `mcp.json` document (credentials never echoed). |
+| `PUT` | `…/mcp/config` | Replace the declared set from that document (admin-only). |
 | `GET` | `…/mcp/registry/search?q=&page=&pageSize=` | Browse the upstream directories. |
 | `GET` | `…/mcp/registry/entry?qualifiedName=` | One entry, with the install decision already made. |
 | `POST` | `…/mcp/registry/install` | Install an entry (+ write-only `env` values) and connect it. |
@@ -132,6 +134,65 @@ takes the ordinary company scope.
 Discovery is gated on the `openhuman` feature (the MCP transport lives there);
 without it the route reports `not_wired` and the console falls back to the
 declared tool lists. Every mutating response carries a `note` reminder.
+
+## `mcp.json` — the same configuration as one document
+
+Issue: the MCP console redesign. `…/mcp/config`
+([`server::ops::mcp_config`](../../src/server/ops/mcp_config.rs)) reads and
+writes the **same runtime index** the per-server routes above write, shaped like
+the `mcpServers` block an operator already has in a desktop MCP config:
+
+```json
+{
+  "mcpServers": {
+    "notion": {
+      "type": "http",
+      "url": "https://notion.example/mcp",
+      "enabled": true,
+      "allowedTools": ["search"],
+      "timeoutSecs": 30,
+      "source": "manifest",
+      "authConfigured": true
+    }
+  }
+}
+```
+
+It is one store behind two spellings, not an import/export format: a save here
+and a `PUT …/mcp/servers/{name}` land in the same place, so the rows and the file
+cannot describe different configurations. Pasting a block of servers is one
+action in the document and N form submissions on the rows, which is what the
+surface is for.
+
+The rules the shape cannot carry:
+
+- **A write is a replace, not a merge.** A runtime server absent from the
+  document is removed, with its credential and health cleared — the same removal
+  `DELETE …/mcp/servers/{name}` performs.
+- **A manifest or default server cannot be deleted by omission.** Its
+  declaration lives in `company.toml` or the instance `config.toml`, so dropping
+  the row would not remove it: the next resolution merges it straight back. The
+  write is refused by name, and `"enabled": false` — which persists as an
+  override — is the way to silence one.
+- **An unedited entry writes no override.** An entry equal to its
+  manifest/default declaration is skipped, so saving a document nobody edited is
+  a genuine no-op rather than a silent conversion of every declared server into
+  an operator override.
+- **Credentials stay write-only.** `headers` (one header;
+  `Authorization: Bearer …` is stored in the same slot the console's token field
+  writes) is accepted on write and never echoed on read. An entry that arrives
+  without `headers` leaves the stored credential **unchanged** — a round-trip
+  cannot silently deauthenticate a server.
+- **Registry installs are not in the document.** They live in OpenHuman's own
+  store keyed by `serverId`, not in this company's index, and a name here
+  addresses no install — so rendering them would invite an edit that does
+  nothing. They stay on the rows with their own routes.
+
+Local checking is deliberately thin
+([`frontend/src/lib/mcp-json.ts`](../../frontend/src/lib/mcp-json.ts)): JSON-ness,
+the `mcpServers` object, and a `url` per entry. Everything else is the host's
+answer to give and is shown verbatim, because a console paraphrase of the host's
+validation is one more thing that can fall out of step with it.
 
 ## The directory
 
@@ -297,11 +358,30 @@ builds with `mcp` (`TENANT_FEATURES` in `deploy-staging.yml`); the default
 
 ## Console surface
 
-One component reads these routes —
+One component reads the server routes —
 [`McpServersSection`](../../frontend/src/views/connections/McpServersSection.tsx),
 over the standalone functions in `frontend/src/api/mcp.ts` (List A) and
 `frontend/src/api/mcp-registry.ts` (the directory) — rendered from two places:
-inline on Connections, and as the whole of Settings, MCP Servers.
+inline on Connections, and as the **Connections** tab of Settings, MCP Servers.
+
+That page ([`McpServersView`](../../frontend/src/views/McpServersView.tsx)) has a
+second tab, **mcp.json**
+([`McpJsonEditor`](../../frontend/src/views/mcp/McpJsonEditor.tsx)), over
+`…/mcp/config`. Two tabs rather than two pages because they are not two things:
+both go through the same host into the same store, so an edit in one shows up in
+the other on its next read. A save bumps the key the rows are mounted on, so the
+list re-reads rather than describing the configuration as it was before the file
+was written.
+
+A row's controls are icons, each carrying its sentence as a tooltip **and** as
+its accessible name ([`McpIconButton`](../../frontend/src/views/mcp/McpIconButton.tsx)):
+credential (sign in / add a token / set env credentials), connect or disconnect,
+re-check, list tools, enable or disable, remove. At labelled-button width a row
+six controls deep wrapped onto a second line, and the line it pushed off was the
+one carrying the endpoint — the row's own information lost to its chrome. The
+enable control being an icon is why a disabled server also says `disabled` in
+words beside its badges: an icon in an off state reads as "press to turn off" as
+readily as the reverse.
 
 There is deliberately no MCP method on `OpenCompanyClient`. A second set used to
 sit there, declaring a `{ servers }` wrapper around this table's bare array,
