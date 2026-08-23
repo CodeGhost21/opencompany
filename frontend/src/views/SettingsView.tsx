@@ -62,8 +62,8 @@ export function SettingsView({ client, company, feed, onFlag }: Props) {
   return (
     <div className="flex-1 overflow-y-auto">
       <div className="mx-auto w-full max-w-3xl space-y-6 px-4 py-6">
-        {/* This sub-page draws no visible title of its own — the sub-nav rail
-            beside it already says "Settings" (issue #1221). */}
+        {/* Settings pages share one visible heading treatment. The rail names
+            the section; this names the page currently open within it. */}
         <h1 className="text-2xl font-semibold tracking-tight">General settings</h1>
         {/* Pairing this machine. Renders nothing in a browser, where the
             session cookie already works. */}
