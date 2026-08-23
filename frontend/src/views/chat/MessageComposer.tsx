@@ -77,6 +77,45 @@ const WRAPS = [
 ] as const;
 
 /**
+ * The end of the `@name` the caret sits inside, or `from` when nothing follows.
+ *
+ * Scans forward while the text still reads as a name the directory knows: a
+ * character is included only if the run up to it is a prefix of some alias.
+ * That keeps `@Jane Doe` whole (two words, one name) while stopping at the
+ * space in `@engineer and …` the moment "engineer and" ceases to be a name —
+ * so picking over an existing mention replaces the mention, not the sentence.
+ */
+function activeMentionEnd(
+  text: string,
+  from: number,
+  nameStart: number,
+  aliases: ReadonlySet<string>,
+): number {
+  let i = from;
+  while (i < text.length) {
+    const ch = text[i];
+    const next =
+      /[A-Za-z0-9_.-]/.test(ch)
+        ? i + 1
+        : ch === " " && /[A-Za-z0-9_]/.test(text[i + 1] ?? "")
+          ? i + 1
+          : null;
+    if (next === null) return i;
+    const name = text.slice(nameStart, next).toLowerCase();
+    let prefix = false;
+    for (const alias of aliases) {
+      if (alias.startsWith(name)) {
+        prefix = true;
+        break;
+      }
+    }
+    if (!prefix) return i;
+    i = next;
+  }
+  return i;
+}
+
+/**
  * The composer dock.
  *
  * A bordered box that owns its own toolbar rather than a bare input: the
