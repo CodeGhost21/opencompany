@@ -2296,7 +2296,23 @@ pub(crate) async fn mutation_is_owned_by_agent(
     let own_origin = WorkspaceOrigin::Agent {
         id: agent_id.to_string(),
     };
-    entry.node.created_by == own_origin && entry.node.updated_by == own_origin
+    if entry.node.created_by != own_origin || entry.node.updated_by != own_origin {
+        return false;
+    }
+    // A rename re-renders the path of every node inside a folder, so the
+    // target's own authorship is not enough: an agent-created folder that has
+    // since accumulated an operator- or teammate-authored node would let this
+    // agent silently relocate that work. Every addressable descendant must be
+    // owned by this agent too. Write, delete and create touch only the node
+    // they name (delete refuses a folder that still holds anything), so those
+    // keep the target-only check.
+    if tool.eq_ignore_ascii_case(WORKSPACE_RENAME_TOOL) && entry.node.kind == NodeKind::Folder {
+        return index
+            .entries_under(Some(&entry.path))
+            .iter()
+            .all(|e| e.node.created_by == own_origin && e.node.updated_by == own_origin);
+    }
+    true
 }
 
 #[cfg(test)]
