@@ -631,6 +631,70 @@ fn the_marketing_campaign_preset_is_runnable() {
     assert_eq!(node("publish").config["agent_ref"], "copywriter");
 }
 
+/// The marketing agency's creative desk ceiling must not strip the company's
+/// workspace-write grant.
+///
+/// The desk states `["*", "workspace.write"]`, and the `*` half deliberately
+/// confers no workspace writes — [`grants_workspace_write_explicit`] matches
+/// only the bare `workspace` or the exact `workspace.write` token — so the
+/// write token has to be restated in the ceiling for the desk's agents to hold
+/// it. Their own AGENTS.md promises the `agents/<id>/` folder is always
+/// writable, and `agent_scoped_grants` would silently strip that promise with
+/// a `["*"]`-only ceiling. Pinned through the *three-level* narrowing (the
+/// `effective_grants` the search-posture tests use ignores desks, which is
+/// precisely how this gap shipped) so a future edit cannot quietly reintroduce
+/// the stripping.
+#[test]
+fn a_restricting_desk_does_not_strip_the_workspace_write_token() {
+    let manifest = load_company("agentic_marketing_agency");
+    let creative = manifest
+        .group_chats
+        .iter()
+        .find(|chat| chat.id == "creative")
+        .expect("the marketing agency declares the creative desk");
+    assert!(
+        !creative.tools.is_empty(),
+        "the creative desk must state a ceiling or this test asserts nothing"
+    );
+
+    for id in ["creative_director", "copywriter", "landing_page_builder"] {
+        let agent = manifest
+            .agents
+            .iter()
+            .find(|agent| agent.id == id)
+            .unwrap_or_else(|| panic!("{id} is a member of the creative desk"));
+        let desk_refs: Vec<&[String]> = manifest
+            .group_chats
+            .iter()
+            .filter(|chat| chat.members.iter().any(|member| member == id))
+            .map(|chat| chat.tools.as_slice())
+            .collect();
+        let grants =
+            agent_scoped_grants(&manifest.tools.allow, &desk_refs, &agent.tools);
+
+        assert!(
+            grants_workspace_write_explicit(&grants),
+            "{id}: the creative desk ceiling ({:?}) must keep the company's \
+             workspace write grant; effective grants: {grants:?}",
+            creative.tools
+        );
+        // The desk still deliberately withholds the billed / third-party
+        // opt-ins the company grants at the top level.
+        assert!(
+            !grants_search_explicit(&grants),
+            "{id}: the creative desk must stay searchless; effective grants: {grants:?}"
+        );
+        assert!(
+            !grants_media_explicit(&grants),
+            "{id}: the creative desk must stay media-less; effective grants: {grants:?}"
+        );
+        assert!(
+            !grants_composio_explicit(&grants),
+            "{id}: the creative desk must stay composio-less; effective grants: {grants:?}"
+        );
+    }
+}
+
 /// Every seeded `output` node names a destination its own manifest can resolve,
 /// except the research lab, which deliberately proves that workflows can
 /// coordinate without desks (issue #963).
