@@ -2,7 +2,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
   Check,
-  ChevronDown,
   ChevronRight,
   Info,
   KeyRound,
@@ -10,9 +9,13 @@ import {
   LogIn,
   Plug,
   Plus,
+  Power,
+  PowerOff,
+  RefreshCw,
   Server,
   Trash2,
   Unplug,
+  Wrench,
 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -62,7 +65,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Switch } from "@/components/ui/switch";
+import { McpIconButton } from "@/views/mcp/McpIconButton";
 import { McpRegistryBrowser } from "@/views/connections/McpRegistryBrowser";
 import { ProviderDetail } from "@/views/connections/ProviderDetail";
 
