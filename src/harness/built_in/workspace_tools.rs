@@ -643,8 +643,14 @@ impl PathIndex {
         // about to be dropped from both maps is still counted against its
         // parent. See `child_count`.
         for node in &nodes {
+            index.all_nodes.insert(node.id.clone(), node.clone());
             if let Some(parent) = node.parent_id.as_deref() {
                 *index.child_count.entry(parent.to_string()).or_insert(0) += 1;
+                index
+                    .children
+                    .entry(parent.to_string())
+                    .or_default()
+                    .push(node.id.clone());
             }
         }
         for node in &nodes {
