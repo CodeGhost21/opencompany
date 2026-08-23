@@ -351,24 +351,25 @@ export function approvalAction(a: ApprovalSummary): string {
  * What the decide buttons are deciding on, told with enough of the request to
  * tell two same-kind cards apart (#1411).
  *
- * {@link approvalAction} names the *kind* — "Run a terminal command" — and that
- * is identical for every card of that kind. A screen-reader user tabbing
- * button-to-button hears only each button's accessible name, never the card
- * body, so a queue holding two shell commands would offer two "Approve: Run a
- * terminal command" buttons with no way to tell which request each one
- * decides. Appending the payload's lead argument — the command itself, the
- * URL, the pattern — the follow-ups that tell two same-kind cards apart (two
+ * {@link approvalSummary} names the *kind* — "Run a terminal command", "Send a
+ * payment — $40.00" — and the amount when there is one. A screen-reader user
+ * tabbing button-to-button hears only each button's accessible name, never the
+ * card body, so a queue holding two shell commands would offer two "Approve:
+ * Run a terminal command" buttons with no way to tell which request each one
+ * decides — and two payments of different sizes would read alike too.
+ * Appending the payload's lead argument — the command itself, the URL, the
+ * pattern — the follow-ups that tell two same-kind cards apart (two
  * `http_request`s to one URL differ by `method`, two shell commands by `cwd`),
  * and, when the card has one, the asker, makes each button name *this*
  * request.
  *
  * Both halves degrade: a card with no payload (an approval with no arguments)
  * omits the lead, and one with no `agent` (a native effect, or an old host)
- * omits the asker — leaving exactly the {@link approvalAction} phrase the
+ * omits the asker — leaving exactly the {@link approvalSummary} phrase the
  * card's headline already shows.
  */
 export function decisionLabel(a: ApprovalSummary, askerNames: Map<string, string>): string {
-  const parts = [approvalAction(a)];
+  const parts = [approvalSummary(a)];
   const lead = payloadLead(a);
   if (lead != null) parts.push(lead);
   const who = a.agent ? (askerNames.get(a.agent) ?? a.agent) : null;
