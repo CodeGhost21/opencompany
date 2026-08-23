@@ -2894,11 +2894,9 @@ impl HarnessBrain {
                     // Resolves nothing on a message that mentions no teammate,
                     // which is every message journaled before mentions existed,
                     // so routing is unchanged byte-for-byte for them.
-                    let responder = crate::runtime::mentions::mention_responder(
-                        &self.record(),
-                        mentions,
-                    )
-                    .unwrap_or_else(|| self.responder_for(chat.as_deref()));
+                    let responder =
+                        crate::runtime::mentions::mention_responder(&self.record(), mentions)
+                            .unwrap_or_else(|| self.responder_for(chat.as_deref()));
                     // Everyone else the message named, for the answering turn's
                     // context. A list, not a fan-out: one operator message still
                     // spawns exactly one turn, and this teammate spreads the
@@ -2908,7 +2906,8 @@ impl HarnessBrain {
                     // desk's membership.
                     let also_mentioned = crate::runtime::mentions::mentioned_agents(
                         &self.record(),
-                        chat.as_deref().unwrap_or(crate::server::ops::language::DEFAULT_DESK),
+                        chat.as_deref()
+                            .unwrap_or(crate::server::ops::language::DEFAULT_DESK),
                         mentions,
                         Some(&responder),
                     );

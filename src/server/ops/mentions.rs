@@ -303,10 +303,7 @@ mod tests {
         call_with_cookie(state, cookie).await
     }
 
-    async fn call_with_cookie(
-        state: &AppState,
-        cookie: Option<String>,
-    ) -> (StatusCode, Value) {
+    async fn call_with_cookie(state: &AppState, cookie: Option<String>) -> (StatusCode, Value) {
         let mut request = Request::builder()
             .method("GET")
             .uri("/api/v1/company/chat/mentionables");
