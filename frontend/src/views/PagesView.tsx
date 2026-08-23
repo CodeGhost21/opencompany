@@ -156,9 +156,9 @@ export function PagesView({ client, company }: Props) {
 
   // The bridge: forwards a page's GraphQL request to the console's own
   // authenticated endpoint and posts the answer back over the same port.
-  // The handler is stored in a ref because the port it listens on is minted
-  // later, in `handleLoad`, when the iframe's document finishes loading.
-  const bridgeHandlerRef = useRef<(event: MessageEvent) => void>(() => {});
+  // The handler lives in a ref ([`bridgeHandlerRef`]) because the port it is
+  // attached to is minted later, in `handleLoad`, when the iframe's document
+  // finishes loading.
   useEffect(() => {
     bridgeHandlerRef.current = (event: MessageEvent) => {
       // The actual authentication of "did this really come from my own
