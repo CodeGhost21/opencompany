@@ -505,14 +505,12 @@ function StandingPermissions({
   grants,
   now,
   askerNames,
-  thread,
   granterNames,
   onRevoke,
 }: {
   grants: StandingGrant[];
   now: number;
   askerNames: Map<string, string>;
-  thread?: import("@/components/approval-card").ApprovalThreadLink | null;
   /** Actor id → display name; empty when the roster read was not permitted. */
   granterNames: Map<string, string>;
   onRevoke: (id: string) => Promise<void>;
