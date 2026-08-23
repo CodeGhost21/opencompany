@@ -31,6 +31,17 @@ function Harness({ items }: { items: string[] }) {
   );
 }
 
+function FocusHarness({ items, disabled }: { items: string[]; disabled: boolean }) {
+  const stable = useStableList(items);
+  captured = stable;
+  return createElement(
+    "div",
+    { "data-testid": "queue", ...stable.containerProps },
+    createElement("button", { disabled, "data-testid": "focus-target" }, "Decide"),
+    stable.items.map((id) => createElement("div", { key: id, "data-id": id }, id)),
+  );
+}
+
 let container: HTMLDivElement;
 let root: Root;
 
