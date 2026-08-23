@@ -387,8 +387,11 @@ export function decisionLabel(a: ApprovalSummary, askerNames: Map<string, string
  * their labels, which is what makes them *distinguishing* — "DELETE" only means
  * the method next to its `method` key, and two shell cards sharing a command
  * still differ by `cwd`. The count is bounded so a large payload cannot turn
- * the button's accessible name into a wall of text. Values are already redacted
- * and bounded host-side (`src/runtime/approval_display.rs`).
+ * the button's accessible name into a wall of text. When the bound drops a
+ * line, the card id rides along as the discriminator — the one field
+ * guaranteed to differ between two cards — so truncated labels still cannot
+ * collide. Values are already redacted and bounded host-side
+ * (`src/runtime/approval_display.rs`).
  */
 function payloadLead(a: ApprovalSummary): string | null {
   const lines = payloadLines(a);
