@@ -25,12 +25,15 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
 import {
   agentEdits,
+  companyCovers,
   draftFrom,
   draftIsValid,
   emptyDraft,
   isEditable,
+  parseToolGlobs,
   summarizeGrants,
   tierLabel,
+  toolGlobsDiffer,
   type AgentDraft,
   type AgentFieldKey,
 } from "@/lib/agent";
@@ -583,7 +586,11 @@ export function AgentDetailView({
               )}
             </Section>
 
-            <Tools agent={agent} />
+            <Tools
+              agent={agent}
+              saving={saving}
+              onSave={(globs) => saveTools(globs)}
+            />
             <Inbox
               agent={agent}
               busy={inboxSaving}
