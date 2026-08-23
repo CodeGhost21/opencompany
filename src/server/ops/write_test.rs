@@ -909,7 +909,7 @@ async fn memory_list_filters_stats_and_dual_write() {
     // List reflects the store, newest-first.
     let (status, rows) = send(&state, "GET", "/api/v1/company/memory", None).await;
     assert_eq!(status, StatusCode::OK);
-    let rows = rows.as_array().unwrap();
+    let rows = rows["items"].as_array().unwrap();
     assert_eq!(rows.len(), 3);
     assert_eq!(rows[0]["id"], "f-new");
     assert_eq!(rows[2]["id"], "f-old");
@@ -1074,7 +1074,7 @@ async fn memory_stats_last_updated_covers_agent_written_context() {
     // renders "—" while the header claims recent activity.
     let (status, rows) = send(&state, "GET", "/api/v1/company/memory", None).await;
     assert_eq!(status, StatusCode::OK);
-    let rows = rows.as_array().unwrap();
+    let rows = rows["items"].as_array().unwrap();
     let context_rows: Vec<&Value> = rows.iter().filter(|r| r["origin"] != "fact").collect();
     assert_eq!(context_rows.len(), 2);
     assert!(
