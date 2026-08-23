@@ -413,8 +413,9 @@ company's installed servers keep rendering through both.
 
 ### Provenance picks the routes, not just the badge
 
-A row's `source` decides which half of the API it may call. List A's Switch,
-`Test` and `Tools` resolve the row's `name` against the declared list; a
+A row's `source` decides which half of the API it may call. List A's
+enable/disable, re-check and tools controls resolve the row's `name` against the
+declared list; a
 directory install has no declaration and its `name` is a slug the merge minted,
 so all three answer `no MCP server named …` on it. The registry's
 connect / disconnect stand in their place, its delete is
