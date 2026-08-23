@@ -321,8 +321,8 @@ fn harness_sections(
     // initialized; a manifest cannot know that, so the origin line says so
     // rather than letting the dump imply a guarantee it does not have.
     let sandbox_files = crate::company::grants_files_or_docs(grants);
-    let sandbox_shell = grants_cover(grants, "shell");
-    let sandbox_code = grants_cover(grants, "code");
+    let sandbox_shell = crate::harness::build::grants_cover(grants, "shell");
+    let sandbox_code = crate::harness::build::grants_cover(grants, "code");
     let sandbox = crate::harness::toolbelt::sandbox_brief(sandbox_files, sandbox_shell, sandbox_code);
     if sandbox.is_empty() {
         deferred.push(Deferred {
