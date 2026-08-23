@@ -128,6 +128,15 @@ describe("the autonomy direction", () => {
     expect(gatedBy([""], "shell")).toBe(false);
   });
 
+  it("folds ASCII case only, like the host matcher", () => {
+    // `"Ä".toLowerCase() === "ä"` in JS, but the host's `eq_ignore_ascii_case`
+    // compares bytes, so a non-ASCII case pair is NOT a match — the
+    // confirmation must not think a fence survives a reset when the gate does
+    // not.
+    expect(gatedBy(["ä"], "Ä")).toBe(false);
+    expect(gatedBy(["shell"], "SHELL")).toBe(true);
+  });
+
   it("shows the looser end of the scale in the console's amber risk tone", async () => {
     await mount(makeClient(status("supervised")).client);
     expect(container.querySelector("[data-testid=policy-tier-auto]")?.className).toContain(
