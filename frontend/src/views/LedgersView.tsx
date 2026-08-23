@@ -1287,7 +1287,10 @@ function EntryCard({
               {entry.title}
             </button>
           ) : (
-            <span className="min-w-0 flex-1 font-medium" data-testid="ledger-entry-title">
+            <span
+              className="min-w-0 flex-1 font-medium"
+              data-testid="ledger-entry-title"
+            >
               {entry.title}
             </span>
           )}
@@ -1319,7 +1322,9 @@ function EntryCard({
               return (
                 <div key={field.name} className="contents">
                   <dt className="text-muted-foreground">{field.name}</dt>
-                  <dd className="whitespace-pre-line">{compactFieldValue(value)}</dd>
+                  <dd className="whitespace-pre-line">
+                    {compactFieldValue(value)}
+                  </dd>
                 </div>
               );
             })}

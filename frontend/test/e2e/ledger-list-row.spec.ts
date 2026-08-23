@@ -5,7 +5,11 @@ const API = "/api/v1/company";
 test.beforeEach(async ({ page }) => {
   await page.addInitScript(() => {
     const seen = JSON.stringify({ skipped: true, seenAt: Date.now() });
-    for (const key of ["oc-tour:single", "oc-tour:e2e-harness-co", "oc-tour:null"]) {
+    for (const key of [
+      "oc-tour:single",
+      "oc-tour:e2e-harness-co",
+      "oc-tour:null",
+    ]) {
       window.localStorage.setItem(key, seen);
     }
   });
@@ -41,7 +45,11 @@ test("a list row leads with its title and shows one readable status", async ({
       data: {
         id,
         status: "todo",
-        fields: { title, column: "todo", note: "First line\n\nSecond line" },
+        fields: {
+          title,
+          column: "todo",
+          note: "First line\n\nSecond line",
+        },
       },
     });
     expect(recorded.ok()).toBeTruthy();
@@ -60,7 +68,11 @@ test("a list row leads with its title and shows one readable status", async ({
     const order = await row.locator(":scope > div").first().evaluate((header) =>
       Array.from(header.children).map((child) => child.getAttribute("data-testid")),
     );
-    expect(order).toEqual(["ledger-entry-title", "ledger-entry-status", "ledger-entry-id"]);
+    expect(order).toEqual([
+      "ledger-entry-title",
+      "ledger-entry-status",
+      "ledger-entry-id",
+    ]);
   } finally {
     await request.delete(`${API}/ledgers/${slug}?purge=true`);
   }
