@@ -111,6 +111,48 @@ describe("the payload block underneath the label", () => {
   });
 });
 
+describe("the decide buttons' label (#1411)", () => {
+  const askers = new Map([["ceo", "Sam"]]);
+
+  it("names the request behind the action, not just its kind", () => {
+    expect(
+      decisionLabel(approval({ kind: "shell", payload: { command: "make release" } }), askers),
+    ).toBe("Run a terminal command — make release — asked by Sam");
+  });
+
+  it("tells two same-kind cards apart when their payloads differ", () => {
+    // The whole point of the label: two shell commands with the same action
+    // phrase must still offer distinguishable decide buttons.
+    const first = decisionLabel(
+      approval({ kind: "shell", payload: { command: "make release" } }),
+      askers,
+    );
+    const second = decisionLabel(
+      approval({ kind: "shell", payload: { command: "npm run deploy" } }),
+      askers,
+    );
+    expect(first).not.toBe(second);
+  });
+
+  it("omits the asker when the card has no agent", () => {
+    expect(
+      decisionLabel(approval({ kind: "shell", payload: { command: "make release" }, agent: null }), askers),
+    ).toBe("Run a terminal command — make release");
+  });
+
+  it("omits the payload lead when the card has none", () => {
+    expect(decisionLabel(approval({ kind: "payment.send" }), askers)).toBe(
+      "Send a payment — asked by Sam",
+    );
+  });
+
+  it("falls back to the asker id when the roster does not know it", () => {
+    expect(decisionLabel(approval({ kind: "shell", payload: { command: "make" } }), new Map())).toBe(
+      "Run a terminal command — make — asked by ceo",
+    );
+  });
+});
+
 describe("a kind nobody has named", () => {
   it("says a teammate wants a tool rather than inventing one", () => {
     expect(approvalAction(approval({ kind: "some_tool_nobody_declared" }))).toBe(
