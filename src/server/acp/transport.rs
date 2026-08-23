@@ -270,6 +270,12 @@ async fn prompt(state: &AppState, auth: &GqlAuth, params: &Value) -> Result<Valu
         .registry()
         .get(&session.company)
         .ok_or_else(|| format!("company `{}` was not found", session.company))?;
+    // A paused or archived company refuses work on every other surface before
+    // any cycle runs (chat, A2A, webhooks); the ACP prompt must hold the same
+    // line. `run_cycle` checks only the process-local quiescing window, so
+    // without this an operator's explicit pause/archive would still pay for
+    // provider and tool work driven here.
+    runtime.ensure_running().await.map_err(|e| e.to_string())?;
     // Keep the person, drop the credential, exactly as `ScopedCompany` does: a
     // human-authored ACP prompt is attributed to that user in the journal and
     // the audit trail. Only platform credentials stay anonymous.
