@@ -223,7 +223,6 @@ pub fn resolve_migrate_configs(
     to: &str,
     to_url: Option<String>,
     to_api_key: Option<String>,
-    _to_data_dir: Option<std::path::PathBuf>,
 ) -> Result<(MemoryDriverConfig, MemoryDriverConfig)> {
     use crate::store::MemoryBackend;
 
