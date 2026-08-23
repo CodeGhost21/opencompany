@@ -313,11 +313,18 @@ struct RunDetail {
 // Routes
 // ---------------------------------------------------------------------------
 
-/// The `?task=` / `?status=` / `?limit=` selectors on the run list.
+/// The `?task=` / `?agent=` / `?status=` / `?limit=` selectors on the run list.
 #[derive(Debug, Deserialize)]
 struct RunsQuery {
     /// Only attempts at this card. Absent = every card.
     task: Option<String>,
+    /// Only attempts dispatched to this desk/teammate. Absent = every desk.
+    ///
+    /// Not validated against the roster on purpose: a teammate can be removed
+    /// while its attempts remain, and refusing to show that history would erase
+    /// the record of work that did happen. An id nobody ran simply answers
+    /// `[]`, which is the truth about it.
+    agent: Option<String>,
     /// A comma-separated status list (`?status=failed,cancelled`). Absent =
     /// any status. An unknown word is a 400 rather than a silent empty page:
     /// a typo'd filter that returns `[]` looks exactly like "nothing matched".
@@ -350,6 +357,7 @@ impl RunsQuery {
         }
         Ok(RunFilter {
             task_id: self.task,
+            agent_id: self.agent,
             statuses,
             limit: Some(match self.limit {
                 Some(0) | None => DEFAULT_RUN_LIMIT,
@@ -359,9 +367,10 @@ impl RunsQuery {
     }
 }
 
-/// `GET …/runs?task=&status=&limit=` — the company's attempts, newest first.
+/// `GET …/runs?task=&agent=&status=&limit=` — the company's attempts, newest
+/// first.
 ///
-/// An indexed store read: the `task`/`status`/`limit` predicates go to
+/// An indexed store read: the `task`/`agent`/`status`/`limit` predicates go to
 /// [`RunStore::list_runs`](crate::ports::RunStore::list_runs), which every
 /// backend answers from its own index, and the ordering is the port's shared
 /// [`sort_newest_first`](crate::ports::runs::sort_newest_first) so all three
