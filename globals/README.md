@@ -9,6 +9,7 @@ part that is the same in all of them.
 | Agents | `agents/*.toml` | Research, writing, and keeping the record straight are not a vertical. |
 | Workflows | `workflows/*.toml` | A weekly review and a research request run the same in a law firm and a game studio. |
 | Ledgers | `ledgers/*.toml` | Risks, promises made outward, and what was learned are axes every company keeps, whatever it sells. |
+| Setup cards | `tasks.toml` | Every company has the same first week of setup — a brief, its first goals, its standing decisions, its top risks, its connections — whatever it goes on to sell. Seeded onto the board once, in To-do. |
 | Skills | `[skills].always` in `globals.toml` | A few shared-library skills are installed rather than offered. |
 | Tools | `[tools].default_allow` in `globals.toml` | Every vertical starts from the same belt; where that belt is *authored* is global, and a company can still narrow it. |
 
@@ -28,7 +29,10 @@ To drop a global instead of replacing it, name it in the manifest:
 
 ```toml
 [globals]
-disable = ["agent:researcher", "workflow:weekly_review", "skill:meeting-brief", "ledger:risks"]
+disable = [
+  "agent:researcher", "workflow:weekly_review", "skill:meeting-brief",
+  "ledger:risks", "task:name-the-top-risks",
+]
 ```
 
 Every entry is `<kind>:<id>` and must name a global that exists — a typo is a

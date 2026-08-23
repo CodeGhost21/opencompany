@@ -6,10 +6,6 @@ import {
   CaseSensitive,
   Code,
   Italic,
-  Link2,
-  List,
-  Paperclip,
-  Smile,
   Strikethrough,
 } from "lucide-react";
 
@@ -21,6 +17,16 @@ interface Props {
   placeholder: string;
   disabled?: boolean;
   onSend: (text: string, intent?: MessageIntent) => void;
+  /**
+   * Called as the box is typed in, so the company can show a typing
+   * indicator.
+   *
+   * Fired on **every** change rather than on a timer: throttling is the
+   * caller's job, because it is per channel and this component does not know
+   * which channel it is in. Absent on the composers where a typing indicator
+   * would be noise.
+   */
+  onTyping?: () => void;
   /** Compact form, for the narrower thread panel. */
   compact?: boolean;
   /**
@@ -63,17 +69,15 @@ export function MessageComposer({
   onSend,
   compact,
   deliverableChoice,
+  onTyping,
 }: Props) {
   const [draft, setDraft] = useState("");
-  // What the NEXT line is for, and only the next one. It resets to "once"
-  // after every send so neither a workflow request nor a "just chatting" mark
-  // silently carries into the message after it — each is an explicit, per-line
-  // decision.
-  //
-  // "once" is the initial value, and stays it (issue #1152): "Just chatting" is
-  // a third position, not the new default, so an unmarked message is
-  // byte-identical on the wire to one sent before this control existed.
-  const [intent, setIntent] = useState<MessageIntent>("once");
+  // What the NEXT line is for, and only the next one. It starts and resets
+  // unselected: an intent is an operator assertion, so no button may claim one
+  // until the operator presses it (issue #984). An unmarked message therefore
+  // reaches the host without an override and lets triage decide whether it is
+  // work or conversation.
+  const [intent, setIntent] = useState<MessageIntent>();
   // The formatting row is opt-in, behind the `Aa` toggle in the icon row. It
   // used to sit open above every composer, which spent the widest strip of the
   // dock on four buttons most lines never use.
@@ -85,7 +89,7 @@ export function MessageComposer({
     if (!text || disabled) return;
     setDraft("");
     onSend(text, deliverableChoice ? intent : undefined);
-    setIntent("once");
+    setIntent(undefined);
   }
 
   function onKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
@@ -132,27 +136,6 @@ export function MessageComposer({
                 <w.icon className="size-3.5" />
               </Button>
             ))}
-            <span className="mx-1 h-4 w-px bg-border" aria-hidden />
-            <Button
-              variant="ghost"
-              size="icon"
-              className="size-7 text-muted-foreground"
-              aria-label="Bulleted list"
-              title="Bulleted list"
-              disabled
-            >
-              <List className="size-3.5" />
-            </Button>
-            <Button
-              variant="ghost"
-              size="icon"
-              className="size-7 text-muted-foreground"
-              aria-label="Link"
-              title="Link"
-              disabled
-            >
-              <Link2 className="size-3.5" />
-            </Button>
           </div>
         )}
 
@@ -162,7 +145,10 @@ export function MessageComposer({
         <textarea
           ref={input}
           value={draft}
-          onChange={(e) => setDraft(e.target.value)}
+          onChange={(e) => {
+            setDraft(e.target.value);
+            onTyping?.();
+          }}
           onKeyDown={onKeyDown}
           aria-label={placeholder}
           placeholder={placeholder}
@@ -190,8 +176,8 @@ export function MessageComposer({
                   // "Just chatting" leads, because it is the position that
                   // withholds: the operator reaches for it to stop something
                   // happening, and a control you press to prevent an action
-                  // belongs before the ones that cause it. It is NOT pre-pressed
-                  // — "Do it once" stays the default.
+                  // belongs before the ones that cause it. None is pre-pressed:
+                  // an operator has to state which outcome they want.
                   { value: "chat", label: "Just chatting" },
                   { value: "once", label: "Do it once" },
                   { value: "workflow", label: "Build me the workflow" },
@@ -224,26 +210,6 @@ export function MessageComposer({
             onClick={() => wrap("@")}
           >
             <AtSign className="size-4" />
-          </Button>
-          <Button
-            variant="ghost"
-            size="icon"
-            className="size-7 text-muted-foreground"
-            aria-label="Attach a file"
-            title="Attach a file"
-            disabled
-          >
-            <Paperclip className="size-4" />
-          </Button>
-          <Button
-            variant="ghost"
-            size="icon"
-            className="size-7 text-muted-foreground"
-            aria-label="Add an emoji"
-            title="Add an emoji"
-            disabled
-          >
-            <Smile className="size-4" />
           </Button>
           {!compact && (
             <Button

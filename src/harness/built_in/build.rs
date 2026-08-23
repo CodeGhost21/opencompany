@@ -223,6 +223,26 @@ pub fn persona_prompt(
     crate::company::prompt::persona_prompt(company_name, agent, instructions)
 }
 
+/// The `(files, shell, code)` flags [`toolbelt::sandbox_brief`] renders from,
+/// each true only when the namespace both (a) was wired from the agent's
+/// GRANT (`wants_files`/`shell_wired`/`wants_code`) and (b) is not denied by
+/// the per-turn capability tier in `capabilities`.
+///
+/// Pulled out of [`build_agent`] as a pure function so the capability-denial
+/// case — the brief must not describe `shell`/`code` on a turn where
+/// `filter_by_capabilities` is about to strip them — is unit-testable without
+/// standing up a full agent build.
+fn sandbox_brief_flags(
+    wants_files: bool,
+    shell_wired: bool,
+    wants_code: bool,
+    capabilities: &toolbelt::CapabilityFilter,
+) -> (bool, bool, bool) {
+    let shell = shell_wired && !toolbelt::namespace_denied(capabilities, "shell");
+    let code = wants_code && !toolbelt::namespace_denied(capabilities, "code");
+    (wants_files, shell, code)
+}
+
 /// Build one openhuman [`Agent`] for `manifest_agent` within `company`.
 ///
 /// `skill_deltas` are the company's operator skill overrides. When the harness
@@ -370,6 +390,13 @@ pub fn build_agent(
     let wants_shell = grants_cover(grants, "shell");
     let wants_code = grants_cover(grants, "code");
     let wants_web = grants_cover(grants, "web");
+    // The GRANT says shell was asked for; this says it was actually wired.
+    // `shell_tools` withholds the whole namespace when the audit logger cannot
+    // be initialized (below), and the sandbox brief must describe the belt the
+    // agent holds rather than the one it requested — otherwise the one company
+    // whose audit sink is unwritable is also the one whose agents are told to
+    // run commands with a tool that is not there.
+    let mut shell_wired = false;
     if wants_shell || wants_code || wants_web {
         let exec_security = Arc::new(toolbelt::exec_security(&workspace, policy.mode()));
         // `shell` and `code` are separate grant namespaces and are wired from
@@ -396,12 +423,9 @@ pub fn build_agent(
                 company,
                 &manifest_agent.id,
             ));
-            tools.extend(toolbelt::shell_tools(
-                exec_security.clone(),
-                runtime,
-                audit,
-                &workspace,
-            ));
+            let shell = toolbelt::shell_tools(exec_security.clone(), runtime, audit, &workspace);
+            shell_wired = !shell.is_empty();
+            tools.extend(shell);
         }
         if wants_code {
             tools.extend(toolbelt::code_tools(exec_security.clone(), &workspace));
@@ -906,6 +930,33 @@ pub fn build_agent(
             &deps.ledger_registry,
         ));
     }
+
+    // The agent's own working directory, and the tools that reach it. Placed
+    // BEFORE the publish brief because that brief's first sentence ("the files
+    // you write live in your sandbox") presumes a sandbox the agent has by then
+    // been told about — and because publishing is gated on an artifact store,
+    // so a company without one used to get no mention of the sandbox at all
+    // while still holding every file tool.
+    //
+    // Each flag is the same one that wired the tools a few hundred lines up, so
+    // the brief cannot describe a namespace this agent was not granted. `shell`
+    // in particular was wired since Cell A and named in no brief anywhere: an
+    // agent asked to run something recorded a task about running it.
+    //
+    // `shell_wired`/`wants_code` only reflect the GRANT, but `deps.capabilities`
+    // (the per-turn capability tier resolved by `capability_budget::resolve_filter`
+    // — live at `HarnessPool::ensure`, not a hypothetical future cell) is applied
+    // to the tool vector later by `filter_by_capabilities`, below. Without this
+    // check the brief would describe `shell`/`code` on a turn where the capability
+    // tier denied them (a fail-closed metering error, or an exhausted budget),
+    // telling the agent to call a tool `filter_by_capabilities` already removed.
+    let (sandbox_files, sandbox_shell, sandbox_code) =
+        sandbox_brief_flags(wants_files, shell_wired, wants_code, &deps.capabilities);
+    persona.push_str(&toolbelt::sandbox_brief(
+        sandbox_files,
+        sandbox_shell,
+        sandbox_code,
+    ));
 
     // Issue #244: what a deliverable is, and how to hand one over. Only when
     // the tool was actually wired above — describing a tool the agent does not
@@ -1451,6 +1502,72 @@ mod tests {
             "the tool write must land on the company port"
         );
         assert_eq!(rows[0].label, "agent-memory/ceo/pin");
+    }
+
+    /// The grant alone is not enough: a wired `shell`/`code` namespace the
+    /// capability tier denies must not be described in the sandbox brief,
+    /// because `filter_by_capabilities` is about to strip the matching tools
+    /// from the vector handed to the builder. This is the fix for the P1
+    /// codex found on PR #1670 — before it, `sandbox_brief_flags` did not
+    /// exist and the brief was built from the grant flags alone.
+    #[test]
+    fn sandbox_brief_flags_withhold_a_capability_denied_namespace() {
+        use std::collections::HashSet;
+
+        let deny_shell = toolbelt::CapabilityFilter::DenyNamespaces(HashSet::from(["shell"]));
+        assert_eq!(
+            sandbox_brief_flags(true, true, true, &deny_shell),
+            (true, false, true),
+            "a denied `shell` must not be reported even though it was wired"
+        );
+
+        let deny_code = toolbelt::CapabilityFilter::DenyNamespaces(HashSet::from(["code"]));
+        assert_eq!(
+            sandbox_brief_flags(true, true, true, &deny_code),
+            (true, true, false),
+            "a denied `code` must not be reported even though it was granted"
+        );
+
+        let deny_both =
+            toolbelt::CapabilityFilter::DenyNamespaces(HashSet::from(["shell", "code"]));
+        assert_eq!(
+            sandbox_brief_flags(true, true, true, &deny_both),
+            (true, false, false)
+        );
+    }
+
+    /// The identity filter changes nothing — the flags are exactly the wired
+    /// grant flags, files included (files are never a gateable namespace).
+    #[test]
+    fn sandbox_brief_flags_pass_through_under_allow_all() {
+        assert_eq!(
+            sandbox_brief_flags(true, true, true, &toolbelt::CapabilityFilter::AllowAll),
+            (true, true, true)
+        );
+        assert_eq!(
+            sandbox_brief_flags(false, false, false, &toolbelt::CapabilityFilter::AllowAll),
+            (false, false, false)
+        );
+    }
+
+    /// An ungranted/unwired namespace stays absent regardless of the capability
+    /// filter — denial can only ever narrow, never widen, what the grant wired.
+    #[test]
+    fn sandbox_brief_flags_never_add_a_namespace_the_grant_did_not_wire() {
+        use std::collections::HashSet;
+
+        let allow_all = toolbelt::CapabilityFilter::AllowAll;
+        assert_eq!(
+            sandbox_brief_flags(false, false, false, &allow_all),
+            (false, false, false)
+        );
+
+        // Denying a namespace that was never wired is a no-op on that flag.
+        let deny_shell = toolbelt::CapabilityFilter::DenyNamespaces(HashSet::from(["shell"]));
+        assert_eq!(
+            sandbox_brief_flags(false, false, false, &deny_shell),
+            (false, false, false)
+        );
     }
 
     #[test]
