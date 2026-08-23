@@ -716,6 +716,32 @@ mod test {
     }
 
     #[test]
+    fn secret_filenames_do_not_end_in_a_period() {
+        let bundle = Bundle::new("/root", &CompanyId::new("acme"));
+
+        // Windows Win32 paths strip trailing periods, so `foo` and `foo.`
+        // would resolve to one directory entry. The trailing `.` is encoded as
+        // `%2E`, so the two keys stay apart and the filename can never end in
+        // a dot for Windows to strip.
+        let plain = bundle.secret("foo");
+        let trailing_dot = bundle.secret("foo.");
+        assert_ne!(plain, trailing_dot);
+        assert!(plain.ends_with("%k-foo"));
+        assert!(trailing_dot.ends_with("%k-foo%2E"));
+        assert!(!trailing_dot.ends_with('.'));
+
+        // Several trailing periods are each distinct too.
+        let two = bundle.secret("foo..");
+        assert_ne!(two, plain);
+        assert_ne!(two, trailing_dot);
+
+        // Interior periods are unaffected: a dot mid-key is a normal filename
+        // character on Windows, only a trailing one is stripped.
+        let interior = bundle.secret("foo.bar");
+        assert!(interior.ends_with("%k-foo.bar"));
+    }
+
+    #[test]
     fn canonical_filenames_are_disjoint_from_legacy_slugs() {
         let bundle = Bundle::new("/root", &CompanyId::new("acme"));
 
