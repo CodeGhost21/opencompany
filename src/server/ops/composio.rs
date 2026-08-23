@@ -1682,7 +1682,7 @@ mod tests {
         )
         .await;
 
-        let (status, body, raw) = send(
+        let (status, _body, raw) = send(
             &state,
             "POST",
             "/api/v1/company/composio/authorize",
@@ -1797,9 +1797,9 @@ mod tests {
         assert_eq!(status, StatusCode::OK, "an admin reaches authorization: {raw}");
         #[cfg(feature = "composio")]
         assert_eq!(
-            body["connectUrl"],
+            _body["connectUrl"],
             "https://composio.test/connect/gmail",
-            "the handler returns the loopback backend's authorization URL: {body}"
+            "the handler returns the loopback backend's authorization URL: {_body}"
         );
         #[cfg(not(feature = "composio"))]
         assert_eq!(
