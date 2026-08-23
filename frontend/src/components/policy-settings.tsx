@@ -411,10 +411,15 @@ export function PolicySettings({ client, company }: Props) {
       event.target as HTMLButtonElement,
     );
     if (focused === -1) return;
-    const tier = status.tiers[focused + step];
+    // Wrap at both ends, like a radio group: ArrowUp on the first tier lands
+    // on the last and ArrowDown on the last lands on the first. A bare
+    // `focused + step` bounds check would dead-end the group at its edges
+    // instead of looping it.
+    const next = (focused + step + status.tiers.length) % status.tiers.length;
+    const tier = status.tiers[next];
     if (!tier) return;
     event.preventDefault();
-    tierButtons.current[focused + step]?.focus();
+    tierButtons.current[next]?.focus();
     chooseTier(tier);
   };
 
