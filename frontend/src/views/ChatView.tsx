@@ -501,6 +501,20 @@ export function ChatView({
    * previous behaviour rather than to a broken one.
    */
   const [directory, setDirectory] = useState<Mentionable[] | null>(null);
+  /**
+   * Re-read the mention directory.
+   *
+   * Called on mount and after a roster write, so a teammate added here appears
+   * in the picker at once and one removed does not stay selectable until the
+   * next reload (server revalidation would demote it, but offering a row that
+   * can only fail is a bad row).
+   */
+  const reloadDirectory = useCallback(() => {
+    void client
+      .mentionables(company)
+      .then((d) => setDirectory(mentionablesFor(d)))
+      .catch(() => setDirectory(null));
+  }, [client, company]);
   useEffect(() => {
     let live = true;
     void client
