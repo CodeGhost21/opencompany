@@ -385,6 +385,11 @@ function CompactApprovalRow({
   busy,
   status,
 }: {
+  /**
+   * The still-undecided items the row's buttons will decide. The caller passes
+   * `pending`, not the whole original batch, so a line naming them never
+   * overstates what Approve/Decline covers once an item has settled elsewhere.
+   */
   approvals: ApprovalSummary[];
   now: number;
   askerNames: Map<string, string>;
