@@ -182,14 +182,15 @@ describe("a teammate's run history", () => {
     // filtered read with an empty page; the section must say the filter matched
     // nothing — not that the teammate has never run — and keep the controls up
     // so the filter can be turned off again.
+    const get = vi.fn(async (path: string) => {
+      if (path.includes("status=")) return [];
+      if (path.startsWith("/runs")) return [run()];
+      if (path.startsWith("/tasks")) return [];
+      if (path.startsWith("/workflows")) return [];
+      throw new Error(`no route for ${path}`);
+    });
     const client = {
-      get: vi.fn(async (path: string) => {
-        if (path.includes("status=")) return [];
-        if (path.startsWith("/runs")) return [run()];
-        if (path.startsWith("/tasks")) return [];
-        if (path.startsWith("/workflows")) return [];
-        throw new Error(`no route for ${path}`);
-      }),
+      get,
       scopeFor: () => "",
     } as unknown as OpenCompanyClient & { get: typeof get };
     await mount(client);
