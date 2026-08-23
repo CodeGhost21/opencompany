@@ -61,7 +61,7 @@ use crate::server::error::ApiError;
 use crate::server::ops::scope::{AdminScopedCompany, scoped};
 use crate::store::{MemoryBackend, MemorySelection, StorageSettings};
 
-/// How long an interactive probe waits for the engine to answer.
+/// How long an operator-visible probe waits for the engine to answer.
 ///
 /// Shorter than boot's five seconds on purpose: a human is watching this one,
 /// and a hosted engine that needs more than three seconds to answer a health
@@ -359,10 +359,16 @@ fn saved_selection(state: &AppState) -> Result<(MemorySelection, &'static str), 
     Ok((selection, if named { "config.toml" } else { "default" }))
 }
 
-/// Renders the whole engine surface.
-fn snapshot(state: &AppState) -> Result<EngineDto, OpenCompanyError> {
+/// Renders the whole engine surface, optionally from a freshly probed overlay.
+///
+/// A read probes its clone rather than replacing the live overlay: health is
+/// status, not configuration, and a concurrent apply must never be overwritten
+/// by a status request that started first.
+fn snapshot(
+    state: &AppState,
+    live: Option<crate::store::MemoryOverlay>,
+) -> Result<EngineDto, OpenCompanyError> {
     let (selection, layer) = saved_selection(state)?;
-    let live = state.memory_overlay();
     // The live overlay is the honest answer to "what is bound"; its absence
     // means the base store serves memory, which is exactly `store`.
     let (active, capabilities, healthy) = match &live {
@@ -404,7 +410,11 @@ async fn read(
     // The company is resolved for authorization only: the engine is an
     // instance-level choice, and every company on this host shares it.
     let _ = company.id();
-    Ok(Json(snapshot(&state)?))
+    let mut live = state.memory_overlay();
+    if let Some(overlay) = &mut live {
+        overlay.refresh_health(PROBE_TIMEOUT).await;
+    }
+    Ok(Json(snapshot(&state, live)?))
 }
 
 /// Refuses an engine this build cannot construct, before its fields are
@@ -651,7 +661,7 @@ async fn apply(
         healthy,
         restart_required_for,
         config_path: config_path.display().to_string(),
-        engine_state: snapshot(&state)?,
+        engine_state: snapshot(&state, state.memory_overlay())?,
     }))
 }
 
