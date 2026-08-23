@@ -27,8 +27,8 @@
 //!   them are ignored and recalled entries carry defaults.
 //! * [`Memory::store`] appends; repeated keys are not coalesced.
 //!
-//! A `tinycortex`-backed [`ContextStore`] removes these gaps; the adapter code
-//! is identical because it only speaks the port.
+//! A hosted-provider [`ContextStore`] with richer semantics removes these
+//! gaps; the adapter code is identical because it only speaks the port.
 
 use std::collections::HashMap;
 use std::sync::Arc;
