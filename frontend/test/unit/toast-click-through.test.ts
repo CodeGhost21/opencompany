@@ -209,10 +209,10 @@ describe("toast click-through", () => {
     const text = document.createElement("span");
     toast().append(text);
     text.addEventListener("click", relayToastClick);
-    clickAt(text, 40, 50);
+    clickAt(text, 40, 50, 7);
 
     expect(posted).toHaveBeenCalledWith(
-      expect.objectContaining({ type: "oc:relay-click", x: 30, y: 30 }),
+      expect.objectContaining({ type: "oc:relay-click", x: 30, y: 30, pointerId: 7 }),
       "*",
     );
     expect(frameClicked).not.toHaveBeenCalled();
