@@ -136,7 +136,7 @@ export function PolicySettings({ client, company }: Props) {
       setDraftAlways(next.alwaysApprove.join(", "));
       setDraftSpend(next.autoApproveUnderUsd?.toString() ?? "");
       setNoSpendCap(next.autoApproveUnderUsd === null);
-      setDraftDeadline(next.approvalTtlHours.toString());
+      setDraftDeadline((next.approvalTtlHours ?? 24).toString());
       setDirty(false);
     } catch (error) {
       const message =
@@ -187,7 +187,7 @@ export function PolicySettings({ client, company }: Props) {
       setDirty(false);
       setDraftSpend(next.autoApproveUnderUsd?.toString() ?? "");
       setNoSpendCap(next.autoApproveUnderUsd === null);
-      setDraftDeadline(next.approvalTtlHours.toString());
+      setDraftDeadline((next.approvalTtlHours ?? 24).toString());
     }
     toast.success(message, { description: next.takesEffect });
   };
