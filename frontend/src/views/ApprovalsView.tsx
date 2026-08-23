@@ -550,7 +550,7 @@ export function StandingPermissions({
                   {/* Phrased, never the raw identifier — the glossary rule. */}
                   <p className="truncate text-sm font-medium">{grantHeadline(g)}</p>
                   <p className="text-xs text-muted-foreground">
-                    {askerNames.get(g.agent) ?? g.agent} ·{" "}
+                    {grantSubject(g, askerNames)} ·{" "}
                     {expired ? "expired" : `expires ${untilLabel(g.expires_at_millis, now)}`} ·
                     granted {timeAgo(g.at_millis, now)} by {granterLabel(g, granterNames)}
                   </p>
@@ -558,11 +558,13 @@ export function StandingPermissions({
                 <Button
                   variant="outline"
                   size="sm"
-                  /* The grantee, not just the grant: two teammates holding the
-                     same tool and scope read identically in grantHeadline, so
-                     button-only navigation would hear two identical "Revoke"
-                     buttons and could take back the wrong one (#1411). */
-                  aria-label={`Revoke ${askerNames.get(g.agent) ?? g.agent}'s permission: ${grantHeadline(g)}`}
+                  /* The subject, not just the grant: two teammates holding the
+                     same tool and scope read identically in grantHeadline — and
+                     a workflow grant carries no agent at all — so button-only
+                     navigation would hear identical "Revoke" buttons and could
+                     take back the wrong one (#1411). `grantSubject` resolves
+                     the workflow subject for that second kind. */
+                  aria-label={`Revoke ${grantSubject(g, askerNames)}'s permission: ${grantHeadline(g)}`}
                   disabled={busy}
                   onClick={() => {
                     mark(g.id, true);
