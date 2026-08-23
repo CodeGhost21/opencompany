@@ -97,4 +97,65 @@ describe("the approvals backlog queue (#1427)", () => {
       "tomorrow",
     ]);
   });
+
+  it("defers a grants update that would insert the permissions section while the queue is held (#1593)", async () => {
+    // The 60s grants poll is gated on the tab being visible; pin it so the poll
+    // actually fires under fake timers.
+    vi.useFakeTimers();
+    Object.defineProperty(document, "visibilityState", {
+      configurable: true,
+      get: () => "visible",
+    });
+
+    // Starts with no grants, then a poll finds one — minted elsewhere, or just
+    // confirmed by the approve that started the hold.
+    let granted = false;
+    const holdingClient = {
+      ...client,
+      listGrants: async () => (granted ? [GRANT] : []),
+    } as unknown as OpenCompanyClient;
+
+    await act(async () => {
+      root.render(
+        createElement(ApprovalsView, {
+          client: holdingClient,
+          company: null,
+          feed,
+          onResolved: () => {},
+          onGoToConversation: () => {},
+        }),
+      );
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    // No grants yet, so nothing renders above the queue.
+    const permissionHeading = () =>
+      [...container.querySelectorAll("h2")].find(
+        (heading) => heading.textContent === "Standing permissions",
+      );
+    expect(permissionHeading()).toBeUndefined();
+
+    // The operator's focus is inside the queue, aiming at an Approve button.
+    // Focus drives the same hold as the pointer (useStableList's
+    // onFocusCapture); jsdom's synthetic pointer-event gaps are why the
+    // stable-list tests call the handlers directly instead.
+    const firstCardButton = container.querySelector<HTMLButtonElement>(
+      "[data-approval-id] button",
+    )!;
+    await act(async () => firstCardButton.focus());
+
+    // A poll returns a grant now: the section must NOT appear above the queue
+    // while the queue is held — it would shift every approve/decline control
+    // under the operator.
+    granted = true;
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(60_000);
+    });
+    expect(permissionHeading()).toBeUndefined();
+
+    // The moment focus leaves the queue, the held grants reconcile into place.
+    await act(async () => firstCardButton.blur());
+    expect(permissionHeading()).toBeDefined();
+  });
 });
