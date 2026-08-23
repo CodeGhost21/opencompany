@@ -107,6 +107,14 @@ export function RunFailurePanel({
             {message}
           </AlertDescription>
         </Alert>
+        <details className="mt-2">
+          <summary className="cursor-pointer text-2xs text-muted-foreground">
+            Details
+          </summary>
+          <pre className="mt-1 overflow-auto rounded border bg-muted/40 p-2 font-mono text-2xs leading-snug text-foreground">
+            {failure.message}
+          </pre>
+        </details>
         <p className="mt-2 text-2xs text-muted-foreground">
           Failed after {formatDuration(ranFor)} ·{" "}
           {new Date(failure.atMillis).toLocaleString()}
