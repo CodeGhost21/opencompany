@@ -102,7 +102,9 @@ export function useStableList<T>(live: T[]): StableList<T> {
    * clear `focusInside`, and — because nothing else ever calls it again —
    * the queue stayed frozen permanently, surviving even the pointer leaving.
    * Re-deriving from the live DOM here, at every thaw check, closes that gap
-   * without depending on an event that this specific case never sends.
+   * without depending on an event that this specific case never sends. A
+   * disabled active element is treated as outside too: jsdom retains focus on
+   * it, while Chromium moves focus to `<body>`.
    */
   const focusInsideNow = useCallback(() => {
     const active = document.activeElement;
