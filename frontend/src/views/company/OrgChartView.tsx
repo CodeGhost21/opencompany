@@ -1134,7 +1134,7 @@ function Seat({
     <>
       <TeammateAvatar
         name={seat.name}
-        avatar={avatarFor(seat.id)}
+        avatar={seat.avatar}
         tone={toneFor(seat.id)}
         className="size-5 shrink-0"
       />

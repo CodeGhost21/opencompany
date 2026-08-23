@@ -25,8 +25,7 @@
 // round-trip and rebuild preservation — the data change #311 rules out.
 
 import type { DeskDto, TeamMemberDto } from "@/api/types";
-import { fromDto, type TeamMember } from "@/lib/team";
-import { avatarFor } from "@/lib/team";
+import { avatarFor, fromDto, type TeamMember } from "@/lib/team";
 
 /**
  * How deep the org chart can go: company, desk, seat.
