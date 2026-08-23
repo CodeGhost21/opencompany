@@ -113,6 +113,11 @@ pub struct FeedbackItem {
     pub filed_issue_url: Option<String>,
     /// The last-observed issue status, once the item is filed.
     pub issue_status: Option<String>,
+    /// The byte-exact final body computed by the last preview, if any. A
+    /// confirm of this item posts exactly this — never a re-derivation under a
+    /// possibly-changed secret store.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scrubbed_body: Option<String>,
     /// The consent mode in force when the item was captured.
     pub consent_mode: ConsentMode,
 }
