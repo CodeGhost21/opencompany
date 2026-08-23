@@ -93,9 +93,9 @@ export function ApprovalHeadline({
       <div className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-muted text-foreground">
         <Icon className="size-5" />
       </div>
-      {/* 12rem floor, capped at the card's own width (#1617 review): a chat
-          column can be narrower than the icon plus a 12rem title, and a hard
-          floor would overflow the card there instead of wrapping. */}
+      {/* 12rem floor, capped at the card's own width: a chat column can be
+          narrower than the icon plus a 12rem title, and a hard floor would
+          overflow the card there instead of wrapping. */}
       <div className="min-w-[min(12rem,100%)] flex-1">
         <p className="font-medium">{approvalAction(a)}</p>
         {a.amount_usd != null && (
