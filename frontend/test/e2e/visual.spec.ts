@@ -123,6 +123,13 @@ const LOADING_PLACEHOLDERS = [
   `${CONTENT_SURFACE} >> [aria-label="Loading approvals"]`,
   // Overview suspends on the graph chunk's import and says so in a fallback.
   `${CONTENT_SURFACE} >> text=Drawing the graph…`,
+  // Settings' sub-pages say what they are waiting on beside a spinner, not
+  // via the shared Skeleton — `Loader2` plus a label in `domain-settings.tsx`
+  // and `policy-settings.tsx`. Each is named so a slow `--update-snapshots`
+  // run cannot record a half-loaded Settings surface as a baseline.
+  `${CONTENT_SURFACE} >> text=Loading domain…`,
+  `${CONTENT_SURFACE} >> text=Loading email settings…`,
+  `${CONTENT_SURFACE} >> text=Loading the current policy…`,
 ];
 
 /** The first-run tour opens a modal over a fresh console and eats every click. */
