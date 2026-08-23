@@ -1384,18 +1384,6 @@ export interface CapabilityStatusDto {
    */
   searchInBuild?: boolean;
   /** Whether a managed search credential is configured on this build (env-only). */
-  /**
-   * Which Smithery key the company's MCP **directory** browsing presents
-   * (issue #1287): `company` (its own), `environment` (one key set for the
-   * whole host and shared by every company on it), or `none` (Smithery is not
-   * queried, so the directory shows only the open registry's few hosted
-   * entries).
-   *
-   * Absent when the host could not determine it — an unknown answer is not
-   * `none`, and reporting a confident "no key" on a transient store failure
-   * would send an admin to paste one they already have.
-   */
-  mcpDirectoryCredential?: "company" | "environment" | "none";
   searchCredentialConfigured?: boolean;
   /** The company's daily `web_search` call ceiling. */
   searchDailyCallCap?: number;
