@@ -83,7 +83,14 @@ describe("the dead-link recovery path", () => {
   it("forwards the setup destination when the address carries it", async () => {
     window.location.hash = "#/company?from=setup";
     const post = vi.fn().mockResolvedValue({ sent: true });
-    await render(hostReporting({ mode: "email", passwords: true, magicLink: true }, post));
+    const client = hostReporting({ mode: "email", passwords: true, magicLink: true }, post);
+    await render(client);
+
+    // The ecosystem buttons are asked for with the same destination, so a
+    // "Continue with …" click from this form lands on the roster the link
+    // promised rather than on Overview with the welcome free to open.
+    const hubFetch = client.get.mock.calls.find(([path]) => path.startsWith("/api/v1/company/auth/hub"));
+    expect(hubFetch?.[0]).toBe("/api/v1/company/auth/hub?from=setup");
 
     await sendLinkRequest();
 
