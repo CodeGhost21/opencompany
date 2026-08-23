@@ -780,18 +780,19 @@ impl GrantSet {
             .cloned()
     }
 
-    /// Removes and returns every **live** standing policy of the opposite
-    /// polarity whose recorded scope would shadow `grant_scope` — the same
-    /// subject and tool, and a scope the old policy admits (issue #1458).
+    /// Returns every **live** standing policy of the opposite polarity whose
+    /// recorded scope would shadow `grant_scope` — the same subject and tool,
+    /// and a scope the old policy admits (issue #1458).
     ///
-    /// This is the mint-side half of newest-decision-wins. `ApprovalPolicy`
-    /// checks a standing *denial* above a standing *grant*, so if both
-    /// polarities were allowed to sit live for the same (subject, tool,
-    /// scope), an approval minted after an older refusal would list as a
-    /// permission and never admit a call — the operator's later decision
-    /// silently inert until the refusal expired or was revoked. Revoking the
-    /// shadowed policy when a new one is minted makes the newest resolution
-    /// authoritative instead.
+    /// This is the read half of the mint-side newest-decision-wins reconcile.
+    /// Callers persist the returned policies as revoked before removing them
+    /// with [`revoke_standing`], preserving the journal-before-live ordering
+    /// used when a standing policy is minted. `ApprovalPolicy` checks a standing
+    /// *denial* above a standing *grant*, so if both polarities were allowed to
+    /// sit live for the same (subject, tool, scope), an approval minted after an
+    /// older refusal would list as a permission and never admit a call — the
+    /// operator's later decision silently inert until the refusal expired or was
+    /// revoked.
     ///
     /// Scoped deliberately to policies whose scope would actually shadow the
     /// new one (`admits_scope`), so a denial of one web host does not revoke a
@@ -800,7 +801,7 @@ impl GrantSet {
     /// old policy (an unresolvable scope, recorded `None`) does shadow any new
     /// policy for the same tool, so the reconcile takes it — the operator's
     /// new decision supersedes the older, broader one.
-    pub fn drain_opposite_polarity(
+    pub fn opposite_polarity(
         &self,
         subject: &GrantSubject,
         tool: &str,
@@ -808,22 +809,19 @@ impl GrantSet {
         verdict: crate::ports::types::Verdict,
         now_millis: u64,
     ) -> Vec<StandingGrant> {
-        let mut state = self.inner.lock().expect("grant set poisoned");
-        let mut shadowed = Vec::new();
-        state.standing.retain(|_, g| {
-            let opposes = g.verdict != verdict
-                && &g.subject() == subject
-                && g.tool == tool
-                && g.admits_scope(grant_scope)
-                && g.is_live_at(now_millis);
-            if opposes {
-                shadowed.push(g.clone());
-                false
-            } else {
-                true
-            }
-        });
-        shadowed
+        let state = self.inner.lock().expect("grant set poisoned");
+        state
+            .standing
+            .values()
+            .filter(|g| {
+                g.verdict != verdict
+                    && &g.subject() == subject
+                    && g.tool == tool
+                    && g.admits_scope(grant_scope)
+                    && g.is_live_at(now_millis)
+            })
+            .cloned()
+            .collect()
     }
 
     /// Revokes a standing grant, returning it when there was one.
