@@ -151,7 +151,11 @@ impl FeedbackResponse {
 /// Runs the scrub-then-preview gate for `item` and either previews or sends it.
 ///
 /// * A scrub abort → a `blocked` response that never leaks the offending value.
-/// * `preview` → the byte-exact final body plus a prefilled link.
+/// * `preview` → the byte-exact final body plus a prefilled link, persisted on
+///   the item so a later confirm of the same item posts exactly those bytes.
+/// * A confirm (a non-preview call for an item that has a previewed body) → the
+///   persisted preview body is re-gated as a verification and then sent
+///   verbatim, never re-derived under a possibly-changed secret store.
 /// * A configured TinyHumans credential → forward to the hub, recorded as the
 ///   credential's owner; no issue is filed from here.
 /// * Otherwise → file through the [`FeedbackFiler`], updating the stored item's
@@ -177,12 +181,45 @@ pub async fn finalize(
     let labels = classify_labels(item, severity, source);
     let (title, body) = candidate_issue(item, &handle);
 
-    let scrubbed = match scrub(&body, company, secrets, &keys, &roster, &charter).await? {
-        ScrubOutcome::Aborted { reason } => return Ok(FeedbackResponse::blocked(&item.id, reason)),
-        ScrubOutcome::Ready(body) => body,
+    // The body that will actually leave the machine. A preview always derives it
+    // fresh from the item and the current gate. A confirm of a previewed item
+    // reuses the persisted preview body byte-for-byte — re-gated only as a
+    // verification, so a value that became a secret since the preview still
+    // aborts (fail closed) while a config change that would alter the approved
+    // body asks for a fresh preview instead of silently posting different bytes.
+    let scrubbed = if preview {
+        match scrub(&body, company, secrets, &keys, &roster, &charter).await? {
+            ScrubOutcome::Aborted { reason } => {
+                return Ok(FeedbackResponse::blocked(&item.id, reason));
+            }
+            ScrubOutcome::Ready(body) => body,
+        }
+    } else if let Some(persisted) = item.scrubbed_body.clone() {
+        match scrub(&persisted, company, secrets, &keys, &roster, &charter).await? {
+            ScrubOutcome::Aborted { reason } => {
+                return Ok(FeedbackResponse::blocked(&item.id, reason));
+            }
+            ScrubOutcome::Ready(gated) if gated != persisted => {
+                return Ok(FeedbackResponse::blocked(
+                    &item.id,
+                    "company configuration changed since the preview; preview again".to_string(),
+                ));
+            }
+            ScrubOutcome::Ready(_) => persisted,
+        }
+    } else {
+        match scrub(&body, company, secrets, &keys, &roster, &charter).await? {
+            ScrubOutcome::Aborted { reason } => {
+                return Ok(FeedbackResponse::blocked(&item.id, reason));
+            }
+            ScrubOutcome::Ready(body) => body,
+        }
     };
 
     if preview {
+        // Freeze the previewed body on the item so the operator's confirm posts
+        // exactly what they inspected.
+        store.record_preview(&item.id, &scrubbed).await?;
         return Ok(FeedbackResponse {
             prefilled_url: Some(manual_issue_url(&filer.repo, &title, &scrubbed, &labels)),
             preview_body: Some(scrubbed),
