@@ -65,8 +65,8 @@ const KIND_ICONS: Record<string, LucideIcon> = {
 
 /**
  * How much of a payload is shown before it is clamped. Past either bound the
- * block collapses behind a "Show everything" toggle — a queue of approvals has
- * to stay scannable, and a forty-line argument object buries the next card.
+ * block collapses behind a "Show everything" toggle — at a line boundary, so
+ * a queue of approvals stays scannable without clipping a line's glyphs.
  */
 const PREVIEW_LINES = 3;
 const PREVIEW_VALUE_CHARS = 160;
@@ -269,7 +269,7 @@ export function ApprovalPayload({ approval }: { approval: ApprovalSummary }) {
       <div
         className={cn(
           "space-y-1 font-mono text-xs break-all whitespace-pre-wrap",
-          clampable && !expanded && "max-h-24 overflow-hidden",
+          clampable && !expanded && "line-clamp-3",
         )}
       >
         {shown.map((line) => (
