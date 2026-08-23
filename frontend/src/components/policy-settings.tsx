@@ -274,6 +274,16 @@ export function PolicySettings({ client, company }: Props) {
     void chooseTier(tier.value);
   };
 
+  // Always-ask gates an operator added that a reset would drop — entries the
+  // manifest's list does not gate. The tier-widening test misses these: the
+  // tiers can agree while the lists disagree, and restoring the manifest then
+  // still widens what gets through, so it earns the same confirmation and the
+  // dialog names it.
+  const removedAlwaysAsk =
+    status?.alwaysApprove.filter(
+      (entry) => !gatedBy(status.manifestAlwaysApprove, entry),
+    ) ?? [];
+
   const requestReset = () => {
     if (!status || saving) return;
     // The manifest's tier can be MORE autonomous than the override an operator
