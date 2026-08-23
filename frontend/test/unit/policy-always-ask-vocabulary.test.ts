@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { OpenCompanyClient } from "@/api/client";
 import type { PolicyStatus } from "@/api/policy";
 import {
+  alwaysApproveGates,
   alwaysAskPlaceholder,
   isAutonomyEscalation,
 } from "@/components/policy-settings";
