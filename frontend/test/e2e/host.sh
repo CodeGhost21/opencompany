@@ -31,10 +31,10 @@ root="$(cd "$here/../../.." && pwd)"
 # Default port derived from this checkout's path, so two worktrees running the
 # suite at once do not land on one port. Playwright normally passes PW_HOST_BIND
 # in; this is the standalone path, and it computes the SAME number from the same
-# path (first 2 bytes of sha256, mod 800, offset 8100) so the two agree. See the
+# path (first 4 bytes of sha256, mod 8800, offset 8100) so the two agree. See the
 # `derivedPort` comment in ../../playwright.config.ts for why a fixed default is
 # actively dangerous here rather than merely inconvenient.
-derived_port=$(( 8100 + 16#$(printf '%s' "$root" | sha256sum | cut -c1-4) % 800 ))
+derived_port=$(( 8100 + 16#$(printf '%s' "$root" | sha256sum | cut -c1-8) % 8800 ))
 bind="${PW_HOST_BIND:-127.0.0.1:$derived_port}"
 company="${PW_HOST_COMPANY:-$root/companies/e2e_harness}"
 data_dir="${PW_HOST_DATA_DIR:-$root/target/e2e/data}"
