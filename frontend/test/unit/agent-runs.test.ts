@@ -27,6 +27,9 @@ import { AgentRuns } from "@/views/team/AgentRuns";
  *    attempt must still list.
  */
 
+/** The list poll's cadence, mirrored from `AgentRuns` (it is module-private). */
+const POLL_MS = 4000;
+
 function run(over: Partial<RunSummary> = {}): RunSummary {
   return {
     id: "run-1",
