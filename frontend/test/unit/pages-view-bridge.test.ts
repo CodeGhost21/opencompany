@@ -240,13 +240,11 @@ describe("PagesView bridge", () => {
     loadFrame(frame as HTMLIFrameElement);
     const inits = postMessage.mock.calls.filter(
       ([msg]) => (msg as { type?: string })?.type === "oc:init",
-    );
+    ) as unknown as Array<
+      [message: { capability?: string }, origin: string, transfer: MessagePort[]]
+    >;
     expect(inits.length).toBe(1);
-    const [message, , transfer] = inits[0] as [
-      { capability?: string },
-      string,
-      MessagePort[],
-    ];
+    const [message, , transfer] = inits[0];
     expect(message.capability).toBeTruthy();
     expect(transfer[0]).toBeInstanceOf(MessagePort);
     // The second load represents a frame navigation, not a new document the
