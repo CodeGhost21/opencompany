@@ -9,11 +9,12 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
-import { Coins, CreditCard, Gauge, Plug, Search, Zap } from "lucide-react";
+import { Coins, CreditCard, Gauge, Plug, Search, TriangleAlert, Zap } from "lucide-react";
 
 import type { OpenCompanyClient } from "@/api/client";
 import type { CapabilityStatusDto, UsageDto } from "@/api/types";
 import { Badge } from "@/components/ui/badge";
+import { Alert, AlertDescription } from "@/components/ui/alert";
 import {
   Card,
   CardContent,
@@ -73,9 +74,8 @@ interface Props {
   company: string | null;
 }
 
-// The empty usage read — shown before the first fetch resolves and as the
-// fallback when a host doesn't expose the surface yet (404). Real-or-zero: an
-// empty series renders flat rather than inventing numbers.
+// A successful usage read with no activity. Failed reads deliberately do not
+// use this shape: zero is a fact about spend, not a fallback for an unknown.
 const EMPTY_USAGE: UsageDto = {
   series: [],
   byAgent: [],
@@ -94,38 +94,43 @@ const EMPTY_USAGE: UsageDto = {
 /** In-depth usage: token burn over time, by agent, and OAuth calls by provider. */
 export function UsageView({ client, company }: Props) {
   const [range, setRange] = useState("30d");
-  const [data, setData] = useState<UsageDto>(EMPTY_USAGE);
+  const [data, setData] = useState<UsageDto | null>(null);
+  const [usageUnavailable, setUsageUnavailable] = useState(false);
   useEffect(() => {
     let alive = true;
+    setData(null);
+    setUsageUnavailable(false);
     client
       .usage(range, company)
       .then((usage) => {
         if (alive) setData(usage);
       })
-      // Hosts without the surface (older builds) 404 — show the empty state
-      // rather than fabricating a series.
       .catch(() => {
-        if (alive) setData(EMPTY_USAGE);
+        if (alive) setUsageUnavailable(true);
       });
     return () => {
       alive = false;
     };
   }, [client, company, range]);
-  const { totals } = data;
+  const displayedData = data ?? EMPTY_USAGE;
+  const { totals } = displayedData;
 
   // Capability budgets (issue #108) — the one live-wired card on this view.
   const [caps, setCaps] = useState<CapabilityStatusDto | null>(null);
   const [capsLoaded, setCapsLoaded] = useState(false);
+  const [capsUnavailable, setCapsUnavailable] = useState(false);
   useEffect(() => {
     let alive = true;
+    setCaps(null);
+    setCapsLoaded(false);
+    setCapsUnavailable(false);
     client
       .capabilityStatus(company)
       .then((status) => {
         if (alive) setCaps(status);
       })
-      // Hosts without the surface (older builds) 404 — treat as unconfigured.
       .catch(() => {
-        if (alive) setCaps({ configured: false });
+        if (alive) setCapsUnavailable(true);
       })
       .finally(() => {
         if (alive) setCapsLoaded(true);
@@ -146,7 +151,7 @@ export function UsageView({ client, company }: Props) {
             </p>
           </div>
           <Select value={range} onValueChange={(v) => v && setRange(v)} items={RANGE_LABELS}>
-            <SelectTrigger className="w-40">
+            <SelectTrigger className="w-40" aria-label="Usage date range">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
@@ -159,25 +164,36 @@ export function UsageView({ client, company }: Props) {
           </Select>
         </div>
 
+        {usageUnavailable ? (
+          <Alert data-testid="usage-unavailable">
+            <TriangleAlert className="size-4" />
+            <AlertDescription>
+              This host does not report usage, so totals and charts are unavailable.
+            </AlertDescription>
+          </Alert>
+        ) : null}
+
         {/* KPIs */}
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-5">
-          <Kpi icon={Coins} label="Total tokens" value={compact(totals.tokens)} hint={`${compact(totals.inputTokens)} in · ${compact(totals.outputTokens)} out`} />
+          <Kpi icon={Coins} label="Total tokens" value={data ? compact(totals.tokens) : "—"} hint={data ? `${compact(totals.inputTokens)} in · ${compact(totals.outputTokens)} out` : "—"} />
           <Kpi
             icon={CreditCard}
             label="Cost"
             value={
-              data.costHidden
+              !data
+                ? "—"
+                : data.costHidden
                 ? "Cost hidden"
                 : formatUsdCost({ amountUsd: totals.costUsd }, "total") ?? "$0.00"
             }
-            hint="Source USD · tokens plus metered calls"
+            hint={data ? "Source USD · tokens plus metered calls" : "—"}
           />
-          <Kpi icon={Zap} label="OAuth calls" value={compact(totals.oauthCalls)} hint={`Across ${totals.connections} providers`} />
-          <Kpi icon={Plug} label="Connections" value={String(totals.connections)} hint="Active integrations" />
+          <Kpi icon={Zap} label="OAuth calls" value={data ? compact(totals.oauthCalls) : "—"} hint={data ? `Across ${totals.connections} providers` : "—"} />
+          <Kpi icon={Plug} label="Connections" value={data ? String(totals.connections) : "—"} hint={data ? "Active integrations" : "—"} />
           {/* Issue #238. Its own KPI rather than a line inside "OAuth calls":
               a search is a priced call on the managed platform, not a connected
               account, and folding it in would overstate integrations. */}
-          <Kpi icon={Search} label="Web searches" value={compact(totals.searchCalls ?? 0)} hint="Billed per search" />
+          <Kpi icon={Search} label="Web searches" value={data ? compact(totals.searchCalls ?? 0) : "—"} hint={data ? "Billed per search" : "—"} />
         </div>
 
         {/* Tokens over time */}
@@ -188,7 +204,7 @@ export function UsageView({ client, company }: Props) {
           </CardHeader>
           <CardContent>
             <ChartContainer config={chartConfig} className="h-64 w-full">
-              <AreaChart data={data.series} margin={{ left: 4, right: 8, top: 4 }}>
+              <AreaChart data={displayedData.series} margin={{ left: 4, right: 8, top: 4 }}>
                 <CartesianGrid vertical={false} />
                 <XAxis
                   dataKey="date"
@@ -217,7 +233,7 @@ export function UsageView({ client, company }: Props) {
             </CardHeader>
             <CardContent>
               <ChartContainer config={chartConfig} className="h-64 w-full">
-                <BarChart data={data.byAgent} layout="vertical" margin={{ left: 8, right: 40 }}>
+                <BarChart data={displayedData.byAgent} layout="vertical" margin={{ left: 8, right: 40 }}>
                   <XAxis type="number" dataKey="tokens" hide />
                   <YAxis type="category" dataKey="name" tickLine={false} axisLine={false} width={96} />
                   <ChartTooltip content={<ChartTooltipContent formatter={(v) => `${compact(Number(v))} tokens`} />} />
@@ -227,11 +243,11 @@ export function UsageView({ client, company }: Props) {
                 </BarChart>
               </ChartContainer>
               <div className="mt-3 divide-y rounded-md border">
-                {data.byAgent.map((agent) => (
+                {displayedData.byAgent.map((agent) => (
                   <div key={agent.name} className="flex items-center justify-between gap-3 px-3 py-2 text-xs">
                     <span className="min-w-0 truncate">{agent.name}</span>
                     <span className="shrink-0 font-medium tabular-nums">
-                      {data.costHidden
+                      {displayedData.costHidden
                         ? "Cost hidden"
                         : formatUsdCost({ amountUsd: agent.costUsd }, "total") ?? "$0.00"}
                     </span>
@@ -249,7 +265,7 @@ export function UsageView({ client, company }: Props) {
             </CardHeader>
             <CardContent>
               <ChartContainer config={chartConfig} className="h-64 w-full">
-                <BarChart data={data.byProvider} layout="vertical" margin={{ left: 8, right: 40 }}>
+                <BarChart data={displayedData.byProvider} layout="vertical" margin={{ left: 8, right: 40 }}>
                   <XAxis type="number" dataKey="calls" hide />
                   <YAxis type="category" dataKey="provider" tickLine={false} axisLine={false} width={96} />
                   <ChartTooltip content={<ChartTooltipContent formatter={(v) => `${compact(Number(v))} calls`} />} />
@@ -276,6 +292,14 @@ export function UsageView({ client, company }: Props) {
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
+            {capsUnavailable ? (
+              <Alert data-testid="capability-status-unavailable">
+                <TriangleAlert className="size-4" />
+                <AlertDescription>
+                  This host does not report capability status, so grants and budgets are unavailable.
+                </AlertDescription>
+              </Alert>
+            ) : null}
             {/* Plan-level total token ceiling (issue #188): a HARD stop — once
                 spend crosses it the harness refuses to dispatch further turns,
                 unlike the soft per-namespace bars below. Rendered first, and on
@@ -289,7 +313,7 @@ export function UsageView({ client, company }: Props) {
                   <CapabilityRow key={tier.namespace} tier={tier} />
                 ))}
               </div>
-            ) : capsLoaded && caps?.configured && caps.total ? null : (
+            ) : capsLoaded && caps?.configured && caps.total ? null : capsUnavailable ? null : (
               <p className="py-2 text-sm text-muted-foreground">
                 {capsLoaded ? "No token plan configured." : "Loading budgets…"}
               </p>
