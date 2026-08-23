@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { describe, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import type { ApprovalSummary, GrantScope, Verdict } from "@/api/types";
 import { ApprovalCard } from "@/views/ApprovalsView";
 
@@ -12,8 +12,8 @@ const APPROVAL: ApprovalSummary = {
   payload: { command: "rm -rf /tmp/build && make release", cwd: "/srv/app" },
 };
 
-describe("debug", () => {
-  it("prints labels", async () => {
+describe("debug2", () => {
+  it("tests selector vs attr", async () => {
     (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
     const container = document.createElement("div");
     document.body.appendChild(container);
@@ -26,8 +26,13 @@ describe("debug", () => {
         onDecide: (_v: Verdict, _s: GrantScope) => {},
       }));
     });
-    const buttons = Array.from(container.querySelectorAll("button"));
-    for (const b of buttons) console.log("LABEL:", JSON.stringify(b.getAttribute("aria-label")));
+    const sel = 'button[aria-label="Approve: Run a terminal command — rm -rf /tmp/build && make release — asked by Ops"]';
+    console.log("selector match:", container.querySelector(sel));
+    const attr = Array.from(container.querySelectorAll("button")).find(
+      (b) => b.getAttribute("aria-label") === "Approve: Run a terminal command — rm -rf /tmp/build && make release — asked by Ops",
+    );
+    console.log("attr match:", !!attr);
+    expect(attr).toBeTruthy();
     act(() => root.unmount());
   });
 });
