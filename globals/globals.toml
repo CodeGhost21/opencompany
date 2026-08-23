@@ -24,8 +24,15 @@
 # literally because `*` deliberately excludes it: `workspace.*` because a bare
 # `*` confers workspace *reads* only, `media` and `composio` because they are
 # the real-money and per-tenant-credential namespaces, `search` because it
-# bills per call, `repo.*` because it materializes third-party source in a
-# sandbox, and `mcp:*` because MCP grants are named per server.
+# bills per call, and `mcp:*` because MCP grants are named per server.
+#
+# `repo` is the one namespace that is NOT here, and it is not an oversight: a
+# host on filesystem storage (`OPENCOMPANY_STORAGE=fs`, the default and the
+# desktop's) **refuses to boot a company whose allow-list names `repo`** — a
+# repository credential would sit on that filesystem in plaintext, readable by
+# the uid an agent shell runs as. Defaulting it on would turn every fs
+# deployment into a boot failure. A company on MongoDB storage that wants it
+# adds `repo.*` to its own `[tools].allow`.
 #
 # All of them are on by default, and the way to turn one off is this list. A
 # company's own `[tools].allow` **replaces** this default rather than extending
@@ -45,7 +52,6 @@ default_allow = [
     "media",
     "composio",
     "search",
-    "repo.*",
     "mcp:*",
 ]
 
