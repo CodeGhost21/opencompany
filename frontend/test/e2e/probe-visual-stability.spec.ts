@@ -49,6 +49,10 @@ test("overview holds still without the mask (probe)", async ({ page }) => {
   const a = await page.screenshot({ fullPage: true, animations: "disabled", caret: "hide" });
   await page.waitForTimeout(1500);
   const b = await page.screenshot({ fullPage: true, animations: "disabled", caret: "hide" });
+  await import("node:fs/promises").then(async (fs) => {
+    await fs.writeFile("/tmp/probe-a.png", a);
+    await fs.writeFile("/tmp/probe-b.png", b);
+  });
   const same = a.equals(b);
   console.log(`PROBE overview stable without mask: ${same} (${a.length} bytes)`);
   expect(same).toBe(true);
