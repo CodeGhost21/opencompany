@@ -478,6 +478,32 @@ describe("policy tier changes", () => {
   });
 });
 
+describe("alwaysApproveGates", () => {
+  it("matches exactly, case-insensitively, like the backend matcher", () => {
+    expect(alwaysApproveGates("SHELL", "shell")).toBe(true);
+    expect(
+      alwaysApproveGates("  Publish_Artifact ", "publish_artifact"),
+    ).toBe(true);
+    expect(alwaysApproveGates("shell", "http_request")).toBe(false);
+  });
+
+  it("gates a leading dotted segment", () => {
+    expect(alwaysApproveGates("invoice", "invoice.send")).toBe(true);
+    expect(alwaysApproveGates("invoice", "invoice.refund")).toBe(true);
+    expect(alwaysApproveGates("Invoice", "invoice.send")).toBe(true);
+  });
+
+  it("keeps the segment boundary load-bearing", () => {
+    expect(alwaysApproveGates("pay", "payroll.export")).toBe(false);
+    expect(alwaysApproveGates("payment", "payments_report")).toBe(false);
+  });
+
+  it("treats an empty entry as gating nothing", () => {
+    expect(alwaysApproveGates("  ", "shell")).toBe(false);
+    expect(alwaysApproveGates("", "shell")).toBe(false);
+  });
+});
+
 describe("manifest resets", () => {
   it("confirms a reset that would escalate to the manifest's tier", async () => {
     const client = makeClient({
