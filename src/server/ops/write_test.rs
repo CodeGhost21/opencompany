@@ -923,7 +923,7 @@ async fn memory_list_filters_stats_and_dual_write() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    let pref = pref.as_array().unwrap();
+    let pref = pref["items"].as_array().unwrap();
     assert_eq!(pref.len(), 1);
     assert_eq!(pref[0]["id"], "f-mid");
 
