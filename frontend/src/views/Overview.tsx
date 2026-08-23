@@ -335,6 +335,7 @@ export function Overview({ client, company, companyName }: Props) {
           memory={memoryGraph}
           toolLabels={adapted.toolLabels}
           statusSlot={statusSlot}
+          emptyState={!loading && sources.fetchedAt !== null && sources.desks.length === 0}
         />
       </Suspense>
     </div>
