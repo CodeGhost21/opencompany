@@ -155,6 +155,8 @@ export function MemoryView({ client, company }: Props) {
 
   useEffect(() => {
     setEntries([]);
+    setTotalContext(0);
+    setContextTruncated(false);
     setStats(null);
     void load();
     return () => {
