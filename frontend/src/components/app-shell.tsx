@@ -1216,6 +1216,7 @@ export function AppShell({
               makeMessage("company", event.text, {
                 channel: event.agentId,
                 taskId: event.taskId,
+                mentions: event.mentions,
                 // Issue #483 — see `liveReplyIdentity`.
                 ...liveReplyIdentity(event),
               }),
@@ -1260,6 +1261,7 @@ export function AppShell({
             makeMessage("company", event.text, {
               channel: event.agentId,
               taskId: event.taskId,
+              mentions: event.mentions,
               // Issue #483: same identity as the thread store above. This is
               // the store `hydrateChannel` writes into, so this is where the
               // duplicate was visible.
