@@ -5,7 +5,7 @@ import { toast } from "sonner";
 import { listPeople, me as fetchMe, type Person } from "@/api/auth";
 import type { OpenCompanyClient } from "@/api/client";
 import { setInboxEnabled } from "@/api/inbox";
-import { listTasks } from "@/api/tasks";
+import { listTasks, type Task } from "@/api/tasks";
 import { ApiError, type AgentDetailDto } from "@/api/types";
 import { TeammateAvatar } from "@/components/teammate-avatar";
 import { Badge } from "@/components/ui/badge";
@@ -135,6 +135,8 @@ export function AgentDetailView({
    * than an invented "idle · 0 open".
    */
   const [workload, setWorkload] = useState<Workload | null>(null);
+  /** The open cards assigned directly to this teammate, when the board is readable. */
+  const [openTasks, setOpenTasks] = useState<Task[] | null>(null);
   /** An inbox write is in flight; the switch is held until the host answers. */
   const [inboxSaving, setInboxSaving] = useState(false);
   /**
@@ -216,6 +218,7 @@ export function AgentDetailView({
     let live = true;
     if (!company) {
       setWorkload(null);
+      setOpenTasks(null);
       return;
     }
     void (async () => {
@@ -226,10 +229,15 @@ export function AgentDetailView({
       if (!live) return;
       // Empty columns is a host whose ledger list carries no board — an absence,
       // not a vocabulary. Same rule as the roster's cards.
-      setWorkload(
-        tasks && columns?.length
-          ? (workloadByAssignee(tasks, columns).get(agentId) ?? { open: 0, status: "idle" })
-          : null,
+      if (!tasks || !columns?.length) {
+        setWorkload(null);
+        setOpenTasks(null);
+        return;
+      }
+      setWorkload(workloadByAssignee(tasks, columns).get(agentId) ?? { open: 0, status: "idle" });
+      const closed = new Set(columns.filter((column) => column.closed).map((column) => column.id));
+      setOpenTasks(
+        tasks.filter((task) => task.assignee.trim() === agentId && !closed.has(task.column)),
       );
     })();
     return () => {
@@ -488,6 +496,7 @@ export function AgentDetailView({
               }
             />
             <FactLine agent={agent} workload={workload} />
+            <OpenTasks tasks={openTasks} />
 
             {/* The Edit action sits on the teammate's name row (issue #1434) —
                 one editing action, in the place a page's actions live, rather
@@ -597,7 +606,6 @@ export function AgentDetailView({
               onRemoveCap={() => void applyBudget(null)}
               onResetBudget={() => void resetBudget()}
             />
-            <Desks agent={agent} />
           </>
         )}
       </div>
@@ -613,7 +621,7 @@ export function AgentDetailView({
   );
 }
 
-/** Name, role, id, and the two facts that classify an agent. */
+/** Name, role, id, desks, and the two facts that classify an agent. */
 function Identity({ agent, action }: { agent: AgentDetailDto; action?: ReactNode }) {
   const display = agent.name?.trim() || agent.role;
   const seed = agent.id || display;
@@ -656,6 +664,19 @@ function Identity({ agent, action }: { agent: AgentDetailDto; action?: ReactNode
             <Badge variant="outline" data-testid="agent-source">
               {agent.source === "manifest" ? "Company blueprint" : "Added here"}
             </Badge>
+            {agent.desks.map((desk) => (
+              <a
+                key={desk.id}
+                href={`#/company/${encodeURIComponent(desk.id)}`}
+                className="inline-flex"
+                data-testid={`agent-desk-${desk.id}`}
+              >
+                <Badge variant="secondary" className="gap-1">
+                  <Users className="size-3" aria-hidden /> {desk.name}
+                  {desk.lead && <span className="text-xs opacity-70">(lead)</span>}
+                </Badge>
+              </a>
+            ))}
             {agent.inboxEnabled && (
               <Badge variant="outline" className="gap-1">
                 <Mail className="size-3" /> Inbox
@@ -731,6 +752,28 @@ function FactLine({
           {(agent.budgetUsdDaily ?? 0).toFixed(2)}
         </span>
       )}
+    </div>
+  );
+}
+
+/** The open cards assigned to this teammate, linked to the work behind the count. */
+function OpenTasks({ tasks }: { tasks: Task[] | null }) {
+  if (!tasks?.length) return null;
+  return (
+    <div className="space-y-1" data-testid="agent-open-tasks">
+      <p className="text-xs font-medium text-muted-foreground">Open tasks</p>
+      <div className="flex flex-wrap gap-x-3 gap-y-1">
+        {tasks.map((task) => (
+          <a
+            key={task.id}
+            href={`#/tasks/${encodeURIComponent(task.id)}`}
+            className="text-sm text-primary underline-offset-4 hover:underline"
+            data-testid={`agent-open-task-${task.id}`}
+          >
+            {task.title}
+          </a>
+        ))}
+      </div>
     </div>
   );
 }
@@ -1012,31 +1055,6 @@ function BudgetDialog({
         </DialogFooter>
       </DialogContent>
     </Dialog>
-  );
-}
-
-/** Desk membership, with the lead named. */
-function Desks({ agent }: { agent: AgentDetailDto }) {
-  return (
-    <Section
-      title="Desks"
-      subtitle="The desks this teammate works on. A desk hands its work to its lead first."
-    >
-      {agent.desks.length === 0 ? (
-        <p className="text-sm text-muted-foreground" data-testid="agent-desks-empty">
-          This teammate is not on any desk.
-        </p>
-      ) : (
-        <div className="flex flex-wrap gap-2" data-testid="agent-desks">
-          {agent.desks.map((desk) => (
-            <Badge key={desk.id} variant="secondary" className="gap-1">
-              <Users className="size-3" /> {desk.name}
-              {desk.lead && <span className="text-xs opacity-70">(lead)</span>}
-            </Badge>
-          ))}
-        </div>
-      )}
-    </Section>
   );
 }
 

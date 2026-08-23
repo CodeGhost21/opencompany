@@ -407,6 +407,19 @@ test("#1141 a card opens a teammate, breadcrumbed and editable", async ({ page }
   await expect(page.getByTestId("agent-status")).toHaveText("Working");
   await expect(page.getByTestId("agent-tasks")).toHaveText("2 open tasks");
 
+  // The desk is identity, not a final detail section. Its chip goes to the
+  // desk's shareable chart address, and the workload names each open card so
+  // the count is not a dead end (issue #1433).
+  const desk = page.getByTestId("agent-desk-research");
+  await expect(desk).toContainText("Research");
+  await expect(desk).toContainText("(lead)");
+  await expect(desk).toHaveAttribute("href", "#/company/research");
+  await expect(page.getByTestId("agent-open-task-t1")).toHaveText("Scan competitor pricing");
+  await expect(page.getByTestId("agent-open-task-t1")).toHaveAttribute("href", "#/tasks/t1");
+  await expect(page.getByTestId("agent-open-task-t2")).toHaveText("Draft the weekly brief");
+  await expect(page.getByTestId("agent-open-task-t2")).toHaveAttribute("href", "#/tasks/t2");
+  await expect(page.getByTestId("agent-open-task-t3")).toHaveCount(0);
+
   // Edit is on the header row, not buried in a card halfway down, and this
   // teammate is an overlay so it is live.
   const edit = page.getByTestId("agent-edit");
