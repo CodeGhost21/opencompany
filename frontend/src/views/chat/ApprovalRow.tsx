@@ -462,15 +462,19 @@ function compactLabel(approvals: ApprovalSummary[]): { text: string; amounts: st
 
   // Mixed actions: "Fetch a web page + 1 more" over a card that also sends a
   // payment would hide it, so the line says how many actions and names each
-  // distinct one — never letting the lead speak for the rest. Amounts are
-  // named for the whole batch, wherever the money is.
+  // distinct one — never letting the lead speak for the rest — and then names
+  // every call's own detail the way the same-kind path does, so a fetch's URL
+  // or a payment's recipient is never hidden behind a count, and a role-hidden
+  // call keeps its warning. Amounts are named for the whole batch, wherever
+  // the money is.
   const kinds = [...new Set(approvals.map(approvalAction))];
   const named =
     kinds.length === 2
       ? `${kinds[0]} and ${kinds[1]}`
       : `${kinds.slice(0, -1).join(", ")}, and ${kinds[kinds.length - 1]}`;
+  const details = approvals.map(itemLabel).join(", ");
   return {
-    text: `${approvals.length} actions need your sign-off — ${named}`,
+    text: `${approvals.length} actions need your sign-off — ${named} — ${details}`,
     amounts: amountText,
   };
 }
