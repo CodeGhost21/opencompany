@@ -6,7 +6,7 @@ name: CI
 # concurrency groups, therefore neither cancelled the other. The evidence is in
 # the run list: `push` and `pull_request` runs on `fix/1059-…`,
 # `feat/1070-…` and `feat/1113-…` created within two seconds of each other,
-# each carrying the same ~33-minute `Rust (openhuman, tinycortex)` lane. Every
+# each carrying the same ~33-minute `Rust (openhuman, tinymemory)` lane. Every
 # minute of that was spent twice and half of it answered a question nobody
 # asked — the PR run is the one whose result is reported on the PR and required
 # by the ruleset.
@@ -29,7 +29,7 @@ on:
 #
 # It had already stopped working. Of the last fourteen runs on `main`, twelve
 # were `cancelled` and one succeeded — merges were landing minutes apart against
-# a `Rust (openhuman, tinycortex)` lane that takes ~26 minutes, so each merge
+# a `Rust (openhuman, tinymemory)` lane that takes ~26 minutes, so each merge
 # killed its predecessor's verification before it could conclude. The honest
 # state of `main` across that stretch was neither known-good nor known-broken.
 # Nothing was red; the signal simply was not there. Verification thinned out
@@ -71,7 +71,7 @@ permissions:
 
 # Issue #1118. Three compiler knobs, set once for every job below, because the
 # critical path through this workflow is compile-shaped: on run 32223481743 the
-# `Rust (openhuman, tinycortex)` lane spent 306s in one `cargo build`, 140s in
+# `Rust (openhuman, tinymemory)` lane spent 306s in one `cargo build`, 140s in
 # clippy and 132s in `Check (--all-features)` before a single feature-scoped
 # test ran.
 #
@@ -161,7 +161,7 @@ jobs:
   #
   # Before this, every pull request ran every lane. A pull request that edits
   # only `gitbooks/` compiled the vendored openhuman tree three times; one that
-  # edits only `frontend/` ran the ~33 minute `Rust (openhuman, tinycortex)`
+  # edits only `frontend/` ran the ~33 minute `Rust (openhuman, tinymemory)`
   # feature matrix, whose twenty feature-scoped suites cannot be affected by a
   # `.tsx` file. The console still gets its Rust: `Console E2E` runs the host
   # binary, so a frontend change keeps the `rust` and `Gated host binary` jobs
@@ -423,7 +423,7 @@ jobs:
       #
       # No `shared-key`: the default key already carries the job id and is
       # stable run-to-run, and this lane's default feature set is NOT the
-      # `openhuman,tinycortex` set `rust-gated` builds. Pointing both at one key
+      # `openhuman,tinymemory` set `rust-gated` builds. Pointing both at one key
       # would have them overwrite each other's `target/` every run.
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
@@ -493,7 +493,7 @@ jobs:
       # 24 tests that read as the guarantee the backend is trustworthy. None of
       # them had ever executed. `cargo test` above omits `--features sqlite`, so
       # the module is not compiled into it; `rust-gated` pins
-      # `openhuman,tinycortex`; and the one step that does compile this code,
+      # `openhuman,tinymemory`; and the one step that does compile this code,
       # `Check (--all-features)`, says so in its own comment: "compiling every
       # target is not running any of them". Three lanes touched the file and no
       # lane ran it.
@@ -603,7 +603,7 @@ jobs:
   # the SQLite step rescued: 20 tests over the task / workspace / fact / skill /
   # inbox / usage / run / user / session ports, plus isolation, append-only and
   # monotonic-seq. None had ever executed. `cargo test` omits `--features
-  # mongodb`, `rust-gated` pins `openhuman,tinycortex`, and `Check
+  # mongodb`, `rust-gated` pins `openhuman,tinymemory`, and `Check
   # (--all-features)` compiles the module without running it — three lanes touch
   # the file, no lane ran it. `StorageKind::Mongodb` is what hosted tenants run,
   # so the one storage backend under the deployed product was the one with no
@@ -774,14 +774,14 @@ jobs:
   #
   # One combination, not a matrix. Cargo features are additive, and `tinycortex`
   # adds no new compilation on top of an `openhuman` build — the crate is already
-  # an unconditional dependency of `openhuman_core` — so `openhuman,tinycortex`
+  # an unconditional dependency of `openhuman_core` — so `openhuman,tinymemory`
   # covers both rot areas in a single compile. A default/`openhuman`/
-  # `openhuman,tinycortex`/`--all-features` matrix would roughly triple CI
+  # `openhuman,tinymemory`/`--all-features` matrix would roughly triple CI
   # compute for a sliver of extra coverage.
   rust-gated:
     needs: changes
     if: needs.changes.outputs.rust == 'true'
-    name: Rust (openhuman, tinycortex)
+    name: Rust (openhuman, tinymemory)
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
@@ -836,7 +836,7 @@ jobs:
       # Steps are ordered to fail fast and cheap: a compile break (the `E0062`
       # class of bug that motivated this job) surfaces before the lint pass
       # spends time on a tree that does not build.
-      - name: Build (openhuman, tinycortex)
+      - name: Build (openhuman, tinymemory)
         run: cargo build --locked --features openhuman --all-targets
 
       # `--no-deps` is LOAD-BEARING — do not "simplify" it away. Cargo treats the
@@ -845,7 +845,7 @@ jobs:
       # `large_enum_variant` in OpenHuman's nested `vendor/tinyagents`), and the
       # gate would never reach first-party code. Scoping to the primary package
       # is what makes it meaningful.
-      - name: Clippy (openhuman, tinycortex)
+      - name: Clippy (openhuman, tinymemory)
         run: cargo clippy --locked --no-deps --features openhuman --all-targets -- -D warnings
 
       # Issue #1524 (PR 1). `pub mod memory` is gated on `tinymemory`
@@ -869,7 +869,7 @@ jobs:
         run: |
           # Two separate failures, checked separately: a broken resolve must
           # fail loudly, not read as "no duplicates" through an empty pipe.
-          if ! report="$(cargo tree --locked -e normal --features openhuman,tinycortex,tinymemory-embedded -d)"; then
+          if ! report="$(cargo tree --locked -e normal --features openhuman,tinymemory -d)"; then
             echo "::error::cargo tree failed to resolve the graph"
             exit 1
           fi
@@ -907,7 +907,7 @@ jobs:
       # exists to dial a real inference backend with a real credential. `--tests`
       # selects exactly the targets that assert: the lib and bin unit tests, plus
       # every integration target under `tests/`, present and future.
-      - name: Test (openhuman, tinycortex)
+      - name: Test (openhuman, tinymemory)
         run: cargo test --locked --features openhuman --tests
 
       # The guard for the next one (issue #475). The step above runs whatever
@@ -964,8 +964,8 @@ jobs:
       # drive a stub on an ephemeral port and the rest never build a request.
       - name: Test the Chargebee billing integration
         run: |
-          scripts/ci/run-scoped-suite.sh "chargebee" openhuman,tinycortex,chargebee,paypal,composio chargebee
-          scripts/ci/run-scoped-suite.sh "finance read plane" openhuman,tinycortex,chargebee,paypal,composio server::ops::finance
+          scripts/ci/run-scoped-suite.sh "chargebee" openhuman,chargebee,paypal,composio chargebee
+          scripts/ci/run-scoped-suite.sh "finance read plane" openhuman,chargebee,paypal,composio server::ops::finance
 
       # Issue #789: PayPal. Here rather than on the fast default job for the same
       # reason as chargebee above — the toolbelt bridge is under `src/harness/`
@@ -1028,7 +1028,7 @@ jobs:
       # `--all-targets` is LOAD-BEARING (issue #288). Without it this step
       # checks the lib and bins only, so test code behind a storage feature is
       # compiled by NOTHING in CI: the default `rust` job runs `cargo test`
-      # without `sqlite`, and the gated steps above pin `openhuman,tinycortex`.
+      # without `sqlite`, and the gated steps above pin `openhuman,tinymemory`.
       # That gap let two `E0034`s in `src/store/sqlite.rs`'s own tests sit on
       # `main` unseen — a green check is only evidence for the surface it
       # actually compiles.
@@ -1042,7 +1042,7 @@ jobs:
 
       # The tool belt the SHIPPED tenant image actually builds (issue #297).
       #
-      # Every other lane here runs `openhuman[,tinycortex]`. `mcp` is the one
+      # Every other lane here runs `openhuman[,tinymemory]`. `mcp` is the one
       # feature that changes what an agent's tool belt *contains* rather than
       # only what compiles, so no lane exercised the belt real deployments get —
       # and `dispatched_desk_agent_tool_belt_is_pinned` was failing unseen on
@@ -1109,7 +1109,7 @@ jobs:
       #
       # All offline — the Composio backend is scripted in every one of them.
       #
-      # `openhuman,tinycortex,composio` rather than a bare `--features composio`
+      # `openhuman,composio` rather than a bare `--features composio`
       # (which would imply `openhuman` anyway): matching this job's own set means
       # the vendored tree is already built and only this crate recompiles.
       # `composio` adds no `openhuman_core/*` subfeature, so there is no vendored
@@ -1253,7 +1253,7 @@ jobs:
       # That one is scoped because `mcp` changes what a tool belt *contains* and
       # a single module pins that contract, so the rest of the run would be
       # re-proving what an earlier lane already proved. `tinyplace` is the
-      # `openhuman,tinycortex` shape instead — a feature that changes behaviour
+      # `openhuman,tinymemory` shape instead — a feature that changes behaviour
       # at every site it gates — and that lane runs its whole suite for the same
       # reason. The compile is what this costs; the compile is identical either
       # way, so a filter would only discard results already paid for.
@@ -1282,7 +1282,7 @@ jobs:
         run: cargo test --locked --features tinyplace --lib
 
   # Issue #1118. The gated host binary the `Console E2E (live brain)` job needs
-  # is built HERE rather than as the last step of `Rust (openhuman, tinycortex)`
+  # is built HERE rather than as the last step of `Rust (openhuman, tinymemory)`
   # above, and the move is a wall-clock change, not a tidy-up.
   #
   # Issue #467 put it in that lane to avoid a second submodule checkout, a
@@ -1740,7 +1740,7 @@ jobs:
   # existed before:
   #
   #   * a host with the harness in it — the gated binary `rust-gated` now
-  #     uploads (`--features openhuman,tinycortex,mcp`);
+  #     uploads (`--features openhuman,mcp`);
   #   * something for the harness to think with — `test/e2e/mock-brain.mjs`, an
   #     OpenAI-compatible endpoint whose answers are a pure function of the
   #     prompt, which `playwright.config.ts` starts and points the host at;
