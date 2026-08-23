@@ -313,7 +313,7 @@ export function Overview({ client, company, companyName }: Props) {
               onClick={refresh}
               disabled={loading}
               aria-label="Retry loading the company overview"
-              className="mt-4 inline-flex items-center gap-2 rounded-md border border-os-border-strong bg-os-surface px-3 py-2 text-sm font-medium text-os-text shadow-sm transition-colors hover:bg-os-hover disabled:opacity-50"
+              className="mt-4 inline-flex items-center gap-2 rounded-md border border-os-border-strong bg-os-surface px-3 py-2 text-sm font-medium text-os-text shadow-sm transition-colors hover:bg-os-bg disabled:opacity-50"
             >
               <RefreshCw className={`size-4 ${loading ? "animate-spin" : ""}`} aria-hidden />
               Try again
