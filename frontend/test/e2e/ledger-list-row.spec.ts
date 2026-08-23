@@ -57,7 +57,7 @@ test("a list row leads with its title and shows one readable status", async ({
     await expect(row.getByText("column", { exact: true })).toHaveCount(0);
     await expect(row.locator("dd")).toHaveText("First line\nSecond line");
 
-    const order = await row.locator(":scope > div > div").first().evaluate((header) =>
+    const order = await row.locator(":scope > div").first().evaluate((header) =>
       Array.from(header.children).map((child) => child.getAttribute("data-testid")),
     );
     expect(order).toEqual(["ledger-entry-title", "ledger-entry-status", "ledger-entry-id"]);
