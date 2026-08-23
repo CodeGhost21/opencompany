@@ -1442,15 +1442,6 @@ impl HarnessPool {
             hasher.finish()
         };
 
-        // Re-read + fingerprint the company's bound repositories (issue #245):
-        // one index document, read live, so a bind / rotate / revoke reaches the
-        // agent on the next turn. Only companies that explicitly grant `repo`
-        // touch the store on this axis; everything else resolves to the static
-        // `deps.repo_bindings` (empty at every construction site but the
-        // production builder), whose fingerprint never moves.
-        let repo_bindings = self.resolve_repo_bindings(company, deps).await;
-        let repo_fp = repo_binding_fingerprint(&repo_bindings);
-
         // Re-fetch + fingerprint the operator skill deltas (issue #41) BEFORE the
         // fast-path check. A skills-only change leaves every other axis stable, so
         // unless skills participate in the staleness check the cached roster is
@@ -1541,10 +1532,6 @@ impl HarnessPool {
         // And the company's own search provider, so a key pasted (or cleared) in
         // the console decides what the rebuilt agents search through.
         fresh_deps.tenant_search = tenant_search_config;
-        // And the freshly-read bindings (issue #245), so a repository bound or
-        // revoked in the console is what the rebuilt agents' tools resolve
-        // against — including the descriptions that name what is bound.
-        fresh_deps.repo_bindings = repo_bindings;
         // Same treatment for the overlay-agent set: `company` may be a stale
         // boot-time snapshot (e.g. `HarnessBrain::record`), so the roster is
         // built from the live-resolved overlay set, not `company.overlay_agents`.
