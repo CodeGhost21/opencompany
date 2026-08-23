@@ -75,12 +75,22 @@ export interface MemoryStats {
   documentMemory: number;
   /** Stored task outcomes, disjoint from teammate memory. */
   taskOutcomes: number;
+}
+
+/**
+ * `GET /memory` — the rows plus the context-truncation metadata for the SAME
+ * read, so the "showing the newest N of M" notice never compares the capped
+ * rows against a count taken at a different moment.
+ */
+export interface MemoryList {
+  /** The rows: operator facts, then the newest non-mirror context chunks. */
+  items: MemoryEntry[];
   /**
-   * Whether `GET /memory` capped its context rows (non-mirror chunk count past
-   * the 500-row list cap). Computed from this same stats snapshot, so the
-   * "showing the newest N of M" notice never compares the list against a
-   * count taken at a different moment.
+   * The non-mirror context chunk population before the 500-row display cap —
+   * the "M" in the notice. Facts are never capped, so they are not counted.
    */
+  totalContext: number;
+  /** Whether `items` dropped context rows to the cap, from this same read. */
   contextTruncated: boolean;
 }
 
