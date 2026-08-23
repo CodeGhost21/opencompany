@@ -200,6 +200,7 @@ window.addEventListener("message", function onRelay(event: MessageEvent) {
       event.data.type === "oc:relay-pointerup" ||
       event.data.type === "oc:relay-pointercancel"
     ) {
+      endRelayedPress(pointerId, event.data.x, event.data.y, event.data.type === "oc:relay-pointercancel");
       relayPressTargets.delete(pointerId);
     }
     return;
@@ -208,6 +209,7 @@ window.addEventListener("message", function onRelay(event: MessageEvent) {
     event.data.type === "oc:relay-pointerup" ||
     event.data.type === "oc:relay-pointercancel"
   ) {
+    endRelayedPress(pointerId, event.data.x, event.data.y, event.data.type === "oc:relay-pointercancel");
     relayPressTargets.delete(pointerId);
   }
 
@@ -215,6 +217,8 @@ window.addEventListener("message", function onRelay(event: MessageEvent) {
   if (!(element instanceof HTMLElement || element instanceof SVGElement)) return;
 
   if (event.data.type === "oc:relay-pointerdown") {
+    pressOrigins.set(pointerId, { x: event.data.x, y: event.data.y });
+    relayedPressCount++;
     relayPressTargets.set(pointerId, element);
   }
   dispatchRelayedPointer(event.data, element);
