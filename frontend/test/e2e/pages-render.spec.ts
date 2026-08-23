@@ -70,13 +70,17 @@ test("an agent-authored page bundle loads and paints in its sandboxed iframe", a
 
     const bundleResponse = await bundle;
     expect(bundleResponse.status()).toBe(200);
-    // TEMP diagnostic: probe the server directly (no browser CORS check) and
-    // dump what it actually sends for the bundle.
-    const bundleUrl = bundleResponse.url();
+    // TEMP diagnostic: bypass the browser and probe the server directly.
+    const shellUrl = `http://127.0.0.1:8689/api/v1/companies/e2e-harness-co/pages/${slug}`;
+    const shell = await request.get(shellUrl);
+    const shellHtml = await shell.text();
+    const capMatch = shellHtml.match(/bootstrap\.mjs\?oc_cap=([a-f0-9]+)/);
+    console.log(`[diag shell status] ${shell.status()} hasCap=${!!capMatch}`);
+    const bundleUrl = `${shellUrl}/bundle.mjs?oc_cap=${capMatch?.[1] ?? "none"}`;
     const probe = await request.get(bundleUrl, { headers: { Origin: "null" } });
-    console.log(`[diag probe] status=${probe.status()} url=${bundleUrl}`);
+    console.log(`[diag probe] status=${probe.status()}`);
     console.log(`[diag probe headers] ${JSON.stringify(probe.headers())}`);
-    console.log(`[diag bundle headers (browser)] ${JSON.stringify(bundleResponse.headers())}`);
+    console.log(`[diag browser bundle headers] ${JSON.stringify(bundleResponse.headers())}`);
     expect(bundleResponse.headers()["access-control-allow-origin"]).toBe("null");
     expect(bundleResponse.headers()["access-control-allow-credentials"]).toBe("true");
     // TEMP diagnostic: dump the iframe DOM after the module graph settles.
