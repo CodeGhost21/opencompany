@@ -1944,6 +1944,43 @@ prompt = "Lead decisively."
         assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
     }
 
+    /// The authority line this route draws (`docs/modules/server/authority.md`):
+    /// a member may pick a colleague's face — it decides nothing about what the
+    /// company reaches the world as — while `tools` stays admin-only. Verified
+    /// as a member specifically, because a rule checked only as an admin passes
+    /// identically against no rule at all.
+    #[tokio::test]
+    async fn a_member_may_change_a_face_but_still_not_a_tool_grant() {
+        let home_dir = home();
+        let state = state_with_manifest(home_dir.path(), ROSTER).await;
+        crate::server::test_support::seed_fixed_member(&state, "acme").await;
+
+        let (status, worn) = send_as(
+            &state,
+            "PATCH",
+            "/api/v1/company/team/ceo",
+            Some(json!({"avatar": "tiny:clay"})),
+            crate::server::test_support::member_cookie("acme"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{worn}");
+        assert_eq!(worn["avatar"], "tiny:clay", "{worn}");
+
+        let (status, refused) = send_as(
+            &state,
+            "PATCH",
+            "/api/v1/company/team/ceo",
+            Some(json!({"tools": ["docs.*"]})),
+            crate::server::test_support::member_cookie("acme"),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::FORBIDDEN,
+            "a grant is still admin-only: {refused}"
+        );
+    }
+
     /// A `blob:` reference is just a node id, and any member can type one.
     /// Pointing it at nothing — or at a prose note — is refused on the request
     /// that asked for it, rather than becoming a broken image on every surface.
