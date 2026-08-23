@@ -140,7 +140,7 @@ pub const MAX_ARTIFACT_BODY_BYTES: usize = 256 * 1024;
 /// repository is something it meant to publish — the same permanent false
 /// positive the runtime-bookkeeping family above exists to prevent, from the
 /// other direction.
-const SCAN_SKIP_DIRS: [&str; 8] = [
+const SCAN_SKIP_DIRS: [&str; 7] = [
     "node_modules",
     "target",
     "sessions",
@@ -148,7 +148,6 @@ const SCAN_SKIP_DIRS: [&str; 8] = [
     "artifacts",
     "checkpoints",
     "tinyagents_store",
-    crate::harness::repo::CHECKOUT_SUBDIR,
 ];
 
 /// File names the scan ignores wherever they appear.

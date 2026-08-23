@@ -1859,41 +1859,6 @@ impl HarnessPool {
         }
     }
 
-    /// Re-reads the company's bound repositories (issue #245) from the
-    /// [`RepoManager`](crate::runtime::RepoManager), so a bind, a credential
-    /// rotation or a revoke reaches the roster on the next turn.
-    ///
-    /// Only companies that **explicitly** grant `repo` read at all; everything
-    /// else answers empty without touching the store, mirroring
-    /// [`Self::resolve_composio`]. A transient read error degrades to the
-    /// boot-resolved [`HarnessDeps::repo_bindings`] with a warning rather than
-    /// dropping an agent's repository tools mid-session — the same direction
-    /// [`Self::resolve_effective_mcp`] degrades in, and the safe one: a stale
-    /// binding list still resolves against real bindings, while an empty one
-    /// un-wires the tools entirely.
-    async fn resolve_repo_bindings(
-        &self,
-        company: &CompanyRecord,
-        deps: &HarnessDeps,
-    ) -> Vec<crate::runtime::repo_manager::types::RepoBinding> {
-        if !crate::company::grants_repo_explicit(&company.manifest.tools.allow) {
-            return Vec::new();
-        }
-        let Some(repos) = deps.repos.as_ref() else {
-            return deps.repo_bindings.clone();
-        };
-        match repos.list().await {
-            Ok(bindings) => bindings,
-            Err(err) => {
-                tracing::warn!(
-                    company = %company.id,
-                    "[repo] could not read the repository bindings; keeping the last known set: {err}"
-                );
-                deps.repo_bindings.clone()
-            }
-        }
-    }
-
     /// Re-resolves the company's effective MCP server set: from the secret store
     /// when [`HarnessDeps::secrets`] is wired (picking up console changes), else
     /// the boot-resolved [`HarnessDeps::mcp_servers`] unchanged. A resolution
@@ -3097,37 +3062,6 @@ fn skill_delta_fingerprint(deltas: &[SkillState]) -> u64 {
 /// Over `(key, token_fingerprint, branches)`, sorted by key, because those are
 /// exactly the three things a rebuild has to notice:
 ///
-/// * **key** — a bind adds one, a revoke removes one, and either changes what
-///   `repo_checkout` can resolve and what its description names;
-/// * **token fingerprint** — a rotation leaves the key alone, and a *revoked*
-///   credential blanks it while the key survives, so keying on the set of
-///   repositories would leave an agent holding a tool over a binding that can no
-///   longer fetch;
-/// * **branches** — the set a checkout may name, and the only other field the
-///   tools read.
-///
-/// Deliberately not `size_bytes` or `last_fetched_millis`: both move on every
-/// fetch, and a fetch is something the agent's own tool does — folding them in
-/// would rebuild the roster after every checkout, for no change an agent can
-/// observe.
-fn repo_binding_fingerprint(bindings: &[crate::runtime::repo_manager::types::RepoBinding]) -> u64 {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-
-    let mut ordered: Vec<&crate::runtime::repo_manager::types::RepoBinding> =
-        bindings.iter().collect();
-    ordered.sort_by(|a, b| a.key.cmp(&b.key));
-
-    let mut hasher = DefaultHasher::new();
-    ordered.len().hash(&mut hasher);
-    for binding in ordered {
-        binding.key.hash(&mut hasher);
-        binding.token_fingerprint.hash(&mut hasher);
-        binding.branches.hash(&mut hasher);
-    }
-    hasher.finish()
-}
-
 /// Build every roster agent for a company: every manifest `[[agent]]`, plus
 /// every operator- or orchestrator-added [`OverlayAgent`] (issue #71 — Active
 /// Runtime Teammates) that does not collide with a manifest agent id.
