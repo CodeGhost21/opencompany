@@ -69,7 +69,7 @@ members = ["creative_director", "copywriter", "landing_page_builder"]
 # Members of this desk sit on no other desk. That matters: a teammate on two
 # desks takes the UNION of their ceilings, so seating one of these agents on an
 # unrestricted desk would hand the company grant straight back.
-tools = ["*", "workspace.write"]
+tools = ["*"]
 
 [[group_chat]]
 id = "growth"
