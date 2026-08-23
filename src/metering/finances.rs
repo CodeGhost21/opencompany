@@ -163,6 +163,18 @@ mod tests {
     }
 
     #[test]
+    fn zero_cap_is_distinct_from_no_cap() {
+        let now = at(2026, 7, 16);
+        // A manifest that sets `monthly_usd = 0` is a hard cap, not an absent
+        // budget: it survives as `Some(0.0)` so the console can say "capped at
+        // zero" rather than "no budget is set".
+        let capped = finances_from(&[], &budget(Some(0.0)), None, now);
+        assert_eq!(capped.budget_usd, Some(0.0));
+        let uncapped = finances_from(&[], &budget(None), None, now);
+        assert_eq!(uncapped.budget_usd, None);
+    }
+
+    #[test]
     fn current_month_spend_and_revenue() {
         let now = at(2026, 7, 16);
         let ledger = vec![
