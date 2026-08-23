@@ -18,6 +18,7 @@ import {
   ApprovalPayload,
   ApprovalScopeControl,
   useAskerNames,
+  useApprovalThreadLinks,
 } from "@/components/approval-card";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -169,6 +170,7 @@ export function ApprovalsView({
    */
   const { items: rows, containerProps: queueHold } = useStableList(visible);
   const askerNames = useAskerNames(client, company, approvals);
+  const threadLinks = useApprovalThreadLinks(client, company, approvals);
   const { grants, granterNames, refreshGrants } = useStandingGrants(client, company);
   /**
    * How many rows each turn's batch still has waiting (#842).
@@ -378,6 +380,7 @@ export function ApprovalsView({
                   approval={a}
                   now={now}
                   askerNames={askerNames}
+                  thread={threadLinks.get(a.id)}
                   deciding={inFlight.get(a.id) ?? null}
                   batchIndex={batchPos.get(a.id)?.index ?? 1}
                   batchTotal={batchPos.get(a.id)?.total ?? 1}
@@ -502,12 +505,14 @@ function StandingPermissions({
   grants,
   now,
   askerNames,
+  thread,
   granterNames,
   onRevoke,
 }: {
   grants: StandingGrant[];
   now: number;
   askerNames: Map<string, string>;
+  thread?: import("@/components/approval-card").ApprovalThreadLink | null;
   /** Actor id → display name; empty when the roster read was not permitted. */
   granterNames: Map<string, string>;
   onRevoke: (id: string) => Promise<void>;
@@ -671,6 +676,7 @@ export function ApprovalCard({
           approval={a}
           now={now}
           askerNames={askerNames}
+          thread={thread}
           /* Honest copy for a request that spans an agent turn (#373): an
              approve is not done when the button stops spinning, it is handed
              to the agent. A decline IS terminal, so it only has to record. */

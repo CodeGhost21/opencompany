@@ -49,6 +49,7 @@ import {
   ApprovalPayload,
   ApprovalScopeControl,
   approvalIcon,
+  type ApprovalThreadLink,
 } from "@/components/approval-card";
 import { Button } from "@/components/ui/button";
 import { approvedLine } from "@/lib/approval-wording";
@@ -145,6 +146,7 @@ export function ApprovalRow({
   approvals,
   now,
   askerNames,
+  thread,
   deciding,
   decided,
   failed,
@@ -154,6 +156,8 @@ export function ApprovalRow({
   approvals: ApprovalSummary[];
   now: number;
   askerNames: Map<string, string>;
+  /** The channel this inline row is already rendered inside. */
+  thread?: ApprovalThreadLink | null;
   /** The verdict an item is waiting on, keyed by approval id; empty when idle. */
   deciding: ReadonlyMap<string, Verdict>;
   /** Verdicts already witnessed — from this console or from the page. */
@@ -306,6 +310,7 @@ export function ApprovalRow({
             approval={lead}
             now={now}
             askerNames={askerNames}
+            thread={thread}
             status={
               busy
                   ? awaiting("approve")

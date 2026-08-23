@@ -38,6 +38,7 @@ import {
 
 import type { OpenCompanyClient } from "@/api/client";
 import { GRANT_DURATIONS, type ApprovalSummary, type GrantScope } from "@/api/types";
+import type { Desk } from "@/lib/desks";
 import {
   approvalAction,
   approvalDeadline,
@@ -46,7 +47,10 @@ import {
   payloadAge,
   payloadLines,
 } from "@/lib/language";
+import type { TeamMember } from "@/lib/team";
 import { cn } from "@/lib/utils";
+import { channelIdForThread, deskFromDto, dmChannelId } from "@/views/chat/model";
+import { fromDto } from "@/lib/team";
 
 const KIND_ICONS: Record<string, LucideIcon> = {
   "payment.send": CreditCard,
@@ -121,11 +125,14 @@ export function ApprovalMeta({
   approval: a,
   now,
   askerNames,
+  thread,
   status,
 }: {
   approval: ApprovalSummary;
   now: number;
   askerNames: Map<string, string>;
+  /** The chat channel that raised this request, when the host named one. */
+  thread?: ApprovalThreadLink | null;
   /** Trailing status text ("Waiting for the teammate…", "Approved"), if any. */
   status?: React.ReactNode;
 }) {
@@ -146,6 +153,20 @@ export function ApprovalMeta({
         <>
           <span>
             Asked by <span className="font-medium text-foreground">{asker}</span>
+          </span>
+          <span aria-hidden>·</span>
+        </>
+      )}
+      {thread && (
+        <>
+          <span>
+            Asked in{" "}
+            <a
+              href={`#/chat/${encodeURIComponent(thread.channelId)}`}
+              className="font-medium text-foreground underline-offset-2 hover:underline"
+            >
+              {thread.label}
+            </a>
           </span>
           <span aria-hidden>·</span>
         </>
@@ -258,7 +279,13 @@ export function ApprovalPayload({ approval }: { approval: ApprovalSummary }) {
     );
   }
 
-  if (lines.length === 0) return null;
+  if (lines.length === 0) {
+    return (
+      <p className="text-xs text-muted-foreground">
+        No further details were supplied.
+      </p>
+    );
+  }
 
   const clampable =
     lines.length > PREVIEW_LINES || lines.some((l) => l.value.length > PREVIEW_VALUE_CHARS);
@@ -291,6 +318,85 @@ export function ApprovalPayload({ approval }: { approval: ApprovalSummary }) {
       )}
     </div>
   );
+}
+
+/** A resolved chat destination for an approval's host-side thread id. */
+export interface ApprovalThreadLink {
+  channelId: string;
+  /** A channel is written with `#`; a direct message is written as a name. */
+  label: string;
+}
+
+/**
+ * Resolve an approval's host thread id into the human-facing chat destination.
+ *
+ * The host calls desk channels by their desk id, while direct messages use an
+ * agent id. `channelIdForThread` is the one place that bridges those two id
+ * schemes; keeping this join here prevents the Approvals page from linking a
+ * DM to a URL no chat channel owns.
+ */
+export function approvalThreadLink(
+  approval: ApprovalSummary,
+  desks: Desk[],
+  members: TeamMember[],
+): ApprovalThreadLink | null {
+  if (!approval.thread) return null;
+  const channelId = channelIdForThread(approval.thread, desks, members);
+  if (!channelId) return null;
+
+  const desk = desks.find((candidate) => candidate.id === approval.thread);
+  if (desk) return { channelId, label: `#${desk.channel}` };
+
+  const member = members.find((candidate) => candidate.id === approval.thread);
+  return member ? { channelId: dmChannelId(member), label: member.name } : null;
+}
+
+/**
+ * Read the small amount of chat topology the Approvals page needs to link a
+ * parked request back to its conversation. An unreadable or older route simply
+ * leaves the existing card intact: an unresolved thread must not be guessed.
+ */
+export function useApprovalThreadLinks(
+  client: OpenCompanyClient,
+  company: string | null,
+  approvals: ApprovalSummary[],
+): Map<string, ApprovalThreadLink> {
+  const [links, setLinks] = useState<Map<string, ApprovalThreadLink>>(() => new Map());
+  const threadKey = useMemo(
+    () =>
+      Array.from(new Set(approvals.map((approval) => approval.thread).filter(Boolean)))
+        .sort()
+        .join(","),
+    [approvals],
+  );
+
+  useEffect(() => {
+    setLinks(new Map());
+    if (!threadKey) return;
+    let live = true;
+    void Promise.all([client.listDesks(company), client.listTeam(company)])
+      .then(([deskDtos, roster]) => {
+        if (!live) return;
+        const desks = deskDtos.map(deskFromDto);
+        const members = roster.map(fromDto);
+        setLinks(
+          new Map(
+            approvals.flatMap((approval) => {
+              const link = approvalThreadLink(approval, desks, members);
+              return link ? [[approval.id, link] as const] : [];
+            }),
+          ),
+        );
+      })
+      .catch(() => {
+        if (live) setLinks(new Map());
+      });
+    return () => {
+      live = false;
+    };
+  }, [client, company, threadKey]);
+
+  return links;
 }
 
 /**
