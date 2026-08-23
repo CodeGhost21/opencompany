@@ -3047,9 +3047,10 @@ mod test {
             .await
             .unwrap();
 
-        // The legacy file is kept: a slug may be shared by several keys, so it
-        // may still hold a colliding alias's value. The canonical file shadows
-        // it for this key, so `get` returns the rotated value.
+        // The legacy file is kept for a non-empty rotation: a slug may be shared
+        // by several keys, so it may still hold a colliding alias's value. The
+        // canonical file shadows it for this key, so `get` returns the rotated
+        // value.
         assert!(tokio::fs::metadata(&legacy_path).await.is_ok());
         assert_eq!(
             secrets.get(&company, key).await.unwrap(),
