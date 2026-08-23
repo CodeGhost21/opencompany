@@ -1236,7 +1236,6 @@ async fn run_memory_cmd(cmd: MemoryCmd) -> Result<()> {
         to,
         to_url,
         to_api_key,
-        to_data_dir,
         page_size,
         dry_run,
         resume_cursor,
