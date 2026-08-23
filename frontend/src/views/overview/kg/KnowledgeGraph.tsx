@@ -755,6 +755,21 @@ export function KnowledgeGraph({
       .on('tick', renderTick);
     configure(sim);
     simRef.current = sim;
+    // TEMP-DIAGNOSTIC: log sim creation + alpha trajectory (visual-flake hunt).
+    // Remove before final push.
+    const alog: Array<{ t: number; a: number; n: number }> = [];
+    const lastLog = { a: sim.alpha() };
+    sim.on("tick", () => {
+      const a = sim.alpha();
+      if (a !== lastLog.a) {
+        lastLog.a = a;
+        alog.push({ t: performance.now(), a: Math.round(a * 1000) / 1000, n: nodes.length });
+      }
+    });
+    const prevLog = (window as unknown as { __simLog?: Array<object> }).__simLog ?? [];
+    prevLog.push({ ev: "create", t: performance.now(), nodes: nodes.length, alpha: sim.alpha() });
+    (window as unknown as { __simLog?: Array<object> }).__simLog = prevLog;
+    (window as unknown as { __alphaLog?: Array<object> }).__alphaLog = alog;
     return () => {
       sim.stop();
       simRef.current = null;
