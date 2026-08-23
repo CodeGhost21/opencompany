@@ -510,6 +510,11 @@ fn company_builder(
     // `[users].mode` to answer, which is the normal case.
     .with_auth_mode_override(state.auth_mode_override())
     .with_skills_registry(state.shared_skill_registry()?)
+    // The setup cards a real operator should find waiting on a real board. Turned
+    // on here rather than inferred from the seed directory, so a test or a
+    // fixture that builds a company gets the empty board it is asserting about —
+    // see `RuntimeBuilder::with_task_seeding`. First boot only.
+    .with_task_seeding(true)
     .with_id(company_id.clone());
     if let Some(source_dir) = source_dir {
         builder = builder.with_seed_dir(source_dir);

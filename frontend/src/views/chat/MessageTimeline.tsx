@@ -286,6 +286,7 @@ export function MessageTimeline({
               approvals={item.approvals}
               now={now ?? Date.now()}
               askerNames={askerNames ?? EMPTY_NAMES}
+              compact
               /* Narrowed to this card's own items (#842): a decision in flight
                  on another turn's batch is not this card's business, which is
                  the same rule #373 established one level down. */
