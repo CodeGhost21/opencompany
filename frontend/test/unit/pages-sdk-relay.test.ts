@@ -195,6 +195,128 @@ describe("the page frame's toast-relay listener", () => {
     );
   });
 
+  it("does not relay a click that ends a drag onto the element under the release point", () => {
+    // The parent relays a compatibility click after a press's `pointerup`, and
+    // the pointer tail has been routed to the element that took the press
+    // (capture semantics). A press that moved is a drag; its release must not
+    // activate whatever happens to be under the release point.
+    const pressTarget = document.createElement("button");
+    document.body.append(pressTarget);
+    mockElementFromPoint(pressTarget);
+
+    relayFrom(window.parent, {
+      type: "oc:relay-pointerdown",
+      x: 10,
+      y: 10,
+      pointerId: 7,
+      pointerType: "mouse",
+      button: 0,
+      buttons: 1,
+    });
+
+    const releaseTarget = document.createElement("button");
+    const releaseClicked = vi.fn();
+    releaseTarget.addEventListener("click", releaseClicked);
+    document.body.append(releaseTarget);
+    mockElementFromPoint(releaseTarget);
+
+    relayFrom(window.parent, {
+      type: "oc:relay-pointerup",
+      x: 60,
+      y: 60,
+      pointerId: 7,
+      pointerType: "mouse",
+      button: 0,
+      buttons: 0,
+    });
+    relayFrom(window.parent, { type: "oc:relay-click", x: 60, y: 60 });
+
+    expect(releaseClicked).not.toHaveBeenCalled();
+  });
+
+  it("relays a click after a press that did not move", () => {
+    // The drag test above must not sweep up a plain click: a press released
+    // where it started is a click, and the element under the point receives it.
+    const below = document.createElement("button");
+    const clicked = vi.fn();
+    below.addEventListener("click", clicked);
+    document.body.append(below);
+    mockElementFromPoint(below);
+
+    relayFrom(window.parent, {
+      type: "oc:relay-pointerdown",
+      x: 12,
+      y: 34,
+      pointerId: 7,
+      pointerType: "mouse",
+      button: 0,
+      buttons: 1,
+    });
+    relayFrom(window.parent, {
+      type: "oc:relay-pointerup",
+      x: 12,
+      y: 34,
+      pointerId: 7,
+      pointerType: "mouse",
+      button: 0,
+      buttons: 0,
+    });
+    relayFrom(window.parent, { type: "oc:relay-click", x: 12, y: 34 });
+
+    expect(clicked).toHaveBeenCalledOnce();
+  });
+
+  it("suppresses the drag-tail click only for the press that just ended", () => {
+    // A click is correlated to the press that ended right before it; a newer
+    // press invalidates the correlation, so a later click is relayed normally.
+    const below = document.createElement("button");
+    const clicked = vi.fn();
+    below.addEventListener("click", clicked);
+    document.body.append(below);
+    mockElementFromPoint(below);
+
+    // A drag that ends over `below`, followed by a fresh press+click on it.
+    relayFrom(window.parent, {
+      type: "oc:relay-pointerdown",
+      x: 10,
+      y: 10,
+      pointerId: 7,
+      pointerType: "mouse",
+      button: 0,
+      buttons: 1,
+    });
+    relayFrom(window.parent, {
+      type: "oc:relay-pointerup",
+      x: 60,
+      y: 60,
+      pointerId: 7,
+      pointerType: "mouse",
+      button: 0,
+      buttons: 0,
+    });
+    relayFrom(window.parent, {
+      type: "oc:relay-pointerdown",
+      x: 60,
+      y: 60,
+      pointerId: 8,
+      pointerType: "mouse",
+      button: 0,
+      buttons: 1,
+    });
+    relayFrom(window.parent, {
+      type: "oc:relay-pointerup",
+      x: 60,
+      y: 60,
+      pointerId: 8,
+      pointerType: "mouse",
+      button: 0,
+      buttons: 0,
+    });
+    relayFrom(window.parent, { type: "oc:relay-click", x: 60, y: 60 });
+
+    expect(clicked).toHaveBeenCalledOnce();
+  });
+
   it("falls back to the point when a relayed press's element is gone", () => {
     // The page re-rendered mid-gesture and the pressed element left the
     // document; the continuation routes by point, like a fresh press would.
