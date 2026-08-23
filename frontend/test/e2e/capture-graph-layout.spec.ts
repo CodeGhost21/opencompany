@@ -113,7 +113,8 @@ test("capture settled graph layout + API data", async ({ page }) => {
       const early = (window as unknown as { __kgCounts?: Array<{ t: number; n: number }> }).__kgCounts ?? [];
       const simLog = (window as unknown as { __simLog?: Array<object> }).__simLog ?? [];
       const alphaLog = (window as unknown as { __alphaLog?: Array<object> }).__alphaLog ?? [];
-      return { count: groups.length, positions, data, trajectory, early, simLog, alphaLog };
+      const pageErrors = (window as unknown as { __pageErrors?: string[] }).__pageErrors ?? [];
+      return { count: groups.length, positions, data, trajectory, early, simLog, alphaLog, pageErrors };
     },
     trajectory,
   );
