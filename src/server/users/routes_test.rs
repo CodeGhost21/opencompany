@@ -2011,3 +2011,128 @@ async fn a_refused_invite_mails_nobody() {
         "a rejected address must mail nobody"
     );
 }
+
+// ---------------------------------------------------------------------------
+// The profile: naming yourself and choosing your own face
+// (docs/spec/runtime/avatars.md)
+// ---------------------------------------------------------------------------
+
+fn patch_with_cookie(uri: &str, body: serde_json::Value, cookie: &str) -> Request<Body> {
+    Request::builder()
+        .method("PATCH")
+        .uri(uri)
+        .header("content-type", "application/json")
+        .header("cookie", cookie)
+        .body(Body::from(body.to_string()))
+        .unwrap()
+}
+
+async fn patch_me(state: &AppState, cookie: &str, body: serde_json::Value) -> (StatusCode, serde_json::Value) {
+    let response = router(state.clone())
+        .oneshot(patch_with_cookie(
+            "/api/v1/companies/acme/auth/me",
+            body,
+            cookie,
+        ))
+        .await
+        .unwrap();
+    let status = response.status();
+    (status, body_json(response).await)
+}
+
+/// A person names themselves and picks a face, without an admin in the loop.
+/// The whole reason this route exists beside the admin one: your own identity
+/// in a company should not be something you have to ask for.
+#[tokio::test]
+async fn a_person_can_name_themselves_and_pick_a_face() {
+    let home = home();
+    let (state, sender) = state_with_mail(home.path()).await;
+    let cookie = login_via_link(&state, &sender, "ada@example.com").await;
+
+    let (status, me) = patch_me(
+        &state,
+        &cookie,
+        serde_json::json!({"displayName": "Ada L.", "avatar": "tiny:violet"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{me}");
+    assert_eq!(me["displayName"], "Ada L.", "{me}");
+    assert_eq!(me["avatar"], "tiny:violet", "{me}");
+
+    // Persisted, not just echoed.
+    let response = router(state.clone())
+        .oneshot(get_with_cookie("/api/v1/companies/acme/auth/me", &cookie))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let reread = body_json(response).await;
+    assert_eq!(reread["displayName"], "Ada L.", "{reread}");
+    assert_eq!(reread["avatar"], "tiny:violet", "{reread}");
+}
+
+/// A partial save leaves the field it did not mention alone — the reason both
+/// fields are double options. Without it, saving a name wipes the face.
+#[tokio::test]
+async fn editing_one_field_of_a_profile_leaves_the_other() {
+    let home = home();
+    let (state, sender) = state_with_mail(home.path()).await;
+    let cookie = login_via_link(&state, &sender, "ada@example.com").await;
+
+    patch_me(&state, &cookie, serde_json::json!({"avatar": "tiny:rose"})).await;
+    let (_, named) = patch_me(&state, &cookie, serde_json::json!({"displayName": "Ada"})).await;
+    assert_eq!(named["avatar"], "tiny:rose", "{named}");
+
+    // And each is individually resettable: `null` — or a blanked input, which is
+    // the same intent typed — goes back to the default.
+    let (_, unnamed) = patch_me(&state, &cookie, serde_json::json!({"displayName": "  "})).await;
+    assert!(
+        unnamed.get("displayName").is_none(),
+        "a blank name is not a name: {unnamed}"
+    );
+    assert_eq!(unnamed["avatar"], "tiny:rose", "{unnamed}");
+    let (_, bare) = patch_me(&state, &cookie, serde_json::json!({"avatar": null})).await;
+    assert!(
+        bare.get("avatar").is_none(),
+        "a reset is absent, not empty: {bare}"
+    );
+}
+
+/// The grammar's rule, on this route too: an avatar names something this host
+/// holds, never a URL the console would fetch on this person's behalf.
+#[tokio::test]
+async fn a_profile_avatar_may_not_be_a_url() {
+    let home = home();
+    let (state, sender) = state_with_mail(home.path()).await;
+    let cookie = login_via_link(&state, &sender, "ada@example.com").await;
+
+    for hostile in [
+        "https://tracker.example/beacon.gif",
+        "javascript:alert(1)",
+        "blob:01NOSUCHNODE",
+    ] {
+        let (status, refused) =
+            patch_me(&state, &cookie, serde_json::json!({"avatar": hostile})).await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "{hostile} was accepted: {refused}"
+        );
+    }
+}
+
+/// No session, no profile. There is no `user_id` in the path to point at
+/// somebody else, so this is the whole of the route's authority check.
+#[tokio::test]
+async fn a_profile_edit_needs_a_session() {
+    let home = home();
+    let (state, _sender) = state_with_mail(home.path()).await;
+    let response = router(state.clone())
+        .oneshot(patch_with_cookie(
+            "/api/v1/companies/acme/auth/me",
+            serde_json::json!({"displayName": "Nobody"}),
+            "oc_session_acme=not-a-session",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
