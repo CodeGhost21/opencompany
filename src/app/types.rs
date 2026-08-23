@@ -974,6 +974,13 @@ impl AppState {
         &self.presence
     }
 
+    /// A cloned handle to the same host-global registry [`Self::presence`]
+    /// borrows from, for a background task (the periodic sweep) that must
+    /// outlive any single request's borrow of `self`.
+    pub fn presence_handle(&self) -> std::sync::Arc<crate::server::presence::PresenceRegistry> {
+        self.presence.clone()
+    }
+
     /// The prebuilt GraphQL read-plane schema.
     pub fn schema(&self) -> &crate::server::graphql::OcSchema {
         &self.schema

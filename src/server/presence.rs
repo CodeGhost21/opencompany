@@ -43,9 +43,12 @@
 //! and are not.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
+use tokio::sync::Notify;
+use tokio::task::JoinHandle;
 
 use crate::ports::types::CompanyId;
 
@@ -58,6 +61,19 @@ pub const PRESENCE_HEARTBEAT_MILLIS: u64 = 60_000;
 /// slow request, a moment of packet loss, a tab that was throttled while
 /// backgrounded — does not flap somebody offline and back.
 pub const PRESENCE_TTL_MILLIS: u64 = 3 * PRESENCE_HEARTBEAT_MILLIS;
+
+/// The most consoles one person may hold a lease on at once, per company.
+///
+/// Bounds a real memory-growth vector: a `consoleId` is client-supplied and
+/// otherwise unbounded, so a buggy console minting a fresh one on every
+/// reconnect — or a member deliberately hammering the route — would otherwise
+/// grow this map forever, since an expired lease is only ever *hidden* from
+/// reads (`list`, `aggregate`) rather than removed until [`PresenceRegistry::sweep`]
+/// next runs. `beat` enforces this cap directly rather than relying on the
+/// sweep's cadence, which bounds the *worst case* between sweeps rather than
+/// the sweep interval itself. Comfortably above any real browser's tab count
+/// (issue: "Bound client-supplied console leases").
+const MAX_CONSOLES_PER_PERSON: usize = 16;
 
 /// Exactly three states.
 ///
@@ -175,6 +191,20 @@ impl PresenceRegistry {
         let key = (company.clone(), user.to_string());
         let consoles = people.entry(key).or_default();
         let before = aggregate(consoles, now_millis);
+        // A genuinely new console (not a renewal of one already tracked) past
+        // the cap evicts the stalest entry first — expired ones before live
+        // ones, then oldest `last_beat_millis` — so an unbounded stream of
+        // fresh `consoleId`s cannot grow this map without limit. See
+        // `MAX_CONSOLES_PER_PERSON`.
+        if !consoles.contains_key(console)
+            && consoles.len() >= MAX_CONSOLES_PER_PERSON
+            && let Some(stalest) = consoles
+                .iter()
+                .min_by_key(|(_, peer)| peer.last_beat_millis)
+                .map(|(id, _)| id.clone())
+        {
+            consoles.remove(&stalest);
+        }
         consoles.insert(
             console.to_string(),
             Peer {
@@ -192,24 +222,39 @@ impl PresenceRegistry {
     /// who closes a tab should not linger as online for three minutes, and the
     /// browser can say so on the way out. Only removes the departing console —
     /// a colleague's other open tabs keep their own leases, so closing one does
-    /// not drop the others. Returns whether the person's aggregate status
-    /// actually changed (i.e. that was their last console), so a duplicate
-    /// teardown, or a departure that leaves another console still live,
-    /// publishes nothing.
-    pub fn detach(&self, company: &CompanyId, user: &str, console: &str, now_millis: u64) -> bool {
+    /// not drop the others.
+    ///
+    /// Returns the person's **new aggregate status**, and only when it
+    /// actually changed: `None` for a duplicate teardown, or for a departure
+    /// that leaves another console whose status already matched the
+    /// aggregate (an away tab closing while an online one is still live
+    /// changes nothing an observer could see). When the departing console was
+    /// carrying the aggregate up — an online tab closing while only an away
+    /// one remains — this reports the *downgraded* status (`Away`), not
+    /// `Offline`, so the caller publishes what the person now looks like
+    /// rather than a false "gone" a moment before their away tab's next
+    /// heartbeat corrects it. `Offline` is reported only when nobody is left.
+    pub fn detach(
+        &self,
+        company: &CompanyId,
+        user: &str,
+        console: &str,
+        now_millis: u64,
+    ) -> Option<PresenceStatus> {
         let mut people = self.people.lock().expect("presence registry poisoned");
         let key = (company.clone(), user.to_string());
-        let Some(consoles) = people.get_mut(&key) else {
-            return false;
-        };
-        if consoles.remove(console).is_none() {
-            return false;
-        }
-        let still_present = aggregate(consoles, now_millis).is_some();
+        let consoles = people.get_mut(&key)?;
+        let before = aggregate(consoles, now_millis);
+        consoles.remove(console)?;
+        let after = aggregate(consoles, now_millis);
         if consoles.is_empty() {
             people.remove(&key);
         }
-        !still_present
+        if after == before {
+            None
+        } else {
+            Some(after.unwrap_or(PresenceStatus::Offline))
+        }
     }
 
     /// Everyone whose lease is still good, newest first.
@@ -296,6 +341,53 @@ fn expired(last_beat: u64, now: u64) -> bool {
     now.saturating_sub(last_beat) > PRESENCE_TTL_MILLIS
 }
 
+/// Periodically forgets lapsed leases across the whole process (issue: "Bound
+/// client-supplied console leases").
+///
+/// [`PresenceRegistry::sweep`] existed from the start but had no production
+/// caller — its only caller was a unit test. That was not silently unsafe
+/// (`list` already filters an expired lease out of every read, so nothing
+/// downstream ever saw a stale one), but the backing map itself only ever
+/// grew: a crashed tab that never sent `DELETE`, or a client minting fresh
+/// `consoleId`s, both left dead entries nothing ever removed. Deliberately not
+/// folded into [`crate::runtime::maintenance::MaintenanceTicker`] — that ticker
+/// is scoped to registered *companies* and drives per-company retirement
+/// through [`crate::CompanyRuntime`]; this registry is host-global and keyed by
+/// neither, so it gets its own always-on task, spawned once at boot the same
+/// way. [`MAX_CONSOLES_PER_PERSON`] bounds the worst case *per person* between
+/// sweeps; this is what reclaims the memory for everyone once a lease expires.
+pub struct PresenceSweeper {
+    registry: Arc<PresenceRegistry>,
+}
+
+impl PresenceSweeper {
+    pub fn new(registry: Arc<PresenceRegistry>) -> Self {
+        Self { registry }
+    }
+
+    /// Runs until `shutdown` is notified, sweeping once per [`PRESENCE_TTL_MILLIS`]
+    /// — lapsed-but-unswept memory is bounded by one TTL's worth of leases, not
+    /// by how long the process has been up.
+    pub fn spawn(self, shutdown: Arc<Notify>) -> JoinHandle<()> {
+        tokio::spawn(async move {
+            // Built once and pinned, not rebuilt inside the loop — see
+            // `MaintenanceTicker::spawn`'s identical comment for why a
+            // freshly-built `Notified` each iteration can miss a shutdown that
+            // arrives mid-sweep.
+            let notified = shutdown.notified();
+            tokio::pin!(notified);
+            loop {
+                tokio::select! {
+                    _ = &mut notified => break,
+                    _ = tokio::time::sleep(Duration::from_millis(PRESENCE_TTL_MILLIS)) => {
+                        self.registry.sweep(crate::ports::now_millis());
+                    }
+                }
+            }
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -347,10 +439,14 @@ mod tests {
     fn a_clean_disconnect_drops_the_lease_at_once() {
         let reg = PresenceRegistry::new();
         reg.beat(&acme(), "u1", "tab-1", PresenceStatus::Online, 0);
-        assert!(reg.detach(&acme(), "u1", "tab-1", 0));
+        assert_eq!(
+            reg.detach(&acme(), "u1", "tab-1", 0),
+            Some(PresenceStatus::Offline)
+        );
         assert!(reg.list(&acme(), 0).is_empty());
-        assert!(
-            !reg.detach(&acme(), "u1", "tab-1", 0),
+        assert_eq!(
+            reg.detach(&acme(), "u1", "tab-1", 0),
+            None,
             "a second teardown changes nothing"
         );
     }
@@ -365,16 +461,18 @@ mod tests {
         reg.beat(&acme(), "u1", "tab-1", PresenceStatus::Online, 0);
         reg.beat(&acme(), "u1", "tab-2", PresenceStatus::Online, 0);
 
-        assert!(
-            !reg.detach(&acme(), "u1", "tab-1", 0),
-            "tab 2 is still open, so this is not a real departure"
+        assert_eq!(
+            reg.detach(&acme(), "u1", "tab-1", 0),
+            None,
+            "tab 2 is still open at the same status, so this is not a real departure"
         );
         let live = reg.list(&acme(), 0);
         assert_eq!(live.len(), 1, "still present through tab 2");
         assert_eq!(live[0].status, PresenceStatus::Online);
 
-        assert!(
+        assert_eq!(
             reg.detach(&acme(), "u1", "tab-2", 0),
+            Some(PresenceStatus::Offline),
             "the last open tab leaving is a real departure"
         );
         assert!(reg.list(&acme(), 0).is_empty());
@@ -391,6 +489,90 @@ mod tests {
         let live = reg.list(&acme(), 0);
         assert_eq!(live.len(), 1);
         assert_eq!(live[0].status, PresenceStatus::Online);
+    }
+
+    /// The downgrade case: closing the console that was carrying the
+    /// aggregate must report the *new* aggregate (`Away`), not `Offline` —
+    /// the person is still here, just not at their most-present console
+    /// anymore, and every other viewer's dot should say so at once rather
+    /// than waiting for the away tab's next heartbeat to correct a false
+    /// "gone".
+    #[test]
+    fn closing_the_more_present_tab_reports_the_downgraded_status() {
+        let reg = PresenceRegistry::new();
+        reg.beat(&acme(), "u1", "tab-online", PresenceStatus::Online, 0);
+        reg.beat(&acme(), "u1", "tab-away", PresenceStatus::Away, 0);
+
+        assert_eq!(
+            reg.detach(&acme(), "u1", "tab-online", 0),
+            Some(PresenceStatus::Away),
+            "the away tab is still open — the aggregate degrades, it does not vanish"
+        );
+        let live = reg.list(&acme(), 0);
+        assert_eq!(live.len(), 1);
+        assert_eq!(live[0].status, PresenceStatus::Away);
+    }
+
+    /// The memory-growth finding: a client that keeps minting fresh
+    /// `consoleId`s (a bug in some other console, or a member hammering the
+    /// route) must not grow one person's lease set without bound. Past the
+    /// cap, a new console evicts the stalest one rather than being appended.
+    #[test]
+    fn a_flood_of_new_consoles_is_capped_rather_than_grown_forever() {
+        let reg = PresenceRegistry::new();
+        for i in 0..(MAX_CONSOLES_PER_PERSON * 3) {
+            reg.beat(
+                &acme(),
+                "u1",
+                &format!("console-{i}"),
+                PresenceStatus::Online,
+                i as u64,
+            );
+        }
+        let count = reg
+            .people
+            .lock()
+            .unwrap()
+            .get(&(acme(), "u1".to_string()))
+            .map(|consoles| consoles.len())
+            .unwrap_or(0);
+        assert!(
+            count <= MAX_CONSOLES_PER_PERSON,
+            "expected at most {MAX_CONSOLES_PER_PERSON} tracked consoles, found {count}"
+        );
+        // And the person is still (correctly) present — capping evicts the
+        // stalest lease, it does not stop tracking the person altogether.
+        assert_eq!(
+            reg.list(&acme(), (MAX_CONSOLES_PER_PERSON * 3) as u64)
+                .len(),
+            1
+        );
+    }
+
+    /// A console renewing its own existing lease must never be evicted by its
+    /// own renewal, even sitting exactly at the cap — the cap only ever makes
+    /// room for a *new* console id.
+    #[test]
+    fn renewing_an_existing_console_at_the_cap_never_evicts_itself() {
+        let reg = PresenceRegistry::new();
+        for i in 0..MAX_CONSOLES_PER_PERSON {
+            reg.beat(
+                &acme(),
+                "u1",
+                &format!("console-{i}"),
+                PresenceStatus::Online,
+                0,
+            );
+        }
+        // Renew the very first console many times — it must still be present
+        // afterward, not evicted as "stalest" by its own renewals.
+        for tick in 1..10 {
+            reg.beat(&acme(), "u1", "console-0", PresenceStatus::Online, tick);
+        }
+        let people = reg.people.lock().unwrap();
+        let consoles = people.get(&(acme(), "u1".to_string())).unwrap();
+        assert!(consoles.contains_key("console-0"));
+        assert_eq!(consoles.len(), MAX_CONSOLES_PER_PERSON);
     }
 
     /// The bus stays quiet while nothing moves: a console beats every minute
