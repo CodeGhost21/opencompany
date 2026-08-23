@@ -2372,6 +2372,7 @@ impl crate::ports::runs::RunStore for MongoStore {
                 "company_id": company.as_ref(),
                 "run_id": &run.id,
                 "task_id": run.task_id.as_deref(),
+                "agent_id": run.agent_id.as_str(),
                 "status": run.status.as_str(),
                 "attempt": run.attempt as i64,
                 "created_ms": run.created_at_millis as i64,
