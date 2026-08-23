@@ -7667,6 +7667,43 @@ mod test {
         (rt, id)
     }
 
+    /// Like [`park_one_blocked_tool_call`], but parks the same effect **twice**
+    /// — two cycles, two identical cards on one runtime.
+    ///
+    /// The ordering matters and is why this exists: the deny/grant reconcile
+    /// tests need both cards parked before either is resolved, because once a
+    /// standing deny is live the identical call is denied inline and never
+    /// parks again.
+    async fn park_two_blocked_tool_calls(
+        home: std::path::PathBuf,
+        effect: Effect,
+    ) -> (Arc<CompanyRuntime>, Vec<ApprovalId>) {
+        let rt = Arc::new(
+            RuntimeBuilder::new(home, manifest("supervised"))
+                .with_brain(Arc::new(ParkingBrain { effect }))
+                .build()
+                .await
+                .unwrap(),
+        );
+        let mut ids = Vec::new();
+        for text in ["do it", "again"] {
+            let report = rt
+                .run_cycle(vec![CompanyEvent::OperatorMessage {
+                    mentions: Vec::new(),
+                    parent: None,
+                    text: text.into(),
+                    by: None,
+                    chat: None,
+                    deliverable: None,
+                }])
+                .await
+                .unwrap();
+            assert_eq!(report.parked.len(), 1);
+            ids.push(report.parked[0].clone());
+        }
+        (rt, ids)
+    }
+
     /// The headline: approving with the broader scope arms a standing grant, and
     /// mints **no** single-use grant beside it.
     ///
