@@ -1,0 +1,49 @@
+# The setup work this company starts with, on the board in To-do at first
+# boot.
+#
+# Vertical-specific: the baseline in `globals/tasks.toml` already covers the
+# brief, the first goals, the standing decisions, the top risks and the
+# connections. What is here is the setup an enterprise sales team is defined
+# by — the flow it runs on, and the ledgers it keeps.
+#
+# Each card names what it produces, so an agent picking it up hands back the
+# thing rather than an essay about the thing.
+
+[[task]]
+id = "set-up-the-qualification-bar"
+title = "Set up the qualification bar"
+priority = "high"
+note = """
+State what makes a `deals` row qualified rather than hopeful: budget, \
+authority, a real problem, and a date. Record it on `decisions`.
+
+An unqualified pipeline forecasts nothing, and the cost is paid at the end \
+of the quarter by everybody.
+
+Done when the bar is recorded and every deal is graded against it.\
+"""
+
+[[task]]
+id = "set-up-the-objection-library"
+title = "Set up the objection library"
+priority = "high"
+note = """
+Open an `objections` row for every objection this product actually meets, \
+with the answer that works and the evidence behind it.
+
+Objections are finite and repeat. A team that improvises each one \
+improvises badly under pressure.
+
+Done when the recurring objections have rows with answers.\
+"""
+
+[[task]]
+id = "set-up-the-account-record"
+title = "Set up the account record"
+priority = "medium"
+note = """
+Get the target accounts onto `accounts`, each with who is actually \
+involved in the decision and what they each want.
+
+Done when every live account names its decision-makers.\
+"""

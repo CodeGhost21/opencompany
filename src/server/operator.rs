@@ -624,16 +624,46 @@ async fn company_events(
     // These are ephemeral and never journaled; the console switches on `type`
     // just like the durable projections. On a company with no active turn this
     // stream is simply quiet.
-    let live = crate::turn_stream::subscribe(&company).map(|frame| {
-        Ok::<Event, Infallible>(
-            Event::default().data(serde_json::to_string(&frame).unwrap_or_default()),
-        )
-    });
+    //
+    // A typing frame authored by this very connection is dropped here rather
+    // than by the console: the bus fans a ping out to every subscriber of the
+    // company, including its sender, so without this a composer would echo its
+    // own "You are typing…" line back at itself for the length of the ping's
+    // TTL. Presence is left alone — a console does not render its own dot from
+    // the live feed, so there is nothing to echo.
+    let self_id = scope.actor.as_ref().map(|a| a.id.clone());
+    let live = crate::turn_stream::subscribe(&company)
+        .filter_map(move |frame| {
+            let drop = is_own_typing_frame(&frame, self_id.as_deref());
+            std::future::ready(if drop { None } else { Some(frame) })
+        })
+        .map(|frame| {
+            Ok::<Event, Infallible>(
+                Event::default().data(serde_json::to_string(&frame).unwrap_or_default()),
+            )
+        });
     let stream = futures::stream::select(durable, live);
     Sse::new(stream).keep_alive(
         KeepAlive::new()
             .interval(Duration::from_secs(15))
             .text("keep-alive"),
+    )
+}
+
+/// Whether a live frame is a typing ping authored by the very connection about
+/// to receive it.
+///
+/// The typing bus fans one ping out to every subscriber in the company,
+/// including its sender — there is no per-listener addressing beneath it — so
+/// without this check a console's own composer would echo its own "You are
+/// typing…" line back at itself for the length of the ping's TTL. Presence
+/// frames are left alone: a console never renders its own dot from the live
+/// feed, so there is nothing there to echo.
+fn is_own_typing_frame(frame: &crate::turn_stream::LiveFrame, self_id: Option<&str>) -> bool {
+    matches!(
+        frame,
+        crate::turn_stream::LiveFrame::Typing(typing)
+            if self_id == Some(typing.user_id.as_str())
     )
 }
 
@@ -8445,6 +8475,38 @@ mode = "full"
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    /// The composer's own typing pings must not echo back to it — the bus has
+    /// no per-listener addressing, so this filter is the only thing standing
+    /// between "you typed" and a fresh "Alice is typing…" line under your own
+    /// cursor.
+    #[test]
+    fn a_typing_frame_from_the_viewer_is_dropped_and_from_anybody_else_is_kept() {
+        let mine = crate::turn_stream::LiveFrame::Typing(crate::turn_stream::TypingFrame {
+            kind: "typing",
+            user_id: "u1".into(),
+            chat_id: "engineering".into(),
+            parent_id: None,
+            at_millis: 0,
+        });
+        assert!(super::is_own_typing_frame(&mine, Some("u1")));
+        assert!(!super::is_own_typing_frame(&mine, Some("u2")));
+        assert!(
+            !super::is_own_typing_frame(&mine, None),
+            "a machine credential with nobody behind it authors nothing to echo"
+        );
+
+        let presence = crate::turn_stream::LiveFrame::Presence(crate::turn_stream::PresenceFrame {
+            kind: "presence",
+            user_id: "u1".into(),
+            status: "online",
+            at_millis: 0,
+        });
+        assert!(
+            !super::is_own_typing_frame(&presence, Some("u1")),
+            "presence is left alone — only typing echoes"
+        );
     }
 
     // -----------------------------------------------------------------------
