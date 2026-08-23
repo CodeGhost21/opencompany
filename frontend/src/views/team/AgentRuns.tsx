@@ -691,6 +691,7 @@ function RunDetailPanel({
   run,
   source,
   now,
+  onDetail,
   onBack,
 }: {
   client: OpenCompanyClient;
@@ -698,6 +699,13 @@ function RunDetailPanel({
   run: RunSummary;
   source: RunSource;
   now: number;
+  /**
+   * The freshest summary this attempt's detail read has seen. The panel itself
+   * renders from the `run` prop (the list's copy, which a poll may have to
+   * *hold* for a run older than the newest page); handing the fresh copy up
+   * lets the list's holder replace the stale one.
+   */
+  onDetail?: (run: RunSummary) => void;
   onBack: () => void;
 }) {
   const [detail, setDetail] = useState<RunDetail | null>(null);
@@ -713,6 +721,7 @@ function RunDetailPanel({
         if (cancelled) return;
         setDetail(next);
         setError(null);
+        onDetail?.(next.run);
       } catch (e) {
         if (!cancelled)
           setError(e instanceof Error ? e.message : "could not load this attempt");
@@ -725,7 +734,7 @@ function RunDetailPanel({
       cancelled = true;
       stop();
     };
-  }, [client, company, runId, live]);
+  }, [client, company, runId, live, onDetail]);
 
   const elapsed = runElapsedMillis(run, now);
   const Icon = SOURCE_ICON[source.kind];
