@@ -72,11 +72,16 @@ function mintBridge(frame: HTMLIFrameElement): { capability: string; port: Messa
   const contentWindow = frame.contentWindow as Window;
   const postMessage = vi.spyOn(contentWindow, "postMessage").mockImplementation(() => {});
   loadFrame(frame);
+  // The spy collapses `postMessage`'s overloads to the two-argument form, but
+  // the view uses the three-argument one (message, targetOrigin, transfer), so
+  // the transferred port lives at index 2. Cast through `unknown` to reach it.
   const init = postMessage.mock.calls.find(
     ([msg]) => (msg as { type?: string })?.type === "oc:init",
-  );
-  const capability = (init?.[0] as { capability: string } | undefined)?.capability;
-  const port = (init?.[2] as MessagePort[] | undefined)?.[0];
+  ) as unknown as
+    | [message: { capability?: string }, origin: string, transfer: MessagePort[]]
+    | undefined;
+  const capability = init?.[0]?.capability;
+  const port = init?.[2]?.[0];
   if (!capability || !port) {
     throw new Error("oc:init did not carry a capability and a transferred port");
   }
