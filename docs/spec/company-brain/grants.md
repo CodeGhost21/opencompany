@@ -66,6 +66,23 @@ epoch-millis deadline, capped at 7 days server-side — a request past the cap i
 a **400, never a silent clamp**, because quietly shortening a duration would
 leave the operator believing a permission is live when it lapsed days earlier.
 
+The same standing-policy record also carries a **verdict**. Approving a card
+with a standing scope creates a standing approval; declining it with that scope
+creates a standing **denial**. A denial is an agent-only refusal for the same
+`(subject, tool, scope)` the card showed: matching calls are rejected until the
+policy expires or is revoked, rather than being parked again. Workflow gate
+cards cannot mint standing denials, because the workflow path does not enforce
+that verdict; the resolve route rejects that combination with a 400 and leaves
+the card parked for a one-time denial instead.
+
+Standing approvals and denials are mutually exclusive for a scope. When a new
+standing policy is minted, any live opposite-polarity policy whose subject and
+tool match and whose recorded scope admits the new scope is journaled as
+revoked before it is removed from the live set. Thus the newest operator
+decision wins, while policies for different hosts or other non-overlapping
+scopes coexist. A wildcard legacy policy (scope `None`) overlaps every new
+scope and is superseded by the newer decision.
+
 Expiry is enforced at **redemption**, under the same lock as the match, and also
 swept on the scheduler's maintenance tick. The sweep is housekeeping and an
 operator notice; it is never the enforcement, or "for one hour" would mean
