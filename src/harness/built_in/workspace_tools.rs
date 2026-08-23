@@ -2681,26 +2681,17 @@ mod tests {
     /// walk on a folder rename.
     #[test]
     fn subtree_ids_terminates_on_a_cycle() {
-        let nodes = vec![
-            folder("f", "archive", None),
-            folder("a", "A", Some("f")),
-            folder("b", "B", Some("a")),
-            folder("c", "C", Some("b")),
-            // `b` already names `a` as its parent, so this edge folds the two
-            // into a cycle; the visited set must keep the walk finite.
-            folder("d", "D", Some("b")),
-        ];
-        let index = PathIndex::build(nodes);
-        // Re-wire: c → b, b → a, a → c would be a 3-cycle, but `a`'s parent is
-        // already `f`. Build the cycle explicitly instead.
-        let _ = index;
-        let cyclic = vec![
-            folder("x", "X", Some("y")),
-            folder("y", "Y", Some("x")),
-        ];
+        // x ↔ y: each names the other as its parent, so no path exists for
+        // either — but a parent-id walk from one of them must still finish.
+        let cyclic = vec![folder("x", "X", Some("y")), folder("y", "Y", Some("x"))];
         let index = PathIndex::build(cyclic);
-        // The walk from a root that reaches the cycle must finish, not loop.
-        let _ = index.subtree_ids("x");
+        let mut subtree = index.subtree_ids("x");
+        subtree.sort_unstable();
+        assert_eq!(
+            subtree,
+            vec!["x", "y"],
+            "the visited set must keep the walk finite and still name both nodes"
+        );
     }
 
     #[test]
