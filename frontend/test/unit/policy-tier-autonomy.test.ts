@@ -118,6 +118,16 @@ describe("the autonomy direction", () => {
     expect(widensAutonomy(TIERS, "unknown", "full")).toBe(false);
   });
 
+  it("gates the same way the host matcher does", () => {
+    expect(gatedBy(["shell"], "shell")).toBe(true);
+    expect(gatedBy(["payment"], "payment.send")).toBe(true);
+    expect(gatedBy(["payment.send"], "payment")).toBe(false);
+    expect(gatedBy(["pay"], "payroll.export")).toBe(false);
+    expect(gatedBy(["Shell"], "shell")).toBe(true);
+    expect(gatedBy([], "shell")).toBe(false);
+    expect(gatedBy([""], "shell")).toBe(false);
+  });
+
   it("shows the looser end of the scale in the console's amber risk tone", async () => {
     await mount(makeClient(status("supervised")).client);
     expect(container.querySelector("[data-testid=policy-tier-auto]")?.className).toContain(
