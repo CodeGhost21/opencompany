@@ -328,7 +328,12 @@ describe("toast click-through", () => {
       expect.objectContaining({ type: "oc:relay-pointercancel", x: 50, y: 50, pointerId: 7 }),
       "*",
     );
-    expect(framePressesEmpty(7)).toBe(true);
+
+    // The press is over: a later move is no longer forwarded to the frame.
+    window.dispatchEvent(
+      new PointerEvent("pointermove", { clientX: 80, clientY: 90, pointerId: 7 }),
+    );
+    expect(posted).toHaveBeenCalledTimes(2); // pointerdown + pointercancel only
   });
 
   it("drops the tail of a frame press when the frame leaves the document", () => {
