@@ -2179,38 +2179,40 @@ mod tests {
         assert_eq!(manifest.agents[0].prompt.as_deref(), Some(profile));
     }
 
-    /// Widening the vocabulary moved nobody's reach.
+    /// Every shape starts from the same base belt, and adds only upward.
     ///
-    /// The enum does two jobs — it picks a belt and it picks the standing
-    /// instructions — and the second wants a finer grain than the first, which
-    /// is why `operations` was split once it was covering 13 of the 30 curated
-    /// profiles. The split is only defensible if it is instruction-only, so
-    /// that is pinned here rather than asserted in the commit message: every
-    /// shape that exists to say something different about *how* the work is
-    /// done carries the identical belt it had before.
+    /// This replaces an earlier "the vocabulary is instruction-only" pin, which
+    /// asserted that six of the eight shapes carried a byte-identical belt.
+    /// They no longer do — the belts diverge on purpose now, which is what
+    /// "scoped to the agent" means. What must hold instead is the structural
+    /// property that makes the divergence readable: `BASE_BELT` is a prefix of
+    /// every shape's belt, so a reader comparing two teammates is comparing
+    /// their *extras*, and nothing a shape adds can take a base capability
+    /// away.
     #[test]
-    fn the_widened_vocabulary_is_instruction_only() {
-        let writing = AgentFocus::Writing.tools();
-        for shape in [
-            AgentFocus::Design,
-            AgentFocus::Operations,
-            AgentFocus::Coordination,
-            AgentFocus::Build,
-            AgentFocus::Support,
-        ] {
-            assert_eq!(shape.tools(), writing, "{shape:?} moved a belt");
-        }
-        // The two that genuinely differ still do, or the split would have
-        // flattened the distinction it was meant to leave alone.
-        assert_ne!(AgentFocus::Research.tools(), writing);
-        assert_ne!(AgentFocus::Analysis.tools(), writing);
-        // `build` is the one whose name invites a wider belt. It gets neither
-        // `repo` nor `shell`, like every other focus.
-        let build = AgentFocus::Build.tools();
-        for denied in ["repo", "shell", "media", "composio", "search"] {
+    fn every_belt_extends_the_base_belt_and_only_adds() {
+        for focus in AgentFocus::ALL {
+            let belt = focus.tools();
             assert!(
-                !build.iter().any(|g| g.starts_with(denied)),
-                "build reaches {denied}"
+                belt.starts_with(&BASE_BELT.map(str::to_string)),
+                "{} does not start from the base belt: {belt:?}",
+                focus.as_str()
+            );
+        }
+        // The shapes whose work genuinely differs still differ, or the split
+        // would have flattened the distinction it exists to keep.
+        let writing = AgentFocus::Writing.tools();
+        assert_ne!(AgentFocus::Research.tools(), writing);
+        assert_ne!(AgentFocus::Build.tools(), writing);
+        assert_ne!(AgentFocus::Design.tools(), writing);
+        // `build` is the one shape that reaches execution, and the only one.
+        for focus in AgentFocus::ALL {
+            let reaches_shell = focus.tools().iter().any(|g| g == "shell");
+            assert_eq!(
+                reaches_shell,
+                focus == AgentFocus::Build,
+                "{} and `shell` disagree",
+                focus.as_str()
             );
         }
     }
@@ -2682,15 +2684,18 @@ mod tests {
 
     /// The hole a prompt-injection test found: an **invalid** focus used to
     /// produce a wider agent than any valid one, because an empty `tools` list is
-    /// read as "inherit the company belt" and that belt is
-    /// `["*", "media", "composio"]`.
+    /// read as "inherit the company belt".
     ///
-    /// Quantified over the whole vocabulary plus the unknown case, so the
-    /// invariant is "no focus, recognised or not, out-grants another" rather than
-    /// four separate assertions about four lists.
+    /// Still the invariant after the belts were widened, and still the reason
+    /// the fallback is a real focus rather than an empty list. What the unknown
+    /// case may now hold is the base belt plus workspace writes — what it may
+    /// never hold is the catch-all, or any namespace no recognised shape asks
+    /// for. `media`, `composio` and `shell` are the ones worth naming: each is
+    /// reachable from exactly one shape, and a tampered focus must not be a
+    /// route to any of them.
     #[test]
     fn an_unrecognised_focus_can_never_out_grant_a_recognised_one() {
-        const FORBIDDEN: [&str; 5] = ["media", "composio", "search", "repo", "shell"];
+        const FORBIDDEN: [&str; 4] = ["media", "composio", "repo", "shell"];
         let unknown = tools_for_focus(AgentFocus::from_wire("media"));
         assert!(!unknown.is_empty());
         for grant in &unknown {
