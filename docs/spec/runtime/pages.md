@@ -104,17 +104,18 @@ read-before-write invariant `workspace_write` enforces.
 
 ## The HTTP routes
 
-[`server::ops::pages`](../../../src/server/ops/pages.rs) serves three routes,
-scoped and authenticated exactly like every other console route (this is an
-internal dashboard page, not a public site):
+[`server::ops::pages`](../../../src/server/ops/pages.rs) serves four routes,
+scoped to the addressed company exactly like every other console route (this
+is an internal dashboard page, not a public site):
 
 | Route | Serves |
 | --- | --- |
 | `GET {scope}/pages` | Every page's manifest as JSON — `[{ "slug", "title", "description", "icon", "navVisible" }]` — for the console nav. |
-| `GET {scope}/pages/{slug}` | A fixed HTML shell: an import map pointing `react` / `react-dom/client` / `react/jsx-runtime` at `/pages-sdk/react.mjs` and `@opencompany/site` at `/pages-sdk/index.mjs`, plus a `<script type="module">` that imports `./{slug}/bundle.mjs` — a path relative to the shell's own URL at `…/pages/{slug}` — and mounts it with `ReactDOM.createRoot`. |
+| `GET {scope}/pages/{slug}` | A fixed HTML shell: an import map pointing `react` / `react-dom/client` / `react/jsx-runtime` at `/pages-sdk/react.mjs` and `@opencompany/site` at `/pages-sdk/index.mjs`, plus a `<script type="module">` that imports `./{slug}/bootstrap.mjs?oc_cap=…` — a path relative to the shell's own URL at `…/pages/{slug}` — and mounts the page with `ReactDOM.createRoot`. |
+| `GET {scope}/pages/{slug}/bootstrap.mjs` | The fixed mounting module, served with the shell-minted capability threaded into its own import of the bundle. |
 | `GET {scope}/pages/{slug}/bundle.mjs` | The page's `page.compiled.mjs`, streamed with `Content-Type: application/javascript` and `Content-Disposition: inline`. |
 
-All three set:
+All four set:
 
 ```text
 Content-Security-Policy: default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'none'; frame-ancestors 'self'
@@ -127,17 +128,33 @@ authenticated, company-specific content, so a browser — or an intermediary —
 must never serve a cached copy of one company's (or one session's) page to
 another request.
 
-The bundle's module response additionally carries `Access-Control-Allow-Origin:
-null` and `Access-Control-Allow-Credentials: true`; the fixed shell loads its
-external bootstrap module with `crossorigin="use-credentials"`. The sandbox makes the shell an
-opaque origin, so every module in its graph is otherwise a CORS request with
-`Origin: null` and no session cookie. The console's fixed `/pages-sdk/*.mjs`
-assets carry the same CORS response headers. This is narrowly for the
-same-origin console deployment: it lets the opaque frame obtain the session
-only while loading the authenticated module graph, never from page JavaScript.
+### Why the module graph is gated by a capability, not a session
 
-as defense in depth, on top of the iframe sandbox described below, which is
-the boundary that actually holds.
+The sandboxed iframe is opaque-origin (`sandbox="allow-scripts"`, no
+`allow-same-origin`), which is what makes the module graph a CORS request with
+`Origin: null` **and no session cookie**: a browser does not attach cookies to
+subresource requests from an opaque-origin frame, no matter what credentials
+mode the module element asks for. So the two module routes cannot be
+session-authenticated the way the shell is. The shell is loaded by an iframe
+`src` *navigation*, which does attach the operator's HttpOnly cookie; it mints
+a short-lived, unguessable capability bound to this company and page and
+embeds it in the module URLs (`?oc_cap=…` on the bootstrap, threaded through
+the bootstrap's static import of the bundle). The module routes accept
+**that** instead of a session. The capability is minted fresh on every shell
+load, expires within a minute, and authorizes only the two module URLs for
+that one page — it cannot list pages, read another page's bundle, or reach any
+other route.
+
+The module responses additionally carry `Access-Control-Allow-Origin: null`
+and `Access-Control-Allow-Credentials: true`. The opaque origin reports itself
+as the literal `"null"` origin, and module scripts always fetch with CORS, so
+the response must admit that origin explicitly or the browser refuses it.
+`Access-Control-Allow-Credentials: true` is harmless — the frame sends no
+credentials — and keeps the pair consistent across every module the shell
+references. The console's fixed `/pages-sdk/*.mjs` assets carry the same CORS
+response headers. This is narrowly for the same-origin console deployment, as
+defense in depth on top of the iframe sandbox described below, which is the
+boundary that actually holds.
 
 ### Why `Content-Disposition: inline` is the right call here, and wrong at `workspace/blob/{id}`
 
