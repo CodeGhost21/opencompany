@@ -21,7 +21,7 @@ export interface TeamMember {
    * Whether this teammate has an inbox on the host. Read from `GET …/team` and
    * written by `PUT …/team/{id}/inbox` — never guessed client-side, so the Inbox
    * page and this toggle agree on the same `InboxStore` state (issue #173).
-  */
+   */
   inboxEnabled: boolean;
   /**
    * Whether this teammate comes from the global baseline every company gets.
