@@ -284,13 +284,18 @@ describe("the page frame's toast-relay listener", () => {
     // completed press, even when another pointer press ended more recently.
     // The first drag's click must target its press element, while the second
     // press's click must target its own element.
-    const below = document.createElement("button");
-    const clicked = vi.fn();
-    below.addEventListener("click", clicked);
-    document.body.append(below);
-    mockElementFromPoint(below);
+    const pressTarget = document.createElement("button");
+    const pressClicked = vi.fn();
+    pressTarget.addEventListener("click", pressClicked);
+    document.body.append(pressTarget);
 
-    // A drag that ends over `below`, followed by a fresh press+click on it.
+    const releaseTarget = document.createElement("button");
+    const releaseClicked = vi.fn();
+    releaseTarget.addEventListener("click", releaseClicked);
+    document.body.append(releaseTarget);
+    mockElementFromPoint(releaseTarget);
+
+    // A drag that ends over `releaseTarget`, followed by a fresh press+click on it.
     relayFrom(window.parent, {
       type: "oc:relay-pointerdown",
       x: 10,
