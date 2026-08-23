@@ -63,8 +63,10 @@ test("a list row leads with its title and shows one readable status", async ({
     await expect(row.getByTestId("ledger-entry-status")).toHaveText("To-do");
     await expect(row.getByTestId("ledger-entry-id")).toHaveText(id);
     await expect(row.getByText("column", { exact: true })).toHaveCount(0);
-    // The blank paragraph goes, but the indentation inside a line is part of
-    // what was recorded — `pre-line` would have collapsed it.
+    // The blank paragraph goes — that is `compactFieldValue`, and textContent
+    // shows it. Indentation inside a line survives only because the row renders
+    // with `pre-wrap`; CSS collapsing under `pre-line` leaves textContent
+    // untouched, so the computed style is what actually guards it.
     const note = row.locator("dd");
     expect(await note.evaluate((el) => el.textContent)).toBe(
       "First line\n    indented line\nSecond line",
