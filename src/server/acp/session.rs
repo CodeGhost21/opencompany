@@ -161,12 +161,25 @@ impl SessionRegistry {
     /// there is a silent no-op, exactly as ACP specifies — an opaque id says
     /// nothing useful by its absence.
     pub fn remove(&self, connection: &str, id: &str) -> bool {
-        self.by_connection
+        let mut by_connection = self
+            .by_connection
             .lock()
-            .expect("session registry poisoned")
+            .expect("session registry poisoned");
+        let removed = by_connection
             .get_mut(connection)
             .map(|sessions| sessions.remove(id).is_some())
-            .unwrap_or(false)
+            .unwrap_or(false);
+        // A connection's last session going also takes the connection key with
+        // it. Without this, `session/new` + `session/delete` (or `disconnect`)
+        // over fresh caller-controlled connection ids grows the host-wide map
+        // by one empty entry per connection, forever.
+        if by_connection
+            .get(connection)
+            .is_some_and(|sessions| sessions.is_empty())
+        {
+            by_connection.remove(connection);
+        }
+        removed
     }
 
     /// Drops every session a connection held.
