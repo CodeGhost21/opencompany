@@ -45,11 +45,11 @@ async function tourKey(page: Page): Promise<string> {
   return key!;
 }
 
-test("a legacy cancelled-handshake query lands in the console, not on a dead page", async ({ page }) => {
+test("a legacy hash callback lands on Connections with its cancellation message", async ({ page }) => {
   // This is the query the former callback used after an operator cancelled at
   // the provider consent screen. Before the original fix it answered with
   // `{"error":"provider returned: access_denied"}` as the document body.
-  await page.goto("/connections?connect_error=denied&provider=slack");
+  await page.goto("/#/connections?connect_error=denied&provider=slack");
 
   // Assert the message first — the toast auto-dismisses, so anything that
   // blocks for a timeout before this would race it away.
@@ -59,10 +59,10 @@ test("a legacy cancelled-handshake query lands in the console, not on a dead pag
   await dismissWelcome(page);
   await expect(page.getByRole("heading", { name: "Connections", level: 1 })).toBeVisible();
 
-  // The param is stripped, so a refresh doesn't re-fire the toast.
+  // The fragment query is stripped, so a refresh doesn't re-fire the toast.
   await expect
-    .poll(() => new URL(page.url()).searchParams.get("connect_error"))
-    .toBeNull();
+    .poll(() => new URL(page.url()).hash.includes("connect_error"))
+    .toBe(false);
 
   // The grid is rendered and usable — the failure was a bounce-back, not a
   // terminal state.

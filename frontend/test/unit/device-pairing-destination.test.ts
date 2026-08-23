@@ -92,7 +92,6 @@ describe("the desktop pairing prompt", () => {
           company: "acme",
           feed: { messages: [] } as unknown as CompanyFeed,
           sub: page.id,
-          onNavigate: () => {},
           onFlag: () => {},
         }),
       );

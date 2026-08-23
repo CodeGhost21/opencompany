@@ -234,9 +234,10 @@ export function ProvidersSection({
             className="grid gap-2"
             style={{
               // Uniform rows so a grid of 123 tiles reads as a grid and not as
-              // ragged masonry — the tile is a fixed slot, and the label clamps.
+              // ragged masonry — the tile is a fixed slot, and both the label
+              // and the access disclosure clamp (issue #1474).
               gridTemplateColumns: "repeat(auto-fill, minmax(8.5rem, 1fr))",
-              gridAutoRows: "5.5rem",
+              gridAutoRows: "8.5rem",
             }}
           >
             {visible.map((row) => (
@@ -344,9 +345,9 @@ export function ProvidersSection({
 function SectionHeading({ count }: { count: number | null }) {
   return (
     <div className="space-y-1">
-      <h3 className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
+      <h2 className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
         Providers
-      </h3>
+      </h2>
       <p className="text-sm text-muted-foreground">
         Every account this company can act through, and which are wired.
         {count !== null && count > 0 && ` ${count} connected.`}
@@ -560,7 +561,7 @@ function ProviderTile({
           type="button"
           onClick={onOpen}
           title={title}
-          aria-label={`Open ${row.label}. ${state}.`}
+          aria-label={`Open ${row.label}. ${state}. Typical access: ${permissionHint(row.category)}.`}
           // Deliberately NOT prefixed `provider-`: `connections-one-list.spec.ts`
           // counts `[data-testid^='provider-']` nodes to prove a provider
           // renders exactly one tile, and a nested node sharing that prefix
@@ -581,6 +582,14 @@ function ProviderTile({
           )}
         >
           {body}
+          {/* The hint is a broad category-derived guess — Composio decides the
+              real consent scopes and does not publish them here. Saying
+              "Permission requested" would present that guess as the actual
+              grant; "Typical access" labels it as the general shape instead
+              (issue #1474). */}
+          <p className="mt-2 line-clamp-2 text-left text-xs text-muted-foreground">
+            Typical access: {permissionHint(row.category)}.
+          </p>
         </button>
       ) : connectable ? (
         <button
@@ -588,7 +597,7 @@ function ProviderTile({
           disabled={anyBusy || (row.route.kind === "composio" && noCredential)}
           onClick={onConnect}
           title={row.description || undefined}
-          aria-label={`Connect ${row.label}. ${state}. Authorises: ${permissionHint(row.category)}.`}
+          aria-label={`Connect ${row.label}. ${state}. Typical access: ${permissionHint(row.category)}.`}
           className={cn(
             shell,
             "transition-colors hover:border-foreground/20 hover:bg-accent",

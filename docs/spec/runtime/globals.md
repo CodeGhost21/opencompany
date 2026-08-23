@@ -38,6 +38,7 @@ the other three.
 | Workflows | `list_workflows_with_globals` / `load_workflow_with_globals` | Seed file, then saved overlay, then the global graph. |
 | Skills | `EffectiveSkills::materialize` | Installed as the bottom layer; a company bundle or `custom_doc` delta of the same slug supersedes it. |
 | Ledgers | `runtime::builder::seed_ledgers` | **Seeded once** into the company's own store at first boot, then owned by the company. A bundle declaration of the same slug replaces the global before either is stored. |
+| Setup cards | `runtime::builder::seed_tasks` | **Seeded once** onto the board at first boot, in To-do. A bundle card of the same id replaces the global one. Opt-in per caller — see below. |
 | Tools | `Tools::default` | `[tools].default_allow` is the belt a company with no `[tools]` section gets. |
 
 ### A company always wins
@@ -48,7 +49,7 @@ nobody's design. To drop a global rather than replace it, the manifest says so:
 
 ```toml
 [globals]
-disable = ["agent:researcher", "workflow:weekly_review", "skill:meeting-brief", "ledger:risks"]
+disable = ["agent:researcher", "workflow:weekly_review", "skill:meeting-brief", "ledger:risks", "task:name-the-top-risks"]
 ```
 
 Every entry is `<kind>:<id>` with a kind from `globals::DISABLE_KINDS`, and must
@@ -58,7 +59,7 @@ synthesized disabling deltas (`harness::globals_skill_disables`) so the manifest
 and the console's own toggle speak the same vocabulary; a disable beats an
 enable, so the manifest wins over a console re-enable.
 
-### Ledgers are the one surface that is seeded rather than resolved
+### Ledgers and setup cards are seeded rather than resolved
 
 Every other surface above is re-resolved on each read, so editing `globals/`
 changes what an existing company gets on its next load. Ledgers cannot work that
@@ -66,6 +67,36 @@ way, because a company **owns its record**: `docs/spec/runtime/ledgers.md` makes
 retiring a ledger a person's call, and a baseline re-applied on every boot would
 undo that call on the next restart. A `ledger:` disable entry therefore governs
 what a *new* company is seeded with, not what an existing one keeps.
+
+### Setup cards, and why they are opt-in
+
+`globals/tasks.toml` is the setup work every company starts with on its board —
+write the brief, set the first goals, record the standing decisions, name the
+top risks, wire the connections — on top of which each bundle's own
+`tasks.toml` adds the setup its vertical is defined by. Seeded once, at first
+boot, into To-do.
+
+Two properties are load-bearing:
+
+- **A seeded card can never dispatch.** A seed file has no `column` key at all,
+  and the seeder writes through the plain `TaskStore`, not
+  `CompanyRuntime::upsert_task` — the single site that edge-fires a dispatch
+  (`in_progress`) or a billed planning pass (`planning`). Either alone would be
+  enough; both are there because a freshly provisioned company spending
+  inference on work nobody asked for is the failure worth paying twice to avoid.
+- **Seeding is opt-in**, unlike ledger seeding, which is unconditional. Cards
+  are visible state that tests count: `tests/one_card_per_message.rs` asserts
+  exact board sizes against a company built straight from `RuntimeBuilder`, and
+  a baseline arriving unasked would quietly turn those assertions into
+  statements about the baseline. `RuntimeBuilder::with_task_seeding(true)` is
+  set by the product entry points and nothing else.
+
+The first-boot gate is `store.load(&id)` returning `None` — the last moment a
+first boot is distinguishable, since the `store.save` at the end of the build
+makes every later boot a returning one. That is stricter than the ledger
+seeder's "nothing declared yet" gate, and deliberately: clearing the board is
+routine, and a card an operator deleted reappearing on the next restart is the
+runtime arguing with them.
 
 Seeding runs only when the company has no declaration at all, and never on a
 rebuild. The honest limit that follows: a person who retires *every* declared

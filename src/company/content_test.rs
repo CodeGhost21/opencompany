@@ -481,7 +481,7 @@ fn the_repo_skill_registry_parses() {
 /// ref is on that company's roster.
 ///
 /// Gated on `openhuman` because `translate` and `namespace_of` live behind that
-/// feature; the `Rust (openhuman, tinycortex)` CI lane runs it.
+/// feature; the `Rust (openhuman, tinymemory)` CI lane runs it.
 #[cfg(feature = "openhuman")]
 #[test]
 fn every_bundled_workflow_is_runnable_against_its_roster() {
@@ -907,6 +907,252 @@ fn every_company_ledger_can_be_closed_and_says_why() {
                     company.display(),
                     spec.slug
                 );
+            }
+        }
+    }
+}
+
+/// The bundles that ship a vertical's own setup cards and tool servers.
+///
+/// Together with [`FIXTURE_COMPANIES`] this is a **partition** of `companies/`,
+/// asserted by [`every_company_declares_a_setup_posture`]. A partition rather
+/// than an allow-list for the reason [`every_company_declares_a_search_posture`]
+/// gives: an allow-list is satisfied by a new template nobody classified, and
+/// "the board is empty because this vertical has no setup work" and "the board
+/// is empty because whoever added this bundle forgot" are indistinguishable
+/// afterwards.
+const SETUP_SEEDED_COMPANIES: [&str; 22] = [
+    "agentic_accounting_firm",
+    "agentic_consultation_firm",
+    "agentic_customer_support",
+    "agentic_design_studio",
+    "agentic_enterprise_sales",
+    "agentic_game_business",
+    "agentic_game_studio",
+    "agentic_influencer_business",
+    "agentic_law_firm",
+    "agentic_marketing_agency",
+    "agentic_math_lab",
+    "agentic_media_company",
+    "agentic_pharma_startup",
+    "agentic_product_team",
+    "agentic_realestate_company",
+    "agentic_recruiting_company",
+    "agentic_research_lab",
+    "agentic_software_company",
+    "agentic_venture_capital",
+    "agentic_venture_studio",
+    "signals_opportunity_studio",
+    "startup_accelerator",
+];
+
+/// The bundles that deliberately ship neither, because they are fixtures.
+///
+/// A fixture proves a mechanism and is asserted against exactly — `e2e_harness`
+/// and `openhuman_demo` also declare their own `[[mcp_server]]` inline — so
+/// seeded cards and a second declaration of `deepwiki` would both perturb what
+/// they exist to pin down.
+const FIXTURE_COMPANIES: [&str; 3] = ["e2e_harness", "e2e_setup", "openhuman_demo"];
+
+/// Every company is either a vertical that ships setup content or a fixture that
+/// deliberately does not — and the classification is re-derived from the files
+/// on disk, so it cannot be made true by editing the lists alone.
+#[test]
+fn every_company_declares_a_setup_posture() {
+    use std::collections::BTreeSet;
+
+    let seeded: BTreeSet<&str> = SETUP_SEEDED_COMPANIES.iter().copied().collect();
+    let fixtures: BTreeSet<&str> = FIXTURE_COMPANIES.iter().copied().collect();
+    assert_eq!(
+        seeded.len(),
+        SETUP_SEEDED_COMPANIES.len(),
+        "SETUP_SEEDED_COMPANIES lists a company twice"
+    );
+    assert_eq!(
+        fixtures.len(),
+        FIXTURE_COMPANIES.len(),
+        "FIXTURE_COMPANIES lists a company twice"
+    );
+    let overlap: Vec<&&str> = seeded.intersection(&fixtures).collect();
+    assert!(
+        overlap.is_empty(),
+        "a company cannot be both a vertical and a fixture: {overlap:?}"
+    );
+
+    let on_disk: BTreeSet<String> = subdirs(&repo_root().join("companies"))
+        .iter()
+        .filter_map(|dir| dir.file_name()?.to_str().map(str::to_string))
+        .collect();
+    let classified: BTreeSet<String> = seeded
+        .union(&fixtures)
+        .map(|name| (*name).to_string())
+        .collect();
+    assert_eq!(
+        on_disk, classified,
+        "every company under `companies/` must be classified as a vertical or a fixture — \
+         add it to SETUP_SEEDED_COMPANIES or FIXTURE_COMPANIES"
+    );
+
+    // The classification has to match the files, not merely the lists.
+    for name in &seeded {
+        let dir = repo_root().join("companies").join(name);
+        assert!(
+            super::has_mcp_file(&dir),
+            "{name} is listed as a vertical but ships no `mcp.json`"
+        );
+        assert!(
+            super::has_task_file(&dir),
+            "{name} is listed as a vertical but ships no `tasks.toml`"
+        );
+    }
+    for name in &fixtures {
+        let dir = repo_root().join("companies").join(name);
+        assert!(
+            !super::has_task_file(&dir),
+            "{name} is a fixture and must not seed cards onto its board"
+        );
+    }
+}
+
+/// Every shipped `mcp.json` parses cleanly, and every server it declares is safe
+/// to hand an agent unattended: HTTP, credential-free, and either answering or
+/// deliberately off pending a token.
+///
+/// `every_company_manifest_is_valid` already runs each file through the real
+/// merge, so a malformed one fails there. This adds the rules that are about
+/// *shipping* a server to everyone who runs the bundle rather than about the
+/// declaration being well-formed.
+#[test]
+fn every_shipped_mcp_server_is_safe_to_ship() {
+    for company in subdirs(&repo_root().join("companies")) {
+        let name = company.file_name().unwrap().to_str().unwrap().to_string();
+        if !super::has_mcp_file(&company) {
+            continue;
+        }
+        let (servers, problems) = super::load_dir_mcp_servers(&company);
+        assert!(problems.is_empty(), "{name}/mcp.json: {problems:?}");
+        assert!(
+            !servers.is_empty(),
+            "{name} ships an `mcp.json` that declares nothing"
+        );
+
+        let readme = std::fs::read_to_string(company.join("README.md"))
+            .unwrap_or_else(|err| panic!("{name}/README.md: {err}"));
+
+        for server in &servers {
+            assert!(
+                server.endpoint.starts_with("https://"),
+                "{name}/mcp.json: `{}` must be https — a shipped template must not send an \
+                 agent's traffic in the clear",
+                server.name
+            );
+            assert!(
+                server
+                    .description
+                    .as_deref()
+                    .is_some_and(|d| !d.trim().is_empty()),
+                "{name}/mcp.json: `{}` has no `description` — JSON carries no comments, so the \
+                 description is the only place this choice can be explained",
+                server.name
+            );
+            // A server that needs a credential must ship off. Enabled plus a
+            // credential means it fails at an agent's first tool call, on every
+            // install, until somebody notices why.
+            if server.auth_secret.is_some() {
+                assert!(
+                    !server.enabled,
+                    "{name}/mcp.json: `{}` names an `authSecret` and ships enabled — it would \
+                     fail at the first tool call; ship it disabled",
+                    server.name
+                );
+            }
+            assert!(
+                readme.contains(&format!("`{}`", server.name)),
+                "{name}/README.md does not mention `{}` — an undocumented server is one nobody \
+                 can decide whether to enable",
+                server.name
+            );
+        }
+    }
+}
+
+/// Every shipped `tasks.toml` parses, and every card on it is one an agent can
+/// actually pick up.
+#[test]
+fn every_shipped_setup_card_is_pickable() {
+    use std::collections::BTreeSet;
+
+    let mut companies: Vec<(String, PathBuf)> = subdirs(&repo_root().join("companies"))
+        .into_iter()
+        .map(|dir| {
+            let name = dir.file_name().unwrap().to_str().unwrap().to_string();
+            (name, dir)
+        })
+        .collect();
+    // The baseline is held to exactly the same rules as a vertical's own file.
+    companies.push(("globals".to_string(), repo_root().join("globals")));
+
+    for (name, dir) in companies {
+        if !super::has_task_file(&dir) {
+            continue;
+        }
+        let cards =
+            super::load_dir_tasks(&dir).unwrap_or_else(|err| panic!("{name}/tasks.toml: {err}"));
+        assert!(
+            !cards.is_empty(),
+            "{name} ships a `tasks.toml` that seeds nothing"
+        );
+
+        let manifest =
+            (name != "globals").then(|| CompanyManifest::from_path(&dir).expect("manifest"));
+        let known: BTreeSet<String> = manifest
+            .as_ref()
+            .map(|m| {
+                m.agents
+                    .iter()
+                    .map(|a| a.id.clone())
+                    .chain(m.group_chats.iter().map(|g| g.id.clone()))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        for card in &cards {
+            let rendered = card.to_record(0);
+            // The safety property, asserted against the shipped content and not
+            // only against the parser: nothing seeded can enter the column that
+            // dispatches a run or the one that bills a planning pass.
+            assert_eq!(
+                rendered.column,
+                crate::ports::tasks::COLUMN_TODO,
+                "{name}/tasks.toml: `{}` is not To-do",
+                card.id
+            );
+            assert!(
+                card.note.as_deref().is_some_and(|n| !n.trim().is_empty()),
+                "{name}/tasks.toml: `{}` has no note — a card that does not say what done looks \
+                 like gets handed back as an essay",
+                card.id
+            );
+            // A baseline card ships to every vertical and can know no roster, so
+            // it must name no owner; a vertical's card may, but only one that
+            // exists — seeding writes below `resolve_assignee`, so a typo would
+            // persist and only surface as a card that refuses to dispatch.
+            match card.assignee.as_deref().map(str::trim) {
+                None | Some("") => {}
+                Some(assignee) => {
+                    assert!(
+                        name != "globals",
+                        "globals/tasks.toml: `{}` names an assignee, but the baseline ships to \
+                         every company and can know no roster",
+                        card.id
+                    );
+                    assert!(
+                        known.contains(assignee),
+                        "{name}/tasks.toml: `{}` is assigned to `{assignee}`, which is neither a \
+                         teammate nor a desk in this company",
+                        card.id
+                    );
+                }
             }
         }
     }

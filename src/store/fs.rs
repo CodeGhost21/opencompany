@@ -2253,6 +2253,16 @@ mod test {
         conformance::assert_inbox_store(Arc::new(FsInboxStore::new(&root))).await;
     }
 
+    /// Issue #1505. The port holds this company's inference credential, its MCP
+    /// OAuth tokens and its SMTP password, and had no conformance case on any
+    /// backend until this one.
+    #[tokio::test]
+    async fn conformance_secret_store() {
+        let root_dir = tmp_root();
+        let root = root_dir.path().to_path_buf();
+        conformance::assert_secret_store(Arc::new(FsSecretStore::new(&root))).await;
+    }
+
     #[tokio::test]
     async fn conformance_context_chunk_stamps() {
         let root_dir = tmp_root();
@@ -2510,6 +2520,7 @@ mod test {
                 log.append(
                     &id,
                     CompanyEvent::OperatorMessage {
+                        mentions: Vec::new(),
                         parent: None,
                         text: format!("event {i}"),
                         by: None,
@@ -2838,6 +2849,7 @@ mod test {
             .append(
                 &id,
                 CompanyEvent::OperatorMessage {
+                    mentions: Vec::new(),
                     parent: None,
                     text: "a".into(),
                     by: None,
@@ -2851,6 +2863,7 @@ mod test {
             .append(
                 &id,
                 CompanyEvent::OperatorMessage {
+                    mentions: Vec::new(),
                     parent: None,
                     text: "b".into(),
                     by: None,
@@ -2881,6 +2894,7 @@ mod test {
         log.append(
             &id,
             CompanyEvent::OperatorMessage {
+                mentions: Vec::new(),
                 parent: None,
                 text: "hi".into(),
                 by: None,
@@ -2897,6 +2911,7 @@ mod test {
         assert_eq!(
             received.event,
             CompanyEvent::OperatorMessage {
+                mentions: Vec::new(),
                 parent: None,
                 text: "hi".into(),
                 by: None,

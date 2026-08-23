@@ -3776,6 +3776,14 @@ mod test {
         conformance::assert_inbox_store(store()).await;
     }
 
+    /// Issue #1505. The port holds this company's inference credential, its MCP
+    /// OAuth tokens and its SMTP password, and had no conformance case on any
+    /// backend until this one.
+    #[tokio::test]
+    async fn conformance_secret_store() {
+        conformance::assert_secret_store(store()).await;
+    }
+
     #[tokio::test]
     async fn conformance_task_store() {
         conformance::assert_task_store(store()).await;
@@ -4461,6 +4469,7 @@ mod test {
             .append(
                 &id,
                 CompanyEvent::OperatorMessage {
+                    mentions: Vec::new(),
                     parent: None,
                     text: "hi".into(),
                     by: None,
@@ -4514,6 +4523,7 @@ mod test {
         s.append(
             &id,
             CompanyEvent::OperatorMessage {
+                mentions: Vec::new(),
                 parent: None,
                 text: "hi".into(),
                 by: None,
@@ -4530,6 +4540,7 @@ mod test {
         assert_eq!(
             received.event,
             CompanyEvent::OperatorMessage {
+                mentions: Vec::new(),
                 parent: None,
                 text: "hi".into(),
                 by: None,
@@ -4617,6 +4628,7 @@ mod test {
             s.append(
                 &id,
                 CompanyEvent::OperatorMessage {
+                    mentions: Vec::new(),
                     parent: None,
                     text: "persist".into(),
                     by: None,
@@ -4634,6 +4646,7 @@ mod test {
         assert_eq!(
             events[0].event,
             CompanyEvent::OperatorMessage {
+                mentions: Vec::new(),
                 parent: None,
                 text: "persist".into(),
                 by: None,
