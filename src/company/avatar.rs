@@ -224,10 +224,10 @@ pub async fn resolve(
     // The store's own byte count, when it has one, refused before any of the
     // payload is buffered. The stream below re-checks with the bytes
     // themselves, so a store that leaves `size` unset is still bounded.
-    if let Some(size) = node.size {
-        if size > MAX_AVATAR_BYTES as u64 {
-            return Err(not_an_image());
-        }
+    if let Some(size) = node.size
+        && size > MAX_AVATAR_BYTES as u64
+    {
+        return Err(not_an_image());
     }
     // The bytes themselves are the only claim worth trusting. A `blob:`
     // reference can name any binary this host holds, and the type a generic
