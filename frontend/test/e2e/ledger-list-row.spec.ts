@@ -55,7 +55,8 @@ test("a list row leads with its title and shows one readable status", async ({
     expect(recorded.ok()).toBeTruthy();
 
     await page.goto(`/#/ledgers/${slug}`);
-    await page.getByRole("button", { name: "List", exact: true }).click();
+    // A declared ledger opens in list mode (`defaultLedgerMode`), so there is
+    // no "List" toggle to click — the row is the default view.
 
     const row = page.getByTestId(`ledger-entry-${id}`);
     await expect(row).toBeVisible({ timeout: 15_000 });
