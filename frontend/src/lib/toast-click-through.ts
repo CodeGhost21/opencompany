@@ -246,7 +246,16 @@ export function relayToastClick(event: MouseEvent): void {
     return;
   }
 
-  beneath.focus({ preventScroll: true });
+  // Focus the control the click activates, not the leaf the point landed on:
+  // `elementFromPoint` hands back the icon `<path>` or `<span>` inside a
+  // button, and `focus()` on that leaf is a no-op — the button is clicked but
+  // keyboard focus is left behind, where a later Enter/Space operates the
+  // wrong element. A native click focuses the nearest focusable ancestor, so
+  // the relay does the same.
+  const focusTarget = beneath.closest(
+    'button, a[href], input, select, textarea, [contenteditable="true"], [tabindex]',
+  ) as HTMLElement | SVGElement | null;
+  (focusTarget ?? beneath).focus({ preventScroll: true });
   // `HTMLElement.click()` also runs the element's default action (link
   // navigation, form submission); `SVGElement` has no `click()` in the DOM, so
   // the event is dispatched to reach its handlers instead.
