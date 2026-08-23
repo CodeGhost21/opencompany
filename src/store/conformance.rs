@@ -143,10 +143,10 @@ fn sample_policy_override() -> crate::ports::types::PolicyOverride {
 }
 
 /// The operator's edits of a manifest-declared teammate: a renamed role, a
-/// cleared description (the empty-string form) and a narrowed tool scope, so a
-/// backend that drops the field — or that collapses "cleared" back into "not
-/// overridden" — is caught by the round-trip rather than in a console that
-/// silently re-inherits the blueprint after a restart.
+/// cleared description (the empty-string form), a narrowed tool scope and a
+/// chosen face, so a backend that drops the field — or that collapses "cleared"
+/// back into "not overridden" — is caught by the round-trip rather than in a
+/// console that silently re-inherits the blueprint after a restart.
 fn sample_agent_overrides() -> Vec<crate::ports::types::AgentOverride> {
     vec![crate::ports::types::AgentOverride {
         agent_id: "ceo".to_string(),
@@ -155,6 +155,10 @@ fn sample_agent_overrides() -> Vec<crate::ports::types::AgentOverride> {
         description: Some(String::new()),
         tools: Some(vec!["docs.*".to_string()]),
         instructions: Some("Be exceedingly concise and decisive.".to_string()),
+        // A dropped avatar reads as "nobody has chosen", so the teammate's face
+        // would silently revert to the hashed default on the next restart — the
+        // same class of loss as re-inheriting the blueprint role.
+        avatar: Some("tiny:violet".to_string()),
     }]
 }
 
