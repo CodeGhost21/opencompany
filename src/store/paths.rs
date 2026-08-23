@@ -204,7 +204,9 @@ const SECRET_FILENAME_DIGEST_BYTES: usize = 16;
 /// namespace:
 ///
 /// - **`%k-`** prefixes a percent-encoded key that fits the budget. Every
-///   byte has a unique encoding (`%` itself is encoded as `%25`), so distinct
+///   byte has a unique encoding (`%` itself is encoded as `%25`), and
+///   [`percent_encode`] distinguishes case even where the filesystem does not
+///   (macOS and Windows volumes are case-insensitive by default), so distinct
 ///   keys map to distinct filenames.
 /// - **`%l-`** prefixes an over-budget key: the encoded form is truncated and
 ///   a digest of the *whole* key is appended, so two distinct long keys cannot
