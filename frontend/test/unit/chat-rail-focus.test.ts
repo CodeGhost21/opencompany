@@ -43,7 +43,8 @@ describe("expanding the compact rail preserves focus (issue #1340)", () => {
     expect(chatView).toContain("const channelsToggleRef = useRef<HTMLButtonElement>(null);");
     // And the expand half of the toggle focuses it — the compact rail button is
     // about to unmount, so focus moves to the toggle that survives the switch.
-    expect(chatView).toContain("if (next) channelsToggleRef.current?.focus();");
+    // `next` is the rail's new collapsed state, so expanding is `!next`.
+    expect(chatView).toContain("if (!next) channelsToggleRef.current?.focus();");
   });
 
   it("passes that ref to the header", () => {
