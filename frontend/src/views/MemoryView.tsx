@@ -181,6 +181,12 @@ export function MemoryView({ client, company }: Props) {
     return counts;
   }, [entries]);
 
+  const listedContextItems = useMemo(
+    () => entries.filter((entry) => entry.origin !== "fact").length,
+    [entries],
+  );
+  const totalContextItems = (stats?.teammateMemory ?? 0) + (stats?.taskOutcomes ?? 0);
+
   // The one engine state the *writing* half of this page has to respect: the
   // null engine takes every write and throws it away, so a live "New memory"
   // button beside that warning invites work the host will silently drop
@@ -304,10 +310,11 @@ export function MemoryView({ client, company }: Props) {
         )}
 
         <HealthStrip loading={loading} stats={stats} perType={perType} />
-        {stats && stats.teammateMemory + stats.taskOutcomes > entries.filter((e) => e.origin !== "fact").length && (
+        {stats && totalContextItems > listedContextItems && (
           <Alert>
             <AlertDescription>
-              Showing the newest {entries.filter((e) => e.origin !== "fact").length} of {stats.teammateMemory + stats.taskOutcomes} teammate memory and task outcome items.
+              Showing the newest {listedContextItems} of {totalContextItems} teammate memory and
+              task outcome items.
             </AlertDescription>
           </Alert>
         )}
@@ -556,24 +563,3 @@ function AddMemoryDialog({
     </Dialog>
   );
 }
-
-/**
- * How many context chunks are teammate memory rather than task outcomes.
- *
- * `/memory/stats` reports a superset and one of its own slices, not two
- * populations: `agentChunks` counts *every* chunk, and `taskOutcomes` is
- * carved out of it by label prefix — the backend says so where it computes
- * them ("the task-outcome prefix narrows to stored outcomes (a subset of the
- * total)", `src/server/ops/memory.rs`). Rendering both raw put a count and its
- * own subset side by side as peers, so a company whose every chunk was an
- * outcome read `Teammate memory 13 / Task outcomes 13` next to `Total items 13`
- * — thirteen teammate memories that do not exist, and a strip that adds up to
- * twice the company's memory (issue #1402).
- *
- * The cards below have always partitioned these correctly: `context_entries`
- * sorts each chunk into one of two **disjoint** buckets. This is that same
- * split, so the strip counts the way the list does.
- *
- * Clamped because the two figures are two reads of a live store and can cross
- * under a concurrent write; a negative tile is a worse lie than a stale one.
- */

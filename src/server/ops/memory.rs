@@ -1051,6 +1051,27 @@ mod route_tests {
                 bulk_peeks: AtomicUsize::new(0),
             })
         }
+
+        fn with_labels(labels: &[&str]) -> Arc<Self> {
+            let mut metas = Vec::new();
+            let mut bodies = HashMap::new();
+            for (index, label) in labels.iter().enumerate() {
+                let addr = format!("addr-{index:04}");
+                metas.push(ChunkMeta {
+                    addr: ChunkAddr::new(addr.clone()),
+                    label: (*label).to_string(),
+                    len: 0,
+                    stored_at_millis: (index + 1) as u64,
+                });
+                bodies.insert(addr, format!("note {index}"));
+            }
+            Arc::new(Self {
+                metas,
+                bodies,
+                single_peeks: AtomicUsize::new(0),
+                bulk_peeks: AtomicUsize::new(0),
+            })
+        }
     }
 
     #[async_trait]
@@ -1163,9 +1184,17 @@ mod route_tests {
     }
 
     async fn get_memory(state: &AppState) -> (StatusCode, Value) {
+        get_json(state, "/api/v1/company/memory").await
+    }
+
+    async fn get_stats(state: &AppState) -> (StatusCode, Value) {
+        get_json(state, "/api/v1/company/memory/stats").await
+    }
+
+    async fn get_json(state: &AppState, uri: &str) -> (StatusCode, Value) {
         let request = Request::builder()
             .method("GET")
-            .uri("/api/v1/company/memory")
+            .uri(uri)
             .header("cookie", crate::server::test_support::fixed_cookie("acme"))
             .body(Body::empty())
             .unwrap();
@@ -1174,6 +1203,29 @@ mod route_tests {
         let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
         (status, value)
+    }
+
+    #[tokio::test]
+    async fn brain_stats_exclude_operator_fact_mirrors_from_the_display_partition() {
+        let home = tempfile::tempdir().unwrap();
+        let context = ScriptedContext::with_labels(&[
+            "agent-memory/ceo/note",
+            "task-outcome/ceo",
+            "operator-fact/fact-123",
+        ]);
+        let state = state_over(home.path(), context).await;
+
+        let (status, stats) = get_stats(&state).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(stats["facts"], 0);
+        assert_eq!(stats["teammateMemory"], 1);
+        assert_eq!(stats["taskOutcomes"], 1);
+        assert_eq!(stats["totalItems"], 2);
+        assert!(
+            stats.get("agentChunks").is_none(),
+            "the ambiguous all-chunks count must not reach the display"
+        );
     }
 
     /// #1488: with more chunks than the cap, the list must keep the NEWEST
