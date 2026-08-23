@@ -332,21 +332,35 @@ impl MongoStore {
     /// this server-side — the desk lives inside a **string** of JSON, not a
     /// sub-document — so the rows are read back and rewritten one by one.
     ///
-    /// The `$exists: false` probe is answered by the `agent_id` index, and
-    /// matches nothing once the backfill has run — but a first boot can still
-    /// hold a whole legacy collection's worth of work, so the migration is
-    /// batched: each pass collects at most [`BACKFILL_BATCH_SIZE`] rows, keeps
-    /// them in memory only long enough to fill them, then re-probes for the
-    /// next batch. Bounded memory, and the server's own run writes interleave
-    /// between passes. Best-effort at the call site for the same reason the
-    /// orphan blob sweep is — a company that will not start is worse than one
-    /// whose oldest run rows are not yet filterable by desk.
+    /// The `$exists: false` probe finds rows written before the mirror column
+    /// existed and matches nothing once the backfill has run — but a first
+    /// boot can still hold a whole legacy collection's worth of work, so the
+    /// migration is batched. Each pass resumes from the previous batch's last
+    /// `_id`, so it never re-reads rows it has already migrated; each pass
+    /// collects at most [`BACKFILL_BATCH_SIZE`] rows, keeps them in memory
+    /// only long enough to fill them, then moves on. Bounded memory, and the
+    /// server's own run writes interleave between passes. Best-effort at the
+    /// call site for the same reason the orphan blob sweep is — a company
+    /// that will not start is worse than one whose oldest run rows are not
+    /// yet filterable by desk.
     async fn backfill_run_agent_ids(&self) -> Result<usize> {
         let runs = self.collection("runs");
         let mut filled = 0usize;
+        // Resume where the last pass stopped. The probe has no leading
+        // `company_id`, so no compound index can serve it — restarting the
+        // scan per batch would re-examine every already-migrated row to reach
+        // the next legacy one. `_id` is the one index every document has, and
+        // the cursor advances in `_id` order, so the `$gt` bound is both cheap
+        // and lossless: everything at or before the watermark has been filled.
+        let mut after: Option<bson::Bson> = None;
         loop {
+            let mut filter = doc! {"agent_id": {"$exists": false}};
+            if let Some(id) = after.clone() {
+                filter.insert("_id", doc! {"$gt": id});
+            }
             let mut cursor = runs
-                .find(doc! {"agent_id": {"$exists": false}})
+                .find(filter)
+                .sort(doc! {"_id": 1})
                 .limit(BACKFILL_BATCH_SIZE as i64)
                 .await
                 .map_err(mongo_err)?;
@@ -359,6 +373,7 @@ impl MongoStore {
                     get_str(&document, "run_id")?,
                     record.agent_id,
                 ));
+                after = document.get("_id").cloned();
             }
             if batch.is_empty() {
                 return Ok(filled);
