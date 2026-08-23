@@ -1210,7 +1210,7 @@ jobs:
         run: scripts/ci/run-scoped-suite.sh "memory provider contract" tinymemory store::memory
 
       - name: Test the memory engine union selection
-        run: scripts/ci/run-scoped-suite.sh "memory selection" tinymemory store::memory
+        run: scripts/ci/run-scoped-suite.sh "memory selection" tinymemory store::select
 
       # Issue #477. Before this step, `tinyplace` was COMPILED by CI and
       # EXECUTED by nothing. `Check (--all-features)` above builds every
