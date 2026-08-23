@@ -41,6 +41,7 @@ import {
   type AddMemberOutcome,
 } from "@/lib/member-feedback";
 import { fromDto, newMember, type TeamMember } from "@/lib/team";
+import { personName } from "@/lib/person";
 import { cn } from "@/lib/utils";
 import { useAskerNames } from "@/components/approval-card";
 import { AddMemberDialog, type NewMemberFields } from "./chat/AddMemberDialog";
@@ -307,7 +308,7 @@ export function ChatView({
   /** A human label for whoever set a cap — never a raw user id. */
   function whoSet(userId: string): string {
     const person = people.find((p) => p.id === userId);
-    return person?.displayName?.trim() || person?.email || "an admin";
+    return person ? personName(person) : "an admin";
   }
 
   const budgetError = (error: unknown, fallback: string): string => {

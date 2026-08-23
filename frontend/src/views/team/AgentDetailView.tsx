@@ -37,6 +37,7 @@ import {
 import { fetchBoardColumns } from "@/lib/board-columns";
 import { avatarRef } from "@/lib/avatar";
 import { AvatarPicker } from "@/components/avatar-picker";
+import { personName } from "@/lib/person";
 import { roleSubtitle, toneFor } from "@/lib/team";
 import { workloadByAssignee, type Workload } from "@/lib/team-workload";
 import { cn } from "@/lib/utils";
@@ -188,7 +189,7 @@ export function AgentDetailView({
   /** A human label for whoever set a cap — never a raw user id. */
   function whoSet(userId: string): string {
     const person = people.find((p) => p.id === userId);
-    return person?.displayName?.trim() || person?.email || "an admin";
+    return person ? personName(person) : "an admin";
   }
 
   const boot = useCallback(async () => {
