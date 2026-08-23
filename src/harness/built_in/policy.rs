@@ -1658,6 +1658,8 @@ fn classify_group(tool_name: &str, args: &serde_json::Value) -> EffectGroup {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ports::workspace::{NodeKind, WorkspaceNode, WorkspaceOrigin, WorkspaceStore};
+    use crate::store::FsOps;
     use oh::agent::tool_policy::{ToolCallContext, ToolPolicyRequest};
 
     // Issue #470: the `composio_execute` fixtures are built here, from the same
@@ -2586,6 +2588,146 @@ mod tests {
                 full.check(&request(tool, serde_json::json!({}))).await,
                 ToolPolicyDecision::Allow,
                 "{tool} under full mode"
+            );
+        }
+    }
+
+    /// The policy asks whose node a workspace mutation targets, not merely
+    /// which workspace tool the agent selected. Only a node both created and
+    /// last written by that agent runs under `auto`; an operator, a teammate,
+    /// a missing lookup, or an unfamiliar create path keeps the gate.
+    #[tokio::test]
+    async fn auto_allows_only_mutations_of_the_callers_own_workspace_work() {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn WorkspaceStore> = Arc::new(FsOps::new(dir.path()));
+        let company = CompanyId::new("acme");
+        let node = |id: &str, name: &str, origin: WorkspaceOrigin| WorkspaceNode {
+            id: id.to_string(),
+            name: name.to_string(),
+            kind: NodeKind::File,
+            parent_id: None,
+            updated_at_millis: 1,
+            created_by: origin.clone(),
+            updated_by: origin,
+            mime: None,
+            size: None,
+            sha256: None,
+        };
+        let own = WorkspaceOrigin::Agent {
+            id: "ceo".to_string(),
+        };
+        store
+            .create(&company, &node("own", "own.md", own), Some("draft"))
+            .await
+            .unwrap();
+        store
+            .create(
+                &company,
+                &node("operator", "operator.md", WorkspaceOrigin::Operator),
+                Some("guidance"),
+            )
+            .await
+            .unwrap();
+        store
+            .create(
+                &company,
+                &node(
+                    "teammate",
+                    "teammate.md",
+                    WorkspaceOrigin::Agent {
+                        id: "cmo".to_string(),
+                    },
+                ),
+                Some("brief"),
+            )
+            .await
+            .unwrap();
+
+        let policy = policy("auto", &[], None)
+            .with_agent("ceo")
+            .with_workspace(store, company);
+        for (tool, args) in [
+            ("workspace_write", serde_json::json!({ "id": "own" })),
+            ("workspace_delete", serde_json::json!({ "id": "own" })),
+            ("workspace_rename", serde_json::json!({ "id": "own" })),
+            (
+                "workspace_create",
+                serde_json::json!({ "path": "agents/ceo/draft.md" }),
+            ),
+        ] {
+            assert_eq!(
+                policy.check(&request(tool, args)).await,
+                ToolPolicyDecision::Allow,
+                "{tool}"
+            );
+        }
+        for args in [
+            serde_json::json!({ "id": "operator" }),
+            serde_json::json!({ "id": "teammate" }),
+            serde_json::json!({ "id": "missing" }),
+        ] {
+            assert!(matches!(
+                policy.check(&request("workspace_write", args)).await,
+                ToolPolicyDecision::RequireApproval { .. }
+            ));
+        }
+        assert!(matches!(
+            policy
+                .check(&request(
+                    "workspace_create",
+                    serde_json::json!({ "path": "standards/new.md" })
+                ))
+                .await,
+            ToolPolicyDecision::RequireApproval { .. }
+        ));
+    }
+
+    /// Authorship narrows the auto tier only. Even an agent's own note is a
+    /// state change, so supervised still presents it and readonly still denies
+    /// it; `always_approve` remains the operator's explicit override.
+    #[tokio::test]
+    async fn ownership_never_relaxes_supervised_or_readonly_workspace_mutations() {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn WorkspaceStore> = Arc::new(FsOps::new(dir.path()));
+        let company = CompanyId::new("acme");
+        let own = WorkspaceOrigin::Agent {
+            id: "ceo".to_string(),
+        };
+        store
+            .create(
+                &company,
+                &WorkspaceNode {
+                    id: "own".to_string(),
+                    name: "own.md".to_string(),
+                    kind: NodeKind::File,
+                    parent_id: None,
+                    updated_at_millis: 1,
+                    created_by: own.clone(),
+                    updated_by: own,
+                    mime: None,
+                    size: None,
+                    sha256: None,
+                },
+                Some("draft"),
+            )
+            .await
+            .unwrap();
+        for mode in ["supervised", "readonly"] {
+            let policy = policy(mode, &[], None)
+                .with_agent("ceo")
+                .with_workspace(store.clone(), company.clone());
+            let decision = policy
+                .check(&request(
+                    "workspace_write",
+                    serde_json::json!({ "id": "own" }),
+                ))
+                .await;
+            assert!(
+                matches!(
+                    decision,
+                    ToolPolicyDecision::RequireApproval { .. } | ToolPolicyDecision::Deny { .. }
+                ),
+                "{mode}"
             );
         }
     }
