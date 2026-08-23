@@ -331,10 +331,6 @@ export function UsageView({ client, company }: Props) {
                 like the three above, but with no credential and no store toggle
                 — so two rungs rather than three. */}
             {capsLoaded && caps ? <PublishStatusRow caps={caps} /> : null}
-            {/* The MCP directory's Smithery key (issue #1287): not metered and
-                not opt-in, but it decides whether browsing finds anything, and
-                this panel is where an operator checks what is configured. */}
-            {capsLoaded && caps ? <McpDirectoryStatusRow caps={caps} /> : null}
           </CardContent>
         </Card>
       </div>
