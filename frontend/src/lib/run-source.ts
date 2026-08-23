@@ -132,7 +132,15 @@ export function runSource(run: RunSummary, index: RunSourceIndex = {}): RunSourc
     return {
       kind: "chat",
       label: name ?? run.chatId,
-      href: chatHref(run.chatId, run.agentId === run.chatId),
+      // A desk's channel id *is* its thread id, so a run in a desk channel
+      // carries `chatId == agentId == desk` and `index.chats` names it; a DM's
+      // thread id is the roster member's id, which no desk claims. So the
+      // "is it a DM" answer is "not a known desk", read from the index rather
+      // than guessed from the record — `agentId === chatId` is true for a
+      // desk-channel run too, and stamping `dm:` on one would link
+      // `#/chat/dm:engineering`, which ChatView treats as an unknown channel
+      // (issue #1671).
+      href: chatHref(run.chatId, name === undefined),
       resolved: name !== undefined,
     };
   }
