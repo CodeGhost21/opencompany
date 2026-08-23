@@ -298,7 +298,7 @@ function WorkflowCard({
       {workflow.description ? (
         <p className="line-clamp-2 text-xs text-muted-foreground">{workflow.description}</p>
       ) : (
-        <p className="text-xs italic text-muted-foreground/70">No description.</p>
+        <p className="text-xs italic text-muted-foreground">No description.</p>
       )}
 
       <WorkflowFacts workflow={workflow} />
@@ -408,7 +408,7 @@ function RowHealth({ runs, runsLoaded }: { runs: WorkflowRunOutcome[]; runsLoade
         {NO_RUNS_LABEL}
       </span>
     ) : (
-      <span className="truncate text-2xs text-muted-foreground/60">{LOADING_RUNS_LABEL}</span>
+      <span className="truncate text-2xs text-muted-foreground">{LOADING_RUNS_LABEL}</span>
     );
   }
 
@@ -421,7 +421,7 @@ function RowHealth({ runs, runsLoaded }: { runs: WorkflowRunOutcome[]; runsLoade
         <span className={`size-1.5 shrink-0 rounded-full ${tone.dot}`} />
         <span className="truncate text-muted-foreground">{label}</span>
       </span>
-      <span className="truncate text-right text-2xs text-muted-foreground/70">
+      <span className="truncate text-right text-2xs text-muted-foreground">
         {relativeTime(last.atMillis)}
       </span>
     </>
@@ -439,7 +439,7 @@ function HealthLine({ runs, runsLoaded }: { runs: WorkflowRunOutcome[]; runsLoad
   if (!last) {
     // Nothing yet, and the two reasons for that are NOT the same thing.
     if (!runsLoaded) {
-      return <span className="text-2xs text-muted-foreground/60">{LOADING_RUNS_LABEL}</span>;
+      return <span className="text-2xs text-muted-foreground">{LOADING_RUNS_LABEL}</span>;
     }
     // "No recent runs", never "never run". The company-wide run page is cut by
     // a limit, so a workflow whose last run has scrolled off it is
@@ -469,7 +469,7 @@ function HealthLine({ runs, runsLoaded }: { runs: WorkflowRunOutcome[]; runsLoad
         {last.scheduled ? "Scheduled" : "Manual"} run {tone.label}
         {failedNode ? ` at “${failedNode}”` : ""}
       </span>
-      <span className="text-muted-foreground/70">· {relativeTime(last.atMillis)}</span>
+      <span className="text-muted-foreground">· {relativeTime(last.atMillis)}</span>
       {undelivered > 0 && (
         <Badge
           variant="outline"
@@ -512,7 +512,7 @@ function RunStrip({ runs }: { runs: WorkflowRunOutcome[] }) {
           />
         );
       })}
-      <span className="ml-0.5 text-3xs text-muted-foreground/70">
+      <span className="ml-0.5 text-3xs text-muted-foreground">
         last {recent.length}
       </span>
     </span>
