@@ -3025,7 +3025,11 @@ mod test {
         );
 
         secrets
-            .set(&company, key, SecretValue("rotated-not-a-real-token".into()))
+            .set(
+                &company,
+                key,
+                SecretValue("rotated-not-a-real-token".into()),
+            )
             .await
             .unwrap();
 
