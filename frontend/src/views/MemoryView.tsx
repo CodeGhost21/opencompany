@@ -195,10 +195,6 @@ export function MemoryView({ client, company }: Props) {
     () => entries.filter((entry) => entry.origin !== "fact").length,
     [entries],
   );
-  const totalContextItems =
-    (stats?.teammateMemory ?? 0) +
-    (stats?.taskOutcomes ?? 0) +
-    (stats?.documentMemory ?? 0);
 
   // The one engine state the *writing* half of this page has to respect: the
   // null engine takes every write and throws it away, so a live "New memory"
