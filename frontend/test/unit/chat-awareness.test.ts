@@ -112,45 +112,49 @@ describe("livePeers", () => {
 
 describe("shouldShowTyping", () => {
   it("shows a fresh frame", () => {
-    expect(shouldShowTyping({ atMillis: 1_000 }, 1_100, undefined)).toBe(true);
+    expect(shouldShowTyping({ atMillis: 1_000 }, undefined)).toBe(true);
   });
 
-  /** Rule 1: a delayed or replayed frame must not resurrect an indicator. */
-  it("drops a frame that is already older than its own TTL", () => {
-    expect(
-      shouldShowTyping({ atMillis: 0 }, TYPING_RECEIVE_TTL_MS, undefined),
-    ).toBe(false);
+  /**
+   * There is deliberately no "frame older than its own TTL" case here anymore.
+   * That rule compared the frame's *server*-stamped `atMillis` against the
+   * *browser's* `now`, so a viewer whose workstation clock ran fast by more
+   * than the TTL saw every typing frame read as already-expired on arrival —
+   * typing was silently broken for them. Freshness is `typingExpiry`'s job
+   * now, anchored to local receipt time instead of a comparison across clock
+   * domains. See both functions' doc comments.
+   */
+  it("does not depend on the receiving console's own clock at all", () => {
+    // A frame nominally many minutes "old" by a naive `now - atMillis` check
+    // must still be shown: nothing here reads wall-clock time.
+    expect(shouldShowTyping({ atMillis: 0 }, undefined)).toBe(true);
   });
 
-  /** Rule 2: somebody who has just spoken is not still typing. */
+  /** Rule 1: somebody who has just spoken is not still typing. */
   it("drops a frame stamped before that author's own message", () => {
-    expect(shouldShowTyping({ atMillis: 1_000 }, 1_100, 1_500)).toBe(false);
+    expect(shouldShowTyping({ atMillis: 1_000 }, 1_500)).toBe(false);
   });
 
-  /** Rule 3: the in-flight ping that lands just after the message. */
+  /** Rule 2: the in-flight ping that lands just after the message. */
   it("suppresses a frame stamped just after that author's message", () => {
-    expect(shouldShowTyping({ atMillis: 1_600 }, 1_700, 1_500)).toBe(false);
+    expect(shouldShowTyping({ atMillis: 1_600 }, 1_500)).toBe(false);
   });
 
   it("shows them again once they genuinely start typing after it", () => {
-    expect(shouldShowTyping({ atMillis: 5_000 }, 5_100, 1_500)).toBe(true);
+    expect(shouldShowTyping({ atMillis: 5_000 }, 1_500)).toBe(true);
   });
 });
 
 describe("typingExpiry", () => {
   /**
-   * A frame delayed in transit must not extend the bubble past its own
-   * validity — otherwise a slow network makes indicators linger.
+   * Anchored purely to the receipt time the caller passes in — never to the
+   * frame's own (server-clock) timestamp, which is exactly what fixes the
+   * clock-skew bug: a workstation clock running arbitrarily far ahead of or
+   * behind the host no longer changes when the indicator disappears.
    */
-  it("never extends past the frame's own lifetime", () => {
-    const delayed = typingExpiry({ atMillis: 0 }, 5_000);
-    expect(delayed).toBe(TYPING_RECEIVE_TTL_MS);
-  });
-
-  it("uses now for a frame that arrived promptly", () => {
-    expect(typingExpiry({ atMillis: 1_000 }, 1_000)).toBe(
-      1_000 + TYPING_RECEIVE_TTL_MS,
-    );
+  it("is a TTL from the given now, regardless of any server timestamp", () => {
+    expect(typingExpiry(1_000)).toBe(1_000 + TYPING_RECEIVE_TTL_MS);
+    expect(typingExpiry(5_000)).toBe(5_000 + TYPING_RECEIVE_TTL_MS);
   });
 });
 
