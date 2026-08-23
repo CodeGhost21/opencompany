@@ -881,7 +881,15 @@ function Tools({
             <Button
               size="sm"
               disabled={saving || !dirty}
-              onClick={() => void onSave(draft).then(() => setEditing(false))}
+              onClick={() => {
+                // The editor closes on success and stays open on a refusal;
+                // the toast is raised by the caller, so the rejection is
+                // swallowed here rather than left unhandled.
+                void onSave(draft).then(
+                  () => setEditing(false),
+                  () => undefined,
+                );
+              }}
               data-testid="agent-tools-save"
             >
               Save
