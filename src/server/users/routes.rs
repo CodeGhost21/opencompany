@@ -898,9 +898,17 @@ fn hub_refused(code: &'static str, message: &'static str) -> Response {
 ///
 /// Carries `?company=` so the console lands scoped to the company it left from.
 /// The hub appends its own `token=…&key=auth` with `&`, so the two coexist.
-fn console_redirect_uri(state: &AppState, company: &CompanyId) -> String {
+///
+/// `from`, when the console asked for one, names the destination the sign-in
+/// should land on. It rides here as a query parameter (a fragment would capture
+/// the hub's `token=` on the way back) and is validated by [`redirect_from`].
+fn console_redirect_uri(state: &AppState, company: &CompanyId, from: Option<&str>) -> String {
     let origin = state.config().host_base_url();
-    format!("{}/?company={}", origin.trim_end_matches('/'), company)
+    let mut uri = format!("{}/?company={}", origin.trim_end_matches('/'), company);
+    if let Some(from) = from.and_then(redirect_from) {
+        uri.push_str(&format!("&from={from}"));
+    }
+    uri
 }
 
 /// `GET …/auth/hub` — the ecosystem sign-in buttons, ready to render.
