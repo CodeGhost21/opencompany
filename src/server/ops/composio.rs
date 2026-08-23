@@ -1768,10 +1768,7 @@ mod tests {
             crate::company::composio::COMPOSIO_BACKEND_URL_ENV,
         ]);
         #[cfg(feature = "composio")]
-        env.set(
-            crate::company::composio::COMPOSIO_BACKEND_URL_ENV,
-            &backend,
-        );
+        env.set(crate::company::composio::COMPOSIO_BACKEND_URL_ENV, &backend);
 
         let home_dir = home();
         let state = state_with_manifest(home_dir.path(), GRANTED).await;
@@ -1794,11 +1791,14 @@ mod tests {
         )
         .await;
         #[cfg(feature = "composio")]
-        assert_eq!(status, StatusCode::OK, "an admin reaches authorization: {raw}");
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "an admin reaches authorization: {raw}"
+        );
         #[cfg(feature = "composio")]
         assert_eq!(
-            body["connectUrl"],
-            "https://composio.test/connect/gmail",
+            body["connectUrl"], "https://composio.test/connect/gmail",
             "the handler returns the loopback backend's authorization URL: {body}"
         );
         #[cfg(not(feature = "composio"))]
