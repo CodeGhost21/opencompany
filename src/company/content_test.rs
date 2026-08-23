@@ -669,8 +669,7 @@ fn a_restricting_desk_does_not_strip_the_workspace_write_token() {
             .filter(|chat| chat.members.iter().any(|member| member == id))
             .map(|chat| chat.tools.as_slice())
             .collect();
-        let grants =
-            agent_scoped_grants(&manifest.tools.allow, &desk_refs, &agent.tools);
+        let grants = agent_scoped_grants(&manifest.tools.allow, &desk_refs, &agent.tools);
 
         assert!(
             grants_workspace_write_explicit(&grants),
