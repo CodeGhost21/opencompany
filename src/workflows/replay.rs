@@ -324,45 +324,45 @@ pub(crate) fn outward_calls_performed(
 /// approved (issue #617).
 ///
 /// A `sub_workflow` child that stops at an approval gate pauses the *parent*:
-/// tinyflows reports the child's gates namespaced (`<node>::<gate>`), and the
-/// continuation re-runs the parent, which re-runs the child from the top. Any
-/// outward call the child made before the gate therefore fires again — but
-/// unlike a top-level call, its result does not travel up when the child
+/// tinyflows reports the child's gates namespaced (`<node>::<gate>`, nested
+/// one level per child — `sub::nested::work` for a gate two levels down), and
+/// the continuation re-runs the parent, which re-runs every child from the
+/// top. Any outward call the child made before the gate therefore fires again —
+/// but unlike a top-level call, its result does not travel up when the child
 /// pauses (tinyflows drops the child's partial output on
 /// `ChildOutcome::Paused`), so there is nothing to replay. Report it the same
 /// way [`outward_calls_performed`] reports a top-level call it cannot replay,
 /// so the operator is warned that approving restarts the child from the top.
 ///
 /// Each namespaced pending id is resolved through `registry` to the child graph
-/// the resolver actually gated, then every call **upstream-reachable** from the
-/// paused gate is examined. "Upstream-reachable" is read off the child's edges
-/// by walking backward from the gate; a call on an un-taken branch of a fan-out
-/// is over-reported, the same conservative direction the top-level
-/// [`outward_calls_performed`] takes when it reads "completed" from the run
-/// state rather than per-branch.
+/// the resolver actually gated — descending through nested namespaces, and
+/// resolving an expression-bound `workflow_id` against `trigger_input` where
+/// the engine's `once` scope allows — then every call **upstream-reachable**
+/// from the paused gate is examined. "Upstream-reachable" is read off the
+/// child's edges by walking backward from the gate; a call on an un-taken
+/// branch of a fan-out is over-reported, the same conservative direction the
+/// top-level [`outward_calls_performed`] takes when it reads "completed" from
+/// the run state rather than per-branch.
+///
+/// A `requires_approval` node this run's list has already approved is *not*
+/// treated as still-blocked: the engine executes an approved gate (it skips the
+/// interrupt only when the id is listed), so the call fires on this
+/// continuation and will fire again on the next — exactly what the operator
+/// must be warned about.
 pub(crate) fn child_calls_to_repeat(
     parent: &WorkflowGraph,
     pending: &[String],
     registry: &ChildGateRegistry,
+    trigger_input: &Value,
 ) -> Vec<UnreplayableCall> {
+    let approved = approved_ids(trigger_input);
     let mut out = Vec::new();
     for node_id in pending {
-        let Some((parent_node, child_gate)) = node_id.split_once(GATE_NAMESPACE) else {
+        let Some((record, gate)) = descend(registry, parent, node_id, Some(trigger_input)) else {
             continue;
         };
-        let Some(child_id) = parent
-            .nodes
-            .iter()
-            .find(|n| n.id == parent_node)
-            .and_then(|n| n.config.get("workflow_id"))
-            .and_then(Value::as_str)
-        else {
-            continue;
-        };
-        let Some(record) = registry.get(child_id) else {
-            continue;
-        };
-        for call in child_calls_preceding(&record.graph, child_gate) {
+        let prefix = namespaced_prefix(node_id);
+        for call in child_calls_preceding(&record.graph, &gate, &approved, &prefix) {
             if !out.contains(&call) {
                 out.push(call);
             }
@@ -371,21 +371,56 @@ pub(crate) fn child_calls_to_repeat(
     out
 }
 
+/// The ids this lineage has already approved, read off the continuation input
+/// the same way the engine's `approvals_for_child` reads them
+/// (`run.trigger.approvals`).
+fn approved_ids(trigger_input: &Value) -> std::collections::HashSet<String> {
+    trigger_input
+        .get("approvals")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::to_string)
+        .collect()
+}
+
+/// The namespaced prefix that turns a node id inside a child into the id the
+/// parent run's approval list carries — `sub::` for `sub::work`, `sub::nested::`
+/// for `sub::nested::work`.
+fn namespaced_prefix(node_id: &str) -> String {
+    format!(
+        "{}::",
+        node_id
+            .rsplit_once(GATE_NAMESPACE)
+            .map(|(prefix, _)| prefix)
+            .unwrap_or("")
+    )
+}
+
 /// The outward calls in `child` that run before `gate` and are not themselves
 /// gated.
 ///
 /// Every node from which `gate` is reachable by walking `edges` backward must
 /// have run (or be on the branch that ran) before the pause; everything past
-/// the gate is unreachable and excluded. Nodes the gate pass marked — the
-/// `requires_approval` flag it writes — are excluded too, because the child
-/// restarts and *pauses at them again* rather than executing them.
+/// the gate is unreachable and excluded. A `requires_approval` node the gate
+/// pass marked is excluded too — the child restarts and *pauses at it again*
+/// rather than executing it — **unless its namespaced id (`namespace_prefix` +
+/// the node's own id) is already in `approved`**: an approved gate does
+/// execute, on this continuation, and will execute again on the next, so it is
+/// exactly the call the operator must be warned about (issue #617).
 ///
 /// Classified with the same [`outward_call_of`] the top-level guard uses, so
 /// the two reports agree about what an "outward call" is. The child's authored
 /// `repeatable` declarations are not consulted (the resolver keeps the
 /// translated graph, not the authored file); an undeclared classification is
 /// the conservative direction for a warning.
-fn child_calls_preceding(child: &WorkflowGraph, gate: &str) -> Vec<UnreplayableCall> {
+fn child_calls_preceding(
+    child: &WorkflowGraph,
+    gate: &str,
+    approved: &std::collections::HashSet<String>,
+    namespace_prefix: &str,
+) -> Vec<UnreplayableCall> {
     let mut reached = std::collections::HashSet::new();
     let mut queue = std::collections::VecDeque::from([gate.to_string()]);
     while let Some(id) = queue.pop_front() {
@@ -403,12 +438,12 @@ fn child_calls_preceding(child: &WorkflowGraph, gate: &str) -> Vec<UnreplayableC
         if !reached.contains(&node.id) {
             continue;
         }
-        if node
+        let is_gate = node
             .config
             .get("requires_approval")
             .and_then(Value::as_bool)
-            == Some(true)
-        {
+            == Some(true);
+        if is_gate && !approved.contains(&format!("{namespace_prefix}{}", node.id)) {
             // The child restarts and pauses at this node again; it does not
             // execute it.
             continue;
