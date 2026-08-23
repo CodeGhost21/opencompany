@@ -150,13 +150,28 @@ fn picture(username: Option<&str>) -> Option<String> {
         .args([".", "-read", &format!("/Users/{}", username?), "JPEGPhoto"])
         .output()
         .ok()?;
-    let text = String::from_utf8_lossy(&out.stdout);
-    let hex: String = text
+    decode_jpegphoto(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// Decodes a `dscl` `JPEGPhoto` record into a `data:` URL.
+///
+/// The payload is the hex after the `JPEGPhoto:` label, and the label itself
+/// contains a hex digit — `E` in `JPEGPhoto` — so filtering the whole response
+/// would prepend that digit to an otherwise even-length payload: the parity
+/// check below would then refuse the picture every time, or worse corrupt the
+/// first byte of the decoded image when the count happens to come out even.
+/// Only the value after the label is treated as hex.
+///
+/// The payload may wrap: `dscl` answers `JPEGPhoto:` alone on the first line
+/// and indented hex on the lines that follow when the value is long, the same
+/// shape the `RealName` reader above handles.
+#[cfg(any(target_os = "macos", test))]
+fn decode_jpegphoto(output: &str) -> Option<String> {
+    let hex: String = output
+        .strip_prefix("JPEGPhoto:")
+        .unwrap_or(output)
         .chars()
         .filter(|c| c.is_ascii_hexdigit())
-        // The `JPEGPhoto:` label itself contains no hex digits beyond none, so
-        // filtering is enough to isolate the payload — but the count must be
-        // even for the pairs below to mean anything.
         .collect();
     if hex.len() < 2 || !hex.len().is_multiple_of(2) {
         return None;
