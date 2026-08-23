@@ -406,6 +406,42 @@ describe("the consolidated approval card", () => {
     expect(row?.textContent).toContain(`Send a payment — vendor@example.test · ${money(42.5)}`);
   });
 
+  it("names every amount in a same-kind compact batch, not just the lead's", async () => {
+    // Two payments from one turn: the lead's line already shows its own value,
+    // and the second's has to appear too — one Approve authorizes both.
+    await render([VENDOR, SUPPLIER], {}, {}, new Map(), true);
+
+    const row = container.querySelector<HTMLElement>('[data-approval-inline="compact"]');
+    expect(row?.textContent).toContain(
+      `Send a payment — vendor@example.test · ${money(42.5)} · ${money(12)} + 1 more`,
+    );
+  });
+
+  it("names every action and amount in a mixed compact batch", async () => {
+    // A fetch and a payment in one turn: "Fetch a web page + 1 more" would
+    // hide the payment (and its amount) behind the lead. The line must say
+    // what the one Approve actually covers.
+    await render([ESPN, VENDOR], {}, {}, new Map(), true);
+
+    const row = container.querySelector<HTMLElement>('[data-approval-inline="compact"]');
+    expect(row?.textContent).toContain(
+      `2 actions need your sign-off — Fetch a web page and Send a payment · ${money(42.5)}`,
+    );
+  });
+
+  it("counts a mixed compact batch with duplicate actions honestly", async () => {
+    // Two fetches and a payment: the distinct actions are named once each, and
+    // the count says there are three of them — the one Approve covers all.
+    await render([ESPN, BBC, VENDOR], {}, {}, new Map(), true);
+
+    const row = container.querySelector<HTMLElement>('[data-approval-inline="compact"]');
+    expect(row?.textContent).toContain(
+      `3 actions need your sign-off — Fetch a web page and Send a payment · ${money(42.5)}`,
+    );
+    // The duplicate fetch is not repeated on the line.
+    expect(row?.textContent).not.toContain("Fetch a web page, Fetch a web page");
+  });
+
   it("names a hidden approval once in the compact chat row", async () => {
     const HIDDEN: ApprovalSummary = {
       id: "a5",
