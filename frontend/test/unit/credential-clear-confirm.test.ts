@@ -76,7 +76,14 @@ describe("credential clearing confirmation (issue #1471)", () => {
         createElement(ChargebeeForm, {
           client: client(),
           company: "acme",
-          status: { apiKeyConfigured: true, webhookConfigured: true },
+          status: {
+            site: null,
+            webhookUrl: null,
+            apiKeyConfigured: true,
+            webhookConfigured: true,
+            granted: true,
+            inBuild: true,
+          },
           onStatus: vi.fn(),
         }),
       );
