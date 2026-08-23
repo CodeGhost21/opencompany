@@ -1516,8 +1516,16 @@ export function KnowledgeGraph({
 
   // compact legend for the fullscreen wheel: color + icon per kind, with the
   // Notes core in its vault orange
+  // `flex-wrap` + `max-w-full` are load-bearing, not cosmetic: this strip is
+  // pinned bottom-left inside the field's `overflow-hidden` box, so a single
+  // non-wrapping row is silently cut off at narrow widths — on mobile, and on
+  // desktop whenever the 13.5rem sidebar is expanded. The trailing caveat is
+  // the last item, so it is the first thing to disappear, which would put the
+  // one control that explains the wheel out of reach exactly where the wheel
+  // is hardest to read. `items-end` keeps every label on the summary's line
+  // when the caveat is open and its explanation has grown the box upward.
   const compactLegend = (
-    <div className="flex items-center gap-3 rounded-sm-t border border-os-border-strong bg-os-bg/85 px-2.5 py-1.5 backdrop-blur">
+    <div className="flex max-w-full flex-wrap items-end gap-3 rounded-sm-t border border-os-border-strong bg-os-bg/85 px-2.5 py-1.5 backdrop-blur">
       {(
         [
           { label: 'Notes', color: HUB_COLOR, Icon: CAT.self.Icon },
