@@ -114,7 +114,7 @@ impl FeedbackStore {
     /// be erased by the read-modify-write (issue #388).
     async fn update<F>(&self, id: &str, edit: F) -> Result<()>
     where
-        F: FnOnce(&mut FeedbackItem),
+        F: FnMut(&mut FeedbackItem),
     {
         let lock = self.write_lock();
         let _guard = lock.lock().await;
