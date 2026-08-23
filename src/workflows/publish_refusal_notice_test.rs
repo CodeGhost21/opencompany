@@ -183,8 +183,10 @@ async fn run_publishing(dir: &std::path::Path) -> crate::ports::WorkflowRun {
 
 /// A scripted endpoint whose per-lane responses let two runs overlap while
 /// they share one publish queue. Each run receives a refused publish before it
-/// completes, so the concurrent join still exercises cross-run isolation
-/// without requiring the provider calls to rendezvous.
+/// completes; a two-lane barrier holds each run's final response until both
+/// have executed their `publish_artifact`, so either drain is guaranteed to
+/// meet both refusals — the exact cross-run schedule the shared bucket got
+/// wrong.
 async fn spawn_interleaved_publish_script() -> String {
     let steps = Arc::new(Mutex::new(BTreeMap::<String, usize>::new()));
     let barrier = Arc::new(tokio::sync::Barrier::new(2));
