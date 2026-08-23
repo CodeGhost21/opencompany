@@ -71,6 +71,163 @@ describe("the page frame's toast-relay listener", () => {
     );
   });
 
+  it("routes the tail of a relayed press to the element that took the press", () => {
+    // A press is a whole gesture: the parent relays its pointermove tail too,
+    // and each continuation must reach the element that took the press, not
+    // the one under the point now — the same retargeting pointer capture gives
+    // a same-document control, so a drag keeps tracking its handle.
+    const below = document.createElement("button");
+    const moved = vi.fn();
+    below.addEventListener("pointermove", moved);
+    document.body.append(below);
+    mockElementFromPoint(below);
+
+    relayFrom(window.parent, {
+      type: "oc:relay-pointerdown",
+      x: 12,
+      y: 34,
+      pointerId: 7,
+      pointerType: "mouse",
+      button: 0,
+      buttons: 1,
+    });
+
+    Object.defineProperty(document, "elementFromPoint", {
+      configurable: true,
+      value: vi.fn(() => document.createElement("aside")),
+    });
+    relayFrom(window.parent, {
+      type: "oc:relay-pointermove",
+      x: 40,
+      y: 50,
+      pointerId: 7,
+      pointerType: "mouse",
+      button: -1,
+      buttons: 1,
+    });
+
+    expect(moved).toHaveBeenCalledWith(
+      expect.objectContaining({ clientX: 40, clientY: 50, pointerId: 7 }),
+    );
+  });
+
+  it("closes a relayed press out on pointerup", () => {
+    const below = document.createElement("button");
+    const up = vi.fn();
+    below.addEventListener("pointerup", up);
+    document.body.append(below);
+    mockElementFromPoint(below);
+
+    relayFrom(window.parent, {
+      type: "oc:relay-pointerdown",
+      x: 12,
+      y: 34,
+      pointerId: 7,
+      pointerType: "mouse",
+      button: 0,
+      buttons: 1,
+    });
+    relayFrom(window.parent, {
+      type: "oc:relay-pointerup",
+      x: 40,
+      y: 50,
+      pointerId: 7,
+      pointerType: "mouse",
+      button: 0,
+      buttons: 0,
+    });
+
+    expect(up).toHaveBeenCalledWith(
+      expect.objectContaining({ clientX: 40, clientY: 50, pointerId: 7 }),
+    );
+
+    // The press is over: a later move falls back to the element under the
+    // point instead of the released one.
+    const other = document.createElement("button");
+    const otherMoved = vi.fn();
+    other.addEventListener("pointermove", otherMoved);
+    document.body.append(other);
+    mockElementFromPoint(other);
+    relayFrom(window.parent, {
+      type: "oc:relay-pointermove",
+      x: 55,
+      y: 65,
+      pointerId: 7,
+      pointerType: "mouse",
+      button: -1,
+      buttons: 0,
+    });
+
+    expect(otherMoved).toHaveBeenCalledOnce();
+  });
+
+  it("closes a relayed press out on pointercancel", () => {
+    const below = document.createElement("button");
+    const canceled = vi.fn();
+    below.addEventListener("pointercancel", canceled);
+    document.body.append(below);
+    mockElementFromPoint(below);
+
+    relayFrom(window.parent, {
+      type: "oc:relay-pointerdown",
+      x: 12,
+      y: 34,
+      pointerId: 7,
+      pointerType: "mouse",
+      button: 0,
+      buttons: 1,
+    });
+    relayFrom(window.parent, {
+      type: "oc:relay-pointercancel",
+      x: 40,
+      y: 50,
+      pointerId: 7,
+      pointerType: "mouse",
+    });
+
+    expect(canceled).toHaveBeenCalledWith(
+      expect.objectContaining({ clientX: 40, clientY: 50, pointerId: 7 }),
+    );
+  });
+
+  it("falls back to the point when a relayed press's element is gone", () => {
+    // The page re-rendered mid-gesture and the pressed element left the
+    // document; the continuation routes by point, like a fresh press would.
+    const below = document.createElement("button");
+    document.body.append(below);
+    mockElementFromPoint(below);
+
+    relayFrom(window.parent, {
+      type: "oc:relay-pointerdown",
+      x: 12,
+      y: 34,
+      pointerId: 7,
+      pointerType: "mouse",
+      button: 0,
+      buttons: 1,
+    });
+    below.remove();
+
+    const other = document.createElement("button");
+    const moved = vi.fn();
+    other.addEventListener("pointermove", moved);
+    document.body.append(other);
+    mockElementFromPoint(other);
+    relayFrom(window.parent, {
+      type: "oc:relay-pointermove",
+      x: 40,
+      y: 50,
+      pointerId: 7,
+      pointerType: "mouse",
+      button: -1,
+      buttons: 1,
+    });
+
+    expect(moved).toHaveBeenCalledWith(
+      expect.objectContaining({ clientX: 40, clientY: 50, pointerId: 7 }),
+    );
+  });
+
   it("ignores relay messages from anyone but the console frame", () => {
     const below = document.createElement("button");
     const clicked = vi.fn();
