@@ -835,7 +835,7 @@ export function KnowledgeGraph({
     }
     sim.alpha(0.16).restart();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [repel, linkDist, centerForce, focusId, coreExpanded]);
+  }, [repel, linkDist, centerForce, focusId, coreExpanded, graph]);
 
   // ── cinematic camera ────────────────────────────────────────────────────────
   // The viewBox glides toward (and then tracks) whatever is selected — reading
