@@ -1264,11 +1264,36 @@ export function KnowledgeGraph({
               return (
                 <g
                   key={m.id}
-                  className={coreExpanded && !restIds.has(m.id) ? 'kg-mem-in' : undefined}
+                  ref={(el) => {
+                    // namespaced so a note id can never collide with an org node id
+                    const key = `memory:${m.id}`;
+                    if (el) nodeRefs.current.set(key, el);
+                    else nodeRefs.current.delete(key);
+                  }}
+                  role="button"
+                  aria-label={`Memory note: ${m.label}. Press Enter or Space to open.`}
+                  tabIndex={activeNodeId === `memory:${m.id}` ? 0 : -1}
+                  className={coreExpanded && !restIds.has(m.id) ? 'kg-mem-node kg-mem-in' : 'kg-mem-node'}
                   transform={`translate(${p.x},${p.y})`}
                   style={{ pointerEvents: coreExpanded ? 'auto' : 'none', cursor: 'pointer' }}
                   onMouseEnter={() => setMemHoverId(m.id)}
                   onMouseLeave={() => setMemHoverId((h) => (h === m.id ? null : h))}
+                  onFocus={() => setActiveNodeId(`memory:${m.id}`)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'ArrowRight' || e.key === 'ArrowDown') {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      memoryKeyNavRef.current.move(1);
+                    } else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      memoryKeyNavRef.current.move(-1);
+                    } else if (e.key === 'Enter' || e.key === ' ') {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      memoryKeyNavRef.current.select(m.id);
+                    }
+                  }}
                   // keep the core's drag machinery (and its pointer capture,
                   // which would retarget the click) out of note interactions
                   onPointerDown={(e) => e.stopPropagation()}
