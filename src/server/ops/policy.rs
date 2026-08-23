@@ -509,9 +509,7 @@ mod tests {
             .as_array()
             .expect("knownTools is an array");
         assert!(
-            known_tools
-                .iter()
-                .any(|tool| tool == "publish_artifact"),
+            known_tools.iter().any(|tool| tool == "publish_artifact"),
             "a wired agent tool the workflow catalog does not carry must be known"
         );
         assert!(
