@@ -38,8 +38,8 @@ use crate::ports::types::{
 use crate::runtime::grants::{GrantId, GrantScope, MAX_STANDING_GRANT_MILLIS};
 use crate::runtime::types::{ApprovalSummary, CompanyStatus, CycleReport};
 use crate::server::chat_history::{
-    CHAT_HISTORY_PAGE_LIMIT, MessageView, ReactionView, Viewer, channel_attributed_replies,
-    history_for_desk,
+    CHAT_HISTORY_PAGE_LIMIT, MentionView, MessageView, ReactionView, Viewer,
+    channel_attributed_replies, history_for_desk,
 };
 use crate::server::error::ApiError;
 use crate::server::graphql::auth::GqlAuth;
@@ -685,6 +685,8 @@ fn project_event(stored: &StoredEvent) -> Option<serde_json::Value> {
             steps,
             task_id,
             parent,
+            mentions,
+            ..
         } => {
             let mut o = envelope("agent_reply");
             o["chatId"] = json!(chat_id);
@@ -706,6 +708,29 @@ fn project_event(stored: &StoredEvent) -> Option<serde_json::Value> {
             // an ordinary chat reply so the legacy wire shape is unchanged.
             if let Some(task_id) = task_id {
                 o["taskId"] = json!(task_id);
+            }
+            // Mention spans, so a console watching live draws the same chips a
+            // reload would rather than rendering the reply flat and then
+            // re-rendering it on refresh.
+            //
+            // **Spans only — deliberately no targets.** A `Mention` carries an
+            // agent id or a *user* id, and this stream has no per-viewer
+            // projection to resolve either into a label; that is the same
+            // reason `ReactionToggled` is dropped here entirely (issue #364).
+            // A chip needs the range and whether it pings, and nothing else, so
+            // that is all this projects. `chat/history` remains the one surface
+            // that answers *who*, per viewer, with labels rather than ids.
+            if !mentions.is_empty() {
+                o["mentions"] = json!(
+                    mentions
+                        .iter()
+                        .map(|m| json!({
+                            "text": m.text,
+                            "offset": m.offset,
+                            "quiet": m.quiet,
+                        }))
+                        .collect::<Vec<_>>()
+                );
             }
             o
         }
@@ -1288,6 +1313,27 @@ struct ChatMessage {
     /// hands back a 202, which needs this turn record to exist first.
     #[serde(default)]
     detach: bool,
+    /// Who this message names, as the console's picker resolved them.
+    ///
+    /// Three states, and they are three different instructions:
+    ///
+    /// * **Absent** — the caller has no picker (`curl`, the API, a console
+    ///   predating this field). The host extracts mentions from the text
+    ///   itself, so `@engineer` still works from the command line.
+    /// * **Present and non-empty** — the caller resolved these against a roster
+    ///   it had loaded. Re-validated here against the live one and demoted, not
+    ///   trusted; a stale picker must not be able to address a turn to a
+    ///   teammate the company no longer has.
+    /// * **Present and empty** — the caller ran its picker and found nothing.
+    ///   Honoured as the answer it is: the host does not then guess on its
+    ///   behalf and chip an `@word` the author deliberately left unresolved.
+    ///
+    /// Additive in both directions, on exactly the terms `detach` documents
+    /// above: this struct has no `deny_unknown_fields`, so a newer console
+    /// against an older host degrades to host-side extraction, and an older
+    /// console against a newer host gets extraction too.
+    #[serde(default)]
+    mentions: Option<Vec<crate::ports::types::Mention>>,
 }
 
 /// A chat or approval-resolution response: the company's channel replies.
@@ -1756,6 +1802,13 @@ async fn accept_chat_turn(
         // that was being exercised on the very same message — see the field
         // docs on `CompanyEvent::OperatorMessage`.
         deliverable: message.deliverable,
+        // Resolved before the journal write, so the durable record and the
+        // routing decision that follows read the same list. The picker's answer
+        // when it sent one, extraction from the text when it did not — and
+        // either way re-validated against the live roster.
+        mentions: runtime
+            .resolve_mentions(&message.text, message.mentions.clone(), by)
+            .await,
     };
     let message_seq = runtime
         .events()
@@ -2081,11 +2134,34 @@ async fn journal_chat_replies(
     // made against a bubble the operator can still see names something every
     // other reader can resolve.
     for response in &mut report.responses {
+        // Scanned host-side from the reply text — the console's picker never
+        // touched this message. The author is passed so a teammate naming
+        // itself in its own answer does not chip itself.
+        let reply_mentions = runtime
+            .resolve_mentions(
+                &response.text,
+                None,
+                response
+                    .agent
+                    .as_deref()
+                    .map(|agent| Actor {
+                        kind: ActorKind::Agent,
+                        id: agent.to_string(),
+                    })
+                    .as_ref(),
+            )
+            .await;
         let journaled = runtime
             .events()
             .append(
                 id,
                 CompanyEvent::AgentReply {
+                    // Who this reply names. Rendered as chips and — unlike an
+                    // operator message's — never consulted by dispatch, which
+                    // is the mention-loop fuse.
+                    mentions: reply_mentions,
+                    // Zero, and stays zero while that edge does not exist.
+                    mention_depth: 0,
                     // The answer joins the thread its question was asked in,
                     // rather than opening one under the question (issue #364).
                     parent,
@@ -2275,6 +2351,43 @@ struct ChatHistoryMessageDto {
     /// per emoji. Omitted when nobody has, keeping the legacy shape.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     reactions: Vec<ChatReactionDto>,
+    /// Who this message names, in reading order. Omitted when it names nobody
+    /// — which is every message journaled before mentions existed — so the
+    /// legacy shape is unchanged.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    mentions: Vec<ChatMentionDto>,
+}
+
+/// One mention on a history message. Mirrors `Mention` in
+/// `frontend/src/lib/chat.ts`.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ChatMentionDto {
+    /// The literal span the author typed, so the renderer highlights the text
+    /// as written rather than the target's current name.
+    text: String,
+    /// Byte offset of `text` in the message body.
+    offset: usize,
+    /// Who was named, as a display label — never a raw user id.
+    label: String,
+    /// Whether the reading viewer is the one named (or was named by
+    /// `@everyone`).
+    mine: bool,
+    /// Whether this mention renders but pings nobody.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    quiet: bool,
+}
+
+impl From<MentionView> for ChatMentionDto {
+    fn from(view: MentionView) -> Self {
+        Self {
+            text: view.text,
+            offset: view.offset,
+            label: view.label,
+            mine: view.mine,
+            quiet: view.quiet,
+        }
+    }
 }
 
 /// One person's reaction on a history message. Mirrors `Reaction` in
@@ -2316,6 +2429,11 @@ impl From<MessageView> for ChatHistoryMessageDto {
                 .reactions
                 .into_iter()
                 .map(ChatReactionDto::from)
+                .collect(),
+            mentions: view
+                .mentions
+                .into_iter()
+                .map(ChatMentionDto::from)
                 .collect(),
         }
     }
@@ -3876,6 +3994,7 @@ mode = "full"
             let runtime = state.registry().get(&id).unwrap();
 
             let message = ChatMessage {
+                mentions: None,
                 text: ask.to_string(),
                 chat: None,
                 parent: None,
@@ -4822,6 +4941,8 @@ mode = "full"
             .append(
                 runtime.id(),
                 CompanyEvent::AgentReply {
+                    mentions: Vec::new(),
+                    mention_depth: 0,
                     parent: None,
                     task_id: None,
                     chat_id: "General".to_string(),
@@ -4837,6 +4958,8 @@ mode = "full"
             .append(
                 runtime.id(),
                 CompanyEvent::AgentReply {
+                    mentions: Vec::new(),
+                    mention_depth: 0,
                     parent: None,
                     task_id: None,
                     chat_id: "main".to_string(),
@@ -4893,6 +5016,8 @@ mode = "full"
             .append(
                 runtime.id(),
                 CompanyEvent::AgentReply {
+                    mentions: Vec::new(),
+                    mention_depth: 0,
                     parent: None,
                     task_id: None,
                     chat_id: "main".to_string(),
@@ -4989,6 +5114,8 @@ mode = "full"
                 .append(
                     runtime.id(),
                     CompanyEvent::AgentReply {
+                        mentions: Vec::new(),
+                        mention_depth: 0,
                         parent: None,
                         task_id,
                         chat_id: "main".to_string(),
@@ -5082,6 +5209,8 @@ mode = "full"
                     .append(
                         runtime.id(),
                         CompanyEvent::AgentReply {
+                            mentions: Vec::new(),
+                            mention_depth: 0,
                             parent: None,
                             task_id: None,
                             chat_id: "workflow-copilot:weekly_report".to_string(),
@@ -5131,6 +5260,8 @@ mode = "full"
             .append(
                 runtime.id(),
                 CompanyEvent::AgentReply {
+                    mentions: Vec::new(),
+                    mention_depth: 0,
                     parent: None,
                     task_id: None,
                     chat_id: "General".to_string(),
@@ -7355,6 +7486,8 @@ mode = "full"
     fn projects_agent_reply_with_chat_fields_and_steps() {
         use crate::ports::types::{TurnStep, TurnStepKind, TurnStepStatus};
         let v = super::project_event(&stored(CompanyEvent::AgentReply {
+            mentions: Vec::new(),
+            mention_depth: 0,
             parent: None,
             task_id: None,
             chat_id: "General".into(),
@@ -7390,6 +7523,8 @@ mode = "full"
     #[test]
     fn projects_agent_reply_with_its_thread_parent() {
         let v = super::project_event(&stored(CompanyEvent::AgentReply {
+            mentions: Vec::new(),
+            mention_depth: 0,
             parent: Some(EventSeq::new(4)),
             task_id: None,
             chat_id: "General".into(),
@@ -7478,6 +7613,7 @@ mode = "full"
     fn projects_nothing_for_the_operators_own_message() {
         assert!(
             super::project_event(&stored(CompanyEvent::OperatorMessage {
+                mentions: Vec::new(),
                 text: "the operator's own words".into(),
                 by: None,
                 chat: Some("General".into()),
@@ -7565,6 +7701,8 @@ mode = "full"
     #[test]
     fn projects_agent_reply_omits_empty_steps() {
         let v = super::project_event(&stored(CompanyEvent::AgentReply {
+            mentions: Vec::new(),
+            mention_depth: 0,
             parent: None,
             task_id: None,
             chat_id: "General".into(),
@@ -7587,6 +7725,8 @@ mode = "full"
     #[test]
     fn projects_task_id_only_when_the_event_is_correlated() {
         let reply = super::project_event(&stored(CompanyEvent::AgentReply {
+            mentions: Vec::new(),
+            mention_depth: 0,
             parent: None,
             task_id: Some("t-1".into()),
             chat_id: "t-1".into(),
@@ -8236,6 +8376,7 @@ mode = "full"
         // still drops everything it dropped before.
         let dropped = [
             CompanyEvent::OperatorMessage {
+                mentions: Vec::new(),
                 parent: None,
                 text: "hi".into(),
                 by: None,

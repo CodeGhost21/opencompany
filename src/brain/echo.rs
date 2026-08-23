@@ -183,6 +183,7 @@ mod test {
         let result = brain
             .run_cycle(
                 request(vec![CompanyEvent::OperatorMessage {
+                    mentions: Vec::new(),
                     parent: None,
                     text: "hi".into(),
                     by: None,
