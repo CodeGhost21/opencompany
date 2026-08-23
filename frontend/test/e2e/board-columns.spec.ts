@@ -123,10 +123,10 @@ test("new work enters through one prompt box and lands in Pending", async ({ pag
   await addTask.click();
   await expect(page.getByRole("heading", { name: "New task" })).toBeVisible();
 
-  // Title / Note / Priority stay gone from create — the host defaults priority
-  // and the card's edit surface owns them (#278).
+  // Title and Note are derived from the prompt; priority, deliverable and owner
+  // are explicit operator choices.
   await expect(page.locator("#new-prompt")).toBeVisible();
-  for (const gone of ["#new-title", "#new-note", "#new-priority"]) {
+  for (const gone of ["#new-title", "#new-note"]) {
     await expect(page.locator(gone)).toHaveCount(0);
   }
 
@@ -140,15 +140,18 @@ test("new work enters through one prompt box and lands in Pending", async ({ pag
   // types a prompt, hits Create, and gets exactly the unassigned card they got
   // before — the field is omitted from the body entirely when untouched.
   await expect(page.locator("#new-assignee")).toHaveCount(1);
+  await expect(page.locator("#new-priority")).toHaveCount(1);
 
   // A prompt longer than the title cap: the title is shortened and the full
   // text survives in the note, so nothing the operator typed is lost.
   const marker = `e2e board shape ${Date.now()}`;
   const long = `${marker} — and then a great deal more detail that runs well past the eighty character title cap so the note has to carry it`;
   await page.locator("#new-prompt").fill(long);
+  await page.getByTestId("create-priority").click();
+  await page.getByRole("option", { name: "High", exact: true }).click();
   await page.getByRole("button", { name: "Create", exact: true }).click();
 
-  type Row = { title: string; note?: string; column: string; assignee: string };
+  type Row = { title: string; note?: string; column: string; priority: string; assignee: string };
   const find = async (): Promise<Row | undefined> => {
     const rows = (await (await request.get(`${API}/tasks`)).json()) as Row[];
     return rows.find((r) => r.title.startsWith(marker));
@@ -160,6 +163,7 @@ test("new work enters through one prompt box and lands in Pending", async ({ pag
   expect(created.column).toBe("pending");
   expect(created.title.length).toBeLessThanOrEqual(81); // 80 + the ellipsis
   expect(created.note).toBe(long);
+  expect(created.priority).toBe("high");
   // The #1106 default, and the reason adding the control is a no-op for anyone
   // who does not use it: the prompt was the only thing filled in, so the card is
   // unassigned exactly as it was before the picker existed.
