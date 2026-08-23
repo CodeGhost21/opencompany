@@ -203,7 +203,20 @@ export function MessageComposer({
   function pick(entry: Mentionable) {
     const el = input.current;
     if (!query || !el) return;
-    const range = { start: query.start, end: el.selectionStart ?? query.start };
+    const caret = el.selectionStart ?? query.start;
+    // Replace the whole `@name`, not just the part before the caret. Moving the
+    // caret into an existing `@engineer` (the onSelect path) opens the picker
+    // with `query.query` = "eng"; replacing only that would leave `@ceo ineer`.
+    // A selection the reader made is honoured, so replacing spans what they
+    // selected when the selection reaches past the token.
+    const selectionEnd = Math.max(el.selectionEnd ?? caret, caret);
+    const tokenEnd = activeMentionEnd(
+      draft,
+      caret,
+      query.start + 1,
+      aliases ?? new Set<string>(),
+    );
+    const range = { start: query.start, end: Math.max(selectionEnd, tokenEnd) };
     const result = insertMention(draft, range, entry);
     setDraft(result.text);
     setMentions((current) =>
