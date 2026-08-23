@@ -239,6 +239,47 @@ describe("what the always-ask field suggests", () => {
     // three — explaining the rule must not double as recommending them.
     expect(text).toContain("invoice.send");
   });
+
+  it("treats a case-variant of a wired tool as wired, not a mistake", async () => {
+    const client = makeClient();
+    await mount(client);
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    const input = field()!;
+    await act(async () => {
+      const setValue = Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        "value",
+      )?.set;
+      // The backend's matcher is case-insensitive (`src/policy/always_approve.rs`),
+      // so `SHELL` gates the wired `shell` tool — the warning must not call it
+      // a fence that is not there.
+      setValue?.call(input, "SHELL");
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    expect(container.textContent).not.toContain("is not a tool");
+  });
+
+  it("treats a leading dotted segment of a wired tool as wired", async () => {
+    const client = makeClient({
+      status: { ...STATUS, alwaysApprove: ["publish_artifact.send"] },
+    });
+    await mount(client);
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    // No "publish_artifact.send" slug is wired, but the entry still matches
+    // nothing under the backend's exact-or-dotted-prefix rule — so it is
+    // presented as a possibly-hosted kind, never as a proven mistake.
+    expect(container.textContent).toContain(
+      "publish_artifact.send is not a tool this deployment wires.",
+    );
+  });
 });
 
 describe("policy tier changes", () => {
