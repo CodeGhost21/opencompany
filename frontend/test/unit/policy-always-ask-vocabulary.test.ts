@@ -64,8 +64,14 @@ const STATUS: PolicyStatus = {
 const WIRED = ["shell", "apply_patch", "git_operations", "web_fetch", "http_request"];
 
 /** A client serving the policy and, optionally, the wired tool slugs. */
-function makeClient({ slugs }: { slugs?: string[] | "unavailable" } = {}) {
-  const put = vi.fn(async () => STATUS);
+function makeClient({
+  slugs,
+  status = STATUS,
+}: {
+  slugs?: string[] | "unavailable";
+  status?: PolicyStatus;
+} = {}) {
+  const put = vi.fn(async () => status);
   return {
     scopeFor: (company: string | null) => `/api/v1/${company ?? "company"}`,
     get: async (path: string) => {
@@ -73,7 +79,7 @@ function makeClient({ slugs }: { slugs?: string[] | "unavailable" } = {}) {
         if (slugs === "unavailable") throw new Error("this host predates the route");
         return { slugs: slugs ?? WIRED, unwired: [] };
       }
-      if (path.endsWith("/policy")) return STATUS;
+      if (path.endsWith("/policy")) return status;
       return null;
     },
     put,
@@ -230,13 +236,7 @@ describe("policy tier changes", () => {
   });
 
   it("keeps tightening one click and softly flags unwired tool names", async () => {
-    const client = makeClient();
-    const fullStatus = { ...STATUS, mode: "full" };
-    (client.get as ReturnType<typeof vi.fn>) = vi.fn(async (path: string) => {
-      if (path.includes("/workflows/tool-slugs")) return { slugs: WIRED, unwired: [] };
-      if (path.endsWith("/policy")) return fullStatus;
-      return null;
-    });
+    const client = makeClient({ status: { ...STATUS, mode: "full" } });
     await mount(client);
 
     const auto = Array.from(container.querySelectorAll<HTMLButtonElement>('[role="radio"]')).find(
