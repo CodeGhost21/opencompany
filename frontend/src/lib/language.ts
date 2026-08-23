@@ -463,6 +463,20 @@ export function grantHeadline(g: StandingGrant): string {
 }
 
 /**
+ * The subject of a standing permission as a person would read it (#1411).
+ *
+ * A teammate grant is the agent; a workflow grant (issue #1098) carries no
+ * agent — `agent` is empty — and names the authored workflow instead. Reading
+ * `agent` alone for that second kind yields `Revoke 's permission: …`, so both
+ * halves have to resolve, and a revocation's accessible name must never read
+ * with an empty subject.
+ */
+export function grantSubject(g: StandingGrant, askerNames: Map<string, string>): string {
+  if (g.workflow != null && g.workflow !== "") return `the ${g.workflow} workflow`;
+  return askerNames.get(g.agent) ?? g.agent;
+}
+
+/**
  * A grant's scope as a person would read it (#785).
  *
  * `StandingGrant.scope` is one string carrying **two different kinds** of value,
