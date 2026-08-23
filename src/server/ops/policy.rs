@@ -203,6 +203,18 @@ pub(crate) struct PolicyDto {
     /// When a change bites. Stated because "stop the flood now" is what an
     /// operator comes here to do, and this is not quite that.
     pub(crate) takes_effect: &'static str,
+    /// Every tool name this build's approval gate can match, for the console's
+    /// "is this a real tool?" note (issue #1423).
+    ///
+    /// The complete registry, not the granted-and-wired subset
+    /// (`/workflows/tool-slugs`): the gate matches a tool call by name, so an
+    /// entry naming a wired agent tool (`hosting_launch_site`,
+    /// `publish_artifact`) is a legitimate fence and must not be called a
+    /// mistake just because it cannot be a workflow node. Sourced from
+    /// `consequence::declared_tools`, which
+    /// `every_registered_tool_is_declared` proves covers every tool a live
+    /// agent can call.
+    pub(crate) known_tools: Vec<String>,
 }
 
 impl PolicyDto {
