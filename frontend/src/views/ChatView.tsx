@@ -48,6 +48,7 @@ import { BudgetDialog } from "./chat/BudgetDialog";
 import { ChannelRail } from "./chat/ChannelRail";
 import { ChatHeader } from "./chat/ChatHeader";
 import { MembersPane } from "./chat/MembersPane";
+import { TypingLine } from "./chat/TypingLine";
 import { MessageComposer } from "./chat/MessageComposer";
 import { MessageTimeline } from "./chat/MessageTimeline";
 import { ThreadPanel } from "./chat/ThreadPanel";
@@ -106,6 +107,23 @@ interface Props {
    * race the Conversation surface already brackets against.
    */
   onSendStart?: (threadId: string) => void;
+  /**
+   * Who is present right now, keyed by user id. Empty when the host has no
+   * presence route, or when nobody else is connected to this replica.
+   */
+  presence?: ReadonlyMap<string, { status: "online" | "away" | "offline" }>;
+  /**
+   * The company's people, for the members pane's People section.
+   *
+   * Separate from `members` (teammates) on purpose: desk membership is a
+   * teammate concept, and every signed-in person can already see every desk,
+   * so people are never "in" or "outside" a channel.
+   */
+  companyPeople?: Array<{ id: string; label: string }>;
+  /** Display names for the typing line, in a stable order. */
+  typingNames?: string[];
+  /** Called as the composer is typed in; the caller throttles. */
+  onTyping?: (chatId: string) => void;
   onSendEnd?: (threadId: string) => void;
   /**
    * The host accepted the turn and answered `202` instead of the reply
@@ -202,6 +220,10 @@ export function ChatView({
   setTranscripts,
   hydration = HISTORY_UNTRACKED,
   onSendStart,
+  presence,
+  companyPeople,
+  typingNames = [],
+  onTyping,
   onSendEnd,
   onSendDetached,
   onSendFailed,
@@ -1055,10 +1077,15 @@ export function ChatView({
                 </span>
               </p>
             )}
+            <TypingLine names={typingNames} />
             <MessageComposer
               placeholder={`Message ${channelTitle(channel)}`}
               disabled={sending}
               onSend={(text, intent) => void send(text, intent)}
+              // Every keystroke asks; the hook throttles to one ping per
+              // channel per few seconds and skips entirely while the event
+              // stream is down.
+              onTyping={() => onTyping?.(active.id)}
               // Channel *and* DM composers offer "just chatting" / "do it once" /
               // "build me the workflow" (issues #580, #845, #1152) — see
               // `offersDeliverableChoice`, which owns the rule and is unchanged:
@@ -1084,6 +1111,8 @@ export function ChatView({
             <MembersPane
               channelMembers={inChannel}
               others={outsideChannel}
+              people={companyPeople}
+              presence={presence}
               leadId={active.kind === "channel" ? active.memberIds?.[0] : undefined}
               loading={loadingTeam}
               fromHost={fromHost}

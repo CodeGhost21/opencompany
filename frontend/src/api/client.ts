@@ -20,6 +20,8 @@ import {
   type BoardQuery,
   type BoardVote,
   type ReadMarker,
+  type MentionablesResponse,
+  type PresenceListResponse,
   type ReadStateResponse,
   type ApiErrorBody,
   type WorkflowProblem,
@@ -625,6 +627,78 @@ export class OpenCompanyClient {
    */
   readState(company?: string | null): Promise<ReadStateResponse> {
     return this.request<ReadStateResponse>("GET", `${this.scope(company)}/chat/read-state`);
+  }
+
+  /**
+   * Everything an `@` can name. Presence uses only `people`, for the
+   * user-id → label map the live frames deliberately do not carry.
+   *
+   * A host that predates this route answers 404; callers treat that as an
+   * empty directory rather than throwing on load.
+   */
+  mentionables(company?: string | null): Promise<MentionablesResponse> {
+    return this.request<MentionablesResponse>(
+      "GET",
+      `${this.scope(company)}/chat/mentionables`,
+    );
+  }
+
+  /** Who is present on this replica right now. */
+  presence(company?: string | null): Promise<PresenceListResponse> {
+    return this.request<PresenceListResponse>("GET", `${this.scope(company)}/presence`);
+  }
+
+  /**
+   * A heartbeat, and what to appear as.
+   *
+   * The body deliberately carries **no user id**: the host takes the subject
+   * from the session, so no caller can move somebody else's dot.
+   */
+  announcePresence(
+    status: "online" | "away" | "offline",
+    company?: string | null,
+  ): Promise<void> {
+    return this.request<void>("PUT", `${this.scope(company)}/presence`, { status });
+  }
+
+  /**
+   * Clear this console's dot on the way out.
+   *
+   * A `keepalive` fetch rather than the ordinary request path, because a
+   * request issued from `pagehide` is otherwise cancelled along with the
+   * document. `sendBeacon` would be the usual tool but cannot issue a
+   * `DELETE`, and inventing a POST alias for one route is a worse trade than
+   * `keepalive`, which every browser this console supports honours.
+   *
+   * Best-effort by design, and allowed to fail silently: if it does not land,
+   * the host's lease expires the dot within a few minutes anyway. That is the
+   * whole reason presence is a lease — no disconnect path has to be correct.
+   */
+  disconnectPresenceBeacon(company?: string | null): void {
+    try {
+      void fetch(`${this.baseUrl}${this.scope(company)}/presence`, {
+        method: "DELETE",
+        credentials: "include",
+        keepalive: true,
+      }).catch(() => {});
+    } catch {
+      // The document is unloading. Nothing to do, and nobody to report it to.
+    }
+  }
+
+  /**
+   * Say this console is typing. Fire-and-forget: an undelivered ping is not
+   * worth a retry, and the indicator expires on its own regardless.
+   */
+  typing(
+    chatId: string,
+    parentId?: string,
+    company?: string | null,
+  ): Promise<void> {
+    return this.request<void>("POST", `${this.scope(company)}/chat/typing`, {
+      chatId,
+      ...(parentId ? { parentId } : {}),
+    });
   }
 
   /**
