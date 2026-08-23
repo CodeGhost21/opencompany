@@ -2,7 +2,7 @@
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { relayToastClick } from "@/lib/toast-click-through";
+import { relayToastClick, relayToastPointerDown } from "@/lib/toast-click-through";
 
 afterEach(() => {
   document.body.replaceChildren();
@@ -15,6 +15,23 @@ function mockElementFromPoint(element: Element): void {
     configurable: true,
     value: vi.fn(() => element),
   });
+}
+
+/** A primary-button press at a known position, the gesture the relay serves. */
+function press(element: Element, x = 40, y = 50, pointerId = 7): void {
+  element.dispatchEvent(
+    new PointerEvent("pointerdown", {
+      bubbles: true,
+      cancelable: true,
+      clientX: x,
+      clientY: y,
+      pointerId,
+      pointerType: "mouse",
+      isPrimary: true,
+      button: 0,
+      buttons: 1,
+    }),
+  );
 }
 
 function toast(): HTMLElement {
