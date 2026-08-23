@@ -47,12 +47,12 @@ both ports, alongside the facts-only `factsUpdatedAtMillis`.
 Read that stamp as a max across chunks, not as one row per body: one address
 carries one row per *label* claiming it (issue #1300), a new label on an
 existing body stamps per-label on fs/sqlite and keeps the address's first
-stamp on the single-record backends (mongodb, the provider facade, the
-tinycortex engine), and neither the export bundle nor a restore preserves it
-— a restored chunk is stamped when it lands.
+stamp on the single-record backends (mongodb, the provider facade), and
+neither the export bundle nor a restore preserves it — a restored chunk is
+stamped when it lands.
 
-**TinyCortex is the intended backend for `MemoryStore` and `ContextStore`**
-([integrations/tinycortex.md](../integrations/tinycortex.md)) but is a
+**A hosted provider is an optional backend for `MemoryStore` and
+`ContextStore`** ([memory-engine.md](../runtime/memory-engine.md)) but is a
 choice, not a dependency: the fs default preserves the one-key promise, and
 DB-agnosticism applies to memory exactly as to every other store.
 

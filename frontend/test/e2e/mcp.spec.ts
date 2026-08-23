@@ -50,7 +50,8 @@ test("Settings MCP lists the company's servers instead of crashing on open", asy
 
   await openMcpSettings(page);
 
-  await expect(page.getByRole("heading", { name: "MCP Servers" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "MCP Servers", level: 1 })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Installed servers", level: 2 })).toBeVisible();
 
   // The manifest server the harness company declares. Rendering it at all is
   // the fix: the old view read the list off a wrapper key the host never sent.
@@ -87,6 +88,8 @@ test("a server opens into the panel a Composio provider opens into", async ({ pa
   page.on("pageerror", (error) => pageErrors.push(error.message));
 
   await openMcpSettings(page);
+
+  await expect(page.getByRole("heading", { name: "MCP Servers", level: 1 })).toBeVisible();
 
   const row = page.getByTestId("mcp-server-row").filter({ hasText: "deepwiki" });
   await expect(row).toBeVisible();
