@@ -5,7 +5,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { useHashView } from "@/hooks/use-hash-view";
-import { VIEWS, type View } from "@/lib/console-routes";
+import { isNavigationActive, VIEWS, type View } from "@/lib/console-routes";
 
 /**
  * Every surface the console renders has to answer at its own address.
@@ -34,6 +34,16 @@ describe("the console's route table", () => {
 
   it("has no duplicate entries", () => {
     expect(new Set(VIEWS).size).toBe(VIEWS.length);
+  });
+});
+
+describe("sidebar navigation", () => {
+  it("keeps Work active while a task detail is open (#1354)", () => {
+    expect(isNavigationActive("ledgers", "tasks")).toBe(true);
+  });
+
+  it("does not make unrelated destinations active", () => {
+    expect(isNavigationActive("approvals", "tasks")).toBe(false);
   });
 });
 

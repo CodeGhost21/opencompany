@@ -58,7 +58,7 @@ import { useLedgerNav } from "@/hooks/use-ledger-nav";
 import type { WorkspaceEvent } from "@/views/WorkspaceView";
 import { useHashView } from "@/hooks/use-hash-view";
 import { BOARD_LEDGER } from "@/lib/board-columns";
-import { VIEWS, type View } from "@/lib/console-routes";
+import { isNavigationActive, VIEWS, type View } from "@/lib/console-routes";
 import { taskIdFromSegment } from "@/lib/task-route";
 import { toast } from "sonner";
 
@@ -1806,7 +1806,7 @@ export function AppShell({
               {NAV.map((item) => (
                 <SidebarMenuItem key={item.view} data-tour={`nav-${item.view}`}>
                   <SidebarMenuButton
-                    isActive={view === item.view || (item.view === "ledgers" && view === "tasks")}
+                    isActive={isNavigationActive(item.view, view)}
                     tooltip={item.label}
                     onClick={() => setView(item.view)}
                     className={RESTING_ROW}
