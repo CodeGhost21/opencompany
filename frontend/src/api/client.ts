@@ -509,7 +509,10 @@ export class OpenCompanyClient {
     // Sent only when asked for, so an ordinary post keeps the exact body shape
     // it had before #983 — the same omitted-field rule `deliverable` follows.
     if (detach) body.detach = detach;
-    if (mentions?.length) body.mentions = mentions;
+    // `undefined` means the client has no directory and asks the host to
+    // extract mentions. An explicit empty list means the loaded directory
+    // resolved none and must suppress fallback extraction.
+    if (mentions !== undefined) body.mentions = mentions;
     return this.request<ChatPostResult>("POST", `${this.scope(company)}/chat`, body);
   }
 

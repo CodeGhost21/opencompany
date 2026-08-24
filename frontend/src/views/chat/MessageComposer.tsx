@@ -279,7 +279,9 @@ export function MessageComposer({
     onSend(
       text,
       deliverableChoice ? intent : undefined,
-      sending.length ? sending : undefined,
+      // Preserve absent-versus-empty: a loaded directory that resolves no
+      // spans intentionally sends [] to suppress host fallback extraction.
+      mentionables ? sending : undefined,
     );
     // Back to unselected, not to a default (issue #984).
     setIntent(undefined);
