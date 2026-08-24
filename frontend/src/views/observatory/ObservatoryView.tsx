@@ -349,10 +349,11 @@ export function ObservatoryView({ client, company, runId, eventTick }: Props) {
             {shown.map((run) => (
               <AttemptCard
                 key={run.id}
-                run={run}
+                run={withDeep(run, deepByRun[run.id])}
                 nowMs={nowMs}
                 turn={turn}
                 focusStep={focusStep}
+                onOpen={loadDeep}
               />
             ))}
           </section>
