@@ -378,6 +378,43 @@ export function reconcileMentions(
 }
 
 /**
+ * Re-anchor mentions after a toolbar `wrap` inserts `mark` at both ends of the
+ * selection `[start, end)`.
+ *
+ * This is a two-ended insertion, so it does not behave like the single-edit
+ * case {@link reconcileMentions} is built for: there the whole edited region is
+ * treated as deleted, which would drop a mention merely *enclosed* by the wrap.
+ * Formatting a mention leaves its literal intact (``**@Sam**`` still reads
+ * `@Sam`), so an enclosed mention keeps its target and shifts by the leading
+ * mark. Only an insertion point strictly inside a mention's span breaks its
+ * literal — `@**Sam**` can no longer resolve — and such a mention is dropped
+ * rather than re-anchored, so a broken span cannot steal a same-text
+ * duplicate's identity at send time.
+ */
+export function reconcileWrap(
+  mentions: Mention[],
+  start: number,
+  end: number,
+  mark: string,
+): Mention[] {
+  return mentions
+    .filter((m) => {
+      const at = m.offset;
+      const to = at + m.text.length;
+      // An insertion point strictly inside the span breaks the literal. An
+      // insertion at a boundary (`start` at `at`, `end` at `to`) only shifts it.
+      return !(start > at && start < to) && !(end > at && end < to);
+    })
+    .map((m) => {
+      // Insertions at or before the mention's start shift it; an insertion at
+      // its end (or later) does not.
+      const shift =
+        (start <= m.offset ? mark.length : 0) + (end <= m.offset ? mark.length : 0);
+      return shift === 0 ? m : { ...m, offset: m.offset + shift };
+    });
+}
+
+/**
  * The length of `s` in UTF-8 bytes, not UTF-16 units.
  *
  * The host defines a mention's `offset` as a byte position into the message
