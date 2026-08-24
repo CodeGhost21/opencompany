@@ -344,6 +344,14 @@ fn skip_sub_blocks(bytes: &[u8], mut i: usize) -> Option<usize> {
     }
 }
 
+/// The common validation error for an animation stream that ends before its
+/// trailer or remaining chunk data.
+fn truncated_animation() -> OpenCompanyError {
+    OpenCompanyError::InvalidRequest(
+        "that image is a truncated animation, so it can't be an avatar.".to_string(),
+    )
+}
+
 /// The height and width a JPEG announces, from its SOF segment.
 ///
 /// The SOF marker carries the frame size, and it may sit after any number of
