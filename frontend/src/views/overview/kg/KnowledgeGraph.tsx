@@ -50,7 +50,7 @@ const CAT: Record<KGNodeKind, { color: string; Icon: LucideIcon; label: string; 
   self: { color: 'var(--text)', Icon: Sparkles, label: 'Notes', r: 18 },
   team: { color: 'var(--brain-1)', Icon: Users, label: 'Pillars', r: 15 },
   workflow: { color: 'var(--brain-2)', Icon: WorkflowIcon, label: 'Workflows', r: 8.5 },
-  step: { color: 'var(--ok)', Icon: Milestone, label: 'Stages', r: 6 },
+  step: { color: 'var(--stage)', Icon: Milestone, label: 'Stages', r: 6 },
   task: { color: 'var(--muted)', Icon: ClipboardList, label: 'SOP tasks', r: 7 },
   person: { color: 'var(--warn)', Icon: UserRound, label: 'Humans', r: 10 },
   employee: { color: 'var(--accent)', Icon: User, label: 'AI teammates', r: 10 },

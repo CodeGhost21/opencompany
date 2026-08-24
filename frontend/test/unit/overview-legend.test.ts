@@ -36,9 +36,13 @@ describe("the overview graph legend", () => {
 
     expect(workflowIcon?.style.color).toBe("var(--brain-2)");
     expect(employeeIcon?.style.color).toBe("var(--accent)");
-    expect(stageIcon?.style.color).toBe("var(--ok)");
+    expect(stageIcon?.style.color).toBe("var(--stage)");
     expect(stageIcon?.style.color).not.toBe(workflowIcon?.style.color);
     expect(stageIcon?.style.color).not.toBe(employeeIcon?.style.color);
+    // `--stage` is an identity hue, not a status one: stages are declared
+    // workflow structure, and `--ok` would paint unexecuted stages with the
+    // product's "finished cleanly" colour (docs/brand/README.md).
+    expect(stageIcon?.style.color).not.toBe("var(--ok)");
   });
 
   it("wraps legend items instead of letting a narrow graph crop them", () => {
