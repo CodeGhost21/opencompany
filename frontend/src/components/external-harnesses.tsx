@@ -40,6 +40,7 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import {
+  desktopHarnessId,
   harnessAction,
   isChecking,
   isUsableHere,
@@ -142,7 +143,7 @@ export function ExternalHarnesses({ client, company }: Props) {
       // lands, so a slow CLI delays only its own row.
       await Promise.all(
         joined.filter(isChecking).map(async (row) => {
-          const confirmation = await confirmAcpHarness(row.id);
+          const confirmation = await confirmAcpHarness(desktopHarnessId(row));
           // `null` means nothing could answer; the row stays on `Checking`
           // rather than being given a verdict nobody reached. The models the
           // confirmation carried are cached inside `confirmAcpHarness` for
@@ -175,12 +176,17 @@ export function ExternalHarnesses({ client, company }: Props) {
    * again" must not apply its result to the newer list — the row it was about
    * may not even be in it.
    */
-  const install = useCallback(async (id: string) => {
+  const install = useCallback(async (row: HarnessRow) => {
+    // Two ids in play: `row.id` keys this page's own state, `desktopHarnessId`
+    // addresses the shell's catalogue. Conflating them is what made a
+    // declared `laptop` unaddressable.
+    const id = row.id;
+    const desktopId = desktopHarnessId(row);
     const run = generation.current;
     setInstalling((current) => new Set(current).add(id));
     setInstallErrors(({ [id]: _dropped, ...rest }) => rest);
 
-    const failure = await installAcpHarness(id);
+    const failure = await installAcpHarness(desktopId);
     const settle = () =>
       setInstalling((current) => {
         const next = new Set(current);
@@ -201,7 +207,7 @@ export function ExternalHarnesses({ client, company }: Props) {
     // while the handshake runs would show "Add-on needed" on a row that just
     // got its add-on.
     setRows((current) => (current ? withReadiness(current, id, { state: "checking" }) : current));
-    const confirmation = await confirmAcpHarness(id);
+    const confirmation = await confirmAcpHarness(desktopId);
     if (confirmation && generation.current === run) {
       setRows((current) =>
         current ? withReadiness(current, id, confirmation.readiness, confirmation.path) : current,
@@ -281,7 +287,7 @@ export function ExternalHarnesses({ client, company }: Props) {
                       size="sm"
                       variant={action === "install" ? "default" : "outline"}
                       disabled={busy}
-                      onClick={() => void install(row.id)}
+                      onClick={() => void install(row)}
                     >
                       {busy
                         ? "Installing…"

@@ -330,10 +330,42 @@ impl Probe for SystemProbe {
         // `launchd`'s minimal one and would report every Homebrew- or
         // npm-installed harness as missing.
         let path = crate::acp::shell_env::effective_path()?;
-        std::env::split_paths(&path)
-            .map(|dir| dir.join(command))
-            .find(|candidate| is_executable(candidate))
+        std::env::split_paths(&path).find_map(|dir| {
+            executable_names(command).find_map(|name| {
+                let candidate = dir.join(&name);
+                is_executable(&candidate).then_some(candidate)
+            })
+        })
     }
+}
+
+/// The filenames one command can have on this platform, in preference order.
+///
+/// On Unix a command is its own filename and this yields one candidate. On
+/// Windows it does not: `node` is installed as `node.exe`, `npm` as `npm.cmd`,
+/// and a lookup for the bare name finds neither — so every adapter install was
+/// refused with "node was not found" on a correctly configured machine. The
+/// extensions come from `PATHEXT`, which is where Windows itself keeps that
+/// list, with the usual default when it is unset.
+///
+/// The bare name is tried first on both platforms, so an extensionless
+/// executable on `PATH` still wins where one exists.
+fn executable_names(command: &str) -> impl Iterator<Item = String> + '_ {
+    let extensions: Vec<String> = if cfg!(windows) && !command.contains('.') {
+        std::env::var("PATHEXT")
+            .unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_string())
+            .split(';')
+            .filter(|ext| !ext.is_empty())
+            .map(|ext| ext.to_ascii_lowercase())
+            .collect()
+    } else {
+        Vec::new()
+    };
+    std::iter::once(command.to_string()).chain(
+        extensions
+            .into_iter()
+            .map(move |ext| format!("{command}{ext}")),
+    )
 }
 
 #[cfg(unix)]
@@ -666,6 +698,40 @@ mod test {
             .find(|h| h.id == id)
             .expect("a known harness");
         diagnose_absent(probe, harness)
+    }
+
+    /// The bare name is always tried, on every platform.
+    ///
+    /// Unix installs a command under its own name, so this must stay a
+    /// single candidate there — and it must stay *first* everywhere, so an
+    /// extensionless executable is not shadowed by a `.exe` beside it.
+    #[test]
+    fn a_command_is_looked_up_under_its_own_name_first() {
+        assert_eq!(executable_names("node").next().as_deref(), Some("node"));
+        #[cfg(unix)]
+        assert_eq!(
+            executable_names("node").count(),
+            1,
+            "unix needs no variants"
+        );
+    }
+
+    /// Windows does not install `node` as `node`.
+    ///
+    /// It is `node.exe`, and `npm` is `npm.cmd`. Looking only for the bare
+    /// name refused every install with "node was not found" on a correctly
+    /// configured machine — the same class of false negative as reading
+    /// `launchd`'s `PATH`, and invisible from a Unix dev box.
+    #[cfg(windows)]
+    #[test]
+    fn windows_also_tries_the_pathext_variants() {
+        let names: Vec<String> = executable_names("node").collect();
+        assert!(
+            names.iter().any(|n| n.eq_ignore_ascii_case("node.exe")),
+            "{names:?}"
+        );
+        // A command that already carries an extension is not extended again.
+        assert_eq!(executable_names("node.exe").count(), 1);
     }
 
     /// The preference order the Install button depends on.

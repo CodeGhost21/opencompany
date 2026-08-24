@@ -774,10 +774,19 @@ export function AgentDetailView({
                 // choose — must drop the override rather than save a value
                 // that will silently never apply. Leaving it also made the
                 // form claim a binding it was not going to honour.
-                const bound = harnesses.find((h) => h.id === next);
-                if (next !== HARNESS_DEFAULT && bound && bound.kind !== "acp") {
-                  setModelDraft("");
-                }
+                // The sentinel has to be resolved first, not excluded. "Company
+                // default" is a *binding*, not a kind — when the company
+                // default is `built_in`, picking it lands the teammate on a
+                // managed harness exactly as naming one explicitly would. The
+                // earlier version skipped the sentinel, so that route kept the
+                // model, hid the control, and then sent the model anyway: the
+                // host refused with a 400 against a field the operator could
+                // no longer see or clear.
+                const bound =
+                  next === HARNESS_DEFAULT
+                    ? harnesses.find((h) => h.default)
+                    : harnesses.find((h) => h.id === next);
+                if (bound && bound.kind !== "acp") setModelDraft("");
               }}
               onModelChange={setModelDraft}
               onCancel={() => setEditingHarness(false)}
@@ -1088,21 +1097,26 @@ function HarnessAndModel({
    */
   const [models, setModels] = useState<AcpHarnessModel[]>([]);
   const draftHarnessId = harnessDraft === HARNESS_DEFAULT ? defaultHarness?.id : harnessDraft;
+  // What the *desktop* calls this harness. A manifest binding and the shell's
+  // catalogue key are different things — `id = "laptop", agent = "claude"` is
+  // a supported shape — and asking the shell about `laptop` returns no models
+  // at all rather than claude's.
+  const draftAgentId = harnesses.find((h) => h.id === draftHarnessId)?.agent ?? draftHarnessId;
 
   useEffect(() => {
-    if (!editing || draftKind !== "acp" || !draftHarnessId) {
+    if (!editing || draftKind !== "acp" || !draftAgentId) {
       setModels([]);
       return;
     }
     let live = true;
-    setModels(cachedAcpModels(draftHarnessId));
-    void ensureAcpModels(draftHarnessId).then((found) => {
+    setModels(cachedAcpModels(draftAgentId));
+    void ensureAcpModels(draftAgentId).then((found) => {
       if (live) setModels(found);
     });
     return () => {
       live = false;
     };
-  }, [editing, draftKind, draftHarnessId]);
+  }, [editing, draftKind, draftAgentId]);
 
   const unlistedModel =
     modelDraft && !models.some((m) => m.value === modelDraft) ? modelDraft : undefined;

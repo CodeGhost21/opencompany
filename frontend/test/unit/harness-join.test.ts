@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import type { AcpHarnessStatus } from "@/api/transport/desktop";
 import type { HarnessDto } from "@/api/types";
 import {
+  desktopHarnessId,
   harnessAction,
   isChecking,
   isUsableHere,
@@ -273,5 +274,30 @@ describe("what this app can do about a row, as opposed to say", () => {
     const note = readinessNote(rowWith({ state: "adapterOutdated", found: "0.1.0", want: "0.70.0" }));
     expect(note).toContain("0.1.0");
     expect(note).toContain("0.70.0");
+  });
+});
+
+describe("which id the desktop is addressed by", () => {
+  it("uses the ACP agent for a declared harness, and the id for a detected one", () => {
+    // The two coincide for a detected row and diverge for a declared one, so
+    // reaching for `.id` directly reads correctly in every test that only
+    // covers detected harnesses — and then sends `laptop` to a shell whose
+    // catalogue knows only `claude`, which comes back "not a harness this
+    // build knows" and strands the row.
+    const [declaredRow] = joinHarnesses([cli({ id: "laptop", agent: "claude" })], []);
+    expect(desktopHarnessId(declaredRow)).toBe("claude");
+    // The company binding key is untouched by any of this.
+    expect(declaredRow.id).toBe("laptop");
+
+    const [detectedRow] = joinHarnesses([cli()], []);
+    expect(desktopHarnessId(detectedRow)).toBe("claude");
+  });
+
+  it("falls back to the id when a row names no agent", () => {
+    // A `built_in` row has no agent at all. Nothing should ask the desktop
+    // about it, but returning `undefined` here would turn a caller's mistake
+    // into a malformed command rather than a harmless miss.
+    const [managed] = joinHarnesses([declared()], []);
+    expect(desktopHarnessId(managed)).toBe("main");
   });
 });

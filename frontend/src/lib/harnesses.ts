@@ -31,6 +31,17 @@ export interface HarnessRow {
   /** `local` / `runner`, for an `acp` harness. */
   transport?: string;
   /**
+   * The ACP agent this harness drives — `claude`, `codex` — as distinct from
+   * `id`, which is whatever the manifest called the binding.
+   *
+   * Kept on the row because **every** desktop call is keyed on this, not on
+   * `id`: the shell's catalogue only knows the agent names. A declared
+   * `id = "laptop", agent = "claude"` addressed by id gets "not a harness this
+   * build knows" back from `confirmAcpHarness`, and an empty model list from
+   * `ensureAcpModels`. `id` remains the company-side binding key.
+   */
+  agent?: string;
+  /**
    * What this machine says about it, or `undefined` when nothing can say —
    * a browser (no local probe), or a harness that is not a local CLI at all.
    *
@@ -86,6 +97,7 @@ export function joinHarnesses(
       isDefault: harness.default,
       declared: !harness.detected,
       transport: harness.transport,
+      agent: harness.agent,
       readiness: found?.readiness,
     };
   });
@@ -159,6 +171,18 @@ export function harnessAction(row: HarnessRow): HarnessAction {
       // Node. Offering a button there would be offering a no-op.
       return "none";
   }
+}
+
+/**
+ * The id the **desktop** knows this harness by.
+ *
+ * Every `confirmAcpHarness` / `ensureAcpModels` call goes through this rather
+ * than reaching for `.id` directly, because the two coincide for a detected
+ * row and diverge for a declared one — which is exactly the case that is easy
+ * to write and hard to notice.
+ */
+export function desktopHarnessId(row: Pick<HarnessRow, "id" | "agent">): string {
+  return row.agent ?? row.id;
 }
 
 /** What to tell the operator about a row, and what to do about it. */
