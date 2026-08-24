@@ -808,7 +808,13 @@ export function ApprovalCard({
               declineScope.kind === "tool"
                 ? `don't ask again for this tool for ${grantDurationLabel(declineScope.expiresInMillis)}`
                 : "just this once"
-            } — request ${a.at_millis}${
+            }${
+              // Redacted cards already carry the exact timestamp in
+              // `decisionLabel`'s "composed … (…)"; appending the usual
+              // `request <timestamp>` suffix here too would announce the opaque
+              // epoch twice on every hidden card.
+              a.contents_hidden ? "" : ` — request ${a.at_millis}`
+            }${
               batchTotal > 1 ? ` — approval ${batchIndex} of ${batchTotal}` : ""
             }`}
             disabled={deciding !== null}
