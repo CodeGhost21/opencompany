@@ -64,7 +64,11 @@ async function mockApi(page: Page, overrides: { mentionables?: "missing" } = {})
     if (path === `/api/v1/companies/${COMPANY}`) return json(status);
     if (path.endsWith("/desks")) return json(DESKS);
     if (path.endsWith("/team")) return json(ROSTER);
-    if (path.endsWith("/chat/mentionables")) return json(MENTIONABLES);
+    if (path.endsWith("/chat/mentionables")) {
+      return overrides.mentionables === "missing"
+        ? json({ error: "not_found" }, 404)
+        : json(MENTIONABLES);
+    }
     if (path.endsWith("/chat/read-state")) return json({ markers: [] });
     if (path.endsWith("/chat/history")) return json([]);
     if (path.endsWith("/chat")) {
