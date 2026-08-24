@@ -153,14 +153,18 @@ export function Overview({ client, company, companyName }: Props) {
       if (outageWasShowingRef.current) {
         outageWasShowingRef.current = false;
         // The overlay that held focus unmounts with the very render that
-        // clears the outage, so focus must land somewhere right now. When the
+        // clears the outage, so — unless the user has already moved focus
+        // somewhere deliberate — focus has just fallen to <body>. A user who
+        // tabbed or clicked into the sidebar while the retry was in flight
+        // made their own choice; reclaim focus only in the former case, never
+        // override theirs (issue #1314).
+        if (document.activeElement !== document.body) return;
+        // Focus is back at <body>, so it must land somewhere real. When the
         // retried read already answered (its last await can batch with this
         // render), Refresh is enabled and is the natural landing spot. When it
         // is still in flight, Refresh is disabled — land on the graph shell,
         // stable and (with `inert` lifted) already interactive, and upgrade to
-        // Refresh once the load answers below. Either way focus never falls to
-        // <body>, which would make a keyboard user restart their whole tab
-        // order (issue #1314).
+        // Refresh once the load answers below.
         if (refreshButtonRef.current?.disabled) {
           shell.focus();
           restoreFocusToRefreshRef.current = true;

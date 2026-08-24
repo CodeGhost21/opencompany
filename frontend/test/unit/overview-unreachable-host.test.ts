@@ -304,6 +304,35 @@ describe("a host that cannot be reached at all", () => {
     sentinel.remove();
   });
 
+  it("does not reclaim focus from the sidebar when the outage dismisses", async () => {
+    const unreachable = fakeClient();
+    goUnreachable(unreachable);
+    await render(unreachable.client);
+
+    // The graph shell is inert, but the app around it is not — a keyboard
+    // user can tab out of the outage overlay into the sidebar while a retry
+    // is pending. Plant focus there.
+    const sidebarLink = document.createElement("a");
+    sidebarLink.href = "#/company/desks";
+    sidebarLink.textContent = "Desks";
+    document.body.appendChild(sidebarLink);
+    sidebarLink.focus();
+    expect(document.activeElement).toBe(sidebarLink);
+
+    // The host comes back; the retry succeeds and the overlay unmounts.
+    // Focus must stay on the sidebar, not jump back to the graph.
+    goHealthy(unreachable);
+    await act(async () => {
+      retryButton()?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await act(async () => {});
+    await act(async () => {});
+
+    expect(container.querySelector('[data-testid="overview-outage"]')).toBeNull();
+    expect(document.activeElement).toBe(sidebarLink);
+    sidebarLink.remove();
+  });
+
   it("keeps the previous snapshot's time rather than re-stamping it", async () => {
     const mocks = fakeClient({
       desks: [desk({ id: "research", name: "Research Desk", members: ["maya"] })],
