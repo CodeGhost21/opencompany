@@ -224,6 +224,9 @@ pub struct MemoryOverlay {
     pub inbound_context: Option<Arc<dyn ContextStore>>,
     /// The scratch firewall: working-out that durable recall can never reach.
     pub scratch: Option<Arc<dyn ContextStore>>,
+    /// Provider-only scoped partitions and archive reads, with no raw
+    /// provider exposed to runtime consumers.
+    pub scopes: Option<Arc<dyn MemoryScopes>>,
     /// What is bound, for status output.
     pub descriptor: MemoryDescriptor,
     /// The bound provider, kept solely so [`Self::refresh_health`] can probe
