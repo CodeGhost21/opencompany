@@ -280,7 +280,7 @@ async fn do_disconnect(
 async fn do_disconnect_from(
     runtime: Arc<CompanyRuntime>,
     provider: &str,
-    env: &dyn crate::app::config::EnvSource,
+    env: &(dyn crate::app::config::EnvSource + Sync),
 ) -> Result<Json<serde_json::Value>, ApiError> {
     best_effort_revoke_from(&runtime, provider, env).await;
     runtime
