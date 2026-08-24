@@ -6,6 +6,7 @@ import {
   useState,
   type Dispatch,
   type ReactNode,
+  type RefObject,
   type SetStateAction,
 } from "react";
 import { TriangleAlert } from "lucide-react";
