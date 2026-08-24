@@ -35,6 +35,7 @@ import {
 } from "@/lib/chat";
 import { defaultDesks, type Desk } from "@/lib/desks";
 import { readLastChannel } from "@/lib/last-channel";
+import { readChannelRailCollapsed, writeChannelRailCollapsed } from "@/lib/chat-rail";
 import {
   addMemberFailure,
   reportAddMember,
@@ -268,6 +269,19 @@ export function ChatView({
   const [membersOpen, setMembersOpen] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
   const [mobilePane, setMobilePane] = useState<"rail" | "chat">("chat");
+  const [channelsCollapsed, setChannelsCollapsed] = useState(() => readChannelRailCollapsed(scope));
+  // Section disclosure is shared by the desktop and sub-`lg` rail instances
+  // (codex P2 review): each instance would otherwise keep its own fold state,
+  // so dropping below `lg` reopened every section the operator had folded.
+  const [railOpenSections, setRailOpenSections] = useState<Record<string, boolean>>({});
+  const toggleRailSection = (id: string) =>
+    setRailOpenSections((prev) => ({ ...prev, [id]: !(prev[id] ?? true) }));
+  // The header's density toggle stays mounted across a collapse/expand, but the
+  // compact rail's expand button does not — expanding unmounts it while a
+  // keyboard user is still focused on it, dropping them at the document. The
+  // ref lets the expand action hand focus to the header toggle instead (the
+  // fix for the rail's issue #1340 focus review).
+  const channelsToggleRef = useRef<HTMLButtonElement>(null);
   const [isAdmin, setIsAdmin] = useState(false);
   // Who set which cap (issue #360, ported from the retired Team page). Only
   // an admin may read the user directory, so this stays empty for a member —
@@ -275,6 +289,26 @@ export function ChatView({
   const [people, setPeople] = useState<Person[]>([]);
   // The member whose budget dialog is open, if any.
   const [budgetFor, setBudgetFor] = useState<TeamMember | null>(null);
+
+  // A host switch keeps this mounted briefly, so replace rather than carry the
+  // previous connection's layout preference into the next company.
+  useEffect(() => {
+    setChannelsCollapsed(readChannelRailCollapsed(scope));
+  }, [scope]);
+
+  function toggleChannels() {
+    setChannelsCollapsed((collapsed) => {
+      const next = !collapsed;
+      writeChannelRailCollapsed(scope, next);
+      // Expanding from the compact rail unmounts the button that carried focus;
+      // hand it to the header toggle, which is mounted on both density states.
+      // `next` is the rail's new collapsed state, so expanding is `!next` —
+      // collapsing from the header's own toggle leaves that button mounted,
+      // and the focus it already holds is the right place to stay.
+      if (!next) channelsToggleRef.current?.focus();
+      return next;
+    });
+  }
 
   const boot = useCallback(async () => {
     try {
@@ -1018,7 +1052,20 @@ export function ChatView({
         activeId={channel.id}
         unread={unread ?? {}}
         onSelect={selectChannel}
-        className={cn("lg:flex", mobilePane === "rail" ? "flex" : "hidden")}
+        openSections={railOpenSections}
+        onToggleSection={toggleRailSection}
+        className={cn("lg:hidden", mobilePane === "rail" ? "flex" : "hidden")}
+      />
+      <ChannelRail
+        sections={sections}
+        activeId={channel.id}
+        unread={unread ?? {}}
+        onSelect={selectChannel}
+        openSections={railOpenSections}
+        onToggleSection={toggleRailSection}
+        collapsed={channelsCollapsed}
+        onExpand={toggleChannels}
+        className="hidden lg:flex"
       />
 
       <div
@@ -1033,6 +1080,9 @@ export function ChatView({
           membersOpen={membersOpen}
           onToggleMembers={() => setMembersOpen((o) => !o)}
           onOpenRail={() => setMobilePane("rail")}
+          channelsCollapsed={channelsCollapsed}
+          onToggleChannels={toggleChannels}
+          channelsToggleRef={channelsToggleRef}
         />
 
         <div className="flex min-h-0 flex-1">
