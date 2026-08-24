@@ -80,6 +80,37 @@ describe("mentionCountsByChannel", () => {
   });
 
   /**
+   * A company can name a desk `general` (or `main`) and not put it first. The
+   * host then stores the *canonical* desk id under that name, and the id is a
+   * real rendered channel — so the exact match must win over the
+   * legacy-spelling alias, or a mention meant for that desk would badge the
+   * default thread, and opening the default thread would silently clear it.
+   */
+  describe("with a real desk id that matches a legacy spelling", () => {
+    const rendered = new Set(["engineering", "general", "design"]);
+
+    it("badges the real desk, not the default thread", () => {
+      expect(
+        mentionCountsByChannel([note({ id: "a", context: "general" })], "engineering", rendered),
+      ).toEqual({ general: 1 });
+    });
+
+    it("still aliases a spelling that names no rendered channel", () => {
+      expect(
+        mentionCountsByChannel(
+          [
+            note({ id: "a", context: "main" }),
+            note({ id: "b", context: "General" }),
+            note({ id: "c", context: "" }),
+          ],
+          "engineering",
+          rendered,
+        ),
+      ).toEqual({ engineering: 3 });
+    });
+  });
+
+  /**
    * A host answering `GET {scope}/notifications` with something other than the
    * documented shape must not take the console down.
    *
