@@ -1168,7 +1168,6 @@ mod test {
     }
 
     /// SCRATCH: proves the callsite-poisoning race behind the CI flake.
-    /// Deliberately NOT wrapped: this is the poisoner ordering.
     #[test]
     fn scratch_proves_callsite_poisoning() {
         let namespace = Namespace::company_root(&CompanyId::new("acme"));
@@ -1184,14 +1183,21 @@ mod test {
             taint: MemoryTaint::Internal,
         };
 
-        // 1. Bare-thread corrupt decode FIRST — this is what `unreadable_content`
-        //    and the `"not json"` arm above can do when they win the scheduling
-        //    race. No subscriber on this thread -> global NoSubscriber ->
-        //    `Interest::never()` cached for the corrupt warn callsite.
+        // 1. A sink raises the GLOBAL max level to WARN (what `Dispatch::new`
+        //    inside `warnings_from` does via `rebuild_interest`).
+        warnings_from(|| {
+            assert!(decode::<u32>(&entry("not json"), &namespace).is_none());
+        });
+
+        // 2. NOW a bare-thread corrupt decode is *level-enabled* (MAX_LEVEL is
+        //    WARN), so it proceeds to register the corrupt callsite. On this
+        //    thread there is no subscriber, so `get_default` returns the global
+        //    NoSubscriber, whose `register_callsite` is `Interest::never()` —
+        //    and that caches the callsite as NEVER for the whole process.
         assert!(decode::<u32>(&entry("not json"), &namespace).is_none());
 
-        // 2. Now the guarded capture, same callsite. If the theory is right this
-        //    comes back empty and the assertion fires.
+        // 3. A fresh `warnings_from` capture of the SAME callsite now sees
+        //    `interest().is_never()` and silently disables the event.
         let warnings = warnings_from(|| {
             assert!(decode::<u32>(&entry("not json"), &namespace).is_none());
         });
