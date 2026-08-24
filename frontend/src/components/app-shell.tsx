@@ -1092,7 +1092,10 @@ export function AppShell({
           // re-read is recreated when `company` changes, so the closure's
           // `company` is the scope it started for and `companyRef` is where
           // the switch landed — see `onSendFailed`'s identical guard.
-          if (companyRef.current !== company) return;
+          if (
+            scopeRef.current.company !== company ||
+            scopeRef.current.connection !== scope.connection
+          ) return;
           const hydrated = fromHistory(entries);
           setThreads((ts) =>
             ts.map((t) => {
@@ -1646,7 +1649,10 @@ export function AppShell({
           // A company switch that happened while the request was in flight
           // invalidates the result: the rows belong to the old company and
           // would restore a stale turn into the new company's openTurns map.
-          if (companyRef.current !== company) return;
+          if (
+            scopeRef.current.company !== company ||
+            scopeRef.current.connection !== scope.connection
+          ) return;
           const open = openTurnsFromRuns(runs);
           // The fold's whole list for this thread, not just its head: the POST
           // died mid-queue, so any rows the host kept are this turn's kin and
