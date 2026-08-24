@@ -993,6 +993,7 @@ mod tests {
     fn the_agent_selector_becomes_a_store_predicate() {
         let filter = RunsQuery {
             task: Some("card-7".into()),
+            workflow_run: None,
             agent: Some("engineer".into()),
             status: None,
             limit: None,
