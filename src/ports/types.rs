@@ -2550,6 +2550,11 @@ pub struct OutboundMessage {
     /// and says so rather than offering an action that cannot persist.
     #[serde(default, rename = "messageId", skip_serializing_if = "Option::is_none")]
     pub message_id: Option<String>,
+    /// Who this reply names, projected for the requesting viewer by the chat
+    /// handler. Stored replies carry structured mentions in `AgentReply`; this
+    /// field keeps the synchronous POST response identical to history and SSE.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mentions: Vec<crate::server::chat_history::MentionView>,
 }
 
 /// One visible step in an agent turn's processing timeline, surfaced in the
