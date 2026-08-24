@@ -17,7 +17,7 @@ import { ToolDetailCard, type DeptLite } from './KnowledgeDetail';
 export function KnowledgeGraphFullscreen({
   deptList, currentTeamId, currentDept,
   toolWiki, extraDetail, coreOpen = false, onCollapseCore, searchSlot, legendSlot, statusSlot,
-  emptyState = false, onNavDept, onBack, children,
+  onNavDept, onBack, covered = false, emptyState = false, children,
 }: {
   deptList: DeptLite[];
   currentTeamId: string | null;
@@ -36,6 +36,9 @@ export function KnowledgeGraphFullscreen({
   legendSlot?: React.ReactNode;
   /** the snapshot line and its Refresh control, rendered top-right */
   statusSlot?: React.ReactNode;
+  /** an outage overlay covers the shell; the graph must not answer the
+      keyboard at all (issue #1314) */
+  covered?: boolean;
   /** the loaded company has no desks, so the graph cannot show its pillars */
   emptyState?: boolean;
   onNavDept: (teamId: string) => void;
@@ -81,6 +84,11 @@ export function KnowledgeGraphFullscreen({
   };
 
   useEffect(() => {
+    // While the outage overlay covers the shell, the graph must not answer
+    // the keyboard at all: `inert` on the covered subtree cannot suppress a
+    // `window` listener, so the handler is simply not registered (issue
+    // #1314).
+    if (covered) return;
     const onKey = (e: KeyboardEvent) => {
       // typing in the vault search (or any input) must not drive navigation
       const tag = (e.target as HTMLElement | null)?.tagName;
@@ -95,7 +103,7 @@ export function KnowledgeGraphFullscreen({
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [hasDetail, coreOpen, idx, deptList]);
+  }, [hasDetail, coreOpen, idx, deptList, covered]);
 
   if (!mounted) return null;
 
