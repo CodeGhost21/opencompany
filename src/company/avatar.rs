@@ -667,12 +667,13 @@ mod test {
         v.extend_from_slice(&30u32.to_le_bytes());
         v.extend_from_slice(b"WEBPVP8 ");
         v.extend_from_slice(&10u32.to_le_bytes());
-        // Frame tag + start code (RFC 6386), then 14-bit width and height.
+        // Frame tag + start code (RFC 6386), then width and height each as
+        // their own little-endian 16-bit field, scale bits clear.
         v.extend_from_slice(&[0x9D, 0x01, 0x2A, 0x9D, 0x01, 0x2A]);
         v.push((w & 0xFF) as u8);
-        v.push((((w >> 8) & 0x3F) | ((h & 0x03) << 6)) as u8);
-        v.push(((h >> 2) & 0xFF) as u8);
-        v.push(((h >> 10) & 0x3F) as u8);
+        v.push(((w >> 8) & 0x3F) as u8);
+        v.push((h & 0xFF) as u8);
+        v.push(((h >> 8) & 0x3F) as u8);
         v
     }
 
