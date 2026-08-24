@@ -73,6 +73,10 @@ export function AvatarPicker({
   // change the teammate's icon after the dialog was gone.
   const mounted = useRef(true);
   useEffect(() => {
+    // StrictMode replays setup → cleanup → setup in development while keeping
+    // refs alive. Re-arm the guard in setup so the replayed mounted instance
+    // can still commit a successful upload.
+    mounted.current = true;
     return () => {
       mounted.current = false;
     };
