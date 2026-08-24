@@ -80,7 +80,8 @@ pub struct WorkflowSpawn {
     events: Arc<dyn EventLog>,
     supervisor: RunSupervisor,
     runner: Arc<dyn WorkflowRunner>,
-    runs: Arc<dyn RunStore>,}
+    runs: Arc<dyn RunStore>,
+}
 
 impl WorkflowSpawn {
     /// Reads the three shared handles off `runtime` and pairs them with the
@@ -99,7 +100,8 @@ impl WorkflowSpawn {
             events: runtime.events().clone(),
             supervisor: runtime.run_supervisor().clone(),
             runner,
-            runs: runtime.runs().clone(),        }
+            runs: runtime.runs().clone(),
+        }
     }
 
     /// Registers a run, spawns it, and returns its id alongside the task.
@@ -263,12 +265,8 @@ impl WorkflowSpawn {
             // active before publishing the run outcome, so cancellation cannot
             // leave Observatory showing a permanently running attempt.
             if !dry_run && ctx.cancel.is_cancelled() {
-                settle_cancelled_workflow_attempts(
-                    self.runs.as_ref(),
-                    &self.company,
-                    &ctx.run_id,
-                )
-                .await;
+                settle_cancelled_workflow_attempts(self.runs.as_ref(), &self.company, &ctx.run_id)
+                    .await;
             }
             if !dry_run {
                 // closed the tab; the record is what is still there tomorrow.
