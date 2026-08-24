@@ -285,10 +285,20 @@ fn gif_animation_cost(bytes: &[u8]) -> Result<Option<u64>> {
             // Image Descriptor: left/top (4) + width/height (4) + packed flags (1).
             0x2C => {
                 saw_descriptor = true;
-                let frame_w = u16::from_le_bytes(bytes.get(i + 4..i + 6)?.try_into().ok()?) as u32;
-                let frame_h = u16::from_le_bytes(bytes.get(i + 6..i + 8)?.try_into().ok()?) as u32;
+                // A frame's own bytes cut off mid-descriptor are a truncated
+                // animation too — the descriptor this frame *is* was reached.
+                let Some(frame_w) = bytes.get(i + 4..i + 6).and_then(|b| b.try_into().ok()) else {
+                    return Err(truncated_animation());
+                };
+                let frame_w = u16::from_le_bytes(frame_w) as u32;
+                let Some(frame_h) = bytes.get(i + 6..i + 8).and_then(|b| b.try_into().ok()) else {
+                    return Err(truncated_animation());
+                };
+                let frame_h = u16::from_le_bytes(frame_h) as u32;
                 cost = cost.saturating_add((frame_w as u64) * (frame_h as u64));
-                let packed = *bytes.get(i + 8)?;
+                let Some(&packed) = bytes.get(i + 8) else {
+                    return Err(truncated_animation());
+                };
                 i += 9;
                 // A local color table follows the descriptor when its flag is
                 // set; the table size is again the low three bits.
