@@ -863,9 +863,10 @@ function RunFilesSection({
       scopeRef.current.company !== scope.company ||
       scopeRef.current.runId !== scope.runId;
     fetchRunArtifacts(client, company, runId)
-      .then((rows) => {
+      .then(({ files, truncated }) => {
         if (stale()) return;
-        setFiles(rows);
+        setFiles(files);
+        setTruncated(truncated);
       })
       .catch(() => {
         if (stale()) return;
