@@ -1449,10 +1449,33 @@ mod test {
         assert_eq!(apng_animation_cost(&png(16, 16)), Ok(None));
     }
 
-    /// An animated WebP can hide a flood of full-canvas frames under the byte
-    /// ceiling exactly like a GIF can; the per-cycle walk must refuse it too.
+    /// A valid-looking animation whose stream is truncated after frames have
+    /// begun must not fall back to the still-image cap. Browsers decode the
+    /// frames that are present, so accepting this would let a frame flood past
+    /// `MAX_AVATAR_ANIMATED_PIXELS` by omitting only a trailer or later chunk.
     #[test]
-    fn size_check_refuses_an_animated_webp_beyond_the_cost_cap() {
+    fn size_check_refuses_truncated_animations() {
+        let mut gif = gif_animated((4096, 4096), &[(4096, 4096); 9]);
+        gif.pop(); // remove the trailer
+        let gif_err = check_image_dimensions(&gif).unwrap_err().to_string();
+        assert!(gif_err.contains("truncated animation"), "GIF: {gif_err}");
+
+        let mut webp = webp_animated((4096, 4096), &[(4096, 4096); 9]);
+        webp.truncate(webp.len() - 1); // cut off the final ANMF payload
+        let webp_err = check_image_dimensions(&webp).unwrap_err().to_string();
+        assert!(webp_err.contains("truncated animation"), "WebP: {webp_err}");
+
+        let mut apng = apng_animated((4096, 4096), &[(4096, 4096); 9]);
+        apng.truncate(apng.len() - 1); // cut off the final chunk
+        let apng_err = check_image_dimensions(&apng).unwrap_err().to_string();
+        assert!(apng_err.contains("truncated animation"), "APNG: {apng_err}");
+
+        // A header-only GIF has never reached a frame, so it remains the
+        // accepted still-image case used by the normal-size test above.
+        check_image_dimensions(&gif(4096, 4096)).expect("header-only GIF is still");
+    }
+
+
         let busy = webp_animated((4096, 4096), &[(4096, 4096); 10]);
         let err = check_image_dimensions(&busy).unwrap_err().to_string();
         assert!(
