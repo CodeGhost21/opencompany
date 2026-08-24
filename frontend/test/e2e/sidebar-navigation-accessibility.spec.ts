@@ -19,6 +19,13 @@ test("the skip link reaches main content and the sidebar is the primary navigati
   const skip = page.getByRole("link", { name: "Skip to content", exact: true });
   const main = page.getByRole("main");
 
+  // The console boots through a "Connecting…" phase that has no shell and so
+  // no skip link; a Tab pressed against that phase moves focus nowhere. The
+  // skip link exists only once the shell (and its sidebar) has mounted, so
+  // waiting for it is the app-ready signal — and the sidebar's chrome renders
+  // in the same commit, so nothing focusable appears between them.
+  await skip.waitFor();
+
   // This is the first tab stop, ahead of the sidebar's host switcher and its
   // destination rows, even though the fixed sidebar renders before main.
   await page.keyboard.press("Tab");
