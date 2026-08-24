@@ -4005,6 +4005,7 @@ mod test {
                 "chargebee*",
                 "hosting*",
                 "paypal*",
+                "mcp*",
             ] {
                 assert!(
                     !allow_covers(&allow, grant),
