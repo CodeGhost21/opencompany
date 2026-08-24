@@ -348,8 +348,9 @@ fn dto_from_decl(
 /// roster walk beside this one is exactly how the two consoles would come to
 /// disagree with each other and with the harness. The roster is exactly what the harness builds in
 /// `build_roster` — the **effective** roster, not the blueprint's: the manifest
-/// agents with every operator edit applied (each with its own `tools` narrowed by
-/// the company `allow`), plus the promoted overlay teammates — each narrowed by
+/// agents with every operator edit applied (each with its own `tools` narrowed
+/// by the company `allow` **and** by the desks it sits on — issue #1674), plus
+/// the promoted overlay teammates — each narrowed by
 /// **its own** `tools` line the same way (issue #661), which for the common
 /// empty line is still the full company `allow`, the standard grant
 /// `overlay_agent_to_manifest` gives it. An overlay id already claimed by a
