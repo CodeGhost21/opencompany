@@ -55,7 +55,7 @@ describe("useApprovalDeadline", () => {
       }),
     } as unknown as OpenCompanyClient;
 
-    let hours: () => number;
+    let hours!: () => number;
     act(() => {
       hours = probe(() => useApprovalDeadline(client, "acme"));
     });
@@ -71,7 +71,7 @@ describe("useApprovalDeadline", () => {
       },
     } as unknown as OpenCompanyClient;
 
-    let hours: () => number;
+    let hours!: () => number;
     act(() => {
       hours = probe(() => useApprovalDeadline(client, "acme"));
     });
@@ -88,7 +88,7 @@ describe("useApprovalDeadline", () => {
       }),
     } as unknown as OpenCompanyClient;
 
-    let hours: () => number;
+    let hours!: () => number;
     act(() => {
       hours = probe(() => useApprovalDeadline(client, "acme"));
     });
@@ -105,7 +105,7 @@ describe("useApprovalDeadline", () => {
       }),
     } as unknown as OpenCompanyClient;
 
-    let hours: () => number;
+    let hours!: () => number;
     act(() => {
       hours = probe(() => useApprovalDeadline(client, "acme"));
     });
@@ -122,7 +122,7 @@ describe("useApprovalDeadline", () => {
       })),
     } as unknown as OpenCompanyClient;
 
-    let hours: () => number;
+    let hours!: () => number;
     act(() => {
       hours = probe(() => useApprovalDeadline(client, "acme"));
     });

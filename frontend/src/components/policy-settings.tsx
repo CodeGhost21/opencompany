@@ -282,42 +282,56 @@ export function PolicySettings({ client, company }: Props) {
   // only a successful load lets the "is not a tool" warning speak.
   const [wiredToolsLoaded, setWiredToolsLoaded] = useState(false);
 
-  const load = useCallback(async () => {
-    setLoading(true);
-    setLoadError(null);
-    // A new scoped read must not carry the previous company's values. If this
-    // read fails, the card should show the error state, not the old company's
-    // policy (deadline, cap, list) as if it were this one's — the drafts below
-    // are the exact state an operator would otherwise save against the new
-    // company. They are overwritten from `next` on success.
-    setStatus(null);
-    setDraftAlways("");
-    setDraftSpend("");
-    setNoSpendCap(false);
-    setDraftDeadline("");
-    try {
-      const next = await getPolicy(client, company);
-      setStatus(next);
-      setDraftAlways(next.alwaysApprove.join(", "));
-      setDraftSpend(next.autoApproveUnderUsd?.toString() ?? "");
-      setNoSpendCap(next.autoApproveUnderUsd === null);
-      // A host that predates the deadline field omits it; `undefined` must
-      // fall back to the historical 24-hour default rather than render as
-      // "undefined hours".
-      setDraftDeadline((next.approvalTtlHours ?? 24).toString());
-      setDirty(false);
-    } catch (error) {
-      const message =
-        error instanceof Error ? error.message : "Could not load the policy.";
-      setLoadError(message);
-      toast.error(message);
-    } finally {
-      setLoading(false);
-    }
-  }, [client, company]);
+  const load = useCallback(
+    async (live: () => boolean) => {
+      setLoading(true);
+      setLoadError(null);
+      // A new scoped read must not carry the previous company's values. If this
+      // read fails, the card should show the error state, not the old company's
+      // policy (deadline, cap, list) as if it were this one's — the drafts below
+      // are the exact state an operator would otherwise save against the new
+      // company. They are overwritten from `next` on success.
+      setStatus(null);
+      setDraftAlways("");
+      setDraftSpend("");
+      setNoSpendCap(false);
+      setDraftDeadline("");
+      try {
+        const next = await getPolicy(client, company);
+        // A response for a company this `load` no longer describes must not
+        // overwrite the current company's state: when the scope changes mid-
+        // flight, the effect's cleanup flips `live` for the stale request, so
+        // its continuation (and its `finally`) stand down here rather than
+        // clobbering the read that replaced it.
+        if (!live()) return;
+        setStatus(next);
+        setDraftAlways(next.alwaysApprove.join(", "));
+        setDraftSpend(next.autoApproveUnderUsd?.toString() ?? "");
+        setNoSpendCap(next.autoApproveUnderUsd === null);
+        // A host that predates the deadline field omits it; `undefined` must
+        // fall back to the historical 24-hour default rather than render as
+        // "undefined hours".
+        setDraftDeadline((next.approvalTtlHours ?? 24).toString());
+        setDirty(false);
+      } catch (error) {
+        if (!live()) return;
+        const message =
+          error instanceof Error ? error.message : "Could not load the policy.";
+        setLoadError(message);
+        toast.error(message);
+      } finally {
+        if (live()) setLoading(false);
+      }
+    },
+    [client, company],
+  );
 
   useEffect(() => {
-    void load();
+    let live = true;
+    void load(() => live);
+    return () => {
+      live = false;
+    };
   }, [load]);
 
   // The confirmation dialog holds a choice reviewed against ONE company's
@@ -541,6 +555,15 @@ export function PolicySettings({ client, company }: Props) {
       apply(
         await resetPolicy(client, company),
         "Reverted to the manifest's policy",
+        undefined,
+        // A reset lands the manifest's deadline on the live gate immediately,
+        // the same way a deadline save does. When that deadline is shorter than
+        // the override it replaces, already-parked approvals can expire on the
+        // next sweep before any new turn — the generic "next turn" line would
+        // hide that retroactive effect, so name it the way `saveDeadline` does.
+        (status.manifestApprovalTtlHours ?? 24) < status.approvalTtlHours
+          ? "takes effect immediately — parked approvals are re-checked against the manifest deadline"
+          : undefined,
       );
       return true;
     } catch (error) {
@@ -757,7 +780,11 @@ export function PolicySettings({ client, company }: Props) {
             <p className="text-sm text-muted-foreground">
               {loadError ?? "Could not load the policy."}
             </p>
-            <Button size="sm" variant="outline" onClick={() => void load()}>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => void load(() => true)}
+            >
               Try again
             </Button>
           </div>
