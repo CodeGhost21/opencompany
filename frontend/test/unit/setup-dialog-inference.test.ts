@@ -449,6 +449,62 @@ describe("a replacing build-out clears the team it replaces", () => {
     ]);
   });
 
+  it("a designed replacement settles the redesign debt before the completion screen", async () => {
+    const settled: (string[] | null)[] = [];
+    const client = clientWith({
+      source: "model",
+      roster: [
+        { id: "f1", name: "Fallback", role: "Operations", global: false } as TeamMemberDto,
+      ],
+    });
+    await show(client, {
+      redesign: true,
+      fallbackIds: ["f1"],
+      onReplacementComplete: (ids) => settled.push(ids),
+    });
+    await runFlow();
+    // The redesign replaced the fallback with a designed team: the debt is
+    // paid. Without this, a reload on the completion screen reopens redesign
+    // with the swept boundary and stacks a duplicate beside the replacement.
+    expect(settled).toEqual([null]);
+    expect(client.removed).toEqual(["f1"]);
+  });
+
+  it("a replacement that falls back again re-keys the debt to the new fallback's rows", async () => {
+    const settled: (string[] | null)[] = [];
+    const roster = [
+      { id: "old-1", name: "Fallback", role: "Operations", global: false } as TeamMemberDto,
+    ];
+    let nextId = 0;
+    const client = {
+      ...clientWith({ source: "fallback", reason: "no_model" }),
+      addTeamMember: async () => {
+        const id = `n${++nextId}`;
+        roster.push({ id, role: "Operations", global: false } as TeamMemberDto);
+        return { id };
+      },
+      listTeam: async () => [...roster],
+      removed: [] as string[],
+      removeTeamMember: async (agentId: string) => {
+        client.removed.push(agentId);
+        const idx = roster.findIndex((m) => m.id === agentId);
+        if (idx >= 0) roster.splice(idx, 1);
+      },
+    } as unknown as OpenCompanyClient & { removed: string[] };
+    await show(client, {
+      redesign: true,
+      fallbackIds: ["old-1"],
+      onReplacementComplete: (ids) => settled.push(ids),
+    });
+    await runFlow();
+    // The replacement also fell back (still no reachable model): the debt must
+    // now name the new fallback's rows, so a reload resumes against them —
+    // never the swept old-1, which would leave the new fallback stacked beside
+    // a second pass that swept nothing.
+    expect(settled).toEqual([["n1"]]);
+    expect(client.removed).toEqual(["old-1"]);
+  });
+
   it("keeps the existing team when a replacing build-out creates nothing", async () => {
     const removed: string[] = [];
     const roster = [
