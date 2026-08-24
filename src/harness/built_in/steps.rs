@@ -448,7 +448,7 @@ impl StepTrace {
                 if buf.len() < DEEP_THINK_FLUSH_BYTES {
                     return Vec::new();
                 }
-                let reasoning = buf.clone();
+                let reasoning = std::mem::take(buf);
                 vec![(
                     seq,
                     TurnStep {
