@@ -1,0 +1,21 @@
+{
+  "mcpServers": {
+    "chrome-devtools": {
+      "command": "./frontend/test/tools/chrome-devtools-mcp.sh",
+      "args": []
+    },
+    "playwright": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@playwright/mcp@0.0.79",
+        "--headless",
+        "--isolated",
+        "--browser",
+        "chromium",
+        "--output-dir",
+        "./frontend/target/mcp"
+      ]
+    }
+  }
+}

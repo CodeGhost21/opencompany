@@ -68,10 +68,11 @@ const EMPTY: Sources = {
 /**
  * The command centre: the company's knowledge graph, and nothing else.
  *
- * The page is the graph — no header, no strip, no top bar (the shell hides its
- * own for this view). The company sits at the core, its desks are the pillars,
- * the jobs hang off each pillar, the teammate who does each job sits above it,
- * and their tools are the outer ring.
+ * The page is the graph — no header or strip. The shell does not render a top
+ * bar for any view; its remaining controls live in the sidebar. The company
+ * sits at the core, its desks are the pillars, the jobs hang off each pillar,
+ * the teammate who does each job sits above it, and their tools are the outer
+ * ring.
  *
  * Every ring is **declared** now: the pillars are the company's own desks
  * (issue #486), the outer ring is the grants the host resolved for each
@@ -108,6 +109,28 @@ export function Overview({ client, company, companyName }: Props) {
   // is a snapshot going stale" without reading `sources` from a stale closure
   // (the effect does not depend on it).
   const fetchedAtRef = useRef<number | null>(null);
+
+  // The outage overlay covers the graph rather than unmounting it, so the
+  // snapshot underneath is still painted — but a covered graph must not stay
+  // keyboard-focusable or exposed to a screen reader (issue #1314). `inert` is
+  // the one attribute that removes both, and it is set imperatively because
+  // React 18's types predate the boolean `inert` prop.
+  const graphShellRef = useRef<HTMLDivElement>(null);
+  const outageRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const shell = graphShellRef.current;
+    if (!shell) return;
+    if (loadError) {
+      shell.setAttribute("inert", "");
+      // The graph — and the Refresh button whose failed click just produced
+      // this outage — are now inert, so the browser would drop focus to
+      // <body>. Land it on the explanation instead, where the keyboard user
+      // can read it and reach the retry control.
+      outageRef.current?.focus();
+    } else {
+      shell.removeAttribute("inert");
+    }
+  }, [loadError]);
 
   useEffect(() => {
     let live = true;
@@ -160,7 +183,9 @@ export function Overview({ client, company, companyName }: Props) {
       const desks = desksResult.status === "fulfilled" ? desksResult.value : ([] as DeskDto[]);
       const people = peopleResult.status === "fulfilled" ? peopleResult.value : ([] as Person[]);
       const memories =
-        memoriesResult.status === "fulfilled" ? memoriesResult.value : ([] as MemoryEntry[]);
+        memoriesResult.status === "fulfilled"
+          ? memoriesResult.value.items
+          : ([] as MemoryEntry[]);
       const flowList = flowListResult.status === "fulfilled" ? flowListResult.value : [];
 
       // `listWorkflows` answers with `{id,name,description,editable,enabled}`
@@ -251,11 +276,19 @@ export function Overview({ client, company, companyName }: Props) {
    * node's card hid the staleness signal, the Refresh control *and* the
    * outage alert, and left them unclickable behind an opaque panel. Only the
    * graph's shell knows how much of the right edge the rail is using, so the
-   * shell is what places this.
+   * shell is what places this. The outage alert no longer lives here at all:
+   * a total failure is the page's state, so it is a full-page overlay over
+   * the graph (issue #1314), not a corner detail.
    */
   const statusSlot = (
     <div className="flex items-center gap-1.5 rounded-md border bg-background/90 px-2 py-1 text-2xs text-muted-foreground shadow-sm backdrop-blur">
-      <span className="truncate">
+      {/* Volatile: the timestamp is `now` relative to the host's clock, so
+          two runs of the same code land a minute apart and the label's
+          glyphs change — the graph's settle time depends on machine speed.
+          Masked via data-visual-volatile (visual.spec.ts) rather than
+          frozen, because a frozen client clock turns "just now" labels in
+          the list below into a distance that grows every day. */}
+      <span className="truncate" data-visual-volatile>
         {sources.fetchedAt === null
           ? loading
             ? "Loading…"
@@ -271,7 +304,7 @@ export function Overview({ client, company, companyName }: Props) {
         disabled={loading}
         title="This page is a snapshot, not a live view. Re-read the company."
         aria-label="Refresh the graph"
-        className="inline-flex items-center gap-1 rounded px-1 py-0.5 hover:bg-muted disabled:opacity-50"
+        className="inline-flex min-h-6 items-center gap-1 rounded px-1 py-0.5 hover:bg-muted disabled:opacity-50 md:min-h-0"
       >
         <RefreshCw className={`size-3 ${loading ? "animate-spin" : ""}`} aria-hidden />
         Refresh
@@ -303,8 +336,10 @@ export function Overview({ client, company, companyName }: Props) {
           explanation instead of asking an operator to find it in a corner. */}
       {loadError && (
         <div
+          ref={outageRef}
+          tabIndex={-1}
           data-testid="overview-outage"
-          className="absolute inset-0 z-50 grid place-items-center bg-os-bg/95 px-5"
+          className="absolute inset-0 z-50 grid place-items-center bg-os-bg/95 px-5 outline-none"
         >
           <div role="alert" className="max-w-md text-center">
             <p className="text-lg font-semibold text-os-text">{loadError}</p>
@@ -321,32 +356,39 @@ export function Overview({ client, company, companyName }: Props) {
           </div>
         </div>
       )}
-      <Suspense
-        fallback={
-          // The graph's chunk is still in flight, so there is no shell to slot
-          // the snapshot line into yet — and no detail rail for it to dodge
-          // either. It is drawn here at the same inset the shell will use, so
-          // a cold load still says "Loading…" and the line does not appear to
-          // pop into existence once the physics arrives.
-          <div className="grid h-full place-items-center text-sm text-muted-foreground">
-            <div className="absolute right-5 top-5 z-40 flex flex-col items-end gap-1.5">
-              {statusSlot}
+      {/* The graph stays mounted under the overlay so its snapshot is never
+          torn down and rebuilt — but while the outage shows it must be inert:
+          not focusable, not exposed to a screen reader (issue #1314). The
+          attribute lives on this wrapper because it must cover the graph and
+          the status slot but not the overlay itself. */}
+      <div ref={graphShellRef} data-graph-shell className="h-full w-full">
+        <Suspense
+          fallback={
+            // The graph's chunk is still in flight, so there is no shell to slot
+            // the snapshot line into yet — and no detail rail for it to dodge
+            // either. It is drawn here at the same inset the shell will use, so
+            // a cold load still says "Loading…" and the line does not appear to
+            // pop into existence once the physics arrives.
+            <div className="grid h-full place-items-center text-sm text-muted-foreground">
+              <div className="absolute right-5 top-5 z-40 flex flex-col items-end gap-1.5">
+                {statusSlot}
+              </div>
+              Drawing the graph…
             </div>
-            Drawing the graph…
-          </div>
-        }
-      >
-        <KnowledgeGraph
-          graph={graph}
-          agents={adapted.agents}
-          departments={adapted.departments}
-          people={adapted.people}
-          tasks={adapted.tasks}
-          memory={memoryGraph}
-          toolLabels={adapted.toolLabels}
-          statusSlot={statusSlot}
-        />
-      </Suspense>
+          }
+        >
+          <KnowledgeGraph
+            graph={graph}
+            agents={adapted.agents}
+            departments={adapted.departments}
+            people={adapted.people}
+            tasks={adapted.tasks}
+            memory={memoryGraph}
+            toolLabels={adapted.toolLabels}
+            statusSlot={statusSlot}
+          />
+        </Suspense>
+      </div>
     </div>
   );
 }

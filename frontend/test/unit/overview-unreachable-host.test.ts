@@ -43,10 +43,12 @@ function member(id: string, role = "Analyst"): TeamMemberDto {
 }
 
 /** Every `client.get` path this component reads, keyed by its suffix. */
-const HEALTHY_GET: Record<string, unknown[]> = {
+const HEALTHY_GET: Record<string, unknown> = {
   "/tasks": [],
   "/users": [],
-  "/memory": [],
+  // `GET /memory` answers with `{ items, totalContext, contextTruncated }` —
+  // the truncation metadata rides beside the rows from one read.
+  "/memory": { items: [], totalContext: 0, contextTruncated: false },
   "/workflows": [],
 };
 
@@ -133,6 +135,15 @@ function retryButton(): HTMLButtonElement | undefined {
 }
 
 describe("a host that cannot be reached at all", () => {
+  it("keeps Refresh at a 24px touch target below the desktop breakpoint", async () => {
+    await render(fakeClient().client);
+
+    const refresh = container.querySelector('[aria-label="Refresh the graph"]');
+    expect(refresh).not.toBeNull();
+    expect(refresh?.className).toContain("min-h-6");
+    expect(refresh?.className).toContain("md:min-h-0");
+  });
+
   it("covers the empty graph with a centered, actionable outage state", async () => {
     const unreachable = fakeClient();
     goUnreachable(unreachable);
@@ -145,6 +156,21 @@ describe("a host that cannot be reached at all", () => {
     // snapshot to draw, not that one was taken and came back empty.
     expect(snapshotText()).not.toContain("Snapshot");
     expect(snapshotText()).toContain("No snapshot yet");
+  });
+
+  it("makes the covered graph inert while the outage shows", async () => {
+    const unreachable = fakeClient();
+    goUnreachable(unreachable);
+    await render(unreachable.client);
+
+    // The overlay exists and the covered shell — the wrapper around the
+    // graph and its status slot — is inert, so a keyboard user cannot tab
+    // into invisible Refresh / pillar / detail controls underneath (issue
+    // #1314), and a screen reader does not expose the covered graph.
+    expect(container.querySelector('[data-testid="overview-outage"]')).not.toBeNull();
+    const shell = container.querySelector('[data-graph-shell]');
+    expect(shell).not.toBeNull();
+    expect(shell?.hasAttribute("inert")).toBe(true);
   });
 
   it("retries from the outage state", async () => {

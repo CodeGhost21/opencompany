@@ -1,0 +1,17 @@
+{
+  "$comment": "An answer here ships with the program that produced it, so the library documentation has to match the version that ran.",
+  "mcpServers": {
+    "deepwiki": {
+      "url": "https://mcp.deepwiki.com/mcp",
+      "description": "Documentation and Q&A for any public GitHub repository. Public and no-auth."
+    },
+    "context7": {
+      "url": "https://mcp.context7.com/mcp",
+      "description": "Version-accurate API and library documentation, so answers match the release in use."
+    },
+    "huggingface": {
+      "url": "https://huggingface.co/mcp",
+      "description": "Models, datasets and papers on the Hugging Face Hub. Public and no-auth."
+    }
+  }
+}

@@ -409,6 +409,16 @@ impl RunOutcome {
 pub struct RunFilter {
     /// Only attempts at this card.
     pub task_id: Option<String>,
+    /// Only attempts dispatched to this desk/teammate.
+    ///
+    /// The selector behind the console's per-teammate run history (issue
+    /// #1573). Deliberately a *store* predicate rather than something a reader
+    /// applies after the fact: a desk's attempts are a thin slice of a
+    /// long-lived company's history, and filtering a fetched page in the
+    /// console would make `limit` mean "the newest N runs in the company, of
+    /// which some happen to be this desk's" — which reads as "this teammate has
+    /// done nothing" for any desk that has been quiet lately.
+    pub agent_id: Option<String>,
     /// Only these statuses. Empty means "any status".
     pub statuses: Vec<RunStatus>,
     /// At most this many rows, applied *after* ordering. `None` is unbounded.
@@ -420,6 +430,14 @@ impl RunFilter {
     pub fn for_task(task_id: impl Into<String>) -> Self {
         Self {
             task_id: Some(task_id.into()),
+            ..Self::default()
+        }
+    }
+
+    /// Narrows to one desk's attempts, whichever card (or none) they were at.
+    pub fn for_agent(agent_id: impl Into<String>) -> Self {
+        Self {
+            agent_id: Some(agent_id.into()),
             ..Self::default()
         }
     }
@@ -445,12 +463,17 @@ impl RunFilter {
         self
     }
 
-    /// Whether `run` passes the `task_id`/`statuses` predicates. The `limit` is
+    /// Whether `run` passes the `task_id`/`agent_id`/`statuses` predicates. The `limit` is
     /// **not** applied here — it is an ordering-dependent cap, so backends that
     /// filter in memory apply it after [`sort_newest_first`].
     pub fn matches(&self, run: &RunRecord) -> bool {
         if let Some(task_id) = &self.task_id
             && run.task_id.as_deref() != Some(task_id.as_str())
+        {
+            return false;
+        }
+        if let Some(agent_id) = &self.agent_id
+            && run.agent_id != *agent_id
         {
             return false;
         }

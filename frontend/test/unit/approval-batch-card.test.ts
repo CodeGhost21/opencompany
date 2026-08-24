@@ -5,6 +5,8 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import type { ApprovalSummary, GrantScope, Verdict } from "@/api/types";
+import type { ApprovalThreadLink } from "@/components/approval-card";
+import { money } from "@/lib/language";
 import { ApprovalRow } from "@/views/chat/ApprovalRow";
 
 /**
@@ -51,6 +53,42 @@ const ESPN = approval("a1", "https://espn.com/nba");
 const BBC = approval("a2", "https://bbc.com/sport");
 const GUARDIAN = approval("a3", "https://theguardian.com/uk");
 
+function payment(id: string, to: string, amountUsd: number): ApprovalSummary {
+  return {
+    id,
+    kind: "payment.send",
+    amount_usd: amountUsd,
+    at_millis: T0,
+    agent: "seo",
+    thread: "desk-marketing",
+    batch: "turn-1",
+    // A spend stays a per-call decision, so the full card offers no standing
+    // scope — and the compact row must render the same way.
+    broadly_grantable: false,
+    payload: { to, amount_usd: amountUsd },
+  };
+}
+
+const VENDOR = payment("p1", "vendor@example.test", 42.5);
+const SUPPLIER = payment("p2", "supplier@example.test", 12);
+
+function request(id: string, url: string, method: string, body?: unknown): ApprovalSummary {
+  return {
+    id,
+    kind: "http_request",
+    amount_usd: null,
+    at_millis: T0,
+    agent: "seo",
+    thread: "desk-marketing",
+    batch: "turn-1",
+    broadly_grantable: true,
+    payload: body === undefined ? { url, method } : { url, method, body },
+  };
+}
+
+const GET_ITEMS = request("h1", "https://example.com/items", "GET");
+const DELETE_ITEMS = request("h2", "https://example.com/items", "DELETE");
+
 interface Decision {
   id: string;
   verdict: Verdict;
@@ -66,6 +104,8 @@ async function render(
   decided: Record<string, Verdict> = {},
   failed: Record<string, string> = {},
   deciding: ReadonlyMap<string, Verdict> = new Map(),
+  compact = false,
+  thread?: ApprovalThreadLink | null,
 ) {
   await act(async () => {
     root.render(
@@ -73,6 +113,8 @@ async function render(
         approvals,
         now: T0 + 60_000,
         askerNames: new Map([["seo", "SEO Specialist"]]),
+        compact,
+        thread,
         deciding,
         decided,
         failed,
@@ -136,6 +178,27 @@ afterEach(() => {
 });
 
 describe("the consolidated approval card", () => {
+  it("lets actions wrap below a readable headline in single and batch cards (#1384)", async () => {
+    // The chat column is narrower than the viewport in both reported cases, so
+    // this has to be a width floor and wrapping contract on each headline — not
+    // a viewport breakpoint. A 12rem title plus the icon and action pair cannot
+    // fit in the narrow transcript, moving the pair to its own line instead of
+    // reducing the title to one word per line. The floor is capped at the
+    // card's own width so a column narrower than the icon plus a 12rem title
+    // wraps rather than overflowing the card.
+    await render([ESPN]);
+    const singleActions = container.querySelector<HTMLElement>("[data-approval-actions]");
+    expect(singleActions).not.toBeNull();
+    expect(singleActions!.parentElement?.className).toContain("flex-wrap");
+    expect(singleActions!.previousElementSibling?.className).toContain("min-w-[min(12rem,100%)]");
+
+    await render([ESPN, BBC]);
+    const batchActions = container.querySelector<HTMLElement>("[data-approval-actions]");
+    expect(batchActions).not.toBeNull();
+    expect(batchActions!.parentElement?.className).toContain("flex-wrap");
+    expect(batchActions!.previousElementSibling?.className).toContain("min-w-[min(12rem,100%)]");
+  });
+
   it("asks once for a turn's three gated calls, naming each of them", async () => {
     await render([ESPN, BBC, GUARDIAN]);
 
@@ -342,5 +405,269 @@ describe("the consolidated approval card", () => {
     expect(container.textContent ?? "").not.toContain("sign-offs");
     await click(button("Approve"));
     expect(decisions).toEqual([{ id: "a1", verdict: "approve", scope: { kind: "once" } }]);
+  });
+
+  it("keeps a chat approval to a quiet, differentiating two-line interruption", async () => {
+    await render([ESPN], {}, {}, new Map(), true);
+
+    const row = container.querySelector<HTMLElement>('[data-approval-inline="compact"]');
+    expect(row).not.toBeNull();
+    expect(row?.textContent).toContain("Fetch a web page — https://espn.com/nba");
+    expect(row?.textContent).toContain("Asked by SEO Specialist");
+    expect(row?.querySelector('a[href="#/approvals"]')?.textContent).toBe("View details");
+    // Payload and grant scope are detailed decisions, so they stay on the
+    // Approvals page instead of making every interruption a full card.
+    expect(row?.querySelectorAll('input[type="radio"]')).toHaveLength(0);
+    expect(row?.className).not.toContain("border");
+
+    const approve = button("Approve");
+    expect(approve.className).toContain("hover:bg-primary");
+    expect(approve.className.split(" ")).not.toContain("bg-primary");
+  });
+
+  it("links the compact chat row back to its conversation when the thread resolves", async () => {
+    // The compact branch used to return before the `ApprovalMeta` call that
+    // receives `thread`, so the value MessageTimeline constructs for it was
+    // discarded and an inline card never said where the request was asked
+    // (#1419). Forwarding it keeps the compact row linked too.
+    await render(
+      [ESPN],
+      {},
+      {},
+      new Map(),
+      true,
+      { channelId: "marketing", label: "#marketing" },
+    );
+
+    const row = container.querySelector<HTMLElement>('[data-approval-inline="compact"]');
+    expect(row?.textContent).toContain("Asked in");
+    const link = row?.querySelector<HTMLAnchorElement>('a[href="#/chat/marketing"]');
+    expect(link?.textContent).toBe("#marketing");
+  });
+
+  it("shows the amount beside a monetary approval in the compact chat row", async () => {
+    const PAYMENT: ApprovalSummary = {
+      id: "a4",
+      kind: "payment.send",
+      amount_usd: 42.5,
+      at_millis: T0,
+      agent: "seo",
+      thread: "desk-marketing",
+      batch: "turn-1",
+      // A spend stays a per-call decision, so the full card offers no standing
+      // scope — and the compact row must render the same way.
+      broadly_grantable: false,
+      payload: { to: "vendor@example.test", amount_usd: 42.5 },
+    };
+    await render([PAYMENT], {}, {}, new Map(), true);
+
+    const row = container.querySelector<HTMLElement>('[data-approval-inline="compact"]');
+    // An operator approving a payment must see its value beside the Approve
+    // button, not just the recipient the first payload line happens to name.
+    expect(row?.textContent).toContain(`Send a payment — vendor@example.test · ${money(42.5)}`);
+  });
+
+  it("names every call and amount in a same-kind compact batch, not just the lead's", async () => {
+    // Two payments from one turn: the lead's line already shows its own value,
+    // and the second's has to appear too — one Approve authorizes both.
+    await render([VENDOR, SUPPLIER], {}, {}, new Map(), true);
+
+    const row = container.querySelector<HTMLElement>('[data-approval-inline="compact"]');
+    expect(row?.textContent).toContain(
+      `Send a payment — vendor@example.test, supplier@example.test · ${money(42.5)} · ${money(12)}`,
+    );
+  });
+
+  it("names every same-kind call in a compact batch, not just the lead's", async () => {
+    // Three fetches from one turn: the second and third URLs are the
+    // consequential ones — one Approve authorizes all three. "+ 2 more" would
+    // hide a sketchy destination behind a harmless first fetch.
+    await render([ESPN, BBC, GUARDIAN], {}, {}, new Map(), true);
+
+    const row = container.querySelector<HTMLElement>('[data-approval-inline="compact"]');
+    expect(row?.textContent).toContain(
+      `Fetch a web page — https://espn.com/nba, https://bbc.com/sport, https://theguardian.com/uk`,
+    );
+    expect(row?.textContent).not.toContain("+ 2 more");
+  });
+
+  it("names every action, call and amount in a mixed compact batch", async () => {
+    // A fetch and a payment in one turn: "Fetch a web page + 1 more" would
+    // hide the payment (and its amount) behind the lead. The line must say
+    // what the one Approve actually covers — the distinct actions, and each
+    // call's own detail, so the operator sees which page and which recipient
+    // before clicking Approve.
+    await render([ESPN, VENDOR], {}, {}, new Map(), true);
+
+    const row = container.querySelector<HTMLElement>('[data-approval-inline="compact"]');
+    expect(row?.textContent).toContain(
+      `2 actions need your sign-off — Fetch a web page and Send a payment — https://espn.com/nba, vendor@example.test · ${money(42.5)}`,
+    );
+  });
+
+  it("counts a mixed compact batch with duplicate actions honestly", async () => {
+    // Two fetches and a payment: the distinct actions are named once each, the
+    // count says there are three of them, and every call's own URL or
+    // recipient is named — the one Approve covers all of it.
+    await render([ESPN, BBC, VENDOR], {}, {}, new Map(), true);
+
+    const row = container.querySelector<HTMLElement>('[data-approval-inline="compact"]');
+    expect(row?.textContent).toContain(
+      `3 actions need your sign-off — Fetch a web page and Send a payment — https://espn.com/nba, https://bbc.com/sport, vendor@example.test · ${money(42.5)}`,
+    );
+    // The duplicate fetch is not repeated as a bare action on the line.
+    expect(row?.textContent).not.toContain("Fetch a web page, Fetch a web page");
+  });
+
+  it("keeps a role-hidden call's warning in a mixed compact batch", async () => {
+    // A hidden payment beside a fetch: #618's flag must survive the mixed
+    // summary, or the operator would approve a call whose payload says nothing
+    // about what it does.
+    const HIDDEN: ApprovalSummary = {
+      id: "a6",
+      kind: "payment.send",
+      amount_usd: null,
+      at_millis: T0,
+      agent: "seo",
+      thread: "desk-marketing",
+      batch: "turn-1",
+      broadly_grantable: false,
+      payload: null,
+      contents_hidden: true,
+    };
+    await render([ESPN, HIDDEN], {}, {}, new Map(), true);
+
+    const row = container.querySelector<HTMLElement>('[data-approval-inline="compact"]');
+    expect(row?.textContent).toContain(
+      `2 actions need your sign-off — Fetch a web page and Send a payment — https://espn.com/nba, Send a payment — details hidden by your role`,
+    );
+  });
+
+  it("names a hidden approval once in the compact chat row", async () => {
+    const HIDDEN: ApprovalSummary = {
+      id: "a5",
+      kind: "payment.send",
+      amount_usd: null,
+      at_millis: T0,
+      agent: "seo",
+      thread: "desk-marketing",
+      batch: "turn-1",
+      broadly_grantable: false,
+      payload: null,
+      contents_hidden: true,
+    };
+    await render([HIDDEN], {}, {}, new Map(), true);
+
+    const row = container.querySelector<HTMLElement>('[data-approval-inline="compact"]');
+    // #618's flag reads as "not shown to you", never as an empty card — and the
+    // action must not be printed twice.
+    expect(row?.textContent).toContain("Send a payment — details hidden by your role");
+    expect(row?.textContent ?? "").not.toContain("Send a payment — Send a payment");
+  });
+
+  it("summarizes only what the compact row's buttons still decide", async () => {
+    // The drift case in the compact row: one of three already approved on the
+    // page, and the row must not go on claiming all three are on the table.
+    // The Approve button left here authorizes only the two still open, so the
+    // line names them and lets the status say what was already decided.
+    await render([ESPN, BBC, GUARDIAN], { a1: "approve" }, {}, new Map(), true);
+
+    const row = container.querySelector<HTMLElement>('[data-approval-inline="compact"]');
+    const text = row?.textContent ?? "";
+    expect(text).toContain(
+      "Fetch a web page — https://bbc.com/sport, https://theguardian.com/uk",
+    );
+    // The status still tells the operator one has been settled elsewhere.
+    expect(text).toContain("1 of 3 decided — 2 still waiting on you");
+    // The settled item is not named as something the buttons here will touch.
+    expect(text).not.toContain("https://espn.com/nba");
+
+    await click(button("Approve"));
+    // And an approve here covers only what the label named — re-resolving a1
+    // would be a second decision on an approval the host has already dropped.
+    expect(decisions.map((d) => d.id)).toEqual(["a2", "a3"]);
+  });
+
+  it("names the HTTP method beside a request URL in the compact chat row", async () => {
+    // The method is the difference between a read and a delete on the same URL:
+    // a row that showed only the address would render GET and DELETE
+    // identically even though approving them has very different effects.
+    await render([DELETE_ITEMS], {}, {}, new Map(), true);
+
+    const row = container.querySelector<HTMLElement>('[data-approval-inline="compact"]');
+    expect(row?.textContent).toContain(
+      "Make a request to a web address — DELETE https://example.com/items",
+    );
+  });
+
+  it("names each request's method in a compact batch, not just the lead's", async () => {
+    // Same URL, opposite effects: the second item's method is the consequential
+    // half of the one Approve, so it has to be on the line, not hidden behind
+    // a count or a shared address.
+    await render([GET_ITEMS, DELETE_ITEMS], {}, {}, new Map(), true);
+
+    const row = container.querySelector<HTMLElement>('[data-approval-inline="compact"]');
+    expect(row?.textContent).toContain(
+      "Make a request to a web address — GET https://example.com/items, DELETE https://example.com/items",
+    );
+  });
+
+  it("shows what a write sends, not just where it goes, in the compact row", async () => {
+    // Two POSTs to the same address are only the same decision if the payload
+    // is the same: the body is what the one Approve authorizes. A row that
+    // showed only "POST https://example.com/items" would render a write that
+    // ships a document and a body-less read identically.
+    const WRITE = request("h3", "https://example.com/items", "POST", {
+      message: "ship it",
+    });
+    await render([WRITE], {}, {}, new Map(), true);
+
+    const row = container.querySelector<HTMLElement>('[data-approval-inline="compact"]');
+    expect(row?.textContent).toContain(
+      'Make a request to a web address — POST {"message":"ship it"} https://example.com/items',
+    );
+  });
+
+  it("previews a long request body rather than flooding the compact row", async () => {
+    // The row's job is to distinguish two requests, not to carry the file; a
+    // giant body is previewed with an ellipsis, and the detailed view still
+    // shows the full payload.
+    const body = { message: "x".repeat(120) };
+    const bodyJson = JSON.stringify(body);
+    expect(bodyJson.length).toBeGreaterThan(60);
+    const WRITE = request("h4", "https://example.com/items", "POST", body);
+    await render([WRITE], {}, {}, new Map(), true);
+
+    const row = container.querySelector<HTMLElement>('[data-approval-inline="compact"]');
+    expect(row?.textContent).toContain(
+      `Make a request to a web address — POST ${bodyJson.slice(0, 60)}… https://example.com/items`,
+    );
+    // And the preview is not the whole body.
+    expect(row?.textContent).not.toContain(bodyJson);
+  });
+
+  it("gates the inline Approve when a body preview was cut (#1330 review)", async () => {
+    // A preview is not the payload: two POSTs to the same URL whose bodies share
+    // the first 60 code units render identically even when the cut-off suffix
+    // changes an amount or recipient. The compact row must not one-click
+    // Approve on that — the operator has to see the complete host-bounded
+    // payload (the detailed view) first, so the inline Approve is replaced by a
+    // path there. Decline is always safe and stays inline.
+    const body = { recipient: "vendor@example.test", message: "x".repeat(120) };
+    const bodyJson = JSON.stringify(body);
+    expect(bodyJson.length).toBeGreaterThan(60);
+    const WRITE = request("h5", "https://example.com/items", "POST", body);
+    await render([WRITE], {}, {}, new Map(), true);
+
+    const row = container.querySelector<HTMLElement>('[data-approval-inline="compact"]');
+    // The cut label names the row and admits it is cut…
+    expect(row?.textContent).toContain("…");
+    expect(row?.textContent).toContain("Review in Approvals");
+    // …but there is no live inline Approve button on the truncated preview, and
+    // a decline is still one press.
+    expect(() => button("Approve")).toThrow();
+    expect(() => button("Decline")).not.toThrow();
+    // Nothing was decided: the row only offered the detailed view.
+    expect(decisions).toEqual([]);
   });
 });
