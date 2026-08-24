@@ -765,6 +765,7 @@ export function ChatView({
       );
       if (scopeCompany !== companyScopeRef.current) {
         outcome = "stale";
+        if (chatId) onSendStale?.(chatId);
         return;
       }
       // Reconcile the optimistic id first, for BOTH shapes. On the detached one
