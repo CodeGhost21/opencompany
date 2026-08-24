@@ -3878,6 +3878,7 @@ mod test {
                 "search.*",
                 "search.web",
                 "mcp:*",
+                "mcp*",
             ] {
                 assert!(
                     !allow_covers(&allow, grant),
