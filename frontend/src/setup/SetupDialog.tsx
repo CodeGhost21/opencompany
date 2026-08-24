@@ -234,15 +234,24 @@ export function SetupDialog({
       setInference(value);
     };
     const timer = setTimeout(() => settle("unknown"), READINESS_TIMEOUT_MS);
-    void getInferenceStatus(client, company).then(
-      (status) => settle(status.cognition === DESIGNING_COGNITION ? "ready" : "unavailable"),
-      () => {
-        // Do not silently treat an unreadable status as a configured model.
-        // The setup route may still work, but its result must not be promised
-        // as tailored while we could not establish that.
-        settle("unknown");
-      },
-    );
+    // `getInferenceStatus` resolves the host-scope address synchronously, so a
+    // client that cannot even build the request (no `scopeFor`, as in the
+    // route-close tests' minimal mock) throws here rather than rejecting.
+    // Treat it like any unreadable status — unknown, never a promise of a
+    // tailored roster.
+    try {
+      void getInferenceStatus(client, company).then(
+        (status) => settle(status.cognition === DESIGNING_COGNITION ? "ready" : "unavailable"),
+        () => {
+          // Do not silently treat an unreadable status as a configured model.
+          // The setup route may still work, but its result must not be promised
+          // as tailored while we could not establish that.
+          settle("unknown");
+        },
+      );
+    } catch {
+      settle("unknown");
+    }
     return () => {
       cancelled = true;
       clearTimeout(timer);
