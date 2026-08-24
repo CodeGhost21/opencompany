@@ -1434,6 +1434,7 @@ export function AppShell({
       replyParents?: ReadonlyMap<string, string>,
       openThreadId?: string | null,
       loadedMessageIds?: ReadonlySet<string>,
+      advanceChannelRead = true,
     ) => {
       activeChatChannelRef.current = channelId;
       if (mentionFeedRevision === undefined) return;
