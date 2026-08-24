@@ -2616,6 +2616,46 @@ mod test {
         }
     }
 
+    /// Appends are O(1): a flush that rewrites an existing ordinal appends a
+    /// line and lets the read side fold it, rather than rewriting the whole
+    /// company file per step (issue #1679). The raw file therefore carries both
+    /// lines, and the read returns the later one.
+    #[tokio::test]
+    async fn deep_trace_append_folds_at_read_not_at_write() {
+        use crate::ports::deep_trace::{DeepTraceStore, RunStepDetailRecord, TurnStepDetail};
+
+        let root_dir = tmp_root();
+        let ops = FsOps::new(root_dir.path());
+        let company = CompanyId::new("alpha");
+        let record = |reasoning: &str, at: u64| RunStepDetailRecord {
+            run_id: "run-a".to_string(),
+            step_seq: 1,
+            at_millis: at,
+            detail: TurnStepDetail {
+                reasoning: Some(reasoning.to_string()),
+                ..TurnStepDetail::default()
+            },
+        };
+
+        ops.append_step_detail(&company, &record("first", 10)).await.unwrap();
+        ops.append_step_detail(&company, &record("second", 20)).await.unwrap();
+
+        // The read folds last-write-wins per ordinal...
+        let got = ops.list_step_details(&company, "run-a").await.unwrap();
+        assert_eq!(got.len(), 1, "a re-write replaces rather than stacking");
+        assert_eq!(got[0].detail.reasoning.as_deref(), Some("second"));
+
+        // ...because the file still physically holds both lines: no rewrite
+        // happened between appends.
+        let path = ops.bundle(&company).deep_trace_jsonl();
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            raw.lines().count(),
+            2,
+            "a same-ordinal append must not rewrite the whole file"
+        );
+    }
+
     /// A run row written before `task_id` could be absent still loads
     /// (issue #983). Backend-independent — see the assertion's own docs — so it
     /// is driven from the one backend every lane builds.
