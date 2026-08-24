@@ -2198,6 +2198,25 @@ async fn a_profile_avatar_may_not_be_a_url() {
     }
 }
 
+/// A display name is a bounded field: it renders on every surface that shows a
+/// person and rides in every roster payload, so a page of text parked in it
+/// would be served to everyone. The bound is a `400`, not a truncation.
+#[tokio::test]
+async fn a_profile_name_may_not_exceed_the_bound() {
+    let home = home();
+    let (state, sender) = state_with_mail(home.path()).await;
+    let cookie = login_via_link(&state, &sender, "ada@example.com").await;
+
+    let long = "A".repeat(crate::server::users::MAX_DISPLAY_NAME_CHARS + 1);
+    let (status, refused) = patch_me(&state, &cookie, serde_json::json!({"displayName": long})).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
+
+    // Nothing was persisted, and a subsequent normal save still works.
+    let (status, _) =
+        patch_me(&state, &cookie, serde_json::json!({"displayName": "Ada L."})).await;
+    assert_eq!(status, StatusCode::OK);
+}
+
 /// No session, no profile. There is no `user_id` in the path to point at
 /// somebody else, so this is the whole of the route's authority check.
 #[tokio::test]
