@@ -847,6 +847,7 @@ fn open_provider(settings: &StorageSettings) -> Result<Option<MemoryOverlay>> {
         facts: Some(bound.facts()),
         inbound_context: Some(bound.inbound_context()),
         scratch: Some(bound.scratch()),
+        scopes: Some(Arc::new(bound.clone())),
         descriptor: MemoryDescriptor {
             backend: settings.memory_backend,
             driver_id: bound.driver_id().to_string(),
