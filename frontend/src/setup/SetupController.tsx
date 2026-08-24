@@ -306,12 +306,13 @@ export function SetupController({
    * The completion screen's "Add a model in Settings" action.
    *
    * Distinct from [`done`] even though both close the dialog: this one leaves
-   * the fallback team in place and records a redesign debt, so when the
-   * operator returns from wiring a model the dialog reopens in redesign mode
-   * and that team is replaced rather than a second one stacked on it.
+   * the fallback team in place and records a redesign debt — naming the exact
+   * team to replace — so when the operator returns from wiring a model the
+   * dialog reopens in redesign mode and that team is replaced rather than a
+   * second one stacked on it.
    */
-  const redesign = useCallback(() => {
-    markSetupRedesign(scope);
+  const redesign = useCallback((fallbackIds: string[]) => {
+    markSetupRedesign(scope, fallbackIds);
     setOpen(false);
   }, [scope]);
 
@@ -324,6 +325,7 @@ export function SetupController({
       client={client}
       company={company}
       redesign={redesigning}
+      fallbackIds={setupRedesignIds(scope)}
       onSkip={skip}
       onLeave={leave}
       onDone={done}
