@@ -377,9 +377,8 @@ setup again. Acceptable, and probably correct.
 
 Only obvious once it ran. **Every company under `companies/` declares a roster**,
 so none of them can ever reach the flow — there is no way to demo or test setup
-against the shipped examples. `companies/e2e_setup` exists for exactly that
-reason: a company that ships with nobody on it, which the end-to-end lane runs
-against.
+against the shipped examples. `companies/e2e_setup` exists for exactly that: a
+company that ships with nobody on it, which the end-to-end lane runs against.
 
 And the lane has to actually run it. It did not, for as long as the flow was
 broken: `frontend/test/e2e/company-setup.spec.ts` carried a `test.skip` written
