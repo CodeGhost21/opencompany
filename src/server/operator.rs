@@ -9620,4 +9620,32 @@ mode = "full"
              not the bare roster thread id — got {contexts:?}"
         );
     }
+
+    /// [`mention_context`] stores the **canonical** id for a key typed in a
+    /// noncanonical shape — a desk by its display name, a teammate by a
+    /// case-variant of their id. `assignee::resolve` already returns canonical
+    /// ids (issue #214); storing the raw key instead would file the badge under
+    /// a channel id the rail never has, so it could neither render nor clear.
+    #[tokio::test]
+    async fn mention_context_stores_canonical_ids_for_noncanonical_keys() {
+        let home_dir = home();
+        let state = state_with_roster(home_dir.path()).await;
+        let id = CompanyId::new("acme");
+        let runtime = state.registry().get(&id).expect("company registered");
+
+        // A desk addressed by its display name files under the desk's id —
+        // `"Engineering"` names the desk whose id is `engineering`.
+        assert_eq!(
+            mention_context(runtime, &id, &[], "Engineering").await,
+            "engineering",
+            "a desk named by its display name has to store the desk id, not the raw key"
+        );
+        // A teammate addressed by a case-variant of their id files under the
+        // canonical agent id, re-keyed into the console's DM channel space.
+        assert_eq!(
+            mention_context(runtime, &id, &[], "BACKEND_ENGINEER").await,
+            "dm:backend_engineer",
+            "a teammate named by a noncanonical key has to store dm:<agent-id>"
+        );
+    }
 }
