@@ -462,6 +462,16 @@ impl BundleContents {
                 jsonl(&self.archived_traces)?.as_bytes(),
             )
             .await?;
+        } else {
+            match tokio::fs::remove_file(memory_dir.join(ARCHIVES_JSONL)).await {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => {
+                    return Err(OpenCompanyError::Store(format!(
+                        "cannot remove a stale archive file from the bundle: {e}"
+                    )));
+                }
+            }
         }
         // Only when there are any: an empty file would make every new export
         // differ from an old host's byte-for-byte for no information. At the
