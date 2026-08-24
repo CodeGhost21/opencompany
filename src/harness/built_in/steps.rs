@@ -400,14 +400,22 @@ impl StepTrace {
                 // here are what the tool actually received and returned, before
                 // `complete` reduced them to a shape and a redacted summary.
                 let detail = self.deep.then(|| {
-                    crate::ports::deep_trace::bound_detail(TurnStepDetail {
+                    let mut detail = TurnStepDetail {
                         arguments: arguments
                             .as_ref()
                             .filter(|a| !a.is_null())
                             .map(|a| a.to_string()),
                         output: (!output.is_empty()).then(|| output.clone()),
                         ..TurnStepDetail::default()
-                    })
+                    };
+                    // The store replaces the whole row on completion, so fold in
+                    // the start-only metadata (label detail, iteration) before
+                    // persisting — otherwise a finalized call loses them.
+                    if let Some(start) = &start_detail {
+                        detail.display_detail = start.display_detail.clone();
+                        detail.iteration = start.iteration;
+                    }
+                    crate::ports::deep_trace::bound_detail(detail)
                 });
                 vec![(seq, step, detail.filter(|d| !d.is_empty()))]
             }
