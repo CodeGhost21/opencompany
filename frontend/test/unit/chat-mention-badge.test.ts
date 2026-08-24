@@ -161,6 +161,38 @@ describe("mentionsToClear", () => {
   });
 
   /**
+   * Same real-desk-id hazard as the count: when `general` is a real desk that
+   * is not the default thread, its canonical id is a rendered channel, so
+   * opening the *default* thread must not clear it — that is the summons
+   * somebody would miss — and only opening the real desk clears it.
+   */
+  describe("with a real desk id that matches a legacy spelling", () => {
+    const rendered = new Set(["engineering", "general", "design"]);
+    const feed = [note({ id: "general-1", context: "general" })];
+
+    it("clears the real desk's mention only when that desk is opened", () => {
+      expect(
+        mentionsToClear(feed, "general", "engineering", new Set(["general"]), rendered),
+      ).toEqual(["general-1"]);
+      expect(
+        mentionsToClear(feed, "engineering", "engineering", new Set(["engineering"]), rendered),
+      ).toEqual([]);
+    });
+
+    it("still clears a non-rendered legacy spelling when the default thread is opened", () => {
+      expect(
+        mentionsToClear(
+          [note({ id: "a", context: "main" })],
+          "engineering",
+          "engineering",
+          new Set(["engineering"]),
+          rendered,
+        ),
+      ).toEqual(["a"]);
+    });
+  });
+
+  /**
    * An empty list is a real instruction to the host ("mark nothing"), distinct
    * from omitting ids ("mark everything") — so the caller must not send it as
    * though it meant the latter.
