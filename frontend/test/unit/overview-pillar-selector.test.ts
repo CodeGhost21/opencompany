@@ -133,5 +133,6 @@ describe("the pillar selector", () => {
     expect(createDesk?.textContent).toBe("Create a desk");
     expect(host.querySelector('[aria-label="Previous department"]')).toBeNull();
     expect(host.querySelector('[aria-label="Next department"]')).toBeNull();
+    expect(host.querySelector("svg")).toBeNull();
   });
 });
