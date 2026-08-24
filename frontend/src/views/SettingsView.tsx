@@ -413,8 +413,8 @@ function ConfirmAction({
  * `…/memory/engine` surface.
  *
  * Deliberately carries no setter. Engine selection is instance-wide and
- * belongs to the infra operator — the `OPENCOMPANY_MEMORY*` variables, read
- * once at boot — so a console admin can see the engine but never repoint a
+ * belongs to the infra operator or the company configuration, depending on
+ * the reported layer. A console admin can see the engine but never repoint a
  * deployment's storage from here. The switch runbook lives in
  * `docs/spec/runtime/memory-engine.md`. Renders nothing on the `store`
  * default and on a host predating the engine route.
