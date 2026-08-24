@@ -49,16 +49,20 @@ import { Switch } from "@/components/ui/switch";
 import { useHashFlag } from "@/hooks/use-hash-flag";
 import {
   agentEdits,
+  companyCovers,
   draftFrom,
   draftIsValid,
   emptyDraft,
+  grantCeiling,
   harnessEdit,
   harnessOptionLabel,
   isEditable,
   modelEdit,
+  parseToolGlobs,
   resolvedHarnessKind,
   summarizeGrants,
   tierLabel,
+  toolGlobsDiffer,
   type AgentDraft,
   type AgentFieldKey,
 } from "@/lib/agent";
