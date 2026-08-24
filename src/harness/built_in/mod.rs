@@ -1437,7 +1437,14 @@ impl HarnessPool {
         // a tier the native gate no longer enforces.
         let policy_fp = match policy_snapshot {
             Some(policy) => effective_policy_fingerprint(policy),
-            None => effective_policy_fingerprint(&company.effective_policy()),
+            None => {
+                // The roster is built with the live overlay installed below,
+                // so fingerprint that same effective policy rather than the
+                // possibly stale snapshot carried by `company`.
+                let mut live_company = company.clone();
+                live_company.overlay_policy = overlay.policy.clone();
+                effective_policy_fingerprint(&live_company.effective_policy())
+            }
         };
         // Desk scoping now decides capability (the middle level of the
         // three-level narrowing), so it joins the staleness check: without this
