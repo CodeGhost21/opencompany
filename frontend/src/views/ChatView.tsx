@@ -45,6 +45,7 @@ import {
 import { fromDto, newMember, type TeamMember } from "@/lib/team";
 import { cn } from "@/lib/utils";
 import { useAskerNames } from "@/components/approval-card";
+import { useIsDesktop } from "@/hooks/use-mobile";
 import { AddMemberDialog, type NewMemberFields } from "./chat/AddMemberDialog";
 import { BudgetDialog } from "./chat/BudgetDialog";
 import { ChannelRail } from "./chat/ChannelRail";
