@@ -91,6 +91,15 @@ pub fn router() -> Router<AppState> {
 /// (no per-chunk read), so it stays unbounded; the list caps its reads here.
 const MAX_CONTEXT_ENTRIES: usize = 500;
 
+/// Upper bound on archived traces materialised by `GET /memory/archives`.
+///
+/// The keep-recent eviction path already bounds the archive tier itself to
+/// [`TRACE_RETENTION_LIMIT`] (see `prune_archive`), but an older-than policy
+/// archives every evicted trace without pruning, so the route caps what it
+/// returns rather than depending on the eviction policy. Mirrors
+/// `recent_traces`' newest-window semantics: same total order, tail of the cap.
+const MAX_ARCHIVED_TRACES: usize = TRACE_RETENTION_LIMIT;
+
 /// `GET /memory/archives` — traces preserved by a provider-backed engine when
 /// it evicts its active trace window. The base and embedded engines have no
 /// archive tier, so they answer a clear refusal instead of an empty list that
@@ -98,12 +107,21 @@ const MAX_CONTEXT_ENTRIES: usize = 500;
 async fn archived_traces(
     company: ScopedCompany,
 ) -> Result<Json<Vec<crate::ports::CompressedTrace>>, ApiError> {
-    let traces = company.runtime.archived_traces().await?.ok_or_else(|| {
+    let mut traces = company.runtime.archived_traces().await?.ok_or_else(|| {
         OpenCompanyError::Config(
             "the selected memory engine does not provide archived traces; use a provider-backed memory engine to retain evicted traces".into(),
         )
     })?;
-    Ok(Json(traces))
+    // Newest-first, capped at the same window the archive tier itself keeps.
+    // The provider read has no limit argument, so the sort-and-tail happens
+    // here rather than in the facade.
+    traces.sort_by(|a, b| {
+        a.at_millis
+            .cmp(&b.at_millis)
+            .then_with(|| a.cycle_id.cmp(&b.cycle_id))
+    });
+    let skip = traces.len().saturating_sub(MAX_ARCHIVED_TRACES);
+    Ok(Json(traces.into_iter().skip(skip).collect()))
 }
 
 /// Max characters kept for a context entry's synthesised title (its first line).
