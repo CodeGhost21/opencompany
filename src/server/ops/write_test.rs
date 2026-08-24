@@ -4716,9 +4716,9 @@ async fn a_withdrawn_discussion_message_stops_being_served() {
     assert_eq!(thread.len(), 2, "the row is withdrawn, not deleted: {body}");
     assert_eq!(thread[0]["seq"], seq);
     assert_eq!(thread[0]["redacted"], true);
-    assert_eq!(thread[0]["redactedBy"], "harness-admin");
+    assert_eq!(thread[0]["redactedBy"], "Harness Admin");
     assert_eq!(
-        thread[0]["author"], "harness-admin",
+        thread[0]["author"], "Harness Admin",
         "the poster is still named"
     );
     assert_eq!(
