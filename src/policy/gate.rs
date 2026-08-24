@@ -1010,7 +1010,6 @@ mod test {
     /// `Some` is the only way to tell those apart.
     #[tokio::test]
     async fn every_policy_mode_has_a_named_arm() {
-        let gate = ManifestApprovalGate::new(policy("supervised", None));
         let probe = effect("misc.do", EffectGroup::Other);
 
         let mut checked = 0;
