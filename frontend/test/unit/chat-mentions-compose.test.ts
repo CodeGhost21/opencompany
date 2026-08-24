@@ -182,6 +182,32 @@ describe("stripCodeRegions", () => {
     const masked = stripCodeRegions(text);
     expect(masked).not.toContain("@engineer");
   });
+
+  /**
+   * A closing backtick run must be a whole run of exactly the opening length.
+   * `` `@engineer`` `` (one opener, two trailing) is not a code span — the
+   * two-backtick run can never close a one-backtick opener — so CommonMark
+   * and the Rust scanner both render `@engineer` as visible text. Masking it
+   * here would suppress a mention the renderer still shows.
+   */
+  it("does not close a span on a prefix of a longer backtick run", () => {
+    const text = "`@engineer``";
+    const masked = stripCodeRegions(text);
+    expect(masked).toContain("@engineer");
+    expect(masked).toHaveLength(text.length);
+  });
+
+  it("still closes a span on an exactly equal run", () => {
+    const text = "`@engineer`";
+    const masked = stripCodeRegions(text);
+    expect(masked).not.toContain("@engineer");
+  });
+
+  it("keeps a mention visible when a longer run cannot close a shorter opener", () => {
+    const text = "``@engineer`";
+    const masked = stripCodeRegions(text);
+    expect(masked).toContain("@engineer");
+  });
 });
 
 describe("rankMentionables", () => {
