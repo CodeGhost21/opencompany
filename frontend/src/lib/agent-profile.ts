@@ -8,8 +8,9 @@
 // asked for one more click away.
 
 import type { AgentDetailDto } from "@/api/types";
+import { avatarRef } from "@/lib/avatar";
 import { summarizeGrants, tierLabel, type ToolGrantSummary } from "@/lib/agent";
-import { avatarFor, roleSubtitle, toneFor } from "@/lib/team";
+import { roleSubtitle, toneFor } from "@/lib/team";
 
 /** How many characters of the persona the panel shows before it truncates. */
 const ABOUT_LIMIT = 320;
