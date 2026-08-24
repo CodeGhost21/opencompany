@@ -3513,10 +3513,6 @@ mod tests {
     // resolves identically to what shipped before desks could scope tools.
     use crate::runtime::builder::agent_effective_grants;
 
-    fn fp_entry(mode: Option<&str>, always: Option<Vec<&str>>) -> PolicyOverride {
-        fp_entry_full(mode, always, None, None)
-    }
-
     fn fp_entry_full(
         mode: Option<&str>,
         always: Option<Vec<&str>>,
@@ -3537,6 +3533,17 @@ mod tests {
         }
     }
 
+    /// An effective `[policy]` block for fingerprint tests — what the roster is
+    /// actually built from (`CompanyRecord::effective_policy`).
+    fn fp_policy(mode: &str, always: &[&str], cap: Option<f64>, ttl: Option<u64>) -> Policy {
+        Policy {
+            mode: mode.to_string(),
+            always_approve: always.iter().map(|k| (*k).to_string()).collect(),
+            auto_approve_under_usd: cap,
+            approval_ttl_hours: ttl,
+        }
+    }
+
     /// The fingerprint moves when the tier moves (issue #562).
     ///
     /// This is the assertion that keeps the feature from being a no-op.
@@ -3547,18 +3554,12 @@ mod tests {
     /// other test in this change would still pass.
     #[test]
     fn the_policy_fingerprint_moves_when_the_tier_does() {
-        let none = policy_fingerprint(None);
-        let supervised = policy_fingerprint(Some(&fp_entry(Some("supervised"), None)));
-        let full = policy_fingerprint(Some(&fp_entry(Some("full"), None)));
+        let supervised = effective_policy_fingerprint(&fp_policy("supervised", &[], None, None));
+        let full = effective_policy_fingerprint(&fp_policy("full", &[], None, None));
 
         assert_ne!(
             supervised, full,
             "a tier change must move the fingerprint or the roster is never rebuilt"
-        );
-        assert_ne!(
-            none, supervised,
-            "setting an override must move the fingerprint even when it names the \
-             tier the manifest already had — the manifest can change under a rebuild"
         );
     }
 
@@ -3570,81 +3571,66 @@ mod tests {
     /// console shows, depending on the edit.
     #[test]
     fn the_policy_fingerprint_moves_when_the_always_ask_list_does() {
-        let absent = policy_fingerprint(Some(&fp_entry(Some("auto"), None)));
-        let empty = policy_fingerprint(Some(&fp_entry(Some("auto"), Some(vec![]))));
-        let one = policy_fingerprint(Some(&fp_entry(Some("auto"), Some(vec!["payment.send"]))));
-        let two = policy_fingerprint(Some(&fp_entry(
-            Some("auto"),
-            Some(vec!["payment.send", "filing.submit"]),
-        )));
+        let empty = effective_policy_fingerprint(&fp_policy("auto", &[], None, None));
+        let one =
+            effective_policy_fingerprint(&fp_policy("auto", &["payment.send"], None, None));
+        let two = effective_policy_fingerprint(&fp_policy(
+            "auto",
+            &["payment.send", "filing.submit"],
+            None,
+            None,
+        ));
 
-        assert_ne!(
-            absent, empty,
-            "clearing the list is not the same as not overriding it"
-        );
-        assert_ne!(empty, one);
-        assert_ne!(one, two);
+        assert_ne!(empty, one, "adding an entry must move the fingerprint");
+        assert_ne!(one, two, "a second entry must move it again");
 
         // Order is part of the value: the list is the operator's own, not an
         // accumulation of independent rows, so a reorder is a real edit.
-        let reordered = policy_fingerprint(Some(&fp_entry(
-            Some("auto"),
-            Some(vec!["filing.submit", "payment.send"]),
-        )));
+        let reordered = effective_policy_fingerprint(&fp_policy(
+            "auto",
+            &["filing.submit", "payment.send"],
+            None,
+            None,
+        ));
         assert_ne!(two, reordered);
 
         // Length is folded in, so concatenation cannot collide.
-        let split = policy_fingerprint(Some(&fp_entry(Some("auto"), Some(vec!["a", "b"]))));
-        let joined = policy_fingerprint(Some(&fp_entry(Some("auto"), Some(vec!["ab"]))));
+        let split = effective_policy_fingerprint(&fp_policy("auto", &["a", "b"], None, None));
+        let joined = effective_policy_fingerprint(&fp_policy("auto", &["ab"], None, None));
         assert_ne!(split, joined);
     }
 
+    /// A deadline-only change has no roster fingerprint.
+    ///
+    /// The TTL is enforced by the live gate, not the roster snapshot
+    /// (`ApprovalPolicy` carries no TTL), so a deadline-only edit must not
+    /// discard live agent sessions for a rebuild that could not apply it.
     #[test]
-    fn a_deadline_only_override_has_no_roster_fingerprint() {
-        let none = policy_fingerprint(None);
-        let deadline = policy_fingerprint(Some(&fp_entry_full(None, None, None, Some(72))));
-        assert_eq!(none, deadline);
+    fn a_deadline_only_change_has_no_roster_fingerprint() {
+        let no_deadline = effective_policy_fingerprint(&fp_policy("auto", &[], None, None));
+        let deadline = effective_policy_fingerprint(&fp_policy("auto", &[], None, Some(72)));
+        assert_eq!(no_deadline, deadline);
     }
 
-    /// A spend-cap or deadline edit moves it too — the third and fourth axes a
-    /// console save can touch without touching the tier or the list.
+    /// A spend-cap edit moves it too — the third axis a console save can touch
+    /// without touching the tier or the list.
     ///
     /// `ApprovalPolicy` is built once per roster, so a cap-only edit that left
     /// the fingerprint stable would keep the harness gate enforcing the old
-    /// threshold until restart. `auto_approve_under_usd`'s outer/inner options
-    /// are both states: no override, an explicit no-cap (`Some(None)`), and a
-    /// finite cap must each be distinct. The deadline is deliberately NOT in the
-    /// fingerprint — the roster snapshot carries no TTL, and the deadline lives
-    /// in the live gate, so a deadline-only edit must not discard agent sessions
-    /// for a rebuild that could not apply it.
+    /// threshold until restart. `auto_approve_under_usd`'s `Some`/`None` are
+    /// both states: an explicit no-cap (`None`) and a finite cap must each be
+    /// distinct. The deadline is deliberately NOT in the fingerprint — the
+    /// roster snapshot carries no TTL, and the deadline lives in the live gate,
+    /// so a deadline-only edit must not discard agent sessions for a rebuild
+    /// that could not apply it.
     #[test]
     fn the_policy_fingerprint_moves_when_the_cap_does() {
-        let base = policy_fingerprint(Some(&fp_entry_full(Some("auto"), None, None, None)));
-        let explicit_none =
-            policy_fingerprint(Some(&fp_entry_full(Some("auto"), None, Some(None), None)));
-        let finite = policy_fingerprint(Some(&fp_entry_full(
-            Some("auto"),
-            None,
-            Some(Some(25.0)),
-            None,
-        )));
-        let tighter = policy_fingerprint(Some(&fp_entry_full(
-            Some("auto"),
-            None,
-            Some(Some(10.0)),
-            None,
-        )));
-        let deadline = policy_fingerprint(Some(&fp_entry_full(Some("auto"), None, None, Some(72))));
+        let base = effective_policy_fingerprint(&fp_policy("auto", &[], None, None));
+        let finite = effective_policy_fingerprint(&fp_policy("auto", &[], Some(25.0), None));
+        let tighter = effective_policy_fingerprint(&fp_policy("auto", &[], Some(10.0), None));
+        let deadline = effective_policy_fingerprint(&fp_policy("auto", &[], None, Some(72)));
 
-        assert_ne!(
-            base, explicit_none,
-            "setting an explicit no-cap override must rebuild: every spend parks"
-        );
         assert_ne!(base, finite, "a finite cap must rebuild");
-        assert_ne!(
-            explicit_none, finite,
-            "no-cap and a finite cap are different states"
-        );
         assert_ne!(finite, tighter, "a different cap value must rebuild");
         assert_eq!(
             base, deadline,
@@ -3654,12 +3640,7 @@ mod tests {
         // Re-setting the same cap is a no-op, like re-setting the same tier.
         assert_eq!(
             finite,
-            policy_fingerprint(Some(&fp_entry_full(
-                Some("auto"),
-                None,
-                Some(Some(25.0)),
-                None
-            )))
+            effective_policy_fingerprint(&fp_policy("auto", &[], Some(25.0), None))
         );
     }
 
