@@ -517,15 +517,17 @@ impl ManifestApprovalGate {
     /// [`POLICY_MODES`](crate::company::POLICY_MODES) and fails on the day a
     /// fifth tier is added to that list and forgotten here.
     ///
-    /// Deliberately takes `mode` as an argument rather than reading
-    /// `self.policy.mode`, so the test can ask about a word without building a
-    /// whole [`Policy`] for it — and so the fail-safe arm stays reachable.
-    fn mode_decision(&self, mode: &str, effect: &Effect) -> Option<PolicyDecision> {
+    /// Takes the evaluated `Policy` snapshot as an argument — not `&self` — so a
+    /// caller already holding the policy read guard can dispatch without a
+    /// recursive read of the non-reentrant `RwLock`, and `mode` as a separate
+    /// argument so the test can ask about a word without building a whole
+    /// [`Policy`] whose mode it is, keeping the fail-safe arm reachable.
+    fn mode_decision(policy: &Policy, mode: &str, effect: &Effect) -> Option<PolicyDecision> {
         match mode {
             "full" => Some(PolicyDecision::Allow),
             "readonly" => Some(PolicyDecision::RequireApproval),
-            "supervised" => Some(self.evaluate_supervised(effect)),
-            "auto" => Some(self.evaluate_auto(effect)),
+            "supervised" => Some(Self::evaluate_supervised_with_policy(policy, effect)),
+            "auto" => Some(Self::evaluate_auto(policy, effect)),
             _ => None,
         }
     }
