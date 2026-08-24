@@ -1174,6 +1174,11 @@ pub enum RosterSource {
 pub enum FallbackReason {
     /// No credential was reachable, so no design pass ran at all.
     NoModel,
+    /// A builder exists and its call was attempted, but it never landed — a
+    /// timeout, or a provider that could not be reached. A model is wired, so
+    /// the operator's next move is to retry or check the provider, not to add a
+    /// key.
+    ModelUnreachable,
     /// A model answered and the answer could not be used: unreadable, too thin
     /// to be a company, or the reference team handed back unchanged. Almost
     /// always means the operator's answers were too sparse to design from.
@@ -1185,6 +1190,7 @@ impl FallbackReason {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::NoModel => "no_model",
+            Self::ModelUnreachable => "model_unreachable",
             Self::NotDesignable => "not_designable",
         }
     }
