@@ -6799,6 +6799,44 @@ description = "Builds the product."
         );
     }
 
+    /// A routing edit — a model or harness re-bind — has to move the persona
+    /// fingerprint too: the roster the harness builds reads those fields, so a
+    /// re-bind that moved nothing would be silently ignored until the process
+    /// restarted (issue #1676 review note). The `Some("")` "cleared" form stays
+    /// distinct from `None` ("never edited"), the same discriminant the
+    /// reset-to-blueprint contract depends on.
+    #[test]
+    fn override_fingerprint_moves_on_a_model_or_harness_change() {
+        use crate::ports::types::AgentOverride;
+        let entry = |model: Option<&str>, harness: Option<&str>| AgentOverride {
+            agent_id: "ceo".into(),
+            model: model.map(str::to_string),
+            harness: harness.map(str::to_string),
+            ..Default::default()
+        };
+
+        assert_ne!(
+            override_fingerprint(&[]),
+            override_fingerprint(&[entry(Some("chat-v2"), None)]),
+            "a model override must move the fingerprint or the re-bind is ignored until restart"
+        );
+        assert_ne!(
+            override_fingerprint(&[entry(Some("chat-v2"), None)]),
+            override_fingerprint(&[entry(None, Some("acp"))]),
+            "a harness override must move the fingerprint too"
+        );
+        assert_ne!(
+            override_fingerprint(&[]),
+            override_fingerprint(&[entry(Some(""), None)]),
+            "an explicit model clear must not hash like an untouched teammate"
+        );
+        // The same override twice → the same fingerprint (no spurious rebuild).
+        assert_eq!(
+            override_fingerprint(&[entry(Some("chat-v2"), None)]),
+            override_fingerprint(&[entry(Some("chat-v2"), None)])
+        );
+    }
+
     /// The persona-override fingerprint is filtered the same way as the overlay
     /// one: a row carrying only a face has no persona text to hash, so choosing
     /// or clearing an avatar for a teammate with no other override must not
