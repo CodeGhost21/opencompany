@@ -1140,12 +1140,14 @@ async fn run_issue_password(
         .filter(|value| !value.trim().is_empty());
 
     let issued = bootstrap::issue_password(
-        &users,
-        &sessions,
-        &login_codes,
-        &id,
-        &manifest_admins,
-        bootstrap_admin.as_deref(),
+        bootstrap::PasswordIssueContext {
+            users: &users,
+            sessions: &sessions,
+            login_codes: &login_codes,
+            company: &id,
+            manifest_admins: &manifest_admins,
+            bootstrap_admin: bootstrap_admin.as_deref(),
+        },
         &email,
         &password,
         require_change,
