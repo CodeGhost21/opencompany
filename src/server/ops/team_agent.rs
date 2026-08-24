@@ -536,13 +536,15 @@ async fn edit_agent(
         require_admin(&headers, &state, &company.runtime, peer).await?;
     }
 
-    let name = trimmed_field(body.name.as_deref(), "name").map_err(|e| e.into_response())?;
-    let role = trimmed_field(body.role.as_deref(), "role").map_err(|e| e.into_response())?;
+    let name = trimmed_field(body.name.as_deref(), "name")
+        .map_err(|e| e.into_response().into())?;
+    let role = trimmed_field(body.role.as_deref(), "role")
+        .map_err(|e| e.into_response().into())?;
     let tools = body
         .tools
         .map(|globs| trimmed_globs(&globs))
         .transpose()
-        .map_err(|e| e.into_response())?;
+        .map_err(|e| e.into_response().into())?;
 
     if is_manifest {
         // Stored as an overlay on the record, exactly like the daily-budget
