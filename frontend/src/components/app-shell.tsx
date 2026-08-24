@@ -1346,15 +1346,17 @@ export function AppShell({
     refreshMentions();
   }, [feed.now, refreshMentions]);
 
-  const mentionCounts = useMemo(
-    () =>
-      mentionCountsByChannel(
-        mentionFeed,
-        chatChannelByThread.main ?? "",
-        new Set(Object.values(chatChannelByThread)),
-      ),
-    [mentionFeed, chatChannelByThread],
-  );
+  const mentionCounts = useMemo(() => {
+    // `main` may be undefined while the desks/roster effect has not resolved —
+    // passing a fabricated `""` would file every legacy "General"/"main"
+    // mention under a channel the rail never has, invisible and unclearable.
+    // The lib drops those rows when there is no rendered main channel.
+    return mentionCountsByChannel(
+      mentionFeed,
+      chatChannelByThread.main,
+      new Set(Object.values(chatChannelByThread)),
+    );
+  }, [mentionFeed, chatChannelByThread]);
   const mentionFeedRef = useRef(mentionFeed);
   mentionFeedRef.current = mentionFeed;
   /**
