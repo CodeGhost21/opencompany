@@ -64,7 +64,7 @@ import type { WorkspaceEvent } from "@/views/WorkspaceView";
 import { useHashView } from "@/hooks/use-hash-view";
 import { LEDGER_VIEW_PARAM, readLedgerViewMode } from "@/hooks/use-ledger-view-mode";
 import { BOARD_LEDGER } from "@/lib/board-columns";
-import { VIEWS, type View } from "@/lib/console-routes";
+import { isNavigationActive, VIEWS, type View } from "@/lib/console-routes";
 import { taskIdFromSegment } from "@/lib/task-route";
 import { toast } from "sonner";
 
@@ -163,7 +163,7 @@ function SidebarNavigation({
         {NAV.map((item) => (
           <SidebarMenuItem key={item.view} data-tour={`nav-${item.view}`}>
             <SidebarMenuButton
-              isActive={view === item.view}
+              isActive={isNavigationActive(item.view, view)}
               tooltip={item.label}
               onClick={() => navigate(item.view)}
               className={RESTING_ROW}
