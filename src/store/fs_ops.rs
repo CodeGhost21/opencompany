@@ -986,6 +986,29 @@ impl RunStore for FsOps {
         let steps = read_jsonl::<RunStepRecord>(&self.bundle(company).run_steps_jsonl()).await?;
         Ok(dedup_steps(steps, run_id))
     }
+
+    async fn list_run_steps_for_runs(
+        &self,
+        company: &CompanyId,
+        run_ids: &[String],
+    ) -> Result<std::collections::HashMap<String, Vec<RunStepRecord>>> {
+        // One scan of the company-wide file, then the same per-run dedup the
+        // single-read applies — the Observatory index would otherwise rescan
+        // the whole history once per listed run.
+        let all = read_jsonl::<RunStepRecord>(&self.bundle(company).run_steps_jsonl()).await?;
+        let mut by_run: std::collections::HashMap<String, Vec<RunStepRecord>> =
+            run_ids.iter().map(|id| (id.clone(), Vec::new())).collect();
+        for step in all {
+            if let Some(mine) = by_run.get_mut(&step.run_id) {
+                mine.push(step);
+            }
+        }
+        let mut out = std::collections::HashMap::with_capacity(by_run.len());
+        for (id, steps) in by_run {
+            out.insert(id.clone(), dedup_steps(steps, &id));
+        }
+        Ok(out)
+    }
 }
 
 // ---------------------------------------------------------------------------
