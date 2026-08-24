@@ -171,6 +171,30 @@ describe("companyCovers", () => {
     expect(companyCovers(["workspace.*"], "workspace")).toBe(false);
   });
 
+  it("does not cover a star glued to an opt-in namespace", () => {
+    // `search*` and `workspace.write*` are stored verbatim by the write path,
+    // and the wiring predicates reject the glued spelling — the card would
+    // render the saved grant as effective while the tools stay unwired. The
+    // preview must not promise them, even when the company holds the namespace.
+    const allow = ["search", "workspace", "media", "composio", "chargebee", "hosting", "paypal"];
+    for (const glob of ["search*", "workspace*", "workspace.write*", "media*", "composio*", "chargebee*", "hosting*", "paypal*"]) {
+      expect(companyCovers(allow, glob)).toBe(false);
+    }
+  });
+
+  it("keeps the separator-broken opt-in spellings covered", () => {
+    // `search.web*` strips to a `search.`-descendant the predicate accepts
+    // verbatim; `workspace.write` is an exact write token; `mcp:notion*` is a
+    // colon-scoped prefix. These all wire when saved, so they stay covered.
+    const allow = ["search", "workspace", "media", "mcp:*"];
+    expect(companyCovers(allow, "search.*")).toBe(true);
+    expect(companyCovers(allow, "search.web*")).toBe(true);
+    expect(companyCovers(allow, "workspace.write")).toBe(true);
+    expect(companyCovers(allow, "media.*")).toBe(true);
+    expect(companyCovers(allow, "media.image*")).toBe(true);
+    expect(companyCovers(allow, "mcp:notion*")).toBe(true);
+  });
+
   it("stops a prefix that does not end on a separator", () => {
     // `documentation.read` is not a `docs` grant, however much of the string
     // lines up — and an unstarred grant matches only itself.
