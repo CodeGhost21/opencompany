@@ -2453,15 +2453,32 @@ impl crate::ports::deep_trace::DeepTraceStore for MongoStore {
             while let Some(doc) = verify.try_next().await.map_err(mongo_err)? {
                 newest.insert(get_str(&doc, "_id")?, get_i64(&doc, "newest")?);
             }
-            let doomed: Vec<&str> = stale
+            let doomed: Vec<(&str, i64)> = stale
                 .iter()
                 .filter(|(id, seen)| newest.get(id.as_str()).is_none_or(|now| now <= seen))
-                .map(|(id, _)| id.as_str())
+                .map(|(id, seen)| (id.as_str(), *seen))
                 .collect();
             if !doomed.is_empty() {
+                // The delete is itself conditional on the recency the ranking
+                // observed, not just on the run id: a writer that refreshes one
+                // of these runs after the verification above but before this
+                // delete would otherwise have its brand-new detail rows removed
+                // by a `delete_many` keyed on `run_id` alone. `at_ms` is
+                // monotone per run, so "row is at or below the recency we saw"
+                // is exactly "this row was already stale when we ranked" — a
+                // row written since has a larger `at_ms` and survives.
+                let stale_row = doomed
+                    .iter()
+                    .map(|(id, seen)| {
+                        doc! {
+                            "run_id": id,
+                            "at_ms": {"$lte": seen},
+                        }
+                    })
+                    .collect::<Vec<_>>();
                 coll.delete_many(doc! {
                     "company_id": company.as_ref(),
-                    "run_id": {"$in": doomed},
+                    "$or": stale_row,
                 })
                 .await
                 .map_err(mongo_err)?;
