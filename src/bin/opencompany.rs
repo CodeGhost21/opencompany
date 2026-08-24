@@ -923,7 +923,7 @@ async fn live_ports(
     Option<Arc<dyn opencompany::ports::FactStore>>,
     opencompany::store::StorageKind,
 )> {
-    use opencompany::store::{
+    opencompany::store::MemoryScopes,
         FsCompanyStore, FsContextStore, FsEventLog, FsMemoryStore, FsOps, StorageSettings,
         open_memory_overlay, open_storage,
     };
