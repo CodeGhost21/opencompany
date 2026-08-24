@@ -2281,7 +2281,7 @@ prompt = "Lead decisively."
         let home_dir = home();
         let state = state_with_manifest(home_dir.path(), ROSTER).await;
 
-        let (status, refused) = upload_avatar(&state, "bomb.png", bomb_png()).await;
+        let (status, refused) = upload_avatar(&state, "bomb.png", &bomb_png()).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
         assert!(
             refused["error"].as_str().is_some() || refused.as_object().is_some(),
