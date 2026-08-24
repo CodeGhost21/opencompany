@@ -661,15 +661,16 @@ mod test {
     /// A WebP whose VP8 (lossy) chunk announces the given size.
     fn webp_vp8(w: u16, h: u16) -> Vec<u8> {
         let mut v = b"RIFF".to_vec();
-        // 12 (container) + 8 (chunk header) + 9 (frame) = 29.
-        v.extend_from_slice(&29u32.to_le_bytes());
+        // 12 (container) + 8 (chunk header) + 10 (frame) = 30.
+        v.extend_from_slice(&30u32.to_le_bytes());
         v.extend_from_slice(b"WEBPVP8 ");
-        v.extend_from_slice(&9u32.to_le_bytes());
+        v.extend_from_slice(&10u32.to_le_bytes());
         // Frame tag + start code (RFC 6386), then 14-bit width and height.
         v.extend_from_slice(&[0x9D, 0x01, 0x2A, 0x9D, 0x01, 0x2A]);
         v.push((w & 0xFF) as u8);
         v.push((((w >> 8) & 0x3F) | ((h & 0x03) << 6)) as u8);
         v.push(((h >> 2) & 0xFF) as u8);
+        v.push(((h >> 10) & 0x3F) as u8);
         v
     }
 
