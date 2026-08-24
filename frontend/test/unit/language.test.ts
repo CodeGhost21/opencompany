@@ -276,7 +276,9 @@ describe("the decide buttons' label (#1411)", () => {
   it("says why there is no lead when the host withheld the contents", () => {
     // A non-admin's withheld card has no payload to lead with, but it must not
     // read as an ordinary no-argument approval — the resolve route accepts any
-    // member, and the phrase is the one `ApprovalRow` already uses.
+    // member, and the phrase is the one `ApprovalRow` already uses. The exact
+    // timestamp appears once, inside the composition phrase; the caller's own
+    // `request <timestamp>` suffix is what is omitted on redacted cards.
     expect(
       decisionLabel(
         approval({ kind: "payment.send", contents_hidden: true }),
@@ -284,8 +286,32 @@ describe("the decide buttons' label (#1411)", () => {
         NOW,
       ),
     ).toBe(
-      "Send a payment — details hidden by your role — composed 1m ago (1000) — request 1000 — asked by Sam",
+      "Send a payment — details hidden by your role — composed 1m ago (1000) — asked by Sam",
     );
+  });
+
+  it("keeps same-bucket hidden cards apart by the exact timestamp", () => {
+    // The relative phrase is bucketed, so two hidden cards composed in the same
+    // bucket read the same "composed 1m ago" — the exact timestamp in
+    // parentheses is the discriminator that still tells their buttons apart.
+    const first = decisionLabel(
+      approval({ kind: "payment.send", contents_hidden: true }),
+      askers,
+      61_000,
+    );
+    const second = decisionLabel(
+      approval({
+        kind: "payment.send",
+        contents_hidden: true,
+        at_millis: 2_000,
+      }),
+      askers,
+      61_000,
+    );
+    expect(first).not.toBe(second);
+    expect(first).toContain("(1000)");
+    expect(second).toContain("(2000)");
+    expect(first).not.toContain("request 1000");
   });
 
   it("keeps two hidden cards' decide buttons apart by their composition time", () => {
