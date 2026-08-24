@@ -67,6 +67,8 @@ import {
   historyReady,
   HISTORY_UNTRACKED,
   clearTaskCardEverywhere,
+  directMessageChannels,
+  directMessageForId,
   offersDeliverableChoice,
   resolveDmChannelId,
   toggleReaction,
