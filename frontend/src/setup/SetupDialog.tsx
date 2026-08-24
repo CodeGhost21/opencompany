@@ -151,14 +151,11 @@ export function SetupDialog({
    */
   const [replacing, setReplacing] = useState(Boolean(redesign));
   /**
-   * Guards the build-out against a second run.
-   *
-   * StrictMode double-invokes effects and the build-out effect creates
-   * teammates, so without this a development build would staff every company
-   * twice. A ref rather than state: it must be set before the first await, not
-   * on the next render.
+   * The operator roster observed before this redesign began. Only these rows
+   * belong to the fallback pass; rows added by another operator while model
+   * settings were open must survive the replacement.
    */
-  const building = useRef(false);
+  const redesignRoster = useRef<Set<string> | null>(null);
 
   // The controller re-mounts this dialog when it reopens, so `useState(redesign)`
   // above covers the return from wiring a model. This is a belt-and-braces
