@@ -44,8 +44,11 @@ function clientWith(roster: TeamMemberDto[]): OpenCompanyClient {
   return {
     scopeFor: (company: string | null) => `/api/v1/companies/${company}`,
     listTeam: async () => roster,
-    // The dialog's own readiness check; `echo` keeps the notice on screen.
-    get: async () => ({ cognition: "echo" }),
+    // The dialog's own readiness check; `echo` keeps the notice on screen. The
+    // role read is a second `get` on `/auth/me`; answer it as an admin so the
+    // model CTAs this spec follows are offered.
+    get: async (path: string) =>
+      path.endsWith("/auth/me") ? { role: "admin" } : { cognition: "echo" },
     post: async () => ({ agents: [], template: "ecommerce", source: "fallback" }),
   } as unknown as OpenCompanyClient;
 }
