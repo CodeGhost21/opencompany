@@ -241,12 +241,14 @@ impl AgentRunGql {
 }
 
 /// Loads one attempt with its trace and, when the host keeps one, its deep half.
-async fn load(runtime: &Arc<CompanyRuntime>, record: RunRecord) -> AgentRunGql {
+///
+/// The scrubbed skeleton is the primary answer, so a failure to read it must
+/// reach the client rather than masquerade as "no steps".
+async fn load(runtime: &Arc<CompanyRuntime>, record: RunRecord) -> async_graphql::Result<AgentRunGql> {
     let steps = runtime
         .runs()
         .list_run_steps(runtime.id(), &record.id)
-        .await
-        .unwrap_or_default();
+        .await?;
     // A missing deep store, or a read that fails, degrades to "no deep half"
     // rather than failing the query: the scrubbed trace is the answer, and the
     // unredacted companion is the bonus.
@@ -258,11 +260,11 @@ async fn load(runtime: &Arc<CompanyRuntime>, record: RunRecord) -> AgentRunGql {
         .into_iter()
         .map(|d| (d.step_seq, d.detail))
         .collect();
-    AgentRunGql {
+    Ok(AgentRunGql {
         record,
         steps,
         details,
-    }
+    })
 }
 
 /// `Company.agentRuns` — attempts, newest first, optionally narrowed.
