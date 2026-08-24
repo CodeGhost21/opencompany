@@ -368,7 +368,11 @@ return, setup reopens over the staffed company, removes only **those** rows, and
 creates the newly designed roster. The global baseline is preserved, and so are
 teammates other operators staffed while model settings were open — the debt
 names what the first pass created, rather than re-reading the roster on return
-and treating everyone else's work as part of the team being replaced.
+and treating everyone else's work as part of the team being replaced. The
+completion screen's in-place "Try again" records the same debt (the rows the
+failed pass just created) before restarting the questions, so a reload or crash
+before that replacement lands can reopen setup in redesign mode rather than
+leaving the gate reporting staffed with no way back in.
 
 ## How we know it is someone's first time
 
