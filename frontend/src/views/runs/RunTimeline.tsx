@@ -142,14 +142,6 @@ export function groupTimeline(entries: TimelineEntry[]): TimelineItem[] {
     }
     items.push({ row: "group", key: g.key, group: g });
   }
-  if (waitingSince !== undefined) {
-    items.push({
-      row: "wait",
-      key: "wait-live",
-      millis: Math.max(0, now - waitingSince),
-      live: true,
-    });
-  }
   return items;
 }
 
