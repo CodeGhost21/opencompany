@@ -141,7 +141,7 @@ describe("ApprovalCard decide ordering (#1406)", () => {
       `Approve: Run a terminal command — rm -rf /tmp/build && make release — cwd: /srv/app — request ${T0} — approval 1 of 1 — asked by Ops`,
     );
     expect(labelled).toContain(
-      `Decline: Run a terminal command — rm -rf /tmp/build && make release — cwd: /srv/app — request ${T0 + 60_000} — asked by Ops`,
+      `Decline: Run a terminal command — rm -rf /tmp/build && make release — cwd: /srv/app — request ${T0} — approval 1 of 1 — asked by Ops`,
     );
   });
 
