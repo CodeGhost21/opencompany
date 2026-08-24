@@ -194,11 +194,13 @@ export function SetupDialog({
    * are an admin's (the Connections form and its restart control render only
    * under management authority and the host refuses the writes for a member),
    * so a member is told to ask an admin rather than handed a dead-end link.
-   * Defaults to `true` while the role is unread, for the same reason the
-   * reachability flag does: a host we could not ask is offered the CTA as
-   * before rather than having it silently taken away.
+   * `null` while the role read is outstanding: the admin actions are withheld
+   * until the host says who the operator is, so a member whose role read
+   * settles after the readiness check is never offered a link that can only
+   * 403 — and a read that never answers keeps the actions withheld rather
+   * than defaulting to a guess that could misdirect anyone.
    */
-  const [canManage, setCanManage] = useState(true);
+  const [canManage, setCanManage] = useState<boolean | null>(null);
   const [touched, setTouched] = useState(false);
   /**
    * Whether this run of the flow replaces the team the company already has.
