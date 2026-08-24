@@ -675,7 +675,10 @@ export function ChatView({
     return members.filter((m) => !inside.has(m.id));
   }, [inChannel, members]);
 
-  const messages = channel ? (transcripts[channel.id] ?? []) : [];
+  const messages = useMemo(
+    () => (channel ? (transcripts[channel.id] ?? EMPTY_MESSAGES) : EMPTY_MESSAGES),
+    [transcripts, channel?.id],
+  );
   /**
    * Whether this channel's history is still on the wire.
    *
