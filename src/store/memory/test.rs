@@ -711,6 +711,84 @@ async fn evict_older_than_bounds_the_archive_at_the_retention_limit() {
 }
 
 #[tokio::test]
+async fn evict_bounds_the_archive_when_the_loop_fails_partway() {
+    // The archive bound must survive a partial eviction failure. Archive-
+    // then-delete has already moved the traces before the failure, so
+    // skipping the prune on the error path would let a maintenance pass that
+    // repeatedly fails partway grow the archive past its retention limit. The
+    // prune is best-effort there: the original provider error still
+    // propagates.
+    //
+    // The flaky engine fails the 6th store into the archive partition. The
+    // first eviction archives four traces (calls 1-4) and prunes to n=1; the
+    // second archives one trace (call 5), then fails on the next (call 6) —
+    // leaving c5 and c4 in the archive, which the failure-path prune must
+    // bring back down to the newest one (c5).
+    let mem = BoundMemory::bind(
+        Arc::new(MemoryTraitProvider::new(
+            FlakyStore::arc(6),
+            "flaky-engine",
+        )),
+        DriverClass::Embedded,
+    )
+    .unwrap();
+    let id = acme_id();
+    let memory = mem.memory();
+    for (n, cycle) in ["c1", "c2", "c3", "c4", "c5"].iter().enumerate() {
+        memory
+            .save_trace(
+                &id,
+                CompressedTrace {
+                    cycle_id: (*cycle).to_string(),
+                    summary: "s".into(),
+                    at_millis: 100 + n as u64,
+                },
+            )
+            .await
+            .unwrap();
+    }
+    // First pass: fully successful, leaves the archive bounded at 1.
+    let archived = memory
+        .evict(&id, EvictionPolicy::KeepRecent { n: 1 })
+        .await
+        .unwrap();
+    assert_eq!(archived, 4);
+
+    for (n, cycle) in ["c6", "c7", "c8"].iter().enumerate() {
+        memory
+            .save_trace(
+                &id,
+                CompressedTrace {
+                    cycle_id: (*cycle).to_string(),
+                    summary: "s".into(),
+                    at_millis: 105 + n as u64,
+                },
+            )
+            .await
+            .unwrap();
+    }
+    // Second pass: archives c5 (call 5), then fails on c6 (call 6).
+    let err = memory
+        .evict(&id, EvictionPolicy::KeepRecent { n: 1 })
+        .await
+        .expect_err("the injected archive store failure must propagate");
+    assert!(
+        err.to_string().contains("injected archive store failure"),
+        "the original provider error must survive: {err}"
+    );
+
+    // The trace moved before the failure is still bounded: the archive keeps
+    // the newest evicted trace (c5) and prunes the one it displaced (c4).
+    let kept = mem.archived_traces(&id).await.unwrap();
+    let ids: Vec<&str> = kept.iter().map(|t| t.cycle_id.as_str()).collect();
+    assert_eq!(
+        ids,
+        vec!["c5"],
+        "the archive must be bounded even when the eviction loop fails partway"
+    );
+}
+
+#[tokio::test]
 async fn task_results_do_not_appear_among_traces() {
     let mem = engine();
     let id = acme_id();
