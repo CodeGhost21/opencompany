@@ -2251,9 +2251,9 @@ impl TokenUsage {
 /// The one live recall path is elsewhere and is untouched by this: before each
 /// turn `HarnessPool::run` retrieves the top-5 prior task outcomes from the
 /// `ContextStore` and injects them as text (`src/harness/memory_loop.rs`, under
-/// the `openhuman` feature). Traces are still *written* every cycle
-/// (they travel with the export bundle); nothing reads them back. Do not
-/// re-add a field here until something consumes it.
+/// the `openhuman` feature). Traces are still *written* every cycle and kept
+/// in a bounded inspection window; nothing reads them back. Do not re-add a
+/// field here until something consumes it.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CycleRequest {
     /// Unique id for this cycle.
