@@ -145,6 +145,25 @@ describe("ApprovalCard decide ordering (#1406)", () => {
     );
   });
 
+  it("announces a hidden card's exact timestamp once", async () => {
+    // A redacted card's composition time is the only discriminator its buttons
+    // can carry (the payload is withheld), but it must be emitted exactly once:
+    // `decisionLabel` puts it in the "composed … (…)" phrase, and the caller
+    // omits its usual `request <timestamp>` suffix so the screen reader does not
+    // hear the opaque epoch twice on every hidden card.
+    await render({ ...APPROVAL, contents_hidden: true });
+
+    const labelled = Array.from(container.querySelectorAll("button")).map((b) =>
+      b.getAttribute("aria-label"),
+    );
+    const approve = labelled.find((l) => l?.startsWith("Approve:"));
+    const decline = labelled.find((l) => l?.startsWith("Decline:"));
+    expect(approve).toContain(`composed 1m ago (${T0})`);
+    expect(approve).not.toContain(`request ${T0}`);
+    expect(decline).toContain(`composed 1m ago (${T0})`);
+    expect(decline).not.toContain(`request ${T0}`);
+  });
+
   it("distinguishes two same-URL http_request cards by method (#1411)", async () => {
     const get: ApprovalSummary = {
       ...APPROVAL,
