@@ -343,6 +343,14 @@ export function companyCovers(allow: string[], glob: string): boolean {
   if (literal === "mcp:" || literal.startsWith("mcp:")) {
     return allow.some((grant) => grant !== "*" && grantMatches(grant, literal));
   }
+  // A delimiter-free MCP spelling (`mcp`, `mcp*`) is not a form the MCP wiring
+  // can honour, so it must not fall through to the generic matcher below: under
+  // a wildcard-only allow-list that generic match would accept it, and the
+  // saved `mcp*` glob reads on the host as covering every server — the opt-in
+  // defeated. Only the colon forms wire; reject the rest of the family here.
+  if (literal.startsWith("mcp")) {
+    return false;
+  }
 
   return allow.some((grant) => grantMatches(grant, literal));
 }
