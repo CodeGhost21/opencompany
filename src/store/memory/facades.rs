@@ -801,6 +801,12 @@ impl MemoryStore for ProviderMemoryStore {
     }
 
     async fn recent_traces(&self, id: &CompanyId, limit: usize) -> Result<Vec<CompressedTrace>> {
+        // Avoid even touching the provider when the caller requests no rows.
+        // This matters for the provider-backed facade because `list` has no
+        // limit argument and otherwise decodes the entire trace partition.
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
         let traces = self.ordered_traces(id).await?;
         // Newest last, per the port contract, so the tail is the window.
         let skip = traces.len().saturating_sub(limit);
