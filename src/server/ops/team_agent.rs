@@ -82,7 +82,7 @@ use crate::error::OpenCompanyError;
 use crate::ports::store::company_write_lock;
 use crate::ports::types::{AgentOverride, CompanyRecord};
 use crate::runtime::builder::agent_scoped_grants;
-use crate::server::error::{ApiError, Rejection};
+use crate::server::error::ApiError;
 use crate::server::ops::ScopedCompany;
 use crate::server::ops::team::{AgentPath, daily_spend_samples, double_option};
 use crate::server::users::admin::require_admin;
