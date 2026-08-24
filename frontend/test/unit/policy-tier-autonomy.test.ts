@@ -526,6 +526,29 @@ describe("changing the spend cap", () => {
     expect(document.querySelector("[data-testid=policy-tier-confirm]")).toBeNull();
   });
 
+  it("allows selecting no cap after clearing a finite cap", async () => {
+    const initial: PolicyStatus = { ...status("supervised"), autoApproveUnderUsd: 100 };
+    const { client, put } = makeClient(initial);
+    await mount(client);
+
+    const input = container.querySelector<HTMLInputElement>("#spend-cap")!;
+    await act(async () => {
+      input.value = "";
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+      await Promise.resolve();
+    });
+    await act(async () => {
+      [...container.querySelectorAll("button")]
+        .find((button) => button.textContent?.includes("Set no cap"))!
+        .click();
+      await Promise.resolve();
+    });
+    expect(put).not.toHaveBeenCalled();
+    expect(input.disabled).toBe(false);
+    expect(document.body.textContent).toContain("No cap");
+  });
+
   it("keeps an unsaved always-ask edit when saving the deadline", async () => {
     const { client } = makeClient(status("supervised"));
     await mount(client);
