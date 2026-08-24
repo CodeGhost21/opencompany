@@ -242,6 +242,15 @@ export function MessageComposer({
     // The trim can shift every span, so the list is re-anchored against exactly
     // what is being sent — never against the untrimmed draft.
     let sending = reconcileMentions(text, mentions);
+    // A previously selected mention can be wrapped in Markdown code after the
+    // picker closes. The host's fallback extractor masks code, so supplied
+    // mentions must obey the same rule rather than bypassing it.
+    const masked = stripCodeRegions(text);
+    sending = sending.filter(
+      (m) =>
+        masked.slice(m.offset, m.offset + m.text.length) ===
+        text.slice(m.offset, m.offset + m.text.length),
+    );
     // A mention completed by hand (`@ceo ` — the query closed on the finished
     // name) never entered `mentions`. When anything was picked, the host uses
     // the supplied list exclusively, so sending just the picks would silently
