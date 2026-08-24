@@ -197,19 +197,42 @@ export function SetupController({
   //
   // The navigation away is a hash change and so is the navigation back, and this
   // controller sees neither through its own props — hence a listener rather than
-  // an effect keyed on the route. Guarded on `unstaffed` so a company staffed in
-  // the meantime (a second tab, a colleague) does not get a setup dialog over a
-  // team that already exists, and the debt is dropped either way so it cannot
-  // resurface on some later unrelated navigation.
+  // an effect keyed on the route. The roster is re-read on arrival rather than
+  // trusted from state captured before the navigation: another tab or colleague
+  // may have staffed the company in the meantime, and a return must never open
+  // setup over a team that already exists. The debt is dropped either way so it
+  // cannot resurface on some later unrelated navigation.
   useEffect(() => {
     const arrive = () => {
-      if (onModelSettings() || !setupResuming(scope)) return;
-      clearSetupResuming(scope);
-      if (unstaffed) setOpen(true);
+      if (onModelSettings()) return;
+      const wasResuming = setupResuming(scope);
+      const wasRedesigning = setupRedesign(scope);
+      if (!wasResuming && !wasRedesigning) return;
+      if (wasResuming) clearSetupResuming(scope);
+      if (wasRedesigning) clearSetupRedesign(scope);
+      void client
+        .listTeam(company)
+        .then((roster) => {
+          const empty = teamIsUnstaffed(roster);
+          setUnstaffed(empty);
+          if (wasRedesigning) {
+            // The first pass shipped a fallback team and the operator went to
+            // wire a model. Reopen in redesign mode so the next build-out
+            // replaces that team instead of stacking a second one.
+            setRedesigning(true);
+            setOpen(true);
+          } else if (empty) {
+            setOpen(true);
+          }
+        })
+        .catch(() => {
+          // Cannot confirm what the roster looks like; opening setup over an
+          // unknown team risks a duplicate, so stay closed.
+        });
     };
     window.addEventListener("hashchange", arrive);
     return () => window.removeEventListener("hashchange", arrive);
-  }, [scope, unstaffed]);
+  }, [scope, company, client]);
 
   // The Team page's prompt reopens setup after a skip.
   useEffect(() => {
