@@ -151,7 +151,17 @@ export function ApprovalMeta({
   const workflowId = workflowIdForApproval(a);
   const workflowRunHref =
     workflowId && a.workflow_run_id ? workflowHref(workflowId, a.workflow_run_id) : null;
-  const hasOriginLink = taskId !== null || conversationChannelId !== null || workflowRunHref !== null;
+  // The "Asked in" link above renders straight from `thread`, which the host
+  // resolved against the desk/roster on its own — independent of the shell's
+  // separate chat-topology hydration. When that hydration is still in flight
+  // (or failed), `chatChannelByThread` is empty but the origin is still
+  // visibly available, so counting `thread` keeps the footer from saying
+  // "Origin unavailable" underneath a live link.
+  const hasOriginLink =
+    thread != null ||
+    taskId !== null ||
+    conversationChannelId !== null ||
+    workflowRunHref !== null;
   // An id the roster does not know still beats no attribution at all — the
   // operator can at least tell two askers apart.
   const asker = a.agent ? (askerNames.get(a.agent) ?? a.agent) : null;
