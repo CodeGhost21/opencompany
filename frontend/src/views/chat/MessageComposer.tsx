@@ -349,6 +349,12 @@ export function MessageComposer({
     const { selectionStart: start, selectionEnd: end } = el;
     const next = `${draft.slice(0, start)}${mark}${draft.slice(start, end)}${mark}${draft.slice(end)}`;
     setDraft(next);
+    // The wrap edits the draft out from under the mention spans. A mention the
+    // wrap merely encloses keeps its literal (``**@Sam**`` still reads `@Sam`)
+    // and shifts; one whose span an insertion point falls inside is broken and
+    // must go — otherwise send-time reconciliation re-anchors it onto an
+    // unrelated same-text duplicate and pings the wrong person.
+    setMentions((current) => reconcileWrap(current, start, end, mark));
     setOutsideWarning(null);
     // Restore the selection around what was wrapped, after React repaints.
     requestAnimationFrame(() => {
