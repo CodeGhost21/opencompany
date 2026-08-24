@@ -3533,6 +3533,44 @@ mod tests {
         assert_ne!(split, joined);
     }
 
+    /// A spend-cap or deadline edit moves it too — the third and fourth axes a
+    /// console save can touch without touching the tier or the list.
+    ///
+    /// `ApprovalPolicy` is built once per roster, so a cap-only edit that left
+    /// the fingerprint stable would keep the harness gate enforcing the old
+    /// threshold until restart. `auto_approve_under_usd`'s outer/inner options
+    /// are both states: no override, an explicit no-cap (`Some(None)`), and a
+    /// finite cap must each be distinct.
+    #[test]
+    fn the_policy_fingerprint_moves_when_the_cap_or_deadline_does() {
+        let base = policy_fingerprint(Some(&fp_entry_full(Some("auto"), None, None, None)));
+        let explicit_none = policy_fingerprint(Some(&fp_entry_full(
+            Some("auto"),
+            None,
+            Some(None),
+            None,
+        )));
+        let finite = policy_fingerprint(Some(&fp_entry_full(Some("auto"), None, Some(Some(25.0)), None)));
+        let tighter = policy_fingerprint(Some(&fp_entry_full(
+            Some("auto"),
+            None,
+            Some(Some(10.0)),
+            None,
+        )));
+        let deadline = policy_fingerprint(Some(&fp_entry_full(Some("auto"), None, None, Some(72))));
+
+        assert_ne!(
+            base, explicit_none,
+            "setting an explicit no-cap override must rebuild: every spend parks"
+        );
+        assert_ne!(base, finite, "a finite cap must rebuild");
+        assert_ne!(explicit_none, finite, "no-cap and a finite cap are different states");
+        assert_ne!(finite, tighter, "a different cap value must rebuild");
+        assert_ne!(base, deadline, "a deadline edit must rebuild");
+        // Re-setting the same cap is a no-op, like re-setting the same tier.
+        assert_eq!(finite, policy_fingerprint(Some(&fp_entry_full(Some("auto"), None, Some(Some(25.0)), None))));
+    }
+
     /// Issue #661 / L5: an overlay teammate's own `tools` grant flows into the
     /// manifest shape `build_agent` consumes, and is INTERSECTED with the company
     /// allow-list — narrow-only, never a widen. An empty grant is the standard
