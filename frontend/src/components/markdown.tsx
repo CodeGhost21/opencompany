@@ -8,6 +8,8 @@ import { mentionRegex } from "@/views/chat/mentions";
 /** One mention span this document should chip, as `chat/history` returns it. */
 export interface MentionSpan {
   text: string;
+  /** UTF-8 byte offset in the raw Markdown message, when supplied by the host. */
+  offset?: number;
   label: string;
   mine: boolean;
   quiet?: boolean;
@@ -43,16 +45,19 @@ function chipMentions(
   // Convert each offset to the source index and record its occurrence ordinal;
   // this prevents an unresolved earlier `@name` from consuming a later chip.
   const occurrences = new Map<string, Map<number, MentionSpan>>();
-  for (const m of mentions) {
+  for (const [fallbackOrdinal, m] of mentions.entries()) {
     let bytes = 0;
     let index = 0;
-    while (index < source.length && bytes < m.offset) {
+    while (m.offset !== undefined && index < source.length && bytes < m.offset) {
       const point = source.codePointAt(index)!;
       const ch = String.fromCodePoint(point);
       bytes += new TextEncoder().encode(ch).length;
       index += ch.length;
     }
-    const ordinal = source.slice(0, index).split(m.text).length - 1;
+    const ordinal =
+      m.offset === undefined
+        ? fallbackOrdinal
+        : source.slice(0, index).split(m.text).length - 1;
     const byOrdinal = occurrences.get(m.text) ?? new Map<number, MentionSpan>();
     byOrdinal.set(ordinal, m);
     occurrences.set(m.text, byOrdinal);

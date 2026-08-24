@@ -621,7 +621,7 @@ async fn company_events(
         .filter_map(move |item| {
             // Keep the teardown guard alive for the life of the stream.
             let _ = &guard;
-            let event = project_stream_item(&item, &authors, &viewer)
+            let event = project_stream_item_for_viewer(&item, &authors, &viewer)
                 .map(|value| Ok(Event::default().data(value.to_string())));
             std::future::ready(event)
         });
