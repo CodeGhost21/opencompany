@@ -713,7 +713,7 @@ async fn edit_agent(
                  `transport = \"runner\"`. Model overrides aren't supported for a runner \
                  yet — the runner wire protocol doesn't carry them."
             )))
-            .into_response());
+            .into());
         }
     }
 
