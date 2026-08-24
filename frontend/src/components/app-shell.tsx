@@ -1375,6 +1375,7 @@ export function AppShell({
       mentionFeedRevision?: number,
       replyParents?: ReadonlyMap<string, string>,
       openThreadId?: string | null,
+      loadedMessageIds?: ReadonlySet<string>,
     ) => {
       activeChatChannelRef.current = channelId;
       if (mentionFeedRevision === undefined) return;
@@ -1399,6 +1400,7 @@ export function AppShell({
             new Set(Object.values(chatChannelByThread)),
             replyParents ?? new Map(),
             openThreadId ?? null,
+            loadedMessageIds,
           );
       if (clearing.length > 0) {
         // Optimistic, so the badge goes at once; the next poll reconciles.
