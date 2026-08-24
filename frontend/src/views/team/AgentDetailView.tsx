@@ -149,6 +149,10 @@ export function AgentDetailView({
   const editing = editRequested && (agent?.editable.length ?? 0) > 0;
   const [draft, setDraft] = useState<AgentDraft>(emptyDraft());
   const [saving, setSaving] = useState(false);
+  /** An icon save is in flight — the picker is disabled until it settles, so two
+      avatar PATCHes for the same teammate can never be pending at once and
+      resolve out of order (the older one overwriting the newer choice). */
+  const [avatarSaving, setAvatarSaving] = useState(false);
   /**
    * What this teammate is on and carrying (issue #1141), or `null` when the
    * board could not be read — in which case the header states neither rather
