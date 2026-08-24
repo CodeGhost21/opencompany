@@ -133,9 +133,12 @@ export function ApprovalsView({
   const [approvalTtlHours, setApprovalTtlHours] = useState(24);
   useEffect(() => {
     let live = true;
+    // A new scoped read starts from the historical default; a failed read must
+    // not carry the previous company's deadline into the new one.
+    setApprovalTtlHours(24);
     void getPolicy(client, company)
       .then((policy) => {
-        if (live) setApprovalTtlHours(policy.approvalTtlHours);
+        if (live) setApprovalTtlHours(policy.approvalTtlHours ?? 24);
       })
       .catch(() => {
         // A policy read is explanatory here. Keep the historical default if an
