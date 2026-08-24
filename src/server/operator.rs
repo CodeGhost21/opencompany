@@ -2074,11 +2074,7 @@ async fn chat_and_emit(
     let responses = report
         .responses
         .into_iter()
-        .map(|response| {
-            let mut response = response;
-            response.mentions = response.mentions;
-            response
-        })
+        .map(|response| response)
         .collect();
     emit_cycle_webhooks(state, id, &report).await;
     if let Some(note) = feedback_note {
