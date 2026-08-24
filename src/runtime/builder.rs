@@ -43,6 +43,7 @@ use crate::policy::ManifestApprovalGate;
 use crate::ports::WorkflowRunner;
 use crate::ports::types::{
     CompanyId, CompanyRecord, OverlayWorkflow, PolicyOverride, SecretValue, TemplateProvenance,
+    effective_policy,
 };
 use crate::ports::{
     AgentEconomy, ArtifactStore, Brain, ChannelAdapter, CompanyStore, ContextStore, EventLog,
