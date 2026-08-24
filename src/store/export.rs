@@ -278,6 +278,10 @@ impl BundleContents {
         let events =
             scrub_redacted_discussion(events.read_from(id, EventSeq::new(0), usize::MAX).await?);
         let traces = memory.recent_traces(id, usize::MAX).await?;
+        let archived_traces = match scopes {
+            Some(scopes) => scopes.archived_traces(id).await?,
+            None => Vec::new(),
+        };
         let facts = match facts {
             Some(port) => port.list(id, None, None).await?,
             None => Vec::new(),
