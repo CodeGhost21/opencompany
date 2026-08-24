@@ -364,7 +364,10 @@ export function approvalAction(a: ApprovalSummary): string {
  * A withheld card's contents are redacted to the same phrase for every hidden
  * approval, so two hidden cards of the same kind from the same asker would
  * read alike — the composition time (non-sensitive, already on the card body)
- * rides in to keep their buttons distinguishable.
+ * rides in to keep their buttons distinguishable. The exact timestamp is the
+ * single exact-time discriminator for a redacted card: it is emitted here and
+ * the caller skips its usual `request <timestamp>` suffix on hidden cards, so
+ * a screen reader never announces the opaque epoch twice.
  *
  * Both halves degrade: a card with no payload (an approval with no arguments)
  * omits the lead, and one with no `agent` (a native effect, or an old host)
