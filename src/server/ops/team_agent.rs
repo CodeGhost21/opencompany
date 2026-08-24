@@ -631,7 +631,7 @@ async fn edit_agent(
     let is_admin = is_admin_actor(&headers, &state, &company, peer).await;
     detail(&company, &record, &agent_id, is_admin)
         .await
-        .map_err(|e| e.into_response())
+        .map_err(|e| e.into_response().into())
 }
 
 /// Rejects a field that was sent but is blank, and trims one that was sent.
