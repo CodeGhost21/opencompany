@@ -528,9 +528,13 @@ export function AppShell({
   const setupScope = { connection: scope.connection, company };
   useEffect(() => {
     // SetupWizard and the magic-link flow use the unscoped marker because the
-    // connection/company may not survive their full-page hand-off. Consume it
-    // here once the shell has identified the landing company.
-    if (!arrivedViaSetupHandoff() && !arrivedViaSetupHandoff(setupScope)) return;
+    // connection/company may not survive their full-page hand-off. Accept that
+    // form only when the marker really carries no scope: a marker scoped to a
+    // different connection/company must not suppress setup on this one, nor be
+    // cleared before the company it names has consumed it.
+    const scoped = arrivedViaSetupHandoff(setupScope);
+    const unscoped = !setupHandoffHasScope() && arrivedViaSetupHandoff();
+    if (!scoped && !unscoped) return;
     setSetupCompleted(true);
     clearSetupHandoff();
   }, [scope.connection, company]);
