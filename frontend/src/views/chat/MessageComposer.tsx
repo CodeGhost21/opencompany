@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   ArrowUp,
   AtSign,
@@ -6,10 +6,6 @@ import {
   CaseSensitive,
   Code,
   Italic,
-  Link2,
-  List,
-  Paperclip,
-  Smile,
   Strikethrough,
 } from "lucide-react";
 
@@ -21,6 +17,18 @@ interface Props {
   placeholder: string;
   disabled?: boolean;
   onSend: (text: string, intent?: MessageIntent) => void;
+  /** A new revision replaces the draft and focuses the composer. */
+  prefill?: { text: string; revision: number };
+  /**
+   * Called as the box is typed in, so the company can show a typing
+   * indicator.
+   *
+   * Fired on **every** change rather than on a timer: throttling is the
+   * caller's job, because it is per channel and this component does not know
+   * which channel it is in. Absent on the composers where a typing indicator
+   * would be noise.
+   */
+  onTyping?: () => void;
   /** Compact form, for the narrower thread panel. */
   compact?: boolean;
   /**
@@ -61,31 +69,45 @@ export function MessageComposer({
   placeholder,
   disabled,
   onSend,
+  prefill,
   compact,
   deliverableChoice,
+  onTyping,
 }: Props) {
   const [draft, setDraft] = useState("");
-  // What the NEXT line is for, and only the next one. It resets to "once"
-  // after every send so neither a workflow request nor a "just chatting" mark
-  // silently carries into the message after it — each is an explicit, per-line
-  // decision.
-  //
-  // "once" is the initial value, and stays it (issue #1152): "Just chatting" is
-  // a third position, not the new default, so an unmarked message is
-  // byte-identical on the wire to one sent before this control existed.
-  const [intent, setIntent] = useState<MessageIntent>("once");
+  // What the NEXT line is for, and only the next one. It starts and resets
+  // unselected: an intent is an operator assertion, so no button may claim one
+  // until the operator presses it (issue #984). An unmarked message therefore
+  // reaches the host without an override and lets triage decide whether it is
+  // work or conversation.
+  const [intent, setIntent] = useState<MessageIntent>();
   // The formatting row is opt-in, behind the `Aa` toggle in the icon row. It
   // used to sit open above every composer, which spent the widest strip of the
   // dock on four buttons most lines never use.
   const [formatting, setFormatting] = useState(false);
   const input = useRef<HTMLTextAreaElement>(null);
 
+  // A first-run card lives above the timeline, outside this component. The
+  // revision lets it request the same prompt more than once after an operator
+  // edits or clears it; comparing text alone would make the second click inert.
+  useEffect(() => {
+    if (!prefill) return;
+    setDraft(prefill.text);
+    // The prefill replaces the draft wholesale, so it must not inherit the
+    // purpose of the line it replaced: a stale "chat" would withhold the
+    // brief's task and a stale "workflow" would mint a repeating workflow out
+    // of what is a one-off request. "Give the team a brief" is always a task,
+    // so pin the intent to "once".
+    setIntent("once");
+    input.current?.focus();
+  }, [prefill]);
+
   function send() {
     const text = draft.trim();
     if (!text || disabled) return;
     setDraft("");
     onSend(text, deliverableChoice ? intent : undefined);
-    setIntent("once");
+    setIntent(undefined);
   }
 
   function onKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
@@ -132,27 +154,6 @@ export function MessageComposer({
                 <w.icon className="size-3.5" />
               </Button>
             ))}
-            <span className="mx-1 h-4 w-px bg-border" aria-hidden />
-            <Button
-              variant="ghost"
-              size="icon"
-              className="size-7 text-muted-foreground"
-              aria-label="Bulleted list"
-              title="Bulleted list"
-              disabled
-            >
-              <List className="size-3.5" />
-            </Button>
-            <Button
-              variant="ghost"
-              size="icon"
-              className="size-7 text-muted-foreground"
-              aria-label="Link"
-              title="Link"
-              disabled
-            >
-              <Link2 className="size-3.5" />
-            </Button>
           </div>
         )}
 
@@ -162,8 +163,12 @@ export function MessageComposer({
         <textarea
           ref={input}
           value={draft}
-          onChange={(e) => setDraft(e.target.value)}
+          onChange={(e) => {
+            setDraft(e.target.value);
+            onTyping?.();
+          }}
           onKeyDown={onKeyDown}
+          aria-label={placeholder}
           placeholder={placeholder}
           rows={1}
           className="field-sizing-content max-h-48 min-h-10 w-full resize-none bg-transparent px-3 py-2 text-sm outline-none placeholder:text-muted-foreground"
@@ -189,23 +194,39 @@ export function MessageComposer({
                   // "Just chatting" leads, because it is the position that
                   // withholds: the operator reaches for it to stop something
                   // happening, and a control you press to prevent an action
-                  // belongs before the ones that cause it. It is NOT pre-pressed
-                  // — "Do it once" stays the default.
-                  { value: "chat", label: "Just chatting" },
-                  { value: "once", label: "Do it once" },
-                  { value: "workflow", label: "Build me the workflow" },
+                  // "Just chatting" leads, because it is the position that
+                  // withholds: the operator reaches for it to stop something
+                  // happening, and a control you press to prevent an action
+                  // belongs before the ones that cause it. None is pre-pressed:
+                  // an operator has to state which outcome they want.
+                  {
+                    value: "chat",
+                    label: "Just chatting",
+                    hint: "Chat without automatically creating a task.",
+                  },
+                  {
+                    value: "once",
+                    label: "Do it once",
+                    hint: "Ask the team to do this once.",
+                  },
+                  {
+                    value: "workflow",
+                    label: "Build me the workflow",
+                    hint: "Turn this into a repeating workflow.",
+                  },
                 ] as const
               ).map((option) => (
                 <button
                   key={option.value}
                   type="button"
                   aria-pressed={intent === option.value}
+                  title={option.hint}
                   onClick={() => setIntent(option.value)}
                   data-testid={`composer-deliverable-${option.value}`}
                   className={cn(
                     "rounded-md px-2 py-1 text-2xs font-medium transition-colors",
                     intent === option.value
-                      ? "bg-primary text-primary-foreground"
+                      ? "bg-primary/10 text-brand-700 dark:text-brand-300"
                       : "text-muted-foreground hover:text-foreground",
                   )}
                 >
@@ -223,26 +244,6 @@ export function MessageComposer({
             onClick={() => wrap("@")}
           >
             <AtSign className="size-4" />
-          </Button>
-          <Button
-            variant="ghost"
-            size="icon"
-            className="size-7 text-muted-foreground"
-            aria-label="Attach a file"
-            title="Attach a file"
-            disabled
-          >
-            <Paperclip className="size-4" />
-          </Button>
-          <Button
-            variant="ghost"
-            size="icon"
-            className="size-7 text-muted-foreground"
-            aria-label="Add an emoji"
-            title="Add an emoji"
-            disabled
-          >
-            <Smile className="size-4" />
           </Button>
           {!compact && (
             <Button
@@ -274,7 +275,8 @@ export function MessageComposer({
       {!compact && (
         <p className="mt-1.5 px-1 text-2xs text-muted-foreground">
           <kbd className="font-sans font-medium">Enter</kbd> to send ·{" "}
-          <kbd className="font-sans font-medium">Shift+Enter</kbd> for a new line
+          <kbd className="font-sans font-medium">Shift+Enter</kbd> for a new
+          line
         </p>
       )}
     </div>

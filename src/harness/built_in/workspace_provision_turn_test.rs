@@ -270,6 +270,7 @@ fn build_brain(
         // The agent workspaces hang off here. Nothing has created a single
         // directory under it — that is the precondition under test.
         workspace_root: dir.join("harness"),
+        mcp_home: None,
         workspace_git_enabled: false,
         audit_root: dir.join("harness"),
         model_override: Some("stub-model".to_string()),
@@ -307,11 +308,10 @@ fn build_brain(
         run_supervisor: crate::runtime::RunSupervisor::default(),
         delivery: None,
         workspace: None,
-        repos: None,
-        repo_bindings: Vec::new(),
-        checkouts: crate::harness::repo::CheckoutLedger::default(),
         search: None,
         tenant_search: None,
+        workflow_runs: None,
+        deep_trace: None,
     };
     (
         HarnessBrain::new(Arc::new(HarnessPool::new()), deps, record(overlays)),
@@ -441,6 +441,8 @@ async fn an_overlay_teammate_added_at_runtime_writes_on_its_first_turn() {
         role: "Analyst".to_string(),
         description: Some("Reads the numbers.".to_string()),
         tools: Vec::new(),
+        model: None,
+        harness: None,
     };
 
     let (script, workspace) = run_write_turn(dir.path(), OVERLAY_AGENT, vec![overlay]).await;

@@ -89,7 +89,7 @@ async function mockApi(page: Page) {
         source: "overlay",
         editable: ["name", "role", "description"],
         isOrchestrator: false,
-        tools: { requested: [], companyAllow: [], effective: [] },
+        tools: { requested: [], companyAllow: [], deskAllow: [], deskCeilingActive: false, effective: [] },
         inboxEnabled: false,
       });
     }
@@ -155,4 +155,24 @@ test("#1440 clicking a desk chip navigates to its own address", async ({ page })
 
   // The org chart landed at that desk's address (issue #485).
   await expect.poll(() => page.url()).toContain("#/company/research");
+});
+
+test("#1391 the teammate action is a focused title button, not an interactive card", async ({ page }) => {
+  await mockApi(page);
+  await page.goto("/#/company");
+
+  const maya = card(page, "Maya");
+  await expect(maya).toBeVisible({ timeout: 30_000 });
+
+  // The card remains a grouping surface while its real controls — the title,
+  // desk chip, and overflow menu — are siblings. This avoids a button owning
+  // other interactive descendants and leaves the title's native Enter/Space
+  // activation and focus indicator intact.
+  await expect(maya).not.toHaveAttribute("role", "button");
+  const open = maya.getByTestId("team-card-open");
+  await expect(open).toHaveJSProperty("tagName", "BUTTON");
+  await open.focus();
+  await expect(open).toBeFocused();
+  await open.press("Enter");
+  await expect(page).toHaveURL(/#\/team\/maya$/);
 });

@@ -94,11 +94,16 @@ pub trait RunTurn: Send + Sync {
         run_sink: Option<Arc<RunTraceSink>>,
     ) -> Result<TurnOutcome>;
 
-    /// An un-streamed, un-steered turn — a workflow agent node, which drops its
-    /// steps and shows no operator chat bubble. Its transient frames must not
-    /// reach the console timeline, which is the same reason this method exists
-    /// beside [`run_steered_background`](Self::run_steered_background) rather
-    /// than reusing [`run`](Self::run).
+    /// An un-streamed, un-steered turn — a workflow agent node, which shows no
+    /// operator chat bubble. Its transient frames must not reach the console
+    /// timeline, which is the same reason this method exists beside
+    /// [`run_steered_background`](Self::run_steered_background) rather than
+    /// reusing [`run`](Self::run).
+    ///
+    /// `run_sink` is what makes such a turn *recorded*. It used to be absent,
+    /// so a workflow node minted no attempt row, persisted no step trace, and
+    /// was addressable by nothing — the node was green or red and that was the
+    /// whole of what could be known about it.
     ///
     /// Defaults to [`run`](Self::run) so the sentinel and test doubles need not
     /// re-declare the same nothing; the streaming harness engines override it
@@ -108,7 +113,12 @@ pub trait RunTurn: Send + Sync {
         company: &CompanyId,
         agent_id: &str,
         message: &str,
+        run_sink: Option<Arc<RunTraceSink>>,
     ) -> Result<TurnOutcome> {
+        // The default drops the sink: [`run`](Self::run) has no channel for one,
+        // and an engine with no step stream has nothing to feed it anyway. The
+        // streaming harness overrides this and does record.
+        let _ = run_sink;
         self.run(company, agent_id, message, None).await
     }
 

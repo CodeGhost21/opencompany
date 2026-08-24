@@ -154,6 +154,14 @@ tinyagents = { path = "vendor/openhuman/vendor/tinyagents", optional = true, fea
 # workspace on a real hosting provider. Taken without OpenHuman's TinyBus
 # module: `tinyhosts` is linked as a library, so nothing here loads a cdylib.
 openhuman_core = { package = "openhuman", path = "vendor/openhuman", optional = true, default-features = false, features = ["skills", "mcp", "hosting"] }
+
+# The MCP client, extracted out of OpenHuman into its own crate. OpenHuman's
+# `oh::mcp::http_client` facade still re-exports the transport and the payload
+# types under their old spellings, but not `tinymcp::Error` — and the typed 401
+# the probe classifier reads (`Error::Unauthorized`, formerly the standalone
+# `McpUnauthorizedError`) is a variant of it. Same vendored path OpenHuman
+# itself depends on, so Cargo resolves one copy, not two.
+tinymcp = { path = "vendor/openhuman/vendor/tinymcp/crates/tinymcp", optional = true, default-features = false }
 # The openhuman `Provider`/`Memory` traits return `anyhow::Result` and log via
 # the `log` facade; both only link under the `openhuman` feature.
 anyhow = { version = "1", optional = true }
@@ -262,17 +270,10 @@ rusqlite = { version = "0.40", features = ["bundled"], optional = true }
 # Only links under the `mongodb` feature; the default build stays offline.
 mongodb = { version = "3", optional = true }
 
-# TinyCortex in-pod memory engine (local SQLite kv/vectors/entity + content
-# vault). Only links under the `tinycortex` feature. Resolved to the vendored
-# submodule via the `[patch.crates-io]` entry below — the *same* crate instance
-# `openhuman_core` already links unconditionally — so enabling this on top of an
-# `openhuman` build adds no new compilation. Backs the `EngineCortex`
-# persistent memory + context overlay; never makes a network call.
-tinycortex = { version = "0.1", optional = true }
-
-# TinyMemory — the engine-neutral memory *contract* (issue #914), as distinct
-# from the TinyCortex *engine* above. `MemoryProvider` with three mandatory
-# capability families and ten optional ones, negotiated once at bind time.
+# TinyMemory — the engine-neutral memory contract. `MemoryProvider` with three
+# mandatory capability families and ten optional ones, negotiated once at bind
+# time. OpenCompany ships only the remote and null providers; embedded engines
+# stay outside this crate.
 #
 # These are path deps rather than `[patch.crates-io]` entries because the crates
 # are `publish = false`: there is no registry version for a patch to replace.
@@ -281,40 +282,12 @@ tinycortex = { version = "0.1", optional = true }
 # resolve to the same directory, and two copies of `tinymemory-api` would mean
 # two nominally distinct `MemoryProvider` traits in one process.
 #
-# NOT `tinycortex-api`: that crate pins `CONTRACT_VERSION = (1, 0)` while this
-# one is at `(2, 0)`, `is_compatible` is major-equality only, and OpenHuman's
-# own inlined contract documents `tinycortex-api` as a deprecated re-export.
-# `docs/spec/runtime/orchestration/memory.md` names this path for that reason.
-#
 # `tinymemory` carries the driver registry (`DriverRegistry::admit`) and the
 # mandatory-family composition (`MemoryTraitProvider`); `tinymemory-remote`
 # carries the HTTP adapters for hosted engines.
-#
-# `tinymemory-tinycortex` is the seam between the engine-side `Memory` trait
-# vocabulary and the contract's — `TinycortexMemory` converts entry/opts types
-# in both directions. The `namespace` driver rides it: `UnifiedMemory`
-# implements the engine-side trait, and the adapter is what lifts it to a
-# `MemoryProvider`. Gated behind `tinymemory-embedded` with `tinymemory-core`,
-# NOT part of `tinymemory`: depending on it unconditionally would drag
-# `tinycortex`, and with it a bundled SQLite build, into a tenant that
-# selected a hosted engine over HTTP and needs neither (tinymemory#18 §D).
 tinymemory = { path = "vendor/openhuman/vendor/tinymemory/crates/tinymemory", optional = true }
 tinymemory-api = { path = "vendor/openhuman/vendor/tinymemory/crates/tinymemory-api", optional = true }
 tinymemory-remote = { path = "vendor/openhuman/vendor/tinymemory/crates/tinymemory-remote", optional = true }
-# `tinymemory-core` carries `UnifiedMemory` — the contract's own durable SQLite
-# store (`impl Memory for UnifiedMemory`, driver id `namespace`) — which is what
-# lets the *embedded* mode bind through the provider seam instead of around it
-# (`OPENCOMPANY_MEMORY=embedded` + `OPENCOMPANY_MEMORY_DRIVER=namespace`).
-#
-# It is a separate feature from `tinymemory` on purpose: this crate pulls
-# `tinycortex` (with `obsidian`, `persona`, `people`, `sync`),
-# `tinyagents/sqlite`, and a bundled `rusqlite` — exactly the in-pod engine
-# weight a tenant that selected a hosted engine over HTTP does not want
-# (tinymemory#18 §D). `remote` and `null` continue to need only the three
-# contract crates above. Same single-checkout rule as those three: the path is
-# byte-identical to the one `vendor/openhuman/Cargo.toml` declares.
-tinymemory-core = { path = "vendor/openhuman/vendor/tinymemory/crates/tinymemory-core", optional = true }
-tinymemory-tinycortex = { path = "vendor/openhuman/vendor/tinymemory/crates/tinymemory-tinycortex", optional = true }
 
 # Single-file `.tar` packing/unpacking for `opencompany export`/`import`. Pure
 # Rust, no system libs, no network. Only links under the `export` feature; the
@@ -367,7 +340,7 @@ rand_core = { version = "0.6", default-features = false, features = ["getrandom"
 # (authorize-url + server-side token exchange) are a first-class console
 # surface, so a company can connect GitHub end-to-end without a custom feature
 # build. It only pulls in `reqwest`, which several already-shipped features
-# (`github`, `telegram`, `medulla`, …) also depend on, so the default build
+# (`medulla`, …) also depend on, so the default build
 # gains no new heavy native dependency. The read-only status route
 # (`ops::connections_read`) is un-gated and available regardless.
 #
@@ -380,7 +353,20 @@ rand_core = { version = "0.6", default-features = false, features = ["getrandom"
 # and *run* by nothing. Moving it into the default set makes both `cargo test`
 # lanes execute them, which is why this needs no new CI lane. It costs one pure
 # dependency (`jsonwebtoken`), already in `Cargo.lock`.
-default = ["oauth", "platform-jwt", "documents"]
+#
+# `tinymemory` ships in the standard build because the memory-engine catalog is
+# a console surface in every build, and without this feature four of its eight
+# tiles ("Supermemory", "Mem0", "Cognee", "No memory") render disabled with
+# "this build was compiled without the `tinymemory` feature" — an instruction
+# to go and find a differently compiled binary, which for the desktop app and
+# for anyone running the shipped container is not an instruction they can
+# follow. It is the cheap half of the memory seam: the driver registry, the
+# contract API and the HTTP remote, all pure Rust already in `Cargo.lock`. The
+# in-pod engines stay opt-in (`tinycortex`, `tinymemory-embedded`) because
+# those do cost a bundled SQLite build, and the desktop — which offers no
+# in-pod memory surface — keeps them off; it enables `tinymemory` itself in
+# `src-tauri/Cargo.toml`, so the hosted catalog tiles are live there too.
+default = ["oauth", "platform-jwt", "documents", "tinymemory"]
 # Text extraction for files dropped on the Brain page (PDF, Word, Excel,
 # PowerPoint). Without it those formats still upload and are still refused
 # honestly — the route reports "no text could be extracted" rather than
@@ -402,7 +388,7 @@ tiny = ["tinyagents"]
 # Enables `tiny` so the `tinyagents` crate is in scope: the harness's inference
 # models implement its `ChatModel<()>` trait (openhuman's old `Provider` trait
 # was deleted upstream); it is the same vendored crate `openhuman_core` uses.
-openhuman = ["tiny", "dep:openhuman_core", "dep:reqwest", "dep:anyhow", "dep:log", "dep:tinyflows", "dep:regex", "dep:uuid", "dep:swc_core"]
+openhuman = ["tiny", "dep:openhuman_core", "dep:tinymcp", "dep:reqwest", "dep:anyhow", "dep:log", "dep:tinyflows", "dep:regex", "dep:uuid", "dep:swc_core"]
 # MCP server management and agent tools share OpenHuman's in-process registry.
 # Enabling it necessarily enables the embedded harness and OpenHuman MCP
 # domain, while the default build remains unchanged.
@@ -488,29 +474,8 @@ sqlite = ["dep:rusqlite"]
 # each tenant its own database on a shared cluster. The fs stores and the
 # port-conformance suite compile without this; only `MongoStore` is gated here.
 mongodb = ["dep:mongodb"]
-# TinyCortex-backed MemoryStore + ContextStore. Pulls the vendored `tinycortex`
-# engine crate (an unconditional dep of `openhuman_core`, so no new build cost
-# under an `openhuman` build) and exposes `EngineCortex`: an in-pod, persistent,
-# per-company memory engine over the crate's local SQLite kv tier. Ships in
-# degraded lexical/recency recall mode — no embedding compute injected yet
-# (that lands in 188c2). The fs stores and the port-conformance suite compile
-# without this; the offline `InMemoryCortex` remains the test/fallback backend.
-tinycortex = ["dep:tinycortex"]
 # The TinyMemory `MemoryProvider` contract (issue #914): binds the three memory
-# ports to one engine-neutral driver instead of three independent backends, and
-# turns the memory engine into an operator choice — the embedded engine in-pod,
-# or a hosted service behind a URL and a credential.
-#
-# Distinct from `tinycortex` above, which is one *engine*. This feature is the
-# *seam*: with it on, `OPENCOMPANY_MEMORY` additionally accepts `remote` and
-# `null`, and `embedded` becomes an alias for `tinycortex`.
-#
-# Deliberately does NOT imply `tinycortex`. The two modes are independent code
-# paths: `remote`/`null` bind a provider here, `embedded` uses the `tinycortex`
-# overlay. Selecting `embedded` without that feature refuses loudly at boot
-# ("requires a build with the `tinycortex` feature"), which is the right
-# outcome — and it lets a hosted-memory tenant build without linking a bundled
-# SQLite it will never call (tinymemory#18 §D).
+# ports to a hosted engine or the explicit null provider.
 tinymemory = [
     "dep:tinymemory",
     "dep:tinymemory-api",
@@ -520,19 +485,6 @@ tinymemory = [
     # `anyhow` directly. Already an optional dep for other features.
     "dep:anyhow",
 ]
-# The embedded mode *through* that seam: `OPENCOMPANY_MEMORY=embedded` +
-# `OPENCOMPANY_MEMORY_DRIVER=namespace` binds `tinymemory-core`'s durable
-# `UnifiedMemory` (driver id `namespace`) as an in-pod provider — same
-# registry admission, same bind-time capability audit, same tenant-namespace
-# facades as `remote`, no network. Without the driver knob, `embedded` keeps
-# the incumbent `EngineCortex` overlay untouched; this feature adds a mode
-# beside it rather than migrating its data (`store::memory::driver` module
-# docs walk through why).
-#
-# Separate from `tinymemory` because it costs the in-pod engine weight —
-# `tinycortex` + `tinyagents/sqlite` + bundled `rusqlite` — that hosted-memory
-# tenants deliberately avoid (tinymemory#18 §D).
-tinymemory-embedded = ["tinymemory", "dep:tinymemory-core", "dep:tinymemory-tinycortex"]
 # Node sidecar brain for self-hosters (bring-your-own-inference). Adds
 # `SidecarBrain`, which speaks the same `/orchestration/v1` wire frames as the
 # hosted brain but against a local sidecar process, with inference routed back
@@ -558,11 +510,6 @@ smtp = ["dep:lettre"]
 # offline `RecordingMailReceiver` compile without this; only `AsyncImapReceiver`
 # and the RFC822 parser are gated here.
 imap = ["dep:async-imap", "dep:mail-parser", "dep:tokio-rustls", "dep:webpki-roots"]
-# Real HTTPS transport to api.telegram.org for the Telegram channel
-# (sendMessage / setWebhook). The `TelegramApi` trait, inbound parsing, token
-# scrubbing, and the offline `RecordingTelegramApi` compile without this; only
-# `HttpTelegramApi` is gated here (it needs the shared `reqwest` client).
-telegram = ["dep:reqwest"]
 # OAuth connection lifecycle (authorize-url + server-side token exchange). The
 # read-only connections catalog compiles without this; only the token-exchanging
 # write routes are gated here (they need the shared `reqwest` client).

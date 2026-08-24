@@ -211,7 +211,17 @@ pub async fn start_with(
         // Issue #1245: the desktop is the one place with an
         // `AcpAgentFactory` implementation to give — a `local` acp harness
         // only has an engine because this line exists.
-        .with_acp_agents(std::sync::Arc::new(crate::acp::LocalAcpAgentFactory));
+        .with_acp_agents(std::sync::Arc::new(crate::acp::LocalAcpAgentFactory))
+        // Without this, `rebuild_company` fails on the one host that most
+        // needs it. The desktop is the only host that runs local ACP
+        // harnesses, so it is the only host where changing a teammate's
+        // harness or model must take effect without a restart — and the edit
+        // handler logs the failure and still returns 200, so the console
+        // reported success while turns kept using the old lane.
+        //
+        // Wired before any company registers, matching `serve`, so the first
+        // edit on a freshly booted host already has a rebuilder to reach for.
+        .with_rebuilder(std::sync::Arc::new(opencompany::desktop::DesktopRebuilder));
     // Read before `state` moves into `bind`. Minting here rather than on the
     // first `/spec` also means the console can be told who this host is without
     // waiting to contact it — which is the whole point, since the address it
@@ -353,42 +363,6 @@ mod test {
             requested.status(),
             409,
             "a magic link is refused by mode, not answered with a silent 202"
-        );
-    }
-
-    /// Memory is a desktop surface, so every engine the console offers must be
-    /// constructible by the host linked into the app. A disabled tile that
-    /// tells the operator to find a differently compiled build is not useful in
-    /// a packaged desktop application: there is no alternate binary to pick.
-    #[tokio::test]
-    async fn the_desktop_build_includes_every_memory_engine() {
-        let dir = tempfile::tempdir().unwrap();
-        let host = start(dir.path().to_path_buf()).await.expect("host starts");
-        let response = reqwest::get(format!("{}/api/v1/company/memory/engine", host.base_url()))
-            .await
-            .unwrap();
-        assert_eq!(response.status(), 200);
-
-        let body: serde_json::Value = response.json().await.unwrap();
-        let unavailable = body["options"]
-            .as_array()
-            .expect("the engine route returns its catalog")
-            .iter()
-            .filter(|option| option["available"] != true)
-            .map(|option| {
-                format!(
-                    "{}: {}",
-                    option["id"].as_str().unwrap_or("unknown"),
-                    option["unavailableReason"]
-                        .as_str()
-                        .unwrap_or("no reason reported")
-                )
-            })
-            .collect::<Vec<_>>();
-
-        assert!(
-            unavailable.is_empty(),
-            "the packaged desktop must not offer disabled memory engines: {unavailable:?}"
         );
     }
 

@@ -44,6 +44,10 @@ interface Sources {
    * the whole graph over them would take the real rings down with them.
    */
   desks: DeskDto[];
+  /** The desks read answered. A rejected `/desks` draws no pillars but must
+   *  not drive the "No desks yet" empty state — that claim is only true of a
+   *  company a successful read found empty, not one whose request failed. */
+  desksRead: boolean;
   people: Person[];
   memories: MemoryEntry[];
   /** The company's saved workflow graphs, whole — nodes and edges, not names. */
@@ -59,6 +63,7 @@ const EMPTY: Sources = {
   // nobody in it (`docs/spec/runtime/company-setup.md`).
   team: [],
   desks: [],
+  desksRead: false,
   people: [],
   memories: [],
   workflows: [],
@@ -68,10 +73,11 @@ const EMPTY: Sources = {
 /**
  * The command centre: the company's knowledge graph, and nothing else.
  *
- * The page is the graph — no header, no strip, no top bar (the shell hides its
- * own for this view). The company sits at the core, its desks are the pillars,
- * the jobs hang off each pillar, the teammate who does each job sits above it,
- * and their tools are the outer ring.
+ * The page is the graph — no header or strip. The shell does not render a top
+ * bar for any view; its remaining controls live in the sidebar. The company
+ * sits at the core, its desks are the pillars, the jobs hang off each pillar,
+ * the teammate who does each job sits above it, and their tools are the outer
+ * ring.
  *
  * Every ring is **declared** now: the pillars are the company's own desks
  * (issue #486), the outer ring is the grants the host resolved for each
@@ -108,6 +114,82 @@ export function Overview({ client, company, companyName }: Props) {
   // is a snapshot going stale" without reading `sources` from a stale closure
   // (the effect does not depend on it).
   const fetchedAtRef = useRef<number | null>(null);
+
+  // The outage overlay covers the graph rather than unmounting it, so the
+  // snapshot underneath is still painted — but a covered graph must not stay
+  // keyboard-focusable or exposed to a screen reader (issue #1314). `inert` is
+  // the one attribute that removes both, and it is set imperatively because
+  // React 18's types predate the boolean `inert` prop.
+  const graphShellRef = useRef<HTMLDivElement>(null);
+  const outageRef = useRef<HTMLDivElement>(null);
+  // The status slot's Refresh control is the natural landing spot when an
+  // outage dismisses — the overlay that held focus unmounts with the "Try
+  // again" button, and dropping a keyboard user to <body> would restart their
+  // whole tab order (issue #1314). The button is disabled while the retried
+  // read is in flight, so the dismissal lands on the graph shell instead and
+  // only hands off to Refresh once the load answers — and even then only if
+  // the user has not moved focus themselves in the meantime.
+  const refreshButtonRef = useRef<HTMLButtonElement>(null);
+  // Set while the outage overlay is showing, so the dismissal branch of the
+  // effect below can tell "the outage just went away" from "the page is
+  // loading for the first time" — only the former must move focus.
+  const outageWasShowingRef = useRef(false);
+  // Set when the outage dismisses with the Refresh control still disabled;
+  // consumed by the hand-off effect below once the retried load answers.
+  const restoreFocusToRefreshRef = useRef(false);
+  useEffect(() => {
+    const shell = graphShellRef.current;
+    if (!shell) return;
+    if (loadError) {
+      outageWasShowingRef.current = true;
+      shell.setAttribute("inert", "");
+      // The graph — and the Refresh button whose failed click just produced
+      // this outage — are now inert, so the browser would drop focus to
+      // <body>. Land it on the explanation instead, where the keyboard user
+      // can read it and reach the retry control.
+      outageRef.current?.focus();
+    } else {
+      shell.removeAttribute("inert");
+      if (outageWasShowingRef.current) {
+        outageWasShowingRef.current = false;
+        // The overlay that held focus unmounts with the very render that
+        // clears the outage, so — unless the user has already moved focus
+        // somewhere deliberate — focus has just fallen to <body>. A user who
+        // tabbed or clicked into the sidebar while the retry was in flight
+        // made their own choice; reclaim focus only in the former case, never
+        // override theirs (issue #1314).
+        if (document.activeElement !== document.body) return;
+        // Focus is back at <body>, so it must land somewhere real. When the
+        // retried read already answered (its last await can batch with this
+        // render), Refresh is enabled and is the natural landing spot. When it
+        // is still in flight, Refresh is disabled — land on the graph shell,
+        // stable and (with `inert` lifted) already interactive, and upgrade to
+        // Refresh once the load answers below.
+        if (refreshButtonRef.current?.disabled) {
+          shell.focus();
+          restoreFocusToRefreshRef.current = true;
+        } else {
+          refreshButtonRef.current?.focus();
+        }
+      }
+    }
+  }, [loadError]);
+
+  // Runs after every commit; the ref flags keep it a no-op until an outage is
+  // actually dismissed with the retried read still in flight. When that read
+  // answers, Refresh is enabled and gets focus — but only if the user has not
+  // already moved focus somewhere of their own during the read. Overriding a
+  // focus the user set deliberately is worse than leaving the graph shell as
+  // the landing spot.
+  useEffect(() => {
+    if (!loading && !loadError && restoreFocusToRefreshRef.current) {
+      restoreFocusToRefreshRef.current = false;
+      const active = document.activeElement;
+      if (active === graphShellRef.current || active === document.body) {
+        refreshButtonRef.current?.focus();
+      }
+    }
+  });
 
   useEffect(() => {
     let live = true;
@@ -157,10 +239,13 @@ export function Overview({ client, company, companyName }: Props) {
 
       const tasks = tasksResult.status === "fulfilled" ? tasksResult.value : ([] as Task[]);
       const roster = rosterResult.status === "fulfilled" ? rosterResult.value : null;
-      const desks = desksResult.status === "fulfilled" ? desksResult.value : ([] as DeskDto[]);
+      const desksRead = desksResult.status === "fulfilled";
+      const desks = desksRead ? desksResult.value : ([] as DeskDto[]);
       const people = peopleResult.status === "fulfilled" ? peopleResult.value : ([] as Person[]);
       const memories =
-        memoriesResult.status === "fulfilled" ? memoriesResult.value : ([] as MemoryEntry[]);
+        memoriesResult.status === "fulfilled"
+          ? memoriesResult.value.items
+          : ([] as MemoryEntry[]);
       const flowList = flowListResult.status === "fulfilled" ? flowListResult.value : [];
 
       // `listWorkflows` answers with `{id,name,description,editable,enabled}`
@@ -197,6 +282,7 @@ export function Overview({ client, company, companyName }: Props) {
         // agents made an unstaffed company look busy.
         team: roster?.length ? roster.map(fromDto) : [],
         desks,
+        desksRead,
         people,
         memories,
         workflows,
@@ -251,46 +337,41 @@ export function Overview({ client, company, companyName }: Props) {
    * node's card hid the staleness signal, the Refresh control *and* the
    * outage alert, and left them unclickable behind an opaque panel. Only the
    * graph's shell knows how much of the right edge the rail is using, so the
-   * shell is what places this.
+   * shell is what places this. The outage alert no longer lives here at all:
+   * a total failure is the page's state, so it is a full-page overlay over
+   * the graph (issue #1314), not a corner detail.
    */
   const statusSlot = (
-    <>
-      {/* Every source failed at once (issue #1219): a host that could not be
-          reached, said out loud, in the same corner that already owns the
-          staleness signal — rather than a graph redrawn empty with no
-          explanation. */}
-      {loadError && (
-        <div
-          role="alert"
-          className="max-w-64 rounded-md border border-destructive/40 bg-destructive/10 px-2 py-1 text-2xs text-destructive shadow-sm backdrop-blur"
-        >
-          {loadError}
-        </div>
-      )}
-      <div className="flex items-center gap-1.5 rounded-md border bg-background/90 px-2 py-1 text-2xs text-muted-foreground shadow-sm backdrop-blur">
-        <span className="truncate">
-          {sources.fetchedAt === null
-            ? loading
-              ? "Loading…"
-              : "No snapshot yet"
-            : `Snapshot ${new Date(sources.fetchedAt).toLocaleTimeString([], {
-                hour: "2-digit",
-                minute: "2-digit",
-              })}`}
-        </span>
-        <button
-          type="button"
-          onClick={refresh}
-          disabled={loading}
-          title="This page is a snapshot, not a live view. Re-read the company."
-          aria-label="Refresh the graph"
-          className="inline-flex items-center gap-1 rounded px-1 py-0.5 hover:bg-muted disabled:opacity-50"
-        >
-          <RefreshCw className={`size-3 ${loading ? "animate-spin" : ""}`} aria-hidden />
-          Refresh
-        </button>
-      </div>
-    </>
+    <div className="flex items-center gap-1.5 rounded-md border bg-background/90 px-2 py-1 text-2xs text-muted-foreground shadow-sm backdrop-blur">
+      {/* Volatile: the timestamp is `now` relative to the host's clock, so
+          two runs of the same code land a minute apart and the label's
+          glyphs change — the graph's settle time depends on machine speed.
+          Masked via data-visual-volatile (visual.spec.ts) rather than
+          frozen, because a frozen client clock turns "just now" labels in
+          the list below into a distance that grows every day. */}
+      <span className="truncate" data-visual-volatile>
+        {sources.fetchedAt === null
+          ? loading
+            ? "Loading…"
+            : "No snapshot yet"
+          : `Snapshot ${new Date(sources.fetchedAt).toLocaleTimeString([], {
+              hour: "2-digit",
+              minute: "2-digit",
+            })}`}
+      </span>
+      <button
+        ref={refreshButtonRef}
+        type="button"
+        onClick={refresh}
+        disabled={loading}
+        title="This page is a snapshot, not a live view. Re-read the company."
+        aria-label="Refresh the graph"
+        className="inline-flex min-h-6 items-center gap-1 rounded px-1 py-0.5 hover:bg-muted disabled:opacity-50 md:min-h-0"
+      >
+        <RefreshCw className={`size-3 ${loading ? "animate-spin" : ""}`} aria-hidden />
+        Refresh
+      </button>
+    </div>
   );
 
   return (
@@ -311,32 +392,77 @@ export function Overview({ client, company, companyName }: Props) {
           #1221) — this names it for a screen reader the same way every other
           view's title does. */}
       <h1 className="sr-only">Company overview</h1>
-      <Suspense
-        fallback={
-          // The graph's chunk is still in flight, so there is no shell to slot
-          // the snapshot line into yet — and no detail rail for it to dodge
-          // either. It is drawn here at the same inset the shell will use, so
-          // a cold load still says "Loading…" and the line does not appear to
-          // pop into existence once the physics arrives.
-          <div className="grid h-full place-items-center text-sm text-muted-foreground">
-            <div className="absolute right-5 top-5 z-40 flex flex-col items-end gap-1.5">
-              {statusSlot}
-            </div>
-            Drawing the graph…
+      {/* A complete read failure is the page's state, not a detail in the
+          snapshot chrome. The opaque canvas keeps an unreachable host from
+          looking like a genuinely empty company, and puts the retry beside the
+          explanation instead of asking an operator to find it in a corner. */}
+      {loadError && (
+        <div
+          ref={outageRef}
+          tabIndex={-1}
+          data-testid="overview-outage"
+          className="absolute inset-0 z-50 grid place-items-center bg-os-bg/95 px-5 outline-none"
+        >
+          <div role="alert" className="max-w-md text-center">
+            <p className="text-lg font-semibold text-os-text">{loadError}</p>
+            <button
+              type="button"
+              onClick={refresh}
+              disabled={loading}
+              aria-label="Retry loading the company overview"
+              className="mt-4 inline-flex items-center gap-2 rounded-md border border-os-border-strong bg-os-surface px-3 py-2 text-sm font-medium text-os-text shadow-sm transition-colors hover:bg-os-bg disabled:opacity-50"
+            >
+              <RefreshCw className={`size-4 ${loading ? "animate-spin" : ""}`} aria-hidden />
+              Try again
+            </button>
           </div>
-        }
-      >
-        <KnowledgeGraph
-          graph={graph}
-          agents={adapted.agents}
-          departments={adapted.departments}
-          people={adapted.people}
-          tasks={adapted.tasks}
-          memory={memoryGraph}
-          toolLabels={adapted.toolLabels}
-          statusSlot={statusSlot}
-        />
-      </Suspense>
+        </div>
+      )}
+      {/* The graph stays mounted under the overlay so its snapshot is never
+          torn down and rebuilt — but while the outage shows it must be inert:
+          not focusable, not exposed to a screen reader (issue #1314). The
+          attribute lives on this wrapper because it must cover the graph and
+          the status slot but not the overlay itself. */}
+      <div ref={graphShellRef} data-graph-shell tabIndex={-1} className="h-full w-full">
+        <Suspense
+          fallback={
+            // The graph's chunk is still in flight, so there is no shell to slot
+            // the snapshot line into yet — and no detail rail for it to dodge
+            // either. It is drawn here at the same inset the shell will use, so
+            // a cold load still says "Loading…" and the line does not appear to
+            // pop into existence once the physics arrives.
+            <div className="grid h-full place-items-center text-sm text-muted-foreground">
+              <div className="absolute right-5 top-5 z-40 flex flex-col items-end gap-1.5">
+                {statusSlot}
+              </div>
+              Drawing the graph…
+            </div>
+          }
+        >
+          <KnowledgeGraph
+            graph={graph}
+            agents={adapted.agents}
+            departments={adapted.departments}
+            people={adapted.people}
+            tasks={adapted.tasks}
+            memory={memoryGraph}
+            toolLabels={adapted.toolLabels}
+            statusSlot={statusSlot}
+            covered={!!loadError}
+            emptyState={
+              !loading &&
+              sources.fetchedAt !== null &&
+              // Only a fulfilled read may claim the company has no desks. A
+              // rejected `/desks` draws the graph without pillars but must not
+              // overlay "No desks yet" on top of it — that is the same lie the
+              // empty state exists to avoid, pointed at the company instead of
+              // the control (issue #1313).
+              sources.desksRead &&
+              sources.desks.length === 0
+            }
+          />
+        </Suspense>
+      </div>
     </div>
   );
 }

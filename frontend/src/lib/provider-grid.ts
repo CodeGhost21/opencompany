@@ -1,4 +1,4 @@
-// The Connections page's ONE provider grid (issue #582).
+// The OAuth page's ONE provider grid (issue #582).
 //
 // ## What this replaces
 //

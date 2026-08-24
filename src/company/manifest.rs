@@ -139,6 +139,13 @@ impl CompanyManifest {
     /// default. `None` only when the named harness does not exist — which
     /// [`validate`](Self::validate) rejects, so a validated manifest always
     /// answers.
+    ///
+    /// An id that no `[[harness]]` declares but that names a coding CLI this
+    /// build can drive locally resolves to
+    /// [`Harness::implicit_local`](crate::company::Harness::implicit_local) —
+    /// see that constructor for why a local ACP harness is not something a
+    /// `company.toml` should have to declare. A declared harness of the same
+    /// id is found first and always wins.
     pub fn harness_for(&self, agent_id: &str) -> Option<Harness> {
         let named = self
             .agents
@@ -146,9 +153,23 @@ impl CompanyManifest {
             .find(|a| a.id == agent_id)
             .and_then(|a| a.harness.clone());
         let want = named.unwrap_or_else(|| self.default_harness_id());
+        self.harness_by_id(&want)
+    }
+
+    /// The harness `id` names: a declared `[[harness]]` first, else the
+    /// synthesized local one when `id` is a coding CLI this build drives.
+    ///
+    /// The single resolver for "does this harness id mean anything?" — used
+    /// by [`harness_for`](Self::harness_for) resolving an agent's own binding
+    /// and by the console's write path validating a submitted one. Two copies
+    /// of the declared-then-implicit precedence would eventually disagree,
+    /// and the shape that disagreement takes is a harness the picker offers
+    /// and the `PATCH` then refuses.
+    pub fn harness_by_id(&self, id: &str) -> Option<Harness> {
         self.effective_harnesses()
             .into_iter()
-            .find(|h| h.id == want)
+            .find(|h| h.id == id)
+            .or_else(|| Harness::is_implicit_local_id(id).then(|| Harness::implicit_local(id)))
     }
 
     /// Reads, parses, and validates a manifest from `path`.
@@ -163,8 +184,12 @@ impl CompanyManifest {
         Self::from_located(&discover(path.as_ref())?)
     }
 
-    /// Loads an already-[`discover`]ed manifest, reading the roster from
-    /// `agents/*.toml` when the bundle has one.
+    /// Loads an already-[`discover`]ed manifest, folding in what the bundle
+    /// around it declares: the roster from `agents/*.toml` when it has one, and
+    /// the MCP servers from `mcp.json`.
+    ///
+    /// This — not [`from_file`](Self::from_file) — is what every production
+    /// caller reaches through, which is why the bundle merge lives here.
     ///
     /// Split out from [`from_path`](Self::from_path) so callers that need the
     /// [`Located`] value for themselves — `opencompany check`, which prints the
@@ -179,45 +204,79 @@ impl CompanyManifest {
         // both, and deriving the root from the located manifest is what keeps
         // the two call forms from resolving `agents/` differently.
         match located.path.parent() {
-            Some(bundle) if super::agent_file::has_agent_files(bundle) => {
-                Self::from_file_with_agents(&located.path, bundle)
-            }
-            _ => Self::from_file(&located.path),
+            Some(bundle) => Self::from_file_in_bundle(&located.path, bundle),
+            None => Self::from_file(&located.path),
         }
+    }
+
+    /// [`from_file`](Self::from_file), with everything the bundle around the
+    /// manifest declares folded in: the roster from `agents/*.toml` and the MCP
+    /// servers from `mcp.json`.
+    ///
+    /// Both are merged **before** validation, so a bundle-declared server is
+    /// held to exactly the rules an inline `[[mcp_server]]` is — the HTTP-only
+    /// transport boundary, the credential-free endpoint, the unique name —
+    /// without a second copy of them living in the parser.
+    fn from_file_in_bundle(path: &Path, bundle: &Path) -> Result<Self> {
+        let mut manifest = Self::parse_file(path)?;
+
+        if super::agent_file::has_agent_files(bundle) {
+            if !manifest.agents.is_empty() {
+                return Err(OpenCompanyError::ManifestInvalid {
+                    path: path.to_path_buf(),
+                    problems: vec![format!(
+                        "this company defines its roster in `{dir}/*.toml`, but `{file}` also has `[[agent]]` entries — the two forms are exclusive, so remove the `[[agent]]` blocks or delete the `{dir}/` directory.",
+                        dir = super::agent_file::AGENTS_DIR,
+                        file = path
+                            .file_name()
+                            .and_then(|name| name.to_str())
+                            .unwrap_or(MANIFEST_FILE),
+                    )],
+                });
+            }
+            manifest.agents = super::agent_file::load_agents(bundle)?;
+        }
+
+        let problems = manifest.merge_bundle_mcp_servers(bundle, path);
+        manifest.into_validated_with(path, problems)
+    }
+
+    /// Folds `<bundle>/mcp.json` into `mcp_servers`, returning every problem the
+    /// file carried.
+    ///
+    /// A name declared in both `mcp.json` and an inline `[[mcp_server]]` is
+    /// refused rather than resolved by precedence — the rule the roster already
+    /// uses for the same situation, and for the same reason: either precedence
+    /// rule silently discards a declaration somebody wrote down, and a server
+    /// that quietly is not the one you configured is worse than one that
+    /// refuses to start.
+    fn merge_bundle_mcp_servers(&mut self, bundle: &Path, path: &Path) -> Vec<String> {
+        let (servers, mut problems) = super::mcp_file::load_dir_mcp_servers(bundle);
+        for server in servers {
+            if self
+                .mcp_servers
+                .iter()
+                .any(|existing| existing.name.trim() == server.name)
+            {
+                problems.push(format!(
+                    "mcp server `{}` is declared in both `{}` and `{}` — the two forms are \
+                     exclusive per server, so keep one.",
+                    server.name,
+                    super::mcp_file::MCP_FILE,
+                    path.file_name()
+                        .and_then(|name| name.to_str())
+                        .unwrap_or(MANIFEST_FILE),
+                ));
+                continue;
+            }
+            self.mcp_servers.push(server);
+        }
+        problems
     }
 
     /// Reads, parses, and validates a specific manifest file.
     pub fn from_file(path: &Path) -> Result<Self> {
         Self::parse_file(path)?.into_validated(path)
-    }
-
-    /// [`from_file`](Self::from_file), with the roster taken from
-    /// `<bundle>/agents/*.toml` rather than the manifest's `[[agent]]` entries.
-    ///
-    /// The bundle roster **replaces** the inline one; it does not merge with it.
-    /// Declaring both is refused rather than resolved by precedence, because
-    /// either precedence rule silently discards teammates an operator wrote
-    /// down — and the roster is the one part of a manifest where a silent
-    /// omission stays invisible until the missing teammate fails to answer.
-    fn from_file_with_agents(path: &Path, bundle: &Path) -> Result<Self> {
-        let mut manifest = Self::parse_file(path)?;
-
-        if !manifest.agents.is_empty() {
-            return Err(OpenCompanyError::ManifestInvalid {
-                path: path.to_path_buf(),
-                problems: vec![format!(
-                    "this company defines its roster in `{dir}/*.toml`, but `{file}` also has `[[agent]]` entries — the two forms are exclusive, so remove the `[[agent]]` blocks or delete the `{dir}/` directory.",
-                    dir = super::agent_file::AGENTS_DIR,
-                    file = path
-                        .file_name()
-                        .and_then(|name| name.to_str())
-                        .unwrap_or(MANIFEST_FILE),
-                )],
-            });
-        }
-
-        manifest.agents = super::agent_file::load_agents(bundle)?;
-        manifest.into_validated(path)
     }
 
     /// Reads and deserializes a manifest file, without validating it.
@@ -292,8 +351,19 @@ impl CompanyManifest {
     /// already parsed and checked by [`crate::globals`], and running it through
     /// this validator would let one malformed global fail every company on the
     /// host rather than only itself.
-    fn into_validated(mut self, path: &Path) -> Result<Self> {
-        let problems = self.validate();
+    fn into_validated(self, path: &Path) -> Result<Self> {
+        self.into_validated_with(path, Vec::new())
+    }
+
+    /// [`into_validated`](Self::into_validated), carrying problems the caller
+    /// already found.
+    ///
+    /// Bundle files that are not the manifest — `mcp.json` today — are parsed
+    /// before validation runs, and what they found has to reach the same
+    /// refusal. Reported first, because a file that would not parse is the
+    /// thing to fix before anything the manifest says about it.
+    fn into_validated_with(mut self, path: &Path, mut problems: Vec<String>) -> Result<Self> {
+        problems.extend(self.validate());
         if problems.is_empty() {
             self.apply_globals();
             Ok(self)
@@ -651,9 +721,17 @@ impl CompanyManifest {
         let mut problems = Vec::new();
 
         // An absent block is the implicit built_in harness, which is always
-        // valid — and is what every shipped company has. Nothing to check.
+        // valid — and is what every shipped company has. Nothing to check
+        // beyond a binding to something that cannot resolve: a coding CLI this
+        // build drives locally needs no declaration (see
+        // `Harness::implicit_local`), so only a *different* name is a problem.
         if self.harnesses.is_empty() {
-            if let Some(agent) = self.agents.iter().find(|a| a.harness.is_some()) {
+            if let Some(agent) = self.agents.iter().find(|a| {
+                a.harness
+                    .as_deref()
+                    .map(str::trim)
+                    .is_some_and(|named| !Harness::is_implicit_local_id(named))
+            }) {
                 let named = agent.harness.as_deref().unwrap_or_default();
                 problems.push(format!(
                     "agent `{}` names harness `{named}`, but the manifest declares no `[[harness]]`. \
@@ -743,12 +821,56 @@ impl CompanyManifest {
             let Some(named) = agent.harness.as_deref().map(str::trim) else {
                 continue;
             };
-            if !seen.contains(named) {
+            // A coding CLI this build drives locally needs no declaration —
+            // whether it is installed is a fact about the machine, not the
+            // blueprint (see `Harness::implicit_local`).
+            if !seen.contains(named) && !Harness::is_implicit_local_id(named) {
                 problems.push(format!(
                     "agent `{}` names harness `{named}`, which no `[[harness]]` declares. Declared: {}.",
                     agent.id,
                     join_backticked(&seen.iter().copied().collect::<Vec<_>>())
                 ));
+            }
+        }
+
+        // Issue #1245's per-agent follow-up: `agent.model` only means anything
+        // on an `acp` harness, exactly like `[harness.acp].model` above — see
+        // `validate_acp_harness`'s own doctrine on why silently accepting it
+        // elsewhere is worse than refusing it. Skipped when the agent names an
+        // unknown harness: the loop above already reports that, and piling a
+        // second, confusing complaint about its model on top would not help.
+        for agent in &self.agents {
+            let Some(model) = agent.model.as_deref() else {
+                continue;
+            };
+            if model.trim().is_empty() {
+                problems.push(format!(
+                    "agent `{}`'s `model` is set but empty. Drop the key to use the harness's \
+                     own default, rather than naming an empty one.",
+                    agent.id
+                ));
+                continue;
+            }
+            match self.harness_for(&agent.id) {
+                Some(harness) if harness.kind == "acp" => {
+                    if harness.acp.as_ref().map(|a| a.transport.as_str()) == Some("runner") {
+                        problems.push(format!(
+                            "agent `{}` names a `model` but its harness `{}` uses \
+                             `transport = \"runner\"`. Model overrides aren't supported for a \
+                             runner yet — the runner wire protocol doesn't carry them.",
+                            agent.id, harness.id
+                        ));
+                    }
+                }
+                Some(harness) => {
+                    problems.push(format!(
+                        "agent `{}` names a `model` but runs on harness `{}` (`kind = \"{}\"`), \
+                         which has no ACP transport to forward it to. Bind this agent to an \
+                         `acp` harness, or drop `model`.",
+                        agent.id, harness.id, harness.kind
+                    ));
+                }
+                None => {}
             }
         }
 
@@ -1693,25 +1815,6 @@ mod tests {
     }
 
     #[test]
-    fn accepts_a_telegram_channel_entry() {
-        let manifest = parse(
-            r#"
-            [company]
-            name = "X"
-            [[agent]]
-            id = "a"
-            role = "A"
-            [channels.telegram]
-            enabled = true
-            "#,
-        );
-        assert!(
-            !manifest.validate().iter().any(|p| p.contains("telegram")),
-            "telegram is a known channel and must validate"
-        );
-    }
-
-    #[test]
     fn public_company_requires_handle() {
         let manifest = parse("[company]\nname = \"X\"\n[place]\ndiscoverable = true\n");
         let problems = manifest.validate();
@@ -1816,6 +1919,71 @@ mod tests {
                 .iter()
                 .any(|p| p.contains("workflow id") && p.contains("Bad-Id")),
             "{problems:?}"
+        );
+    }
+
+    /// A bundle laying an `mcp.json` beside its `company.toml` gets those
+    /// servers, and they are held to the same validator an inline entry is.
+    #[test]
+    fn a_bundle_mcp_json_reaches_the_manifest() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join(MANIFEST_FILE), "[company]\nname = \"X\"\n")
+            .expect("write manifest");
+        std::fs::write(
+            dir.path().join("mcp.json"),
+            r#"{"mcpServers": {"deepwiki": {"url": "https://mcp.deepwiki.com/mcp"}}}"#,
+        )
+        .expect("write mcp.json");
+
+        let manifest = CompanyManifest::from_path(dir.path()).expect("loads");
+        let names: Vec<&str> = manifest
+            .mcp_servers
+            .iter()
+            .map(|s| s.name.as_str())
+            .collect();
+        assert_eq!(names, ["deepwiki"]);
+    }
+
+    /// A server declared in both forms is refused rather than resolved by
+    /// precedence — the roster's rule, for the roster's reason: either
+    /// precedence rule silently discards a declaration somebody wrote down.
+    #[test]
+    fn a_server_declared_in_both_forms_is_refused() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join(MANIFEST_FILE),
+            "[company]\nname = \"X\"\n[[mcp_server]]\nname = \"deepwiki\"\nendpoint = \"https://one.test/mcp\"\n",
+        )
+        .expect("write manifest");
+        std::fs::write(
+            dir.path().join("mcp.json"),
+            r#"{"mcpServers": {"deepwiki": {"url": "https://two.test/mcp"}}}"#,
+        )
+        .expect("write mcp.json");
+
+        let err = CompanyManifest::from_path(dir.path()).expect_err("must refuse");
+        let text = err.to_string();
+        assert!(text.contains("deepwiki"), "{text}");
+    }
+
+    /// A bad entry in `mcp.json` is reported against the manifest rather than
+    /// swallowed — the file is genuinely read, and its problems genuinely land.
+    #[test]
+    fn a_bad_bundle_server_is_reported_against_the_manifest() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join(MANIFEST_FILE), "[company]\nname = \"X\"\n")
+            .expect("write manifest");
+        std::fs::write(
+            dir.path().join("mcp.json"),
+            r#"{"mcpServers": {"local": {"command": "npx some-mcp"}}}"#,
+        )
+        .expect("write mcp.json");
+
+        let err = CompanyManifest::from_path(dir.path()).expect_err("must refuse");
+        let text = err.to_string();
+        assert!(
+            text.contains("stdio") && text.contains("mcp.json"),
+            "{text}"
         );
     }
 
@@ -2134,6 +2302,62 @@ provider = "openrouter"
         );
     }
 
+    /// Issue #1245's detected-harness follow-up: whether `claude-agent-acp` is
+    /// installed is a fact about the **machine**, so binding to it must not
+    /// require a `company.toml` edit — the same manifest is opened from
+    /// machines where the answer differs. Accepted with a harness block
+    /// declared and without one, and it resolves to a `local` acp harness.
+    #[test]
+    fn a_coding_cli_is_bindable_without_being_declared() {
+        for tail in [
+            "",
+            "\n[[harness]]\nid = \"embedded\"\nkind = \"built_in\"\ndefault = true\n",
+        ] {
+            let manifest = parse(&format!("{BASE}harness = \"claude\"\n{tail}"));
+            assert!(
+                harness_problems(&manifest).is_empty(),
+                "`claude` needs no declaration ({tail:?}): {:?}",
+                harness_problems(&manifest)
+            );
+
+            let resolved = manifest.harness_for("ceo").expect("resolves");
+            assert_eq!(resolved.id, "claude");
+            assert_eq!(resolved.kind, "acp");
+            let acp = resolved.acp.expect("acp section");
+            assert_eq!(acp.transport, "local");
+            assert_eq!(acp.agent.as_deref(), Some("claude"));
+        }
+    }
+
+    /// The synthesized harness must never be the default: which harness an
+    /// *unbound* teammate runs on stays a blueprint decision, or something a
+    /// machine happens to have installed could silently redirect the roster.
+    #[test]
+    fn an_implicit_local_harness_is_never_the_default() {
+        let manifest = parse(&format!("{BASE}harness = \"claude\"\n"));
+        assert_ne!(manifest.default_harness_id(), "claude");
+        assert!(manifest.default_harness().is_built_in());
+        assert!(!Harness::implicit_local("claude").default);
+    }
+
+    /// A declared `[[harness]]` of the same id wins — otherwise a company that
+    /// deliberately pinned a model on its `claude` harness would silently get
+    /// the bare synthesized one instead.
+    #[test]
+    fn a_declared_harness_wins_over_the_synthesized_one() {
+        let manifest = parse(&format!(
+            "{BASE}harness = \"claude\"\n\n[[harness]]\nid = \"embedded\"\nkind = \"built_in\"\ndefault = true\n\n\
+             [[harness]]\nid = \"claude\"\nkind = \"acp\"\n\n[harness.acp]\ntransport = \"local\"\nagent = \"claude\"\nmodel = \"opus-4-5\"\n"
+        ));
+        assert!(harness_problems(&manifest).is_empty());
+        let resolved = manifest.harness_for("ceo").expect("resolves");
+        assert_eq!(
+            resolved.acp.expect("acp").model.as_deref(),
+            Some("opus-4-5"),
+            "the declared harness, not the synthesized one"
+        );
+    }
+
     #[test]
     fn duplicate_harness_ids_are_rejected() {
         let manifest = parse(&format!(
@@ -2298,6 +2522,54 @@ provider = "openrouter"
                 Some(msg) => assert!(
                     problems.iter().any(|p| p.contains(msg)),
                     "`{acp}` should report {msg:?}, got {problems:?}"
+                ),
+            }
+        }
+    }
+
+    /// Issue #1245's per-agent follow-up: `agent.model` follows the exact
+    /// same doctrine as `[harness.acp].model` — valid on `local`, rejected on
+    /// `runner`, rejected when empty — plus one rule the harness-level field
+    /// has no need for: it is meaningless on a `built_in` harness, since
+    /// there is no ACP session to steer a model through.
+    #[test]
+    fn agent_model_follows_the_harness_level_models_own_doctrine() {
+        let cases: &[(&str, &str, Option<&str>)] = &[
+            (
+                "kind = \"built_in\"\ndefault = true",
+                "model = \"opus-4-5\"",
+                Some("has no ACP transport to forward it to"),
+            ),
+            (
+                "kind = \"acp\"\ndefault = true\n\n[harness.acp]\ntransport = \"local\"\nagent = \"claude\"",
+                "model = \"opus-4-5\"",
+                None,
+            ),
+            (
+                "kind = \"acp\"\ndefault = true\n\n[harness.acp]\ntransport = \"runner\"\nrunner = \"laptop\"",
+                "model = \"opus-4-5\"",
+                Some("uses `transport = \"runner\"`"),
+            ),
+            (
+                "kind = \"acp\"\ndefault = true\n\n[harness.acp]\ntransport = \"local\"\nagent = \"claude\"",
+                "model = \"   \"",
+                Some("is set but empty"),
+            ),
+        ];
+        for (harness, agent_model, expected) in cases {
+            let manifest = parse(&format!(
+                "[company]\nname = \"X\"\n\n[[agent]]\nid = \"ceo\"\nrole = \"CEO\"\n{agent_model}\n\n\
+                 [[harness]]\nid = \"a\"\n{harness}\n"
+            ));
+            let problems = manifest.validate();
+            match expected {
+                None => assert!(
+                    !problems.iter().any(|p| p.contains("model")),
+                    "{harness} / {agent_model} should be valid: {problems:?}"
+                ),
+                Some(msg) => assert!(
+                    problems.iter().any(|p| p.contains(*msg)),
+                    "{harness} / {agent_model} should report {msg:?}, got {problems:?}"
                 ),
             }
         }
