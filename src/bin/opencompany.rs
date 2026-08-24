@@ -957,7 +957,7 @@ async fn live_ports(
             facts = Some(f);
         }
     }
-    Ok(((store, events, memory, context), facts, settings.kind))
+    Ok(((store, events, memory, context), facts, scopes, settings.kind))
 }
 
 /// A process-unique temporary path under the system temp dir. Used only by the
