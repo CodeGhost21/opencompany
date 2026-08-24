@@ -268,6 +268,40 @@ impl ManifestApprovalGate {
         self.ttl_millis.store(ttl_millis, Ordering::Relaxed);
     }
 
+    /// Replaces the policy snapshot the gate evaluates against, keeping the
+    /// parked queue and the emergency switch.
+    ///
+    /// Used at boot/rebuild time, where the gate is constructed from the seed's
+    /// `[policy]` alone and the operator's console override resolves only after
+    /// the persisted record is read — see
+    /// [`CompanyRecord::effective_policy`](crate::ports::types::CompanyRecord::effective_policy).
+    /// Applying the effective policy keeps native evaluation (mode,
+    /// `always_approve`, spend cap) and the derived deadline enforcing what the
+    /// console reports; without it a persisted override would still be returned
+    /// by `GET` while the live gate silently reverted to the manifest snapshot,
+    /// which is especially unsafe after an operator *shortened* a deadline.
+    pub fn apply_effective_policy(&self, policy: Policy) {
+        let ttl_millis = policy
+            .approval_ttl_hours
+            .map(|hours| hours.saturating_mul(60 * 60 * 1000))
+            .unwrap_or(DEFAULT_TTL_MILLIS);
+        self.policy = policy;
+        self.ttl_millis.store(ttl_millis, Ordering::Relaxed);
+    }
+
+    /// Updates the spend threshold used by native evaluation.
+    ///
+    /// The policy overlay is an operator control, so waiting for a process
+    /// restart would make the Settings panel report a cap the live gate does
+    /// not enforce — a spend below the old cap would keep executing without
+    /// approval after the operator tightened it.
+    /// [`apply_effective_policy`](Self::apply_effective_policy) sets this and
+    /// the deadline together; this setter exists for the write route, which
+    /// carries the resolved effective policy and needs to touch only the cap.
+    pub fn set_auto_approve_under_usd(&self, cap: Option<f64>) {
+        self.policy.auto_approve_under_usd = cap;
+    }
+
     /// The ids of every currently-parked approval.
     pub fn parked_ids(&self) -> Vec<ApprovalId> {
         self.parked
