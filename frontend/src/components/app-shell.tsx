@@ -2036,6 +2036,10 @@ export function AppShell({
               companyName={feed.status.name}
               feed={feed}
               scope={scope}
+              // Issue #1015: re-read the run panels when a run parks or fails
+              // while this page stays open (the same tick TaskDetailView
+              // re-reads on).
+              attemptEventTick={attemptEventTick}
             />
           )}
           {view === "company" && (
