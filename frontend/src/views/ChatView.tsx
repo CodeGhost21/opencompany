@@ -665,6 +665,20 @@ export function ChatView({
     () => (channel ? buildTimeline(messages, channel, members) : []),
     [messages, channel, members],
   );
+  /**
+   * The open channel's thread replies, for the mention-clearing gate: a reply
+   * is folded out of the main timeline (`buildTimeline`), so a mention inside
+   * one must not clear on channel-open alone — only once the thread panel
+   * actually renders it. Keyed by the console's `h<seq>` id, the namespace
+   * `subjectId` on a mention notification meets through `hostMessageId`.
+   */
+  const replyParents = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const m of messages) {
+      if (m.parentId) map.set(m.id, m.parentId);
+    }
+    return map;
+  }, [messages]);
 
   /**
    * The approvals raised in the channel on screen (#379).
