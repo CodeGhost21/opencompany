@@ -115,6 +115,39 @@ export function clearSetupResuming(scope: LocalScope): void {
   }
 }
 
+/** Is a redesign owed because the operator left the completion screen to wire a model? */
+export function setupRedesign(scope: LocalScope): boolean {
+  return Boolean(read(scope).redesign);
+}
+
+/**
+ * Record that the operator left the completion screen to wire a model and
+ * wants the standard team redesigned on their return.
+ *
+ * Merged rather than written whole, for the same reason as
+ * [`markSetupResuming`]: a company that had been skipped before can be forced
+ * open again, and clearing the skip here would silently re-enable the
+ * unprompted offer.
+ */
+export function markSetupRedesign(scope: LocalScope): void {
+  try {
+    const next: SetupState = { ...read(scope), redesign: true, at: Date.now() };
+    localStorage.setItem(KEY(scope), JSON.stringify(next));
+  } catch {
+    /* private mode / quota — the Company page's prompt is still the way back */
+  }
+}
+
+/** Forget the redesign debt, once it has been paid by reopening the dialog. */
+export function clearSetupRedesign(scope: LocalScope): void {
+  try {
+    const { redesign: _dropped, ...rest } = read(scope);
+    localStorage.setItem(KEY(scope), JSON.stringify(rest));
+  } catch {
+    /* nothing to clear */
+  }
+}
+
 /**
  * Forget the skip.
  *
