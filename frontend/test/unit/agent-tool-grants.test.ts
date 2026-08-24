@@ -161,6 +161,52 @@ describe("companyCovers", () => {
   });
 });
 
+describe("grantCeiling", () => {
+  it("is the company allow-list when no desk states a ceiling", () => {
+    // `deskAllow` empty means no desk narrows anything — the same
+    // empty-is-not-nothing trap `requested` carries, not "this desk grants no
+    // tools". The company list is the whole gate.
+    expect(
+      grantCeiling({
+        requested: [],
+        companyAllow: ["*", "media"],
+        deskAllow: [],
+        effective: ["*", "media"],
+      }),
+    ).toEqual(["*", "media"]);
+  });
+
+  it("is the desk allowance when a desk states a ceiling", () => {
+    // The marketing agency's creative desk omits `media` while the company
+    // allows it, so the desk allowance (already company-narrowed on the host)
+    // is the gate an editor draft has to clear.
+    expect(
+      grantCeiling({
+        requested: [],
+        companyAllow: ["*", "media"],
+        deskAllow: ["*"],
+        effective: ["*"],
+      }),
+    ).toEqual(["*"]);
+  });
+
+  it("lets the desk ceiling narrow what an editor warns about", () => {
+    // The whole point of the preview: a grant the company allows but the desk
+    // omits is stored happily and then dropped immediately after saving, so the
+    // live hint must flag it while typing. `media` is company-allowed but not
+    // on the creative desk, so `companyCovers` against the desk allowance says
+    // it will not apply — exactly what `willNotApply` renders.
+    const ceiling = grantCeiling({
+      requested: [],
+      companyAllow: ["*", "media"],
+      deskAllow: ["*"],
+      effective: ["*"],
+    });
+    expect(companyCovers(ceiling, "media")).toBe(false);
+    expect(companyCovers(ceiling, "docs.*")).toBe(true);
+  });
+});
+
 describe("isEditable", () => {
   it("accepts `tools`, which the host lists but no form field carries", () => {
     expect(isEditable(agent(), "tools")).toBe(true);
