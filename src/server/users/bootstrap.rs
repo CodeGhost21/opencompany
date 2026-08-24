@@ -387,7 +387,14 @@ mod test {
 
         for _ in 0..3 {
             issue_password(
-                context(&users, &sessions, &login_codes, &company, &[], Some("ada@acme.test")),
+                context(
+                    &users,
+                    &sessions,
+                    &login_codes,
+                    &company,
+                    &[],
+                    Some("ada@acme.test"),
+                ),
                 "ada@acme.test",
                 GOOD,
                 false,

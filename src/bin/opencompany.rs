@@ -1089,11 +1089,7 @@ async fn run_issue_password(
             .or_else(|| config_file.as_ref().and_then(|c| c.auth_mode.clone()));
         raw.map(|value| opencompany::app::config::AuthMode::from_str(&value))
             .transpose()?
-            .unwrap_or_else(|| {
-                // The manifest is loaded below; absent host configuration uses
-                // the email default, matching RuntimeBuilder's fallback.
-                opencompany::app::config::AuthMode::Email
-            })
+            .unwrap_or(opencompany::app::config::AuthMode::Email)
     };
     if !auth_mode.uses_email() {
         return Err(opencompany::error::OpenCompanyError::Config(format!(
