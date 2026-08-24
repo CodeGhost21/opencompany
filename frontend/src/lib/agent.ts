@@ -287,9 +287,10 @@ export function parseToolGlobs(input: string): string[] {
  * field the operator did not really change does not produce a write.
  */
 export function toolGlobsDiffer(before: string[], after: string[]): boolean {
-  if (before.length !== after.length) return true;
-  const set = new Set(before);
-  return after.some((glob) => !set.has(glob));
+  const beforeSet = new Set(before);
+  const afterSet = new Set(after);
+  if (beforeSet.size !== afterSet.size) return true;
+  return [...afterSet].some((glob) => !beforeSet.has(glob));
 }
 
 export function summarizeGrants(tools: AgentToolsDto): ToolGrantSummary {
