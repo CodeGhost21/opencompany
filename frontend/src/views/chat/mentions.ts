@@ -135,7 +135,11 @@ export function stripCodeRegions(text: string): string {
   };
 
   // Fenced blocks first, so a backtick inside one is never read as a span.
-  const fence = /^([`~]{3,})[^\n]*\n?([\s\S]*?)(?:^\1[`~]*[^\n]*$|$)/gm;
+  // CommonMark allows a fence up to three spaces of indentation, so both the
+  // opening and closing delimiters accept it — a fence indented by three spaces
+  // renders as code, and an `@` inside it must not open the picker either.
+  const fence =
+    /^ {0,3}([`~]{3,})[^\n]*\n?([\s\S]*?)(?:^ {0,3}\1[`~]*[^\n]*$|$)/gm;
   for (const m of text.matchAll(fence)) {
     if (m.index !== undefined) blank(m.index, m.index + m[0].length);
   }
