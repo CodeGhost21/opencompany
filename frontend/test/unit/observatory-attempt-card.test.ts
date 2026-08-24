@@ -69,7 +69,11 @@ let root: Root;
 
 async function mount(
   runs: ObservatoryRun[],
-  props: { turn?: string | null; focusStep?: number | null } = {},
+  props: {
+    turn?: string | null;
+    focusStep?: number | null;
+    onOpen?: (runId: string) => void;
+  } = {},
 ) {
   await act(async () => {
     root.render(
@@ -83,6 +87,7 @@ async function mount(
             nowMs: 1_700_000_020_000,
             turn: props.turn ?? null,
             focusStep: props.focusStep ?? null,
+            onOpen: props.onOpen,
           }),
         ),
       ),
