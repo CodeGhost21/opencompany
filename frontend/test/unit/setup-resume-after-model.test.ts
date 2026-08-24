@@ -233,7 +233,7 @@ describe("leaving to wire a model", () => {
     // because the roster is unknown, but the debt survives so the next arrival
     // or reload can retry — otherwise the flow the operator went to enable is
     // reachable again only through the Company-page prompt.
-    let failing = true;
+    let failing = false;
     const roster: TeamMemberDto[] = [...BASELINE];
     const client = {
       ...clientWith(roster),
@@ -245,6 +245,7 @@ describe("leaving to wire a model", () => {
     await mount(client);
     await leaveForModelSettings();
 
+    failing = true;
     await goTo("#/overview");
     expect(dialog(), "unknown roster — must stay shut").toBeNull();
     expect(setupResuming(SCOPE), "debt must survive the failed read").toBe(true);
