@@ -1140,6 +1140,30 @@ mod test {
         assert_eq!(proposal.reason, Some(FallbackReason::NotDesignable));
     }
 
+    /// A call that never lands is not "no model": a builder exists (that is why
+    /// the call was made), so the operator's next move is to retry or check the
+    /// provider, not to add a key that is already wired.
+    #[tokio::test]
+    async fn an_unreachable_call_reports_unreachable_not_no_model() {
+        let answers = SetupAnswers {
+            industry: "I sell homeware online".to_string(),
+            team_hint: String::new(),
+            automate: "Meta ads, order dispatch".to_string(),
+        };
+        let (proposal, _) = builder(Arc::new(UnreachableModel)).propose(&answers).await;
+        assert_eq!(proposal.source, RosterSource::Fallback);
+        assert_eq!(
+            proposal.reason,
+            Some(FallbackReason::ModelUnreachable),
+            "a configured but unreachable model must not be reported as no_model"
+        );
+        assert_eq!(
+            proposal.reason.map(|r| r.as_str()),
+            Some("model_unreachable"),
+            "the wire spelling must round-trip"
+        );
+    }
+
     /// A designed roster reports no reason at all — there is nothing to explain.
     #[tokio::test]
     async fn a_designed_roster_carries_no_fallback_reason() {
