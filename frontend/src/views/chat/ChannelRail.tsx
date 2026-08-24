@@ -171,6 +171,13 @@ function CompactChannelRow({
       )}
     >
       <ChannelIcon channel={channel} />
+      {hasMentions && (
+        <span
+          data-testid="channel-mentions"
+          title={`${mentions} mentions of you here`}
+          className="absolute -right-0.5 -top-0.5 size-2 rounded-full bg-destructive"
+        />
+      )}
       {hasUnread && (
         <span
           title={UNREAD_IS_LOCAL}
