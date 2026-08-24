@@ -841,14 +841,14 @@ describe("resolvableMentions", () => {
   });
 
   /**
-   * An unequal backtick run is not code, so a mention inside it that *opens*
-   * must resolve: `` `code @engineer`` `` (one opener, two trailing) is
-   * rendered with `@engineer` visible, and the host's fallback extraction
-   * resolves it — the console must not blank the span and send an explicit
-   * empty list that suppresses the host's read.
+   * An unequal backtick run is not code, so a mention inside it that opens
+   * and closes must resolve: `` `code @engineer here`` `` (one opener, two
+   * trailing) is rendered with `@engineer` visible, and the host's fallback
+   * extraction resolves it — the console must not blank the span and send an
+   * explicit empty list that suppresses the host's read.
    */
   it("resolves a mention inside an unequal, unclosed backtick run", () => {
-    const out = resolvableMentions("`code @engineer``", directory);
+    const out = resolvableMentions("`code @engineer here``", directory);
     expect(out.map((m) => m.text)).toEqual(["@engineer"]);
     expect(out[0].target).toEqual({ kind: "agent", id: "engineer" });
   });
