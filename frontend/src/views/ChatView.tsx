@@ -224,6 +224,9 @@ interface Props {
     replyParents?: ReadonlyMap<string, string>,
     /** The thread panel currently open, or `null`. */
     openThreadId?: string | null,
+    /** All loaded message ids for this channel, so the reader can defer a
+     * mention whose subject is outside the history window. */
+    loadedMessageIds?: ReadonlySet<string>,
   ) => void;
   /**
    * Every approval currently awaiting the operator, straight off the shell's
