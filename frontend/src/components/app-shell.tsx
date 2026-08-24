@@ -1366,7 +1366,7 @@ export function AppShell({
           next,
           loadedByChannel,
           chatChannelByThreadRef.current,
-          chatChannelByThreadRef.current.main,
+          firstDeskChannelId ?? undefined,
           mentionReReadSubjectsRef.current,
         );
         if (threadIds.length > 0) {
