@@ -2393,6 +2393,19 @@ impl HarnessBrain {
         self.responder.clone()
     }
 
+    /// The desk key `@everyone` expands against for a message addressed to
+    /// `chat`. Folds the General-desk spellings [`is_general_chat`] admits
+    /// (`None`, `""`, `"main"`, `"General"`) to [`DEFAULT_DESK`], so a
+    /// broadcast from the console's default thread — which sends
+    /// `chat: "main"`, an alias `resolve_desk_id` does not know — expands
+    /// against the General desk rather than no desk at all.
+    fn everyone_desk(chat: Option<&str>) -> &str {
+        match chat {
+            Some(chat) if !crate::server::chat_history::is_general_chat(Some(chat)) => chat,
+            _ => crate::server::ops::language::DEFAULT_DESK,
+        }
+    }
+
     /// The lead member of a desk: the first member of the matching group chat
     /// (by id, or by case-insensitive name) that is a real roster teammate.
     /// `None` when no desk matches or none of its members are on the roster.
