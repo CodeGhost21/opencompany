@@ -907,6 +907,18 @@ impl DeepTraceStore for FsOps {
         if removed > 0 {
             rewrite_jsonl(&path, &all).await?;
         }
+        // Keep the in-memory run set in step: a purged run is gone, so a later
+        // append of that id must count as fresh again, and a company-wide purge
+        // empties the file entirely.
+        let mut by_path = self.deep_runs.lock().await;
+        if let Some(runs) = by_path.get_mut(&path) {
+            match run_id {
+                Some(id) => {
+                    runs.remove(id);
+                }
+                None => runs.clear(),
+            }
+        }
         Ok(removed as u64)
     }
 }
