@@ -1309,6 +1309,7 @@ export function ChatView({
             <MessageComposer
               placeholder={`Message ${channelTitle(channel)}`}
               disabled={sending}
+              prefill={composerPrefill ?? undefined}
               onSend={(text, intent, mentions) =>
                 void send(text, intent, undefined, mentions)
               }
