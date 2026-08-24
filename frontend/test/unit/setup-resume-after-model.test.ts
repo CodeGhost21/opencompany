@@ -9,7 +9,7 @@ import type { TeamMemberDto } from "@/api/types";
 import { ConnectionScopeProvider } from "@/connections/ConnectionContext";
 import type { ConnectionId, LocalScope } from "@/connections/types";
 import { SetupController } from "@/setup/SetupController";
-import { markSetupSkipped, setupResuming } from "@/setup/state";
+import { markSetupSkipped, setupRedesign, setupResuming } from "@/setup/state";
 
 /**
  * The way back into setup after leaving it to wire a model.
