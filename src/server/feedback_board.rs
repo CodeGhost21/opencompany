@@ -141,7 +141,7 @@ fn addressed_sole(
     state: &AppState,
     auth: &GqlAuth,
 ) -> Result<Arc<CompanyRuntime>, crate::server::Rejection> {
-    let runtime = sole(state).map_err(|error| IntoResponse::into_response(error).into())?;
+    let runtime = sole(state)?;
     if let Some(resp) = authorize_address(state, auth, runtime.id()) {
         return Err(resp.into());
     }

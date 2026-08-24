@@ -531,8 +531,7 @@ async fn mint_session(
             .and_then(|v| v.to_str().ok())
             .map(|v| v.chars().take(200).collect()),
     )
-    .await
-    .map_err(|e| ApiError(e).into_response().into())?;
+    .await?;
 
     // The header carrier hands the token to the client and sets **no** cookie.
     // Setting both would leave one session reachable two ways, and the cookie
@@ -599,8 +598,7 @@ async fn request_code(
     let now = now_millis();
 
     let eligible = eligibility(state.config(), &runtime, &email, now)
-        .await
-        .map_err(|e| ApiError(e).into_response().into())?;
+        .await?;
     let Some(_role) = eligible else {
         // Unknown or uninvited: no code, no mail, same answer.
         return Ok(Json(RequestCodeResult {
@@ -624,8 +622,7 @@ async fn request_code(
         && let Some(previous) = runtime
             .login_codes()
             .latest_for_email(runtime.id(), &email)
-            .await
-            .map_err(|e| ApiError(e).into_response().into())?
+            .await?
         && now.saturating_sub(previous.created_at_millis) < RESEND_INTERVAL_MILLIS
     {
         tracing::debug!(company = %runtime.id(), "login link throttled");
@@ -649,13 +646,11 @@ async fn request_code(
     runtime
         .login_codes()
         .delete_for_email(runtime.id(), &email)
-        .await
-        .map_err(|e| ApiError(e).into_response().into())?;
+        .await?;
     runtime
         .login_codes()
         .create(runtime.id(), &record)
-        .await
-        .map_err(|e| ApiError(e).into_response().into())?;
+        .await?;
 
     // Deliver. A send failure must not change the response — it would report
     // that the address exists.
@@ -775,8 +770,7 @@ async fn verify_code(
     let consumed = runtime
         .login_codes()
         .consume(runtime.id(), &token::sha256_hex(&body.code), now)
-        .await
-        .map_err(|e| ApiError(e).into_response().into())?;
+        .await?;
     let Some(code) = consumed else {
         return Err(invalid_login().into());
     };
@@ -784,15 +778,13 @@ async fn verify_code(
     // The address comes from the *code*, never from the request: otherwise
     // anyone holding any valid link could name whoever they liked.
     let Some(role) = eligibility(state.config(), &runtime, &code.email, now)
-        .await
-        .map_err(|e| ApiError(e).into_response().into())?
+        .await?
     else {
         // Eligibility can lapse between mailing and clicking.
         return Err(invalid_login().into());
     };
     let user = upsert_from_eligibility(&runtime, &code.email, role, now)
-        .await
-        .map_err(|e| ApiError(e).into_response().into())?;
+        .await?;
     mint_session(&state, &runtime, &user, &headers).await
 }
 
@@ -948,8 +940,7 @@ async fn hub_sign_in(
     let email = normalize_email(&identity.email);
     let now = now_millis();
     let Some(role) = eligibility(state.config(), &runtime, &email, now)
-        .await
-        .map_err(|e| ApiError(e).into_response().into())?
+        .await?
     else {
         // Signed in to the ecosystem, but not a person this company knows. A
         // distinct code so the console can say "ask an admin to invite you"
@@ -959,8 +950,7 @@ async fn hub_sign_in(
         );
     };
     let user = upsert_from_eligibility(&runtime, &email, role, now)
-        .await
-        .map_err(|e| ApiError(e).into_response().into())?;
+        .await?;
     mint_session(&state, &runtime, &user, &headers).await
 }
 
@@ -981,8 +971,7 @@ async fn login_password(
     let user = runtime
         .users()
         .find_user_by_email(runtime.id(), &email)
-        .await
-        .map_err(|e| ApiError(e).into_response().into())?;
+        .await?;
 
     // Every path with no hash to check burns equivalent work first, so an
     // unknown address costs the same wall-clock as a wrong password.
@@ -1063,8 +1052,7 @@ async fn me(
     let user = runtime
         .users()
         .get_user(runtime.id(), &principal.user_id)
-        .await
-        .map_err(|e| ApiError(e).into_response().into())?
+        .await?
         .ok_or_else(no_session)?;
     Ok(Json(me_result(runtime.id(), &user)))
 }
@@ -1094,14 +1082,11 @@ async fn set_password(
     let mut user = runtime
         .users()
         .get_user(runtime.id(), &principal.user_id)
-        .await
-        .map_err(|e| ApiError(e).into_response().into())?
+        .await?
         .ok_or_else(no_session)?;
 
-    password::validate(&body.password, &user.email)
-        .map_err(|e| ApiError(e).into_response().into())?;
-    let hash = password::hash(&token::OsTokens, &body.password)
-        .map_err(|e| ApiError(e).into_response().into())?;
+    password::validate(&body.password, &user.email)?;
+    let hash = password::hash(&token::OsTokens, &body.password)?;
     let now = now_millis();
     user.password_hash = Some(hash);
     // Whatever prompted the change is now satisfied.
@@ -1110,8 +1095,7 @@ async fn set_password(
     runtime
         .users()
         .upsert_user(runtime.id(), &user)
-        .await
-        .map_err(|e| ApiError(e).into_response().into())?;
+        .await?;
 
     // Every *other* session is revoked: changing a password is what someone
     // does when they think a session is stolen, so leaving the others live
@@ -1172,8 +1156,7 @@ async fn wallet_challenge(
 
     let identity = LoginIdentity::Wallet(address.clone()).key();
     let eligible = eligibility(state.config(), &runtime, &identity, now)
-        .await
-        .map_err(|e| ApiError(e).into_response().into())?;
+        .await?;
     if eligible.is_none() {
         return Ok(Json(wallet::unpersisted_challenge(
             runtime.id(),
@@ -1215,15 +1198,13 @@ async fn wallet_verify(
     // eligibility is re-checked against the wallet that actually signed.
     let identity = LoginIdentity::Wallet(address).key();
     let Some(role) = eligibility(state.config(), &runtime, &identity, now)
-        .await
-        .map_err(|e| ApiError(e).into_response().into())?
+        .await?
     else {
         // Eligibility can lapse between the challenge and the answer.
         return Err(invalid_login().into());
     };
     let user = upsert_from_eligibility(&runtime, &identity, role, now)
-        .await
-        .map_err(|e| ApiError(e).into_response().into())?;
+        .await?;
     mint_session(&state, &runtime, &user, &headers).await
 }
 

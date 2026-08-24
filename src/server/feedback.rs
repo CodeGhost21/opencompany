@@ -99,7 +99,7 @@ async fn submit(
     if let Some(resp) = authorize_address(&state, &auth, &company) {
         return Err(resp.into());
     }
-    let runtime = lookup(&state, &id).map_err(|error| IntoResponse::into_response(error).into())?;
+    let runtime = lookup(&state, &id)?;
     run(runtime, body)
         .await
         .map_err(|error| IntoResponse::into_response(error).into())
@@ -111,7 +111,7 @@ async fn submit_single(
     State(state): State<AppState>,
     Json(body): Json<FeedbackRequest>,
 ) -> Result<Json<FeedbackResponse>, crate::server::Rejection> {
-    let runtime = sole(&state).map_err(|error| IntoResponse::into_response(error).into())?;
+    let runtime = sole(&state)?;
     // The sole company IS the addressed one, so the principal is checked
     // against it exactly as on the `{id}` form.
     if let Some(resp) = authorize_address(&state, &auth, runtime.id()) {
@@ -138,7 +138,7 @@ async fn list(
     if let Some(resp) = authorize_address(&state, &auth, &company) {
         return Err(resp.into());
     }
-    let runtime = lookup(&state, &id).map_err(|error| IntoResponse::into_response(error).into())?;
+    let runtime = lookup(&state, &id)?;
     runtime
         .list_feedback()
         .await
@@ -151,7 +151,7 @@ async fn list_single(
     CompanyAuth(auth): CompanyAuth,
     State(state): State<AppState>,
 ) -> Result<Json<Vec<FeedbackSummary>>, crate::server::Rejection> {
-    let runtime = sole(&state).map_err(|error| IntoResponse::into_response(error).into())?;
+    let runtime = sole(&state)?;
     if let Some(resp) = authorize_address(&state, &auth, runtime.id()) {
         return Err(resp.into());
     }

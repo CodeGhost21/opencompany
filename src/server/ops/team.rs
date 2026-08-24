@@ -510,8 +510,7 @@ async fn add_member(
         .runtime
         .store()
         .save(&record)
-        .await
-        .map_err(|e| ApiError(e).into_response().into())?;
+        .await?;
     // A brand-new overlay teammate has no `[[agent]]` row at all, so it declares
     // no tier, holds the company's standard grant, and sits on no desk until
     // somebody adds it to one. Resolved through the shared helpers rather than
@@ -660,8 +659,7 @@ async fn set_budget(
         .runtime
         .store()
         .save(&record)
-        .await
-        .map_err(|e| ApiError(e).into_response().into())?;
+        .await?;
 
     updated_row(&company, &record, &agent_id).await
 }
@@ -696,8 +694,7 @@ async fn clear_budget(
         .runtime
         .store()
         .save(&record)
-        .await
-        .map_err(|e| ApiError(e).into_response().into())?;
+        .await?;
 
     updated_row(&company, &record, &agent_id).await
 }
@@ -736,8 +733,7 @@ async fn load_record(company: &ScopedCompany) -> Result<CompanyRecord, crate::se
         .runtime
         .store()
         .load(company.id())
-        .await
-        .map_err(|e| ApiError(e).into_response().into())?
+        .await?
         .ok_or_else(|| {
             ApiError(OpenCompanyError::CompanyNotFound(company.id().to_string())).into_response()
         })
@@ -779,8 +775,7 @@ async fn updated_row(
         .runtime
         .inbox()
         .inboxes(company.id())
-        .await
-        .map_err(|e| ApiError(e).into_response().into())?
+        .await?
         .into_iter()
         .any(|meta| meta.key == agent_id && meta.enabled);
 

@@ -1513,15 +1513,13 @@ async fn run_workflow(
     // Load the saved graph from the seed ∪ overlay union, so a graph created on
     // a hosted tenant (no source directory) runs the same as a committed one.
     let (overlays, globals_disable) = overlay_workflows_and_globals(&company)
-        .await
-        .map_err(|error| IntoResponse::into_response(error).into())?;
+        .await?;
     let file = load_workflow_with_globals(
         company.runtime.source_dir(),
         &overlays,
         &globals_disable,
         &wid,
-    )
-    .map_err(|e| ApiError(e).into_response().into())?
+    )?
     .ok_or_else(|| {
         ApiError(OpenCompanyError::NotFound(format!("workflow {wid}"))).into_response()
     })?;
@@ -1549,8 +1547,7 @@ async fn run_workflow(
         file,
         body.input,
         dry_run,
-    )
-    .map_err(|e| ApiError(e).into_response().into())?;
+    )?;
 
     if detach {
         // Returned before the engine has walked a node. From here the client
@@ -2143,8 +2140,7 @@ async fn fix_from_run(
     // Load the saved graph for `wid` (seed ∪ overlay) and convert it to the spec
     // the copilot corrects and pins its identity to.
     let (overlays, globals_disable) = overlay_workflows_and_globals(&company)
-        .await
-        .map_err(|error| IntoResponse::into_response(error).into())?;
+        .await?;
     // A source-defined workflow (seed-backed, or seed-shadowed) can never take
     // the correction: `PUT …/workflows/{wid}` refuses it with the same 409 this
     // mirrors (`locate_editable_overlay`). Catching it here — before the copilot
@@ -2163,8 +2159,7 @@ async fn fix_from_run(
         &overlays,
         &globals_disable,
         &wid,
-    )
-    .map_err(|e| ApiError(e).into_response().into())?
+    )?
     .ok_or_else(|| {
         ApiError(OpenCompanyError::NotFound(format!("workflow {wid}"))).into_response()
     })?;
@@ -2189,8 +2184,7 @@ async fn fix_from_run(
     // The failure to correct from: prefer what the run journaled, fall back to the
     // caller's hint. Neither → there is nothing to fix from.
     let journaled = journaled_run_failure(&company, &body.run_id)
-        .await
-        .map_err(|error| IntoResponse::into_response(error).into())?;
+        .await?;
     let hint = body
         .error_hint
         .as_deref()

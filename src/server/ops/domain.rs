@@ -119,8 +119,7 @@ async fn run_verify(
         return Err(super::not_wired("domain verification").into());
     };
     let stored = load_domain(&runtime)
-        .await
-        .map_err(|e| ApiError(e).into_response().into())?;
+        .await?;
     let Some(stored) = stored else {
         return Err(ApiError(crate::error::OpenCompanyError::InvalidRequest(
             "no domain configured".to_string(),
@@ -128,11 +127,9 @@ async fn run_verify(
         .into_response());
     };
     let status = dns::verify(&stored.domain, resolver.as_ref())
-        .await
-        .map_err(|e| ApiError(e).into_response().into())?;
+        .await?;
     persist(&runtime, &status)
-        .await
-        .map_err(|error| IntoResponse::into_response(error).into())?;
+        .await?;
     Ok(Json(status))
 }
 

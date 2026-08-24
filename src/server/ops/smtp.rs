@@ -436,8 +436,7 @@ async fn run_test(
         return Err(super::not_wired("smtp test send").into());
     };
     let creds = load_credentials(&runtime)
-        .await
-        .map_err(|e| ApiError(e).into_response().into())?;
+        .await?;
     let Some(creds) = creds else {
         return Err(ApiError(OpenCompanyError::InvalidRequest(
             "no SMTP credentials configured".to_string(),

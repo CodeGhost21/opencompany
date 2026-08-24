@@ -85,8 +85,7 @@ async fn list_read_state(
         .runtime
         .read_state()
         .list(company.id(), &user)
-        .await
-        .map_err(|e| ApiError(e).into_response().into())?
+        .await?
         .into_iter()
         .map(ReadMarkerDto::from)
         .collect();
@@ -115,8 +114,7 @@ async fn mark_read(
         .runtime
         .read_state()
         .mark(company.id(), &user, &body.channel_id, body.last_read_at)
-        .await
-        .map_err(|e| ApiError(e).into_response().into())?;
+        .await?;
     Ok(Json(settled.into()))
 }
 
