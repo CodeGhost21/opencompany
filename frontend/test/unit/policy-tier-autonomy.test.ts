@@ -472,3 +472,31 @@ describe("changing the spend cap", () => {
     expect(container.querySelector<HTMLInputElement>("#spend-cap")?.value).toBe("25");
   });
 });
+
+describe("loading the policy", () => {
+  it("clears the previous company's policy when a company-switch read fails", async () => {
+    const { client } = makeClient(status("supervised"));
+    await mount(client);
+    expect(container.querySelector<HTMLInputElement>("#approval-deadline")?.value).toBe("24");
+
+    // The scope moves to another company whose read fails. The card must show
+    // the error, not "acme"'s policy as if it were the new company's — an
+    // operator would otherwise save the old company's values against it.
+    const failing = {
+      ...client,
+      scopeFor: () => "/api/v1/other",
+      get: async () => {
+        throw new Error("network down");
+      },
+    } as unknown as OpenCompanyClient;
+    await act(async () => {
+      root.render(createElement(PolicySettings, { client: failing, company: "other" }));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(container.textContent).toContain("network down");
+    expect(container.querySelector<HTMLInputElement>("#approval-deadline")).toBeNull();
+    expect(container.querySelector<HTMLInputElement>("#spend-cap")).toBeNull();
+  });
+});
