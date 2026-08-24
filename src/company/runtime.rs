@@ -1974,8 +1974,7 @@ impl CompanyRuntime {
             .then_some(parent)
     }
 
-    async fn publish_continuation(&self, approval_id: &ApprovalId, report: &mut CycleReport) {
-        let conversation = self
+    async fn publish_continuation(&self, approval_id: &ApprovalId, report: &mut CycleReport) {        let conversation = self
             .journal
             .approval_conversation(approval_id)
             .unwrap_or_default();
