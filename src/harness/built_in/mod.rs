@@ -6584,6 +6584,49 @@ description = "Builds the product."
         );
     }
 
+    /// The persona-override fingerprint is filtered the same way as the overlay
+    /// one: a row carrying only a face has no persona text to hash, so choosing
+    /// or clearing an avatar for a teammate with no other override must not
+    /// rebuild the roster (issue #1676 review note).
+    #[test]
+    fn override_fingerprint_ignores_an_avatar_only_row() {
+        use crate::ports::types::AgentOverride;
+        let avatar_only = AgentOverride {
+            agent_id: "ceo".into(),
+            avatar: Some("tiny:robot".into()),
+            ..Default::default()
+        };
+        let persona = AgentOverride {
+            agent_id: "ceo".into(),
+            instructions: Some("speak plainly".into()),
+            avatar: Some("tiny:robot".into()),
+            ..Default::default()
+        };
+
+        // A row carrying only a face hashes like no row at all.
+        assert_eq!(
+            override_fingerprint(&[]),
+            override_fingerprint(&[avatar_only.clone()]),
+            "an avatar-only row must not move the fingerprint"
+        );
+        // A persona edit still moves it, with or without a face riding along.
+        assert_ne!(
+            override_fingerprint(&[]),
+            override_fingerprint(&[persona.clone()]),
+            "a persona edit must still move the fingerprint"
+        );
+        // Two rows differing only in their face hash alike — no spurious rebuild
+        // when an operator changes one teammate's avatar.
+        assert_eq!(
+            override_fingerprint(&[persona.clone()]),
+            override_fingerprint(&[AgentOverride {
+                avatar: Some("tiny:fox".into()),
+                ..persona.clone()
+            }]),
+            "the face must not be part of the fingerprint"
+        );
+    }
+
     /// A persona override written through the store reaches the roster on the
     /// next dispatch — the cache-invalidation the whole feature turns on (#1530).
     /// The pool is never reconstructed (`resident_companies()` stays 1), so the
