@@ -196,6 +196,20 @@ struct AddMember {
     /// only restrict the new teammate below what the company already allows.
     #[serde(default)]
     tools: Vec<String>,
+    /// The job shape that decides this teammate's tool belt, sent by the
+    /// first-run setup build-out (issue #1674). When present it derives the
+    /// grant list through
+    /// [`tools_for_focus`](crate::company::setup::tools_for_focus) — the same
+    /// host-side belt table the roster proposal uses — instead of `tools`, so a
+    /// setup-created teammate gets the belt its shape was approved with on the
+    /// review screen rather than inheriting the whole company default. An
+    /// unreadable value fails closed to the Writing belt, exactly as the
+    /// proposal's [`focus_from_wire`](crate::company::setup) does; the derived
+    /// list is still intersected with the company `[tools].allow` like any
+    /// other `tools` line, so this can only ever narrow. Takes no permission:
+    /// the setup flow that sends it is the same member-level add as before.
+    #[serde(default)]
+    focus: Option<String>,
     /// Optional persona instructions for the new teammate (issue #1530), so a
     /// teammate can be born with an overridden persona rather than needing a
     /// second PATCH. A plain `Option` — at creation there is no blueprint to
