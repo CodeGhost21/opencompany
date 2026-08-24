@@ -1434,6 +1434,29 @@ export function AppShell({
     [scope, client, company, chatChannelByThread.main],
   );
 
+  /**
+   * The Conversation surface's own view report, mapped onto the Chat rail.
+   *
+   * Conversation renders the `main` thread (and every desk thread) that the
+   * rail maps to a channel, but it is a different store with its own view
+   * lifecycle — ChatView's `onChannelViewed` never fires for it. For a company
+   * with real desks the `main` conversation lives *only* here, so a mention
+   * whose subject sits in that thread could never clear: the rail channel it
+   * badges hydrates the first desk's own thread, whose loaded messages can
+   * never contain the main-thread subject. Reporting the view through the same
+   * channel id, gated by the *thread's* loaded ids, gives the badge its read
+   * path while keeping the clear honest — it still only fires once the named
+   * message is actually on screen.
+   */
+  const onThreadViewed = useCallback(
+    (threadId: string, loadedMessageIds: ReadonlySet<string>) => {
+      const channelId = chatChannelByThreadRef.current[threadId];
+      if (!channelId) return;
+      onChannelViewed(channelId, false, mentionFeedVersion, undefined, null, loadedMessageIds);
+    },
+    [onChannelViewed, mentionFeedVersion],
+  );
+
   const setThreadMessages = (
     threadId: string,
     updater: (m: ChatMessage[]) => ChatMessage[],
