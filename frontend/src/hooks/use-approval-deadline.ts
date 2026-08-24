@@ -2,9 +2,20 @@ import { useEffect, useState } from "react";
 
 import type { OpenCompanyClient } from "@/api/client";
 import { getPolicy } from "@/api/policy";
+import { startVisiblePolling } from "@/lib/visible-poll";
 
 /** The historical fallback when a host's policy omits the deadline. */
 const DEFAULT_TTL_HOURS = 24;
+
+/**
+ * How often the sentence refreshes while the approvals view is mounted.
+ *
+ * A policy PUT from another operator or tab applies on the host at once, and
+ * the approvals feed — which paints each card's own deadline — polls on this
+ * cadence, so the header refreshes beside it. A sentence that only refetched
+ * on mount would keep the value it loaded with until the view was remounted.
+ */
+const POLL_MS = 5000;
 
 /**
  * The queue's "Each one has a deadline" sentence, read from the company policy.
@@ -14,6 +25,10 @@ const DEFAULT_TTL_HOURS = 24;
  * `undefined` into the rendered sentence. A new scoped read restarts from that
  * default too: when the operator switches company and the next read fails, the
  * previous company's deadline must not carry into the new one's queue.
+ *
+ * Refreshed on the same visibility-gated cadence as the approvals feed (issue
+ * #581), so a live policy change reaches the sentence without a remount, and a
+ * backgrounded tab costs the host nothing.
  */
 export function useApprovalDeadline(
   client: OpenCompanyClient,
@@ -23,16 +38,21 @@ export function useApprovalDeadline(
   useEffect(() => {
     let live = true;
     setHours(DEFAULT_TTL_HOURS);
-    void getPolicy(client, company)
-      .then((policy) => {
-        if (live) setHours(policy.approvalTtlHours ?? DEFAULT_TTL_HOURS);
-      })
-      .catch(() => {
-        // A policy read is explanatory here. Keep the historical default if an
-        // older or temporarily unreachable host cannot serve it.
-      });
+    const refresh = () => {
+      void getPolicy(client, company)
+        .then((policy) => {
+          if (live) setHours(policy.approvalTtlHours ?? DEFAULT_TTL_HOURS);
+        })
+        .catch(() => {
+          // A policy read is explanatory here. Keep the historical default if an
+          // older or temporarily unreachable host cannot serve it.
+        });
+    };
+    refresh();
+    const dispose = startVisiblePolling(refresh, POLL_MS);
     return () => {
       live = false;
+      dispose();
     };
   }, [client, company]);
   return hours;

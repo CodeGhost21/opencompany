@@ -145,4 +145,33 @@ describe("useApprovalDeadline", () => {
     await flush();
     expect(hours()).toBe(24);
   });
+
+  it("refreshes the deadline when the policy changes while mounted", async () => {
+    vi.useFakeTimers();
+    const get = vi.fn(async () => ({
+      approvalTtlHours: 24,
+      mode: "supervised",
+    }));
+    const client = {
+      scopeFor: () => "/api/v1/acme",
+      get,
+    } as unknown as OpenCompanyClient & { get: typeof get };
+
+    let hours!: () => number;
+    act(() => {
+      hours = probe(() => useApprovalDeadline(client, "acme"));
+    });
+    await flush();
+    expect(hours()).toBe(24);
+
+    // Another operator raises the TTL on the host while the view stays
+    // mounted. The next poll tick must bring the new value into the sentence
+    // — a mount-only read would keep advertising 24 until a remount.
+    get.mockResolvedValue({ approvalTtlHours: 72, mode: "supervised" });
+    await act(async () => {
+      vi.advanceTimersByTime(5000);
+    });
+    await flush();
+    expect(hours()).toBe(72);
+  });
 });
