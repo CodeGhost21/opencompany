@@ -94,7 +94,7 @@ afterEach(() => {
 
 async function show(
   client: OpenCompanyClient,
-  over: { redesign?: boolean; onRedesign?: () => void } = {},
+  over: { redesign?: boolean; fallbackIds?: string[]; onRedesign?: () => void } = {},
 ) {
   await act(async () => {
     root.render(
@@ -103,6 +103,7 @@ async function show(
         client,
         company: "acme",
         redesign: over.redesign,
+        fallbackIds: over.fallbackIds,
         onSkip: () => {
           skipped += 1;
         },
