@@ -225,6 +225,7 @@ describe("readiness is the addressed company's, not the host's", () => {
             onSkip: () => {},
             onLeave: () => {},
             onDone: () => {},
+            onRedesign: () => {},
           }),
         );
       });
