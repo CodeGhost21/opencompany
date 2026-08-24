@@ -409,35 +409,41 @@ function ConfirmAction({
 }
 
 /**
- * Read-only: which memory engine this instance is bound to, from `/spec`.
+ * Read-only: which memory engine this instance is bound to, from the
+ * `…/memory/engine` surface.
  *
  * Deliberately carries no setter. Engine selection is instance-wide and
  * belongs to the infra operator — the `OPENCOMPANY_MEMORY*` variables, read
  * once at boot — so a console admin can see the engine but never repoint a
  * deployment's storage from here. The switch runbook lives in
  * `docs/spec/runtime/memory-engine.md`. Renders nothing on the `store`
- * default and on a host predating the `/spec` memory field.
+ * default and on a host predating the engine route.
  */
-function MemoryEngineCard({ client }: { client: OpenCompanyClient }) {
-  const [engine, setEngine] = useState<MemorySpec | undefined>(undefined);
+function MemoryEngineCard({
+  client,
+  company,
+}: {
+  client: OpenCompanyClient;
+  company: string | null;
+}) {
+  const [engine, setEngine] = useState<MemoryEngineState | undefined>(undefined);
   useEffect(() => {
     let live = true;
     setEngine(undefined);
-    client
-      .spec()
-      .then((spec) => {
-        if (live) setEngine(spec.memory);
+    memoryEngine(client, company)
+      .then((state) => {
+        if (live) setEngine(state);
       })
       .catch(() => {
-        /* best-effort: the settings page works without /spec */
+        /* best-effort: the settings page works without the engine route */
       });
     return () => {
       live = false;
     };
-  }, [client]);
+  }, [client, company]);
 
-  if (!engine || engine.backend === "store") return null;
-  const discarding = engine.backend === "null";
+  if (!engine || engine.active === "store") return null;
+  const discarding = engine.active === "null";
   const unservedFamilies = MANDATORY_ADJACENT_MEMORY_FAMILIES.filter(
     (family) => !engine.capabilities.includes(family),
   );
@@ -454,21 +460,16 @@ function MemoryEngineCard({ client }: { client: OpenCompanyClient }) {
       </CardHeader>
       <CardContent className="space-y-0 divide-y">
         <InfoRow label="Engine">
-          <span className="font-mono text-xs">{engine.driver_id ?? engine.backend}</span>
+          <span className="font-mono text-xs">{engine.active}</span>
         </InfoRow>
-        <InfoRow label="Mode">
-          <span className="font-mono text-xs">{engine.backend}</span>
+        <InfoRow label="Layer">
+          <span className="font-mono text-xs">{engine.layer}</span>
         </InfoRow>
         <InfoRow label="Capabilities">
           <span className="text-sm">
             {engine.capabilities.length > 0
               ? engine.capabilities.join(", ")
               : "not negotiated"}
-          </span>
-        </InfoRow>
-        <InfoRow label="Not served">
-          <span className="text-sm">
-            {unservedFamilies.length > 0 ? unservedFamilies.join(", ") : "none in this set"}
           </span>
         </InfoRow>
         <InfoRow label="Not served">
