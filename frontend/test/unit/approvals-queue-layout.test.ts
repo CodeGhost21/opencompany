@@ -97,10 +97,12 @@ describe("the approvals backlog queue (#1427)", () => {
       permissionsHeading!.compareDocumentPosition(queueHeading!) &
         Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
-    expect(queueHeading!.parentElement?.className).toContain("sticky");
-    expect(queueHeading!.parentElement?.textContent).toContain(
-      "Each one has a deadline.",
-    );
+    // The heading and the deadline sentence both live in the sticky orientation
+    // header; main's bulk-actions merge put a flex row between the heading and
+    // the sticky edge, so find the header rather than asserting an exact parent.
+    const stickyHeader = queueHeading!.closest(".sticky");
+    expect(stickyHeader).not.toBeNull();
+    expect(stickyHeader!.textContent).toContain("Each one has a deadline.");
     expect(
       [...container.querySelectorAll("[data-approval-id]")].map((row) =>
         row.getAttribute("data-approval-id"),
