@@ -175,9 +175,21 @@ export function Markdown({
           p: ({ children: content, ...rest }) => (
             <p {...rest}>{chipMentions(content, spans, sourceText, seen)}</p>
           ),
-          li: ({ children: content, ...rest }) => (
-            <li {...rest}>{chipMentions(content, spans, sourceText, seen)}</li>
-          ),
+          li: ({ children: content, ...rest }) => {
+            // Loose lists contain a nested paragraph. Leave that paragraph to
+            // the `p` handler instead of traversing it twice; tight-list text
+            // still needs to be transformed here.
+            const childrenToRender = Array.isArray(content)
+              ? content.map((child, index) =>
+                  isValidElement(child) && child.type === "p"
+                    ? child
+                    : chipMentions(child, spans, sourceText, seen),
+                )
+              : isValidElement(content) && content.type === "p"
+                ? content
+                : chipMentions(content, spans, sourceText, seen);
+            return <li {...rest}>{childrenToRender}</li>;
+          },
         }}
       >
         {children}
