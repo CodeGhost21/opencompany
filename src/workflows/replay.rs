@@ -460,6 +460,7 @@ fn child_calls_preceding(
     gate: &str,
     approved: &std::collections::HashSet<String>,
     namespace_prefix: &str,
+    output_prefix: &str,
 ) -> Vec<UnreplayableCall> {
     let mut reached = std::collections::HashSet::new();
     let mut queue = std::collections::VecDeque::from([gate.to_string()]);
