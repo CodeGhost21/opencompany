@@ -248,9 +248,9 @@ impl AgentFocus {
 
     /// This focus's tool belt.
     ///
-    /// Every shape starts from [`BASE_BELT`] — the workspace (read *and*
-    /// write), documents, files, the web, web search and whatever MCP servers
-    /// the company has granted — and adds only what its own work needs on top.
+    /// Every shape starts from [`BASE_BELT`] — read access to the workspace,
+    /// documents, files, the web, web search and whatever MCP servers the
+    /// company has granted — and adds only what its own work needs on top.
     /// A shape that adds nothing still differs from its neighbours in mandate
     /// and in what the prompt routes to it; keeping the arms distinct is what
     /// lets a belt diverge later without re-deciding which agents are which.
@@ -261,14 +261,17 @@ impl AgentFocus {
     /// [`grants_workspace_write_explicit`](crate::company::grants_workspace_write_explicit)),
     /// so the `workspace.*` these belts used to carry was a read grant wearing
     /// a wildcard — a teammate told it owned the workspace and refused every
-    /// write to it.
+    /// write to it. The base belt deliberately holds `workspace.read` only, and
+    /// `Research` — which reads what is there and reports, with no business
+    /// writing the company's own guidance tree — stays read-only by adding no
+    /// write grant of its own.
     ///
-    /// `Build` is the one shape that reaches `shell`, `code` and `repo`,
-    /// because "makes and maintains the product" is not doable without them.
-    /// That reach is real, and the control over it is the company's
-    /// `[tools].allow`: drop `repo.*` (or `*`, which covers shell and code)
-    /// from that list and no teammate this flow mints can reach them,
-    /// whatever the model called the shape.
+    /// `Build` is the one shape that reaches `shell` and `code`, because
+    /// "makes and maintains the product" is not doable without them. That reach
+    /// is real, and the control over it is the company's `[tools].allow`: drop
+    /// `shell`/`code` (or `*`, which covers them both) from that list and no
+    /// teammate this flow mints can reach them, whatever the model called the
+    /// shape.
     pub fn tools(self) -> Vec<String> {
         let extra: &[&str] = match self {
             // Reads what is there and reports; it has no business writing the
