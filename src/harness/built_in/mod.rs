@@ -3526,6 +3526,13 @@ mod tests {
         assert_ne!(split, joined);
     }
 
+    #[test]
+    fn a_deadline_only_override_has_no_roster_fingerprint() {
+        let none = policy_fingerprint(None);
+        let deadline = policy_fingerprint(Some(&fp_entry_full(None, None, None, Some(72))));
+        assert_eq!(none, deadline);
+    }
+
     /// A spend-cap or deadline edit moves it too — the third and fourth axes a
     /// console save can touch without touching the tier or the list.
     ///
