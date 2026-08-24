@@ -99,6 +99,8 @@ interface Props {
   sub?: string | null;
   onResolved: (systemLine: string) => void;
   onGoToConversation: () => void;
+  /** Host thread id → console channel id, owned by the shell's chat hydration. */
+  chatChannelByThread?: Readonly<Record<string, string>>;
   /**
    * Called the instant a decide click starts, before the network call
    * (issue #1211) — so the shell can mark this approval as "this tab decided
@@ -116,6 +118,7 @@ export function ApprovalsView({
   sub,
   onResolved,
   onGoToConversation,
+  chatChannelByThread,
   onDecideStart,
 }: Props) {
   const [approvalTtlHours, setApprovalTtlHours] = useState(24);
@@ -397,6 +400,7 @@ export function ApprovalsView({
                   approval={a}
                   now={now}
                   askerNames={askerNames}
+                  chatChannelByThread={chatChannelByThread}
                   thread={threadLinks.get(a.id)}
                   deciding={inFlight.get(a.id) ?? null}
                   batchIndex={batchPos.get(a.id)?.index ?? 1}
@@ -628,6 +632,7 @@ export function ApprovalCard({
   approval: a,
   now,
   askerNames,
+  chatChannelByThread,
   thread,
   deciding,
   batchIndex,
@@ -637,6 +642,7 @@ export function ApprovalCard({
   approval: ApprovalSummary;
   now: number;
   askerNames: Map<string, string>;
+  chatChannelByThread?: Readonly<Record<string, string>>;
   thread?: import("@/components/approval-card").ApprovalThreadLink | null;
   /** The verdict this card is waiting on, or `null` when it is idle (#373). */
   deciding: Verdict | null;
@@ -697,6 +703,7 @@ export function ApprovalCard({
           approval={a}
           now={now}
           askerNames={askerNames}
+          chatChannelByThread={chatChannelByThread}
           thread={thread}
           /* Honest copy for a request that spans an agent turn (#373): an
              approve is not done when the button stops spinning, it is handed

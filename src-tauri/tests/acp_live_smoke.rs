@@ -122,6 +122,25 @@ async fn session_new_advertises_a_model_config_option() {
             .find(|o| o.get("category").and_then(|c| c.as_str()) == Some("model"))
     });
 
+    // Printed, not just asserted: which model ids a harness actually
+    // advertises is the input to the console's model picker, and reading them
+    // off a live adapter is the only way to know them. Run with
+    // `--ignored --nocapture` to see the current list.
+    if let Some(option) = model_option {
+        eprintln!(
+            "[models] configId={:?}",
+            option.get("configId").or_else(|| option.get("id"))
+        );
+        for value in option
+            .get("options")
+            .and_then(|o| o.as_array())
+            .into_iter()
+            .flatten()
+        {
+            eprintln!("[models]   {value:#}");
+        }
+    }
+
     assert!(
         model_option.is_some() || raw.get("models").is_some(),
         "expected a `configOptions` entry with category \"model\" or an unstable \
@@ -206,7 +225,7 @@ async fn local_acp_agent_answers_a_prompt_through_the_acp_agent_trait() {
     let workspace_root = dir.path().canonicalize().unwrap();
 
     let agent = LocalAcpAgentFactory
-        .build("claude", None, &workspace_root)
+        .build("claude", None, &Default::default(), &workspace_root)
         .expect("claude-agent-acp must be on PATH");
 
     let company = CompanyId::new("acme-live-smoke");
@@ -264,7 +283,12 @@ async fn local_acp_agent_steers_codex_via_set_config_option_fallback() {
     let workspace_root = dir.path().canonicalize().unwrap();
 
     let agent = LocalAcpAgentFactory
-        .build("codex", Some("gpt-5.5"), &workspace_root)
+        .build(
+            "codex",
+            Some("gpt-5.5"),
+            &Default::default(),
+            &workspace_root,
+        )
         .expect("codex-acp must be on PATH");
 
     let company = CompanyId::new("acme-codex-smoke");
@@ -342,4 +366,186 @@ fn model_config_id_matches_the_real_codex_shape() {
         None,
         "must not match a value the adapter never advertised"
     );
+}
+
+/// The codex twin of [`session_new_advertises_a_model_config_option`], and the
+/// reason both exist rather than one: the two adapters do **not** return the
+/// same shape. `codex-acp` keys its entry `id` where the ACP spec (and
+/// `claude-agent-acp`) say `configId`, and it carries other categories —
+/// `mode`, `thought_level` — alongside the model one. A picker built against
+/// only one of them silently finds nothing on the other.
+///
+/// Opens a session and stops; it never prompts, so unlike
+/// `local_acp_agent_steers_codex_via_set_config_option_fallback` below it runs
+/// no inference. Run with `--ignored --nocapture` to see the current list.
+#[tokio::test]
+#[ignore = "spawns a real, authenticated codex-acp (no prompt, so no inference)"]
+async fn codex_session_new_advertises_its_own_model_option_shape() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let updates = Updates::default();
+
+    let client = AcpClient::spawn("codex-acp", &[], &root, &[], handler(&root), updates.sink())
+        .await
+        .expect("codex-acp must be on PATH");
+    client.initialize().await.expect("initialize");
+
+    let raw = client
+        .call(
+            "session/new",
+            serde_json::json!({ "cwd": root.display().to_string(), "mcpServers": [] }),
+        )
+        .await
+        .expect("session/new");
+
+    let model_option = raw["configOptions"].as_array().and_then(|opts| {
+        opts.iter()
+            .find(|o| o.get("category").and_then(|c| c.as_str()) == Some("model"))
+    });
+
+    if let Some(option) = model_option {
+        eprintln!(
+            "[codex models] key={:?} current={:?}",
+            option.get("configId").or_else(|| option.get("id")),
+            option.get("currentValue")
+        );
+        for value in option
+            .get("options")
+            .and_then(|o| o.as_array())
+            .into_iter()
+            .flatten()
+        {
+            eprintln!("[codex models]   {value:#}");
+        }
+    }
+
+    assert!(
+        model_option.is_some(),
+        "expected a model-category config option, got: {raw:#}"
+    );
+}
+
+/// The whole desktop path in one call, for both adapters: `confirm` spawns the
+/// harness, settles its readiness, **and** returns the models the console's
+/// picker is built from — proving the two answers really do come from a single
+/// spawn rather than needing a second one.
+#[tokio::test]
+#[ignore = "spawns the real, authenticated CLIs (no prompt, so no inference)"]
+async fn confirm_returns_readiness_and_models_for_every_installed_harness() {
+    for id in ["claude", "codex"] {
+        let dir = tempfile::tempdir().unwrap();
+        let found = opencompany_desktop_lib::acp::discovery::confirm(id, dir.path()).await;
+
+        eprintln!("[{id}] readiness={:?}", found.readiness);
+        for model in &found.models {
+            eprintln!(
+                "[{id}]   {}{}{}",
+                model.value,
+                model
+                    .name
+                    .as_deref()
+                    .map(|n| format!("  ({n})"))
+                    .unwrap_or_default(),
+                if model.current { "  <- current" } else { "" },
+            );
+        }
+
+        assert!(found.readiness.is_ready(), "[{id}] {:?}", found.readiness);
+        assert!(
+            !found.models.is_empty(),
+            "[{id}] a ready harness must advertise the models its picker offers"
+        );
+    }
+}
+
+/// Diagnostic: exactly what `oc_acp_harnesses` returns on *this* machine.
+///
+/// The unit tests drive [`diagnose_absent`] through a `Fake` probe, which
+/// proves the rules but says nothing about whether `SystemProbe` finds a real
+/// install — the gap that made "Not installed" impossible to explain from the
+/// tests alone. Run with `--ignored --nocapture` when the console and the
+/// shell disagree about what is installed.
+///
+/// Prints what `PATH` would say about each harness *if* its adapter failed to
+/// start. It is not the verdict — only running the adapter produces one, and
+/// `confirm_returns_readiness_and_models_for_every_installed_harness` is the
+/// test that does that — but it is where a wrong "not installed" comes from.
+#[test]
+#[ignore = "reports this machine's real state; asserts nothing"]
+fn what_path_would_say_about_each_harness_on_this_machine() {
+    use opencompany_desktop_lib::acp::discovery::{HARNESSES, SystemProbe, diagnose_absent};
+    eprintln!(
+        "inherited PATH = {:?}",
+        std::env::var("PATH").unwrap_or_default()
+    );
+    eprintln!(
+        "shell PATH     = {:?}",
+        opencompany_desktop_lib::acp::shell_env::effective_path()
+    );
+    for harness in HARNESSES {
+        eprintln!(
+            "[{:8}] adapter={:20} would report {:?}",
+            harness.id,
+            harness.command,
+            diagnose_absent(&SystemProbe, harness)
+        );
+    }
+}
+
+/// Installs an adapter the way the Install button does, then proves the thing
+/// it produced actually starts and speaks ACP.
+///
+/// The unit tests in `acp::tools` build a `node_modules` layout by hand, which
+/// proves the *reading* rules and nothing about the writing: that `npm
+/// --prefix` really links the executable where this expects it, that the
+/// pinned version really exists on the registry, and — the part no fixture can
+/// reach — that the installed script runs on this machine. `block/buzz` shipped
+/// a private tools directory whose contents could not execute (their #2342),
+/// which is exactly the gap between "installed" and "works".
+///
+/// Uses Codex deliberately: `codex-acp` depends on `@openai/codex`, so the
+/// install is self-contained and this does not also require a separately
+/// installed CLI. Installs into a temp dir, never the operator's real
+/// `tools_dir`.
+#[tokio::test]
+#[ignore = "downloads from the npm registry and spawns what it installed"]
+async fn an_installed_adapter_starts_and_speaks_acp() {
+    use opencompany_desktop_lib::acp::discovery::HARNESSES;
+    use opencompany_desktop_lib::acp::tools;
+
+    let harness = HARNESSES.iter().find(|h| h.id == "codex").unwrap();
+    let root = tempfile::tempdir().unwrap();
+
+    tools::install_into(root.path(), harness)
+        .await
+        .expect("the pinned adapter installs");
+
+    // Where the code expects `npm --prefix` to have put things.
+    let adapter = tools::installed_adapter_in(root.path(), harness)
+        .expect("the executable is linked into node_modules/.bin");
+    assert!(
+        tools::is_pinned_version_in(root.path(), harness),
+        "installed {:?}, pinned {}",
+        tools::installed_version_in(root.path(), harness),
+        harness.version
+    );
+
+    // The half a fixture cannot prove: it runs, and it is an ACP agent.
+    let updates = Updates::default();
+    let client = AcpClient::spawn(
+        &adapter.display().to_string(),
+        &[],
+        root.path(),
+        &[],
+        handler(root.path()),
+        updates.sink(),
+    )
+    .await
+    .expect("the installed adapter starts");
+    client
+        .initialize()
+        .await
+        .expect("the installed adapter completes the ACP handshake");
+
+    eprintln!("[install] {} -> {}", harness.version, adapter.display());
 }
