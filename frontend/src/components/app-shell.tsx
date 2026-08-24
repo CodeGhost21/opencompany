@@ -541,7 +541,10 @@ export function AppShell({
   // completion gets, and so a reload cannot re-apply it.
   const setupScope = { connection: scope.connection, company };
   useEffect(() => {
-    if (!arrivedViaSetupHandoff(setupScope)) return;
+    // SetupWizard and the magic-link flow use the unscoped marker because the
+    // connection/company may not survive their full-page hand-off. Consume it
+    // here once the shell has identified the landing company.
+    if (!arrivedViaSetupHandoff() && !arrivedViaSetupHandoff(setupScope)) return;
     setSetupCompleted(true);
     clearSetupHandoff();
   }, [scope.connection, company]);
