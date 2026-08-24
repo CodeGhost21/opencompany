@@ -170,11 +170,9 @@ export function SetupController({
       const wasResuming = setupResuming(scope);
       const wasRedesigning = setupRedesign(scope);
       const returned = (wasResuming || wasRedesigning) && !onModelSettings();
-      // Dropped only once the operator has actually come back: a reload while
-      // still *on* the settings page is not a return, and consuming the debt
-      // there would strand the later return. `empty` decides only whether a
-      // *resume* is worth acting on; a redesign reopens over the staffed
-      // company the first pass created.
+      // A reload on the destination page is not a return, and consuming the
+      // debt there would strand the later return. On a reload after navigating
+      // back, the debt is consumed here and the dialog opens immediately.
       if (returned) {
         if (wasResuming) clearSetupResuming(scope);
         if (wasRedesigning) clearSetupRedesign(scope);
