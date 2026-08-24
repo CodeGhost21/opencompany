@@ -1500,7 +1500,7 @@ mod test {
             _company: &crate::ports::types::CompanyId,
             _parent: Option<&str>,
             name: &str,
-            origin: WorkspaceOrigin,
+            _origin: WorkspaceOrigin,
         ) -> Result<crate::ports::workspace::FolderClaim> {
             Ok(crate::ports::workspace::FolderClaim::Created(folder_node(
                 &format!("folder-{name}"),
