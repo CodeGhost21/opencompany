@@ -430,6 +430,8 @@ async fn applying_an_engine_persists_it_to_config_toml() {
 #[tokio::test]
 async fn an_unknown_engine_is_refused_with_the_catalog() {
     let dir = tempfile::tempdir().unwrap();
+    let guard = EnvVarGuard::capture(&MEMORY_ENV);
+    guard.remove("OPENCOMPANY_MEMORY");
     let state = state_at(dir.path()).await;
 
     let (status, body) = call(
