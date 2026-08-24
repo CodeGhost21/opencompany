@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { companyCovers, isEditable, parseToolGlobs, toolGlobsDiffer } from "@/lib/agent";
+import { companyCovers, grantCeiling, isEditable, parseToolGlobs, toolGlobsDiffer } from "@/lib/agent";
 import type { AgentDetailDto } from "@/api/types";
 
 /**
