@@ -383,7 +383,7 @@ and a second person joining the same company, with no stored flag to drift out
 of step with reality.
 
 **"Staffed" is narrower than "has a roster", and the difference is load-bearing.**
-The [global baseline](globals.md) merges a fixed set of teammates into *every*
+The [global baseline](../globals.md) merges a fixed set of teammates into *every*
 company whatever its manifest says, and they cannot be deleted — `DELETE
 …/team/{id}` answers `409` on each. So "is the roster empty?" is false on every
 company this product can serve. Asked that way, as it was until issue #1404, the
