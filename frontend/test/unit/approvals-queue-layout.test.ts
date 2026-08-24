@@ -255,6 +255,13 @@ describe("the approvals backlog queue (#1427)", () => {
       [...container.querySelectorAll("[data-approval-id]")].find(
         (row) => row.getAttribute("data-approval-id") === id,
       )!;
+    console.log(
+      "DEBUG batch cards:",
+      [...container.querySelectorAll("[data-approval-id]")].map((row) => ({
+        id: row.getAttribute("data-approval-id"),
+        text: row.textContent,
+      })),
+    );
     expect(card("first").textContent).toContain("1 of 2 from the same turn");
     expect(card("second").textContent).toContain("2 of 2 from the same turn");
 
