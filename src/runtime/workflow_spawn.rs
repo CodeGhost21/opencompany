@@ -99,7 +99,7 @@ impl WorkflowSpawn {
             events: runtime.events().clone(),
             supervisor: runtime.run_supervisor().clone(),
             runner,
-        }
+            runs: runtime.runs().clone(),        }
     }
 
     /// Registers a run, spawns it, and returns its id alongside the task.
