@@ -90,7 +90,6 @@ export function AnalyticsLens({ runs }: { runs: ObservatoryRun[] }) {
                 <Bar dataKey="outputTokens" stackId="t" fill="var(--color-outputTokens)" />
                 <Bar
                   dataKey="cachedInputTokens"
-                  stackId="t"
                   fill="var(--color-cachedInputTokens)"
                 />
               </BarChart>
