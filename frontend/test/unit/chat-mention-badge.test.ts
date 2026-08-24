@@ -193,6 +193,45 @@ describe("mentionsToClear", () => {
   });
 
   /**
+   * A mention inside a thread reply must not clear on channel-open alone: the
+   * main timeline folds replies into their parent (`buildTimeline`), so a
+   * collapsed thread hides the text even while the channel is on screen —
+   * clearing it would lose the summons without the person ever seeing it. The
+   * notification names the message by its host sequence, which the loaded
+   * transcript's reply map keys by the console's `h<seq>` id.
+   */
+  describe("with a mention inside a thread reply", () => {
+    const replies = new Map([["h42", "h7"]]);
+    const feed = [note({ id: "threaded", context: "engineering", subjectId: "42" })];
+
+    it("keeps it unread while the channel is open but its thread is collapsed", () => {
+      expect(mentionsToClear(feed, "engineering", "engineering", new Set(["engineering"]), new Set(), replies, null)).toEqual([]);
+    });
+
+    it("clears it the moment the thread panel makes the reply visible", () => {
+      expect(
+        mentionsToClear(feed, "engineering", "engineering", new Set(["engineering"]), new Set(), replies, "h7"),
+      ).toEqual(["threaded"]);
+    });
+
+    it("clears a different thread's mention only when that thread is the open one", () => {
+      // A reply under another parent is still hidden: opening a sibling thread
+      // must not clear it either.
+      expect(
+        mentionsToClear(feed, "engineering", "engineering", new Set(["engineering"]), new Set(), replies, "h99"),
+      ).toEqual([]);
+    });
+  });
+
+  it("still clears a top-level mention on channel open", () => {
+    // A message with no parent id is on screen the moment the channel is: the
+    // reply gate must not hold it hostage.
+    expect(
+      mentionsToClear(feed, "engineering", "engineering", new Set(["engineering"]), new Set(), new Map(), null),
+    ).toEqual(["eng-1", "eng-2"]);
+  });
+
+  /**
    * An empty list is a real instruction to the host ("mark nothing"), distinct
    * from omitting ids ("mark everything") — so the caller must not send it as
    * though it meant the latter.
