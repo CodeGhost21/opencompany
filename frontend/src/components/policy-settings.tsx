@@ -122,17 +122,14 @@ export function isAutonomyEscalation(
  * counts as known.
  */
 export function alwaysApproveGates(entry: string, target: string): boolean {
-  const e = entry.trim();
-  const t = target.trim();
-  if (e === "") return false;
-  if (asciiEqualsIgnoreCase(t, e)) return true;
-  // Leading dotted segment: `invoice` gates `invoice.send`, but a bare prefix
-  // (`pay` for `payroll.export`) does not — the segment boundary is load
-  // bearing, exactly as it is in the backend.
+  const e = entry.trim().toLowerCase();
+  const t = target.trim().toLowerCase();
+  if (!e) return false;
+  if (t === e) return true;
   return (
     t.length > e.length &&
     t[e.length] === "." &&
-    asciiEqualsIgnoreCase(t.slice(0, e.length), e)
+    t.slice(0, e.length) === e
   );
 }
 
