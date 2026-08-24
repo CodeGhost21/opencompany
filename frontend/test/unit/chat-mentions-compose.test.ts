@@ -235,6 +235,32 @@ describe("insertMention", () => {
   });
 });
 
+describe("mentionsOutsideRange", () => {
+  const a: Mention = { target: { kind: "user", id: "a" }, text: "@Sam", offset: 0 };
+
+  it("keeps a mention the replacement range does not touch", () => {
+    const out = mentionsOutsideRange([a], { start: 6, end: 10 });
+    expect(out).toEqual([a]);
+  });
+
+  it("drops a mention the replacement range overlaps", () => {
+    expect(mentionsOutsideRange([a], { start: 0, end: 4 })).toEqual([]);
+    expect(mentionsOutsideRange([a], { start: 1, end: 3 })).toEqual([]);
+    expect(mentionsOutsideRange([a], { start: 3, end: 8 })).toEqual([]);
+  });
+
+  /**
+   * The picker-replacement case this exists for: replacing the *first* of two
+   * `@Sam` spans must not let the replaced identity re-anchor onto the second,
+   * hand-typed occurrence at send time.
+   */
+  it("drops only the mention being replaced, keeping a same-text duplicate", () => {
+    const b: Mention = { target: { kind: "user", id: "b" }, text: "@Sam", offset: 10 };
+    const out = mentionsOutsideRange([a, b], { start: 0, end: 4 });
+    expect(out).toEqual([b]);
+  });
+});
+
 describe("reconcileMentions", () => {
   const mention: Mention = {
     target: { kind: "agent", id: "engineer" },
