@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { TimelineEntry } from "@/api/tasks";
-import { groupTimeline } from "@/views/TaskDetailView";
+import { groupTimeline } from "@/views/runs/RunTimeline";
 
 function entry(over: Partial<TimelineEntry> = {}): TimelineEntry {
   return {
