@@ -519,7 +519,7 @@ async fn mint_session(
         return Err(ApiError(OpenCompanyError::InvalidRequest(
             "this company's id cannot carry a session cookie".to_string(),
         ))
-        .into_response());
+        .into_response().into());
     };
     let plaintext = create_session(
         runtime,
@@ -543,13 +543,13 @@ async fn mint_session(
             return Err(ApiError(OpenCompanyError::InvalidRequest(
                 "this company's id cannot carry a session header".to_string(),
             ))
-            .into_response());
+            .into_response().into());
         };
         return Ok(Json(SignInResult {
             user: me_result(company, user),
             session: Some(session),
         })
-        .into_response());
+        .into_response().into());
     }
 
     let insecure = !state.config().host_base_url().starts_with("https://");
