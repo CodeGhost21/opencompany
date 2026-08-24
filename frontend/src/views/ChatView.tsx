@@ -205,6 +205,9 @@ interface Props {
   failedApprovals?: Record<string, string>;
 }
 
+const FIRST_TEAM_BRIEF =
+  "Help us get started: propose the first three priorities for our company and who should own each one.";
+
 /**
  * The chat workspace.
  *
@@ -265,6 +268,10 @@ export function ChatView({
   /** Set when `/desks` failed for a reason that isn't "this host has none". */
   const [desksError, setDesksError] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
+  const [composerPrefill, setComposerPrefill] = useState<{
+    text: string;
+    revision: number;
+  } | null>(null);
   const [openThreadId, setOpenThreadId] = useState<string | null>(null);
   const [dismissingCardId, setDismissingCardId] = useState<string | null>(null);
   const [membersOpen, setMembersOpen] = useState(false);
@@ -1128,6 +1135,12 @@ export function ChatView({
               onReact={react}
               onDismissCard={(taskId) => void dismissCard(taskId)}
               dismissingCardId={dismissingCardId}
+              onStartBrief={() =>
+                setComposerPrefill((current) => ({
+                  text: FIRST_TEAM_BRIEF,
+                  revision: (current?.revision ?? 0) + 1,
+                }))
+              }
               onAddPeople={() => setMembersOpen(true)}
               now={now}
               askerNames={askerNames}
@@ -1153,6 +1166,7 @@ export function ChatView({
             <MessageComposer
               placeholder={`Message ${channelTitle(channel)}`}
               disabled={sending}
+              prefill={composerPrefill ?? undefined}
               onSend={(text, intent) => void send(text, intent)}
               // Every keystroke asks; the hook throttles to one ping per
               // channel per few seconds and skips entirely while the event
