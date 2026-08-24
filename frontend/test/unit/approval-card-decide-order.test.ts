@@ -4,7 +4,12 @@ import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import type { ApprovalSummary, GrantScope, StandingGrant, Verdict } from "@/api/types";
+import type {
+  ApprovalSummary,
+  GrantScope,
+  StandingGrant,
+  Verdict,
+} from "@/api/types";
 import { money } from "@/lib/language";
 import { ApprovalCard, StandingPermissions } from "@/views/ApprovalsView";
 
@@ -56,7 +61,9 @@ async function render(approval: ApprovalSummary) {
 }
 
 beforeEach(() => {
-  (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+  (
+    globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }
+  ).IS_REACT_ACT_ENVIRONMENT = true;
   container = document.createElement("div");
   document.body.appendChild(container);
   root = createRoot(container);
@@ -93,7 +100,10 @@ describe("ApprovalCard decide ordering (#1406)", () => {
 
     const scope = container.querySelector("fieldset");
     const approve = approveButton();
-    expect(scope, "the scope control should render for a broadly-grantable card").not.toBeNull();
+    expect(
+      scope,
+      "the scope control should render for a broadly-grantable card",
+    ).not.toBeNull();
 
     // `DOCUMENT_POSITION_FOLLOWING` on the scope element, tested against the
     // Approve button, means the button comes *after* the scope control — the
@@ -128,10 +138,10 @@ describe("ApprovalCard decide ordering (#1406)", () => {
       b.getAttribute("aria-label"),
     );
     expect(labelled).toContain(
-      "Approve: Run a terminal command — rm -rf /tmp/build && make release — cwd: /srv/app — asked by Ops",
+      "Approve: Run a terminal command — rm -rf /tmp/build && make release — cwd: /srv/app — request 1772445600000 — asked by Ops",
     );
     expect(labelled).toContain(
-      "Decline: Run a terminal command — rm -rf /tmp/build && make release — cwd: /srv/app — asked by Ops",
+      "Decline: Run a terminal command — rm -rf /tmp/build && make release — cwd: /srv/app — request 1772445600000 — asked by Ops",
     );
   });
 
@@ -182,10 +192,10 @@ describe("ApprovalCard decide ordering (#1406)", () => {
     // Same URL, different method — the accessible names must not collide: the
     // method rides after the URL with its label so the two buttons read apart.
     expect(labelled).toContain(
-      "Approve: Make a request to a web address — https://api.example.com/items — method: GET — asked by Ops",
+      "Approve: Make a request to a web address — https://api.example.com/items — method: GET — request 1772445600000 — asked by Ops",
     );
     expect(labelled).toContain(
-      "Approve: Make a request to a web address — https://api.example.com/items — method: DELETE — asked by Ops",
+      "Approve: Make a request to a web address — https://api.example.com/items — method: DELETE — request 1772445600000 — asked by Ops",
     );
   });
 
@@ -203,7 +213,7 @@ describe("ApprovalCard decide ordering (#1406)", () => {
         url: "https://api.example.com/items",
         method: "POST",
         headers: "content-type: application/json",
-        body: "{\"q\": 1}",
+        body: '{"q": 1}',
       },
     };
     const b: ApprovalSummary = {
@@ -214,7 +224,7 @@ describe("ApprovalCard decide ordering (#1406)", () => {
         url: "https://api.example.com/items",
         method: "POST",
         headers: "content-type: application/json",
-        body: "{\"q\": 2}",
+        body: '{"q": 2}',
       },
     };
 
@@ -249,10 +259,10 @@ describe("ApprovalCard decide ordering (#1406)", () => {
       b.getAttribute("aria-label"),
     );
     expect(labelled).toContain(
-      'Approve: Make a request to a web address — https://api.example.com/items — method: POST — headers: content-type: application/json — body: {"q": 1} — asked by Ops',
+      'Approve: Make a request to a web address — https://api.example.com/items — method: POST — headers: content-type: application/json — body: {"q": 1} — request 1772445600000 — asked by Ops',
     );
     expect(labelled).toContain(
-      'Approve: Make a request to a web address — https://api.example.com/items — method: POST — headers: content-type: application/json — body: {"q": 2} — asked by Ops',
+      'Approve: Make a request to a web address — https://api.example.com/items — method: POST — headers: content-type: application/json — body: {"q": 2} — request 1772445600000 — asked by Ops',
     );
   });
 
@@ -321,7 +331,9 @@ describe("ApprovalCard decide ordering (#1406)", () => {
     const second = { ...APPROVAL, id: "batch-2" };
     await act(async () => {
       root.render(
-        createElement("div", null,
+        createElement(
+          "div",
+          null,
           createElement(ApprovalCard, {
             approval: first,
             now: T0,
@@ -367,17 +379,35 @@ describe("ApprovalCard decide ordering (#1406)", () => {
 
     expect(
       container.querySelector(
-        "button[aria-label=\"Revoke Ops's permission: Fetch a web page — https://docs.rs only — expires in 1h — grant 1 of 1\"]",
+        'button[aria-label="Revoke Ops\'s permission: Fetch a web page — https://docs.rs only — expires in 1h — grant 1 of 1"]',
       ),
     ).not.toBeNull();
   });
   it("distinguishes revocations for identical grants with different expirations (#1411)", async () => {
-    const first: StandingGrant = { ...GRANT, id: "grant-short", expires_at_millis: T0 + 60 * 60 * 1000 };
-    const second: StandingGrant = { ...GRANT, id: "grant-long", expires_at_millis: T0 + 7 * 24 * 60 * 60 * 1000 };
+    const first: StandingGrant = {
+      ...GRANT,
+      id: "grant-short",
+      expires_at_millis: T0 + 60 * 60 * 1000,
+    };
+    const second: StandingGrant = {
+      ...GRANT,
+      id: "grant-long",
+      expires_at_millis: T0 + 7 * 24 * 60 * 60 * 1000,
+    };
     await act(async () => {
-      root.render(createElement(StandingPermissions, { grants: [first, second], now: T0, askerNames: new Map([["ops", "Ops"]]), granterNames: new Map([["operator", "you"]]), onRevoke: async () => {} }));
+      root.render(
+        createElement(StandingPermissions, {
+          grants: [first, second],
+          now: T0,
+          askerNames: new Map([["ops", "Ops"]]),
+          granterNames: new Map([["operator", "you"]]),
+          onRevoke: async () => {},
+        }),
+      );
     });
-    const labels = Array.from(container.querySelectorAll("button"), (button) => button.getAttribute("aria-label"));
+    const labels = Array.from(container.querySelectorAll("button"), (button) =>
+      button.getAttribute("aria-label"),
+    );
     expect(labels).toEqual([
       "Revoke Ops's permission: Fetch a web page — https://docs.rs only — expires in 1h — grant 1 of 2",
       "Revoke Ops's permission: Fetch a web page — https://docs.rs only — expires in 7d — grant 2 of 2",
@@ -413,5 +443,4 @@ describe("ApprovalCard decide ordering (#1406)", () => {
       ),
     ).not.toBeNull();
   });
-
 });
