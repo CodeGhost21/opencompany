@@ -441,6 +441,75 @@ describe("leaving the completion screen to wire a model", () => {
     expect(removed, "a teammate staffed while settings were open must survive").not.toContain("bob");
   });
 
+  it("does not reopen a redesign whose fallback team another operator already replaced", async () => {
+    // The redesign debt names the team the first pass created. If a colleague
+    // replaces that team while model settings are open, the debt is stale —
+    // reopening redesign would build a full roster and sweep nothing (the
+    // recorded rows are gone), stacking a second team over their work.
+    const roster: TeamMemberDto[] = [...BASELINE];
+    const client = {
+      scopeFor: () => "/api/v1/companies/acme",
+      listTeam: async () => [...roster],
+      get: async () => ({ cognition: "echo" }),
+      post: async () => ({
+        agents: [{ name: "Ada", role: "Operations", description: "Runs the desk." }],
+        template: "ecommerce",
+        source: "fallback",
+        reason: "no_model",
+      }),
+      addTeamMember: async () => ({ id: "ada" }),
+    } as unknown as OpenCompanyClient;
+    await mount(client);
+    await runFlow();
+
+    await act(async () => {
+      (addModelLink() as HTMLElement).click();
+    });
+    expect(setupRedesign(SCOPE)).toBe(true);
+
+    // The colleague replaces the fallback team with their own while the
+    // settings page is open: the row the debt names is gone.
+    roster.push({ id: "zoe", role: "Operations", inboxEnabled: false } as TeamMemberDto);
+
+    await goTo("#/overview");
+
+    expect(dialog(), "setup over a team the redesign no longer names").toBeNull();
+    expect(setupRedesign(SCOPE), "the stale debt should be dropped").toBe(false);
+  });
+
+  it("reopens as a first run, not a redesign, when the fallback team was deleted", async () => {
+    // The debt's team is gone and nobody has staffed the company since — the
+    // return should offer first-run setup, not a redesign over nothing. A
+    // redesign here would claim a replacement while sweeping zero rows.
+    const roster: TeamMemberDto[] = [...BASELINE];
+    const client = {
+      scopeFor: () => "/api/v1/companies/acme",
+      listTeam: async () => [...roster],
+      get: async () => ({ cognition: "echo" }),
+      post: async () => ({
+        agents: [{ name: "Ada", role: "Operations", description: "Runs the desk." }],
+        template: "ecommerce",
+        source: "fallback",
+        reason: "no_model",
+      }),
+      addTeamMember: async () => ({ id: "ada" }),
+    } as unknown as OpenCompanyClient;
+    await mount(client);
+    await runFlow();
+
+    await act(async () => {
+      (addModelLink() as HTMLElement).click();
+    });
+    expect(setupRedesign(SCOPE)).toBe(true);
+
+    // The fallback team is gone entirely — the company is empty again.
+    await goTo("#/overview");
+
+    expect(dialog(), "the return should offer setup").toBeTruthy();
+    expect(find("setup-redesign-notice"), "reopened as a redesign over nothing").toBeNull();
+    expect(setupRedesign(SCOPE), "the stale debt should be dropped").toBe(false);
+  });
+
   it("keeps the redesign debt across a reload after the return reopens it", async () => {
     // The redesign reopens the moment the operator returns, but the replacement
     // build-out has not run yet — the fallback team is still what the gate
