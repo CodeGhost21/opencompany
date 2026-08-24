@@ -41,6 +41,7 @@ import {
   type FeedbackSummary,
   type FinancesDto,
   type GrantScope,
+  type HarnessDto,
   type InboxDto,
   type InboxMessageDto,
   type PageManifestDto,
@@ -934,6 +935,17 @@ export class OpenCompanyClient {
       "GET",
       `${this.scope(company)}/team/${encodeURIComponent(agentId)}`,
     );
+  }
+
+  /**
+   * Every harness this company has declared (issue #1245's harness-picker
+   * follow-up): what Settings' Harnesses card and an agent's Harness picker
+   * both read, so the two cannot disagree about what the company has
+   * declared. Read-only — hosts predating the route 404, which callers should
+   * treat as "this host can't list harnesses yet" rather than as an empty set.
+   */
+  listHarnesses(company?: string | null): Promise<HarnessDto[]> {
+    return this.request<HarnessDto[]>("GET", `${this.scope(company)}/harnesses`);
   }
 
   /**
