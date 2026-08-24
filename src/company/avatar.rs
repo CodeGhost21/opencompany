@@ -777,7 +777,7 @@ mod test {
         // A small VP8L with all version bits set (version = 7) must still
         // decode to the correct size — the spec requires version=0 but the
         // dimension parser must not read those bits as height.
-        let bad_version = b"RIFF\x19\x00\x00\x00WEBPVP8L\x05\x00\x00\x00\x2F\x00\x00\xE0\x00";
+        let bad_version = b"RIFF\x19\x00\x00\x00WEBPVP8L\x05\x00\x00\x00\x2F\x00\x00\x00\xE0";
         assert_eq!(
             image_dimensions(bad_version).unwrap(),
             (1, 1),
