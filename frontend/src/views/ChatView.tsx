@@ -270,6 +270,12 @@ export function ChatView({
   const [addOpen, setAddOpen] = useState(false);
   const [mobilePane, setMobilePane] = useState<"rail" | "chat">("chat");
   const [channelsCollapsed, setChannelsCollapsed] = useState(() => readChannelRailCollapsed(scope));
+  // Section disclosure is shared by the desktop and sub-`lg` rail instances
+  // (codex P2 review): each instance would otherwise keep its own fold state,
+  // so dropping below `lg` reopened every section the operator had folded.
+  const [railOpenSections, setRailOpenSections] = useState<Record<string, boolean>>({});
+  const toggleRailSection = (id: string) =>
+    setRailOpenSections((prev) => ({ ...prev, [id]: !(prev[id] ?? true) }));
   // The header's density toggle stays mounted across a collapse/expand, but the
   // compact rail's expand button does not — expanding unmounts it while a
   // keyboard user is still focused on it, dropping them at the document. The
