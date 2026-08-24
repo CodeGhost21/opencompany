@@ -237,7 +237,16 @@ test("opening a channel does not clear its mentions before history has loaded", 
   const historyGate = new Promise<void>((resolve) => {
     releaseHistory = resolve;
   });
-  await mockApi(page, seedFeed(), { historyGates: { engineering: historyGate } });
+  await mockApi(page, seedFeed(), {
+    historyGates: { engineering: historyGate },
+    // The message `eng-1` names (`subjectId: "10"`); a mention whose summoning
+    // text is absent from the loaded transcript never clears (codex P1).
+    history: {
+      engineering: [
+        { id: "10", channel: "engineering", author: "ceo", text: "please review the invoice", atMillis: 3, mine: false },
+      ],
+    },
+  });
 
   await openChannel(page, "general");
   await expect(mentionBadge(page, "Engineering")).toHaveText("@2");
