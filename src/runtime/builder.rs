@@ -3842,7 +3842,8 @@ mod test {
                     "catch-all must not cover opt-in grant `{grant}`"
                 );
             }
-            assert!(allow_covers(&allow, "workspace.write"));
+            assert!(!allow_covers(&allow, "workspace.write"));
+            assert!(allow_covers(&allow, "workspace.read"));
             assert!(allow_covers(&allow, "docs.read"));
         }
 
