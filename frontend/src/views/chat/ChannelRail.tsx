@@ -148,6 +148,7 @@ function CompactChannelRow({
   onSelect: (id: string) => void;
 }) {
   const hasUnread = unread > 0 && !active;
+  const hasMentions = mentions > 0;
 
   return (
     <button
@@ -276,6 +277,7 @@ function ChannelRow({
   onSelect: (id: string) => void;
 }) {
   const hasUnread = unread > 0 && !active;
+  const hasMentions = mentions > 0;
 
   return (
     <button
