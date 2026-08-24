@@ -150,6 +150,8 @@ interface Props {
    * answer anyone is going to get.
    */
   onSendFailed?: (threadId: string) => void;
+  /** Called when a delayed response belongs to a previous company scope. */
+  onSendStale?: (threadId: string) => void;
   /**
    * Turns accepted but not settled, by host thread id — including ones this
    * console never POSTed, which is what makes the indicator survive a reload.
