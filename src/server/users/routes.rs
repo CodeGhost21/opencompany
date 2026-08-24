@@ -1242,7 +1242,7 @@ async fn edit_me(
                         &value,
                     )
                     .await
-                    .map_err(|e| ApiError(e).into_response().into())?,
+                    .map_err(crate::server::Rejection::from)?,
                 ),
                 None => None,
             },
