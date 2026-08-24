@@ -317,12 +317,13 @@ pub fn strip_code_regions(text: &str) -> String {
                         }
                         let indent = line_start + leading_spaces(bytes, line_start);
                         // CommonMark: a closing fence may be followed only by
-                        // spaces or tabs, never by text. A line like
-                        // ```not-a-close stays inside the block, so blanking
-                        // must not stop there and unmask a later `@` the
-                        // renderer still shows as code. The same line also has
-                        // to be the same character (`bytes[indent] == ch`) and
-                        // at least as long, which `run_len` already enforces.
+                        // spaces or tabs (or a CR in a CRLF line ending), never
+                        // by text. A line like ```not-a-close stays inside the
+                        // block, so blanking must not stop there and unmask a
+                        // later `@` the renderer still shows as code. The same
+                        // line also has to be the same character
+                        // (`bytes[indent] == ch`) and at least as long, which
+                        // `run_len` already enforces.
                         let close_run = run_len(bytes, indent, ch);
                         let after = indent + close_run;
                         if indent < bytes.len()
@@ -330,7 +331,7 @@ pub fn strip_code_regions(text: &str) -> String {
                             && close_run >= run
                             && bytes[after..line_end(bytes, indent)]
                                 .iter()
-                                .all(|b| *b == b' ' || *b == b'\t')
+                                .all(|b| *b == b' ' || *b == b'\t' || *b == b'\r')
                         {
                             break line_end(bytes, indent);
                         }
