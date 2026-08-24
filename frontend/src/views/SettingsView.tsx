@@ -12,7 +12,8 @@ import {
 import { toast } from "sonner";
 
 import type { LifecycleAction, OpenCompanyClient } from "@/api/client";
-import { ApiError, type MemorySpec } from "@/api/types";
+import { memoryEngine, type MemoryEngineState } from "@/api/memory";
+import { ApiError } from "@/api/types";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import {
   AlertDialog,
