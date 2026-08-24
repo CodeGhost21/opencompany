@@ -385,6 +385,7 @@ export function PolicySettings({ client, company }: Props) {
         spendCapWidens)
     ) {
       setPendingReset(true);
+      setPendingCapRaise(null);
       setPendingTier(manifestTier);
       return;
     }
