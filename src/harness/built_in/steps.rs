@@ -338,7 +338,19 @@ impl StepTrace {
                 self.thinking_open = false;
                 let label = label_for(display_label.clone(), tool_name);
                 let seq = self.claim();
-                self.running.insert(call_id.clone(), (seq, label.clone()));
+                // NOTE: `arguments` is `Null` here on the tinyagents path —
+                // the crate emits real arguments on the *completed* event —
+                // so a started step has nothing unredacted to add beyond the
+                // harness's own label.
+                let start_detail = self.deep.then(|| {
+                    crate::ports::deep_trace::bound_detail(TurnStepDetail {
+                        display_detail: display_detail.clone(),
+                        iteration: Some(*iteration),
+                        ..TurnStepDetail::default()
+                    })
+                });
+                self.running
+                    .insert(call_id.clone(), (seq, label.clone(), start_detail.clone()));
                 let mut out = Vec::new();
                 out.extend(closing);
                 out.push((
@@ -349,17 +361,7 @@ impl StepTrace {
                         label,
                         ..TurnStep::default()
                     },
-                    // NOTE: `arguments` is `Null` here on the tinyagents path —
-                    // the crate emits real arguments on the *completed* event —
-                    // so a started step has nothing unredacted to add beyond the
-                    // harness's own label.
-                    self.deep.then(|| {
-                        crate::ports::deep_trace::bound_detail(TurnStepDetail {
-                            display_detail: display_detail.clone(),
-                            iteration: Some(*iteration),
-                            ..TurnStepDetail::default()
-                        })
-                    }),
+                    start_detail,
                 ));
                 out
             }
