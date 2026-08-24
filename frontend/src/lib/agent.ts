@@ -302,26 +302,40 @@ export function companyCovers(allow: string[], glob: string): boolean {
   // as `workspace.write` — because a bare `workspace` request under a `["*"]`
   // allow-list would otherwise fall through to the generic matcher below and
   // preview as covered a grant that hands the agent the exact write token.
+  //
+  // Every opt-in branch also demands the *request* glob be a spelling the
+  // wiring predicate accepts when stored verbatim. The write path keeps the
+  // request intact in `effective`, so a glued-star ask like `search*` or
+  // `workspace.write*` reaches the belt as `search*` / `workspace.write*` —
+  // which `grants_search_explicit` and `grants_workspace_write_explicit` both
+  // reject, even though their stripped forms would pass. Only the bare
+  // namespace, a separator-broken descendant (`search.*`, `search.web`), and
+  // the colon forms (`mcp:*`) ever wire; anything else must not preview as
+  // covered, or the card would render the saved grant as effective while the
+  // tools stay unwired.
   if (literal === "workspace" || literal === "workspace.write") {
-    return allow.some((grant) => grant === "workspace" || grant === "workspace.write");
+    return (
+      (glob === "workspace" || glob === "workspace.write") &&
+      allow.some((grant) => grant === "workspace" || grant === "workspace.write")
+    );
   }
   if (literal === "media" || literal.startsWith("media.")) {
-    return grantsExplicit(allow, "media");
+    return grantsExplicit(allow, "media") && grantsExplicit([glob], "media");
   }
   if (literal === "composio" || literal.startsWith("composio.")) {
-    return grantsExplicit(allow, "composio");
+    return grantsExplicit(allow, "composio") && grantsExplicit([glob], "composio");
   }
   if (literal === "chargebee" || literal.startsWith("chargebee.")) {
-    return grantsExplicit(allow, "chargebee");
+    return grantsExplicit(allow, "chargebee") && grantsExplicit([glob], "chargebee");
   }
   if (literal === "hosting" || literal.startsWith("hosting.")) {
-    return grantsExplicit(allow, "hosting");
+    return grantsExplicit(allow, "hosting") && grantsExplicit([glob], "hosting");
   }
   if (literal === "paypal" || literal.startsWith("paypal.")) {
-    return grantsExplicit(allow, "paypal");
+    return grantsExplicit(allow, "paypal") && grantsExplicit([glob], "paypal");
   }
   if (literal === "search" || literal.startsWith("search.")) {
-    return grantsExplicit(allow, "search");
+    return grantsExplicit(allow, "search") && grantsExplicit([glob], "search");
   }
 
   // MCP grants use a colon namespace, so `mcp:*` is the explicit opt-in for an
