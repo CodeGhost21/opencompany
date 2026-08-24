@@ -277,6 +277,10 @@ export function ChatView({
   /** Set when `/desks` failed for a reason that isn't "this host has none". */
   const [desksError, setDesksError] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
+  const [composerPrefill, setComposerPrefill] = useState<{
+    text: string;
+    revision: number;
+  } | null>(null);
   const [openThreadId, setOpenThreadId] = useState<string | null>(null);
   const [dismissingCardId, setDismissingCardId] = useState<string | null>(null);
   const [membersOpen, setMembersOpen] = useState(false);
