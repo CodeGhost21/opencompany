@@ -961,6 +961,14 @@ export interface AgentDetailDto {
 export interface AgentToolsDto {
   requested: string[];
   companyAllow: string[];
+  /**
+   * The ceiling contributed by the desks this agent sits on — the union of
+   * their `tools`, already narrowed by `companyAllow`. **Empty means no desk
+   * narrows anything** (the same empty-is-not-nothing trap `requested` carries),
+   * so a preview has to pick `companyAllow` when this is empty and this list
+   * when it is not.
+   */
+  deskAllow: string[];
   effective: string[];
 }
 
