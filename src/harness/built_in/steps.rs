@@ -383,11 +383,11 @@ impl StepTrace {
                     arguments.as_ref(),
                     failure.as_ref(),
                 );
-                let (seq, label) = match self.running.remove(call_id) {
+                let (seq, label, start_detail) = match self.running.remove(call_id) {
                     Some(found) => found,
                     // No observed start — surface it standalone, exactly as the
                     // fold does.
-                    None => (self.claim(), humanize(tool_name)),
+                    None => (self.claim(), humanize(tool_name), None),
                 };
                 let mut step = TurnStep {
                     kind: TurnStepKind::ToolCall,
