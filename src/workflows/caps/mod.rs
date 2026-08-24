@@ -1571,8 +1571,7 @@ impl HarnessAgentRunner {
         } else {
             (crate::ports::RunStatus::Succeeded, None)
         };
-        self.settle_attempt(run_sink.as_ref(), status, error)
-            .await;
+        self.settle_attempt(run_sink.as_ref(), status, error).await;
         let value = json!({ "text": outcome.reply, "agent_ref": agent_ref });
         Ok((value, outcome))
     }
@@ -3141,7 +3140,6 @@ mod tests {
                 assert_eq!(failure.wire_word(), expected);
             }
         }
-
     }
 
     // ---- the attempt row a workflow node now opens ------------------------
