@@ -167,6 +167,39 @@ describe("resolveAvatarSrc bounded cache", () => {
     vi.unstubAllGlobals();
   });
 
+  it("forgetAvatarNode fires subscribers so a mounted tile re-resolves", async () => {
+    const { resolveAvatarSrc, forgetAvatarNode, subscribeAvatarNode } = await freshAvatar();
+    const { revokeObjectURL } = stubUrlApi();
+    const requested = stubFetch();
+    const c = client();
+    const id = node(0);
+
+    // A mounted tile has resolved the face and subscribes for its node. The
+    // tile keeps the decoded pixels after a revoke, so only the subscription
+    // can tell it to re-resolve.
+    await resolveAvatarSrc(c, "acme", `blob:${id}`);
+    const notified: string[] = [];
+    const unsubscribe = subscribeAvatarNode(c, "acme", id, () => notified.push(id));
+
+    // Deleting the node reaches the mounted tile...
+    forgetAvatarNode(c, "acme", id);
+    expect(notified).toHaveLength(1);
+
+    // ...and the tile that re-resolves gets a fresh fetch (a 404 in the real
+    // world) rather than a revoked URL, so it draws the tone tile.
+    const before = requested.length;
+    await resolveAvatarSrc(c, "acme", `blob:${id}`);
+    expect(requested).toHaveLength(before + 1);
+
+    // An unmounted tile has unsubscribed; a later forget of the same node no
+    // longer reaches it, so the registry does not accumulate dead callbacks.
+    unsubscribe();
+    forgetAvatarNode(c, "acme", id);
+    expect(notified).toHaveLength(1);
+
+    vi.unstubAllGlobals();
+  });
+
   it("hands a face out uncached when every cache entry is pinned", async () => {
     const { resolveAvatarSrc, retainAvatar, releaseAvatar } = await freshAvatar();
     const { revokeObjectURL } = stubUrlApi();
