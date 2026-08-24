@@ -545,6 +545,7 @@ export function SetupDialog({
             created={phase.kind === "building" ? phase.created : phase.agents.length}
             finished={phase.kind === "done"}
             fallback={phase.fallback}
+            harnessReachable={harnessReachable}
             onDone={onDone}
             onRedesign={() => onRedesign(createdIds.current)}
             onTryAgain={tryRedesign}
