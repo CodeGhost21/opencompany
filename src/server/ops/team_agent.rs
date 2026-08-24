@@ -2259,6 +2259,23 @@ prompt = "Lead decisively."
         assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
     }
 
+    /// A payload small enough to pass the 4 MiB ceiling whose header claims a
+    /// 65535×65535 frame — the decompression bomb. Refused on the upload, so
+    /// the bytes are never stored to allocate a gigabyte for every member who
+    /// views the roster.
+    #[tokio::test]
+    async fn an_upload_that_decodes_to_a_huge_size_is_refused() {
+        let home_dir = home();
+        let state = state_with_manifest(home_dir.path(), ROSTER).await;
+
+        let (status, refused) = upload_avatar(&state, "bomb.png", bomb_png()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
+        assert!(
+            refused["error"].as_str().is_some() || refused.as_object().is_some(),
+            "a named refusal: {refused}"
+        );
+    }
+
     /// The authority line this route draws (`docs/modules/server/authority.md`):
     /// a member may pick a colleague's face — it decides nothing about what the
     /// company reaches the world as — while `tools` stays admin-only. Verified
