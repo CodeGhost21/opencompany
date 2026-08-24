@@ -71,6 +71,25 @@ pub fn standing_admins(manifest_admins: &[String], bootstrap_admin: Option<&str>
     admins
 }
 
+/// The stores and company context used to issue a password.
+///
+/// Keeping these related inputs together also makes the host-side operation
+/// harder to call with the wrong stores or company.
+pub struct PasswordIssueContext<'a> {
+    /// User persistence.
+    pub users: &'a Arc<dyn UserStore>,
+    /// Session persistence.
+    pub sessions: &'a Arc<dyn crate::ports::sessions::SessionStore>,
+    /// Login-code persistence.
+    pub login_codes: &'a Arc<dyn crate::ports::login_codes::LoginCodeStore>,
+    /// Company receiving the password.
+    pub company: &'a CompanyId,
+    /// Admin addresses declared by the company manifest.
+    pub manifest_admins: &'a [String],
+    /// Optional deployment-provided standing admin.
+    pub bootstrap_admin: Option<&'a str>,
+}
+
 /// Sets `email`'s password in `company`, creating the account if the address is
 /// eligible and has none.
 ///
@@ -79,6 +98,7 @@ pub fn standing_admins(manifest_admins: &[String], bootstrap_admin: Option<&str>
 /// password gets, and the right default when the operator and the eventual
 /// holder are different people.
 pub async fn issue_password(
+    context: PasswordIssueContext<'_>,
     users: &Arc<dyn UserStore>,
     sessions: &Arc<dyn crate::ports::sessions::SessionStore>,
     login_codes: &Arc<dyn crate::ports::login_codes::LoginCodeStore>,
