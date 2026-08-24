@@ -6,6 +6,7 @@ import { listRuns, RUN_STATUS_LABEL, type RunSummary } from "@/api/runs";
 import type { LocalScope } from "@/connections/types";
 import type { CompanyFeed } from "@/hooks/use-company";
 import { readOverviewVisit, writeOverviewVisit } from "@/lib/overview-visit";
+import { chatHref } from "@/lib/run-source";
 
 interface Props {
   client: OpenCompanyClient;
