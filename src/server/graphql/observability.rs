@@ -297,5 +297,5 @@ pub(crate) async fn resolve_run(
     let Some(record) = runtime.runs().get_run(runtime.id(), &id).await? else {
         return Ok(None);
     };
-    Ok(Some(load(runtime, record).await))
+    Ok(Some(load(runtime, record).await?))
 }
