@@ -145,6 +145,16 @@ describe("stripCodeRegions", () => {
     expect(masked).not.toContain("@engineer");
     expect(masked.split("\n")).toHaveLength(text.split("\n").length);
   });
+
+  it("masks fenced blocks indented up to three spaces", () => {
+    // CommonMark renders a fence indented by 1-3 spaces as code, so an `@`
+    // inside it must be masked exactly like a column-zero fence.
+    const text = "before\n   ```\n@engineer\n   ```\nafter";
+    const masked = stripCodeRegions(text);
+    expect(masked).toHaveLength(text.length);
+    expect(masked).not.toContain("@engineer");
+    expect(masked.split("\n")).toHaveLength(text.split("\n").length);
+  });
 });
 
 describe("rankMentionables", () => {
