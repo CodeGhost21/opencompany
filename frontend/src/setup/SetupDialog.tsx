@@ -187,6 +187,18 @@ export function SetupDialog({
    * the CTA as before rather than having it silently taken away.
    */
   const [harnessReachable, setHarnessReachable] = useState(true);
+  /**
+   * Whether the operator may change where the company's model calls go.
+   *
+   * The actions the notice offers — wiring a model, restarting to pick one up —
+   * are an admin's (the Connections form and its restart control render only
+   * under management authority and the host refuses the writes for a member),
+   * so a member is told to ask an admin rather than handed a dead-end link.
+   * Defaults to `true` while the role is unread, for the same reason the
+   * reachability flag does: a host we could not ask is offered the CTA as
+   * before rather than having it silently taken away.
+   */
+  const [canManage, setCanManage] = useState(true);
   const [touched, setTouched] = useState(false);
   /**
    * Whether this run of the flow replaces the team the company already has.
