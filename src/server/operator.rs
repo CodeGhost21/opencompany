@@ -2249,7 +2249,7 @@ async fn journal_chat_replies(
                 // which is worst for exactly the person it is meant to reach:
                 // offline when the reply lands.
                 if !reply_mentions.is_empty() {
-                    notify_mentioned(runtime, id, &reply_mentions, &seq, None, desk).await;
+                    runtime.notify_mentions(id, &reply_mentions, &seq, None, desk).await;
                 }
             }
             Err(err) => tracing::warn!(
