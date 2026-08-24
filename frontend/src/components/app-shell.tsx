@@ -1522,12 +1522,29 @@ export function AppShell({
    * channel id, gated by the *thread's* loaded ids, gives the badge its read
    * path while keeping the clear honest — it still only fires once the named
    * message is actually on screen.
+   *
+   * The mention clear is not the whole of `onChannelViewed`, though. A desk or
+   * DM thread view maps to the channel that owns that same transcript, so its
+   * ordinary channel-view side effects (advancing the unread floor and the
+   * persisted read marker) are correct. The `main` view is different: `main`
+   * aliases the first desk's channel for *badging*, but its transcript is the
+   * legacy General conversation, not the desk's own — so marking that desk read
+   * would permanently un-badge unread lines the operator never saw. That view
+   * reports the mention clear only ([`threadViewAdvancesChannel`]).
    */
   const onThreadViewed = useCallback(
     (threadId: string, loadedMessageIds: ReadonlySet<string>) => {
       const channelId = chatChannelByThreadRef.current[threadId];
       if (!channelId) return;
-      onChannelViewed(channelId, false, mentionFeedVersion, undefined, null, loadedMessageIds);
+      onChannelViewed(
+        channelId,
+        false,
+        mentionFeedVersion,
+        undefined,
+        null,
+        loadedMessageIds,
+        threadViewAdvancesChannel(threadId, channelId),
+      );
     },
     [onChannelViewed, mentionFeedVersion],
   );
