@@ -8857,12 +8857,17 @@ mode = "full"
                             continue;
                         };
                         rt.grants.consume(&grant.agent, &grant.tool, &grant.args);
+                        let mut text = format!("re-issued {approval_id}");
+                        if let Some(mention) = &self.continuation_mention {
+                            text.push(' ');
+                            text.push_str(mention);
+                        }
                         responses.push(crate::ports::types::OutboundMessage {
                             message_id: None,
                             task_id: None,
                             channel: grant.agent.clone(),
                             agent: None,
-                            text: format!("re-issued {approval_id}"),
+                            text,
                             steps: Vec::new(),
                             reply_to: None,
                         });
