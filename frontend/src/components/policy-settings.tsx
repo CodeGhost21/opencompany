@@ -112,24 +112,27 @@ export function isAutonomyEscalation(
  * (`src/policy/always_approve.rs`).
  *
  * The matcher accepts more than an exact tool name: the comparison is
- * ASCII-case-insensitive, and a leading dotted segment gates the rest, so
- * `SHELL` is the wired `shell` tool and `invoice` covers `invoice.send`. The
- * "is not a tool" warning under the field must not contradict the gate it
- * describes — an entry the backend would match is a valid fence, not a
- * mistake — so the same two rules decide whether an entry counts as known.
+ * ASCII-case-insensitive (a full-Unicode fold would accept a case confusable
+ * the host's `eq_ignore_ascii_case` does not — `worKspace_write` lowercases
+ * to `workspace_write` but never gates), and a leading dotted segment gates
+ * the rest, so `SHELL` is the wired `shell` tool and `invoice` covers
+ * `invoice.send`. The "is not a tool" warning under the field must not
+ * contradict the gate it describes — an entry the backend would match is a
+ * valid fence, not a mistake — so the same two rules decide whether an entry
+ * counts as known.
  */
 export function alwaysApproveGates(entry: string, target: string): boolean {
-  const e = entry.trim().toLowerCase();
-  const t = target.trim().toLowerCase();
-  if (!e) return false;
-  if (t === e) return true;
+  const e = entry.trim();
+  const t = target.trim();
+  if (e === "") return false;
+  if (asciiEqualsIgnoreCase(t, e)) return true;
   // Leading dotted segment: `invoice` gates `invoice.send`, but a bare prefix
   // (`pay` for `payroll.export`) does not — the segment boundary is load
   // bearing, exactly as it is in the backend.
   return (
     t.length > e.length &&
     t[e.length] === "." &&
-    t.slice(0, e.length) === e
+    asciiEqualsIgnoreCase(t.slice(0, e.length), e)
   );
 }
 
