@@ -48,7 +48,6 @@ export type View =
   | "ledgers"
   | "team"
   | "workspace"
-  | "memory"
   | "approvals"
   | "workflows"
   | "pages"
