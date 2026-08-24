@@ -1356,6 +1356,7 @@ export function AppShell({
                 (threadId) => chatChannelByThread[threadId] === channelId,
               ),
             ),
+            new Set(Object.values(chatChannelByThread)),
           );
       if (clearing.length > 0) {
         // Optimistic, so the badge goes at once; the next poll reconciles.
