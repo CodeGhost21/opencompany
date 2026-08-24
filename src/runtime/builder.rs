@@ -2468,7 +2468,14 @@ impl RuntimeBuilder {
                                 serves: None,
                                 context: context.clone(),
                                 store: store.clone(),
-                                meter: Some(fs_ops.clone()),
+                                // The harness must write usage to the SELECTED
+                                // backend, not always the filesystem. The read
+                                // side (`company.usage`) reads `ops.usage` — the
+                                // selected backend — so on a non-fs store the
+                                // samples were written to disk while the console
+                                // read an empty table. Same handle the read side
+                                // resolves to (see the `usage:` field below).
+                                meter: Some(ops.usage.clone()),
                                 workspace_root: home.join("harness"),
                                 // The company's own MCP store, so the
                                 // registry tools on the belt read the same
