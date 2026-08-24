@@ -207,7 +207,8 @@ describe("changing the autonomy tier", () => {
     );
     const client = {
       scopeFor: () => "/api/v1/acme",
-      get: async () => status("supervised"),
+      get: async (path: string) =>
+        path.endsWith("/policy") ? status("supervised") : { slugs: [], unwired: [] },
       put,
       del: async () => status("supervised"),
     } as unknown as OpenCompanyClient;
