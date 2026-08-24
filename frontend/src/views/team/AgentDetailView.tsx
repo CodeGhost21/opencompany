@@ -1150,6 +1150,7 @@ function AvatarDialog({
             seed={agent.id || name}
             name={name}
             tone={toneFor(agent.id || name)}
+            disabled={busy}
             onChange={onPick}
           />
         )}
