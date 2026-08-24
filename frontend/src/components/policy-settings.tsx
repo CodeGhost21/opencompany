@@ -395,7 +395,7 @@ export function PolicySettings({ client, company }: Props) {
   const saveSpendCap = async () => {
     if (!status || saving) return;
     const cap = Number(draftSpend);
-    if (!noSpendCap && (!Number.isFinite(cap) || cap < 0)) {
+    if (!noSpendCap && (draftSpend.trim() === "" || !Number.isFinite(cap) || cap < 0)) {
       toast.error("Enter a non-negative amount, or choose no cap.");
       return;
     }
