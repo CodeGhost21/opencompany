@@ -104,6 +104,14 @@ impl crate::store::select::MemoryScopes for BoundMemory {
     ) -> Result<Vec<crate::ports::CompressedTrace>> {
         Self::archived_traces(self, company).await
     }
+
+    async fn restore_archived_traces(
+        &self,
+        company: &CompanyId,
+        traces: &[crate::ports::CompressedTrace],
+    ) -> Result<()> {
+        Self::restore_archived_traces(self, company, traces).await
+    }
 }
 
 pub use driver::{
