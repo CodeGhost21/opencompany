@@ -279,6 +279,17 @@ export function SetupDialog({
     setPhase({ kind: "asking", step: phase.step - 1 });
   }, [phase]);
 
+  /**
+   * Retry a build-out that shipped the standard team because a wired model
+   * could not be reached. The company now has that team, so the retry runs in
+   * replacing mode: the next build-out clears it before creating the designed
+   * one.
+   */
+  const tryRedesign = useCallback(() => {
+    setReplacing(true);
+    setPhase({ kind: "asking", step: 0 });
+  }, []);
+
   // The build-out: create each proposed agent in turn, revealing as we go.
   useEffect(() => {
     if (phase.kind !== "building" || building.current) return;
