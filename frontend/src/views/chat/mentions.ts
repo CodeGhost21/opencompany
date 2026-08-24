@@ -31,8 +31,8 @@ export type Mention = ChatMentionInput;
 /** One row the picker can offer. */
 export interface Mentionable {
   target: MentionTarget;
-  /** What to render, and what gets inserted after the `@`. */
-  label: string;
+  /** The person's collaboration-facing avatar reference, when chosen. */
+  avatar?: string;
   /** Every spelling that reaches this row, lowercase. */
   aliases: string[];
   /** A line of context under the label — a job title, a slug, a member count. */
