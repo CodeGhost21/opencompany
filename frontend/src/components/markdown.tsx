@@ -180,7 +180,7 @@ export function Markdown({
             // the `p` handler instead of traversing it twice; tight-list text
             // still needs to be transformed here.
             const childrenToRender = Array.isArray(content)
-              ? content.map((child, index) =>
+              ? content.map((child) =>
                   isValidElement(child) && child.type === "p"
                     ? child
                     : chipMentions(child, spans, sourceText, seen),
