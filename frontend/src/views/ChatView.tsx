@@ -838,7 +838,7 @@ export function ChatView({
       onReply?.();
     } catch (err) {
       outcome = "failed";
-      if (scopeCompany !== companyScopeRef.current) {
+      if (scopeCompany !== scopeCompanyRef.current) {
         outcome = "stale";
         if (chatId) onSendStale?.(chatId);
         return;
