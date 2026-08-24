@@ -1059,6 +1059,30 @@ mod test {
         assert_eq!(gif_animation_cost(&gif_animated((16, 16), &[])), None);
     }
 
+    /// A global color table is skipped only when the descriptor's flag says one
+    /// is present — a walker that always skipped the table it expected would
+    /// misread the first block after a table-less header, and one that never
+    /// skipped it would read the table's bytes as block kinds.
+    #[test]
+    fn gif_animation_cost_skips_a_global_color_table_when_one_is_declared() {
+        // Header + packed flags with the GCT flag (0x80) and size 0 (two
+        // entries), then the 2 × 3-byte table, then one 16×16 frame.
+        let mut v = GIF_SIGNATURE_89.to_vec();
+        v.extend_from_slice(&16u16.to_le_bytes());
+        v.extend_from_slice(&16u16.to_le_bytes());
+        v.extend_from_slice(&[0x80, 0x00, 0x00]);
+        v.extend_from_slice(&[0, 0, 0, 0, 0, 0]);
+        v.push(0x2C);
+        v.extend_from_slice(&[0, 0, 0, 0]);
+        v.extend_from_slice(&16u16.to_le_bytes());
+        v.extend_from_slice(&16u16.to_le_bytes());
+        v.push(0x00); // no local color table
+        v.push(0x02); // LZW min code size
+        v.push(0x00); // empty raster data
+        v.push(0x3B); // trailer
+        assert_eq!(gif_animation_cost(&v), Some(256));
+    }
+
     /// A GIF can hide a flood of full-canvas frames under the byte ceiling: the
     /// logical screen fits the dimension caps and a single `4096²` frame would
     /// too, but ten of them repaint ten times the decoded pixels every cycle.
