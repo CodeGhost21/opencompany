@@ -1054,6 +1054,7 @@ async fn chat_history_projects_attachments() {
                     name: "diagram.png".to_string(),
                     mime: "image/png".to_string(),
                     size: 2048,
+                    extracted_text: None,
                 }],
             },
         )

@@ -353,6 +353,21 @@ pub struct Attachment {
     pub mime: String,
     /// The stored payload's exact length in bytes, as the store computed it.
     pub size: u64,
+    /// The payload's text, extracted server-side at resolve time, capped to a
+    /// wire-safe length (issue #1682, codex review finding).
+    ///
+    /// A node id alone told a hosted or sidecar brain a file existed but gave
+    /// it nothing to act on — no device tool bridges that surface into the
+    /// workspace's binary store. This reuses the same `ingest::extract`
+    /// pipeline the memory-drop page already runs, so a PDF, DOCX, PPTX, XLSX
+    /// or plain-text attachment's actual words ride the same event the
+    /// reference does. `None` covers three cases alike: an image or other
+    /// format nothing here parses, a scanned document with no text layer, and
+    /// a payload too large to read for one chat turn — the caller cannot tell
+    /// which, and for "does the brain have something to read" it does not
+    /// need to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extracted_text: Option<String>,
 }
 
 /// An operator's resolution of a parked approval.
@@ -7566,6 +7581,7 @@ mod test {
                 name: "diagram.png".into(),
                 mime: "image/png".into(),
                 size: 2048,
+                extracted_text: None,
             }],
         };
         let json = serde_json::to_string(&carried).unwrap();
@@ -7588,5 +7604,52 @@ mod test {
             CompanyEvent::OperatorMessage { attachments, .. } => assert!(attachments.is_empty()),
             other => panic!("expected OperatorMessage, got {other:?}"),
         }
+    }
+
+    /// Codex review finding on #1682, round 2: `extracted_text` is a later
+    /// addition to `Attachment` itself, so it needs the identical
+    /// omit-when-absent / default-on-load contract `attachments` got above —
+    /// a record journaled by the first round of the fix (a reference with no
+    /// extracted text) must still load, and a `None` must not put a stray key
+    /// on the wire.
+    #[test]
+    fn attachment_extracted_text_round_trips_and_skips_when_absent() {
+        let no_text = Attachment {
+            node_id: "node-1".into(),
+            name: "photo.png".into(),
+            mime: "image/png".into(),
+            size: 2048,
+            extracted_text: None,
+        };
+        let json = serde_json::to_string(&no_text).unwrap();
+        assert!(
+            !json.contains("extractedText"),
+            "no extracted text must not appear on the wire: {json}"
+        );
+        assert_eq!(serde_json::from_str::<Attachment>(&json).unwrap(), no_text);
+
+        let with_text = Attachment {
+            node_id: "node-2".into(),
+            name: "report.pdf".into(),
+            mime: "application/pdf".into(),
+            size: 4096,
+            extracted_text: Some("Q3 revenue grew 12%.".to_string()),
+        };
+        let json = serde_json::to_string(&with_text).unwrap();
+        assert!(
+            json.contains(r#""extractedText":"Q3 revenue grew 12%.""#),
+            "{json}"
+        );
+        assert_eq!(
+            serde_json::from_str::<Attachment>(&json).unwrap(),
+            with_text
+        );
+
+        // A round 1 record (the reference alone, no `extractedText` key) still
+        // loads, defaulting to `None` — the same contract `attachments` itself
+        // got when it was added onto `OperatorMessage`.
+        let round_one = r#"{"nodeId":"node-3","name":"old.png","mime":"image/png","size":10}"#;
+        let loaded: Attachment = serde_json::from_str(round_one).unwrap();
+        assert_eq!(loaded.extracted_text, None);
     }
 }
