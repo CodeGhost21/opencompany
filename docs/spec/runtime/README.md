@@ -130,9 +130,10 @@ Supporting docs:
 - [connectors.md](connectors.md) — where the runtime runs: the four connectors
   (this computer, TinyHumans Cloud, a remote gateway, over SSH), why the choice
   is per host rather than per application, and what each one costs
-- [company-setup.md](company-setup.md) — first-run **company** setup: three
-  questions asked once, turned into a real roster of agents. Distinct from
-  [setup.md](setup.md), which configures the *instance*
+- [company-setup/overview.md](company-setup/overview.md) — first-run **company**
+  setup: three questions asked once, turned into a real roster of agents, with
+  fallback and resume flows. Distinct from [setup.md](setup.md), which
+  configures the *instance*
   - [company-setup-guarantees.md](company-setup-guarantees.md) — the four things
     the host *enforces* rather than asks a prompt for: job coverage checked
     against its own list, a tool belt asked for rather than inherited, a copy of
