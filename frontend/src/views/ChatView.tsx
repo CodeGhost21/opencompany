@@ -804,6 +804,7 @@ export function ChatView({
     } catch (err) {
       outcome = "failed";
       if (scopeCompany !== companyScopeRef.current) {
+        outcome = "stale";
         if (chatId) onSendStale?.(chatId);
         return;
       }
