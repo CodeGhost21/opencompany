@@ -3629,6 +3629,56 @@ mod tests {
         );
     }
 
+    /// Choosing or clearing a face writes an `AgentOverride` row whose only set
+    /// field is `avatar` (a teammate with no other override). The fingerprints
+    /// hash what a teammate *is*, never its face, so such a row must not move
+    /// either fingerprint — otherwise a purely cosmetic change would rebuild the
+    /// roster and drop every live agent session (issue #1676 review note).
+    #[test]
+    fn overlay_fingerprint_ignores_an_avatar_only_edit() {
+        use crate::ports::types::AgentOverride;
+        let avatar_only = |avatar: &str| {
+            vec![AgentOverride {
+                agent_id: "ceo".into(),
+                avatar: Some(avatar.to_string()),
+                ..Default::default()
+            }]
+        };
+        let none: Vec<AgentOverride> = Vec::new();
+
+        // Choosing a face for a teammate with no other override writes a row
+        // whose only set field is `avatar`. That is not a persona change — the
+        // harness reads nothing from the face — so it must not move the
+        // fingerprint.
+        assert_eq!(
+            overlay_fingerprint(&[], &none, &[]),
+            overlay_fingerprint(&[], &avatar_only("tiny:robot"), &[]),
+            "an avatar-only row must not move the fingerprint"
+        );
+        // Clearing the face drops the row entirely (`clear_agent_avatar` →
+        // `retain_nonempty_agent_edits`), which must not move it either.
+        assert_eq!(
+            overlay_fingerprint(&[], &avatar_only("tiny:robot"), &[]),
+            overlay_fingerprint(&[], &none, &[]),
+            "clearing an avatar-only row must not move the fingerprint"
+        );
+        // The filter is narrow: a real persona edit still moves the
+        // fingerprint, even when the same teammate also carries a face.
+        let edited = || {
+            vec![AgentOverride {
+                agent_id: "ceo".into(),
+                role: Some("Chief".into()),
+                avatar: Some("tiny:robot".into()),
+                ..Default::default()
+            }]
+        };
+        assert_ne!(
+            overlay_fingerprint(&[], &none, &[]),
+            overlay_fingerprint(&[], &edited(), &[]),
+            "a real persona edit must still move the fingerprint"
+        );
+    }
+
     /// A removal has to move the same axis: a retired teammate left in a cached
     /// roster would keep taking turns and keep receiving delegations after the
     /// console said it was gone — the sharpest form of the staleness this axis
