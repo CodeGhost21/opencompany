@@ -436,7 +436,10 @@ function payloadLead(a: ApprovalSummary): string | null {
   // "command:" prefix on every shell card is noise); labelled when it is not,
   // because an unmapped tool's argument names vary and the name is then the
   // distinguishing bit. See the doc comment above for both halves.
-  const firstLead = `${first.label}: ${first.value}`;
+  const firstLead =
+    first.label === PAYLOAD_KEY_ORDER[a.kind]?.[0]
+      ? first.value
+      : `${first.label}: ${first.value}`;
   const parts = [
     firstLead,
     ...rest.map((line) => `${line.label}: ${line.value}`),
