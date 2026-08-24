@@ -67,6 +67,7 @@ impl Brain for EchoBrain {
                     text,
                     steps: Vec::new(),
                     reply_to,
+                    mentions: Vec::new(),
                 });
             }
         }
