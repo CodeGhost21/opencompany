@@ -1620,18 +1620,7 @@ impl AgentRunner for HarnessAgentRunner {
 
 /// The snake_case wire word for a step failure, matching how it serializes.
 fn failure_word(failure: crate::ports::types::TurnStepFailure) -> &'static str {
-    use crate::ports::types::TurnStepFailure as F;
-    match failure {
-        F::Declined => "declined",
-        F::BlockedByPolicy => "blocked_by_policy",
-        F::Unauthorized => "unauthorized",
-        F::MissingPermission => "missing_permission",
-        F::MissingApp => "missing_app",
-        F::NotFound => "not_found",
-        F::Timeout => "timeout",
-        F::Unavailable => "unavailable",
-        F::Failed => "failed",
-    }
+    failure.wire_word()
 }
 
 /// Folds a turn's scrubbed [`TurnStep`]s into engine transcript entries.
