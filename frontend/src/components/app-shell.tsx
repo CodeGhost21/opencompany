@@ -593,7 +593,13 @@ export function AppShell({
   // refreshes its run history live. Same shape as `taskEventTick` — a counter,
   // not the payload, so the view owns what it refetches.
   const [workflowRunTick, setWorkflowRunTick] = useState(0);
-  /** Bumped by a live turn frame that belongs to no chat — see `onTurnEvent`. */
+  /**
+   * Bumped by the events that actually signal a workflow node's agent is
+   * working — `workflow_run_started`, `workflow_node_started` and
+   * `workflow_node_finished`. Node turns stream no live turn frames
+   * (`run_background` publishes nothing), so this tick is fed from the node
+   * boundaries rather than from `onTurnEvent`; see `onWorkflowRunEvent`.
+   */
   const [backgroundTurnTick, setBackgroundTurnTick] = useState(0);
   // Issue #384: bumped on every `workflow_created` / `workflow_updated` /
   // `workflow_deleted`, and since issue #276 on `workflow_enabled_changed` too,
