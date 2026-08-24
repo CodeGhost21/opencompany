@@ -890,6 +890,7 @@ function RunFilesSection({
   useEffect(() => {
     requested.current = false;
     setFiles(null);
+    setTruncated(false);
     setError(false);
     setLoading(false);
     if (detailsRef.current?.open) {
