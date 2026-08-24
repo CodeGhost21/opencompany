@@ -1,7 +1,12 @@
 import { describe, expect, it } from "vitest";
 
 import type { NotificationDto } from "@/api/types";
-import { mentionCountsByChannel, mentionsToClear } from "@/lib/mention-badge";
+import {
+  mentionCountsByChannel,
+  mentionsToClear,
+  renderedChannelIdForContext,
+  threadsToReReadForMentions,
+} from "@/lib/mention-badge";
 
 /**
  * The mention badge is the durable half of the feature: the SSE feed only
