@@ -369,16 +369,12 @@ Relevant configuration:
 - `OPENCOMPANY_PUBLIC_URL` — public host base embedded in published Agent Card
   endpoints. When unset, the endpoint falls back to `http://{bind}`.
 
-## Inbound channel webhooks (`hooks.rs`)
+## Inbound channel webhooks
 
-`POST /hooks/{company}/telegram` is the **optional hosted fast-path** for
-Telegram inbound, not the default. Telegram can only deliver to it from the
-public internet, so it is surfaced only when `OPENCOMPANY_PUBLIC_URL` is a
-public **https** URL (`AppConfig::public_webhook_base_url`); otherwise
-`GET …/channels/telegram` reports `webhookUrl: null` and
-`POST …/channels/telegram/webhook` is refused with `400`, rather than handing an
-operator a `http://127.0.0.1:<port>/hooks/…` URL that can never receive a
-delivery. Everywhere else — local and most self-hosted deployments — inbound
-arrives over `getUpdates` long-polling
-([`runtime::telegram_poller`](../runtime/README.md#background-listeners)) and a
-bot token is the whole setup: no webhook secret, no `setWebhook`, no public URL.
+There are none. `POST /hooks/{company}/telegram` was the hosted fast-path for
+Telegram inbound; it left with the channel itself, along with the
+`getUpdates` poller behind it. What reaches a company from outside now is mail
+(IMAP in, SMTP out) and the console's own write plane.
+
+The Chargebee webhook (`hooks_chargebee.rs`) is unrelated and stays: it is a
+billing callback, not a messaging channel.

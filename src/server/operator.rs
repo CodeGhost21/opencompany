@@ -4100,6 +4100,7 @@ mode = "full"
             store: Arc::new(FsCompanyStore::new(home.to_path_buf())),
             meter: Some(Arc::new(FsOps::new(home.to_path_buf()))),
             workspace_root: home.to_path_buf(),
+            mcp_home: None,
             workspace_git_enabled: false,
             audit_root: home.to_path_buf(),
             model_override: None,
@@ -4138,9 +4139,6 @@ mode = "full"
             search: None,
             tenant_search: None,
             workspace: None,
-            repos: None,
-            repo_bindings: Vec::new(),
-            checkouts: crate::harness::repo::CheckoutLedger::default(),
         };
         let brain = HarnessBrain::new(Arc::new(HarnessPool::new()), deps, record);
 

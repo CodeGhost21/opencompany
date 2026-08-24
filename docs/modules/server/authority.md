@@ -28,8 +28,7 @@ the world as, and which third-party accounts its agents act through:
 | `inference` | `PUT …/inference`, `DELETE …/inference`, `POST …/inference/restart` |
 | `smtp` | `PUT …/smtp`, `POST …/smtp/test` (the caller names the recipient) |
 | `domain` | `PUT …/domain` |
-| `channels` | `PUT`/`DELETE …/channels/telegram`, `POST …/channels/telegram/webhook` |
-| `mcp` | `POST …/mcp/servers`, `PUT`/`DELETE …/mcp/servers/{name}`, `POST …/mcp/servers/{name}/oauth/start` |
+| `mcp` | `POST …/mcp/servers`, `PUT`/`DELETE …/mcp/servers/{name}`, `POST …/mcp/servers/{name}/oauth/start`, `PUT …/mcp/config` |
 
 Reads on those same surfaces stay open to any member: they carry a tier name and
 non-secret routing, never a credential, and knowing *that* Gmail is connected is
