@@ -935,7 +935,7 @@ impl DeepTraceStore for FsOps {
                 None => runs.clear(),
             }
         }
-        Ok(removed as u64)
+        Ok(removed)
     }
 }
 
