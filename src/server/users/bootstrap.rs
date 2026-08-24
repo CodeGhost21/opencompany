@@ -109,6 +109,14 @@ pub async fn issue_password(
     plaintext: &str,
     require_change: bool,
 ) -> Result<Issued, OpenCompanyError> {
+    let PasswordIssueContext {
+        users,
+        sessions,
+        login_codes,
+        company,
+        manifest_admins,
+        bootstrap_admin,
+    } = context;
     let email = normalize_email(email);
     if email.is_empty() {
         return Err(OpenCompanyError::InvalidRequest(
