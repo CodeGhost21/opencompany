@@ -68,6 +68,88 @@ const KIND_ICONS: Record<string, LucideIcon> = {
 };
 
 /**
+ * The host's consequence group in the operator's vocabulary (#1426).
+ *
+ * `group` is derived from the tool call and its arguments by the host, which
+ * is the only layer that can know the actual consequence. `other` is the
+ * internal catch-all, while an absent group means an older host: both stay
+ * deliberately unmarked so the badge and tint retain their signal.
+ *
+ * The tints come from the identity palette (`--tone-1` … `--tone-5`), not from
+ * `--status-*`. A consequence group is a category, which is what that palette
+ * exists for — `docs/brand/README.md` ("Identity is not status") reserves the
+ * five status hues for run state and says not to reuse one for anything that
+ * is not that status. These badges did: a pending hire approval was painted
+ * the green that means "finished cleanly", and spend the red that means
+ * "failed". The identity palette deliberately holds no amber, green or red,
+ * so a queue of approvals can no longer read as a queue of run outcomes.
+ *
+ * Six groups over five tones, so `spend` and `hire` share tone 4 — the two
+ * that most often move the same money. Sharing is safe here and precedented
+ * (`lib/team.ts`, `lib/skills.ts` both fold more names onto these five): the
+ * badge always carries its own icon and label, so colour is never the only
+ * carrier of the distinction, which is the rule the brand doc actually sets.
+ */
+const APPROVAL_CONSEQUENCES = {
+  spend: { label: "Spends money", iconClass: "bg-tone-4/15 text-tone-4-text" },
+  send: { label: "Leaves the company", iconClass: "bg-tone-2/15 text-tone-2-text" },
+  sign: { label: "Makes a commitment", iconClass: "bg-tone-1/15 text-tone-1-text" },
+  // Not "Goes public". The group spans genuinely external publishing —
+  // `repo_publish`'s push to the real remote, `hosting_launch_site`,
+  // `hosting_add_domain` — *and* `publish_artifact`, which writes only into the
+  // company's own workspace and artifact chain and sends nothing anywhere. A
+  // card reading "Goes public" over that hand-off is the misleading label
+  // `language.ts` already refuses to print for the same tool. "Publishes work"
+  // is true under either reading: it is the step that makes finished work
+  // visible past the agent's sandbox, whoever is on the other side of it.
+  publish: { label: "Publishes work", iconClass: "bg-tone-3/15 text-tone-3-text" },
+  // `hire` and `identity` are separate rows in the taxonomy
+  // (`docs/spec/company-brain/approvals.md`) and had been sharing one label,
+  // which hid exactly the distinction this change exists to draw. `hire` is an
+  // outbound engagement with another company or the firing of a vendor;
+  // `identity` is handle registration and renewal, key rotation, delegated
+  // signer mint/expand and `composio_authorize` — the company's own name and
+  // credentials, not who it does business with.
+  hire: { label: "Engages or drops a counterparty", iconClass: "bg-tone-4/15 text-tone-4-text" },
+  identity: { label: "Changes its identity or keys", iconClass: "bg-tone-5/15 text-tone-5-text" },
+} as const;
+
+type ApprovalConsequence = (typeof APPROVAL_CONSEQUENCES)[keyof typeof APPROVAL_CONSEQUENCES];
+
+/** The marked consequence, or nothing for internal and old-host approvals. */
+export function approvalConsequence(group: ApprovalSummary["group"]): ApprovalConsequence | null {
+  if (group == null || group === "other") return null;
+  return APPROVAL_CONSEQUENCES[group];
+}
+
+/**
+ * Every distinct consequence a batch of approvals carries, in the order the
+ * batch first raises each one.
+ *
+ * A turn that parks several calls renders as one card with one Approve, so the
+ * warning has to survive the consolidation: a batch of three outbound sends
+ * still leaves the company, and a mixed batch spends money *and* leaves it.
+ * Returning the distinct set rather than a single verdict is what lets the
+ * headline stay honest either way — one badge when the batch agrees with
+ * itself, one per consequence when it does not.
+ *
+ * Deduplicated by label, not by group: `hire` and `identity` are separate
+ * groups, while `spend` and `hire` share a tint, so the label is the thing an
+ * operator actually reads twice.
+ */
+export function batchConsequences(approvals: ApprovalSummary[]): ApprovalConsequence[] {
+  const seen = new Set<string>();
+  const out: ApprovalConsequence[] = [];
+  for (const a of approvals) {
+    const consequence = approvalConsequence(a.group);
+    if (!consequence || seen.has(consequence.label)) continue;
+    seen.add(consequence.label);
+    out.push(consequence);
+  }
+  return out;
+}
+
+/**
  * How much of a payload is shown before it is clamped. Past either bound the
  * block collapses behind a "Show everything" toggle — at a line boundary, so
  * a queue of approvals stays scannable without clipping a line's glyphs.
@@ -92,16 +174,29 @@ export function ApprovalHeadline({
   actions?: React.ReactNode;
 }) {
   const Icon = approvalIcon(a.kind);
+  const consequence = approvalConsequence(a.group);
   return (
     <div className="flex flex-wrap items-start gap-4">
-      <div className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-muted text-foreground">
+      <div
+        className={cn(
+          "flex size-10 shrink-0 items-center justify-center rounded-lg",
+          consequence?.iconClass ?? "bg-muted text-foreground",
+        )}
+      >
         <Icon className="size-5" />
       </div>
       {/* 12rem floor, capped at the card's own width: a chat column can be
           narrower than the icon plus a 12rem title, and a hard floor would
           overflow the card there instead of wrapping. */}
       <div className="min-w-[min(12rem,100%)] flex-1">
-        <p className="font-medium">{approvalAction(a)}</p>
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+          <p className="font-medium">{approvalAction(a)}</p>
+          {consequence && (
+            <span className="rounded-full bg-muted px-2 py-0.5 text-2xs font-medium text-foreground">
+              {consequence.label}
+            </span>
+          )}
+        </div>
         {a.amount_usd != null && (
           <p className="text-xs font-medium text-muted-foreground">{money(a.amount_usd)}</p>
         )}
