@@ -28,8 +28,8 @@ for (const viewport of VIEWPORTS) {
     await page.goto("/#/overview");
 
     const legend = page.getByTestId("kg-legend");
-    const previous = page.getByRole("button", { name: "Previous department" });
-    const next = page.getByRole("button", { name: "Next department" });
+    const previous = page.getByRole("button", { name: "Previous desk" });
+    const next = page.getByRole("button", { name: "Next desk" });
     await expect(legend).toBeVisible();
     await expect(previous).toBeVisible();
     await expect(next).toBeVisible();
