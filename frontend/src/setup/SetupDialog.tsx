@@ -106,6 +106,7 @@ export function SetupDialog({
   onDone,
   onRedesign,
   onRetry,
+  onReplacementComplete,
 }: {
   open: boolean;
   client: OpenCompanyClient;
