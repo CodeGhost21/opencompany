@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   ArrowUp,
   AtSign,
@@ -17,6 +17,8 @@ interface Props {
   placeholder: string;
   disabled?: boolean;
   onSend: (text: string, intent?: MessageIntent) => void;
+  /** A new revision replaces the draft and focuses the composer. */
+  prefill?: { text: string; revision: number };
   /**
    * Called as the box is typed in, so the company can show a typing
    * indicator.
@@ -67,6 +69,7 @@ export function MessageComposer({
   placeholder,
   disabled,
   onSend,
+  prefill,
   compact,
   deliverableChoice,
   onTyping,
@@ -83,6 +86,21 @@ export function MessageComposer({
   // dock on four buttons most lines never use.
   const [formatting, setFormatting] = useState(false);
   const input = useRef<HTMLTextAreaElement>(null);
+
+  // A first-run card lives above the timeline, outside this component. The
+  // revision lets it request the same prompt more than once after an operator
+  // edits or clears it; comparing text alone would make the second click inert.
+  useEffect(() => {
+    if (!prefill) return;
+    setDraft(prefill.text);
+    // The prefill replaces the draft wholesale, so it must not inherit the
+    // purpose of the line it replaced: a stale "chat" would withhold the
+    // brief's task and a stale "workflow" would mint a repeating workflow out
+    // of what is a one-off request. "Give the team a brief" is always a task,
+    // so pin the intent to "once".
+    setIntent("once");
+    input.current?.focus();
+  }, [prefill]);
 
   function send() {
     const text = draft.trim();
@@ -176,17 +194,33 @@ export function MessageComposer({
                   // "Just chatting" leads, because it is the position that
                   // withholds: the operator reaches for it to stop something
                   // happening, and a control you press to prevent an action
+                  // "Just chatting" leads, because it is the position that
+                  // withholds: the operator reaches for it to stop something
+                  // happening, and a control you press to prevent an action
                   // belongs before the ones that cause it. None is pre-pressed:
                   // an operator has to state which outcome they want.
-                  { value: "chat", label: "Just chatting" },
-                  { value: "once", label: "Do it once" },
-                  { value: "workflow", label: "Build me the workflow" },
+                  {
+                    value: "chat",
+                    label: "Just chatting",
+                    hint: "Chat without automatically creating a task.",
+                  },
+                  {
+                    value: "once",
+                    label: "Do it once",
+                    hint: "Ask the team to do this once.",
+                  },
+                  {
+                    value: "workflow",
+                    label: "Build me the workflow",
+                    hint: "Turn this into a repeating workflow.",
+                  },
                 ] as const
               ).map((option) => (
                 <button
                   key={option.value}
                   type="button"
                   aria-pressed={intent === option.value}
+                  title={option.hint}
                   onClick={() => setIntent(option.value)}
                   data-testid={`composer-deliverable-${option.value}`}
                   className={cn(
@@ -241,7 +275,8 @@ export function MessageComposer({
       {!compact && (
         <p className="mt-1.5 px-1 text-2xs text-muted-foreground">
           <kbd className="font-sans font-medium">Enter</kbd> to send ·{" "}
-          <kbd className="font-sans font-medium">Shift+Enter</kbd> for a new line
+          <kbd className="font-sans font-medium">Shift+Enter</kbd> for a new
+          line
         </p>
       )}
     </div>
