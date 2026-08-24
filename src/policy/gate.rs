@@ -1015,8 +1015,11 @@ mod test {
 
         let mut checked = 0;
         for mode in crate::company::POLICY_MODES {
+            // A fresh snapshot whose mode is the probed word: `mode_decision`
+            // takes the `Policy` explicitly, so the fail-safe arm stays
+            // reachable without building a gate for every word.
             assert!(
-                gate.mode_decision(mode, &probe).is_some(),
+                ManifestApprovalGate::mode_decision(&policy(mode, None), mode, &probe).is_some(),
                 "`{mode}` is a selectable tier but falls into the fail-safe \
                  catch-all, so it silently behaves like `readonly`"
             );
@@ -1030,7 +1033,12 @@ mod test {
 
         // The catch-all still exists, and still fails safe, for a word that is
         // not a tier at all.
-        assert!(gate.mode_decision("moderately", &probe).is_none());
+        assert!(ManifestApprovalGate::mode_decision(
+            &policy("moderately", None),
+            "moderately",
+            &probe
+        )
+        .is_none());
         let unknown = ManifestApprovalGate::new(policy("moderately", None));
         assert_eq!(
             decide(&unknown, &probe).await,
