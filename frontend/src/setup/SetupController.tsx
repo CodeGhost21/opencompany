@@ -228,9 +228,12 @@ export function SetupController({
   // an effect keyed on the route. The roster is re-read on arrival rather than
   // trusted from state captured before the navigation: another tab or colleague
   // may have staffed the company in the meantime, and a return must never open
-  // setup over a team that already exists. The debt is cleared only when the
-  // return is actually handled — a roster read that fails transiently keeps it,
-  // so a later navigation or reload can retry the resume.
+  // setup over a team that already exists. The resume debt is cleared only when
+  // the return is actually handled — a roster read that fails transiently keeps
+  // it, so a later navigation or reload can retry the resume. The redesign debt
+  // is cleared only when the redesign resolves or is explicitly declined, not on
+  // the return: its whole point is to survive a reload between the reopen and
+  // the replacement build-out.
   useEffect(() => {
     // A return handled while the company is switching is a return handled for a
     // company the controller no longer renders. The listener is removed on the
