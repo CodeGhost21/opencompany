@@ -1447,11 +1447,12 @@ mod test {
     #[test]
     fn apng_animation_cost_counts_the_canvas_and_every_fctl_frame() {
         assert_eq!(
-            apng_animation_cost(&apng_animated((100, 100), &[(100, 100), (50, 50)])),
-            Ok(Some(22_500))
+            apng_animation_cost(&apng_animated((100, 100), &[(100, 100), (50, 50)]))
+                .unwrap(),
+            Some(22_500)
         );
         // A still PNG carries no acTL, so there is nothing animated to count.
-        assert_eq!(apng_animation_cost(&png(16, 16)), Ok(None));
+        assert_eq!(apng_animation_cost(&png(16, 16)).unwrap(), None);
     }
 
     /// A valid-looking animation whose stream is truncated after frames have
