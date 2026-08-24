@@ -55,7 +55,7 @@ import {
   type WorkspaceFile,
   type WorkspaceOrigin,
 } from "@/api/workspace";
-import { forgetAvatarNode } from "@/lib/avatar";
+import { cachedAvatarNodeIds, forgetAvatarNode } from "@/lib/avatar";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import {
   AlertDialog,
