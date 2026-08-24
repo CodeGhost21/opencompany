@@ -77,11 +77,15 @@ the card parked for a one-time denial instead.
 
 Standing approvals and denials are mutually exclusive for a scope. When a new
 standing policy is minted, any live opposite-polarity policy whose subject and
-tool match and whose recorded scope admits the new scope is journaled as
+tool match and whose recorded scope overlaps the new scope is journaled as
 revoked before it is removed from the live set. Thus the newest operator
 decision wins, while policies for different hosts or other non-overlapping
-scopes coexist. A wildcard legacy policy (scope `None`) overlaps every new
-scope and is superseded by the newer decision.
+scopes coexist. Overlap is symmetric: a wildcard policy (scope `None`) shadows
+every policy for the same tool in either direction. A wildcard legacy policy
+is superseded by any newer scoped decision, and a wildcard **new** policy
+supersedes every older scoped one — the newest decision is the whole standing
+contract for that tool, rather than leaving the older scoped policy
+listed-but-inert until the wildcard expires and resurrects it.
 
 Expiry is enforced at **redemption**, under the same lock as the match, and also
 swept on the scheduler's maintenance tick. The sweep is housekeeping and an
