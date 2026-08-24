@@ -1273,9 +1273,6 @@ export function AppShell({
    * feed. A ref is how both hold: the callback stays stable and still sees the
    * latest value, instead of capturing the empty array it was created with.
    */
-  const mentionFeedRef = useRef(mentionFeed);
-  mentionFeedRef.current = mentionFeed;
-
   const onChannelViewed = useCallback(
     (channelId: string, historyPending: boolean) => {
       activeChatChannelRef.current = channelId;
