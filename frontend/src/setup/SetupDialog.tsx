@@ -320,6 +320,7 @@ export function SetupDialog({
           const roster = await client.listTeam(company);
           for (const member of staffedTeam(roster)) {
             if (cancelled) return;
+            if (redesignRoster.current && !redesignRoster.current.has(member.id)) continue;
             await client.removeTeamMember(member.id, company);
           }
         } catch {
