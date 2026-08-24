@@ -129,13 +129,19 @@ impl CompanyGql {
     /// `workflowRunId` is the join that had no answer before agent nodes minted
     /// rows: a node's turn has neither a card nor a conversation, so nothing
     /// could ask what a workflow run's agents did.
+    ///
+    /// The unredacted half of each step is **role-gated**: a member sees the
+    /// scrubbed trace, and only a principal who may read sensitive contents sees
+    /// the raw reasoning, arguments and output (`approval_visibility`).
     async fn agent_runs(
         &self,
+        ctx: &Context<'_>,
         task_id: Option<ID>,
         workflow_run_id: Option<ID>,
         #[graphql(default = 50)] limit: i32,
     ) -> async_graphql::Result<Vec<observability::AgentRunGql>> {
         observability::resolve_runs(
+            ctx,
             &self.runtime,
             task_id.map(|id| id.0),
             workflow_run_id.map(|id| id.0),
@@ -145,8 +151,14 @@ impl CompanyGql {
     }
 
     /// One attempt by id, with its step trace; null when absent.
-    async fn agent_run(&self, id: ID) -> async_graphql::Result<Option<observability::AgentRunGql>> {
-        observability::resolve_run(&self.runtime, id.0).await
+    ///
+    /// The unredacted half is role-gated exactly as on [`agent_runs`](Self::agent_runs).
+    async fn agent_run(
+        &self,
+        ctx: &Context<'_>,
+        id: ID,
+    ) -> async_graphql::Result<Option<observability::AgentRunGql>> {
+        observability::resolve_run(ctx, &self.runtime, id.0).await
     }
 
     /// The company's installed skills.
