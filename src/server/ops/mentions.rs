@@ -220,6 +220,7 @@ async fn list_mentionables(company: ScopedCompany) -> Result<Json<MentionablesDt
         .map(|(u, slug)| MentionablePersonDto {
             id: u.id.clone(),
             label: user_label(u),
+            avatar: u.avatar.clone(),
             slug,
         })
         .collect();
