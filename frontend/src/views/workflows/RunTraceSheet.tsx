@@ -107,7 +107,7 @@ export function RunTraceSheet({
   const nodeResults = useMemo(
     () =>
       output && output.runId === runId && output.record
-        ? parseRunNodes(output.record.nodes, null)
+        ? parseRunNodes({ nodes: output.record.nodes }, null)
         : null,
     [output, runId],
   );

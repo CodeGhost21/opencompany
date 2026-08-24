@@ -10,7 +10,7 @@
 // filtering below are client-side over that one bounded page, not a new
 // request per interaction.
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { ArrowDown, ArrowUp, ArrowUpDown, ListFilter } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
@@ -159,8 +159,6 @@ export function RunTracesList({
     () => new Map(workflows.map((w) => [w.id, w.name])),
     [workflows],
   );
-  const now = useRunningClock(runs.some(isRunning));
-
   const [sortKey, setSortKey] = useState<SortKey>("startedAt");
   const [sortDir, setSortDir] = useState<SortDir>("desc");
   const [timeRange, setTimeRange] = useState<string>("all");
@@ -196,6 +194,11 @@ export function RunTracesList({
   }, [runs, nameById]);
 
   const rangeMs = TIME_RANGES.find((r) => r.value === timeRange)?.ms ?? null;
+  const now = useRunningClock(runs.some(isRunning) || rangeMs !== null);
+
+  useEffect(() => {
+    setWorkflowFilter(new Set());
+  }, [workflows]);
 
   const filtered = useMemo(
     () => runs.filter((run) => runMatchesFilters(run, { now, rangeMs, workflowFilter, verdictFilter })),
@@ -312,9 +315,11 @@ function RunTraceHeader({
           type="button"
           onClick={() => onSort(key)}
           data-testid={`workflow-run-traces-sort-${key}`}
-          aria-label={`Sort by ${label}${
-            sortKey === key ? `, ${sortDir === "asc" ? "ascending" : "descending"}` : ""
-          }`}
+          aria-label={
+            sortKey === key
+              ? `${label}, sorted ${sortDir === "asc" ? "ascending" : "descending"}. Reverse the order.`
+              : `${label}, not sorted. Sort by ${label}.`
+          }
           className={`flex items-center gap-1 text-2xs font-medium text-muted-foreground hover:text-foreground ${
             align === "right" ? "justify-end" : ""
           }`}

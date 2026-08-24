@@ -1223,6 +1223,11 @@ export function WorkflowsView({
     };
   }, [client, company, detailOpen, runsTick, runEventTick]);
 
+  useEffect(() => {
+    if (detailOpen || !indexRuns.some((run) => run.running)) return;
+    return startVisiblePolling(() => setRunsTick((n) => n + 1), 2_000);
+  }, [detailOpen, indexRuns]);
+
   // A company switch invalidates the whole page — another company's runs must
   // never be folded onto this one's cards, and `indexRunsLoaded` has to go back
   // to false so the cards say "Loading runs…" rather than "No recent runs"
@@ -1230,6 +1235,7 @@ export function WorkflowsView({
   useEffect(() => {
     setIndexRuns([]);
     setIndexRunsLoaded(false);
+    setTraceRun(null);
     // Issue #1697: the open transcript names a run of the company being
     // left. Left up, its header resolves `workflowId` against the NEW
     // company's workflows — ids are not unique across companies — and its
