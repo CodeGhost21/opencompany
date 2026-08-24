@@ -642,8 +642,7 @@ export function PolicySettings({ client, company }: Props) {
                         {status.autoApproveUnderUsd === null
                           ? "Today every spend asks first."
                           : `Today spend under $${status.autoApproveUnderUsd} asks nothing.`}{" "}
-                        Raising the cap to ${pendingCapRaise} lets everything up
-                        to it pass without asking.
+                        {`Raising the cap to ${pendingCapRaise} lets everything up to it pass without asking.`}
                       </>
                     )}
                   </AlertDialogDescription>
