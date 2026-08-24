@@ -2032,6 +2032,14 @@ impl CompanyRuntime {
     /// `desk` (the console's channel-id space), for the journaled message at
     /// `message_seq`.
     ///
+    /// **One row, many recipients** — not one row each. Read state is already
+    /// per `(company, user, notification)`, so a single row carrying an
+    /// audience gives every recipient independent read state for free, and the
+    /// feed does not grow by the size of the room every time somebody types
+    /// `@everyone`. Teammates produce no notification: an agent has no inbox to
+    /// badge and no person to interrupt; a mention of one is already handled by
+    /// routing.
+    ///
     /// Shared by the operator `/chat` path and the approval-continuation path,
     /// so an `@user` an agent types back badges and notifies whoever it names
     /// whichever journaling surface wrote the reply. Without this, a
