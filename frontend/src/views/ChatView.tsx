@@ -694,6 +694,9 @@ export function ChatView({
     return map;
   }, [messages]);
 
+  /** All loaded message ids in this channel, for the mention-clearing gate. */
+  const loadedMessageIds = useMemo(() => new Set(messages.map((m) => m.id)), [messages]);
+
   /**
    * The approvals raised in the channel on screen (#379).
    *
