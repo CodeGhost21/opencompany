@@ -48,6 +48,7 @@ export function ChannelRail({
   sections,
   activeId,
   unread,
+  mentions,
   onSelect,
   collapsed = false,
   onExpand,
