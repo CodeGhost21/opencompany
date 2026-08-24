@@ -549,7 +549,7 @@ async fn mint_session(
             user: me_result(company, user),
             session: Some(session),
         })
-        .into_response().into());
+        .into_response());
     }
 
     let insecure = !state.config().host_base_url().starts_with("https://");

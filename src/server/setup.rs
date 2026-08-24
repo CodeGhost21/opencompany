@@ -1293,10 +1293,9 @@ async fn propose_roster(
             crate::desktop::preset(id)
                 .map(|preset| preset.name)
                 .ok_or_else(|| {
-                    ApiError::from(OpenCompanyError::InvalidRequest(format!(
+                    OpenCompanyError::InvalidRequest(format!(
                         "unknown company template `{id}`"
-                    )))
-                    .into_response()
+                    ))
                 })
         })
         .transpose()?;
