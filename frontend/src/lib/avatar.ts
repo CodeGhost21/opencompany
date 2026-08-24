@@ -158,14 +158,24 @@ const blobUrlValues = new Map<string, string>();
  */
 const MAX_BLOB_URLS = 64;
 
-/** Drops the oldest entry, revoking its object URL once it has resolved. */
+/**
+ * Drops the oldest *resolved* entry, revoking its object URL.
+ *
+ * An entry still in flight is deliberately skipped: it pins no blob yet, so
+ * evicting it would save nothing and would throw away a fetch a mounted tile
+ * is waiting on. The pending set is bounded by how many faces a single screen
+ * can mount at once; every one of them lands in `blobUrlValues` on success,
+ * which is where the cap actually bites.
+ */
 function evictOldestBlobUrl() {
-  const oldest = blobUrls.keys().next().value;
-  if (oldest === undefined) return;
-  const url = blobUrlValues.get(oldest);
-  if (url) URL.revokeObjectURL(url);
-  blobUrlValues.delete(oldest);
-  blobUrls.delete(oldest);
+  for (const key of blobUrls.keys()) {
+    const url = blobUrlValues.get(key);
+    if (url === undefined) continue; // still in flight — nothing to revoke
+    URL.revokeObjectURL(url);
+    blobUrlValues.delete(key);
+    blobUrls.delete(key);
+    return;
+  }
 }
 
 /**
