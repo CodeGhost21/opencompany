@@ -343,7 +343,12 @@ export function MessageComposer({
       }
       if (e.key === "Enter" || e.key === "Tab") {
         e.preventDefault();
-        pick(rows[activeRow]);
+        const entry = rows[activeRow];
+        // `rows` is non-empty here by `pickerOpen`, but a render between this
+        // keydown and the picker closing can shrink the list, leaving
+        // `activeRow` past its end. Picking `undefined` would throw inside
+        // `insertMention`, so resolve the row and guard before calling.
+        if (entry) pick(entry);
         return;
       }
       if (e.key === "Escape") {
