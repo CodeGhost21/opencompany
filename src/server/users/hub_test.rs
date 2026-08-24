@@ -234,7 +234,9 @@ async fn a_setup_handoff_asks_the_hub_to_return_to_the_setup_destination() {
     let start = body["providers"][0]["startUrl"].as_str().unwrap();
 
     assert!(
-        start.ends_with("redirectUri=http%3A%2F%2F127.0.0.1%3A8080%2F%3Fcompany%3Dacme%26from%3Dsetup"),
+        start.ends_with(
+            "redirectUri=http%3A%2F%2F127.0.0.1%3A8080%2F%3Fcompany%3Dacme%26from%3Dsetup"
+        ),
         "the redirect must carry the setup destination: {start}"
     );
 }

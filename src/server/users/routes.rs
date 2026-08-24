@@ -773,7 +773,9 @@ fn redirect_fragment(redirect: &str) -> Option<String> {
 /// than refused, exactly like [`redirect_fragment`].
 fn redirect_from(from: &str) -> Option<&str> {
     let safe = from.len() <= 32
-        && from.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'));
+        && from
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'));
     safe.then_some(from)
 }
 
