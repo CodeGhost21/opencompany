@@ -114,7 +114,6 @@ fn router_with_console(state: AppState, console_dir: Option<PathBuf>) -> Router 
         .route("/tiny", get(tiny))
         .merge(crate::server::operator::router())
         .merge(crate::server::ops::router())
-        .merge(crate::server::hooks::router())
         .merge(crate::server::hooks_chargebee::router())
         .merge(crate::server::provision::router())
         .merge(crate::server::setup::router())
@@ -122,8 +121,9 @@ fn router_with_console(state: AppState, console_dir: Option<PathBuf>) -> Router 
         .merge(crate::server::feedback_board::router())
         .merge(crate::server::users::router())
         .merge(crate::server::users::admin::router())
-        .merge(crate::server::users::devices::router())
         .merge(crate::server::graphql::router());
+    #[cfg(feature = "acp")]
+    let router = router.merge(crate::server::acp::router());
     // tiny.place A2A inbound + discovery routes, only when the feature is on.
     #[cfg(feature = "tinyplace")]
     let router = router.merge(crate::server::a2a::router());
@@ -832,7 +832,7 @@ mod tests {
         assert_eq!(spec_body(restarted).await["instance_id"], id);
 
         let caps = body["capabilities"].as_array().expect("capabilities");
-        for expected in ["rest", "graphql", "sse", "devices"] {
+        for expected in ["rest", "graphql", "sse"] {
             assert!(caps.iter().any(|c| c == expected), "missing {expected}");
         }
         assert_eq!(body["storage"], "fs");

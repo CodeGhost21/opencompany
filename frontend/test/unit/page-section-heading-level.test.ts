@@ -40,20 +40,25 @@ const VIEWS = new URL("../../src/views", import.meta.url).pathname;
  */
 const PAGES = [
   {
-    view: "ConnectionsView",
+    view: "OAuthView",
     sections: [
-      // Also serves the standalone `#/settings/mcp` page, where its heading sits
-      // under that page's own `h1` — the same level either way, which is why one
-      // tag serves both.
-      "connections/McpServersSection",
-      "connections/InferenceSection",
       "connections/CompanyCredentialCard",
       "connections/ComposioSection",
-      "connections/ChannelsSection",
-      "connections/RepositoriesCard",
       "connections/ProvidersSection",
       "connections/AccountChoiceSection",
     ],
+  },
+  {
+    // The Connections split gave MCP and inference pages of their own, and a
+    // page's outline is exactly what that changes: each section that used to
+    // sit under the accounts `h1` now sits under its own. Pinned here so the
+    // split cannot decay back into a page whose `h2` heads nothing.
+    view: "McpServersView",
+    sections: ["connections/McpServersSection"],
+  },
+  {
+    view: "InferenceView",
+    sections: ["connections/InferenceSection"],
   },
   {
     view: "FeedbackView",

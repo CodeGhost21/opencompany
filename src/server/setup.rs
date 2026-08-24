@@ -628,11 +628,7 @@ fn auth_modes(state: &AppState) -> Vec<&'static str> {
 fn build_flags() -> BuildDto {
     BuildDto {
         acp_in_build: cfg!(feature = "acp"),
-        // No `.route("/acp", …)` exists anywhere in this tree — only the session
-        // and permission model plus the reserved path. Hard-coded false until a
-        // handler is actually mounted; a flag that guessed from the feature
-        // would tell a client to dial an endpoint that 404s.
-        acp_transport_mounted: false,
+        acp_transport_mounted: cfg!(feature = "acp"),
         mcp_in_build: cfg!(feature = "mcp"),
         harness_in_build: cfg!(feature = "openhuman"),
         oauth_in_build: cfg!(feature = "oauth"),

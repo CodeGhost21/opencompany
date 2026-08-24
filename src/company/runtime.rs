@@ -269,18 +269,6 @@ pub struct CompanyRuntime {
     /// which is what makes a wedged cron fire and an agent-initiated run as
     /// stoppable from the console as a Run-button one.
     pub(crate) run_supervisor: crate::runtime::RunSupervisor,
-    /// Issue #245: the company's bound repositories and their host-side mirror
-    /// cache, when the runtime was built over a filesystem home.
-    ///
-    /// `None` is a real state, not an omission: the manager is rooted at
-    /// `companies/<slug>/repos/`, so a runtime assembled from injected ports
-    /// with no home (a test harness, an embedding) has no cache to manage and
-    /// the ops routes answer "not wired" rather than inventing a location.
-    ///
-    /// Compiled in every build. Nothing here is agent-facing — there is no
-    /// grant and no tool in this tier — so it needs no feature gate, and the
-    /// forge HTTP client it can optionally hold is the only part that does.
-    pub(crate) repos: Option<Arc<crate::runtime::RepoManager>>,
     /// Issue #243: the live single-use grants minted when an operator approves a
     /// tool call an agent was blocked from making.
     ///
@@ -475,7 +463,6 @@ impl CompanyRuntime {
             workflow_runner: None,
             steer: crate::company::steer::InflightRegistry::new(),
             run_supervisor: crate::runtime::RunSupervisor::new(),
-            repos: None,
             grants,
             continuations: ContinuationQueue::default(),
             workflow_gates: WorkflowGateQueue::default(),
@@ -526,20 +513,6 @@ impl CompanyRuntime {
     /// caching it honest.
     pub fn auth_mode(&self) -> AuthMode {
         self.auth_mode
-    }
-
-    /// Issue #245: attach the repository manager after construction, wired by
-    /// the [`RuntimeBuilder`](crate::runtime::RuntimeBuilder) from the same
-    /// filesystem home the company's bundle hangs off.
-    pub fn set_repos(&mut self, repos: Arc<crate::runtime::RepoManager>) {
-        self.repos = Some(repos);
-    }
-
-    /// The company's bound repositories, if a mirror cache is wired. `None` on
-    /// a runtime built without a filesystem home, where the ops routes report
-    /// the surface as not wired.
-    pub fn repos(&self) -> Option<&Arc<crate::runtime::RepoManager>> {
-        self.repos.as_ref()
     }
 
     /// Issue #29: attach the workflow runner after construction. Wired by the
@@ -2583,6 +2556,17 @@ impl CompanyRuntime {
                 // cannot disagree.
                 broadly_grantable: crate::runtime::grants::subject_of(&p.effect).is_some()
                     && p.effect.may_be_granted_standing(),
+                // Issue #1458: a standing **denial** is enforced only on the
+                // agent turn path (`standing_deny_applies`); the workflow gate
+                // does not honour `Deny`, and the resolve route's 400 refuses a
+                // workflow standing denial before the gate is touched. So the
+                // deny control is offered only where the runtime will actually
+                // enforce it — an agent subject — while the grant half above
+                // still covers a workflow, which can hold a standing permission.
+                broadly_deniable: matches!(
+                    crate::runtime::grants::subject_of(&p.effect),
+                    Some(crate::runtime::grants::GrantSubject::Agent(_))
+                ),
                 // Always false here. Whether a *reader* may see the contents is
                 // a property of who is asking, and this projection is
                 // deliberately principal-free (issue #618) — the redaction
@@ -2620,13 +2604,64 @@ impl CompanyRuntime {
     /// previews the exact final issue body or files it (per consent). The
     /// scrubber fails closed, so a report that cannot be safely scrubbed is
     /// blocked rather than risked.
+    ///
+    /// `item_id` carries the previewed item on the confirm (Send-after-Preview)
+    /// path: the same item is finalized — never a second capture — so the report
+    /// appears once in the feedback family and the posted body is the exact
+    /// previewed bytes (see [`crate::feedback::service::finalize`]).
+    ///
+    /// A confirm closes two gaps a bare `finalize` call would leave open:
+    ///
+    /// * **Idempotent** — an item that already left this machine (its
+    ///   `issue_status` is recorded) returns the recorded result instead of
+    ///   filing or forwarding again, so a retried or double-submitted Send does
+    ///   not file a second issue or add a duplicate comment. A per-item lock
+    ///   held across the whole confirm serialises concurrent confirms of the
+    ///   same item, so the loser re-reads the winner's recorded result instead
+    ///   of both sending.
+    /// * **Preview-first** — an item captured by the feedback tool or the chat
+    ///   intent was never previewed and its words are hidden from the reports
+    ///   list, so confirming it by id would send a body nobody inspected.
+    ///   Confirms of such items are refused; the operator must preview first.
     pub async fn submit_feedback(
         &self,
         input: FeedbackInput,
         preview: bool,
+        item_id: Option<String>,
     ) -> Result<FeedbackResponse> {
-        let item = self.capture_feedback(input).await?;
         let manifest = self.store.load(&self.id).await?.map(|r| r.manifest);
+        // Held until the end of the call for a confirm, so the check below and
+        // the finalize that records the status are one critical section.
+        let mut _confirm_guard = None;
+        let item = match item_id {
+            Some(id) => {
+                // A nonexistent `item_id` is caller-supplied, so it must not
+                // mint an entry in the process-wide confirm-lock registry,
+                // which is never evicted. Validate existence before taking the
+                // lock; the feedback family is append-only, so an id that
+                // exists here still exists at the locked re-read below.
+                if self.feedback.get(&id).await?.is_none() {
+                    return Err(OpenCompanyError::NotFound(format!("feedback item {id}")));
+                }
+                _confirm_guard = Some(crate::feedback::store::confirm_lock(&id).lock_owned().await);
+                let item = self.feedback.get(&id).await?.expect(
+                    "feedback item exists: existence checked before taking the confirm lock",
+                );
+                if !preview {
+                    if item.issue_status.is_some() {
+                        return Ok(FeedbackResponse::recorded(&item));
+                    }
+                    if item.scrubbed_body.is_none() {
+                        return Ok(FeedbackResponse::blocked(
+                            &id,
+                            "this report was not previewed; preview it before sending".to_string(),
+                        ));
+                    }
+                }
+                item
+            }
+            None => self.capture_feedback(input).await?,
+        };
         crate::feedback::service::finalize(
             &self.feedback,
             self.secrets.as_ref(),
