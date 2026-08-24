@@ -379,8 +379,8 @@ describe("ApprovalCard decide ordering (#1406)", () => {
     });
     const labels = Array.from(container.querySelectorAll("button"), (button) => button.getAttribute("aria-label"));
     expect(labels).toEqual([
-      "Revoke Ops's permission: Fetch a web page — https://docs.rs only — expires in 1h",
-      "Revoke Ops's permission: Fetch a web page — https://docs.rs only — expires in 7d",
+      "Revoke Ops's permission: Fetch a web page — https://docs.rs only — expires in 1h — grant 1 of 2",
+      "Revoke Ops's permission: Fetch a web page — https://docs.rs only — expires in 7d — grant 2 of 2",
     ]);
   });
 
