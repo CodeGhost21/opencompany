@@ -12,10 +12,6 @@ import { fromHistory, mergeHistoryInOrder, type ChatMessage } from "@/lib/chat";
 const here = dirname(fileURLToPath(import.meta.url));
 const appShell = readFileSync(resolve(here, "../../src/components/app-shell.tsx"), "utf8");
 
-afterEach(() => {
-  vi.useRealTimers();
-});
-
 describe("chat channel history polling", () => {
   it("wires each resolved channel fan-out to a disposable 5s visible-tab poll", () => {
     expect(appShell.match(/startVisiblePolling\(rehydrateAll, 5000\)/g)).toHaveLength(2);
