@@ -203,10 +203,13 @@ export function SetupController({
     // setup again rather than left on an empty team page.
     clearSetupSkipped(scope);
     setOpen(false);
+    // The route must be left before the completion handler chooses the staffed
+    // company's destination (Company). Skip has no completion handler, so it
+    // still lands on Overview through the same callback.
+    if (routeOpen) onRouteDismiss?.();
     // The team exists now, so the tour has something to walk through.
     setUnstaffed(false);
     onCompleted?.();
-    if (routeOpen) onRouteDismiss?.();
   }, [scope, onCompleted, routeOpen, onRouteDismiss]);
 
   if (!checked && !force) return null;
