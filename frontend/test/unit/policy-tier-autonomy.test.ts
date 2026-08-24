@@ -610,4 +610,54 @@ describe("loading the policy", () => {
     expect(container.querySelector<HTMLInputElement>("#approval-deadline")).toBeNull();
     expect(container.querySelector<HTMLInputElement>("#spend-cap")).toBeNull();
   });
+
+  it("ignores a stale read that resolves after the company changed", async () => {
+    // A `get` that parks every policy response until the test releases it, in
+    // call order: the first render ("acme") holds resolver [0] and the
+    // company-switch render ("other") holds [1].
+    const held: Array<(value: PolicyStatus) => void> = [];
+    const client = {
+      scopeFor: () => "/api/v1/acme",
+      get: (path: string) =>
+        path.endsWith("/policy")
+          ? new Promise<PolicyStatus>((resolve) => held.push(resolve))
+          : Promise.resolve({ slugs: [], unwired: [] }),
+      put: async () => status("readonly"),
+      del: async () => status("readonly"),
+    } as unknown as OpenCompanyClient;
+
+    await act(async () => {
+      root.render(createElement(PolicySettings, { client, company: "acme" }));
+      await Promise.resolve();
+    });
+    // Move to another company while "acme"'s read is still in flight.
+    await act(async () => {
+      root.render(createElement(PolicySettings, { client, company: "other" }));
+      await Promise.resolve();
+    });
+
+    // The response describing the visible company lands first and wins.
+    await act(async () => {
+      held[1]?.(status("full"));
+      await Promise.resolve();
+    });
+    expect(
+      container.querySelector<HTMLElement>("[data-testid=policy-tier-full]")?.getAttribute("aria-checked"),
+    ).toBe("true");
+    expect(container.querySelector<HTMLInputElement>("#approval-deadline")?.value).toBe("24");
+
+    // The stale "acme" response resolving late must not overwrite it: the
+    // visible company keeps its tier, and its draft deadline stays put.
+    await act(async () => {
+      held[0]?.(status("readonly"));
+      await Promise.resolve();
+    });
+    expect(
+      container.querySelector<HTMLElement>("[data-testid=policy-tier-full]")?.getAttribute("aria-checked"),
+    ).toBe("true");
+    expect(
+      container.querySelector<HTMLElement>("[data-testid=policy-tier-readonly]")?.getAttribute("aria-checked"),
+    ).toBe("false");
+    expect(container.querySelector<HTMLInputElement>("#approval-deadline")?.value).toBe("24");
+  });
 });
