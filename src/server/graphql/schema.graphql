@@ -844,8 +844,9 @@ type Policy {
 	"""
 	alwaysApprove: [String!]!
 	"""
-	Spend strictly under this amount is auto-approved without an approval;
-	`null` means no spend cap is in force.
+	The spend cap actually in force — console override where one sets it,
+	the committed manifest otherwise. A higher cap is looser; `null` is the
+	strictest setting — no spend is auto-approved, so every spend parks.
 	"""
 	autoApproveUnderUsd: Float
 	"""
