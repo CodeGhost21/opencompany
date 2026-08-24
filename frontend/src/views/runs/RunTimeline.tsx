@@ -216,19 +216,12 @@ function isFailureRow(entry: TimelineEntry): boolean {
  */
 export function TimelineList({
   entries,
-  waitingSince,
-  now,
   empty = null,
 }: {
   entries: TimelineEntry[];
-  waitingSince?: number;
-  now: number;
   empty?: ReactNode;
 }) {
-  const items = useMemo(
-    () => groupTimeline(entries, waitingSince, now),
-    [entries, waitingSince, now],
-  );
+  const items = useMemo(() => groupTimeline(entries), [entries]);
   if (items.length === 0) return <>{empty}</>;
   return (
     <ol className="space-y-1.5">
