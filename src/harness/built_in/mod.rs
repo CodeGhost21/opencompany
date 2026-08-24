@@ -2889,8 +2889,8 @@ fn effective_policy_fingerprint(policy: &Policy) -> u64 {
 /// how to read a policy through `CompanyRecord::effective_policy` — so this is
 /// the inverse of that merge: for each field, override it iff the snapshot
 /// differs from the manifest. The attribution fields are transient (never
-/// persisted, and neither `policy_fingerprint` nor `build_roster` reads them),
-/// so a synthetic system actor is honest about what they are.
+/// persisted, and neither `effective_policy_fingerprint` nor `build_roster`
+/// reads them), so a synthetic system actor is honest about what they are.
 fn policy_override_for(policy: &Policy, manifest: &Policy) -> PolicyOverride {
     PolicyOverride {
         mode: (policy.mode != manifest.mode).then(|| policy.mode.clone()),
