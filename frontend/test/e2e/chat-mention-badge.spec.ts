@@ -253,8 +253,14 @@ test("a collapsed section aggregates its hidden mentions, same as unread", async
   await page.getByRole("button", { name: "Channels", exact: true }).click();
 
   await expect(mentionBadge(page, "Engineering")).toHaveCount(0);
+  // Both rails (mobile, desktop) render the collapsed-section badge now, but
+  // only the `lg+` one is on screen at this viewport — and a CSS `section`
+  // locator matches hidden DOM, where the role-based locator above did not. So
+  // the section is narrowed to the visible rail before reading its badge.
   const sectionMentions = page
-    .locator("section", { hasText: "Channels" })
+    .locator("section")
+    .filter({ hasText: "Channels" })
+    .filter({ visible: true })
     .getByTestId("section-mentions");
   await expect(sectionMentions).toHaveText("@3");
 });
