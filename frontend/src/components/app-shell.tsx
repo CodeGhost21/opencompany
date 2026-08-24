@@ -1335,7 +1335,13 @@ export function AppShell({
    * latest value, instead of capturing the empty array it was created with.
    */
   const onChannelViewed = useCallback(
-    (channelId: string, historyPending: boolean, mentionFeedRevision?: number) => {
+    (
+      channelId: string,
+      historyPending: boolean,
+      mentionFeedRevision?: number,
+      replyParents?: ReadonlyMap<string, string>,
+      openThreadId?: string | null,
+    ) => {
       activeChatChannelRef.current = channelId;
       if (mentionFeedRevision === undefined) return;
       // Clear only THIS channel's mentions, and only once its history is
@@ -1357,6 +1363,8 @@ export function AppShell({
               ),
             ),
             new Set(Object.values(chatChannelByThread)),
+            replyParents ?? new Map(),
+            openThreadId ?? null,
           );
       if (clearing.length > 0) {
         // Optimistic, so the badge goes at once; the next poll reconciles.
