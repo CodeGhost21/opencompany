@@ -1105,6 +1105,23 @@ members = ["engineer", "ceo"]
         assert!(resolve_text(text).is_empty());
     }
 
+    /// A line like ```not-a-close is code, not a closing fence: CommonMark
+    /// only lets a fence be followed by spaces or tabs. Closing the mask there
+    /// would unmask a later `@engineer` the renderer still shows as code.
+    #[test]
+    fn a_false_closing_fence_does_not_unmask_a_later_mention() {
+        let text = "before\n```\ncode\n```not-a-close\n@engineer\n```\nafter";
+        assert!(resolve_text(text).is_empty());
+    }
+
+    /// Trailing whitespace on a closing fence is still a valid close
+    /// (CommonMark allows spaces or tabs), so the block keeps masking.
+    #[test]
+    fn a_fence_closed_with_trailing_whitespace_still_masks() {
+        let text = "before\n```\n@engineer\n```  \nafter";
+        assert!(resolve_text(text).is_empty());
+    }
+
     /// The reason [`strip_code_regions`] blanks rather than removes: a mention
     /// *after* a code span must still land on its real byte offset.
     #[test]
