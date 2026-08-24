@@ -1526,6 +1526,9 @@ base_url = "https://byo.example/v1"
         // The config resolves now; the running brain still does not know it.
         assert_eq!(resp["status"]["cognition"], "echo");
         assert_eq!(resp["status"]["restartRequired"], true, "{raw}");
+        // A pool is attached on this build, so the design path is reachable —
+        // the flag the setup dialog reads to keep the "set up a model" CTA.
+        assert_eq!(resp["status"]["harnessReachable"], true, "{raw}");
 
         let note = resp["note"].as_str().unwrap_or_default();
         assert!(note.contains("restart"), "note must say restart: {note}");
