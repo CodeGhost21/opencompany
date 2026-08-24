@@ -250,4 +250,54 @@ describe("the operator overview landing page (#1321)", () => {
     expect(container.textContent).toContain("the host caps the read here");
     expect(container.textContent).not.toContain("No failed attempts were recorded since the previous visit.");
   });
+
+  it("links an operator-chat run to its desk channel when the chat id names a desk", async () => {
+    const chatRun = run({
+      id: "chat-desk-1",
+      taskId: undefined,
+      chatId: "engineering",
+      agentId: "engineering",
+    });
+    await render(
+      client(
+        Promise.resolve([chatRun]),
+        Promise.resolve([{ id: "engineering", name: "Engineering desk", members: [] }]),
+      ),
+      readyFeed,
+    );
+    await settle();
+
+    // A desk's channel id is its thread id, so the run links by bare id.
+    expect(container.querySelector('[href="#/chat/engineering"]')?.textContent).toContain("Open");
+    expect(container.textContent).toContain("Conversation work");
+  });
+
+  it("links an operator-chat run to its DM when the chat id is not a known desk", async () => {
+    const chatRun = run({
+      id: "chat-dm-1",
+      taskId: undefined,
+      chatId: "ada-1f3k",
+      agentId: "maya",
+    });
+    await render(client(Promise.resolve([chatRun]), Promise.resolve([])), readyFeed);
+    await settle();
+
+    expect(container.querySelector('[href="#/chat/dm:ada-1f3k"]')?.textContent).toContain("Open");
+  });
+
+  it("keeps the alert icon only for attempts with neither a task nor a conversation", async () => {
+    const stray = run({
+      id: "stray-1",
+      taskId: undefined,
+      chatId: undefined,
+    });
+    await render(client(Promise.resolve([stray])), readyFeed);
+    await settle();
+
+    expect(container.textContent).toContain("Unattributed attempt");
+    expect(
+      container.querySelector('[aria-label="No task or conversation is attached to this attempt"]'),
+    ).not.toBeNull();
+    expect(container.querySelector('a[href^="#/tasks/"], a[href^="#/chat"]')).toBeNull();
+  });
 });
