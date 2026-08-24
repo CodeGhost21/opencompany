@@ -207,7 +207,7 @@ export function ApprovalsView({
   // interaction region, then let the next render use the current feed time.
   const heldNow = useRef(now);
   if (!holding) heldNow.current = now;
-  const permissionNow = holding ? heldNow.current : now;
+  const regionNow = holding ? heldNow.current : now;
   const askerNames = useAskerNames(client, company, approvals, holding);
   const threadLinks = useApprovalThreadLinks(client, company, rows);
   const { grants, granterNames, refreshGrants } = useStandingGrants(
