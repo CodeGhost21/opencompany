@@ -364,8 +364,12 @@ pub(crate) async fn resolve_run(
 ) -> async_graphql::Result<Option<AgentRunGql>> {
     let auth = ctx.data::<GqlAuth>()?;
     let may_read_deep = approval_visibility::may_read_deep_trace(auth);
+    // The single-run read is the deep read, so it is almost always selected —
+    // but the same lookahead guard keeps a `steps`-only query from dragging the
+    // deep store into the request at all.
+    let wants_deep = ctx.look_ahead().field("steps").field("deep").exists();
     let Some(record) = runtime.runs().get_run(runtime.id(), &id).await? else {
         return Ok(None);
     };
-    Ok(Some(load(runtime, record, may_read_deep).await?))
+    Ok(Some(load(runtime, record, may_read_deep && wants_deep).await?))
 }
