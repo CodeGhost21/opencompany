@@ -200,7 +200,7 @@ describe("changing the autonomy tier", () => {
     // exactly the window where Base UI forwards an Escape close request.
     let resolvePut: (saved: PolicyStatus) => void = () => {};
     const put = vi.fn(
-      async (_path: string, body: { mode?: string }) =>
+      async (_path: string) =>
         new Promise<PolicyStatus>((resolve) => {
           resolvePut = resolve;
         }),
