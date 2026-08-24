@@ -3819,12 +3819,18 @@ mod test {
                 "composio",
                 "composio.*",
                 "composio.gmail",
+                "chargebee",
+                "chargebee.*",
+                "chargebee.read",
+                "hosting",
+                "hosting.*",
+                "hosting.deploy",
+                "paypal",
+                "paypal.*",
+                "paypal.wallet",
                 "search",
                 "search.*",
                 "search.web",
-                "repo",
-                "repo.*",
-                "repo.read",
                 "mcp:*",
             ] {
                 assert!(
@@ -3841,7 +3847,15 @@ mod test {
         /// wiring predicates that accept both shapes.
         #[test]
         fn explicit_special_grants_cover_their_namespaces() {
-            let allow = strings(&["media", "composio", "search", "repo.*", "mcp:*"]);
+            let allow = strings(&[
+                "media",
+                "composio",
+                "chargebee",
+                "hosting",
+                "paypal",
+                "search",
+                "mcp:*",
+            ]);
             for grant in [
                 "media",
                 "media.*",
@@ -3849,12 +3863,18 @@ mod test {
                 "composio",
                 "composio.*",
                 "composio.gmail",
+                "chargebee",
+                "chargebee.*",
+                "chargebee.read",
+                "hosting",
+                "hosting.*",
+                "hosting.deploy",
+                "paypal",
+                "paypal.*",
+                "paypal.wallet",
                 "search",
                 "search.*",
                 "search.web",
-                "repo",
-                "repo.*",
-                "repo.read",
                 "mcp:*",
             ] {
                 assert!(
@@ -3875,6 +3895,7 @@ mod test {
             assert!(allow_covers(&strings(&["search"]), "search.*"));
             assert!(allow_covers(&strings(&["search"]), "search.web"));
             assert!(allow_covers(&strings(&["media"]), "media.image"));
+            assert!(allow_covers(&strings(&["chargebee"]), "chargebee.read"));
             assert!(
                 !allow_covers(&strings(&["docs"]), "docs.read"),
                 "ordinary namespaces keep the unstarred-grant exact-match rule"
