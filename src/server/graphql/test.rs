@@ -95,10 +95,11 @@ async fn state_with_builder(
         })
         .await
         .unwrap();
-    let runtime = override_runtime(RuntimeBuilder::new(home.to_path_buf(), manifest).with_id(id.clone()))
-        .build()
-        .await
-        .unwrap();
+    let runtime =
+        override_runtime(RuntimeBuilder::new(home.to_path_buf(), manifest).with_id(id.clone()))
+            .build()
+            .await
+            .unwrap();
     let state = AppState::new(AppConfig::default()).with_home(home.to_path_buf());
     state.registry().insert(id, Arc::new(runtime));
     // Every route needs a principal now; the harness signs in as an admin so
@@ -2424,7 +2425,9 @@ async fn a_list_query_without_deep_does_not_read_the_deep_store() {
         ) -> crate::error::Result<std::collections::HashMap<String, Vec<RunStepDetailRecord>>>
         {
             self.reads.fetch_add(1, Ordering::SeqCst);
-            self.inner.list_step_details_for_runs(company, run_ids).await
+            self.inner
+                .list_step_details_for_runs(company, run_ids)
+                .await
         }
 
         async fn purge_deep_trace(
@@ -2472,10 +2475,7 @@ async fn a_list_query_without_deep_does_not_read_the_deep_store() {
     let steps = value["data"]["company"]["agentRun"]["steps"]
         .as_array()
         .unwrap_or_else(|| panic!("agentRun missing: {value}"));
-    assert_eq!(
-        steps[0]["deep"]["reasoning"],
-        "Collatz — memoise the chain"
-    );
+    assert_eq!(steps[0]["deep"]["reasoning"], "Collatz — memoise the chain");
     assert!(
         reads.load(Ordering::SeqCst) >= 1,
         "selecting deep must read the store"

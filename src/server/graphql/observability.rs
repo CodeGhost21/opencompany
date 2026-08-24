@@ -372,5 +372,7 @@ pub(crate) async fn resolve_run(
     let Some(record) = runtime.runs().get_run(runtime.id(), &id).await? else {
         return Ok(None);
     };
-    Ok(Some(load(runtime, record, may_read_deep && wants_deep).await?))
+    Ok(Some(
+        load(runtime, record, may_read_deep && wants_deep).await?,
+    ))
 }
