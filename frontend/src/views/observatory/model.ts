@@ -100,10 +100,12 @@ export function totals(runs: ObservatoryRun[], nowMs: number): RunTotals {
   let startMs = Infinity;
   let endMs = -Infinity;
   for (const run of runs) {
-    // `cachedInput` is counted: it is tokens the provider processed, and
-    // excluding it would make a cache-heavy run look cheaper in tokens than it
-    // was while its cost said otherwise.
-    tokens += run.usage.inputTokens + run.usage.outputTokens + run.usage.cachedInputTokens;
+    // `cachedInput` is a breakdown of `input` (providers report it as
+    // `prompt_tokens_details.cached_tokens`, a subset of `prompt_tokens`), so
+    // adding it again would inflate cache-heavy runs. The canonical metering
+    // aggregate totals input + output only; cached rides along as its own
+    // diagnostic column.
+    tokens += run.usage.inputTokens + run.usage.outputTokens;
     costUsd += run.usage.costUsd;
     // `steps.length`, never `stepCount`: the settled total is null while an
     // attempt is live, and treating that as zero would under-report exactly the
