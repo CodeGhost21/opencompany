@@ -65,6 +65,27 @@ pub(super) struct HarnessDto {
     /// `acp::discovery` survey — which this host cannot see and deliberately
     /// does not guess at. The console joins the two on `id`.
     detected: bool,
+    /// Whether **this host** can spawn this harness's transport.
+    ///
+    /// The console cannot work this out for itself, and the attempts to infer
+    /// it were wrong in a way nobody sees. A desktop connected to a *remote*
+    /// company still runs its own `acp::discovery` survey, so a declared
+    /// `transport = "local"` harness was probed against the operator's laptop
+    /// — reporting `Ready`, and offering to install an adapter — while turns
+    /// for that company spawn on the remote host, where the CLI may be absent
+    /// and no `AcpAgentFactory` may exist at all.
+    ///
+    /// So the host answers instead of the client guessing:
+    ///
+    /// - `built_in` — always true; it is this host's own engine.
+    /// - `acp` + `local` — true only where this host wired an
+    ///   `AcpAgentFactory`, which is the embedded desktop and nothing else.
+    /// - `acp` + `runner` — false; it runs on a registered remote machine.
+    ///
+    /// False means "do not probe this against the machine you are on", not
+    /// "broken": a hosted company's declared local harness is perfectly valid
+    /// on the host that serves it.
+    runs_here: bool,
 }
 
 /// `GET {scope}/harnesses` — every harness an agent here can be bound to.
@@ -103,6 +124,13 @@ async fn list_harnesses(
     // is stating what that deployment has, and this route does not get to
     // second-guess it.
     let can_run_local = state.acp_agents().is_some();
+    let runs_here = |harness: &Harness| match harness.kind.as_str() {
+        "built_in" => true,
+        "acp" => {
+            can_run_local && harness.acp.as_ref().map(|a| a.transport.as_str()) == Some("local")
+        }
+        _ => false,
+    };
     let detected = ACP_AGENTS
         .iter()
         .filter(|_| can_run_local)
@@ -113,13 +141,19 @@ async fn list_harnesses(
         declared
             .iter()
             .cloned()
-            .map(|harness| dto(harness, false))
-            .chain(detected.map(|harness| dto(harness, true)))
+            .map(|harness| {
+                let here = runs_here(&harness);
+                dto(harness, false, here)
+            })
+            .chain(detected.map(|harness| {
+                let here = runs_here(&harness);
+                dto(harness, true, here)
+            }))
             .collect(),
     ))
 }
 
-fn dto(harness: Harness, detected: bool) -> HarnessDto {
+fn dto(harness: Harness, detected: bool, runs_here: bool) -> HarnessDto {
     HarnessDto {
         id: harness.id,
         kind: harness.kind,
@@ -127,6 +161,7 @@ fn dto(harness: Harness, detected: bool) -> HarnessDto {
         agent: harness.acp.as_ref().and_then(|acp| acp.agent.clone()),
         transport: harness.acp.map(|acp| acp.transport),
         detected,
+        runs_here,
     }
 }
 
@@ -211,6 +246,50 @@ mod test {
     }
 
     const BASE: &str = "[company]\nname = \"Acme\"\n\n[[agent]]\nid = \"ceo\"\nrole = \"CEO\"\n";
+
+    /// A **declared** local harness still says whether *this* host runs it.
+    ///
+    /// This is the half the detected-row filter does not cover, and it is the
+    /// one that misled the console: a hosted company may legitimately declare
+    /// `transport = "local"` — local to the host serving it — and a desktop
+    /// opening that company probed the binding against its own laptop,
+    /// reporting readiness and offering an install for a machine that never
+    /// runs those turns. The row stays listed either way, because the binding
+    /// is valid; only the "probe it here" claim changes.
+    #[tokio::test]
+    async fn a_declared_local_harness_says_whether_this_host_runs_it() {
+        const WITH_LOCAL: &str = r#"
+[company]
+name = "Acme"
+
+[[agent]]
+id = "ceo"
+role = "CEO"
+
+[[harness]]
+id = "laptop"
+kind = "acp"
+default = true
+
+[harness.acp]
+transport = "local"
+agent = "claude"
+"#;
+        let hosted_home = home();
+        let hosted = state_with_manifest(hosted_home.path(), WITH_LOCAL).await;
+        let (status, body) = get(&hosted, "/api/v1/company/harnesses").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let row = body
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|h| h["id"] == "laptop")
+            .expect("a declared harness is listed whoever is serving it");
+        assert_eq!(
+            row["runsHere"], false,
+            "a host with no ACP factory cannot spawn it: {body}"
+        );
+    }
 
     #[tokio::test]
     async fn a_company_with_no_harness_block_lists_the_implicit_default() {

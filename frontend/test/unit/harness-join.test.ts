@@ -27,9 +27,12 @@ const declared = (over: Partial<HarnessDto> = {}): HarnessDto => ({
   kind: "built_in",
   default: true,
   detected: false,
+  runsHere: true,
   ...over,
 });
 
+// `runsHere: true` is the desktop-hosted shape: the host serving this company
+// is the machine the console is running on, so its survey is the right answer.
 const cli = (over: Partial<HarnessDto> = {}): HarnessDto => ({
   id: "claude",
   kind: "acp",
@@ -37,6 +40,7 @@ const cli = (over: Partial<HarnessDto> = {}): HarnessDto => ({
   detected: true,
   agent: "claude",
   transport: "local",
+  runsHere: true,
   ...over,
 });
 
@@ -299,5 +303,28 @@ describe("which id the desktop is addressed by", () => {
     // into a malformed command rather than a harmless miss.
     const [managed] = joinHarnesses([declared()], []);
     expect(desktopHarnessId(managed)).toBe("main");
+  });
+});
+
+describe("whose machine a harness actually runs on", () => {
+  it("does not probe a declared local harness belonging to a remote host", () => {
+    // The desktop connected to a hosted company. That company's manifest can
+    // declare `transport = "local"` — local *to the host serving it*, not to
+    // the laptop this console runs on. Probing it here reported Ready, and
+    // offered to install an adapter, for a machine that will never run those
+    // turns.
+    const [row] = joinHarnesses([cli({ runsHere: false, detected: false })], [probe()]);
+    expect(row.readiness).toBeUndefined();
+    expect(isUsableHere(row)).toBe(false);
+    expect(harnessAction(row)).toBe("none");
+  });
+
+  it("does not probe when the host is too old to say", () => {
+    // Absent is not "yes". A host predating the field degrades to not probing,
+    // which renders honestly as "can't say from here" — the opposite default
+    // would reinstate the bug.
+    const { runsHere: _dropped, ...withoutField } = cli();
+    const [row] = joinHarnesses([withoutField], [probe()]);
+    expect(row.readiness).toBeUndefined();
   });
 });

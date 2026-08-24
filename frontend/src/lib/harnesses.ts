@@ -78,11 +78,20 @@ export function joinHarnesses(
 ): HarnessRow[] {
   const byId = new Map((local ?? []).map((h) => [h.id, h]));
   return declared.map((harness) => {
-    // Only a *local* ACP harness can be probed on this machine. A `runner`
-    // one names a CLI on somebody else's, and a `built_in` one has no CLI at
-    // all — reporting either against this machine's PATH would be a category
-    // error, so neither gets a readiness.
-    const probeable = harness.kind === "acp" && harness.transport === "local";
+    // Probeable when the **host** says this machine runs it, not when the
+    // shape looks local. A `runner` harness names a CLI on somebody else's
+    // machine and a `built_in` one has no CLI at all — but the case that
+    // needed the host's answer is subtler: a desktop connected to a remote
+    // company sees a declared `transport = "local"` harness that is local to
+    // *that host*, not to the laptop running this console. Probing it here
+    // reported readiness — and offered an install — for a machine that will
+    // never run those turns.
+    //
+    // A host that does not send `runsHere` is not probed at all. That renders
+    // as "can't say from here", which is honest, where the opposite default
+    // would resurrect exactly the bug this replaced.
+    const probeable =
+      harness.runsHere === true && harness.kind === "acp" && harness.transport === "local";
     // Keyed on the **ACP agent**, not the harness id. They coincide for a
     // detected row (the host synthesizes it named after the agent) but not for
     // a declared one: a manifest is free to write

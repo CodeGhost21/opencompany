@@ -782,11 +782,29 @@ export function AgentDetailView({
                 // model, hid the control, and then sent the model anyway: the
                 // host refused with a 400 against a field the operator could
                 // no longer see or clear.
-                const bound =
-                  next === HARNESS_DEFAULT
+                const resolve = (id: string) =>
+                  id === HARNESS_DEFAULT
                     ? harnesses.find((h) => h.default)
-                    : harnesses.find((h) => h.id === next);
-                if (bound && bound.kind !== "acp") setModelDraft("");
+                    : harnesses.find((h) => h.id === id);
+                const before = resolve(harnessDraft);
+                const bound = resolve(next);
+
+                // Two ways a model stops meaning anything, and both have to
+                // clear it:
+                //
+                //   - the target is managed, whose model is the host's choice;
+                //   - the target is a *different* ACP agent. Model ids are the
+                //     agent's own vocabulary, so a Claude model handed to
+                //     Codex is not refused — `model_config_id` simply fails to
+                //     find it and the session stays on its default, while the
+                //     page goes on claiming an override that is not applied.
+                //
+                // Compared on `agent` rather than harness id, since two
+                // harnesses can drive the same CLI and a model is valid across
+                // those.
+                if (!bound || bound.kind !== "acp" || bound.agent !== before?.agent) {
+                  setModelDraft("");
+                }
               }}
               onModelChange={setModelDraft}
               onCancel={() => setEditingHarness(false)}

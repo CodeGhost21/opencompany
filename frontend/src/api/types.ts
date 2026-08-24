@@ -1044,6 +1044,19 @@ export interface HarnessDto {
   default: boolean;
   /** `acp` harnesses only: which CLI (`claude`/`codex`), when `transport === "local"`. */
   agent?: string;
+  /**
+   * Whether the host serving this company can spawn this harness's transport.
+   *
+   * Answered by the host because the console cannot work it out: a desktop
+   * connected to a *remote* company still has its own local survey, and
+   * probing a declared `transport = "local"` harness against the operator's
+   * laptop reports readiness for a machine that will never run those turns.
+   *
+   * Optional so a host predating the field degrades to not probing rather
+   * than to probing wrongly — the safe direction, since "can't say from here"
+   * is a state the page already renders honestly.
+   */
+  runsHere?: boolean;
   /** `acp` harnesses only: `"local"` (spawned on this machine) or `"runner"` (a registered remote). */
   transport?: string;
   /**
