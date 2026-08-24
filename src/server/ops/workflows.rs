@@ -1964,7 +1964,7 @@ async fn draft_from_description(
         ))
         .into_response().into());
     }
-    Err(super::not_wired("the workflow copilot"))
+    Err(super::not_wired("the workflow copilot").into())
 }
 
 // ---------------------------------------------------------------------------
@@ -2258,7 +2258,7 @@ async fn fix_from_run(
     Json(body): Json<FixFromRunBody>,
 ) -> Result<Json<FixFromRunResponse>, crate::server::Rejection> {
     let _ = (&company, &wid, &body.run_id, &body.error_hint);
-    Err(super::not_wired("the workflow copilot"))
+    Err(super::not_wired("the workflow copilot").into())
 }
 
 /// The `GET …/workflows/tool-slugs` answer (issues #783, #874): the tools the
