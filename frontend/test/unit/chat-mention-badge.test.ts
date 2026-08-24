@@ -55,7 +55,13 @@ describe("mentionCountsByChannel", () => {
     expect(mentionCountsByChannel([note({ id: "a", context: undefined })])).toEqual({});
   });
 
-  it("is empty for an empty feed", () => {
+  it("maps the legacy main thread onto the rendered main channel", () => {
+    expect(mentionCountsByChannel([note({ id: "a", context: "main" })], "general")).toEqual({
+      general: 1,
+    });
+  });
+
+
     expect(mentionCountsByChannel([])).toEqual({});
   });
 
