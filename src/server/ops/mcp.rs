@@ -391,7 +391,12 @@ pub(super) fn roster_grants(record: &CompanyRecord) -> Vec<(RosterAgentDto, Vec<
     };
     let mut grants: Vec<(RosterAgentDto, Vec<String>)> = effective
         .iter()
-        .map(|agent| (roster_agent(&agent.id), desk_narrowed(&agent.id, &agent.tools)))
+        .map(|agent| {
+            (
+                roster_agent(&agent.id),
+                desk_narrowed(&agent.id, &agent.tools),
+            )
+        })
         .collect();
     let manifest_ids: std::collections::HashSet<&str> = record
         .manifest
