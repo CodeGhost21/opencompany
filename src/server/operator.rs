@@ -2033,10 +2033,10 @@ async fn notify_mentioned(
         title: format!("{who} mentioned you in {desk}"),
         audience: Some(audience),
         // The console's channel-id space, so a badge lands without the browser
-        // having loaded that transcript. Direct messages use the console's
-        // `dm:<teammate-id>` key while the host desk/thread id is the teammate id.
-        context: Some(if let Some(member_id) = desk.strip_prefix("dm:") {
-            format!("dm:{member_id}")
+        // having loaded that transcript. Direct messages use `dm:<teammate-id>`
+        // in the console, while the host thread id is the bare teammate id.
+        context: Some(if users.iter().any(|u| u.id == desk) {
+            format!("dm:{desk}")
         } else {
             desk.to_string()
         }),
