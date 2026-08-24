@@ -903,8 +903,10 @@ function BuildOut({
    * links below render only under management authority — the Connections card
    * is read-only for a member — so an operator who cannot land the action is
    * told to ask an admin instead of being handed a link that can only 403.
+   * `null` while the role read is outstanding: both variants are withheld,
+   * because an unread role must not be guessed either way.
    */
-  canManage: boolean;
+  canManage: boolean | null;
   onDone: () => void;
   /**
    * The completion screen's "Add a model in Settings" action: close and send the
