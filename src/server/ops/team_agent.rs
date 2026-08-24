@@ -1807,12 +1807,13 @@ prompt = "Lead decisively."
     }
 
     /// Posts `bytes` to the generic workspace upload route as a `file` part
-    /// named `name`, declaring `image/png`. The declared type is what the store
-    /// keeps — the referent check must not trust it, and this helper exists to
-    /// prove that.
+    /// named `name`, declaring `mime` as its `Content-Type`. The declared type
+    /// is what the store keeps — the referent check must not trust it, and this
+    /// helper exists to prove that.
     async fn upload_workspace_binary(
         state: &AppState,
         name: &str,
+        mime: &str,
         bytes: &[u8],
     ) -> (StatusCode, Value) {
         const BOUNDARY: &str = "----ocworkspacetest";
@@ -1820,7 +1821,7 @@ prompt = "Lead decisively."
         body.extend_from_slice(
             format!(
                 "--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"file\"; \
-                 filename=\"{name}\"\r\nContent-Type: image/png\r\n\r\n"
+                 filename=\"{name}\"\r\nContent-Type: {mime}\r\n\r\n"
             )
             .as_bytes(),
         );
