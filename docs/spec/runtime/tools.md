@@ -47,11 +47,12 @@ turned off for a whole company**. It defaults to `globals/globals.toml`'s
 default_allow = ["*", "workspace.*", "workspace.write", "media", "composio", "search", "mcp:*"]
 ```
 
-Everything a company can hold is on by default, and dropping an entry from this
-list is how it comes off — for every teammate at once, whatever their own
+Every capability in the list above is on by default, and dropping an entry from
+this list is how it comes off — for every teammate at once, whatever their own
 `tools` line asks for. `allow` **replaces** the default rather than extending
 it, so a company that means to withhold one namespace writes the rest of the
-list out and leaves that one off.
+list out and leaves that one off. What is not on by default is the credential-gated
+integrations and `repo` that the next paragraph excludes.
 
 The default withholds the credential-gated `chargebee`, `hosting` and `paypal`
 integrations, and `repo`. The first three are opt-in by name because each is a
