@@ -4621,6 +4621,8 @@ mod test {
                 task_id: None,
                 agent_id: agent.to_string(),
                 chat_id: None,
+                workflow_run_id: None,
+                node_id: None,
                 attempt: 1,
                 status: crate::ports::runs::RunStatus::Succeeded,
                 trigger_event_seq: None,
