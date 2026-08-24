@@ -615,17 +615,31 @@ impl StorageSettings {
             .is_some_and(|value| !value.trim().is_empty())
     }
 
-    /// Layers a `config.toml` `[memory]` section under the environment.
+    /// Layers a `config.toml` `[memory]` section under the process
+    /// environment.
     ///
     /// A no-op when [`Self::memory_is_env_owned`] — see [`MemorySection`] for
     /// why the env layer wins rather than the more recent write.
     ///
     /// [`MemorySection`]: crate::app::config::MemorySection
-    pub fn with_memory_config(
+    pub fn with_memory_config(self, section: &crate::app::config::MemorySection) -> Result<Self> {
+        self.with_memory_config_from(&ProcessEnv, section)
+    }
+
+    /// Like [`Self::with_memory_config`], but resolves the ownership check from
+    /// the injected `env` source rather than the ambient process environment.
+    ///
+    /// A caller that built the settings with [`Self::from_env_source`] must
+    /// layer through here: the plain variant reads `ProcessEnv`, so a `MapEnv`
+    /// carrying `OPENCOMPANY_MEMORY` would be overridden by the file, and an
+    /// absent injected value would wrongly appear env-owned when the ambient
+    /// process sets it.
+    pub fn with_memory_config_from(
         mut self,
+        env: &dyn EnvSource,
         section: &crate::app::config::MemorySection,
     ) -> Result<Self> {
-        if Self::memory_is_env_owned() {
+        if Self::memory_is_env_owned_by(env) {
             return Ok(self);
         }
         let selection = MemorySelection::from_section(section)?;
@@ -1404,6 +1418,36 @@ mod test {
                 "{falsy:?} must read as not asserted"
             );
         }
+    }
+
+    #[test]
+    fn with_memory_config_from_resolves_ownership_from_the_injected_source() {
+        let section = crate::app::config::MemorySection {
+            backend: Some("remote".into()),
+            driver: Some("supermemory".into()),
+            url: Some("https://memory.example".into()),
+            ..Default::default()
+        };
+
+        // The injected source owns the choice: the `config.toml` layer is
+        // inert, exactly as it is for a deployment env naming an engine.
+        let env = MapEnv::new([("OPENCOMPANY_MEMORY", "store")]);
+        let settings = StorageSettings::from_env_source(&env)
+            .unwrap()
+            .with_memory_config_from(&env, &section)
+            .unwrap();
+        assert_eq!(settings.memory_backend, MemoryBackend::Store);
+        assert_eq!(settings.memory_driver, None);
+        assert_eq!(settings.memory_url, None);
+
+        // No injected ownership: the file layer is applied.
+        let unset = StorageSettings::from_env_source(&MapEnv::default())
+            .unwrap()
+            .with_memory_config_from(&MapEnv::default(), &section)
+            .unwrap();
+        assert_eq!(unset.memory_backend, MemoryBackend::Remote);
+        assert_eq!(unset.memory_driver.as_deref(), Some("supermemory"));
+        assert_eq!(unset.memory_url.as_deref(), Some("https://memory.example"));
     }
 
     #[cfg(feature = "mongodb")]
