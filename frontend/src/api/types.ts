@@ -287,7 +287,7 @@ export interface ChatMentionInput {
   target: MentionTarget;
   /** The literal span typed, `@` included. */
   text: string;
-  /** Offset of `text` in the message body. */
+  /** UTF-8 byte offset of `text` in the message body. */
   offset: number;
 }
 
