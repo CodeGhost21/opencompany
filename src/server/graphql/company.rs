@@ -304,6 +304,11 @@ impl CompanyGql {
                 spent_today_usd: cap.and_then(|_| spent(id)),
                 budget_set_by: attribution.map(|entry| entry.set_by.id.clone()),
                 budget_set_at_millis: attribution.map(|entry| entry.at_millis as f64),
+                // Resolved through the record, like the caps: one override row
+                // answers for a manifest teammate and an overlay one alike, so
+                // both arms of the roster get the chosen face with no second
+                // lookup to keep in step (mirrored from the REST `list_team`).
+                avatar: record.effective_avatar(id),
             }
         };
         // Resolved through the record for the same reason the caps are: a
