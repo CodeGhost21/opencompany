@@ -1391,7 +1391,7 @@ async fn post_to_channel(
             text: format!("{subject}\n\n{text}"),
             steps: Vec::new(),
             reply_to: None,
-                        mentions: Vec::new(),
+            mentions: Vec::new(),
         })
         .await
         // `err` is the adapter's own words. Same rule as mail: it rides

@@ -2116,7 +2116,7 @@ impl CompanyRuntime {
                 ),
                 steps: Vec::new(),
                 reply_to: None,
-                        mentions: Vec::new(),
+                mentions: Vec::new(),
             }],
             executed_effects: Vec::new(),
             parked: Vec::new(),
@@ -2319,7 +2319,7 @@ impl CompanyRuntime {
                             text: text.clone(),
                             steps: Vec::new(),
                             reply_to: None,
-                        mentions: Vec::new(),
+                            mentions: Vec::new(),
                         })
                         .await
                     {

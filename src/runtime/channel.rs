@@ -294,7 +294,7 @@ mod test {
                 text: "hello".into(),
                 steps: Vec::new(),
                 reply_to: None,
-                        mentions: Vec::new(),
+                mentions: Vec::new(),
             })
             .await
             .unwrap();
@@ -353,7 +353,7 @@ mod test {
                 text: "the weekly digest".into(),
                 steps: Vec::new(),
                 reply_to: None,
-                        mentions: Vec::new(),
+                mentions: Vec::new(),
             })
             .await;
         assert!(result.is_err(), "an unwritable journal must fail the send");

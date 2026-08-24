@@ -8896,7 +8896,7 @@ mode = "full"
                             text: format!("re-issued {approval_id}"),
                             steps: Vec::new(),
                             reply_to: None,
-                        mentions: Vec::new(),
+                            mentions: Vec::new(),
                         });
                     }
                     _ => {}

@@ -4657,6 +4657,7 @@ mod test {
             text: "hi".to_string(),
             steps: Vec::new(),
             reply_to: None,
+            mentions: Vec::new(),
         };
         let json = serde_json::to_string(&no_steps).unwrap();
         assert_eq!(json, r#"{"channel":"operator","text":"hi"}"#);
@@ -4680,6 +4681,7 @@ mod test {
                 ..TurnStep::default()
             }],
             reply_to: None,
+            mentions: Vec::new(),
         };
         assert_eq!(round_trip(&with_steps), with_steps);
     }
@@ -4699,6 +4701,7 @@ mod test {
             text: "hi".to_string(),
             steps: Vec::new(),
             reply_to: None,
+            mentions: Vec::new(),
         };
         assert_eq!(
             serde_json::to_string(&no_card).unwrap(),
@@ -4718,6 +4721,7 @@ mod test {
             text: "opened one".to_string(),
             steps: Vec::new(),
             reply_to: None,
+            mentions: Vec::new(),
         };
         assert_eq!(round_trip(&with_card), with_card);
         assert!(
