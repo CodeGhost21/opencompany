@@ -2402,28 +2402,60 @@ impl crate::ports::deep_trace::DeepTraceStore for MongoStore {
         // Prune to the cap by RUN, not by row: ranking rows would leave a
         // surviving run holding a torn half of its own trace. A run's recency is
         // the newest `at_ms` any of its rows carries, so a long run is ranked by
-        // when it last wrote. Two statements, like the run-output prune beside
-        // it — Mongo has no "delete all but the newest N" operator.
+        // when it last wrote. Ranking and deleting are two statements (Mongo has
+        // no "delete all but the newest N" operator), and a run a concurrent
+        // writer refreshes between them must survive — so the delete is
+        // conditional on the recency the ranking observed, not on the run id
+        // alone. `at_ms` is monotone per run, so "still the recency we saw" is
+        // exactly "still ranks past the cap"; a run written to since is spared.
         let mut cursor = coll
-            .find(doc! {"company_id": company.as_ref()})
-            .sort(doc! {"at_ms": -1, "run_id": -1})
+            .aggregate(vec![
+                doc! {"$match": {"company_id": company.as_ref()}},
+                doc! {"$group": {"_id": "$run_id", "newest": {"$max": "$at_ms"}}},
+                doc! {"$sort": {"newest": -1, "_id": -1}},
+                doc! {"$skip": MAX_DEEP_RUNS_PER_COMPANY as i64},
+            ])
             .await
             .map_err(mongo_err)?;
-        let mut seen: Vec<String> = Vec::new();
+        let mut stale: Vec<(String, i64)> = Vec::new();
         while let Some(doc) = cursor.try_next().await.map_err(mongo_err)? {
-            let id = get_str(&doc, "run_id")?;
-            if !seen.contains(&id) {
-                seen.push(id);
-            }
+            stale.push((get_str(&doc, "_id")?, get_i64(&doc, "newest")?));
         }
-        if seen.len() > MAX_DEEP_RUNS_PER_COMPANY {
-            let stale: Vec<&String> = seen.iter().skip(MAX_DEEP_RUNS_PER_COMPANY).collect();
-            coll.delete_many(doc! {
-                "company_id": company.as_ref(),
-                "run_id": {"$in": stale},
-            })
-            .await
-            .map_err(mongo_err)?;
+        if !stale.is_empty() {
+            let candidate_ids: Vec<&str> = stale.iter().map(|(id, _)| id.as_str()).collect();
+            // Re-verify in one pass: the newest `at_ms` each candidate carries
+            // *now*, then delete only the candidates that did not move since
+            // the ranking read them. A candidate another prune already removed
+            // has no current row, so deleting it is a no-op.
+            let mut verify = coll
+                .aggregate(vec![
+                    doc! {
+                        "$match": {
+                            "company_id": company.as_ref(),
+                            "run_id": {"$in": candidate_ids},
+                        }
+                    },
+                    doc! {"$group": {"_id": "$run_id", "newest": {"$max": "$at_ms"}}},
+                ])
+                .await
+                .map_err(mongo_err)?;
+            let mut newest: std::collections::HashMap<String, i64> = Default::default();
+            while let Some(doc) = verify.try_next().await.map_err(mongo_err)? {
+                newest.insert(get_str(&doc, "_id")?, get_i64(&doc, "newest")?);
+            }
+            let doomed: Vec<&str> = stale
+                .iter()
+                .filter(|(id, seen)| newest.get(id.as_str()).is_none_or(|now| now <= seen))
+                .map(|(id, _)| id.as_str())
+                .collect();
+            if !doomed.is_empty() {
+                coll.delete_many(doc! {
+                    "company_id": company.as_ref(),
+                    "run_id": {"$in": doomed},
+                })
+                .await
+                .map_err(mongo_err)?;
+            }
         }
         Ok(())
     }
