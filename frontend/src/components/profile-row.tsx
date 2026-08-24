@@ -54,7 +54,7 @@ export function ProfileRow({
     };
   }, [client, company]);
 
-  if (!me) return null;
+  if (!me || typeof me !== "object" || !("email" in me) || !("id" in me)) return null;
   const name = personName(me);
 
   return (
