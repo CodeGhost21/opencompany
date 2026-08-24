@@ -578,11 +578,12 @@ export function PolicySettings({ client, company }: Props) {
             </div>
 
             <AlertDialog
-              open={pendingTier !== null}
+              open={pendingTier !== null || pendingCapRaise !== null}
               onOpenChange={(open) => {
                 if (!open) {
                   setPendingTier(null);
                   setPendingReset(false);
+                  setPendingCapRaise(null);
                 }
               }}
             >
@@ -636,13 +637,24 @@ export function PolicySettings({ client, company }: Props) {
                         )}
                       </>
                     )}
+                    {pendingCapRaise !== null && (
+                      <>
+                        {status.autoApproveUnderUsd === null
+                          ? "Today every spend asks first."
+                          : `Today spend under $${status.autoApproveUnderUsd} asks nothing.`}{" "}
+                        Raising the cap to ${pendingCapRaise} lets everything up
+                        to it pass without asking.
+                      </>
+                    )}
                   </AlertDialogDescription>
                   <p className="text-sm text-muted-foreground">
                     {pendingReset
                       ? "Reset replaces the whole policy override, including the always-ask list."
-                      : dirty
-                        ? "Your saved always-ask list still wins, even on Full — save the list to enforce new gates."
-                        : "Your always-ask list still wins, even on Full."}
+                      : pendingCapRaise !== null
+                        ? "Your saved always-ask list still wins, even under the raised cap."
+                        : dirty
+                          ? "Your saved always-ask list still wins, even on Full — save the list to enforce new gates."
+                          : "Your always-ask list still wins, even on Full."}
                   </p>
                 </AlertDialogHeader>
                 <AlertDialogFooter>
@@ -651,6 +663,8 @@ export function PolicySettings({ client, company }: Props) {
                     onClick={() => {
                       if (pendingReset) {
                         void reset();
+                      } else if (pendingCapRaise !== null) {
+                        void commitSpendCap(pendingCapRaise);
                       } else if (pendingTier) {
                         void chooseTier(pendingTier.value);
                       }
@@ -659,7 +673,9 @@ export function PolicySettings({ client, company }: Props) {
                   >
                     {pendingReset
                       ? "Revert to the manifest's policy"
-                      : `Use ${pendingTier?.label}`}
+                      : pendingCapRaise !== null
+                        ? `Raise cap to $${pendingCapRaise}`
+                        : `Use ${pendingTier?.label}`}
                   </AlertDialogAction>
                 </AlertDialogFooter>
               </AlertDialogContent>
