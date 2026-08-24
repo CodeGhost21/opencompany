@@ -248,6 +248,10 @@ export function MessageComposer({
     );
     const range = { start: query.start, end: Math.max(selectionEnd, tokenEnd) };
     const result = insertMention(draft, range, entry);
+    // `insertMention` is typed to always return a result, but guard anyway:
+    // it is a module-boundary call and a future refactor must not let a
+    // malformed range turn a pick into a dereference of `undefined`.
+    if (!result) return;
     setDraft(result.text);
     // A pick replaces the token under the caret, so any mention the range
     // touched is gone from the draft. Drop those before reconciling, or the
