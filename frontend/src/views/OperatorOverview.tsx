@@ -57,6 +57,17 @@ export function OperatorOverview({
   const [runLoad, setRunLoad] = useState<RunLoad>("loading");
 
   /**
+   * The generation of the newest in-flight run read.
+   *
+   * Every read — the initial load and each `run_status_changed` re-read —
+   * takes a ticket before it starts and only applies its answer if it still
+   * holds the newest ticket. Without this, a re-read that returns while the
+   * initial snapshot is still outstanding would be overwritten by that older
+   * answer when it lands, leaving the panels stale until the next event.
+   */
+  const runReadGen = useRef(0);
+
+  /**
    * The two run reads this page makes, kept separate on purpose.
    *
    * "Work that stopped" wants the newest parked-or-failed attempts of either
