@@ -270,8 +270,11 @@ pub(crate) struct StepTrace {
     /// The next ordinal to hand out. Also the number of steps yielded so far.
     next: u32,
     /// `call_id` → the ordinal and label its start claimed, so the completion
-    /// finalizes that row keeping the richer start-time label.
-    running: std::collections::HashMap<String, (u32, String)>,
+    /// finalizes that row keeping the richer start-time label. In deep mode it
+    /// also carries the start event's detail, whose `display_detail` and
+    /// `iteration` the store would otherwise discard when the completion
+    /// replaces the row at the same ordinal.
+    running: std::collections::HashMap<String, (u32, String, Option<TurnStepDetail>)>,
     /// Whether the most recent step is an open "Thinking" run.
     thinking_open: bool,
     /// Whether to yield the unredacted companion alongside each step.
