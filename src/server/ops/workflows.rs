@@ -7027,8 +7027,12 @@ mod tests {
                     .unwrap(),
             )
             .await;
-            assert_eq!(under_a.as_array().unwrap().len(), 1, "{under_a}");
-            assert_eq!(under_a[0]["artifactId"], "art-a1");
+            assert_eq!(
+                under_a["files"].as_array().unwrap().len(),
+                1,
+                "{under_a}"
+            );
+            assert_eq!(under_a["files"][0]["artifactId"], "art-a1");
 
             // Under the re-owner: nothing — provenance is the opening run.
             let under_b = json_body(
