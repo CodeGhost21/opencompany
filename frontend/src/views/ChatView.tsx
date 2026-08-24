@@ -791,7 +791,10 @@ export function ChatView({
    */
   async function send(text: string, intent?: MessageIntent, parentId?: string) {
     if (sending) return;
-    const scopeCompany = company;
+    const scopeAtSend = {
+      connection: scope.connection,
+      company: scopeCompany,
+    };
     const target = active.id;
     const chatId = activeThreadId;
     const local = makeMessage("you", text, { parentId });
