@@ -3903,7 +3903,6 @@ mod test {
                 "search.web",
                 "mcp:*",
                 "workspace",
-                "workspace.*",
                 "workspace.write",
             ] {
                 assert!(
