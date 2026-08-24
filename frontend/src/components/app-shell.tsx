@@ -1031,12 +1031,12 @@ export function AppShell({
    * that effect. {@link reReadSettledThread} is that case; see its doc.
    */
   const mountedRef = useRef(true);
-  // The latest company, so an async completion started for one company can
-  // tell whether it still belongs to the active scope (issue #1000).
-  const companyRef = useRef(company);
+  // The latest full browser scope, so async completions cannot cross either a
+  // company switch or an in-place connection reconfiguration.
+  const scopeRef = useRef({ connection: scope.connection, company });
   useEffect(() => {
-    companyRef.current = company;
-  }, [company]);
+    scopeRef.current = { connection: scope.connection, company };
+  }, [scope.connection, company]);
   useEffect(() => {
     // Re-armed on mount, which is not redundant with the initial `true`:
     // `main.tsx` renders under `StrictMode`, so in development React mounts,
