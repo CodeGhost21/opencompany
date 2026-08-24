@@ -78,10 +78,15 @@ export function SettingsView({ client, company, feed, onFlag }: Props) {
       <div className="mx-auto w-full max-w-3xl space-y-6 px-4 py-6">
         {/* This sub-page draws no visible title of its own — the sub-nav rail
             beside it already says "Settings" (issue #1221). */}
-        <h1 className="sr-only">General settings</h1>
-        {/* Pairing this machine. Renders nothing in a browser, where the
-            session cookie already works. */}
-        <DevicePairing />
+        <h1 className="text-2xl font-semibold tracking-tight lg:sr-only">General settings</h1>
+        {/* Device pairing was here. Sessions are the frontend client's own
+            business now — the desktop app holds its session the same way the
+            browser does — so there is no machine for this page to pair. */}
+
+        {/* Every coding engine a teammate can be bound to, joined against
+            whether it can actually run on this machine (issue #1245). Works in
+            a browser; the installed-here half only fills in on the desktop. */}
+        <ExternalHarnesses client={client} company={company} />
 
         {/* Approvals: the autonomy tier and the always-ask list (issue #562).
             High in the page on purpose — an operator who comes to settings
