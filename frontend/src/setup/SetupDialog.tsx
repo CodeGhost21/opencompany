@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ArrowLeft, Check, Loader2, RotateCcw, Sparkles, Users } from "lucide-react";
 
+import { me } from "@/api/auth";
 import type { OpenCompanyClient } from "@/api/client";
 import { proposeRoster, type ProposedAgent, type RosterFallback } from "@/api/company-setup";
 import { getInferenceStatus } from "@/api/inference";
