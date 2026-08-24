@@ -1636,7 +1636,7 @@ async fn run_workflow(
             Err(ApiError(OpenCompanyError::BackgroundTask(
                 "the workflow run task did not complete".to_string(),
             ))
-            .into_response())
+            .into_response().into())
         }
     }
 }
