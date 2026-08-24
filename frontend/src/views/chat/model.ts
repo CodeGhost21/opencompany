@@ -138,13 +138,18 @@ export interface ChannelSection {
  * `lib/desks.ts`'s static set for a host that doesn't expose `.../desks` yet
  * (issue #53); the caller fetches the real ones and passes them in once they
  * land, so a company's own desks show up instead of the generic
- * strategy/creative/front-desk trio. Every roster teammate additionally gets
- * a DM, so a one-to-one line exists for anyone the company employs.
+ * strategy/creative/front-desk trio. A DM appears only after it has a
+ * transcript, newest conversation first; the compose picker still exposes the
+ * complete roster for starting one.
  *
  * Both kinds post to the same company endpoint. A channel scopes a transcript
  * and gives the company side a stable identity; it is not a separate backend.
  */
-export function buildChannels(members: TeamMember[], desks: Desk[] = defaultDesks()): ChannelSection[] {
+export function buildChannels(
+  members: TeamMember[],
+  desks: Desk[] = defaultDesks(),
+  transcripts: Transcripts = {},
+): ChannelSection[] {
   const channels: Channel[] = desks.map((d) => ({
     id: d.id,
     name: d.channel,
@@ -155,7 +160,19 @@ export function buildChannels(members: TeamMember[], desks: Desk[] = defaultDesk
     memberIds: d.members,
   }));
 
-  const dms: Channel[] = members.map((m) => ({
+  const dms = directMessageChannels(members)
+    .filter((dm) => (transcripts[dm.id]?.length ?? 0) > 0)
+    .sort((a, b) => latestMessageAt(transcripts[b.id]) - latestMessageAt(transcripts[a.id]));
+
+  return [
+    { id: "channels", label: "Channels", channels },
+    { id: "dms", label: "Direct messages", channels: dms },
+  ];
+}
+
+/** Every roster teammate as a DM target, including conversations not yet started. */
+export function directMessageChannels(members: TeamMember[]): Channel[] {
+  return members.map((m) => ({
     id: dmChannelId(m),
     name: m.name,
     kind: "dm" as const,
@@ -173,11 +190,16 @@ export function buildChannels(members: TeamMember[], desks: Desk[] = defaultDesk
     tone: m.tone,
     member: m,
   }));
+}
 
-  return [
-    { id: "channels", label: "Channels", channels },
-    { id: "dms", label: "Direct messages", channels: dms },
-  ];
+/** A DM target addressed by `id`, whether or not it is in the rail yet. */
+export function directMessageForId(members: TeamMember[], id: string | null): Channel | null {
+  if (!id) return null;
+  return directMessageChannels(members).find((channel) => channel.id === id) ?? null;
+}
+
+function latestMessageAt(messages: ChatMessage[] | undefined): number {
+  return messages?.reduce((latest, message) => Math.max(latest, message.at), 0) ?? 0;
 }
 
 /**
@@ -224,6 +246,29 @@ export function resolveDmChannelId(id: string, members: TeamMember[]): string | 
     (m) => dmChannelId(m) === id || legacyDmChannelId(m) === id,
   );
   return match ? dmChannelId(match) : null;
+}
+
+/**
+ * The channel id a `#/chat/<id>` hash segment names, with the URL escaping
+ * undone.
+ *
+ * The hash router hands views its raw segments without decoding, while hrefs
+ * that mint channel links — an approval card's "Open the conversation" pill —
+ * write them with `encodeURIComponent`, so a DM id arrives as `dm%3A<agent-id>`
+ * rather than `dm:<agent-id>`. Decode here, the same boundary
+ * `taskIdFromSegment` keeps for `#/tasks/<id>`.
+ *
+ * On a malformed escape the raw segment comes back rather than `null`: a
+ * typo'd address should still surface as an unknown channel (issue #370's
+ * notice), not silently collapse onto the fallback.
+ */
+export function channelIdFromSegment(segment: string | null): string | null {
+  if (!segment) return null;
+  try {
+    return decodeURIComponent(segment);
+  } catch {
+    return segment;
+  }
 }
 
 function nameHash(name: string): string {

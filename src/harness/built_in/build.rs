@@ -894,8 +894,11 @@ pub fn build_agent(
         let mcp_security = Arc::new(SecurityPolicy::default());
         // The known-secret set for the scrubber: every credential the agent's
         // granted servers carry, so no configured token can leak into an
-        // agent-visible MCP error (the error-hardening cell).
-        let secrets = granted_secrets(&deps.mcp_servers, manifest_agent);
+        // agent-visible MCP error (the error-hardening cell). Use the same
+        // effective grants that selected `registry`, not the raw manifest
+        // request: an empty request inherits the company belt and can therefore
+        // reach servers even when `manifest_agent.tools` is empty.
+        let secrets = granted_secrets(&deps.mcp_servers, grants);
         tools.push(Box::new(OcMcpListServersTool::new(registry.clone())));
         tools.push(Box::new(McpListToolsTool::new(registry.clone())));
         // `OcMcpCallTool` replaces upstream's `McpCallTool`: same name/schema,
@@ -1749,6 +1752,7 @@ mod tests {
             classes: Vec::new(),
             ledgers: None,
             can_declare_ledgers: true,
+            model: None,
         }
     }
 
@@ -1930,6 +1934,8 @@ mod tests {
             // tools are never built and the pinned belt below is the
             // pre-#237 belt exactly.
             workspace: None,
+            workflow_runs: None,
+            deep_trace: None,
         }
     }
 
@@ -1967,6 +1973,7 @@ mod tests {
             classes: Vec::new(),
             ledgers: None,
             can_declare_ledgers: true,
+            model: None,
         };
         let policy = ApprovalPolicy::new(&Policy::default(), None);
         let grants: Vec<String> = grants.iter().map(|g| g.to_string()).collect();
@@ -2018,6 +2025,7 @@ mod tests {
             classes: Vec::new(),
             ledgers: None,
             can_declare_ledgers: true,
+            model: None,
         };
         let policy = ApprovalPolicy::new(&Policy::default(), None);
         let grants: Vec<String> = grants.iter().map(|g| g.to_string()).collect();
@@ -2065,6 +2073,7 @@ mod tests {
             description: None,
             tier: None,
             harness: None,
+            model: None,
             tools: Vec::new(),
             delegates_to: Vec::new(),
             context: None,
@@ -2173,6 +2182,7 @@ mod tests {
             classes: Vec::new(),
             ledgers: None,
             can_declare_ledgers: true,
+            model: None,
         };
         let policy = ApprovalPolicy::new(&Policy::default(), None);
         let grants: Vec<String> = grants.iter().map(|g| g.to_string()).collect();
@@ -2218,6 +2228,7 @@ mod tests {
             classes: Vec::new(),
             ledgers: None,
             can_declare_ledgers: true,
+            model: None,
         };
         let policy = ApprovalPolicy::new(&Policy::default(), None);
         let grants: Vec<String> = grants.iter().map(|g| g.to_string()).collect();
@@ -2629,6 +2640,7 @@ mod tests {
             classes: Vec::new(),
             ledgers: None,
             can_declare_ledgers: true,
+            model: None,
         };
         let agent = build_agent(
             &CompanyId::new("acme"),
@@ -2888,6 +2900,7 @@ mod tests {
             classes: Vec::new(),
             ledgers: None,
             can_declare_ledgers: true,
+            model: None,
         };
         // `full` so the sandboxed write executes without a supervised prompt.
         let policy = ApprovalPolicy::new(

@@ -25,6 +25,7 @@ use axum::{Json, Router};
 use futures::StreamExt;
 use futures::stream::Stream;
 use serde::{Deserialize, Serialize};
+use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
 use crate::AppState;
@@ -38,8 +39,8 @@ use crate::ports::types::{
 use crate::runtime::grants::{GrantId, GrantScope, MAX_STANDING_GRANT_MILLIS};
 use crate::runtime::types::{ApprovalSummary, CompanyStatus, CycleReport};
 use crate::server::chat_history::{
-    CHAT_HISTORY_PAGE_LIMIT, MentionView, MessageView, ReactionView, Viewer,
-    channel_attributed_replies, history_for_desk,
+    CHAT_HISTORY_PAGE_LIMIT, MentionView, MessageView, ReactionView, Viewer, author_labels,
+    channel_attributed_replies, history_for_desk, project_mentions,
 };
 use crate::server::error::ApiError;
 use crate::server::graphql::auth::GqlAuth;
@@ -148,13 +149,8 @@ struct DeskDto {
 /// chats with any operator-added overlay members merged in (issue #72). Empty
 /// when the company defines none (the console then falls back to its static
 /// default threads).
-async fn list_desks(scope: ScopedCompany) -> Result<Json<Vec<DeskDto>>, Response> {
-    let record = scope
-        .runtime
-        .store()
-        .load(scope.id())
-        .await
-        .map_err(|e| ApiError(e).into_response())?;
+async fn list_desks(scope: ScopedCompany) -> Result<Json<Vec<DeskDto>>, crate::server::Rejection> {
+    let record = scope.runtime.store().load(scope.id()).await?;
     let desks = record
         .map(|record| {
             // Manifest (blueprint) desks first, then operator-created overlay
@@ -583,13 +579,33 @@ async fn delete_desk(
 
 /// Logs SSE stream teardown when the subscriber disconnects. Held inside the
 /// projection closure so it drops exactly when the response body is dropped.
-struct SseStreamGuard(CompanyId);
+///
+/// Also owns the label-refresh task's handle, so the periodic roster re-read
+/// dies with its connection instead of leaking for the process's lifetime.
+struct SseStreamGuard {
+    company: CompanyId,
+    /// One-shot stop signal for the label-refresh task. Sent before the handle
+    /// is aborted so the loop exits at its next sleep boundary rather than
+    /// waking once more to write a roster map nobody will read.
+    cancel: Option<oneshot::Sender<()>>,
+    label_refresh: Option<JoinHandle<()>>,
+}
 
 impl Drop for SseStreamGuard {
     fn drop(&mut self) {
-        tracing::debug!(company = %self.0, "operator SSE stream closed");
+        if let Some(cancel) = self.cancel.take() {
+            let _ = cancel.send(());
+        }
+        if let Some(handle) = self.label_refresh.take() {
+            handle.abort();
+        }
+        tracing::debug!(company = %self.company, "operator SSE stream closed");
     }
 }
+
+/// How often an open SSE stream re-reads the roster, so a mention chip for a
+/// user added or renamed after the stream opened picks up the new label.
+const LABEL_REFRESH_EVERY: Duration = Duration::from_secs(60);
 
 /// `GET {scope}/events` — the company → operator attention feed (issue #66).
 ///
@@ -607,18 +623,58 @@ async fn company_events(
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let company = scope.id().clone();
     tracing::debug!(company = %company, "operator SSE stream opening");
-    let guard = SseStreamGuard(company.clone());
-    let durable = scope
-        .runtime
-        .events()
-        .subscribe(&company)
-        .filter_map(move |item| {
-            // Keep the teardown guard alive for the life of the stream.
-            let _ = &guard;
-            let event = project_stream_item(&item)
-                .map(|value| Ok(Event::default().data(value.to_string())));
-            std::future::ready(event)
-        });
+    let viewer = scope
+        .actor
+        .as_ref()
+        .map(|actor| Viewer::User(actor.id.clone()))
+        .unwrap_or(Viewer::Operator);
+    let subscription = scope.runtime.events().subscribe(&company);
+    // Roster display labels for mention chips. Held in a shared lock rather
+    // than captured once: the stream outlives membership changes that can add
+    // or rename a user, and a transiently failed initial read must not fix the
+    // map empty for the rest of the connection. A background task refreshes it
+    // on an interval, and the guard above aborts that task when the stream
+    // closes.
+    let authors: Arc<std::sync::RwLock<std::collections::HashMap<String, String>>> = Arc::new(
+        std::sync::RwLock::new(author_labels(&scope.runtime).await.unwrap_or_default()),
+    );
+    let (cancel, cancel_rx) = tokio::sync::oneshot::channel::<()>();
+    let label_refresh = {
+        let runtime = scope.runtime.clone();
+        let shared = Arc::clone(&authors);
+        tokio::spawn(async move {
+            let mut cancel = cancel_rx;
+            loop {
+                // The guard's one-shot fires when the stream closes, so the
+                // loop stops at the next boundary instead of waking once more
+                // to attempt a write nobody will read.
+                tokio::select! {
+                    _ = tokio::time::sleep(LABEL_REFRESH_EVERY) => {}
+                    _ = &mut cancel => return,
+                }
+                if let Ok(fresh) = author_labels(&runtime).await {
+                    *shared
+                        .write()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner()) = fresh;
+                }
+            }
+        })
+    };
+    let guard = SseStreamGuard {
+        company: company.clone(),
+        cancel: Some(cancel),
+        label_refresh: Some(label_refresh),
+    };
+    let durable = subscription.filter_map(move |item| {
+        // Keep the teardown guard alive for the life of the stream.
+        let _ = &guard;
+        let authors = authors
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let event = project_stream_item_for_viewer(&item, &authors, &viewer)
+            .map(|value| Ok(Event::default().data(value.to_string())));
+        std::future::ready(event)
+    });
     // Merge the transient live turn-progress bus (tool_call/tool_result frames a
     // turn emits while it runs — see [`crate::turn_stream`]) onto the same feed.
     // These are ephemeral and never journaled; the console switches on `type`
@@ -669,9 +725,13 @@ fn is_own_typing_frame(frame: &crate::turn_stream::LiveFrame, self_id: Option<&s
 
 /// Projects a live subscription item into the operator stream's safe wire
 /// shape. A gap is an unpersisted control frame, deliberately structural-only.
-fn project_stream_item(item: &EventStreamItem) -> Option<serde_json::Value> {
+fn project_stream_item_for_viewer(
+    item: &EventStreamItem,
+    authors: &std::collections::HashMap<String, String>,
+    viewer: &Viewer,
+) -> Option<serde_json::Value> {
     match item {
-        EventStreamItem::Event(stored) => project_event(stored),
+        EventStreamItem::Event(stored) => project_event_for_viewer(stored, authors, viewer),
         EventStreamItem::Gap { missed } => Some(serde_json::json!({
             "type": "stream_gap",
             "missed": missed,
@@ -696,7 +756,16 @@ fn project_stream_item(item: &EventStreamItem) -> Option<serde_json::Value> {
 ///
 /// Adding a variant to [`CompanyEvent`] therefore drops it by default; it
 /// reaches the console only by being listed here on purpose.
+#[cfg(test)]
 fn project_event(stored: &StoredEvent) -> Option<serde_json::Value> {
+    project_event_for_viewer(stored, &std::collections::HashMap::new(), &Viewer::Operator)
+}
+
+fn project_event_for_viewer(
+    stored: &StoredEvent,
+    authors: &std::collections::HashMap<String, String>,
+    viewer: &Viewer,
+) -> Option<serde_json::Value> {
     use serde_json::json;
 
     let envelope = |ty: &str| {
@@ -739,26 +808,15 @@ fn project_event(stored: &StoredEvent) -> Option<serde_json::Value> {
             if let Some(task_id) = task_id {
                 o["taskId"] = json!(task_id);
             }
-            // Mention spans, so a console watching live draws the same chips a
-            // reload would rather than rendering the reply flat and then
-            // re-rendering it on refresh.
-            //
-            // **Spans only — deliberately no targets.** A `Mention` carries an
-            // agent id or a *user* id, and this stream has no per-viewer
-            // projection to resolve either into a label; that is the same
-            // reason `ReactionToggled` is dropped here entirely (issue #364).
-            // A chip needs the range and whether it pings, and nothing else, so
-            // that is all this projects. `chat/history` remains the one surface
-            // that answers *who*, per viewer, with labels rather than ids.
-            if !mentions.is_empty() {
+            // Project the same viewer-relative metadata as chat/history. The
+            // stream must carry complete ChatMentionDto values because the live
+            // row is already durable and hydration intentionally skips it.
+            let projected = project_mentions(mentions, authors, viewer);
+            if !projected.is_empty() {
                 o["mentions"] = json!(
-                    mentions
-                        .iter()
-                        .map(|m| json!({
-                            "text": m.text,
-                            "offset": m.offset,
-                            "quiet": m.quiet,
-                        }))
+                    projected
+                        .into_iter()
+                        .map(ChatMentionDto::from)
                         .collect::<Vec<_>>()
                 );
             }
@@ -1142,6 +1200,7 @@ fn project_event(stored: &StoredEvent) -> Option<serde_json::Value> {
             // stays the three structural scalars it already was — the console
             // surfaces diagnostics from the run-detail drawer, not this stream.
             diagnostics: _,
+            agent_run_id,
         } => {
             let mut o = envelope("workflow_node_finished");
             o["workflowId"] = json!(workflow_id);
@@ -1149,6 +1208,15 @@ fn project_event(stored: &StoredEvent) -> Option<serde_json::Value> {
             o["nodeId"] = json!(node_id);
             o["status"] = json!(status);
             o["elapsedMs"] = json!(elapsed_ms);
+            // A fourth structural id, on the same terms as the three above: it
+            // is reachable by this same operator through `GET {scope}/runs`, and
+            // it is what lets a console watching the canvas open the node's step
+            // trace directly rather than searching for which attempt was its.
+            // Omitted entirely when the node opened none, so a frame for a
+            // non-agent node is byte-identical to what it was.
+            if let Some(agent_run_id) = agent_run_id {
+                o["agentRunId"] = json!(agent_run_id);
+            }
             o
         }
         // Issue #983: a turn was accepted, so a console watching the
@@ -1266,17 +1334,17 @@ async fn company_status(
     CompanyAuth(auth): CompanyAuth,
     State(state): State<AppState>,
     Path(id): Path<String>,
-) -> Result<Json<CompanyStatus>, Response> {
+) -> Result<Json<CompanyStatus>, crate::server::Rejection> {
     let company = CompanyId::new(&id);
     if let Some(resp) = authorize_address(&state, &auth, &company) {
-        return Err(resp);
+        return Err(resp.into());
     }
-    let runtime = lookup(&state, &id).map_err(IntoResponse::into_response)?;
+    let runtime = lookup(&state, &id)?;
     runtime
         .status()
         .await
         .map(Json)
-        .map_err(|e| ApiError(e).into_response())
+        .map_err(|e| ApiError(e).into_response().into())
 }
 
 /// The operator's chat request body.
@@ -2057,6 +2125,7 @@ async fn chat_and_emit(
     }
 
     let (report, feedback_note) = join_chat_turn(turn).await?;
+    let responses = report.responses.clone();
     emit_cycle_webhooks(state, id, &report).await;
     if let Some(note) = feedback_note {
         emit_feedback_webhook(state, id, &note).await;
@@ -2065,7 +2134,7 @@ async fn chat_and_emit(
         // The operator's own message is the cycle's single input event, so its
         // sequence is the first the cycle journaled (issue #364).
         message_id: report.input_seqs.first().map(|seq| seq.value().to_string()),
-        responses: report.responses,
+        responses,
         // A chat turn is nobody's sign-off, so this stays absent here.
         still_awaiting: None,
         turn_id,
@@ -2119,6 +2188,40 @@ fn spawn_chat_turn(turn: ChatTurn) -> JoinHandle<Result<(CycleReport, Option<Str
         let (mut report, feedback_note) = match outcome {
             Ok(both) => both,
             Err(err) => {
+                // A turn that aborts — most often a tool call that exceeded its
+                // wall-clock budget — was only ever logged server-side. To the
+                // operator watching the thread, the teammate simply vanished
+                // mid-answer with no word. Journal a visible system line in the
+                // same desk thread the reply would have gone to, naming the
+                // failure and what to do next. Same shape and author as the
+                // continuation-failure notice (SYSTEM_AUTHOR): a direct
+                // `AgentReply` so it round-trips through history like any other
+                // reply, and is distinguishable on disk from a real teammate
+                // bubble. `err.0` is the inner error (it carries `Display`);
+                // the `ApiError` newtype does not.
+                let notice = CompanyEvent::AgentReply {
+                    parent,
+                    chat_id: desk.clone(),
+                    agent_id: crate::ports::SYSTEM_AUTHOR.to_string(),
+                    text: format!(
+                        "This turn couldn't be finished — something went wrong or \
+                         a step took too long ({}). Nothing was left half-done. \
+                         Send the message again to retry; if it keeps failing, \
+                         try breaking it into a smaller request.",
+                        err.0
+                    ),
+                    steps: Vec::new(),
+                    task_id: None,
+                    mentions: Vec::new(),
+                    mention_depth: 0,
+                };
+                if let Err(journal_err) = runtime.events().append(&company, notice).await {
+                    tracing::warn!(
+                        company = %company,
+                        error = %journal_err,
+                        "an aborted chat turn could not be reported to the operator"
+                    );
+                }
                 settle_chat_turn(&runtime, &company, turn_id.as_deref(), Some(&err)).await;
                 return Err(err);
             }
@@ -2262,7 +2365,7 @@ async fn chat_actor(
     state: &AppState,
     company: &CompanyId,
     peer: Option<std::net::SocketAddr>,
-) -> Result<Option<Actor>, Response> {
+) -> Result<Option<Actor>, crate::server::Rejection> {
     use crate::server::graphql::auth::{GqlAuth, resolve_principal};
 
     // `peer` is threaded from every one of this function's callers, all the
@@ -2273,10 +2376,10 @@ async fn chat_actor(
         .await
         .map_err(|_| unauthorized_response())?;
     if let Some(resp) = authorize_address(state, &auth, company) {
-        return Err(resp);
+        return Err(resp.into());
     }
     if let Some(resp) = refuse_until_password_changed(&auth) {
-        return Err(resp);
+        return Err(resp.into());
     }
     Ok(match auth {
         GqlAuth::User(user) => Some(Actor {
@@ -2302,13 +2405,13 @@ async fn operator_chat(
     headers: HeaderMap,
     crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
     Json(message): Json<ChatMessage>,
-) -> Result<ChatOk, Response> {
+) -> Result<ChatOk, crate::server::Rejection> {
     let company = CompanyId::new(&id);
     let by = chat_actor(&headers, &state, &company, peer).await?;
-    let runtime = lookup(&state, &id).map_err(IntoResponse::into_response)?;
+    let runtime = lookup(&state, &id)?;
     chat_and_emit(&state, &company, runtime, message, by)
         .await
-        .map_err(IntoResponse::into_response)
+        .map_err(|error| IntoResponse::into_response(error).into())
 }
 
 /// `POST /api/v1/company/chat` (single-company alias).
@@ -2317,13 +2420,13 @@ async fn operator_chat_single(
     headers: HeaderMap,
     crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
     Json(message): Json<ChatMessage>,
-) -> Result<ChatOk, Response> {
-    let runtime = sole(&state).map_err(IntoResponse::into_response)?;
+) -> Result<ChatOk, crate::server::Rejection> {
+    let runtime = sole(&state)?;
     let id = runtime.id().clone();
     let by = chat_actor(&headers, &state, &id, peer).await?;
     chat_and_emit(&state, &id, runtime, message, by)
         .await
-        .map_err(IntoResponse::into_response)
+        .map_err(|error| IntoResponse::into_response(error).into())
 }
 
 /// Query params for `GET .../chat/history`.
@@ -2508,7 +2611,7 @@ async fn history_viewer(
     state: &AppState,
     company: &CompanyId,
     peer: Option<std::net::SocketAddr>,
-) -> Result<Viewer, Response> {
+) -> Result<Viewer, crate::server::Rejection> {
     let actor = chat_actor(headers, state, company, peer).await?;
     Ok(match actor {
         Some(actor) if actor.kind == ActorKind::User => Viewer::User(actor.id),
@@ -2524,18 +2627,15 @@ async fn chat_history_response(
     headers: &HeaderMap,
     peer: Option<std::net::SocketAddr>,
     query: ChatHistoryQuery,
-) -> Result<Json<Vec<ChatHistoryMessageDto>>, Response> {
+) -> Result<Json<Vec<ChatHistoryMessageDto>>, crate::server::Rejection> {
     let viewer = history_viewer(headers, state, company, peer).await?;
-    let (desk_id, desk_name) = resolve_desk(&runtime, query.desk.as_deref())
-        .await
-        .map_err(|e| ApiError(e).into_response())?;
+    let (desk_id, desk_name) = resolve_desk(&runtime, query.desk.as_deref()).await?;
     let limit = query
         .limit
         .unwrap_or(CHAT_HISTORY_PAGE_LIMIT)
         .min(CHAT_HISTORY_PAGE_LIMIT);
-    let messages = history_for_desk(&runtime, &desk_id, &desk_name, &viewer, query.before, limit)
-        .await
-        .map_err(|e| ApiError(e).into_response())?;
+    let messages =
+        history_for_desk(&runtime, &desk_id, &desk_name, &viewer, query.before, limit).await?;
     Ok(Json(
         messages
             .into_iter()
@@ -2553,9 +2653,9 @@ async fn chat_history(
     headers: HeaderMap,
     crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
     Query(query): Query<ChatHistoryQuery>,
-) -> Result<Json<Vec<ChatHistoryMessageDto>>, Response> {
+) -> Result<Json<Vec<ChatHistoryMessageDto>>, crate::server::Rejection> {
     let company = CompanyId::new(&id);
-    let runtime = lookup(&state, &id).map_err(IntoResponse::into_response)?;
+    let runtime = lookup(&state, &id)?;
     chat_history_response(&state, &company, runtime, &headers, peer, query).await
 }
 
@@ -2565,8 +2665,8 @@ async fn chat_history_single(
     headers: HeaderMap,
     crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
     Query(query): Query<ChatHistoryQuery>,
-) -> Result<Json<Vec<ChatHistoryMessageDto>>, Response> {
-    let runtime = sole(&state).map_err(IntoResponse::into_response)?;
+) -> Result<Json<Vec<ChatHistoryMessageDto>>, crate::server::Rejection> {
+    let runtime = sole(&state)?;
     let id = runtime.id().clone();
     chat_history_response(&state, &id, runtime, &headers, peer, query).await
 }
@@ -2601,19 +2701,14 @@ async fn attribution_audit_response(
     runtime: Arc<CompanyRuntime>,
     headers: &HeaderMap,
     peer: Option<std::net::SocketAddr>,
-) -> Result<Json<AttributionAuditDto>, Response> {
+) -> Result<Json<AttributionAuditDto>, crate::server::Rejection> {
     let _viewer = history_viewer(headers, state, company, peer).await?;
     let record = runtime
         .store()
         .load(runtime.id())
-        .await
-        .map_err(|e| ApiError(e).into_response())?
-        .ok_or_else(|| {
-            ApiError(OpenCompanyError::CompanyNotFound(company.to_string())).into_response()
-        })?;
-    let audit = channel_attributed_replies(&runtime, &record)
-        .await
-        .map_err(|e| ApiError(e).into_response())?;
+        .await?
+        .ok_or_else(|| OpenCompanyError::CompanyNotFound(company.to_string()))?;
+    let audit = channel_attributed_replies(&runtime, &record).await?;
     Ok(Json(AttributionAuditDto {
         replies: audit.replies,
         affected: audit.affected,
@@ -2626,9 +2721,9 @@ async fn attribution_audit(
     Path(id): Path<String>,
     headers: HeaderMap,
     crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
-) -> Result<Json<AttributionAuditDto>, Response> {
+) -> Result<Json<AttributionAuditDto>, crate::server::Rejection> {
     let company = CompanyId::new(&id);
-    let runtime = lookup(&state, &id).map_err(IntoResponse::into_response)?;
+    let runtime = lookup(&state, &id)?;
     attribution_audit_response(&state, &company, runtime, &headers, peer).await
 }
 
@@ -2637,8 +2732,8 @@ async fn attribution_audit_single(
     State(state): State<AppState>,
     headers: HeaderMap,
     crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
-) -> Result<Json<AttributionAuditDto>, Response> {
-    let runtime = sole(&state).map_err(IntoResponse::into_response)?;
+) -> Result<Json<AttributionAuditDto>, crate::server::Rejection> {
+    let runtime = sole(&state)?;
     let id = runtime.id().clone();
     attribution_audit_response(&state, &id, runtime, &headers, peer).await
 }
@@ -2702,19 +2797,15 @@ async fn react_to_message(
     peer: Option<std::net::SocketAddr>,
     seq: String,
     body: ReactionBody,
-) -> Result<StatusCode, Response> {
+) -> Result<StatusCode, crate::server::Rejection> {
     let by = chat_actor(headers, state, company, peer).await?;
-    let message_seq = parse_message_id(&seq).map_err(IntoResponse::into_response)?;
-    validate_emoji(&body.emoji).map_err(IntoResponse::into_response)?;
+    let message_seq = parse_message_id(&seq)?;
+    validate_emoji(&body.emoji)?;
     // The target must be a message. Without this the route would happily hang a
     // reaction off an approval, a lifecycle change, or a sequence position that
     // has never existed — none of which any reader could render, and all of
     // which would sit in the log forever claiming otherwise.
-    let target = runtime
-        .events()
-        .read_from(company, message_seq, 1)
-        .await
-        .map_err(|e| ApiError(e).into_response())?;
+    let target = runtime.events().read_from(company, message_seq, 1).await?;
     let is_message = target
         .first()
         .filter(|stored| stored.seq == message_seq)
@@ -2726,7 +2817,9 @@ async fn react_to_message(
         });
     if !is_message {
         return Err(
-            ApiError(OpenCompanyError::NotFound(format!("no chat message {seq}"))).into_response(),
+            ApiError(OpenCompanyError::NotFound(format!("no chat message {seq}")))
+                .into_response()
+                .into(),
         );
     }
     runtime
@@ -2740,8 +2833,7 @@ async fn react_to_message(
                 by,
             },
         )
-        .await
-        .map_err(|e| ApiError(e).into_response())?;
+        .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -2753,9 +2845,9 @@ async fn react_to_message_scoped(
     headers: HeaderMap,
     crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
     Json(body): Json<ReactionBody>,
-) -> Result<StatusCode, Response> {
+) -> Result<StatusCode, crate::server::Rejection> {
     let company = CompanyId::new(&id);
-    let runtime = lookup(&state, &id).map_err(IntoResponse::into_response)?;
+    let runtime = lookup(&state, &id)?;
     react_to_message(&state, &company, runtime, &headers, peer, seq, body).await
 }
 
@@ -2766,8 +2858,8 @@ async fn react_to_message_single(
     headers: HeaderMap,
     crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
     Json(body): Json<ReactionBody>,
-) -> Result<StatusCode, Response> {
-    let runtime = sole(&state).map_err(IntoResponse::into_response)?;
+) -> Result<StatusCode, crate::server::Rejection> {
+    let runtime = sole(&state)?;
     let id = runtime.id().clone();
     react_to_message(&state, &id, runtime, &headers, peer, seq, body).await
 }
@@ -2777,12 +2869,12 @@ async fn list_approvals(
     CompanyAuth(auth): CompanyAuth,
     State(state): State<AppState>,
     Path(id): Path<String>,
-) -> Result<Json<Vec<ApprovalSummary>>, Response> {
+) -> Result<Json<Vec<ApprovalSummary>>, crate::server::Rejection> {
     let company = CompanyId::new(&id);
     if let Some(resp) = authorize_address(&state, &auth, &company) {
-        return Err(resp);
+        return Err(resp.into());
     }
-    let runtime = lookup(&state, &id).map_err(IntoResponse::into_response)?;
+    let runtime = lookup(&state, &id)?;
     // Membership got you the list; role decides whether you may read what is in
     // it (issue #618).
     Ok(Json(crate::server::approval_visibility::for_principal(
@@ -2795,12 +2887,12 @@ async fn list_approvals(
 async fn list_approvals_single(
     CompanyAuth(auth): CompanyAuth,
     State(state): State<AppState>,
-) -> Result<Json<Vec<ApprovalSummary>>, Response> {
-    let runtime = sole(&state).map_err(IntoResponse::into_response)?;
+) -> Result<Json<Vec<ApprovalSummary>>, crate::server::Rejection> {
+    let runtime = sole(&state)?;
     // The sole company IS the addressed one, so the principal is checked
     // against it exactly as on the `{id}` form.
     if let Some(resp) = authorize_address(&state, &auth, runtime.id()) {
-        return Err(resp);
+        return Err(resp.into());
     }
     // Same contents rule as the `{id}` form (issue #618) — the two handlers are
     // the same read behind two addressing forms, and a redaction applied to one
@@ -2959,6 +3051,16 @@ struct StandingGrantDto {
     /// the pre-#457 shape is byte-identical for every other tool.
     #[serde(skip_serializing_if = "Option::is_none")]
     scope: Option<String>,
+    /// The authored workflow allowed to redeem it (issue #1098), when the grant
+    /// is to a workflow rather than a teammate.
+    ///
+    /// On the wire for the same reason `scope` is: `agent` is empty on a
+    /// workflow permission, so without this the console would read the row as a
+    /// nameless teammate and could not tell two workflows holding the same
+    /// tool/scope apart. Absent — not `null` — on every teammate grant, so the
+    /// pre-#1098 wire shape is byte-identical for them.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    workflow: Option<String>,
 }
 
 impl From<crate::runtime::grants::StandingGrant> for StandingGrantDto {
@@ -2972,6 +3074,7 @@ impl From<crate::runtime::grants::StandingGrant> for StandingGrantDto {
             at_millis: g.at_millis,
             expires_at_millis: g.expires_at_millis,
             scope: g.scope,
+            workflow: g.workflow,
         }
     }
 }
@@ -3154,16 +3257,16 @@ async fn resolve_approval(
     State(state): State<AppState>,
     Path((id, aid)): Path<(String, String)>,
     Json(body): Json<ResolveApproval>,
-) -> Result<Response, Response> {
+) -> Result<Response, crate::server::Rejection> {
     let company = CompanyId::new(&id);
     if let Some(resp) = authorize_address(&state, &auth, &company) {
-        return Err(resp);
+        return Err(resp.into());
     }
-    let runtime = lookup(&state, &id).map_err(IntoResponse::into_response)?;
+    let runtime = lookup(&state, &id)?;
     let actor = resolving_actor(auth);
     run_resolve(&state, &company, runtime, aid, body, actor)
         .await
-        .map_err(IntoResponse::into_response)
+        .map_err(|error| IntoResponse::into_response(error).into())
 }
 
 /// Who is resolving this approval (issue #374).
@@ -3191,19 +3294,19 @@ async fn resolve_approval_single(
     State(state): State<AppState>,
     Path(aid): Path<String>,
     Json(body): Json<ResolveApproval>,
-) -> Result<Response, Response> {
-    let runtime = sole(&state).map_err(IntoResponse::into_response)?;
+) -> Result<Response, crate::server::Rejection> {
+    let runtime = sole(&state)?;
     let id = runtime.id().clone();
     if let Some(resp) = authorize_address(&state, &auth, &id) {
-        return Err(resp);
+        return Err(resp.into());
     }
     if let Some(resp) = refuse_until_password_changed(&auth) {
-        return Err(resp);
+        return Err(resp.into());
     }
     let actor = resolving_actor(auth);
     run_resolve(&state, &id, runtime, aid, body, actor)
         .await
-        .map_err(IntoResponse::into_response)
+        .map_err(|error| IntoResponse::into_response(error).into())
 }
 
 #[cfg(test)]
@@ -4132,6 +4235,8 @@ mode = "full"
             search: None,
             tenant_search: None,
             workspace: None,
+            workflow_runs: None,
+            deep_trace: None,
         };
         let brain = HarnessBrain::new(Arc::new(HarnessPool::new()), deps, record);
 
@@ -6549,6 +6654,7 @@ mode = "full"
                         text: SLOW_TURN_REPLY.into(),
                         steps: Vec::new(),
                         reply_to: None,
+                        mentions: Vec::new(),
                     });
                 }
             }
@@ -6729,6 +6835,7 @@ mode = "full"
                         text: format!("answered: {text}"),
                         steps: Vec::new(),
                         reply_to: None,
+                        mentions: Vec::new(),
                     });
                 }
             }
@@ -7484,8 +7591,12 @@ mode = "full"
 
     #[test]
     fn projects_a_gap_with_structural_fields_only() {
-        let value = super::project_stream_item(&EventStreamItem::Gap { missed: 44 })
-            .expect("a gap must reach the console");
+        let value = super::project_stream_item_for_viewer(
+            &EventStreamItem::Gap { missed: 44 },
+            &std::collections::HashMap::new(),
+            &Viewer::Operator,
+        )
+        .expect("a gap must reach the console");
         assert_eq!(
             value,
             serde_json::json!({ "type": "stream_gap", "missed": 44 })
@@ -7526,10 +7637,43 @@ mode = "full"
         assert!(v.get("parentId").is_none(), "unexpected parentId: {v}");
     }
 
-    /// A threaded reply carries its parent onto the live frame (issue #364), so
-    /// a console watching the stream folds it under the same row a reload would
-    /// — otherwise a thread answer arrives live in the channel and then jumps
-    /// into the thread on the next refresh.
+    #[test]
+    fn projects_agent_reply_with_viewer_mention_metadata() {
+        use crate::ports::types::{Mention, MentionTarget};
+        let stored = stored(CompanyEvent::AgentReply {
+            mentions: vec![
+                Mention {
+                    target: MentionTarget::User { id: "u-1".into() },
+                    text: "@Ada".into(),
+                    offset: 0,
+                    quiet: false,
+                },
+                Mention {
+                    target: MentionTarget::Everyone,
+                    text: "@everyone".into(),
+                    offset: 5,
+                    quiet: true,
+                },
+            ],
+            mention_depth: 0,
+            parent: None,
+            task_id: None,
+            chat_id: "General".into(),
+            agent_id: "ceo".into(),
+            text: "@Ada @everyone".into(),
+            steps: Vec::new(),
+        });
+        let authors = std::collections::HashMap::from([(String::from("u-1"), String::from("Ada"))]);
+        let value = super::project_event_for_viewer(&stored, &authors, &Viewer::User("u-1".into()))
+            .expect("agent_reply is an attention signal");
+        assert_eq!(
+            value["mentions"],
+            serde_json::json!([
+                { "text": "@Ada", "offset": 0, "label": "Ada", "mine": true },
+                { "text": "@everyone", "offset": 5, "label": "everyone", "mine": true, "quiet": true },
+            ])
+        );
+    }
     #[test]
     fn projects_agent_reply_with_its_thread_parent() {
         let v = super::project_event(&stored(CompanyEvent::AgentReply {
@@ -8266,6 +8410,7 @@ mode = "full"
             status: crate::ports::types::WorkflowNodeStatus::Error,
             elapsed_ms: 1234,
             diagnostics: Vec::new(),
+            agent_run_id: None,
         }))
         .expect("workflow_node_finished reaches the console");
         assert_eq!(node["type"], "workflow_node_finished");
@@ -8848,6 +8993,7 @@ mode = "full"
                             text: format!("re-issued {approval_id}"),
                             steps: Vec::new(),
                             reply_to: None,
+                            mentions: Vec::new(),
                         });
                     }
                     _ => {}

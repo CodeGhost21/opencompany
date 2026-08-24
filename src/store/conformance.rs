@@ -181,6 +181,10 @@ fn sample_overlay_agents() -> Vec<crate::ports::types::OverlayAgent> {
             role: "Head of Support".to_string(),
             description: Some("Answers customer mail and escalates refunds.".to_string()),
             tools: vec!["docs.*".to_string(), "web".to_string()],
+            // Both set, so a backend that drops either fails here — the same
+            // reason `tools` is non-empty on this one and empty on the next.
+            model: Some("claude-sonnet-4".to_string()),
+            harness: Some("claude".to_string()),
         },
         OverlayAgent {
             id: "pax_ivory".to_string(),
@@ -188,6 +192,11 @@ fn sample_overlay_agents() -> Vec<crate::ports::types::OverlayAgent> {
             role: "Analyst".to_string(),
             description: None,
             tools: Vec::new(),
+            // The absent half of the pair: `None` must rehydrate as `None`,
+            // never as an empty string pinning the teammate to a nameless
+            // harness.
+            model: None,
+            harness: None,
         },
     ]
 }
@@ -233,6 +242,11 @@ fn sample_agent_overrides() -> Vec<crate::ports::types::AgentOverride> {
         description: Some(String::new()),
         tools: Some(vec!["docs.*".to_string()]),
         instructions: Some("Be exceedingly concise and decisive.".to_string()),
+        // Set rather than defaulted: this fixture exists to prove a store
+        // round-trips the whole override, so every field it gains needs a real
+        // value here or the new ones are covered by nothing.
+        model: Some("claude-opus-4-5".to_string()),
+        harness: Some("laptop".to_string()),
     }]
 }
 
@@ -5868,4 +5882,219 @@ pub async fn assert_journal_import(journal: Arc<dyn crate::ports::journal::Journ
     journal.complete_import(&beta, Vec::new()).await.unwrap();
     assert!(journal.journal_imported(&beta).await.unwrap());
     assert!(journal.read_journal(&beta).await.unwrap().is_empty());
+}
+
+/// The workflow-run join, on every backend.
+///
+/// Split out of [`assert_run_store`] rather than folded into it so a backend can
+/// be brought up against the join alone, and so the assertion reads as one idea.
+pub async fn assert_run_store_workflow_join(runs: Arc<dyn crate::ports::runs::RunStore>) {
+    use crate::ports::runs::{NewRun, RunFilter};
+
+    let alpha = CompanyId::new("alpha");
+
+    // Two nodes of one workflow run, plus an ordinary card dispatch beside them.
+    runs.create_run(
+        &alpha,
+        NewRun::for_workflow_node("w1", "wr-1", "solve", "programmer"),
+    )
+    .await
+    .unwrap();
+    runs.create_run(
+        &alpha,
+        NewRun::for_workflow_node("w2", "wr-1", "check", "verifier"),
+    )
+    .await
+    .unwrap();
+    runs.create_run(
+        &alpha,
+        NewRun::for_workflow_node("w3", "wr-2", "solve", "programmer"),
+    )
+    .await
+    .unwrap();
+    runs.create_run(&alpha, NewRun::for_task("t1", "card", "ceo"))
+        .await
+        .unwrap();
+
+    // The fields round-trip.
+    let one = runs.get_run(&alpha, "w1").await.unwrap().unwrap();
+    assert_eq!(one.workflow_run_id.as_deref(), Some("wr-1"));
+    assert_eq!(one.node_id.as_deref(), Some("solve"));
+    assert_eq!(one.task_id, None, "a workflow node attempts no card");
+    assert_eq!(one.chat_id, None, "and belongs to no conversation");
+
+    // A card dispatch belongs to no workflow — `None` is true, not a placeholder.
+    let card = runs.get_run(&alpha, "t1").await.unwrap().unwrap();
+    assert_eq!(card.workflow_run_id, None);
+    assert_eq!(card.node_id, None);
+
+    // The filter selects exactly one run's nodes.
+    let mine = runs
+        .list_runs(&alpha, &RunFilter::for_workflow_run("wr-1"))
+        .await
+        .unwrap();
+    let mut ids: Vec<&str> = mine.iter().map(|r| r.id.as_str()).collect();
+    ids.sort_unstable();
+    assert_eq!(ids, ["w1", "w2"], "only wr-1's nodes");
+
+    // An unknown workflow run matches nothing rather than everything — the
+    // failure mode of a filter that is silently dropped.
+    assert!(
+        runs.list_runs(&alpha, &RunFilter::for_workflow_run("nope"))
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    // An unfiltered list still sees them all, including the card dispatch.
+    let all = runs.list_runs(&alpha, &RunFilter::default()).await.unwrap();
+    assert_eq!(all.len(), 4);
+}
+
+/// Every backend's [`DeepTraceStore`](crate::ports::deep_trace::DeepTraceStore)
+/// must agree on isolation, replacement, ordering, pruning and purge.
+///
+/// The contract this pins is narrow but load-bearing: the store holds secrets,
+/// so "company A cannot see company B" and "purge really destroys" are not
+/// niceties, and a backend that quietly diverges on either is a disclosure bug
+/// rather than a bug.
+pub async fn assert_deep_trace_store(deep: Arc<dyn crate::ports::deep_trace::DeepTraceStore>) {
+    use crate::ports::deep_trace::{RunStepDetailRecord, TurnStepDetail};
+
+    let alpha = CompanyId::new("alpha");
+    let beta = CompanyId::new("beta");
+
+    let record = |run: &str, seq: u32, at: u64, reasoning: &str| RunStepDetailRecord {
+        run_id: run.to_string(),
+        step_seq: seq,
+        at_millis: at,
+        detail: TurnStepDetail {
+            reasoning: Some(reasoning.to_string()),
+            ..TurnStepDetail::default()
+        },
+    };
+
+    // -- a run with no detail reads as empty, not as an error ----------------
+
+    assert!(
+        deep.list_step_details(&alpha, "missing")
+            .await
+            .unwrap()
+            .is_empty(),
+        "a run that recorded nothing reads empty"
+    );
+
+    // -- append and read back, ordered by step_seq ---------------------------
+
+    // Deliberately written out of order: the store orders, the caller does not.
+    deep.append_step_detail(&alpha, &record("r1", 2, 20, "second"))
+        .await
+        .unwrap();
+    deep.append_step_detail(&alpha, &record("r1", 0, 10, "first"))
+        .await
+        .unwrap();
+    deep.append_step_detail(&alpha, &record("r1", 1, 15, "middle"))
+        .await
+        .unwrap();
+
+    let got = deep.list_step_details(&alpha, "r1").await.unwrap();
+    assert_eq!(got.len(), 3);
+    assert_eq!(
+        got.iter().map(|r| r.step_seq).collect::<Vec<_>>(),
+        [0, 1, 2],
+        "details come back in step order regardless of write order"
+    );
+    assert_eq!(got[0].detail.reasoning.as_deref(), Some("first"));
+    assert_eq!(got[2].detail.reasoning.as_deref(), Some("second"));
+
+    // -- replacement on (run_id, step_seq), not duplication ------------------
+
+    // A reasoning run flushes partway and again at close under the same ordinal.
+    deep.append_step_detail(&alpha, &record("r1", 1, 30, "middle, finished"))
+        .await
+        .unwrap();
+    let got = deep.list_step_details(&alpha, "r1").await.unwrap();
+    assert_eq!(got.len(), 3, "a re-write replaces rather than stacking");
+    assert_eq!(
+        got[1].detail.reasoning.as_deref(),
+        Some("middle, finished"),
+        "the later write is the truth"
+    );
+
+    // -- per-company isolation ----------------------------------------------
+
+    deep.append_step_detail(&beta, &record("r1", 0, 10, "beta's secret"))
+        .await
+        .unwrap();
+    let alpha_view = deep.list_step_details(&alpha, "r1").await.unwrap();
+    assert_eq!(alpha_view.len(), 3, "beta's row is invisible to alpha");
+    assert!(
+        alpha_view
+            .iter()
+            .all(|r| r.detail.reasoning.as_deref() != Some("beta's secret")),
+        "a run id shared across companies must not leak"
+    );
+    assert_eq!(deep.list_step_details(&beta, "r1").await.unwrap().len(), 1);
+
+    // -- every field survives the round trip ---------------------------------
+
+    let rich = RunStepDetailRecord {
+        run_id: "r2".to_string(),
+        step_seq: 0,
+        at_millis: 99,
+        detail: TurnStepDetail {
+            reasoning: Some("why".to_string()),
+            arguments: Some(r#"{"cmd":"ls"}"#.to_string()),
+            output: Some("a\nb\n".to_string()),
+            display_detail: Some("listing".to_string()),
+            iteration: Some(3),
+            clipped: true,
+        },
+    };
+    deep.append_step_detail(&alpha, &rich).await.unwrap();
+    assert_eq!(
+        deep.list_step_details(&alpha, "r2").await.unwrap(),
+        vec![rich],
+        "read-back is byte-identical (the export-totality precondition)"
+    );
+
+    // -- purge one run leaves the others -------------------------------------
+
+    let removed = deep.purge_deep_trace(&alpha, Some("r2")).await.unwrap();
+    assert_eq!(removed, 1, "purge reports what it destroyed");
+    assert!(
+        deep.list_step_details(&alpha, "r2")
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        deep.list_step_details(&alpha, "r1").await.unwrap().len(),
+        3,
+        "purging one run does not touch another"
+    );
+    assert_eq!(
+        deep.list_step_details(&beta, "r1").await.unwrap().len(),
+        1,
+        "purging alpha does not touch beta"
+    );
+
+    // Purging what is already gone is not an error.
+    assert_eq!(deep.purge_deep_trace(&alpha, Some("r2")).await.unwrap(), 0);
+
+    // -- purge the whole company ---------------------------------------------
+
+    let removed = deep.purge_deep_trace(&alpha, None).await.unwrap();
+    assert_eq!(removed, 3);
+    assert!(
+        deep.list_step_details(&alpha, "r1")
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        deep.list_step_details(&beta, "r1").await.unwrap().len(),
+        1,
+        "a company-wide purge is still scoped to that company"
+    );
 }

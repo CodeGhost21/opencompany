@@ -15,6 +15,7 @@ use super::connections::{ConnectionStateGql, DomainStatusGql, SmtpStatusGql};
 use super::finances::FinancesGql;
 use super::inbox::InboxGql;
 use super::memory_facts::{MemoryFactGql, MemoryKindGql};
+use super::observability;
 use super::pagination::Page;
 use super::policy;
 use super::skills::SkillGql;
@@ -120,6 +121,44 @@ impl CompanyGql {
         #[graphql(default = 0)] offset: i32,
     ) -> async_graphql::Result<Page<TaskGql>> {
         tasks::resolve(&self.runtime, column, first, offset).await
+    }
+
+    /// Attempts at work — a card dispatch, a chat turn, or a workflow node —
+    /// newest first, each with its step trace.
+    ///
+    /// `workflowRunId` is the join that had no answer before agent nodes minted
+    /// rows: a node's turn has neither a card nor a conversation, so nothing
+    /// could ask what a workflow run's agents did.
+    ///
+    /// The unredacted half of each step is **role-gated**: a member sees the
+    /// scrubbed trace, and only a principal who may read sensitive contents sees
+    /// the raw reasoning, arguments and output (`approval_visibility`).
+    async fn agent_runs(
+        &self,
+        ctx: &Context<'_>,
+        task_id: Option<ID>,
+        workflow_run_id: Option<ID>,
+        #[graphql(default = 50)] limit: i32,
+    ) -> async_graphql::Result<Vec<observability::AgentRunGql>> {
+        observability::resolve_runs(
+            ctx,
+            &self.runtime,
+            task_id.map(|id| id.0),
+            workflow_run_id.map(|id| id.0),
+            limit,
+        )
+        .await
+    }
+
+    /// One attempt by id, with its step trace; null when absent.
+    ///
+    /// The unredacted half is role-gated exactly as on [`agent_runs`](Self::agent_runs).
+    async fn agent_run(
+        &self,
+        ctx: &Context<'_>,
+        id: ID,
+    ) -> async_graphql::Result<Option<observability::AgentRunGql>> {
+        observability::resolve_run(ctx, &self.runtime, id.0).await
     }
 
     /// The company's installed skills.
@@ -386,6 +425,14 @@ pub struct ApprovalGql {
     /// every park with no workflow behind it (a chat turn, a scheduler tick, a
     /// board task's attempt), which is the majority.
     pub workflow_run_id: Option<String>,
+    /// Which workflow a parked `workflow.approve` gate is asking about
+    /// (issue #1418), when the effect is one.
+    ///
+    /// Carried for the same reason it is on the REST summary: it is the second
+    /// half of the run address, and it must survive role redaction or a Member
+    /// holding up a stalled workflow would see `workflow_run_id` and still have
+    /// nowhere to click.
+    pub workflow_id: Option<String>,
 }
 
 impl From<crate::runtime::types::ApprovalSummary> for ApprovalGql {
@@ -398,6 +445,7 @@ impl From<crate::runtime::types::ApprovalSummary> for ApprovalGql {
             expires_at_millis: summary.expires_at_millis.map(|ms| ms as f64),
             contents_hidden: summary.contents_hidden,
             workflow_run_id: summary.workflow_run_id,
+            workflow_id: summary.workflow_id,
         }
     }
 }
