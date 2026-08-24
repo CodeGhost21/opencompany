@@ -174,14 +174,22 @@ export function PagesView({ client, company }: Props) {
       if (!isGraphQLBridgeMessage(event.data)) return;
       if (!capabilityRef.current || event.data.capability !== capabilityRef.current) return;
       const { id, query, variables } = event.data;
+      // Reply through the port that delivered this request, not through
+      // `portRef.current` at settle time. A switch — to another page or
+      // company — closes the old port and mints a fresh one while the request
+      // is still in flight, and the stale response must not land on the newly
+      // mounted document's port. Posting to a closed port is a silent no-op,
+      // so a reply that settles after the switch simply goes nowhere.
+      const replyPort = portRef.current;
+      if (!replyPort) return;
       const reply = { type: "oc:graphql:result" as const, id };
       void client
         .graphqlRequest(query, variables)
         .then((result) => {
-          portRef.current?.postMessage({ ...reply, data: result.data, errors: result.errors });
+          replyPort.postMessage({ ...reply, data: result.data, errors: result.errors });
         })
         .catch((cause: unknown) => {
-          portRef.current?.postMessage({
+          replyPort.postMessage({
             ...reply,
             errors: [{ message: cause instanceof Error ? cause.message : "request failed" }],
           });

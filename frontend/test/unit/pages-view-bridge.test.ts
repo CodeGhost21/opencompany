@@ -274,4 +274,53 @@ describe("PagesView bridge", () => {
     expect(capability).toBeTruthy();
     expect(port).toBeInstanceOf(MessagePort);
   });
+
+  it("never delivers an in-flight reply to the replacement document's port", async () => {
+    // A request posted on document A's port resolves after the operator has
+    // switched to document B. The bridge must reply through the port that
+    // issued the request (now closed, so the reply is dropped) rather than
+    // `portRef.current` at settle time — otherwise B's document observes A's
+    // unsolicited GraphQL response.
+    let resolveRequest: (value: { data: unknown; errors?: undefined }) => void = () => {};
+    const graphqlRequest = vi
+      .fn()
+      .mockReturnValue(new Promise<{ data: unknown; errors?: undefined }>((resolve) => {
+        resolveRequest = resolve;
+      }));
+    await show(clientWith(graphqlRequest));
+
+    const first = iframe();
+    expect(first).not.toBeNull();
+    const { capability, port } = mintBridge(first as HTMLIFrameElement);
+
+    port.postMessage({
+      type: "oc:graphql",
+      id: "req-a",
+      capability,
+      query: "{ acmeData }",
+    });
+    // Drain both queues so the console's handler has definitely received the
+    // request and captured the issuing port before the switch below closes it.
+    await flush();
+    expect(graphqlRequest).toHaveBeenCalledTimes(1);
+
+    // Switch companies while the request is still in flight, then mint the new
+    // document's bridge.
+    await show(clientWith(graphqlRequest), "globex");
+    const second = iframe();
+    expect(second).not.toBeNull();
+    const secondPort = mintBridge(second as HTMLIFrameElement).port;
+
+    let stray: unknown = null;
+    secondPort.addEventListener("message", (event) => {
+      stray = (event as { data?: unknown }).data;
+    });
+
+    await act(async () => {
+      resolveRequest({ data: { acmeData: "acme" } });
+    });
+    await flush();
+
+    expect(stray).toBeNull();
+  });
 });
