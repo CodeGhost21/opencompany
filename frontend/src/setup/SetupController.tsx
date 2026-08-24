@@ -3,6 +3,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { OpenCompanyClient } from "@/api/client";
 import type { TeamMemberDto } from "@/api/types";
 import { useLocalScope } from "@/connections/ConnectionContext";
+import type { LocalScope } from "@/connections/types";
 import { shouldOfferSetup, teamIsUnstaffed } from "@/lib/company-setup";
 import { SetupDialog } from "./SetupDialog";
 import {
