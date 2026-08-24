@@ -1,0 +1,410 @@
+//! Issuing the *first* password for a company, from the host.
+//!
+//! # Why this exists
+//!
+//! Every way into a new company runs through a credential the deployment may
+//! not be able to deliver (#1718):
+//!
+//! - `POST …/auth/password` needs a session, which is what we are trying to get.
+//! - `POST …/users/{id}/password` and the invite routes need an existing
+//!   **admin**, and on a first boot there is none.
+//! - The magic link needs a mail transport. Its code is minted and stored
+//!   *hashed*, so on a host with no transport the credential exists and is
+//!   unreachable.
+//! - The dev echo of that code is gated on [`AppConfig::is_local_only`], which
+//!   is false for exactly the hosted deployment that has this problem.
+//! - The platform hub needs the hub wired.
+//!
+//! So a self-hosted company with no mail and no hub could not be signed into at
+//! all. The console said as much — *"an admin can issue you one if you have
+//! none"* — with nobody to ask.
+//!
+//! # Why the host, and not another route
+//!
+//! This is deliberately **not** reachable over HTTP. The authority it relies on
+//! is possession of the process and its storage, which an operator already has
+//! and a request never does. Adding an HTTP surface would mean inventing a way
+//! to authenticate the one caller who cannot yet authenticate.
+//!
+//! # What it will not do
+//!
+//! It issues a password only to an address that is *already* eligible — named
+//! in the manifest's `[users] admins`, or injected as the deployment's
+//! bootstrap admin. It cannot invent membership, so it is not a way to add
+//! someone to a company; it only makes an existing standing invite usable
+//! without mail.
+
+use std::sync::Arc;
+
+use crate::error::OpenCompanyError;
+use crate::ports::generate_id;
+use crate::ports::types::CompanyId;
+use crate::ports::users::{UserRecord, UserRole, UserStatus, UserStore, normalize_email};
+use crate::server::users::{password, token};
+
+/// What [`issue_password`] did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Issued {
+    /// The address the password now belongs to, normalized.
+    pub email: String,
+    /// Whether the account was created, as opposed to an existing one updated.
+    pub created: bool,
+    /// Whether the holder must replace this password before doing anything else.
+    pub must_change_password: bool,
+}
+
+/// The addresses a company admits without an invite record: its manifest
+/// admins, plus the deployment's bootstrap admin when one is injected.
+///
+/// Both are the same grant, so they are one list. Shared with the HTTP path's
+/// `bootstrap_admins` rather than re-derived, so the CLI cannot come to a
+/// different answer than the login route about who is eligible.
+pub fn standing_admins(manifest_admins: &[String], bootstrap_admin: Option<&str>) -> Vec<String> {
+    let mut admins: Vec<String> = manifest_admins.iter().map(|a| normalize_email(a)).collect();
+    if let Some(email) = bootstrap_admin
+        .map(normalize_email)
+        .filter(|e| !e.is_empty())
+        && !admins.contains(&email)
+    {
+        admins.push(email);
+    }
+    admins
+}
+
+/// Sets `email`'s password in `company`, creating the account if the address is
+/// eligible and has none.
+///
+/// `require_change` flags the account so the holder must replace the password
+/// before doing anything else — the same treatment an admin-issued temporary
+/// password gets, and the right default when the operator and the eventual
+/// holder are different people.
+pub async fn issue_password(
+    users: &Arc<dyn UserStore>,
+    company: &CompanyId,
+    manifest_admins: &[String],
+    bootstrap_admin: Option<&str>,
+    email: &str,
+    plaintext: &str,
+    require_change: bool,
+) -> Result<Issued, OpenCompanyError> {
+    let email = normalize_email(email);
+    if email.is_empty() {
+        return Err(OpenCompanyError::InvalidRequest(
+            "an email address is required".into(),
+        ));
+    }
+
+    // Validated before anything is written, and against the address it will
+    // belong to — `validate` refuses a password that contains its own email.
+    password::validate(plaintext, &email)?;
+
+    let existing = users.find_user_by_email(company, &email).await?;
+
+    // Eligibility is only consulted when there is no account yet. An address
+    // that already holds one keeps it even if the manifest later stops naming
+    // them: removing someone is `status`, not a silent inability to reset.
+    if existing.is_none() {
+        let admins = standing_admins(manifest_admins, bootstrap_admin);
+        if !admins.contains(&email) {
+            return Err(OpenCompanyError::InvalidRequest(format!(
+                "{email} is not a standing admin of `{}`, so there is no account to issue a \
+                 password for. Add the address to the manifest's [users] admins, or set the \
+                 deployment's bootstrap admin, and try again. This command makes an existing \
+                 grant usable without mail; it does not create one.",
+                company.as_ref()
+            )));
+        }
+    }
+
+    let hash = password::hash(&token::OsTokens, plaintext)?;
+    let now = crate::ports::now_millis();
+    let created = existing.is_none();
+
+    let user = match existing {
+        Some(mut user) => {
+            user.password_hash = Some(hash);
+            user.must_change_password = require_change;
+            user.updated_at_millis = now;
+            user
+        }
+        None => UserRecord {
+            // The same id scheme the login path mints, so an account created
+            // here is indistinguishable from one created by a magic link.
+            id: generate_id(),
+            email: email.clone(),
+            display_name: None,
+            // Eligibility above proved this address is a standing *admin*;
+            // there is no other role this path can mint.
+            role: UserRole::Admin,
+            status: UserStatus::Active,
+            password_hash: Some(hash),
+            must_change_password: require_change,
+            created_at_millis: now,
+            last_seen_at_millis: None,
+            updated_at_millis: now,
+        },
+    };
+
+    users.upsert_user(company, &user).await?;
+    Ok(Issued {
+        email,
+        created,
+        must_change_password: require_change,
+    })
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use crate::store::FsOps;
+
+    fn users_store(dir: &tempfile::TempDir) -> Arc<dyn UserStore> {
+        Arc::new(FsOps::new(dir.path().to_path_buf()))
+    }
+
+    const GOOD: &str = "a long enough bootstrap password";
+
+    #[tokio::test]
+    async fn issues_a_first_password_to_the_deployment_bootstrap_admin() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let users = users_store(&dir);
+        let company = CompanyId::new("acme");
+
+        let issued = issue_password(
+            &users,
+            &company,
+            &[],
+            Some("Founder@Acme.test"),
+            "founder@acme.test",
+            GOOD,
+            false,
+        )
+        .await
+        .expect("issues");
+
+        assert!(issued.created, "there was no account before this");
+        assert_eq!(issued.email, "founder@acme.test");
+
+        let user = users
+            .find_user_by_email(&company, "founder@acme.test")
+            .await
+            .expect("read")
+            .expect("the account now exists");
+        assert_eq!(user.role, UserRole::Admin);
+        assert_eq!(user.status, UserStatus::Active);
+        // The stored value must be a hash, never the password.
+        let hash = user.password_hash.expect("a hash was stored");
+        assert!(hash.starts_with("$argon2id$"), "{hash}");
+        assert!(!hash.contains(GOOD));
+        assert!(password::verify(GOOD, &hash), "the hash verifies");
+    }
+
+    /// The manifest is the other source of a standing grant, and it must work
+    /// with no deployment bootstrap admin injected at all.
+    #[tokio::test]
+    async fn a_manifest_admin_is_eligible_without_a_bootstrap_admin() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let users = users_store(&dir);
+        let company = CompanyId::new("acme");
+
+        issue_password(
+            &users,
+            &company,
+            &["ada@acme.test".into()],
+            None,
+            "ada@acme.test",
+            GOOD,
+            false,
+        )
+        .await
+        .expect("issues");
+
+        assert!(
+            users
+                .find_user_by_email(&company, "ada@acme.test")
+                .await
+                .expect("read")
+                .is_some()
+        );
+    }
+
+    /// The boundary that keeps this from being a back door. Possession of the
+    /// host lets an operator issue a password to someone the company already
+    /// admits — not add a member.
+    #[tokio::test]
+    async fn refuses_an_address_the_company_does_not_already_admit() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let users = users_store(&dir);
+        let company = CompanyId::new("acme");
+
+        let error = issue_password(
+            &users,
+            &company,
+            &["ada@acme.test".into()],
+            Some("founder@acme.test"),
+            "stranger@elsewhere.test",
+            GOOD,
+            false,
+        )
+        .await
+        .expect_err("a stranger is not eligible");
+        assert!(
+            error.to_string().contains("not a standing admin"),
+            "{error}"
+        );
+
+        assert!(
+            users
+                .find_user_by_email(&company, "stranger@elsewhere.test")
+                .await
+                .expect("read")
+                .is_none(),
+            "nothing may be written for a refused address"
+        );
+    }
+
+    /// An existing account keeps its password resettable even once the manifest
+    /// stops naming it. Removing someone is a status change; it must not become
+    /// a silent inability to recover the account.
+    #[tokio::test]
+    async fn an_existing_account_can_be_reset_without_a_standing_grant() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let users = users_store(&dir);
+        let company = CompanyId::new("acme");
+
+        issue_password(
+            &users,
+            &company,
+            &[],
+            Some("ada@acme.test"),
+            "ada@acme.test",
+            GOOD,
+            false,
+        )
+        .await
+        .expect("first issue");
+
+        // Now nobody is named: no manifest admins, no bootstrap admin.
+        let again = issue_password(
+            &users,
+            &company,
+            &[],
+            None,
+            "ada@acme.test",
+            "a different long password",
+            false,
+        )
+        .await
+        .expect("an existing account is still resettable");
+        assert!(!again.created, "the account was updated, not recreated");
+
+        let user = users
+            .find_user_by_email(&company, "ada@acme.test")
+            .await
+            .expect("read")
+            .expect("still there");
+        let hash = user.password_hash.expect("hash");
+        assert!(password::verify("a different long password", &hash));
+        assert!(
+            !password::verify(GOOD, &hash),
+            "the old password must stop working"
+        );
+    }
+
+    /// Re-issuing must not mint a second account for the same address, which
+    /// would leave two rows racing to answer a login.
+    #[tokio::test]
+    async fn re_issuing_keeps_one_account() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let users = users_store(&dir);
+        let company = CompanyId::new("acme");
+
+        for _ in 0..3 {
+            issue_password(
+                &users,
+                &company,
+                &[],
+                Some("ada@acme.test"),
+                "ada@acme.test",
+                GOOD,
+                false,
+            )
+            .await
+            .expect("issues");
+        }
+        let all = users.list_users(&company).await.expect("list");
+        assert_eq!(all.len(), 1, "one address, one account: {all:?}");
+    }
+
+    #[tokio::test]
+    async fn a_temporary_password_flags_the_account_for_replacement() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let users = users_store(&dir);
+        let company = CompanyId::new("acme");
+
+        let issued = issue_password(
+            &users,
+            &company,
+            &[],
+            Some("ada@acme.test"),
+            "ada@acme.test",
+            GOOD,
+            true,
+        )
+        .await
+        .expect("issues");
+        assert!(issued.must_change_password);
+        assert!(
+            users
+                .find_user_by_email(&company, "ada@acme.test")
+                .await
+                .expect("read")
+                .expect("there")
+                .must_change_password
+        );
+    }
+
+    /// A password too weak to set through the console must not be settable here
+    /// either — the host path is a different door, not a lower bar.
+    #[tokio::test]
+    async fn a_weak_password_is_refused_before_anything_is_written() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let users = users_store(&dir);
+        let company = CompanyId::new("acme");
+
+        issue_password(
+            &users,
+            &company,
+            &[],
+            Some("ada@acme.test"),
+            "ada@acme.test",
+            "short",
+            false,
+        )
+        .await
+        .expect_err("too short");
+
+        assert!(
+            users
+                .find_user_by_email(&company, "ada@acme.test")
+                .await
+                .expect("read")
+                .is_none(),
+            "a refused password must leave no account behind"
+        );
+    }
+
+    #[test]
+    fn standing_admins_dedupes_and_normalizes() {
+        // The same address in both sources is one grant, and case/whitespace
+        // must not make it look like two.
+        let admins = standing_admins(&["Ada@Acme.test".into()], Some("  ada@acme.test  "));
+        assert_eq!(admins, vec!["ada@acme.test"]);
+    }
+
+    #[test]
+    fn an_empty_bootstrap_admin_adds_nobody() {
+        assert!(standing_admins(&[], Some("   ")).is_empty());
+        assert!(standing_admins(&[], None).is_empty());
+    }
+}

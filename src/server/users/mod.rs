@@ -52,6 +52,7 @@
 //! sessions and flags the account so the user is asked to replace it.
 
 pub mod admin;
+pub mod bootstrap;
 pub mod cookie;
 pub mod password;
 pub mod routes;

@@ -115,6 +115,43 @@ enum Command {
     /// Separate from `doctor` on purpose: `doctor` explains configuration and
     /// needs no database, and making it open storage would leave it unable to
     /// answer at all when the backend is the thing that is broken.
+    /// Issue a sign-in password for a company, from the host (#1718).
+    ///
+    /// The way in when a deployment cannot mail a sign-in link: the magic-link
+    /// code is minted and stored hashed, every admin route needs an admin that
+    /// does not exist yet, and the console's own advice — "an admin can issue
+    /// you one" — has nobody to ask on a first boot.
+    ///
+    /// Only for an address the company ALREADY admits: named in the manifest's
+    /// `[users] admins`, or injected as the deployment's bootstrap admin
+    /// (`OPENCOMPANY_ADMIN_EMAIL`). It makes a standing grant usable without
+    /// mail; it does not create one.
+    IssuePassword {
+        /// The company id, as `serve` registers it. In shared-database mode
+        /// this is the namespaced `<tenant>--<id>` form.
+        #[arg(long)]
+        company: String,
+        /// The address to issue for.
+        #[arg(long)]
+        email: String,
+        /// The password. Omit to read it from stdin, which keeps it out of
+        /// shell history and out of `ps` — argv is world-readable for the
+        /// lifetime of the exec, and this is a credential.
+        #[arg(long)]
+        password: Option<String>,
+        /// Do not require the holder to replace this password on first use.
+        ///
+        /// The default requires a change, matching an admin-issued temporary
+        /// password: whoever runs this knows the value, and usually conveys it
+        /// over a channel they do not control. Pass this when the operator and
+        /// the holder are the same person.
+        #[arg(long)]
+        no_change_required: bool,
+        /// Data root, for backends that resolve one. Defaults the same way
+        /// `serve` does.
+        #[arg(long)]
+        home: Option<PathBuf>,
+    },
     Orphans {
         /// Data root, for backends that resolve one. Defaults the same way
         /// `serve` does.
@@ -1001,6 +1038,90 @@ async fn run_export(
         "exported bundle for `{id}` to {} (build with --features export to produce a .tar)",
         dest.display()
     );
+    Ok(())
+}
+
+/// `opencompany issue-password` — the host-side way into a company whose
+/// deployment cannot mail a sign-in link (issue #1718).
+///
+/// Opens the configured storage directly rather than going through a running
+/// server, because the authority here is possession of the process and its
+/// data — which an operator has and an HTTP caller never does.
+async fn run_issue_password(
+    company: String,
+    email: String,
+    password: Option<String>,
+    require_change: bool,
+    home: Option<PathBuf>,
+) -> Result<()> {
+    use opencompany::server::users::bootstrap;
+
+    // stdin when not passed, so the value stays out of shell history and out of
+    // `ps`. Deliberately not a TTY prompt: a pipe is the case that matters
+    // here — from a password manager, a secret file, or a provisioning script —
+    // and reading stdin serves an interactive operator too.
+    let password = match password {
+        Some(value) => value,
+        None => {
+            use std::io::Read as _;
+            let mut buf = String::new();
+            std::io::stdin().read_to_string(&mut buf).map_err(|e| {
+                opencompany::error::OpenCompanyError::Config(format!(
+                    "could not read a password from stdin: {e}"
+                ))
+            })?;
+            // Only the trailing newline goes: a password may legitimately end
+            // in a space, and trimming both ends would silently change it.
+            buf.trim_end_matches(['\n', '\r']).to_string()
+        }
+    };
+
+    let home = resolve_home_migrated(home)?;
+    let settings = opencompany::store::StorageSettings::from_env()?;
+    let Some(handles) = opencompany::store::open_storage(&settings, &home).await? else {
+        return Err(opencompany::error::OpenCompanyError::Config(format!(
+            "storage backend `{:?}` keeps no user accounts, so there is no password to issue. \
+             Set OPENCOMPANY_STORAGE to the backend this deployment serves with.",
+            settings.kind
+        )));
+    };
+
+    let id = CompanyId::new(company);
+    // The manifest is the other source of a standing grant, so a company that
+    // is not there at all is a mistyped id rather than an empty admin list —
+    // worth saying, since the alternative is a confusing "not a standing admin".
+    let record = handles.company.load(&id).await?.ok_or_else(|| {
+        opencompany::error::OpenCompanyError::Config(format!(
+            "no company `{}` in this storage. Check the id — in shared-database mode it is the \
+             namespaced `<tenant>--<id>` form.",
+            id.as_ref()
+        ))
+    })?;
+    let manifest_admins: Vec<String> = record.manifest.users.admins.clone();
+
+    // The same variable `serve` reads for the deployment's standing admin, read
+    // the same way. `standing_admins` normalizes and drops a blank, so this is
+    // the value `AppConfig::bootstrap_admin` would produce.
+    let bootstrap_admin = std::env::var("OPENCOMPANY_ADMIN_EMAIL")
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+
+    let issued = bootstrap::issue_password(
+        &handles.users,
+        &id,
+        &manifest_admins,
+        bootstrap_admin.as_deref(),
+        &email,
+        &password,
+        require_change,
+    )
+    .await?;
+
+    let verb = if issued.created { "created" } else { "updated" };
+    println!("{verb} {} as an admin of `{}`", issued.email, id.as_ref());
+    if issued.must_change_password {
+        println!("they will be asked to replace this password on first sign-in");
+    }
     Ok(())
 }
 
@@ -2062,6 +2183,13 @@ async fn async_main() -> Result<()> {
             }
             Ok(())
         }
+        Some(Command::IssuePassword {
+            company,
+            email,
+            password,
+            no_change_required,
+            home,
+        }) => run_issue_password(company, email, password, !no_change_required, home).await,
         Some(Command::Orphans { home, json }) => run_orphans(home, json).await,
         Some(Command::Export {
             company,
