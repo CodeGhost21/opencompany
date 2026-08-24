@@ -604,6 +604,30 @@ async fn edit_agent(
     Path(AgentPath { agent_id }): Path<AgentPath>,
     Json(body): Json<EditAgent>,
 ) -> Result<Json<AgentDetailDto>, crate::server::Rejection> {
+    // Identity before validation, and before the avatar below is resolved.
+    //
+    // A `blob:` avatar streams up to 4 MiB from the workspace backend, and that
+    // resolution is deliberately moved ahead of the write lock (see the note
+    // there). That ordering must not also move it ahead of the roster check: an
+    // id that names nobody has a `404` coming, not a `400` (or up to 4 MiB of
+    // I/O) spent proving the shape of a body nobody could have applied. So the
+    // roster is read once, unlocked, and an unknown id is refused before any
+    // avatar work; the lock below re-reads and re-checks, because the roster
+    // may have changed while the avatar was resolving.
+    let early = company
+        .runtime
+        .store()
+        .load(company.id())
+        .await?
+        .ok_or_else(|| OpenCompanyError::CompanyNotFound(company.id().to_string()))?;
+    if !early.is_roster_agent(&agent_id) {
+        return Err(ApiError(OpenCompanyError::CompanyNotFound(format!(
+            "teammate {agent_id}"
+        )))
+        .into_response()
+        .into());
+    }
+
     // A submitted face is resolved *before* the write lock below is taken.
     //
     // A `blob:` avatar streams up to 4 MiB from the workspace backend, and the
@@ -647,6 +671,11 @@ async fn edit_agent(
         .await?
         .ok_or_else(|| OpenCompanyError::CompanyNotFound(company.id().to_string()))?;
 
+    // The roster was already checked, unlocked, above — but the write lock was
+    // taken and the record re-loaded *after* the avatar resolved, and a
+    // concurrent add or retirement can have changed the roster in between. So
+    // the id is re-checked against the locked load before anything is mutated.
+    //
     // Identity before validation, so an unknown id is a 404 rather than a
     // complaint about the shape of a body nobody could have applied anyway.
     //
