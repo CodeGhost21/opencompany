@@ -70,10 +70,9 @@ describe("mentionCountsByChannel", () => {
    */
   it("maps every spelling of the General desk onto the rendered main channel", () => {
     for (const context of ["General", "general", ""]) {
-      expect(mentionCountsByChannel([note({ id: "a", context })], "general")).toEqual(
-        { general: 1 },
-        `context ${JSON.stringify(context)} must badge the main channel`,
-      );
+      expect(mentionCountsByChannel([note({ id: "a", context })], "general")).toEqual({
+        general: 1,
+      });
     }
   });
   it("is empty for an empty feed", () => {
