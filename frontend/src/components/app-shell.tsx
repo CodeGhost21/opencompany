@@ -2446,5 +2446,6 @@ export function AppShell({
         suppressWelcome={setupCompleted}
       />
       </SidebarProvider>
+    </ConsoleProvider>
   );
 }
