@@ -706,7 +706,11 @@ fn project_stream_item(
 ///
 /// Adding a variant to [`CompanyEvent`] therefore drops it by default; it
 /// reaches the console only by being listed here on purpose.
-fn project_event(stored: &StoredEvent) -> Option<serde_json::Value> {
+fn project_event(
+    stored: &StoredEvent,
+    authors: &std::collections::HashMap<String, String>,
+    viewer: &Viewer,
+) -> Option<serde_json::Value> {
     use serde_json::json;
 
     let envelope = |ty: &str| {
