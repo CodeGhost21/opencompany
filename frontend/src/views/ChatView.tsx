@@ -515,8 +515,14 @@ export function ChatView({
 
   // No channels exist until the host has answered. Resolving against a
   // half-built list is exactly the first-paint swap issue #370 describes.
-  const companyScopeRef = useRef(company);
-  companyScopeRef.current = company;
+  //
+  // `scopeCompanyRef` is the shell's ref, not a local one: a local ref would
+  // freeze at the last render's company once this subtree unmounts, and a
+  // `client.chat` still in flight from before the switch would then pass its
+  // stale check and write the old company's reply into the new company's
+  // transcript. The shell keeps updating its ref on every company change,
+  // mounted or not, so the comparison in `send` stays honest after Chat is
+  // gone (codex P1).
 
   const sections = useMemo(
     () => (desks ? buildChannels(members, desks, transcripts) : []),
