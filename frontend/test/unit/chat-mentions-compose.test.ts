@@ -245,6 +245,24 @@ describe("reconcileMentions", () => {
     expect(out[0].offset).toBe(0);
   });
 
+  it("keeps the selected identity when an identical span is inserted before it", () => {
+    const selected: Mention = {
+      target: { kind: "user", id: "selected" },
+      text: "@Sam",
+      offset: 0,
+    };
+    const newlyInserted: Mention = {
+      target: { kind: "user", id: "new" },
+      text: "@Sam",
+      offset: 0,
+    };
+    const out = reconcileMentions("@Sam @Sam", [selected, newlyInserted]);
+    expect(out.map((m) => [m.target, m.offset])).toEqual([
+      [{ kind: "user", id: "new" }, 0],
+      [{ kind: "user", id: "selected" }, 5],
+    ]);
+  });
+
   it("returns them in reading order", () => {
     const out = reconcileMentions("@engineer and @engineer", [
       { ...mention, offset: 14 },
