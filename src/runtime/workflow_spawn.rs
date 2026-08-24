@@ -334,7 +334,13 @@ async fn settle_cancelled_workflow_attempts(
     company: &CompanyId,
     workflow_run_id: &str,
 ) {
-    let active = match runs.list_runs(company, &crate::ports::RunFilter::active()).await {
+    let active = match runs
+        .list_runs(
+            company,
+            &crate::ports::RunFilter::for_workflow_run(workflow_run_id.to_string()),
+        )
+        .await
+    {
         Ok(active) => active,
         Err(err) => {
             tracing::error!(
@@ -346,9 +352,7 @@ async fn settle_cancelled_workflow_attempts(
             return;
         }
     };
-    for attempt in active.into_iter().filter(|attempt| {
-        attempt.workflow_run_id.as_deref() == Some(workflow_run_id)
-    }) {
+    for attempt in active {
         if let Err(err) = runs
             .finish_run(
                 company,
