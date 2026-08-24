@@ -228,8 +228,14 @@ export function SetupController({
       if (returned) {
         if (wasResuming) clearSetupResuming(scope);
       }
-      const resume = returned && (wasRedesigning || empty);
-      setRedesigning(wasRedesigning && returned);
+      // The redesign debt is only good while the team it names still exists. A
+      // return that finds that team gone — another operator deleted or replaced
+      // it while model settings were open — must not reopen a redesign that
+      // would sweep nothing and stack a second team over the concurrent work.
+      const redesignOwed =
+        returned && wasRedesigning && reconcileRedesign(scope, roster) !== null;
+      const resume = returned && (redesignOwed || empty);
+      setRedesigning(redesignOwed);
       // Only the first evaluation may open the dialog by itself; see
       // `evaluatedOnce`. Later switches still report `unstaffed`, so the tour
       // keeps holding and the Team page keeps prompting.
