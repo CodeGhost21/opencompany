@@ -329,11 +329,7 @@ nothing in the console read or wrote it, so an operator drowning in approval
 cards could change it only by redeploying an edited `company.toml` — or, on a
 hosted tenant with a read-only manifest snapshot, not at all.
 
-`GET` returns the tier, spend cap, approval deadline, and always-ask list **in force**, what the manifest would restore, whether an override is set and by whom, and the selectable tiers with the host's own description of each (`POLICY_MODES` narrowed to tiers the console has text for, so it never offers one the host would downgrade). `PUT` takes `mode`
-and `alwaysApprove`, both optional and independent — `{"mode": "auto"}`
-leaves the list alone, `{"alwaysApprove": []}` clears it (a real state, not a
-reset), `{"mode": null}` stops overriding the tier, and `{}` is a **`422`**
-because a body that sets nothing is never stored. An unknown `mode` is `422`
+`GET` returns the tier, spend cap, approval deadline, and always-ask list **in force**, what the manifest would restore, whether an override is set and by whom, and the selectable tiers with the host's own description of each (`POLICY_MODES` narrowed to tiers the console has text for, so it never offers one the host would downgrade). `PUT` takes `mode`, `alwaysApprove`, `autoApproveUnderUsd`, and `approvalTtlHours`, all optional and independent — `{"mode": "auto"}` leaves the other fields alone, `{"alwaysApprove": []}` clears the list (a real state, not a reset), `{"autoApproveUnderUsd": 25}` permits qualifying spends strictly below $25 without asking, `{"autoApproveUnderUsd": null}` stores an explicit no-cap override so every spend remains subject to approval, and `{"approvalTtlHours": 48}` changes the approval deadline. `{"mode": null}` and `{"approvalTtlHours": null}` stop overriding those individual fields, while `{}` is a **`422`** because a body that sets nothing is never stored. An unknown `mode` is `422`
 too, not accepted-and-downgraded, or the console would show a tier the gate was
 not running. Both writes are admin-only and attributed. `DELETE` restores the
 manifest's `[policy]` — its own verb, since a `PUT` of the manifest's current

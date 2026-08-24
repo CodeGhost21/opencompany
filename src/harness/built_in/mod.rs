@@ -2801,10 +2801,7 @@ fn policy_fingerprint(override_: Option<&PolicyOverride>) -> u64 {
         0u8.hash(&mut hasher);
         return hasher.finish();
     };
-
-    // TTL is applied by the live ManifestApprovalGate, not the roster's
-    // ApprovalPolicy snapshot. A deadline-only overlay therefore has exactly
-    // the same roster semantics as no overlay and must not force a rebuild.
+    // TTL is enforced by the live gate, not roster policies.
     if entry.mode.is_none()
         && entry.always_approve.is_none()
         && entry.auto_approve_under_usd.is_none()
@@ -2812,53 +2809,28 @@ fn policy_fingerprint(override_: Option<&PolicyOverride>) -> u64 {
         0u8.hash(&mut hasher);
         return hasher.finish();
     }
-
     1u8.hash(&mut hasher);
     match &entry.mode {
-                Some(mode) => {
-                    1u8.hash(&mut hasher);
-                    mode.hash(&mut hasher);
-                }
-                None => 0u8.hash(&mut hasher),
-            }
-            match &entry.always_approve {
-                Some(kinds) => {
-                    1u8.hash(&mut hasher);
-                    kinds.len().hash(&mut hasher);
-                    for kind in kinds {
-                        kind.hash(&mut hasher);
-                    }
-                }
-                None => 0u8.hash(&mut hasher),
-            }
-            // The spend cap joins the fingerprint for the same reason the tier
-            // and list do: `ApprovalPolicy` is built once per roster, so a
-            // cap-only edit must still rebuild. `auto_approve_under_usd` is
-            // `Option<Option<f64>>` — hash the outer present marker, then the
-            // inner value with its own present marker, so `None` (no override),
-            // `Some(None)` (no cap: every spend parks) and `Some(Some(n))` are
-            // three distinct states.
-            //
-            // `approval_ttl_hours` is deliberately NOT here: the deadline lives
-            // in the live gate's `AtomicU64`, applied by `apply_effective_policy`
-            // at `PUT`/`DELETE` time and at build, and the roster's
-            // `ApprovalPolicy` snapshot carries no TTL — so a deadline-only edit
-            // cannot be applied by rebuilding, and rebuilding would only discard
-            // live agent sessions for nothing.
-            match &entry.auto_approve_under_usd {
-                Some(cap) => {
-                    1u8.hash(&mut hasher);
-                    match cap {
-                        Some(amount) => {
-                            1u8.hash(&mut hasher);
-                            amount.to_bits().hash(&mut hasher);
-                        }
-                        None => 0u8.hash(&mut hasher),
-                    }
-                }
+        Some(mode) => { 1u8.hash(&mut hasher); mode.hash(&mut hasher); }
+        None => 0u8.hash(&mut hasher),
+    }
+    match &entry.always_approve {
+        Some(kinds) => {
+            1u8.hash(&mut hasher);
+            kinds.len().hash(&mut hasher);
+            for kind in kinds { kind.hash(&mut hasher); }
+        }
+        None => 0u8.hash(&mut hasher),
+    }
+    match &entry.auto_approve_under_usd {
+        Some(cap) => {
+            1u8.hash(&mut hasher);
+            match cap {
+                Some(amount) => { 1u8.hash(&mut hasher); amount.to_bits().hash(&mut hasher); }
                 None => 0u8.hash(&mut hasher),
             }
         }
+        None => 0u8.hash(&mut hasher),
     }
     hasher.finish()
 }
