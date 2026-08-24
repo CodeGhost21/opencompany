@@ -190,6 +190,7 @@ function Section({
   section: ChannelSection;
   activeId: string | null;
   unread: Record<string, number>;
+  mentions?: Record<string, number>;
   onSelect: (id: string) => void;
   open: boolean;
   onToggle: () => void;
