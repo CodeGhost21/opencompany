@@ -481,6 +481,24 @@ export interface ApprovalSummary {
    */
   workflow_run_id?: string | null;
   /**
+   * Which **workflow** a parked `workflow.approve` gate is asking about
+   * (#1418) — the second half of the run address, beside {@link workflow_run_id}.
+   *
+   * A run id alone cannot name a console page, so this is what turns a native
+   * workflow approval into an "Open the run" link.
+   *
+   * **Deliberately not read from {@link payload}.** Payload is a redacted
+   * rendering, and role redaction (#618) strips it from a member reader
+   * entirely; the host projects this top-level field from the raw parked effect
+   * (`gate_workflow_id`) so it survives redaction the way `workflow_run_id`
+   * already does — a member holding up a stalled workflow keeps the address.
+   *
+   * Absent on every non-gate approval (a chat turn, a scheduler tick) and on a
+   * tool call parked *by* a workflow; only native `workflow.approve` effects
+   * carry it. Optional because an old host predates the field.
+   */
+  workflow_id?: string | null;
+  /**
    * Which turn's gated calls this one belongs to (#842) — an opaque key shared
    * by every approval a single agent turn parked.
    *
@@ -933,6 +951,21 @@ export interface AgentDetailDto {
   /** The declared cognition-tier hint, when the manifest sets one. */
   tier?: string;
   /**
+   * Which declared harness this teammate runs on, by id (issue #1245's
+   * harness-picker follow-up). `undefined` means the harness marked
+   * `default = true` — read `GET {scope}/harnesses` ([`HarnessDto`]) for the
+   * full declared set, including which one that is.
+   */
+  harness?: string;
+  /**
+   * This teammate's own model override, when it has one (issue #1245's
+   * per-agent follow-up). Meaningful only when the teammate runs on an ACP
+   * harness (an operator's own coding CLI) — the host does not tell this
+   * response which harness that is, so the console shows it as informational
+   * rather than validating it against one.
+   */
+  model?: string;
+  /**
    * Whether this teammate is the company's orchestrator. Resolved by the roster
    * rule (a tagged tier first, else the first declared agent), so it is NOT the
    * same question as `tier === "orchestrator"`: a company that tags nobody still
@@ -1010,17 +1043,23 @@ export interface EditAgentInput {
    * persona the operator did not touch.
    */
   instructions?: string | null;
-  /**
-   * The teammate's own tool-grant globs, admin-only on the host (a member gets
-   * a 403). Omitted leaves them alone; a list replaces them verbatim, exactly
-   * as a manifest `[[agent]].tools` line would be read.
-   *
-   * `[]` is the sharp one and is deliberately expressible: an empty list means
-   * **the company's standard grant**, not "no tools", so sending it is a
-   * potential *widening* rather than a revocation. That is why the host gates
-   * this key on admin and why the console asks before sending it.
-   */
+  /** The teammate's own model override. */
+  model?: string | null;
+  /** Which declared harness this teammate runs on. */
+  harness?: string | null;
+  /** The teammate's own tool-grant globs. */
   tools?: string[];
+}
+
+/** One declared or detected harness. */
+export interface HarnessDto {
+  id: string;
+  kind: "built_in" | "acp";
+  default: boolean;
+  agent?: string;
+  runsHere?: boolean;
+  transport?: string;
+  detected: boolean;
 }
 
 /**

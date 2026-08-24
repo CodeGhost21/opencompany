@@ -237,7 +237,7 @@ export function ConnectionConsole({
     case "setup":
       return (
         <ConsoleChrome>
-          <SetupWizard client={client} onDone={reBoot} />
+          <SetupWizard client={client} onDone={reBoot} expectsShellRemount />
         </ConsoleChrome>
       );
 
