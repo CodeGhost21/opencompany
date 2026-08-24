@@ -7495,7 +7495,11 @@ mode = "full"
 
     #[test]
     fn projects_a_gap_with_structural_fields_only() {
-        let value = super::project_stream_item(&EventStreamItem::Gap { missed: 44 })
+        let value = super::project_stream_item_for_viewer(
+            &EventStreamItem::Gap { missed: 44 },
+            &std::collections::HashMap::new(),
+            &Viewer::Operator,
+        )
             .expect("a gap must reach the console");
         assert_eq!(
             value,
