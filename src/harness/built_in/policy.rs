@@ -2891,11 +2891,8 @@ mod tests {
         let own = WorkspaceOrigin::Agent {
             id: "ceo".to_string(),
         };
-        let node = |id: &str,
-                    name: &str,
-                    parent: Option<&str>,
-                    origin: WorkspaceOrigin| {
-            WorkspaceNode {
+        let node =
+            |id: &str, name: &str, parent: Option<&str>, origin: WorkspaceOrigin| WorkspaceNode {
                 id: id.to_string(),
                 name: name.to_string(),
                 kind: if id.starts_with("n-") {
@@ -2910,25 +2907,23 @@ mod tests {
                 mime: None,
                 size: None,
                 sha256: None,
-            }
-        };
+            };
         store
             .create(&company, &node("agents", "agents", None, own.clone()), None)
             .await
             .unwrap();
         store
-            .create(&company, &node("home", "ceo", Some("agents"), own.clone()), None)
+            .create(
+                &company,
+                &node("home", "ceo", Some("agents"), own.clone()),
+                None,
+            )
             .await
             .unwrap();
         store
             .create(
                 &company,
-                &node(
-                    "inbox",
-                    "inbox",
-                    Some("home"),
-                    WorkspaceOrigin::Operator,
-                ),
+                &node("inbox", "inbox", Some("home"), WorkspaceOrigin::Operator),
                 None,
             )
             .await
