@@ -32,15 +32,19 @@ let root: Root;
 async function show(props: { force?: boolean; routeOpen?: boolean } = {}) {
   await act(async () => {
     root.render(
-      createElement(SetupController, {
-        client: clientWith(),
-        company: "acme",
-        // The automatic first-run gate is a different concern from the route;
-        // deep-linking suppresses it so `force` is the only thing that opens.
-        deepLinked: true,
-        onOpenChange: () => {},
-        ...props,
-      }),
+      createElement(
+        ConnectionScopeProvider,
+        { scope: { connection: "conn-test", company: "acme" } },
+        createElement(SetupController, {
+          client: clientWith(),
+          company: "acme",
+          // The automatic first-run gate is a different concern from the route;
+          // deep-linking suppresses it so `force` is the only thing that opens.
+          deepLinked: true,
+          onOpenChange: () => {},
+          ...props,
+        }),
+      ),
     );
   });
 }
